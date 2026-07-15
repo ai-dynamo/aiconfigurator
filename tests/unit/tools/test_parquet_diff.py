@@ -32,10 +32,10 @@ def _snapshot(parquet_diff_module, path: str, rows: list[dict[str, object]]):
 
 def test_legacy_perf_policy_flags_added_and_modified_text_files(parquet_diff_module):
     entries = [
-        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/gemm_perf.txt"),
-        parquet_diff_module.DiffEntry("M", "src/aiconfigurator/systems/data/h100/moe_perf.txt"),
-        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/nccl_perf.txt"),
-        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"),
+        parquet_diff_module.DiffEntry("A", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.txt"),
+        parquet_diff_module.DiffEntry("M", "aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt"),
+        parquet_diff_module.DiffEntry("D", "aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.txt"),
+        parquet_diff_module.DiffEntry("A", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet"),
     ]
 
     legacy_changes = parquet_diff_module.find_legacy_perf_changes(entries)
@@ -46,7 +46,7 @@ def test_legacy_perf_policy_flags_added_and_modified_text_files(parquet_diff_mod
 
 def test_legacy_perf_policy_allows_text_file_deletions(parquet_diff_module):
     entries = [
-        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/gemm_perf.txt"),
+        parquet_diff_module.DiffEntry("D", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.txt"),
     ]
 
     legacy_changes = parquet_diff_module.find_legacy_perf_changes(entries)
@@ -84,7 +84,7 @@ def test_row_diff_writes_added_removed_and_modified_artifacts(parquet_diff_modul
     )
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -131,7 +131,7 @@ def test_row_diff_pairs_duplicate_keys_within_key(parquet_diff_module, tmp_path)
     )
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "src/aiconfigurator/systems/data/h100/sglang/0.5.10/moe_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/sglang/0.5.10/moe_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -148,7 +148,7 @@ def test_measurement_only_columns_use_full_row_delta(parquet_diff_module, tmp_pa
     head = _snapshot(parquet_diff_module, "latency_perf.parquet", [{"latency": 2.0}, {"latency": 3.0}])
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "src/aiconfigurator/systems/data/h100/vllm/0.19.0/latency_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/latency_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -184,37 +184,37 @@ def test_full_row_delta_preserves_original_nested_values(parquet_diff_module):
 
 def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module, tmp_path, monkeypatch):
     entries = [
-        parquet_diff_module.DiffEntry("M", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"),
-        parquet_diff_module.DiffEntry("A", "src/aiconfigurator/systems/data/h100/new_perf.parquet"),
-        parquet_diff_module.DiffEntry("D", "src/aiconfigurator/systems/data/h100/moe_perf.txt"),
+        parquet_diff_module.DiffEntry("M", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet"),
+        parquet_diff_module.DiffEntry("A", "aic-core/src/aiconfigurator_core/systems/data/h100/new_perf.parquet"),
+        parquet_diff_module.DiffEntry("D", "aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt"),
         parquet_diff_module.DiffEntry(
             "R100",
-            "src/aiconfigurator/systems/data/h100/nccl_perf.parquet",
-            old_path="src/aiconfigurator/systems/data/h100/comm_perf.parquet",
+            "aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.parquet",
+            old_path="aic-core/src/aiconfigurator_core/systems/data/h100/comm_perf.parquet",
         ),
     ]
     file_lines = {
-        ("base", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"): [
+        ("base", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet"): [
             "framework,latency",
             "vllm,1.0",
         ],
-        ("head", "src/aiconfigurator/systems/data/h100/gemm_perf.parquet"): [
+        ("head", "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet"): [
             "framework,latency",
             "vllm,1.5",
         ],
-        ("head", "src/aiconfigurator/systems/data/h100/new_perf.parquet"): [
+        ("head", "aic-core/src/aiconfigurator_core/systems/data/h100/new_perf.parquet"): [
             "framework,latency",
             "trtllm,3.0",
         ],
-        ("base", "src/aiconfigurator/systems/data/h100/moe_perf.txt"): [
+        ("base", "aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt"): [
             "framework,latency",
             "sglang,2.0",
         ],
-        ("base", "src/aiconfigurator/systems/data/h100/comm_perf.parquet"): [
+        ("base", "aic-core/src/aiconfigurator_core/systems/data/h100/comm_perf.parquet"): [
             "framework,bandwidth",
             "nccl,900",
         ],
-        ("head", "src/aiconfigurator/systems/data/h100/nccl_perf.parquet"): [
+        ("head", "aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.parquet"): [
             "framework,bandwidth",
             "nccl,950",
         ],
@@ -232,10 +232,10 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
     parquet_diff_module._write_diff_manifest(tmp_path, artifacts)
 
     assert [artifact.diff_file for artifact in artifacts] == [
-        "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
-        "diffs/src/aiconfigurator/systems/data/h100/new_perf.parquet.diff",
-        "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
-        "diffs/src/aiconfigurator/systems/data/h100/nccl_perf.parquet.diff",
+        "diffs/aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet.diff",
+        "diffs/aic-core/src/aiconfigurator_core/systems/data/h100/new_perf.parquet.diff",
+        "diffs/aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt.diff",
+        "diffs/aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.parquet.diff",
     ]
     assert "+vllm,1.5" in (tmp_path / artifacts[0].diff_file).read_text()
     assert "+trtllm,3.0" in (tmp_path / artifacts[1].diff_file).read_text()
@@ -251,35 +251,35 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
     assert manifest_rows == [
         {
             "status": "M",
-            "file": "src/aiconfigurator/systems/data/h100/gemm_perf.parquet",
+            "file": "aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet",
             "old_file": "",
-            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/gemm_perf.parquet.diff",
+            "full_diff_file": ("diffs/aic-core/src/aiconfigurator_core/systems/data/h100/gemm_perf.parquet.diff"),
         },
         {
             "status": "A",
-            "file": "src/aiconfigurator/systems/data/h100/new_perf.parquet",
+            "file": "aic-core/src/aiconfigurator_core/systems/data/h100/new_perf.parquet",
             "old_file": "",
-            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/new_perf.parquet.diff",
+            "full_diff_file": ("diffs/aic-core/src/aiconfigurator_core/systems/data/h100/new_perf.parquet.diff"),
         },
         {
             "status": "D",
-            "file": "src/aiconfigurator/systems/data/h100/moe_perf.txt",
+            "file": "aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt",
             "old_file": "",
-            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/moe_perf.txt.diff",
+            "full_diff_file": "diffs/aic-core/src/aiconfigurator_core/systems/data/h100/moe_perf.txt.diff",
         },
         {
             "status": "R100",
-            "file": "src/aiconfigurator/systems/data/h100/nccl_perf.parquet",
-            "old_file": "src/aiconfigurator/systems/data/h100/comm_perf.parquet",
-            "full_diff_file": "diffs/src/aiconfigurator/systems/data/h100/nccl_perf.parquet.diff",
+            "file": "aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.parquet",
+            "old_file": "aic-core/src/aiconfigurator_core/systems/data/h100/comm_perf.parquet",
+            "full_diff_file": ("diffs/aic-core/src/aiconfigurator_core/systems/data/h100/nccl_perf.parquet.diff"),
         },
     ]
 
 
 def test_report_includes_row_level_counts(parquet_diff_module):
     comparison = parquet_diff_module.Comparison(
-        path="src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
-        base_path="src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
+        path="aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
+        base_path="aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
         status="M",
         base_rows=3,
         head_rows=3,
@@ -311,7 +311,7 @@ def test_report_includes_row_level_counts(parquet_diff_module):
                 status="M",
                 path=comparison.path,
                 old_path=None,
-                diff_file="diffs/src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet.diff",
+                diff_file="diffs/aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet.diff",
             )
         ],
     )
@@ -319,7 +319,7 @@ def test_report_includes_row_level_counts(parquet_diff_module):
     assert "- Row-level changes: +1 / -1 / ~1" in report
     assert "- Full per-file diff artifacts: 1 file under `parquet-diff-details/diffs/`" in report
     assert "### Other Parquet Changes" not in report
-    assert "| M | src/aiconfigurator/systems/data/h100/vllm/0.19.0/gemm_perf.parquet |" not in report
+    assert "| M | aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet |" not in report
     assert "Full per-file unified diffs: `parquet-diff-details/diffs/` (1 file)" in report
     assert "Exact row-level CSVs: `parquet-diff-details/` (listed in `summary.csv`)" in report
     assert "**added rows** - full CSV: `parquet-diff-details/gemm.added.csv`" in report

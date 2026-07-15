@@ -5,7 +5,7 @@
 """
 Full support-matrix Rust-vs-Python parity scan.
 
-Iterates every PASS row in `src/aiconfigurator/systems/support_matrix/*.csv`
+Iterates every PASS row in `aic-core/src/aiconfigurator_core/systems/support_matrix/*.csv`
 and verifies the Rust engine-step backend matches the Python reference within
 tolerance. Results land in a single SQLite file so the run is resumable
 across crashes, SIGINTs, or multi-day wall-clock budgets.
@@ -55,8 +55,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASELINE_DIR = _REPO_ROOT / "src" / "aiconfigurator" / "systems" / "support_matrix"
-DEFAULT_DB_PATH = _REPO_ROOT / "rust" / "aiconfigurator-core" / "parity_tests" / "scan.sqlite"
+DEFAULT_BASELINE_DIR = _REPO_ROOT / "aic-core" / "src" / "aiconfigurator_core" / "systems" / "support_matrix"
+DEFAULT_DB_PATH = _REPO_ROOT / "aic-core" / "rust" / "aiconfigurator-core" / "parity_tests" / "scan.sqlite"
 
 SCAN_MODE_PROBE = "probe_only"
 SCAN_MODE_PARETO = "pareto_only"

@@ -29,20 +29,49 @@ Let's get started.
 
 ### Install from PyPI
 
-> **Supported platform: Linux x86-64 only.** The published `aiconfigurator` wheel
-> bundles a native (Rust/PyO3) extension and is built as a `manylinux_2_28_x86_64`
-> wheel (Linux x86-64, glibc >= 2.28). macOS, Windows, and other architectures
-> (including Linux aarch64) are **not supported** and have no published release
-> wheels — `pip3 install aiconfigurator` will not find a compatible wheel there.
-> Please install from source for non-Linux platforms.
+> **Published-wheel support: Linux x86-64 only.** The required
+> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is built
+> as a `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). Linux
+> aarch64 has no published core wheel and must build `./aic-core` and the root
+> project from source; that path is not covered by published-wheel support.
+> macOS and Windows have no supported installation path.
 
 ```bash
 pip3 install aiconfigurator
 ```
 
-The `aiconfigurator` wheel is self-contained: it includes the CLI, SDK, model
-and system data, Spica, and the native core extension. No separate Python core
-distribution is required.
+The upper `aiconfigurator` wheel contains the CLI, generator, webapp, and Spica.
+It depends on the exact matching `aiconfigurator-core` wheel, which independently
+owns the SDK, model/system data, and native extension. Installing
+`aiconfigurator` therefore installs the complete product, while core-only
+consumers can install `aiconfigurator-core` without pulling in the upper layer.
+
+`Task` and the orchestration APIs live in the application wheel only:
+
+```python
+from aiconfigurator.sdk.task_v2 import Task
+```
+
+The core wheel intentionally does not expose `task_v2`; the standalone core
+never depends back on the application package.
+
+#### Upgrading from 0.9
+
+Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
+safely transfer those same paths to the new dependency during a normal in-place
+upgrade because dependencies are installed before dependents. Remove the old
+owner first when crossing this package boundary:
+
+```bash
+python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
+python3 -m pip install 'aiconfigurator==0.10.0'
+```
+
+If a normal upgrade was already attempted, repair the core payload with:
+
+```bash
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+```
 
 ### Build and Install from Source
 
@@ -59,14 +88,15 @@ git lfs pull
 # 3. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install aiconfigurator
+# 4. Install the standalone core, then the upper package
+pip3 install ./aic-core
 pip3 install .
 ```
 
 ### Build with Docker
 
 ```bash
-# This creates the self-contained AIC wheel
+# This creates disjoint upper AIC and standalone core wheels
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```
@@ -492,7 +522,7 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
-The raw data is also available as [per-system CSV files](src/aiconfigurator/systems/support_matrix).
+The raw data is also available as [per-system CSV files](aic-core/src/aiconfigurator_core/systems/support_matrix).
 
 You can also check support via the CLI:
 ```bash

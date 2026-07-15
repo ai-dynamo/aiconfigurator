@@ -1,22 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify the self-contained AIC release wheel."""
+"""Verify the release wheel boundary and ensure every payload has one owner."""
 
 from __future__ import annotations
 
 import argparse
+import re
 import zipfile
 from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
 
 PAYLOAD_SUFFIXES = {".css", ".csv", ".j2", ".js", ".json", ".md", ".parquet", ".py", ".rule", ".txt", ".yaml"}
-SOURCE_PACKAGES = {
-    "src/aiconfigurator": "aiconfigurator",
-    "src/aiconfigurator_core": "aiconfigurator_core",
-    "src/spica": "spica",
-}
 
 
 def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
@@ -29,6 +25,10 @@ def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
     return names, metadata
 
 
+def _payload_files(names: set[str]) -> set[str]:
+    return {name for name in names if ".dist-info/" not in name and not name.endswith("/")}
+
+
 def _one_wheel(dist_dir: Path, pattern: str) -> Path:
     matches = sorted(dist_dir.glob(pattern))
     if len(matches) != 1:
@@ -36,43 +36,99 @@ def _one_wheel(dist_dir: Path, pattern: str) -> Path:
     return matches[0]
 
 
-def _source_payload() -> set[str]:
+def _add_source_tree(expected: set[str], source_root: Path, package_root: str) -> None:
+    for path in source_root.rglob("*"):
+        if path.is_file() and path.suffix in PAYLOAD_SUFFIXES:
+            expected.add((Path(package_root) / path.relative_to(source_root)).as_posix())
+
+
+def _source_payloads() -> tuple[set[str], set[str]]:
+    """Return ``(upper, core)`` payload paths expected from the source tree."""
     repo_root = Path(__file__).resolve().parents[1]
-    expected = set()
-    for source, package in SOURCE_PACKAGES.items():
-        source_root = repo_root / source
-        for path in source_root.rglob("*"):
-            if path.is_file() and path.suffix in PAYLOAD_SUFFIXES:
-                expected.add((Path(package) / path.relative_to(source_root)).as_posix())
-    return expected
+    upper_source = repo_root / "src"
+    core_source = repo_root / "aic-core" / "src"
+    upper: set[str] = set()
+    core: set[str] = set()
+
+    _add_source_tree(upper, upper_source / "aiconfigurator", "aiconfigurator")
+    _add_source_tree(upper, upper_source / "spica", "spica")
+    _add_source_tree(core, core_source / "aiconfigurator_core", "aiconfigurator_core")
+    return upper, core
 
 
-def _verify_main_wheel(wheel: Path) -> None:
+def _requirement_name(requirement: str) -> str:
+    match = re.match(r"[A-Za-z0-9_.-]+", requirement)
+    if match is None:
+        return ""
+    return re.sub(r"[-_.]+", "-", match.group(0)).lower()
+
+
+def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, set[str]]:
     names, metadata = _wheel_files(wheel)
+    payload = _payload_files(names)
     required = {
+        "aiconfigurator/__init__.py",
         "aiconfigurator/cli/main.py",
         "aiconfigurator/generator/api.py",
-        "aiconfigurator/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
-        "aiconfigurator/sdk/common.py",
-        "aiconfigurator/systems/h100_sxm.yaml",
-        "aiconfigurator_core/__init__.py",
+        "aiconfigurator/logging_utils.py",
+        "aiconfigurator/sdk/_compat.py",
+        "aiconfigurator/sdk/engine.py",
+        "aiconfigurator/sdk/task_v2.py",
         "spica/config.py",
     }
-    missing = sorted(required - names)
+    missing = sorted(required - payload)
     if missing:
-        raise RuntimeError(f"{wheel.name}: missing required payload: {missing}")
+        raise RuntimeError(f"{wheel.name}: missing upper-layer payload: {missing}")
 
-    missing_source = sorted(_source_payload() - names)
+    missing_source = sorted(expected_payload - payload)
     if missing_source:
-        raise RuntimeError(f"{wheel.name}: missing source-tree payload: {missing_source}")
+        raise RuntimeError(f"{wheel.name}: missing upper source-tree payload: {missing_source}")
+
+    misplaced = sorted(name for name in payload if name.startswith("aiconfigurator_core/"))
+    if misplaced:
+        raise RuntimeError(f"{wheel.name}: upper wheel must not own core payload: {misplaced}")
+
+    version = metadata.get("Version")
+    if not version:
+        raise RuntimeError(f"{wheel.name}: missing distribution version")
+    expected_requirement = f"aiconfigurator-core=={version}"
+    requirements = metadata.get_all("Requires-Dist", [])
+    if expected_requirement not in requirements:
+        raise RuntimeError(f"{wheel.name}: expected Requires-Dist {expected_requirement!r}, found {requirements}")
+    return version, payload
+
+
+def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]) -> set[str]:
+    names, metadata = _wheel_files(wheel)
+    payload = _payload_files(names)
+    required = {
+        "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
+        "aiconfigurator_core/sdk/__init__.py",
+        "aiconfigurator_core/sdk/common.py",
+        "aiconfigurator_core/sdk/engine.py",
+        "aiconfigurator_core/sdk/memory.py",
+        "aiconfigurator_core/systems/h100_sxm.yaml",
+    }
+    missing = sorted(required - payload)
+    if missing:
+        raise RuntimeError(f"{wheel.name}: missing standalone core payload: {missing}")
+
+    missing_source = sorted(expected_payload - payload)
+    if missing_source:
+        raise RuntimeError(f"{wheel.name}: missing core source-tree payload: {missing_source}")
+
+    misplaced = sorted(name for name in payload if name.startswith("aiconfigurator/") or name.startswith("spica/"))
+    if misplaced:
+        raise RuntimeError(f"{wheel.name}: core wheel must not own upper-layer payload: {misplaced}")
 
     checks = {
         "native core extension": any(
             name.startswith("aiconfigurator_core/_aiconfigurator_core.") and name.endswith((".so", ".pyd"))
-            for name in names
+            for name in payload
         ),
         "nested performance data": any(
-            name.startswith("aiconfigurator/systems/data/") and name.endswith(".parquet") for name in names
+            name.startswith("aiconfigurator_core/systems/data/") and name.endswith(".parquet") for name in payload
         ),
         "Rust SBOM": any(".dist-info/sboms/" in name and name.endswith(".json") for name in names),
     }
@@ -80,12 +136,14 @@ def _verify_main_wheel(wheel: Path) -> None:
     if failed:
         raise RuntimeError(f"{wheel.name}: missing {', '.join(failed)}")
 
+    if metadata.get("Version") != aic_version:
+        raise RuntimeError(
+            f"{wheel.name}: version {metadata.get('Version')!r} does not match aiconfigurator {aic_version!r}"
+        )
     requirements = metadata.get_all("Requires-Dist", [])
-    if any(requirement.lower().startswith("aiconfigurator-core") for requirement in requirements):
-        raise RuntimeError(f"{wheel.name}: must not depend on the removed aiconfigurator-core distribution")
-
-    if not metadata.get("Version"):
-        raise RuntimeError(f"{wheel.name}: missing distribution version")
+    if any(_requirement_name(requirement) == "aiconfigurator" for requirement in requirements):
+        raise RuntimeError(f"{wheel.name}: standalone core must not depend on aiconfigurator: {requirements}")
+    return payload
 
 
 def main() -> int:
@@ -94,12 +152,19 @@ def main() -> int:
     args = parser.parse_args()
 
     main_wheel = _one_wheel(args.dist_dir, "aiconfigurator-*.whl")
-    removed_core_wheels = sorted(args.dist_dir.glob("aiconfigurator_core-*.whl"))
-    if removed_core_wheels:
-        raise RuntimeError(f"unexpected aiconfigurator-core wheel: {[path.name for path in removed_core_wheels]}")
+    core_wheel = _one_wheel(args.dist_dir, "aiconfigurator_core-*.whl")
+    expected_main, expected_core = _source_payloads()
+    aic_version, main_payload = _verify_main_wheel(main_wheel, expected_main)
+    core_payload = _verify_core_wheel(core_wheel, aic_version, expected_core)
 
-    _verify_main_wheel(main_wheel)
-    print(f"Verified self-contained {main_wheel.name}")
+    overlap = sorted(main_payload & core_payload)
+    if overlap:
+        raise RuntimeError(f"release wheels have overlapping payload ownership: {overlap}")
+
+    print(
+        f"Verified upper {main_wheel.name} and standalone {core_wheel.name}: "
+        f"{len(main_payload)} + {len(core_payload)} disjoint payload files"
+    )
     return 0
 
 

@@ -40,7 +40,8 @@ source .venv/bin/activate
 ### 4. Install Development Dependencies
 
 ```bash
-# Install the package in editable mode with dev dependencies
+# Install the standalone core and upper package in editable mode
+pip install -e ./aic-core
 pip install -e ".[dev]"
 ```
 
@@ -51,8 +52,8 @@ pre-commit install
 ```
 
 This installs:
-- The `aiconfigurator` package in editable mode
-- The SDK, performance data, and native `aiconfigurator_core` extension
+- The upper `aiconfigurator` package in editable mode
+- The standalone SDK/data/native `aiconfigurator-core` package in editable mode
 - All runtime dependencies
 - Development tools: `ruff`, `pre-commit`, `pytest` and related plugins
 
