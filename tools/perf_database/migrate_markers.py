@@ -30,8 +30,21 @@ migration, PR 2, already made every marker dir single-family):
   (no data files) is unexpected on the current tree (PR 2 already dropped
   marker-only dirs at the family-layout migration) and fails closed rather
   than silently guessing what to synthesize.
+- Backfill (AIC-1502, extends the legacy-provenance tier to ALL pre-V3
+  data): any family version dir holding >=1 parquet table but carrying NO
+  `collection_meta.yaml` at all — i.e. it never had an `INCOMPLETE.txt`
+  marker either, because it was always served as complete — gets a
+  synthesized `provenance: legacy` sidecar with every held table marked
+  `status: complete` (not `partial`; unlike the `INCOMPLETE.txt` conversion
+  above, nothing here was ever incomplete). A dir that already carries a
+  sidecar (including the `INCOMPLETE.txt`-derived ones, which keep their
+  `status: partial` entries) is left untouched — backfill never overwrites
+  an existing `collection_meta.yaml`. A dir with no parquet table of its own
+  (e.g. a declared-reuse-only dir holding only `reuse.yaml`) has nothing to
+  describe and is skipped.
 
-Both marker files are deleted as part of their conversion.
+Both marker files are deleted as part of their conversion. The backfill has
+no source marker to delete — it only adds a sidecar where none exists.
 
 Modeled on `migrate_family_layout.py`: plan/execute/verify CLI modes, a `git`
 subprocess wrapper for execute, fail-closed aborts that list every offender
@@ -113,6 +126,20 @@ class SidecarAction:
 
 
 @dataclass(frozen=True)
+class BackfillAction:
+    """A parquet-holding version dir with NO `collection_meta.yaml` at all — it
+    never had an `INCOMPLETE.txt` marker either, because it was always served as
+    complete. Unlike `SidecarAction`, there is no source marker file to delete;
+    this only adds a sidecar where none exists.
+    """
+
+    dst: Path  # relative collection_meta.yaml path
+    framework: str  # backend dir name (version_dir.parent.name)
+    version: str  # version dir name
+    tables: tuple[str, ...]  # sorted parquet stems, all synthesized as status: complete
+
+
+@dataclass(frozen=True)
 class CommExclusionAction:
     """A `SHARED_LAYER_REUSE.txt` marker found inside a `comm`-family version dir.
 
@@ -128,6 +155,7 @@ class ScanResult:
     reuse_actions: list[ReuseAction]
     sidecar_actions: list[SidecarAction]
     comm_exclusion_deletions: list[CommExclusionAction]
+    backfill_actions: list[BackfillAction]
 
 
 # --- version ordering (textually duplicated from parse_support_matrix_version, ---
@@ -165,6 +193,16 @@ def _iter_version_dirs(data_root: Path) -> list[Path]:
 
 def _table_files(version_dir: Path) -> list[Path]:
     return sorted(f for f in version_dir.iterdir() if f.is_file() and f.name not in METADATA_NAMES)
+
+
+def _parquet_table_stems(version_dir: Path) -> tuple[str, ...]:
+    """Sorted parquet-file stems directly in a version dir — design §8's
+    definition of a "table" for R1 sidecar-coverage purposes
+    (`audit_collector_data.py`'s `_parquet_stems` mirrors this exactly). Narrower
+    than `_table_files`: only real `.parquet` data counts as a table to backfill
+    or verify coverage for.
+    """
+    return tuple(sorted(f.stem for f in version_dir.iterdir() if f.is_file() and f.suffix == ".parquet"))
 
 
 def _is_comm_family_version_dir(version_dir: Path) -> bool:
@@ -210,17 +248,29 @@ def render_reuse_yaml(entries: tuple[ReuseEntry, ...]) -> str:
 # --- INCOMPLETE.txt -> collection_meta.yaml -----------------------------------------
 
 
-def render_collection_meta_yaml(action: SidecarAction) -> str:
+def _render_legacy_collection_meta_yaml(framework: str, version: str, tables: tuple[str, ...], status: str) -> str:
     doc = {
         "schema_version": 1,
         "provenance": "legacy",
         "runtime": {
-            "framework": action.framework,
-            "version": action.version,
+            "framework": framework,
+            "version": version,
         },
-        "tables": {table: {"status": "partial"} for table in action.tables},
+        "tables": {table: {"status": status} for table in tables},
     }
     return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+
+
+def render_collection_meta_yaml(action: SidecarAction) -> str:
+    return _render_legacy_collection_meta_yaml(action.framework, action.version, action.tables, "partial")
+
+
+def render_backfill_collection_meta_yaml(action: BackfillAction) -> str:
+    """Backfill status is always `complete`, never `partial` — these dirs were
+    always served as complete data; unlike `INCOMPLETE.txt` conversions, nothing
+    here was ever flagged incomplete.
+    """
+    return _render_legacy_collection_meta_yaml(action.framework, action.version, action.tables, "complete")
 
 
 # --- scan: walk the tree, apply both rules, fail closed -----------------------------
@@ -230,6 +280,7 @@ def scan_tree(data_root: Path) -> ScanResult:
     reuse_actions: list[ReuseAction] = []
     sidecar_actions: list[SidecarAction] = []
     comm_exclusion_deletions: list[CommExclusionAction] = []
+    backfill_actions: list[BackfillAction] = []
     no_donor_offenders: list[str] = []
     marker_only_incomplete_offenders: list[str] = []
 
@@ -255,7 +306,8 @@ def scan_tree(data_root: Path) -> ScanResult:
                     )
 
         incomplete_marker = version_dir / INCOMPLETE
-        if incomplete_marker.is_file():
+        has_incomplete_marker = incomplete_marker.is_file()
+        if has_incomplete_marker:
             own_tables = tuple(sorted(f.stem for f in _table_files(version_dir)))
             if not own_tables:
                 marker_only_incomplete_offenders.append(str(incomplete_marker.relative_to(data_root)))
@@ -267,6 +319,24 @@ def scan_tree(data_root: Path) -> ScanResult:
                         framework=version_dir.parent.name,
                         version=version_dir.name,
                         tables=own_tables,
+                    )
+                )
+
+        # Backfill (AIC-1502): a parquet-holding dir with no sidecar at all --
+        # never had an INCOMPLETE.txt marker either (always served as complete).
+        # Skips dirs that already have a collection_meta.yaml (including the
+        # INCOMPLETE.txt-derived ones handled above) and dirs with no parquet of
+        # their own (e.g. declared-reuse-only dirs -- nothing to describe).
+        meta_path = version_dir / COLLECTION_META_YAML
+        if not has_incomplete_marker and not meta_path.is_file():
+            parquet_stems = _parquet_table_stems(version_dir)
+            if parquet_stems:
+                backfill_actions.append(
+                    BackfillAction(
+                        dst=meta_path.relative_to(data_root),
+                        framework=version_dir.parent.name,
+                        version=version_dir.name,
+                        tables=parquet_stems,
                     )
                 )
 
@@ -288,10 +358,12 @@ def scan_tree(data_root: Path) -> ScanResult:
     reuse_actions.sort(key=lambda a: str(a.src))
     sidecar_actions.sort(key=lambda a: str(a.src))
     comm_exclusion_deletions.sort(key=lambda a: str(a.src))
+    backfill_actions.sort(key=lambda a: str(a.dst))
     return ScanResult(
         reuse_actions=reuse_actions,
         sidecar_actions=sidecar_actions,
         comm_exclusion_deletions=comm_exclusion_deletions,
+        backfill_actions=backfill_actions,
     )
 
 
@@ -311,13 +383,19 @@ def render_plan(scan: ScanResult) -> list[str]:
         lines.append(f"git rm {action.src}")
     for action in scan.comm_exclusion_deletions:
         lines.append(f"git rm {action.src}  # {COMM_EXCLUSION_LOG}")
+    for action in scan.backfill_actions:
+        lines.append(
+            f"git add {action.dst}  # collection_meta.yaml legacy backfill sidecar "
+            f"({len(action.tables)} table(s), status: complete)"
+        )
     lines.sort()
     total_marker_deletions = len(scan.reuse_actions) + len(scan.sidecar_actions) + len(scan.comm_exclusion_deletions)
     lines.append(
         f"# summary: shared_reuse_conversions={len(scan.reuse_actions)} "
         f"incomplete_sidecars={len(scan.sidecar_actions)} "
         f"marker_deletions={total_marker_deletions} "
-        f"comm_exclusions={len(scan.comm_exclusion_deletions)}"
+        f"comm_exclusions={len(scan.comm_exclusion_deletions)} "
+        f"legacy_backfills={len(scan.backfill_actions)}"
     )
     return lines
 
@@ -347,6 +425,11 @@ def execute_plan(data_root: Path, scan: ScanResult) -> None:
     for action in scan.comm_exclusion_deletions:
         _git(["rm", "-f", "-q", str(data_root / action.src)], cwd=data_root)
 
+    for action in scan.backfill_actions:
+        dst = data_root / action.dst
+        dst.write_text(render_backfill_collection_meta_yaml(action), encoding="utf-8")
+        _git(["add", str(dst)], cwd=data_root)
+
     errors: list[str] = []
     for action in (*scan.reuse_actions, *scan.sidecar_actions):
         if (data_root / action.src).exists():
@@ -356,6 +439,9 @@ def execute_plan(data_root: Path, scan: ScanResult) -> None:
     for action in scan.comm_exclusion_deletions:
         if (data_root / action.src).exists():
             errors.append(f"still present at legacy path: {action.src}")
+    for action in scan.backfill_actions:
+        if not (data_root / action.dst).exists():
+            errors.append(f"missing at destination: {action.dst}")
     if errors:
         raise MigrationError("execute post-check failed: " + "; ".join(errors))
 
@@ -374,7 +460,6 @@ def verify_tree(data_root: Path) -> list[str]:
 
     try:
         from aiconfigurator_core.sdk.perf_database import (
-            _collection_meta_has_partial_table,
             _load_collection_meta_yaml,
             _parse_reuse_yaml,
         )
@@ -406,14 +491,29 @@ def verify_tree(data_root: Path) -> list[str]:
                     f"for table {entry['table']}"
                 )
 
-    for meta_path in sorted(data_root.rglob(COLLECTION_META_YAML)):
+    # Coverage completeness (AIC-1502 backfill): every parquet-holding version
+    # dir must have a collection_meta.yaml whose `tables` key set covers every
+    # parquet stem present -- mirrors audit_collector_data.py's R1 rule, applied
+    # here as a self-check that plan/execute actually closed the gap.
+    for version_dir in _iter_version_dirs(data_root):
+        parquet_stems = set(_parquet_table_stems(version_dir))
+        if not parquet_stems:
+            continue
+        rel_dir = version_dir.relative_to(data_root)
+        meta_path = version_dir / COLLECTION_META_YAML
+        if not meta_path.is_file():
+            errors.append(f"{rel_dir}: missing {COLLECTION_META_YAML} for parquet table(s) {sorted(parquet_stems)}")
+            continue
         try:
             meta = _load_collection_meta_yaml(str(meta_path))
         except ValueError as exc:
             errors.append(str(exc))
             continue
-        if meta.get("provenance") == "legacy" and not _collection_meta_has_partial_table(meta):
-            errors.append(f"{meta_path.relative_to(data_root)}: legacy sidecar has no table with status: partial")
+        tables = meta.get("tables")
+        covered = set(tables) if isinstance(tables, dict) else set()
+        missing = sorted(parquet_stems - covered)
+        if missing:
+            errors.append(f"{rel_dir}/{COLLECTION_META_YAML}: sidecar does not cover parquet table(s) {missing}")
 
     return errors
 
@@ -462,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"executed {len(scan.reuse_actions)} reuse.yaml conversion(s), "
             f"{len(scan.sidecar_actions)} collection_meta.yaml sidecar(s), "
+            f"{len(scan.backfill_actions)} legacy backfill sidecar(s), "
             f"{len(scan.comm_exclusion_deletions)} comm-family exclusion(s) (no declaration emitted), "
             f"{total_marker_deletions} marker deletion(s)"
         )

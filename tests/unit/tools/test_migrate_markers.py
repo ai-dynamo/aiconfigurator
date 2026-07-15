@@ -7,11 +7,13 @@ Builds synthetic family-layout trees (`<system>/<family>/<backend>/<version>/`)
 inside a real `git init` repo under tmp_path (the script shells out to `git
 add`/`git rm`), and exercises: donor-table derivation for
 `SHARED_LAYER_REUSE.txt` -> `reuse.yaml`, legacy-sidecar synthesis for
-`INCOMPLETE.txt` -> `collection_meta.yaml`, both fail-closed abort paths,
-determinism/idempotency, the plan/execute/verify CLI modes, and — per the
-design's schema lock — that every generated file round-trips through the
-REAL loader parser (`aiconfigurator_core.sdk.perf_database._parse_reuse_yaml`
-/ `_load_collection_meta_yaml`), not a reimplementation of it.
+`INCOMPLETE.txt` -> `collection_meta.yaml`, the AIC-1502 backfill of
+`collection_meta.yaml` for parquet-holding dirs that never had ANY marker,
+both fail-closed abort paths, determinism/idempotency, the plan/execute/verify
+CLI modes, and — per the design's schema lock — that every generated file
+round-trips through the REAL loader parser
+(`aiconfigurator_core.sdk.perf_database._parse_reuse_yaml` /
+`_load_collection_meta_yaml`), not a reimplementation of it.
 """
 
 from __future__ import annotations
@@ -291,6 +293,105 @@ class TestScanIncomplete:
         assert target.exists()
 
 
+# --- scan_tree: backfill (AIC-1502) -----------------------------------------------------
+
+
+class TestScanBackfill:
+    def test_parquet_dir_with_no_sidecar_gets_backfilled(self, mod, repo):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert scan.reuse_actions == []
+        assert scan.sidecar_actions == []
+        [action] = scan.backfill_actions
+        assert action.dst == Path("h100_sxm/gemm/sglang/0.5.9/collection_meta.yaml")
+        assert action.framework == "sglang"
+        assert action.version == "0.5.9"
+        assert action.tables == ("gemm_perf",)
+
+    def test_covers_every_parquet_stem_in_the_dir(self, mod, repo):
+        _touch(repo, "h100_sxm/attention/vllm/0.14.0/context_attention_perf.parquet")
+        _touch(repo, "h100_sxm/attention/vllm/0.14.0/generation_attention_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        [action] = scan.backfill_actions
+        assert action.tables == ("context_attention_perf", "generation_attention_perf")
+
+    def test_existing_sidecar_is_not_overwritten_or_re_planned(self, mod, repo):
+        # Mirrors the real tree's 7 INCOMPLETE-derived sidecars: already migrated,
+        # status: partial, and must never be touched by the backfill pass.
+        _touch(repo, "gb300/moe/vllm/0.14.0/moe_perf.parquet")
+        _touch(
+            repo,
+            "gb300/moe/vllm/0.14.0/collection_meta.yaml",
+            b"schema_version: 1\nprovenance: legacy\nruntime:\n  framework: vllm\n  version: '0.14.0'\n"
+            b"tables:\n  moe_perf:\n    status: partial\n",
+        )
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert scan.backfill_actions == []
+        meta_path = repo / "gb300" / "moe" / "vllm" / "0.14.0" / "collection_meta.yaml"
+        meta = _load_collection_meta_yaml(str(meta_path))
+        assert meta["tables"]["moe_perf"]["status"] == "partial"
+
+    def test_dir_with_incomplete_marker_is_not_also_backfilled(self, mod, repo):
+        # The INCOMPLETE.txt path (TestScanIncomplete) already produces a
+        # SidecarAction for this dir; it must not ALSO show up as a backfill
+        # action (that would double-plan the same destination path).
+        _touch(repo, "gb300/attention/vllm/0.14.0/context_attention_perf.parquet")
+        _touch(repo, "gb300/attention/vllm/0.14.0/INCOMPLETE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert len(scan.sidecar_actions) == 1
+        assert scan.backfill_actions == []
+
+    def test_reuse_only_dir_with_no_parquet_is_skipped(self, mod, repo):
+        # Declared-reuse-only dir: reuse.yaml present, no own parquet data.
+        # Nothing to describe -- not a backfill candidate. (The donor dir,
+        # 0.5.14, legitimately holds real parquet and DOES get backfilled --
+        # that's a separate, correct action, not what this test is about.)
+        _touch(
+            repo,
+            "h100_sxm/gemm/sglang/0.5.9/reuse.yaml",
+            b"schema_version: 1\nreuse:\n- table: gemm_perf\n  from_version: '0.5.14'\n"
+            b"  reason: r\n  approved_by: yimingl\n",
+        )
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert Path("h100_sxm/gemm/sglang/0.5.9/collection_meta.yaml") not in {a.dst for a in scan.backfill_actions}
+
+    def test_dir_with_own_parquet_and_reuse_yaml_still_gets_backfilled(self, mod, repo):
+        # A dir can hold BOTH its own parquet data AND a reuse.yaml declaring
+        # other tables' donors (the l40s pattern); its own table still needs a
+        # sidecar for R1 coverage.
+        _touch(repo, "l40s/gemm/sglang/0.5.12/gemm_perf.parquet")
+        _touch(
+            repo,
+            "l40s/gemm/sglang/0.5.12/reuse.yaml",
+            b"schema_version: 1\nreuse:\n- table: moe_perf\n  from_version: '0.5.14'\n"
+            b"  reason: r\n  approved_by: yimingl\n",
+        )
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        [action] = scan.backfill_actions
+        assert action.tables == ("gemm_perf",)
+
+    def test_multiple_backfills_sorted_by_destination(self, mod, repo):
+        _touch(repo, "h200_sxm/moe/sglang/0.5.12/moe_perf.parquet")
+        _touch(repo, "a100_sxm/gemm/sglang/0.5.12/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert [a.dst for a in scan.backfill_actions] == sorted(a.dst for a in scan.backfill_actions)
+
+    def test_does_not_mutate_on_scan(self, mod, repo):
+        target = _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        mod.scan_tree(repo)
+        assert target.exists()
+        assert not (target.parent / "collection_meta.yaml").exists()
+
+
 # --- determinism -------------------------------------------------------------------------
 
 
@@ -362,6 +463,22 @@ class TestRenderRoundTripsThroughRealLoader:
         assert meta["tables"]["moe_perf"]["status"] == "partial"
         assert _collection_meta_has_partial_table(meta) is True
 
+    def test_backfill_collection_meta_yaml_written_to_disk_parses_via_loader_and_is_complete(self, mod, tmp_path):
+        action = mod.BackfillAction(
+            dst=Path("x/collection_meta.yaml"),
+            framework="sglang",
+            version="0.5.9",
+            tables=("gemm_perf",),
+        )
+        path = tmp_path / "collection_meta.yaml"
+        path.write_text(mod.render_backfill_collection_meta_yaml(action), encoding="utf-8")
+        meta = _load_collection_meta_yaml(str(path))
+        assert meta["provenance"] == "legacy"
+        assert meta["runtime"] == {"framework": "sglang", "version": "0.5.9"}
+        assert meta["tables"]["gemm_perf"]["status"] == "complete"
+        # Backfilled dirs were always served as complete -- never partial.
+        assert _collection_meta_has_partial_table(meta) is False
+
 
 # --- execute_plan: real git add / git rm -------------------------------------------------
 
@@ -411,6 +528,36 @@ class TestExecutePlan:
         assert not (vdir / "SHARED_LAYER_REUSE.txt").exists()
         assert not (vdir / "reuse.yaml").exists()
 
+    def test_execute_writes_backfill_sidecar_with_no_source_marker_to_delete(self, mod, repo):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+
+        meta_path = repo / "h100_sxm" / "gemm" / "sglang" / "0.5.9" / "collection_meta.yaml"
+        assert meta_path.is_file()
+        meta = _load_collection_meta_yaml(str(meta_path))
+        assert meta["provenance"] == "legacy"
+        assert meta["tables"]["gemm_perf"]["status"] == "complete"
+        assert not _collection_meta_has_partial_table(meta)
+
+    def test_execute_backfill_leaves_existing_incomplete_sidecar_untouched(self, mod, repo):
+        _touch(repo, "gb300/attention/vllm/0.14.0/context_attention_perf.parquet")
+        _touch(repo, "gb300/attention/vllm/0.14.0/INCOMPLETE.txt")
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+
+        incomplete_meta = _load_collection_meta_yaml(
+            str(repo / "gb300" / "attention" / "vllm" / "0.14.0" / "collection_meta.yaml")
+        )
+        assert incomplete_meta["tables"]["context_attention_perf"]["status"] == "partial"
+        backfill_meta = _load_collection_meta_yaml(
+            str(repo / "h100_sxm" / "gemm" / "sglang" / "0.5.9" / "collection_meta.yaml")
+        )
+        assert backfill_meta["tables"]["gemm_perf"]["status"] == "complete"
+
 
 # --- verify_tree ---------------------------------------------------------------------------
 
@@ -457,7 +604,30 @@ class TestVerify:
         errors = mod.verify_tree(repo)
         assert any("from_version target does not exist" in e for e in errors)
 
-    def test_verify_fails_on_legacy_sidecar_without_partial_table(self, mod, repo):
+    def test_verify_passes_on_legacy_sidecar_with_only_complete_tables(self, mod, repo):
+        # AIC-1502: a status:complete-only legacy sidecar (the backfill shape) is
+        # now a legitimate, fully-covered dir -- not an error. Supersedes the old
+        # "legacy implies >=1 partial table" invariant, which the backfill breaks
+        # by design (these dirs were never incomplete).
+        _touch(repo, "gb300/moe/vllm/0.14.0/moe_perf.parquet")
+        _touch(
+            repo,
+            "gb300/moe/vllm/0.14.0/collection_meta.yaml",
+            b"schema_version: 1\nprovenance: legacy\nruntime:\n  framework: vllm\n  version: '0.14.0'\n"
+            b"tables:\n  moe_perf:\n    status: complete\n",
+        )
+        _track(repo)
+        assert mod.verify_tree(repo) == []
+
+    def test_verify_fails_on_parquet_dir_missing_sidecar_entirely(self, mod, repo):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        errors = mod.verify_tree(repo)
+        assert any("missing collection_meta.yaml" in e for e in errors)
+
+    def test_verify_fails_on_sidecar_missing_coverage_for_one_table(self, mod, repo):
+        _touch(repo, "gb300/moe/vllm/0.14.0/moe_perf.parquet")
+        _touch(repo, "gb300/moe/vllm/0.14.0/router_perf.parquet")
         _touch(
             repo,
             "gb300/moe/vllm/0.14.0/collection_meta.yaml",
@@ -466,7 +636,29 @@ class TestVerify:
         )
         _track(repo)
         errors = mod.verify_tree(repo)
-        assert any("no table with status: partial" in e for e in errors)
+        assert any("does not cover parquet table(s)" in e and "router_perf" in e for e in errors)
+
+    def test_verify_passes_on_reuse_only_dir_with_no_parquet_and_no_sidecar(self, mod, repo):
+        _touch(
+            repo,
+            "h100_sxm/gemm/sglang/0.5.9/reuse.yaml",
+            b"schema_version: 1\nreuse:\n- table: gemm_perf\n  from_version: '0.5.14'\n"
+            b"  reason: r\n  approved_by: yimingl\n",
+        )
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+        assert mod.verify_tree(repo) == []
+
+    def test_verify_passes_after_backfill_execute(self, mod, repo):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _touch(repo, "gb300/attention/vllm/0.14.0/context_attention_perf.parquet")
+        _touch(repo, "gb300/attention/vllm/0.14.0/INCOMPLETE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+        assert mod.verify_tree(repo) == []
 
     def test_verify_passes_after_comm_exclusion_execute(self, mod, repo):
         _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
@@ -492,14 +684,35 @@ class TestIdempotency:
         rescan = mod.scan_tree(repo)
         assert rescan.reuse_actions == []
         assert rescan.sidecar_actions == []
+        assert rescan.backfill_actions == []
         assert mod.verify_tree(repo) == []
 
-    def test_tree_with_no_markers_at_all_has_empty_plan(self, mod, repo):
+    def test_tree_with_no_markers_and_existing_sidecar_has_empty_plan(self, mod, repo):
+        # A dir with no legacy markers and an already-present sidecar (e.g. from a
+        # prior backfill run) proposes nothing on any pass -- true idempotency,
+        # as distinct from TestScanBackfill's "no markers, no sidecar yet" case.
         _touch(repo, "h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+        _touch(
+            repo,
+            "h200_sxm/gemm/sglang/0.5.14/collection_meta.yaml",
+            b"schema_version: 1\nprovenance: legacy\nruntime:\n  framework: sglang\n  version: '0.5.14'\n"
+            b"tables:\n  gemm_perf:\n    status: complete\n",
+        )
         _track(repo)
         scan = mod.scan_tree(repo)
         assert scan.reuse_actions == []
         assert scan.sidecar_actions == []
+        assert scan.backfill_actions == []
+        assert mod.verify_tree(repo) == []
+
+    def test_backfill_idempotent_after_execute(self, mod, repo):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+
+        rescan = mod.scan_tree(repo)
+        assert rescan.backfill_actions == []
         assert mod.verify_tree(repo) == []
 
     def test_comm_exclusion_idempotent_after_execute(self, mod, repo):
@@ -586,3 +799,33 @@ class TestCli:
         assert "git add" not in out  # no reuse.yaml ever staged for a comm marker
         assert "comm_exclusions=1" in out
         assert "marker_deletions=1" in out
+        assert "legacy_backfills=0" in out
+
+    def test_plan_execute_verify_round_trip_for_backfill_only_tree(self, mod, repo, capsys):
+        _touch(repo, "h100_sxm/gemm/sglang/0.5.9/gemm_perf.parquet")
+        _track(repo)
+
+        rc = mod.main(["--data-root", str(repo)])
+        assert rc == 0
+        plan_out = capsys.readouterr().out
+        assert "git add h100_sxm/gemm/sglang/0.5.9/collection_meta.yaml" in plan_out
+        assert "legacy backfill sidecar" in plan_out
+        assert "legacy_backfills=1" in plan_out
+
+        rc = mod.main(["--data-root", str(repo), "--verify"])
+        assert rc == 1  # not yet executed: parquet dir still has no sidecar
+        assert "VERIFY FAIL" in capsys.readouterr().err
+
+        rc = mod.main(["--data-root", str(repo), "--execute"])
+        assert rc == 0
+        assert "1 legacy backfill sidecar(s)" in capsys.readouterr().out
+
+        rc = mod.main(["--data-root", str(repo), "--verify"])
+        assert rc == 0
+        assert "VERIFY OK" in capsys.readouterr().out
+
+        rc = mod.main(["--data-root", str(repo)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "git add" not in out
+        assert "legacy_backfills=0" in out
