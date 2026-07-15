@@ -37,7 +37,10 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
-          lfs: true
+          # No `lfs: true`: the audit and changed-ops steps only ever read
+          # parquet filenames/stems and the YAML sidecars beside them, never
+          # parquet content, so LFS smudging is unneeded weight -- and would
+          # fail checkout for fork PRs that can't authenticate to LFS.
           persist-credentials: false
 
       - name: Fetch base ref

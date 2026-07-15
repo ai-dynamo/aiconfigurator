@@ -4,8 +4,11 @@
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 
 from collector.helper import finalize_perf_files, finalize_perf_outputs, find_perf_csv_outputs
+
+pytestmark = pytest.mark.unit
 
 
 def _write_perf_csv(path: Path, latency: float = 1.25) -> None:

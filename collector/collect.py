@@ -1468,6 +1468,14 @@ def _write_collector_provenance(
         except yaml.YAMLError as error:
             logger.warning(f"collection_meta: could not parse existing {existing_meta}, overwriting it: {error}")
             existing_doc = {}
+        if existing_doc.get("provenance") == "legacy":
+            raise RuntimeError(
+                f"{output_root}: existing collection_meta.yaml is a legacy-tier sidecar "
+                "(provenance: legacy). A fresh collection finalizing into this directory "
+                "must not silently merge into it — that would drop the legacy tier tag. "
+                "Remove the legacy sidecar first if this directory is being deliberately "
+                "replaced by a new collection."
+            )
         existing_tables = existing_doc.get("tables") or {}
         if isinstance(existing_tables, dict):
             tables = {**existing_tables, **tables}
