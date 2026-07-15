@@ -68,11 +68,17 @@ def _dir_is_incomplete(path: str) -> bool:
     INCOMPLETE.txt as the legacy fallback. Duplicated (not imported) from
     aiconfigurator_core.sdk.perf_database._version_dir_state, the source of
     truth for this semantic — kept local so this tool doesn't take an aic-core
-    dependency for one predicate."""
+    dependency for one predicate. Malformed collection_meta.yaml raises
+    ValueError naming the file, matching that canonical loader's fail-loudly
+    behavior (unlike operations/base.py's deliberately lenient hot-path
+    duplicate of this same predicate)."""
     meta_path = os.path.join(path, "collection_meta.yaml")
     if os.path.isfile(meta_path):
-        with open(meta_path, encoding="utf-8") as f:
-            meta = yaml.safe_load(f)
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"{meta_path}: failed to parse collection_meta.yaml: {e}") from e
         tables = meta.get("tables") if isinstance(meta, dict) else None
         return isinstance(tables, dict) and any(
             isinstance(t, dict) and t.get("status") == "partial" for t in tables.values()

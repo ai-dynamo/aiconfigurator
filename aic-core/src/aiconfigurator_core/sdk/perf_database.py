@@ -361,6 +361,11 @@ def _parse_reuse_yaml(path: str) -> dict:
     """Parse+validate a ``reuse.yaml`` sidecar (design §6.3): top-level ``reuse:``
     list of {table, from_version, reason, approved_by}. Raises ValueError on any
     structural or type mismatch (fail loudly on malformed authored data).
+
+    A present-but-empty ``reuse: []`` is a valid "nothing declared" document.
+    A MISSING (or misspelled, e.g. ``reuses:``) top-level ``reuse`` key is a
+    schema error, not silently treated as empty — it almost always means the
+    author typo'd the key and the file's declarations are being dropped.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -369,7 +374,9 @@ def _parse_reuse_yaml(path: str) -> dict:
         raise ValueError(f"{path}: failed to parse reuse.yaml: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected a YAML mapping at the top level, got {type(raw).__name__}")  # noqa: TRY004
-    entries = raw.get("reuse") or []
+    if "reuse" not in raw:
+        raise ValueError(f"{path}: missing required top-level 'reuse' key")
+    entries = raw["reuse"]
     if not isinstance(entries, list):
         raise ValueError(f"{path}: 'reuse' must be a list, got {type(entries).__name__}")  # noqa: TRY004
 
@@ -446,10 +453,6 @@ def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dic
         "partial": partial,
         "has_perf": _database_version_dir_has_perf_files(version_path),
     }
-
-
-def _database_version_dir_has_shared_layer_marker(version_path: str, *, data_dir: str | None = None) -> bool:
-    return _version_dir_state(version_path, data_dir=data_dir)["declared_reuse"] is not None
 
 
 def _database_version_dir_is_declared(version_path: str, *, data_dir: str | None = None) -> bool:

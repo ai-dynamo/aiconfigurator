@@ -256,6 +256,25 @@ def test_malformed_reuse_yaml_raises(systems_root):
         _declared_versions(data_dir, "sglang")
 
 
+def test_reuse_yaml_missing_top_level_key_raises(systems_root):
+    # 'reuses' (typo) instead of 'reuse': the file's declarations would
+    # otherwise be silently dropped (raw.get("reuse") treated as empty and
+    # the version undeclared) instead of failing loudly on the schema error.
+    data_dir = str(systems_root / "data" / "h200_sxm")
+    _write_yaml(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", {"reuses": [_REUSE_ENTRY]})
+
+    with pytest.raises(ValueError, match="missing required top-level 'reuse' key"):
+        _declared_versions(data_dir, "sglang")
+
+
+def test_reuse_yaml_non_list_reuse_key_raises(systems_root):
+    data_dir = str(systems_root / "data" / "h200_sxm")
+    _write_yaml(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", {"reuse": "not-a-list"})
+
+    with pytest.raises(ValueError, match="'reuse' must be a list"):
+        _declared_versions(data_dir, "sglang")
+
+
 def test_resolve_op_path_skips_partial_collection_meta_family_dir(systems_root):
     root = str(systems_root / "data/h200_sxm")
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
