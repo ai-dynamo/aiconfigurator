@@ -124,6 +124,10 @@ def main(args):
             scrollbar-width: none !important;
             -ms-overflow-style: none !important;
         }
+        /* Monospace font for debugging output textboxes */
+        .debug-output textarea {
+            font-family: monospace !important;
+        }
     """,
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
