@@ -75,6 +75,53 @@ fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     None
 }
 
+/// True when at least one family-first dir directly under `system_data_root`
+/// (any first-level entry whose name is not in `KNOWN_BACKEND_DIRS`) contains
+/// a `<backend>/<version>` subdirectory. Lets [`PerfDatabase::load_with_sources`]
+/// accept a tuple whose data has migrated entirely off the legacy
+/// `<backend>/<version>` layout — no legacy dir needs to exist as long as some
+/// family dir holds the tuple. The actual per-file resolution then happens
+/// inside each table's `resolve_op_sources` call via `find_in_family_dirs`.
+fn has_family_backend_version(system_data_root: &Path, backend: &str, version: &str) -> bool {
+    let entries = match std::fs::read_dir(system_data_root) {
+        Ok(entries) => entries,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = match name.to_str() {
+            Some(name) => name,
+            None => continue,
+        };
+        if KNOWN_BACKEND_DIRS.contains(&name) || !entry.path().is_dir() {
+            continue;
+        }
+        if entry.path().join(backend).join(version).is_dir() {
+            return true;
+        }
+    }
+    false
+}
+
+/// NCCL/OneCCL system-wide perf data is migrating from the legacy
+/// `<system_data_root>/{nccl,oneccl}/<version>` layout to family-first
+/// `<system_data_root>/comm/{nccl,oneccl}/<version>` (the collector always
+/// writes NCCL/OneCCL under the single `comm` family, unlike the per-backend
+/// families gemm/attention/etc. use — there is only ever one comm family).
+/// Python's loader (`operations/base.py::resolve_op_data_path`) discovers the
+/// family dir structurally by scanning every first-level entry under
+/// `system_data_root`; Rust hardcodes the one `comm` candidate instead, since
+/// NCCL/OneCCL only ever land under that name in practice — a plain path
+/// check is simpler than a directory scan and behaves identically here.
+fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathBuf {
+    let family_root = system_data_root.join("comm").join(backend_dir).join(version);
+    if family_root.is_dir() {
+        family_root
+    } else {
+        system_data_root.join(backend_dir).join(version)
+    }
+}
+
 /// Whether a row's `kernel_source` passes a source's filter, mirroring Python
 /// `_read_filtered_rows`: `None` admits every row; a `Some` allowlist keeps only
 /// rows whose `kernel_source` value is in the set (a row missing the column is
@@ -183,28 +230,38 @@ impl PerfDatabase {
         let spec = SystemSpec::load(&system_yaml)?;
         let system_data_root = systems_root.join(&spec.data_dir);
         let data_root = system_data_root.join(backend).join(version);
-        if !data_root.is_dir() {
+        // Accept either layout: the legacy `<backend>/<version>` dir itself,
+        // or at least one family-first `<family>/<backend>/<version>` dir
+        // (family = any first-level dir under `system_data_root` other than
+        // the known legacy backend names). `data_root` stays the legacy path
+        // either way — each table's `resolve_op_sources` call resolves the
+        // actual per-file location (legacy or family) independently.
+        if !data_root.is_dir() && !has_family_backend_version(&system_data_root, backend, version) {
             return Err(AicError::PerfDatabase(format!(
-                "perf data directory not found: {} (system={system}, backend={backend}, version={version})",
-                data_root.display()
+                "perf data directory not found in either the legacy layout ({}) or a family-first layout \
+                 (<family>/{backend}/{version} under {}) (system={system}, backend={backend}, version={version})",
+                data_root.display(),
+                system_data_root.display()
             )));
         }
-        // NCCL/OneCCL parquet files live under `<system_data_root>/{nccl,
-        // oneccl}/<version>/`, NOT under the backend/version data dir. The
-        // version comes from `SystemSpec.misc.{nccl,oneccl}_version` and is
-        // optional — XPU systems decl ``oneccl_version`` only, GPU systems
-        // typically decl `nccl_version` only. Mirrors Python
+        // NCCL/OneCCL parquet files live under `<system_data_root>/comm/
+        // {nccl, oneccl}/<version>/` (family-first, preferred) or the legacy
+        // `<system_data_root>/{nccl, oneccl}/<version>/`, NOT under the
+        // backend/version data dir — see `comm_root`. The version comes from
+        // `SystemSpec.misc.{nccl,oneccl}_version` and is optional — XPU
+        // systems decl ``oneccl_version`` only, GPU systems typically decl
+        // `nccl_version` only. Mirrors Python
         // `sdk/operations/communication.py:294, 301-303`.
         let nccl_root = spec
             .misc
             .nccl_version
             .as_ref()
-            .map(|v| system_data_root.join("nccl").join(v));
+            .map(|v| comm_root(&system_data_root, "nccl", v));
         let oneccl_root = spec
             .misc
             .oneccl_version
             .as_ref()
-            .map(|v| system_data_root.join("oneccl").join(v));
+            .map(|v| comm_root(&system_data_root, "oneccl", v));
         Ok(Self {
             system: system.to_string(),
             backend: backend.to_string(),
@@ -314,5 +371,98 @@ mod tests {
         // backend dir, not a family dir, and must be skipped during the scan.
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].0, legacy_data_root.join("nccl_perf.parquet"));
+    }
+
+    /// Minimal `SystemSpec` YAML with `data_dir: data` (relative to
+    /// `systems_root`) — just enough for `SystemSpec::load` to succeed so
+    /// `PerfDatabase::load`'s existence-gate behavior can be exercised on a
+    /// synthetic tree without a real systems fixture.
+    fn write_synthetic_system_yaml(systems_root: &Path, system: &str) {
+        let yaml = "\
+data_dir: data
+gpu:
+  mem_bw: 1000000000000
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 100000000000
+  intra_node_bw: 900000000000
+";
+        std::fs::write(systems_root.join(format!("{system}.yaml")), yaml).unwrap();
+    }
+
+    #[test]
+    fn load_succeeds_on_family_only_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let systems_root = tmp.path();
+        let (system, backend, version) = ("synth_family", "vllm", "1.2.3");
+        write_synthetic_system_yaml(systems_root, system);
+
+        // Family-first layout only: <data>/gemm/<backend>/<version>/gemm_perf.parquet.
+        // No legacy <data>/<backend>/<version> dir exists at all.
+        let family_dir = systems_root.join("data").join("gemm").join(backend).join(version);
+        std::fs::create_dir_all(&family_dir).unwrap();
+        std::fs::write(family_dir.join("gemm_perf.parquet"), b"stub").unwrap();
+
+        let legacy_data_root = systems_root.join("data").join(backend).join(version);
+        assert!(!legacy_data_root.is_dir(), "fixture must not have a legacy dir");
+
+        let db = PerfDatabase::load(systems_root, system, backend, version)
+            .expect("family-only layout must load");
+        assert_eq!(db.system, system);
+        // `data_root` stays the legacy path by contract; per-file resolution
+        // (tested separately above) is what actually finds the family file.
+        assert_eq!(db.data_root, legacy_data_root);
+    }
+
+    #[test]
+    fn load_succeeds_on_legacy_only_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let systems_root = tmp.path();
+        let (system, backend, version) = ("synth_legacy", "vllm", "1.2.3");
+        write_synthetic_system_yaml(systems_root, system);
+
+        let legacy_dir = systems_root.join("data").join(backend).join(version);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join("gemm_perf.parquet"), b"stub").unwrap();
+
+        let db = PerfDatabase::load(systems_root, system, backend, version)
+            .expect("legacy-only layout must load");
+        assert_eq!(db.data_root, legacy_dir);
+    }
+
+    #[test]
+    fn load_errors_mentioning_both_layouts_on_total_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let systems_root = tmp.path();
+        let (system, backend, version) = ("synth_missing", "vllm", "9.9.9");
+        write_synthetic_system_yaml(systems_root, system);
+        std::fs::create_dir_all(systems_root.join("data")).unwrap();
+
+        match PerfDatabase::load(systems_root, system, backend, version) {
+            Err(AicError::PerfDatabase(msg)) => {
+                assert!(msg.contains("legacy"), "error should mention legacy layout: {msg}");
+                assert!(msg.contains("family"), "error should mention family layout: {msg}");
+            }
+            Ok(_) => panic!("expected load to fail for a totally missing tuple"),
+            Err(other) => panic!("expected PerfDatabase error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comm_root_prefers_family_comm_dir_over_legacy_nccl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system_data_root = tmp.path();
+        let version = "2.27.3";
+
+        // Only the legacy dir exists: fall back to it.
+        let legacy = system_data_root.join("nccl").join(version);
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(comm_root(system_data_root, "nccl", version), legacy);
+
+        // Once the family-first `comm/nccl/<version>` dir also exists, it
+        // takes priority over the legacy dir.
+        let family = system_data_root.join("comm").join("nccl").join(version);
+        std::fs::create_dir_all(&family).unwrap();
+        assert_eq!(comm_root(system_data_root, "nccl", version), family);
     }
 }
