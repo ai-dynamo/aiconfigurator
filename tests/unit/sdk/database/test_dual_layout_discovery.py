@@ -134,3 +134,10 @@ def test_database_refs_found_from_family_layout_only(systems_root):
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
     refs = list(_iter_database_refs_for_system(str(systems_root), "h200_sxm", {"data_dir": "data/h200_sxm"}))
     assert ("h200_sxm", "sglang", "0.5.14", str(systems_root)) in refs
+
+
+def test_underscore_prefixed_version_dirs_are_skipped(systems_root):
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/_staging/gemm_perf.parquet")
+    supported = get_supported_databases(str(systems_root))
+    assert supported["h200_sxm"]["sglang"] == ["0.5.14"]

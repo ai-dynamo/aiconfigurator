@@ -384,7 +384,7 @@ def _iter_version_subdirs(backend_path: str):
         return
     for version in versions:
         version_path = os.path.join(backend_path, version)
-        if not version.startswith(".") and os.path.isdir(version_path):
+        if not version.startswith((".", "_")) and os.path.isdir(version_path):
             yield version, version_path
 
 
