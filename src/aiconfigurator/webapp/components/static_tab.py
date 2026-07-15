@@ -59,7 +59,7 @@ def create_static_tab(app_config):
                 label="Generation Breakdown",
             )
         record_df = gr.Dataframe(label="Records:", headers=ColumnsStatic, interactive=False)
-        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False)
+        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False, elem_classes=["debug-output"])
         with gr.Row():
             clear_btn = gr.Button("Clear")
             download_btn = gr.Button("Download")
