@@ -17,8 +17,9 @@
 # space yet — fill them the same way, never from memory.
 #
 # tools/perf_database/backend_facts.py cross-checks the generated registry
-# against this catalog: every op_file must have a family, and observed
-# backends must appear in an enumerated family's choice space.
+# against this catalog: every op_file must have a family, and each fact
+# entry's observed backends must appear in its own (family, framework)
+# choice space when that space is enumerated.
 
 schema_version: 1
 
