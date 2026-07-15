@@ -107,8 +107,11 @@ families:
     op_files:
       - dsa_context_module_perf
       - dsa_generation_module_perf
+      - dsa_context_module_skip_indexer_perf
+      - dsa_generation_module_skip_indexer_perf
       - dsv4_csa_context_module_perf
       - dsv4_csa_generation_module_perf
+      - dsv4_csa_attn_module_perf
       - dsv4_hca_attn_module_perf
       - dsv4_hca_context_module_perf
       - dsv4_hca_generation_module_perf
