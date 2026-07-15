@@ -85,6 +85,11 @@ _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
 _DEFAULT_ENCODER_TP_LIST: list[int] = [1, 2, 4, 8]
 _DEFAULT_ENCODER_BATCH_SCHEDULE: list[int] = [1, 2, 4, 8, 16, 32]
 
+# E+agg: agg-worker replicas explored per rate-matched cell.  Mirrors the
+# disagg worker lists (range(1, 33)); the cell only exists to express the
+# integer agg:encode worker ratio.
+_MAX_AGG_WORKERS_EPD = 32
+
 # Default batch-size schedule used by sweep_agg.  Mirrors the schedule in
 # the legacy ``backend.find_best_agg_result_under_constraints`` so results
 # stay byte-identical.
@@ -382,6 +387,10 @@ def sweep_agg(
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    enable_epd: bool = False,
+    encoder_tp_list: list[int] | None = None,
+    encoder_batch_list: list[int] | None = None,
+    encoder_latency_correction: float = 1.0,
     predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
@@ -396,6 +405,16 @@ def sweep_agg(
     Per-tpot sweeping (``runtime_config.tpot`` may be a list) and
     request-latency-derived constraints are handled here as in the legacy
     proxy.
+
+    ``enable_epd`` switches VL agg into E+agg: the vision encoder runs on
+    dedicated encode workers (same candidate space as EPD disagg,
+    ``encoder_tp_list x encoder_batch_list``) while prefill+decode stay
+    aggregated.  The agg worker becomes language-only (vision tokens stay in
+    context, no ViT hosted); each row is then a rate-matched cell of
+    ``(a)workers`` agg workers plus ``(e)workers`` encode workers, with the
+    encode batch latency added to TTFT.  Default (``enable_epd=False``) keeps
+    the encoder inline (colocated): its latency is part of the agg worker's
+    TTFT and its weights part of the worker's memory.
 
     Args:
         model_path: HuggingFace model path or local path.
@@ -428,6 +447,23 @@ def sweep_agg(
     exceptions: list[Exception] = []
     saw_model_fit = False
     saw_memory_fit = False
+
+    encoder_candidates: list[dict] | None = None
+    if enable_epd:
+        # E+agg: enumerate the encode-worker pool once (independent of the
+        # agg parallel choice), then sweep language-only agg workers.
+        encoder_candidates = _get_encoder_worker_candidates(
+            model_path=model_path,
+            model_config=model_config,
+            tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
+            b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
+            runtime_config=runtime_config,
+            database=database,
+            backend_name=backend_name,
+            latency_correction=encoder_latency_correction,
+        )
+        model_config = copy.deepcopy(model_config)
+        model_config.encoder_colocated = False
 
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
@@ -502,6 +538,15 @@ def sweep_agg(
                 )
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
+                if encoder_candidates is not None and len(point_df) > 0:
+                    # E+agg: the per-point ttft filter above ran on the
+                    # language-only ttft (a superset — adding the encode
+                    # latency only tightens it); pair exactly here.
+                    point_df = _rate_match_agg_epd(
+                        point_df,
+                        encoder_candidates,
+                        ttft_target=point_rt.ttft,
+                    )
                 if len(point_df) == 0:
                     continue
                 if len(results_df) == 0:
@@ -769,6 +814,64 @@ def _overlay_encoder_stage(
     row["(e)parallel"] = f"tp{encoder_worker['tp']}"
     row["(e)memory"] = encoder_worker["memory"]
     return row
+
+
+def _rate_match_agg_epd(
+    agg_df: pd.DataFrame,
+    encoder_records: list[dict],
+    *,
+    ttft_target: float,
+) -> pd.DataFrame:
+    """Rate-match the encode pool against language-only agg workers (E+agg).
+
+    The agg counterpart of ``_match_workers_epd`` + ``_overlay_encoder_stage``:
+    for each (agg row, encode-worker choice) whose encode latency still fits
+    the TTFT budget, pick the cell of ``a`` agg workers + ``e`` encode workers
+    (``e`` = smallest count that does not bottleneck the agg throughput, the
+    EPD disagg convention) maximizing throughput-per-GPU; ties keep the
+    smaller cell.  The returned rows are per-cell — ``(a)workers`` agg workers
+    — so the downstream replicas logic scales whole cells.
+    """
+    rows: list[dict] = []
+    for r in agg_df.to_dict("records"):
+        rate_one = float(r["seq/s"])
+        gpus_one = int(r["num_total_gpus"])
+        if rate_one <= 0:
+            continue
+        for enc in encoder_records:
+            if enc["encoder_latency"] + r["ttft"] >= ttft_target:
+                continue
+            encoder_capacity = float(enc["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
+            best: tuple[tuple[float, int], int, int] | None = None
+            for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
+                e_num = max(1, math.ceil(rate_one * a_num / encoder_capacity))
+                num_gpu = gpus_one * a_num + enc["num_total_gpus"] * e_num
+                key = (rate_one * a_num / num_gpu, -num_gpu)
+                if best is None or key > best[0]:
+                    best = (key, a_num, e_num)
+            _, a_num, e_num = best
+            cell = dict(r)
+            cell["(a)workers"] = a_num
+            cell["seq/s"] = rate_one * a_num
+            cell["tokens/s"] = float(r["tokens/s"]) * a_num
+            cell["request_rate"] = cell["seq/s"]
+            cell["concurrency"] = r["concurrency"] * a_num
+            cell["num_total_gpus"] = gpus_one * a_num
+            # per-GPU metrics are recomputed by the overlay with the encode
+            # pool GPUs included; the agg worker covers both the prefill and
+            # decode phases of the power timeline.
+            rows.append(
+                _overlay_encoder_stage(
+                    cell,
+                    enc,
+                    e_num,
+                    prefill_power=r.get("power_w", 0.0),
+                    decode_power=r.get("power_w", 0.0),
+                )
+            )
+    if not rows:
+        return pd.DataFrame(columns=list(agg_df.columns))
+    return pd.DataFrame(rows)
 
 
 def _find_best_disagg_under_constraint(

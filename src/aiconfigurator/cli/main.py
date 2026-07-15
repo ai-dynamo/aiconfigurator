@@ -274,8 +274,8 @@ def _add_default_mode_arguments(parser):
         "--enable-epd",
         action="store_true",
         help="EPD (vision-language models): run the vision encoder on dedicated encode workers "
-        "instead of colocated with prefill. Turns the disagg experiment into EPD; requires an "
-        "image workload (--image-height/--image-width).",
+        "instead of colocated. Turns the disagg experiment into E+P+D and the agg experiment "
+        "into E+agg; requires an image workload (--image-height/--image-width).",
     )
     parser.add_argument(
         "--encoder-tp",
@@ -1329,6 +1329,8 @@ def build_default_tasks(
             enable_wideep=enable_wideep,
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
             **global_kwargs,
         )
 

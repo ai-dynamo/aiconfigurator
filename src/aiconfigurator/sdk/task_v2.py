@@ -446,11 +446,14 @@ class Task:
     # ``picking.pick_autoscale``; default 1.8 locked by parity test.
     autoscale_ttft_correction_factor: float = 1.8
 
-    # ====== 8.6 EPD: encoder disaggregation (VL models, disagg only) ======
+    # ====== 8.6 EPD: encoder disaggregation (VL models) ======
     # enable_epd runs the vision encoder on dedicated encode workers, swept
-    # over tp x batch on the prefill database.  Prefill workers become
-    # language-only (vision tokens stay in context, no ViT hosted); TTFT adds
-    # the encode batch latency; the encode pool joins the worker rate matching.
+    # over tp x batch.  serving_mode='disagg' gives E+P+D; serving_mode='agg'
+    # gives E+agg (encoder disaggregated, prefill+decode aggregated).  The
+    # P/agg workers become language-only (vision tokens stay in context, no
+    # ViT hosted); TTFT adds the encode batch latency; the encode pool joins
+    # the worker rate matching.  Default (False) keeps the encoder inline
+    # (colocated) in both serving modes.
     enable_epd: bool = False
     encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
     encoder_batch_candidates: list[int] | None = None  # None -> default schedule
@@ -1177,6 +1180,10 @@ class Task:
             raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
+        # EPD is switched on explicitly and only by enable_epd (both serving
+        # modes); the encoder candidate lists are pure search-space knobs.
+        if (self.encoder_tp_candidates or self.encoder_batch_candidates) and not self.enable_epd:
+            raise ValueError("encoder_tp_candidates/encoder_batch_candidates require enable_epd=True.")
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":
@@ -1190,8 +1197,6 @@ class Task:
             raise ValueError("agg mode requires model_path")
         if not self.system_name:
             raise ValueError("agg mode requires system_name")
-        if self.enable_epd:
-            raise ValueError("enable_epd (EPD) requires serving_mode='disagg'.")
         # fp8_static is not hard-gated to trtllm: it is derived from the dynamic
         # fp8 GEMM minus compute_scale/scale_matrix overhead and works on any
         # backend whose perf DB carries those tables.  _validate_database_quant_modes
@@ -1213,8 +1218,6 @@ class Task:
             )
         if not self.prefill_system_name or not self.decode_system_name:
             raise ValueError("disagg mode requires both prefill_system_name and decode_system_name.")
-        if (self.encoder_tp_candidates or self.encoder_batch_candidates) and not self.enable_epd:
-            raise ValueError("encoder_tp_candidates/encoder_batch_candidates require enable_epd=True.")
         # fp8_static is not hard-gated to trtllm (see _validate_agg); the
         # per-role DB check in _validate_database_quant_modes governs support.
 
@@ -1430,6 +1433,10 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "enable_epd": self.enable_epd,
+            "encoder_tp_list": self.encoder_tp_candidates,
+            "encoder_batch_list": self.encoder_batch_candidates,
+            "encoder_latency_correction": self.encoder_latency_correction,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
