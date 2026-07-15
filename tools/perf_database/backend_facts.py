@@ -409,20 +409,33 @@ def main() -> None:
         )
 
     catalog = load_catalog(args.catalog)
-    for line in catalog_inconsistencies(by_op, catalog):
+    problems = catalog_inconsistencies(by_op, catalog)
+    for line in problems:
         logger.warning(line)
 
     if args.check:
         drift = check(args.registry, by_op, axes_by_op)
-        if drift:
-            for line in drift[:50]:
+        failures = drift + [f"catalog: {p}" for p in problems]
+        if failures:
+            for line in failures[:50]:
                 print(line)
-            if len(drift) > 50:
-                print(f"... and {len(drift) - 50} more")
-            print(f"\nDRIFT: {len(drift)} differences between {args.registry} and {args.data_root}")
+            if len(failures) > 50:
+                print(f"... and {len(failures) - 50} more")
+            print(
+                f"\nFAIL: {len(drift)} drift differences, {len(problems)} catalog inconsistencies "
+                f"between {args.registry} and {args.data_root}"
+            )
             sys.exit(1)
         print(f"OK: {args.registry} matches {args.data_root} ({total:,} fact slices)")
         return
+
+    if problems:
+        for line in problems[:50]:
+            print(line)
+        if len(problems) > 50:
+            print(f"... and {len(problems) - 50} more")
+        print(f"\nFAIL: {len(problems)} catalog inconsistencies; refusing to write {args.registry}")
+        sys.exit(1)
 
     args.registry.parent.mkdir(parents=True, exist_ok=True)
     args.registry.write_text(render_yaml(by_op, axes_by_op, catalog_families(catalog)))

@@ -312,3 +312,93 @@ def test_catalog_inconsistencies_still_exempts_unverified(backend_facts_module):
         ]
     }
     assert backend_facts_module.catalog_inconsistencies(by_op, catalog) == []
+
+
+def _write_inconsistent_catalog(tmp_path):
+    """A catalog whose (attention, sglang) choice space is missing 'triton', so
+    the fp8 slice in `data_tree` (backends [fa3, triton]) trips a catalog violation."""
+    catalog_path = tmp_path / "op_backend_catalog.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "families": [
+                    {
+                        "family": "attention",
+                        "op_files": ["context_attention_perf"],
+                        "frameworks": {"sglang": {"choices": [{"backend": "fa3"}]}},  # missing "triton"
+                    },
+                    {"family": "mla", "op_files": ["context_mla_perf"]},
+                ]
+            }
+        )
+    )
+    return catalog_path
+
+
+def _write_backend_map(tmp_path):
+    backend_map_path = tmp_path / "kernel_source_backends.yaml"
+    backend_map_path.write_text(yaml.safe_dump({"mappings": MAPPINGS}))
+    return backend_map_path
+
+
+def test_main_check_fails_on_catalog_inconsistencies(backend_facts_module, data_tree, tmp_path, monkeypatch, capsys):
+    backend_map_path = _write_backend_map(tmp_path)
+    catalog_path = _write_inconsistent_catalog(tmp_path)
+
+    # Registry in sync with the data (no drift) so only the catalog check can fail.
+    facts, axes_by_op = backend_facts_module.scan(data_tree)
+    mappings = backend_facts_module.load_backend_map(backend_map_path)
+    by_op = backend_facts_module._fact_entries(facts, axes_by_op, mappings)
+    registry_path = tmp_path / "op_backend_facts.yaml"
+    registry_path.write_text(backend_facts_module.render_yaml(by_op, axes_by_op, FAMILIES))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backend_facts.py",
+            "--data-root",
+            str(data_tree),
+            "--registry",
+            str(registry_path),
+            "--backend-map",
+            str(backend_map_path),
+            "--catalog",
+            str(catalog_path),
+            "--check",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        backend_facts_module.main()
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "catalog: backend-not-in-catalog: family=attention framework=sglang" in out and "triton" in out
+
+
+def test_main_write_refuses_when_catalog_inconsistent(backend_facts_module, data_tree, tmp_path, monkeypatch, capsys):
+    backend_map_path = _write_backend_map(tmp_path)
+    catalog_path = _write_inconsistent_catalog(tmp_path)
+    registry_path = tmp_path / "op_backend_facts.yaml"  # does not exist yet
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backend_facts.py",
+            "--data-root",
+            str(data_tree),
+            "--registry",
+            str(registry_path),
+            "--backend-map",
+            str(backend_map_path),
+            "--catalog",
+            str(catalog_path),
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        backend_facts_module.main()
+    assert exc_info.value.code == 1
+    # Refused before render_yaml: no registry written, so "family: unknown" can never land on disk.
+    assert not registry_path.exists()
+    out = capsys.readouterr().out
+    assert "backend-not-in-catalog: family=attention framework=sglang" in out and "triton" in out
