@@ -49,18 +49,54 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 )
 
 
+# Legacy top-level backend dirs (family-first layout treats any other first-level
+# directory under <system>/ as a family dir containing <backend>/<version>
+# subtrees). Keep textually identical to the SDK loader's KNOWN_BACKEND_DIRS
+# (aic-core/src/aiconfigurator_core/sdk/perf_database.py).
+_KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl"}
+
+
+def _systems_data_root() -> str:
+    return os.path.join(REPO_ROOT, "aic-core", "src", "aiconfigurator_core", "systems", "data")
+
+
+def _legacy_data_dir(system: str, backend: str, backend_version: str) -> str:
+    return os.path.join(_systems_data_root(), system, backend, backend_version)
+
+
+def _family_data_dirs(system: str, backend: str, backend_version: str) -> list[str]:
+    """<system>/<family>/<backend>/<backend_version> dirs that exist, for every
+    first-level entry under <system>/ that isn't a legacy backend dir."""
+    system_dir = os.path.join(_systems_data_root(), system)
+    try:
+        entries = os.listdir(system_dir)
+    except OSError:
+        return []
+    dirs = []
+    for entry in sorted(entries):
+        if entry in _KNOWN_BACKEND_DIRS:
+            continue
+        candidate = os.path.join(system_dir, entry, backend, backend_version)
+        if os.path.isdir(candidate):
+            dirs.append(candidate)
+    return dirs
+
+
 def _data_dir(system: str, backend: str, backend_version: str) -> str:
-    return os.path.join(
-        REPO_ROOT,
-        "aic-core",
-        "src",
-        "aiconfigurator_core",
-        "systems",
-        "data",
-        system,
-        backend,
-        backend_version,
-    )
+    """Resolve the data dir for a (system, backend, backend_version), across both
+    the legacy (<backend>/<version>) and family-first (<family>/<backend>/<version>)
+    tree layouts. Always returns a single directory (the smoke-gate contract):
+    among the legacy path and every family dir holding this (backend, version),
+    picks whichever exists and contains the most *_perf.parquet files (ties favor
+    the legacy path). Falls back to the (possibly nonexistent) legacy path when
+    nothing is found, matching the old always-legacy behavior.
+    """
+    legacy = _legacy_data_dir(system, backend, backend_version)
+    candidates = [legacy, *_family_data_dirs(system, backend, backend_version)]
+    existing = [d for d in candidates if os.path.isdir(d)]
+    if not existing:
+        return legacy
+    return max(existing, key=lambda d: len(_perf_files_present(d)))
 
 
 def _perf_files_present(data_dir: str) -> set[str]:

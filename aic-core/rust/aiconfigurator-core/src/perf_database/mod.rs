@@ -16,9 +16,22 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 
+/// The five known legacy/framework-agnostic backend directory names. Mirrors the
+/// SDK loader's `KNOWN_BACKEND_DIRS`
+/// (`aic-core/src/aiconfigurator_core/sdk/perf_database.py`): any other
+/// first-level directory under a system's data dir is a family dir containing
+/// `<backend>/<version>` subtrees.
+const KNOWN_BACKEND_DIRS: [&str; 5] = ["trtllm", "sglang", "vllm", "nccl", "oneccl"];
+
 /// Resolve the ordered source list for one op-file basename: the Python-supplied
 /// shared-layer sources when present, else a single primary `data_root/<basename>`
-/// with no `kernel_source` filter (identical to the pre-shared-layer default).
+/// with no `kernel_source` filter (identical to the pre-shared-layer default). When
+/// that legacy file is absent (`data_root` migrated to the family-first layout),
+/// falls back to scanning sibling family dirs for
+/// `<family>/<backend>/<version>/<basename>`.
+///
+/// Minimal fallback: Python supplies `perf_db_sources` in practice, so this only
+/// covers the plain (no shared-layer) default-source case.
 pub(crate) fn resolve_op_sources(
     perf_db_sources: &PerfDbSources,
     basename: &str,
@@ -26,8 +39,40 @@ pub(crate) fn resolve_op_sources(
 ) -> Vec<PerfSource> {
     match perf_db_sources.get(basename) {
         Some(sources) if !sources.is_empty() => sources.clone(),
-        _ => vec![PerfSource(data_root.join(basename), None)],
+        _ => {
+            let legacy = data_root.join(basename);
+            let path = if legacy.is_file() {
+                legacy
+            } else {
+                find_in_family_dirs(data_root, basename).unwrap_or(legacy)
+            };
+            vec![PerfSource(path, None)]
+        }
     }
+}
+
+/// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
+/// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
+/// derived from `data_root` (`<data_dir>/<backend>/<version>`).
+fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
+    let version = data_root.file_name()?.to_str()?;
+    let backend = data_root.parent()?.file_name()?.to_str()?;
+    let data_dir = data_root.parent()?.parent()?;
+    for entry in std::fs::read_dir(data_dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = match name.to_str() {
+            Some(name) => name,
+            None => continue,
+        };
+        if KNOWN_BACKEND_DIRS.contains(&name) {
+            continue;
+        }
+        let candidate = entry.path().join(backend).join(version).join(basename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Whether a row's `kernel_source` passes a source's filter, mirroring Python
@@ -227,5 +272,47 @@ mod tests {
             Ok(_) => panic!("expected load to fail for missing version"),
             Err(other) => panic!("expected PerfDatabase error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_op_sources_falls_back_to_family_dir_when_legacy_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = "sglang";
+        let version = "0.5.14";
+
+        // Legacy <data_dir>/<backend>/<version> dir exists but doesn't hold the file.
+        let legacy_data_root = tmp.path().join(backend).join(version);
+        std::fs::create_dir_all(&legacy_data_root).unwrap();
+
+        // Family dir <data_dir>/gemm/<backend>/<version>/gemm_perf.parquet does.
+        let family_data_root = tmp.path().join("gemm").join(backend).join(version);
+        std::fs::create_dir_all(&family_data_root).unwrap();
+        std::fs::write(family_data_root.join("gemm_perf.parquet"), b"stub").unwrap();
+
+        let sources = resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &legacy_data_root);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0, family_data_root.join("gemm_perf.parquet"));
+        assert!(sources[0].1.is_none());
+    }
+
+    #[test]
+    fn resolve_op_sources_skips_known_backend_dirs_when_scanning_families() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = "nccl";
+        let version = "2.19";
+        let legacy_data_root = tmp.path().join(backend).join(version);
+        std::fs::create_dir_all(&legacy_data_root).unwrap();
+
+        // A sibling top-level dir named like a known legacy backend must not be
+        // treated as a family dir, even though it holds a matching path.
+        let decoy = tmp.path().join("vllm").join(backend).join(version);
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(decoy.join("nccl_perf.parquet"), b"stub").unwrap();
+
+        let sources = resolve_op_sources(&PerfDbSources::default(), "nccl_perf.parquet", &legacy_data_root);
+        // Falls back to the legacy (nonexistent) path since "vllm" is a known
+        // backend dir, not a family dir, and must be skipped during the scan.
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].0, legacy_data_root.join("nccl_perf.parquet"));
     }
 }

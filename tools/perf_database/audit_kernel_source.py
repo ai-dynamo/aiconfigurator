@@ -71,6 +71,13 @@ _SKIP_FILE_BASENAMES = {"INCOMPLETE.txt"}
 # Backend directory names to skip — these are framework-agnostic by construction.
 _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
 
+# Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
+# other first-level directory under a system dir as a family dir containing
+# <backend>/<version> subtrees. Keep this set textually identical to the SDK
+# loader's KNOWN_BACKEND_DIRS minus _SKIP_BACKEND_DIRS
+# (aic-core/src/aiconfigurator_core/sdk/perf_database.py).
+_LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
+
 
 def classify_tier(kernel_source: str) -> str:
     """Classify a kernel_source string into one of the two tiers.
@@ -190,14 +197,31 @@ def _build_shape_key(row: dict[str, str], header: list[str], latency_col: str) -
     return tuple((c, row.get(c, "")) for c in keys)
 
 
+def _iter_backend_dirs(system_dir: Path) -> Iterable[tuple[str, Path]]:
+    """Yield (backend, backend_path) for every backend dir under a system dir,
+    across both the legacy (<backend>/<version>) and family-first
+    (<family>/<backend>/<version>) layouts. `_SKIP_BACKEND_DIRS` entries are
+    excluded at whichever level they appear (top-level or inside a family dir).
+    """
+    for entry in sorted(system_dir.iterdir()):
+        if not entry.is_dir() or entry.name in _SKIP_BACKEND_DIRS:
+            continue
+        if entry.name in _LEGACY_BACKEND_DIRS:
+            yield entry.name, entry
+        else:  # family dir
+            for backend_dir in sorted(entry.iterdir()):
+                if not backend_dir.is_dir() or backend_dir.name in _SKIP_BACKEND_DIRS:
+                    continue
+                yield backend_dir.name, backend_dir
+
+
 def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
-    """Yield (system, backend, version, path) for every perf data table."""
+    """Yield (system, backend, version, path) for every perf data table, across
+    both the legacy and family-first (Collector V3) tree layouts."""
     for system_dir in sorted(data_root.iterdir()):
         if not system_dir.is_dir():
             continue
-        for backend_dir in sorted(system_dir.iterdir()):
-            if not backend_dir.is_dir() or backend_dir.name in _SKIP_BACKEND_DIRS:
-                continue
+        for backend, backend_dir in _iter_backend_dirs(system_dir):
             for version_dir in sorted(backend_dir.iterdir()):
                 if not version_dir.is_dir():
                     continue
@@ -205,7 +229,7 @@ def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
                 for path in paths:
                     if path.name in _SKIP_FILE_BASENAMES:
                         continue
-                    yield system_dir.name, backend_dir.name, version_dir.name, path
+                    yield system_dir.name, backend, version_dir.name, path
 
 
 @dataclass
