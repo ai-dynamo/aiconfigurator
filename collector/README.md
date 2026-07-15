@@ -173,7 +173,10 @@ Image digests are policy, not decoration: any image reference that names a
 public registry path (contains `/`) must be pinned with `@sha256:<64 hex>`;
 bare internal image names (no `/`, e.g. `deepseek-v4-blackwell`) are exempt.
 When bumping a version pin, re-fetch and update the digest for every image
-variant touched — a stale digest silently keeps pulling the old image.
+variant touched — a stale digest silently keeps pulling the old image. Always
+pin the manifest-list (index) digest, never a platform-child digest —
+`docker buildx imagetools inspect <image>` prints the index digest; a child
+digest pins one architecture and breaks the other platforms.
 
 Use `collector.framework_manifest.resolve_op_runtime(framework, op)` to
 resolve a single op's runtime, and

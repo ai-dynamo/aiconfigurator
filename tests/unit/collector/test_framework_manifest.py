@@ -86,6 +86,60 @@ frameworks:
         get_collector_runtime("sglang", path=manifest)
 
 
+def test_wideep_entry_missing_base_framework_is_rejected(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+  wideep_sglang:
+    collector_dir: "collector/wideep/sglang"
+    data_backend: "sglang"
+    default:
+      version: "0.5.10"
+      images:
+        default: "deepseek-v4-blackwell"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="base_framework"):
+        get_collector_runtime("wideep_sglang", path=manifest)
+
+
+def test_wideep_entry_missing_data_backend_is_rejected(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+  wideep_sglang:
+    base_framework: sglang
+    collector_dir: "collector/wideep/sglang"
+    default:
+      version: "0.5.10"
+      images:
+        default: "deepseek-v4-blackwell"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="data_backend"):
+        get_collector_runtime("wideep_sglang", path=manifest)
+
+
 WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}
 
 
@@ -114,6 +168,11 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
 def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, requested_ops, match):
     with pytest.raises(RuntimeError, match=match):
         require_collector_runtime("sglang", installed_version, requested_ops=requested_ops, wideep_ops=WIDEEP_OPS)
+
+
+def test_unknown_requested_op_fails_with_key_error():
+    with pytest.raises(KeyError, match="none of the requested ops"):
+        require_collector_runtime("sglang", "0.5.14", requested_ops={"not_a_real_op"}, wideep_ops=set())
 
 
 def test_wideep_registry_entries_are_separate_from_stock_backend_registries():

@@ -132,6 +132,7 @@ frameworks:
         version: "0.5.15"
         images: {default: "lmsysorg/sglang:v0.5.15@sha256:..."}
   wideep_sglang:                   # flattened from the v1 `wideep:` section
+    base_framework: sglang
     collector_dir: collector/wideep/sglang
     data_backend: sglang           # writes under <family>/sglang/<its version>/
     default:

@@ -194,6 +194,8 @@ def require_collector_runtime(
                 f"{framework} ops resolve to multiple runtime versions ({split}); "
                 "run each version group in its own container"
             )
+        if not by_version:
+            raise KeyError(f"{key} registry has none of the requested ops: {sorted(ops)}")
         resolved[key] = next(iter(by_version.values()))
 
     wideep_key = f"wideep_{normalized}"
@@ -228,11 +230,11 @@ def validate_resolution(
     """Return one error per registry op that does not resolve to a pinned runtime."""
     try:
         manifest = load_manifest(manifest_path)
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, yaml.YAMLError) as error:
         return [f"manifest: {error}"]
     try:
         family_map = load_family_map(catalog_path)
-    except ValueError as error:
+    except (ValueError, yaml.YAMLError) as error:
         return [f"op catalog: {error}"]
 
     errors: list[str] = []

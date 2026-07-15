@@ -5,7 +5,7 @@
 
 import pytest
 
-from collector.framework_manifest import resolve_op_runtime
+from collector.framework_manifest import resolve_op_runtime, validate_resolution
 
 pytestmark = pytest.mark.unit
 
@@ -97,9 +97,6 @@ def test_unknown_op_is_a_hard_error(paths):
         resolve_op_runtime("sglang", "not_an_op", manifest_path=manifest, catalog_path=catalog)
 
 
-from collector.framework_manifest import validate_resolution
-
-
 def test_real_manifest_resolves_every_registry_op():
     # The fail-closed CI gate (spec §4): every op in every registry resolves to
     # exactly one pinned runtime with the committed manifest (+ catalog, once
@@ -126,3 +123,17 @@ frameworks:
     errors = validate_resolution(manifest_path=manifest, catalog_path=tmp_path / "op_backend_catalog.yaml")
     assert any("trtllm" in error for error in errors)
     assert any("wideep_sglang" in error for error in errors)
+
+
+def test_validator_reports_non_mapping_catalog(paths):
+    manifest, catalog = paths(MANIFEST_NO_OVERRIDES, "- foo\n- bar\n")
+    errors = validate_resolution(manifest_path=manifest, catalog_path=catalog)
+    assert len(errors) == 1
+    assert errors[0].startswith("op catalog: ")
+
+
+def test_validator_reports_malformed_catalog_yaml(paths):
+    manifest, catalog = paths(MANIFEST_NO_OVERRIDES, "families: [\n")
+    errors = validate_resolution(manifest_path=manifest, catalog_path=catalog)
+    assert len(errors) == 1
+    assert errors[0].startswith("op catalog: ")
