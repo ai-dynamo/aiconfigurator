@@ -26,16 +26,15 @@ def test_manifest_exposes_current_framework_versions_and_images():
     vllm = get_collector_runtime("vllm")
 
     assert sglang.version == "0.5.14"
-    assert sglang.image() == "lmsysorg/sglang:v0.5.14"
-    assert sglang.image("cu130") == "lmsysorg/sglang:v0.5.14-cu130"
+    assert sglang.image().startswith("lmsysorg/sglang:v0.5.14@sha256:")
+    assert sglang.image("cu130").startswith("lmsysorg/sglang:v0.5.14-cu130@sha256:")
     assert trtllm.version == "1.3.0rc10"
-    assert trtllm.image() == "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+    assert trtllm.image().startswith("nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:")
     assert vllm.version == "0.24.0"
-    assert vllm.image() == "vllm/vllm-openai:v0.24.0"
-    assert vllm.image("cu129") == "vllm/vllm-openai:v0.24.0-cu129"
-    # vLLM 0.24.0 has no separately published cu130 tag. Unknown variants
-    # intentionally fall back to the pinned default image.
-    assert vllm.image("cu130") == "vllm/vllm-openai:v0.24.0"
+    assert vllm.image().startswith("vllm/vllm-openai:v0.24.0@sha256:")
+    assert vllm.image("cu129").startswith("vllm/vllm-openai:v0.24.0-cu129@sha256:")
+    # Unknown variants intentionally fall back to the pinned default image.
+    assert vllm.image("cu130") == vllm.image()
 
 
 def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
@@ -54,6 +53,37 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     assert wideep_sglang.version != get_collector_runtime("sglang").version
     assert wideep_sglang.collector_dir == "collector/wideep/sglang"
     assert "deepseek-v4" in wideep_sglang.image()
+
+
+def test_wideep_entries_are_flattened_peer_frameworks():
+    # workload="wideep" is the compatibility spelling for manifest key wideep_<fw>
+    via_workload = get_collector_runtime("sglang", workload="wideep")
+    direct = get_collector_runtime("wideep_sglang")
+    assert via_workload == direct
+    assert direct.framework == "wideep_sglang"
+    assert direct.data_backend == "sglang"
+    assert direct.collector_dir == "collector/wideep/sglang"
+    # wideep inherits the base framework's source_repo unless overridden
+    assert direct.source_repo == get_collector_runtime("sglang").source_repo
+
+
+def test_public_images_must_be_digest_pinned(tmp_path):
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        """
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="digest-pinned"):
+        get_collector_runtime("sglang", path=manifest)
 
 
 WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,14 +15,18 @@ from packaging.version import InvalidVersion, Version
 
 MANIFEST_PATH = Path(__file__).with_name("framework_manifest.yaml")
 
+_DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
+
 
 @dataclass(frozen=True)
 class CollectorRuntime:
-    framework: str
+    framework: str  # manifest key: sglang | trtllm | vllm | wideep_sglang | wideep_trtllm
     version: str
     images: dict[str, str]
     source_repo: str | None = None
     collector_dir: str | None = None
+    data_backend: str | None = None
+    family: str | None = None  # set when resolved per-op with the catalog present
     workload: str = "default"
 
     def image(self, variant: str = "default") -> str:
@@ -45,24 +50,41 @@ def get_collector_runtime(
     path: str | Path = MANIFEST_PATH,
 ) -> CollectorRuntime:
     manifest = load_manifest(path)
-    normalized = framework.lower()
-    if workload == "wideep":
-        section = manifest.get("wideep", {})
-    elif workload == "default":
-        section = manifest.get("frameworks", {})
-    else:
-        raise KeyError(f"Unsupported collector workload {workload!r}")
-
-    spec = section.get(normalized)
+    key = _framework_key(framework, workload)
+    spec = manifest["frameworks"].get(key)
     if spec is None:
-        raise KeyError(f"No {workload} collector runtime is configured for {framework!r}")
+        raise KeyError(f"No collector runtime is configured for {framework!r} (workload={workload!r})")
+    return _runtime_from_spec(key, spec, spec["default"], manifest, family=None)
+
+
+def _framework_key(framework: str, workload: str) -> str:
+    normalized = framework.lower()
+    if workload == "wideep" and not normalized.startswith("wideep_"):
+        return f"wideep_{normalized}"
+    if workload not in ("default", "wideep"):
+        raise KeyError(f"Unsupported collector workload {workload!r}")
+    return normalized
+
+
+def _runtime_from_spec(
+    framework_key: str,
+    spec: dict[str, Any],
+    runtime_spec: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    family: str | None,
+) -> CollectorRuntime:
+    base = spec.get("base_framework")
+    source_repo = spec.get("source_repo") or (manifest["frameworks"].get(base, {}).get("source_repo") if base else None)
     return CollectorRuntime(
-        framework=normalized,
-        version=spec["version"],
-        images=dict(spec["images"]),
-        source_repo=spec.get("source_repo") or manifest["frameworks"].get(normalized, {}).get("source_repo"),
+        framework=framework_key,
+        version=runtime_spec["version"],
+        images=dict(runtime_spec["images"]),
+        source_repo=source_repo,
         collector_dir=spec.get("collector_dir"),
-        workload=workload,
+        data_backend=spec.get("data_backend"),
+        family=family,
+        workload="wideep" if framework_key.startswith("wideep_") else "default",
     )
 
 
@@ -105,24 +127,35 @@ def require_collector_runtime(
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
-    if manifest.get("schema_version") != 1:
-        raise ValueError("collector framework manifest schema_version must be 1")
+    if manifest.get("schema_version") != 2:
+        raise ValueError("collector framework manifest schema_version must be 2")
 
     frameworks = manifest.get("frameworks")
     if not isinstance(frameworks, dict) or not frameworks:
         raise ValueError("collector framework manifest must define frameworks")
     for framework, spec in frameworks.items():
-        _validate_runtime_spec(f"frameworks.{framework}", spec)
+        _validate_framework_spec(framework, spec, frameworks)
 
-    wideep = manifest.get("wideep", {})
-    if not isinstance(wideep, dict):
-        raise TypeError("collector framework manifest wideep section must be a mapping")
-    for framework, spec in wideep.items():
-        if framework not in frameworks:
-            raise ValueError(f"wideep.{framework} does not have a matching framework entry")
-        _validate_runtime_spec(f"wideep.{framework}", spec)
+
+def _validate_framework_spec(name: str, spec: object, frameworks: dict[str, Any]) -> None:
+    if not isinstance(spec, dict):
+        raise TypeError(f"frameworks.{name} must be a mapping")
+    if name.startswith("wideep_"):
+        base = name.removeprefix("wideep_")
+        if spec.get("base_framework") != base:
+            raise ValueError(f"frameworks.{name}.base_framework must be {base!r}")
+        if base not in frameworks:
+            raise ValueError(f"frameworks.{name}.base_framework {base!r} has no manifest entry")
         if not spec.get("collector_dir"):
-            raise ValueError(f"wideep.{framework}.collector_dir is required")
+            raise ValueError(f"frameworks.{name}.collector_dir is required")
+        if not spec.get("data_backend"):
+            raise ValueError(f"frameworks.{name}.data_backend is required")
+    _validate_runtime_spec(f"frameworks.{name}.default", spec.get("default"))
+    families = spec.get("families") or {}
+    if not isinstance(families, dict):
+        raise TypeError(f"frameworks.{name}.families must be a mapping")
+    for family, override in families.items():
+        _validate_runtime_spec(f"frameworks.{name}.families.{family}", override)
 
 
 def _validate_runtime_spec(name: str, spec: object) -> None:
@@ -135,3 +168,9 @@ def _validate_runtime_spec(name: str, spec: object) -> None:
         raise ValueError(f"{name}.images.default is required")
     if not all(isinstance(key, str) and isinstance(value, str) and value for key, value in images.items()):
         raise ValueError(f"{name}.images must map image variants to non-empty strings")
+    for variant, image in images.items():
+        if "/" in image and not _DIGEST_RE.search(image):
+            raise ValueError(
+                f"{name}.images.{variant} must be digest-pinned (...@sha256:<64 hex>); "
+                "bare internal image names without '/' are exempt"
+            )
