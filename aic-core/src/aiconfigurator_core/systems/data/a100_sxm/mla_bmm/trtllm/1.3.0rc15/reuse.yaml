@@ -1,0 +1,6 @@
+schema_version: 1
+reuse:
+- table: mla_bmm_perf
+  from_version: 1.0.0
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl

@@ -1,0 +1,6 @@
+schema_version: 1
+reuse:
+- table: custom_allreduce_perf
+  from_version: 0.5.10
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl

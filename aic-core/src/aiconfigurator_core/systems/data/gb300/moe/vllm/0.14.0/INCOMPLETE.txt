@@ -1,1 +1,0 @@
-# context_attention_perf.txt is incomplete, most data points failed in collection.
