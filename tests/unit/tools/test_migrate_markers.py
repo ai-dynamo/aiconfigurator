@@ -17,6 +17,7 @@ REAL loader parser (`aiconfigurator_core.sdk.perf_database._parse_reuse_yaml`
 from __future__ import annotations
 
 import importlib.util
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -186,6 +187,75 @@ class TestScanSharedLayerReuse:
         assert target.exists()
 
 
+# --- scan_tree: comm family exclusion (design §6.5 rule 5) -----------------------------
+
+
+class TestScanCommFamilyExclusion:
+    def test_comm_marker_is_deleted_without_reuse_yaml_even_with_donor(self, mod, repo):
+        # A real donor exists (0.5.10 holds custom_allreduce_perf) -- proves the
+        # exclusion is unconditional, not merely a side effect of "no donor found".
+        _touch(repo, "h200_sxm/comm/sglang/0.5.10/custom_allreduce_perf.parquet")
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert scan.reuse_actions == []
+        [action] = scan.comm_exclusion_deletions
+        assert action.src == Path("h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+
+    def test_comm_marker_with_no_donor_at_all_does_not_abort(self, mod, repo):
+        # Would trip the "no donor table" fail-closed abort for any other family;
+        # comm bypasses donor lookup entirely so this must not raise.
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)  # no MigrationError
+        assert scan.reuse_actions == []
+        [action] = scan.comm_exclusion_deletions
+        assert action.src == Path("h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+
+    def test_logs_exclusion_reason(self, mod, repo, caplog):
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        with caplog.at_level(logging.INFO, logger="migrate_markers"):
+            mod.scan_tree(repo)
+        assert any(
+            "comm family excluded from sibling reuse (design §6.5 rule 5); marker dropped without declaration"
+            in record.message
+            and "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt" in record.message
+            for record in caplog.records
+        )
+
+    def test_non_comm_family_unaffected_in_same_scan(self, mod, repo):
+        # One tree, one comm-family marker and one gemm-family marker: only comm is
+        # excluded; gemm still converts normally via the donor-based path.
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _touch(repo, "h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+        _touch(repo, "h200_sxm/gemm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert len(scan.comm_exclusion_deletions) == 1
+        assert scan.comm_exclusion_deletions[0].src == Path("h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        [action] = scan.reuse_actions
+        assert action.src == Path("h200_sxm/gemm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        assert action.entries == (mod.ReuseEntry(table="gemm_perf", from_version="0.5.14"),)
+
+    def test_family_named_similarly_is_not_treated_as_comm(self, mod, repo):
+        # Exact-name match only: a family literally named "commfoo" is unrelated to
+        # "comm" and must go through the normal donor-based conversion path.
+        _touch(repo, "h200_sxm/commfoo/sglang/0.5.14/x_perf.parquet")
+        _touch(repo, "h200_sxm/commfoo/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        assert scan.comm_exclusion_deletions == []
+        [action] = scan.reuse_actions
+        assert action.entries == (mod.ReuseEntry(table="x_perf", from_version="0.5.14"),)
+
+    def test_does_not_mutate_on_scan(self, mod, repo):
+        target = _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        mod.scan_tree(repo)  # scan only plans; execute_plan performs the deletion
+        assert target.exists()
+
+
 # --- scan_tree: INCOMPLETE.txt -> collection_meta.yaml ----------------------------------
 
 
@@ -332,6 +402,15 @@ class TestExecutePlan:
         donor = repo / "h200_sxm" / "gemm" / "sglang" / "0.5.14" / "gemm_perf.parquet"
         assert donor.read_bytes() == b"gemm-bytes"
 
+    def test_execute_deletes_comm_marker_without_creating_reuse_yaml(self, mod, repo):
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+        vdir = repo / "h200_sxm" / "comm" / "sglang" / "0.5.12"
+        assert not (vdir / "SHARED_LAYER_REUSE.txt").exists()
+        assert not (vdir / "reuse.yaml").exists()
+
 
 # --- verify_tree ---------------------------------------------------------------------------
 
@@ -389,6 +468,13 @@ class TestVerify:
         errors = mod.verify_tree(repo)
         assert any("no table with status: partial" in e for e in errors)
 
+    def test_verify_passes_after_comm_exclusion_execute(self, mod, repo):
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+        assert mod.verify_tree(repo) == []
+
 
 # --- idempotency ---------------------------------------------------------------------------
 
@@ -415,6 +501,17 @@ class TestIdempotency:
         assert scan.reuse_actions == []
         assert scan.sidecar_actions == []
         assert mod.verify_tree(repo) == []
+
+    def test_comm_exclusion_idempotent_after_execute(self, mod, repo):
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        scan = mod.scan_tree(repo)
+        mod.execute_plan(repo, scan)
+
+        rescan = mod.scan_tree(repo)
+        assert rescan.reuse_actions == []
+        assert rescan.sidecar_actions == []
+        assert rescan.comm_exclusion_deletions == []
 
 
 # --- CLI ---------------------------------------------------------------------------------------
@@ -478,3 +575,14 @@ class TestCli:
         _track(repo)
         with pytest.raises(mod.MigrationError, match="marker-only"):
             mod.scan_tree(repo)
+
+    def test_plan_includes_comm_exclusion_line_and_summary_counts(self, mod, repo, capsys):
+        _touch(repo, "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        rc = mod.main(["--data-root", str(repo)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "git rm h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt  # comm family excluded" in out
+        assert "git add" not in out  # no reuse.yaml ever staged for a comm marker
+        assert "comm_exclusions=1" in out
+        assert "marker_deletions=1" in out

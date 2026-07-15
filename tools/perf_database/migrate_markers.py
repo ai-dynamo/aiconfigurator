@@ -17,6 +17,12 @@ migration, PR 2, already made every marker dir single-family):
   effective newest-first donor, so behavior is preserved). A marker whose
   siblings hold no table at all (nothing to inherit) is dead data: fail
   closed and list the offender rather than emit an empty declaration.
+  EXCEPTION — design §6.5 rule 5 excludes the `comm` family from
+  sibling-version reuse ENTIRELY (NCCL/oneCCL curves are topology-bound, so
+  cross-version shape-filling is wrong there). A `SHARED_LAYER_REUSE.txt`
+  marker inside a `<system>/comm/<backend>/<version>` dir is deleted with NO
+  `reuse.yaml` emitted — a comm `reuse.yaml` would be a standing
+  contradiction of that rule, and PR 4's loader/CI audit must never see one.
 - `INCOMPLETE.txt` -> `collection_meta.yaml`: a synthesized `provenance:
   legacy` sidecar (T6 amendment to design §5 — no hashes, since legacy data
   predates the collector's provenance writer) marking every table the
@@ -75,6 +81,10 @@ METADATA_NAMES = MARKER_NAMES | SIDECAR_NAMES
 APPROVED_BY = "yimingl"
 SHARED_REUSE_REASON = "migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)"
 
+# Design §6.5 rule 5: comm is excluded from sibling-version reuse entirely.
+COMM_FAMILY = "comm"
+COMM_EXCLUSION_LOG = "comm family excluded from sibling reuse (design §6.5 rule 5); marker dropped without declaration"
+
 
 class MigrationError(Exception):
     """Fail-closed error: abort, never guess, never skip silently."""
@@ -97,15 +107,27 @@ class ReuseAction:
 class SidecarAction:
     src: Path  # relative INCOMPLETE.txt path
     dst: Path  # relative collection_meta.yaml path (same dir)
-    framework: str  # backend dir name (version_dir.parent.parent.name)
+    framework: str  # backend dir name (version_dir.parent.name)
     version: str  # version dir name
     tables: tuple[str, ...]  # sorted table stems, all synthesized as status: partial
+
+
+@dataclass(frozen=True)
+class CommExclusionAction:
+    """A `SHARED_LAYER_REUSE.txt` marker found inside a `comm`-family version dir.
+
+    Design §6.5 rule 5 excludes `comm` from sibling-version reuse entirely, so this
+    is deleted outright — no `reuse.yaml` is emitted for it.
+    """
+
+    src: Path  # relative SHARED_LAYER_REUSE.txt path
 
 
 @dataclass
 class ScanResult:
     reuse_actions: list[ReuseAction]
     sidecar_actions: list[SidecarAction]
+    comm_exclusion_deletions: list[CommExclusionAction]
 
 
 # --- version ordering (textually duplicated from parse_support_matrix_version, ---
@@ -143,6 +165,14 @@ def _iter_version_dirs(data_root: Path) -> list[Path]:
 
 def _table_files(version_dir: Path) -> list[Path]:
     return sorted(f for f in version_dir.iterdir() if f.is_file() and f.name not in METADATA_NAMES)
+
+
+def _is_comm_family_version_dir(version_dir: Path) -> bool:
+    """True for `<system>/comm/<backend>/<version>` dirs. Relies on the family-layout
+    tree PR 2 already produced (same assumption `SidecarAction.framework` makes via
+    `version_dir.parent.name`): the family dir is `version_dir.parent.parent`.
+    """
+    return version_dir.parent.parent.name == COMM_FAMILY
 
 
 # --- SHARED_LAYER_REUSE.txt -> reuse.yaml -------------------------------------------
@@ -199,24 +229,30 @@ def render_collection_meta_yaml(action: SidecarAction) -> str:
 def scan_tree(data_root: Path) -> ScanResult:
     reuse_actions: list[ReuseAction] = []
     sidecar_actions: list[SidecarAction] = []
+    comm_exclusion_deletions: list[CommExclusionAction] = []
     no_donor_offenders: list[str] = []
     marker_only_incomplete_offenders: list[str] = []
 
     for version_dir in _iter_version_dirs(data_root):
         shared_marker = version_dir / SHARED_LAYER_REUSE
         if shared_marker.is_file():
-            donor_map = donor_table_map(version_dir)
-            if not donor_map:
-                no_donor_offenders.append(str(shared_marker.relative_to(data_root)))
+            rel_marker = shared_marker.relative_to(data_root)
+            if _is_comm_family_version_dir(version_dir):
+                logger.info("%s: %s", COMM_EXCLUSION_LOG, rel_marker)
+                comm_exclusion_deletions.append(CommExclusionAction(src=rel_marker))
             else:
-                entries = tuple(ReuseEntry(table=t, from_version=v) for t, v in sorted(donor_map.items()))
-                reuse_actions.append(
-                    ReuseAction(
-                        src=shared_marker.relative_to(data_root),
-                        dst=(version_dir / REUSE_YAML).relative_to(data_root),
-                        entries=entries,
+                donor_map = donor_table_map(version_dir)
+                if not donor_map:
+                    no_donor_offenders.append(str(rel_marker))
+                else:
+                    entries = tuple(ReuseEntry(table=t, from_version=v) for t, v in sorted(donor_map.items()))
+                    reuse_actions.append(
+                        ReuseAction(
+                            src=rel_marker,
+                            dst=(version_dir / REUSE_YAML).relative_to(data_root),
+                            entries=entries,
+                        )
                     )
-                )
 
         incomplete_marker = version_dir / INCOMPLETE
         if incomplete_marker.is_file():
@@ -251,7 +287,12 @@ def scan_tree(data_root: Path) -> ScanResult:
 
     reuse_actions.sort(key=lambda a: str(a.src))
     sidecar_actions.sort(key=lambda a: str(a.src))
-    return ScanResult(reuse_actions=reuse_actions, sidecar_actions=sidecar_actions)
+    comm_exclusion_deletions.sort(key=lambda a: str(a.src))
+    return ScanResult(
+        reuse_actions=reuse_actions,
+        sidecar_actions=sidecar_actions,
+        comm_exclusion_deletions=comm_exclusion_deletions,
+    )
 
 
 # --- plan rendering ------------------------------------------------------------------
@@ -268,11 +309,15 @@ def render_plan(scan: ScanResult) -> list[str]:
             f"({len(action.tables)} table(s)) replacing {action.src}"
         )
         lines.append(f"git rm {action.src}")
+    for action in scan.comm_exclusion_deletions:
+        lines.append(f"git rm {action.src}  # {COMM_EXCLUSION_LOG}")
     lines.sort()
+    total_marker_deletions = len(scan.reuse_actions) + len(scan.sidecar_actions) + len(scan.comm_exclusion_deletions)
     lines.append(
         f"# summary: shared_reuse_conversions={len(scan.reuse_actions)} "
         f"incomplete_sidecars={len(scan.sidecar_actions)} "
-        f"marker_deletions={len(scan.reuse_actions) + len(scan.sidecar_actions)}"
+        f"marker_deletions={total_marker_deletions} "
+        f"comm_exclusions={len(scan.comm_exclusion_deletions)}"
     )
     return lines
 
@@ -299,12 +344,18 @@ def execute_plan(data_root: Path, scan: ScanResult) -> None:
         _git(["add", str(dst)], cwd=data_root)
         _git(["rm", "-f", "-q", str(data_root / action.src)], cwd=data_root)
 
+    for action in scan.comm_exclusion_deletions:
+        _git(["rm", "-f", "-q", str(data_root / action.src)], cwd=data_root)
+
     errors: list[str] = []
     for action in (*scan.reuse_actions, *scan.sidecar_actions):
         if (data_root / action.src).exists():
             errors.append(f"still present at legacy path: {action.src}")
         if not (data_root / action.dst).exists():
             errors.append(f"missing at destination: {action.dst}")
+    for action in scan.comm_exclusion_deletions:
+        if (data_root / action.src).exists():
+            errors.append(f"still present at legacy path: {action.src}")
     if errors:
         raise MigrationError("execute post-check failed: " + "; ".join(errors))
 
@@ -405,10 +456,14 @@ def main(argv: list[str] | None = None) -> int:
         except MigrationError as exc:
             print(f"ABORT: {exc}", file=sys.stderr)
             return 1
+        total_marker_deletions = (
+            len(scan.reuse_actions) + len(scan.sidecar_actions) + len(scan.comm_exclusion_deletions)
+        )
         print(
             f"executed {len(scan.reuse_actions)} reuse.yaml conversion(s), "
             f"{len(scan.sidecar_actions)} collection_meta.yaml sidecar(s), "
-            f"{len(scan.reuse_actions) + len(scan.sidecar_actions)} marker deletion(s)"
+            f"{len(scan.comm_exclusion_deletions)} comm-family exclusion(s) (no declaration emitted), "
+            f"{total_marker_deletions} marker deletion(s)"
         )
         return 0
 
