@@ -13,7 +13,7 @@ from aiconfigurator.sdk.models.helpers import _infer_quant_modes_from_raw_config
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
 from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
 
-from .population import load_model_config, resolve_attention_source
+from .model_capability import load_model_config, resolve_attention_source
 
 TEMPLATE_VERSION = 1
 
@@ -263,8 +263,8 @@ def resolve_model_capability(
 
     # vLLM folds MoE tensor parallelism into ordinary tensor parallelism, so
     # pure TP is a backend capability rather than an attention-family
-    # capability. Enumerate it for every MoE checkpoint and let exact topology,
-    # quantization-alignment, and residency checks reject invalid widths.
+    # capability. Enumerate it for every MoE checkpoint; the target runtime
+    # remains authoritative for exact topology and quantization alignment.
     allow_pure_tp = is_moe and backend == "vllm"
     return ModelCapabilityProfile(
         architecture=architecture,

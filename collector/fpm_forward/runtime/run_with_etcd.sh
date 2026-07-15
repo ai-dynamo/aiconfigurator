@@ -20,7 +20,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-python3 "${workdir}/install_overlay.py"
 python3 "${workdir}/preflight.py"
 
 if [[ "${node_rank}" == "0" ]]; then

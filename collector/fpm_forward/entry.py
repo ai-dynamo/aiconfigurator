@@ -14,7 +14,7 @@ import yaml
 from .config import FPMCollectionOptions
 from .planner import FPMCollectionPlan, build_collection_plan
 
-ResolvedFPMInputs = tuple[FPMCollectionPlan, dict[str, Any], str | None]
+ResolvedFPMInputs = tuple[FPMCollectionPlan, dict[str, Any]]
 
 
 # FPM owns every engine/workload field.  The optional YAML is deliberately a
@@ -133,7 +133,7 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
         collector_config={},
         generator_overrides=generator_overrides,
     )
-    return plan, generator_overrides, None
+    return plan, generator_overrides
 
 
 def resolve_run_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
@@ -143,15 +143,13 @@ def resolve_run_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs
         raise ValueError("fpm_forward --limit is allowed only with --smoke")
     if args.limit is not None and args.limit < 1:
         raise ValueError("fpm_forward --limit must be a positive cell count")
-    if args.fpm_smoke_points is not None and not args.smoke:
-        raise ValueError("--fpm-smoke-points requires --smoke")
     return resolve_inputs(args, case_plan)
 
 
 def run_resolved(args: argparse.Namespace, resolved_inputs: ResolvedFPMInputs) -> list[dict[str, object]]:
     """Execute already-resolved inputs without reclassifying runtime failures as CLI errors."""
 
-    plan, generator_overrides, runtime_overlay_dir = resolved_inputs
+    plan, generator_overrides = resolved_inputs
     from .runner import run_collection
 
     return run_collection(
@@ -163,7 +161,6 @@ def run_resolved(args: argparse.Namespace, resolved_inputs: ResolvedFPMInputs) -
         retry_failed=args.resume_retry_failed,
         smoke=args.smoke,
         cell_limit=args.limit,
-        runtime_overlay_dir=runtime_overlay_dir,
         database_root=args.fpm_database_root,
     )
 

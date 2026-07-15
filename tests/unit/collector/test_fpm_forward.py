@@ -9,30 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from collector.fpm_forward.capacity import (
-    FPMCapacityModel,
-    FPMExecutionProfile,
-    _cudagraph_capture_sizes,
-    _engine_envelope,
-    _required_point_kv_bytes,
-    _runtime_reserve_bytes,
-    build_execution_profile,
-    filter_memory_feasible_points,
-)
-from collector.fpm_forward.config import FPMCollectionOptions
+from collector.fpm_forward.config import FPMCollectionOptions, PrefillSamplingProfile, add_fpm_arguments
 from collector.fpm_forward.database import aggregate_cell, write_formal_database
-from collector.fpm_forward.planner import (
-    RUNTIME_OVERLAY_FILES,
-    BackendPolicy,
-    FPMCell,
-    _runtime_overlay_files,
-    build_collection_plan,
-)
-from collector.fpm_forward.population import build_attention_population
-from collector.fpm_forward.sampling import build_sampling_design
+from collector.fpm_forward.planner import BackendPolicy, FPMCell, build_collection_plan
 from collector.fpm_forward.topology import enumerate_fpm_topologies
-from collector.fpm_forward.types import FPMPoint, ParallelTopology
-from collector.model_cases import build_collection_case_plan
+from collector.fpm_forward.types import ParallelTopology
 
 pytestmark = pytest.mark.unit
 
@@ -46,258 +27,73 @@ def _args(**overrides):
         "fpm_backend_axes": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
-        "fpm_sampling_budget": None,
         "fpm_tp_sizes": None,
         "fpm_pp_sizes": None,
         "fpm_dp_sizes": None,
         "fpm_moe_tp_sizes": None,
-        "fpm_smoke_points": None,
         "fpm_moe_ep_sizes": None,
         "fpm_cp_sizes": None,
-        "fpm_kv_block_size": 64,
         "fpm_warmup_iterations": None,
+        "fpm_max_prefill_isl": None,
+        "fpm_max_prefill_batch_size": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
 
 
-def test_options_freeze_single_sample_policy_and_gpu_bound():
+def test_options_leave_point_generation_to_dynamo():
     options = FPMCollectionOptions.from_args(_args())
-    assert options.warmup_iterations == 0
-    assert options.measurement_repeats == 1
-    assert options.sampling_budget == "one_eighth"
+
+    assert options.warmup_iterations == 5
     assert options.gpu_counts == (4,)
     assert options.parallel_presets == ("auto",)
-    assert options.to_dict()["warmup_repeats"] == 0
+    assert options.to_dict()["point_source"] == "dynamo_native_self_benchmark"
+    assert options.to_dict()["measurement_repeats"] == 1
+    assert options.max_prefill_isl == 8192
+    assert options.max_prefill_batch_size is None
+    assert options.vllm_max_model_len == -1
+    assert options.prefill_sampling.max_total_prefill_tokens == 8192
+    assert len(options.prefill_sampling.cudagraph_capture_sizes) == 99
+    assert options.prefill_sampling.max_cudagraph_capture_size == 2048
+    assert len(options.prefill_sampling.new_token_axis_points) == 199
+    assert options.prefill_sampling.max_new_token_samples == 199
+    assert "sampling_budget" not in options.to_dict()
+    assert "kv_block_size" not in options.to_dict()
 
     warmed = FPMCollectionOptions.from_args(_args(fpm_warmup_iterations=3))
-    assert warmed.warmup_iterations == 3
     assert warmed.to_dict()["global_warmup_iterations"] == 3
-    assert warmed.to_dict()["warmup_repeats"] == 0
+    disabled = FPMCollectionOptions.from_args(_args(fpm_warmup_iterations=0))
+    assert disabled.to_dict()["global_warmup_iterations"] == 0
 
     with pytest.raises(ValueError, match="exceed"):
         FPMCollectionOptions.from_args(_args(fpm_gpu_counts=[4, 8]))
 
 
-def test_runtime_overlay_is_complete_and_hash_frozen(tmp_path):
-    for name in RUNTIME_OVERLAY_FILES:
-        (tmp_path / name).write_text(f"# {name}\n")
-    original_sha256 = dict.fromkeys(RUNTIME_OVERLAY_FILES, "0" * 64)
+def test_prefill_limits_expose_no_cli_aliases():
+    parser = argparse.ArgumentParser()
+    add_fpm_arguments(parser)
 
-    manifest, base_manifest = _runtime_overlay_files(
-        {
-            "runtime_overlay_dir": str(tmp_path),
-            "runtime_overlay_original_sha256": original_sha256,
-        }
-    )
-
-    assert [name for name, _sha256 in manifest] == list(RUNTIME_OVERLAY_FILES)
-    assert all(len(sha256) == 64 for _name, sha256 in manifest)
-    assert dict(base_manifest) == original_sha256
-
-    (tmp_path / RUNTIME_OVERLAY_FILES[0]).unlink()
-    with pytest.raises(ValueError, match="missing"):
-        _runtime_overlay_files(
-            {
-                "runtime_overlay_dir": str(tmp_path),
-                "runtime_overlay_original_sha256": original_sha256,
-            }
-        )
+    help_text = parser.format_help()
+    assert "--fpm-max-prefill-isl" in help_text
+    assert "--fpm-max-prefill-batch-size" in help_text
+    assert "--fpm-max-isl" not in help_text
+    assert "--fpm-max-prefill-bs" not in help_text
 
 
-def test_prefill_sampling_is_deterministic_nested_and_latency_blind():
-    points = tuple(
-        FPMPoint("prefill", batch, suffix, prefix)
-        for prefix in (0, 64, 128)
-        for batch in (1, 2, 4)
-        for suffix in (16, 64, 256)
-    )
-    first = build_sampling_design(points, block_size=64, active_budget="one_quarter")
-    second = build_sampling_design(points, block_size=64, active_budget="one_quarter")
-    assert first.sha256 == second.sha256
-    assert first.ordered_points == second.ordered_points
-    assert set(first.selected).isdisjoint(first.reserve)
-    assert set(first.selected) | set(first.reserve) == set(points)
-    counts = first.budget_counts
-    assert counts["one_eighth"] <= counts["one_quarter"] <= counts["one_half"] <= counts["full"]
-    assert first.to_dict()["latency_labels_used"] is False
+def test_prefill_sampling_profile_keeps_vllm_strides_and_exact_endpoint():
+    short = PrefillSamplingProfile.build(max_isl=1000, max_batch_size=16)
 
+    assert short.max_cudagraph_capture_size == 1000
+    assert short.cudagraph_capture_sizes[:7] == (1, 2, 4, 8, 16, 24, 32)
+    assert short.cudagraph_capture_sizes[-4:] == (928, 960, 992, 1000)
+    assert len(short.cudagraph_capture_sizes) == 67
+    assert len(short.new_token_axis_points) == 132
+    assert short.max_new_token_samples == 132
 
-def test_decode_sampling_uses_only_aic_population_members():
-    points = tuple(FPMPoint("decode", batch, 1, length) for batch in (1, 2, 4, 8) for length in (64, 256, 1024, 4096))
-    design = build_sampling_design(points, block_size=64, active_budget="one_half")
-    assert len(design.ordered_points) == len(points)
-    assert set(design.ordered_points) == set(points)
-
-
-def test_execution_profile_replaces_infeasible_point_and_computes_fraction():
-    high = FPMPoint("prefill", 1, 4000, 0)
-    low = FPMPoint("prefill", 1, 64, 0)
-    replacement = FPMPoint("prefill", 2, 64, 0)
-    design = SimpleNamespace(
-        phase="prefill",
-        selected=(high, low),
-        ordered_points=(high, low, replacement),
-    )
-    capacity_model = FPMCapacityModel(
-        total_gpu_capacity_bytes=10_000,
-        fixed_non_activation_bytes=3_000,
-        activation_floor_bytes=100,
-        activation_bytes_per_token=1.0,
-        tokens_from_kv_bytes=lambda byte_count: int(byte_count // 2),
-        kv_bytes_for_sequence=lambda tokens: tokens * 2,
-        source="test",
-    )
-
-    profile = build_execution_profile(
-        model_path="unused",
-        system="unused",
-        backend="vllm",
-        capability=SimpleNamespace(),
-        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
-        kv_cache_dtype="fp8",
-        design=design,
-        block_size=64,
-        capacity_model=capacity_model,
-        runtime_reserve_bytes_override=0,
-    )
-
-    assert profile.selected == (low, replacement)
-    assert profile.max_num_tokens == 128
-    assert profile.max_batch_size == 2
-    assert profile.required_kv_bytes == 256
-    assert profile.gpu_memory_utilization == 0.3398
-    assert profile.cudagraph_capture_sizes == (64, 128)
-    assert next(decision for decision in profile.decisions if decision.point == high).admitted is False
-
-
-def test_execution_profile_reserves_runtime_headroom_before_point_admission():
-    high = FPMPoint("prefill", 1, 4000, 0)
-    low = FPMPoint("prefill", 1, 64, 0)
-    replacement = FPMPoint("prefill", 2, 64, 0)
-    design = SimpleNamespace(
-        phase="prefill",
-        selected=(high, low),
-        ordered_points=(high, low, replacement),
-    )
-    gib = 1024**3
-    capacity_model = FPMCapacityModel(
-        total_gpu_capacity_bytes=100 * gib,
-        fixed_non_activation_bytes=50 * gib,
-        activation_floor_bytes=5 * gib,
-        activation_bytes_per_token=0.0,
-        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
-        kv_bytes_for_sequence=lambda tokens: tokens * 7 * 1024**2,
-        source="test",
-    )
-
-    without_reserve = build_execution_profile(
-        model_path="unused",
-        system="unused",
-        backend="vllm",
-        capability=SimpleNamespace(),
-        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
-        kv_cache_dtype="fp8",
-        design=design,
-        block_size=64,
-        capacity_model=capacity_model,
-        runtime_reserve_bytes_override=0,
-    )
-    with_reserve = build_execution_profile(
-        model_path="unused",
-        system="unused",
-        backend="vllm",
-        capability=SimpleNamespace(),
-        topology=ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
-        kv_cache_dtype="fp8",
-        design=design,
-        block_size=64,
-        capacity_model=capacity_model,
-    )
-
-    assert without_reserve.selected == (high, low)
-    assert with_reserve.selected == (low, replacement)
-    assert with_reserve.gpu_memory_utilization <= 0.9
-    assert with_reserve.aic_non_kv_bytes == 55 * gib
-    assert with_reserve.runtime_reserve_bytes == 10 * gib
-    assert with_reserve.runtime_reserve_fraction == 0.1
-    assert with_reserve.non_kv_bytes == 65 * gib
-    assert with_reserve.memory_source == "test+static_runtime_reserve"
-
-
-def test_runtime_reserve_uses_larger_of_ten_percent_and_ten_gibibytes():
-    gib = 1024**3
-
-    assert _runtime_reserve_bytes(80 * gib) == 10 * gib
-    assert _runtime_reserve_bytes(180 * gib) == 18 * gib
-
-
-def test_pointwise_memory_filter_runs_before_sparse_sampling():
-    high = FPMPoint("prefill", 1, 4000, 0)
-    low = FPMPoint("prefill", 1, 64, 0)
-    replacement = FPMPoint("prefill", 2, 64, 0)
-    gib = 1024**3
-    capacity_model = FPMCapacityModel(
-        total_gpu_capacity_bytes=100 * gib,
-        fixed_non_activation_bytes=50 * gib,
-        activation_floor_bytes=5 * gib,
-        activation_bytes_per_token=0.0,
-        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
-        kv_bytes_for_sequence=lambda tokens: tokens * 7 * 1024**2,
-        source="test",
-    )
-
-    feasible, decisions = filter_memory_feasible_points(
-        (high, low, replacement),
-        capacity_model=capacity_model,
-        block_size=64,
-    )
-    design = build_sampling_design(feasible, block_size=64, active_budget="one_quarter")
-
-    assert set(feasible) == {low, replacement}
-    assert set(design.population) == {low, replacement}
-    assert high not in design.ordered_points
-    rejected = next(decision for decision in decisions if decision.point == high)
-    assert rejected.admitted is False
-    assert rejected.disposition == "rejected_before_sampling"
-
-
-def test_cudagraph_sizes_cover_every_piecewise_shape_at_or_below_8192():
-    points = (
-        FPMPoint("prefill", 2, 64, 0),
-        FPMPoint("prefill", 1, 8192, 0),
-        FPMPoint("prefill", 3, 4096, 0),
-        FPMPoint("prefill", 1, 9000, 0),
-        FPMPoint("decode", 512, 1, 64),
-    )
-
-    assert _cudagraph_capture_sizes(points) == (128, 512, 808, 4096, 8192)
-
-
-def test_cudagraph_shape_excludes_past_kv_while_capacity_includes_it():
-    no_prefix = FPMPoint("prefill", 2, 64, 0)
-    with_prefix = FPMPoint("prefill", 2, 64, 1024)
-    decode = FPMPoint("decode", 2, 1, 2048)
-    points = (no_prefix, with_prefix, decode)
-
-    # The graph key is the current forward's scheduled query tokens.  Prefix
-    # length is dynamic attention metadata, so both prefills share B*S=128.
-    assert _cudagraph_capture_sizes(points) == (2, 128)
-    assert _engine_envelope(list(points)) == (2, 128, 2050)
-
-    capacity_model = FPMCapacityModel(
-        total_gpu_capacity_bytes=1_000_000,
-        fixed_non_activation_bytes=1,
-        activation_floor_bytes=1,
-        activation_bytes_per_token=1.0,
-        tokens_from_kv_bytes=lambda byte_count: int(byte_count),
-        kv_bytes_for_sequence=lambda tokens: tokens,
-        source="test",
-    )
-    estimate = capacity_model.envelope(max_batch_size=2, max_num_tokens=128, max_seq_len=2050)
-    assert _required_point_kv_bytes(no_prefix, block_size=64, estimate=estimate) == 128
-    assert _required_point_kv_bytes(with_prefix, block_size=64, estimate=estimate) == 2176
-    assert _required_point_kv_bytes(decode, block_size=64, estimate=estimate) == 4224
+    long = PrefillSamplingProfile.build(max_isl=8192, max_batch_size=None)
+    assert long.cudagraph_capture_sizes[-4:] == (1952, 1984, 2016, 2048)
+    assert long.new_token_axis_points[-4:] == (2048, 2049, 4096, 8192)
+    assert long.to_dict()["new_token_axis_point_count"] == 199
 
 
 def test_parallel_topologies_are_delegated_to_aic_enumerator():
@@ -333,7 +129,7 @@ def test_pure_tp_requires_explicit_model_runtime_capability():
         enumerate_fpm_topologies(backend="vllm", is_moe=True, options=options)
 
 
-def test_plan_identity_includes_deployment_config():
+def test_plan_contains_only_cell_matrix_and_native_point_contract():
     options = FPMCollectionOptions.from_args(
         _args(
             fpm_parallel_axes=["dp", "moe_ep"],
@@ -357,16 +153,42 @@ def test_plan_identity_includes_deployment_config():
         generator_overrides={"K8sConfig": {"k8s_image": "example/vllm-runtime:second"}},
     )
 
-    assert first.generator_config_sha256 != second.generator_config_sha256
     assert first.sha256 != second.sha256
-    assert first.capability.support_level == "exact"
-    assert first.capability.attention_kind == "moe_dsa"
     assert first.dtype_profile.gemm_quant_mode == "nvfp4"
     assert first.dtype_profile.kv_cache_dtypes == ("fp8",)
+    assert len(first.cells) == 2
+    assert {cell.workload_kind for cell in first.cells} == {"prefill", "decode"}
     assert {cell.parallel_strategy for cell in first.cells} == {"dep"}
+    payload = first.to_dict()
+    assert payload["schema_version"] == 9
+    point_generation = dict(payload["point_generation"])
+    prefill_sampling = point_generation.pop("prefill_sampling")
+    assert point_generation == {
+        "owner": "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler",
+        "method": "native_self_benchmark",
+        "coordinates": ["batch_size", "total_prefill_tokens", "total_kv_read_tokens"],
+        "partition_policy": "balanced_v1",
+        "point_admission": "dynamo_live_scheduler",
+        "precondition": "vllm_engine_initialized",
+        "planned_point_count": None,
+    }
+    assert prefill_sampling["cudagraph_capture_size_count"] == 99
+    assert prefill_sampling["new_token_axis_point_count"] == 199
+    assert prefill_sampling["prefill_max_new_token_samples"] == 199
+    assert "prefix_max_batch_size_samples" not in prefill_sampling
+    assert payload["counts"]["prefill_cudagraph_capture_sizes"] == 99
+    assert payload["counts"]["prefill_new_token_axis_points"] == 199
+    assert payload["counts"]["points"] == "runtime-determined"
+    assert "population" not in payload
+    assert "sampling" not in payload
+    assert "capacity_admission" not in payload
+    assert payload["counts"]["candidate_topologies"] == 1
+    assert payload["counts"]["memory_rejected_topologies"] == 0
+    assert payload["topology_memory_admission"][0]["disposition"] == "admitted"
+    assert "runtime_overlay" not in payload
 
 
-def test_glm_auto_matrix_includes_capacity_admitted_pure_tp():
+def test_glm_auto_matrix_keeps_aic_parallel_and_dtype_resolution():
     plan = build_collection_plan(
         backend="vllm",
         model_path="nvidia/GLM-5.2-NVFP4",
@@ -379,28 +201,82 @@ def test_glm_auto_matrix_includes_capacity_admitted_pure_tp():
     assert plan.capability.allow_pure_tp is True
     assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
     assert ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1) in plan.topologies
-    for cell in plan.cells:
-        assert cell.sampling_design is not None
-        assert cell.sampling_sha256 == cell.sampling_design.sha256
-        source_population = (
-            plan.population.prefill_points if cell.workload_kind == "prefill" else plan.population.decode_points
+    assert len(plan.cells) == len(plan.topologies) * 2
+    assert all(cell.to_dict()["point_source"] == "dynamo_native_self_benchmark" for cell in plan.cells)
+
+
+def test_glm_memory_admission_uses_configured_max_new_tokens_and_warns_on_drops(caplog):
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_gpu_counts=[1, 2, 4],
+                fpm_max_prefill_isl=16384,
+            )
+        ),
+    )
+
+    assert {topology.total_gpus for topology in plan.topologies} == {4}
+    assert len(plan.topologies) == 3
+    payload = plan.to_dict()
+    assert payload["counts"]["candidate_topologies"] == 7
+    assert payload["counts"]["memory_rejected_topologies"] == 4
+    assert {
+        decision["topology"]["tp"] * decision["topology"]["dp"]
+        for decision in payload["topology_memory_admission"]
+        if decision["disposition"] == "rejected"
+    } == {1, 2}
+    assert "fpm_forward: dropped 4/7 topologies" in caplog.text
+    assert "max_new_tokens=16384" in caplog.text
+    assert {decision["activation_envelope"]["max_new_tokens"] for decision in payload["topology_memory_admission"]} == {
+        16384
+    }
+
+
+def test_glm_memory_admission_fails_after_warning_when_every_topology_is_impossible(caplog):
+    with pytest.raises(ValueError, match="rejected every structurally valid FPM topology"):
+        build_collection_plan(
+            backend="vllm",
+            model_path="nvidia/GLM-5.2-NVFP4",
+            model_architecture="GlmMoeDsaForCausalLM",
+            system="b200_sxm",
+            selected_ops={"dsa_context_module", "dsa_generation_module"},
+            options=FPMCollectionOptions.from_args(
+                _args(
+                    fpm_gpu_counts=[1, 2],
+                )
+            ),
         )
-        assert set(cell.sampling_design.population) <= set(source_population)
-        rejected_before_sampling = {
-            decision.point
-            for decision in cell.execution_profile.decisions
-            if decision.disposition == "rejected_before_sampling"
-        }
-        assert rejected_before_sampling.isdisjoint(cell.sampling_design.population)
-        assert set(cell.execution_profile.selected) <= set(cell.sampling_design.population)
-        assert cell.sampling_design.selection_constraint == "joint_memory_envelope"
-        assert cell.execution_profile.selected == cell.sampling_design.selected
-        assert all(size <= 8192 for size in cell.execution_profile.cudagraph_capture_sizes)
-        if cell.workload_kind == "prefill":
-            assert 8192 in cell.execution_profile.cudagraph_capture_sizes
+
+    assert "fpm_forward: dropped 4/4 topologies" in caplog.text
 
 
-def test_minimax_m3_uses_dsa_transfer_population_and_registered_pure_tp():
+def test_memory_admission_keeps_unknown_estimates_for_runtime_verification(monkeypatch):
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("model is not supported by the AIC memory estimator")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        unavailable,
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert len(plan.topologies) == 3
+    assert {decision.disposition for decision in plan.topology_memory_admission} == {"unknown"}
+
+
+def test_minimax_m3_keeps_family_dtype_and_parallel_capabilities():
     plan = build_collection_plan(
         backend="vllm",
         model_path="MiniMaxAI/MiniMax-M3",
@@ -421,7 +297,6 @@ def test_minimax_m3_uses_dsa_transfer_population_and_registered_pure_tp():
     assert plan.capability.attention_kind == "moe_msa"
     assert plan.capability.attention_source == "dsa_module"
     assert plan.capability.allow_pure_tp is True
-    assert plan.population.source_ops == ("dsa_context_module", "dsa_generation_module")
     assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
 
 
@@ -434,13 +309,17 @@ _DSV4_ATTENTION_OPS = {
 
 
 @pytest.mark.parametrize(
-    "model_path",
+    ("model_path", "expected_strategies", "expected_memory_rejections"),
     [
-        "sgl-project/DeepSeek-V4-Pro-FP8",
-        "sgl-project/DeepSeek-V4-Flash-FP8",
+        ("sgl-project/DeepSeek-V4-Pro-FP8", {"pure_tp", "tep"}, 1),
+        ("sgl-project/DeepSeek-V4-Flash-FP8", {"pure_tp", "tep", "dep"}, 0),
     ],
 )
-def test_dsv4_fp8_uses_exact_compressed_attention_population(model_path):
+def test_dsv4_fp8_keeps_exact_capabilities_and_applies_max_new_token_memory_admission(
+    model_path,
+    expected_strategies,
+    expected_memory_rejections,
+):
     plan = build_collection_plan(
         backend="vllm",
         model_path=model_path,
@@ -462,10 +341,9 @@ def test_dsv4_fp8_uses_exact_compressed_attention_population(model_path):
     assert plan.capability.allow_pure_tp is True
     assert plan.dtype_profile.fmha_quant_mode == "bfloat16"
     assert plan.dtype_profile.kv_cache_dtypes == ("fp8",)
-    assert set(plan.population.source_ops) == _DSV4_ATTENTION_OPS
-    assert FPMPoint("prefill", 1, 64, 65472) in plan.population.prefill_points
-    assert FPMPoint("decode", 1, 1, 65536) in plan.population.decode_points
-    assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
+    assert {cell.parallel_strategy for cell in plan.cells} == expected_strategies
+    assert plan.to_dict()["counts"]["memory_rejected_topologies"] == expected_memory_rejections
+    assert all(cell.to_dict()["point_source"] == "dynamo_native_self_benchmark" for cell in plan.cells)
 
 
 @pytest.mark.parametrize(
@@ -492,14 +370,13 @@ def test_dsv4_native_fp4_is_rejected_by_vllm_dtype_capability(model_path):
         )
 
 
-def test_unknown_model_uses_auditable_bootstrap_template(tmp_path):
+def test_unknown_model_keeps_auditable_capability_template(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
                 "architectures": ["NewMoeDsaForCausalLM"],
                 "num_attention_heads": 32,
                 "num_key_value_heads": 32,
-                "head_dim": 128,
                 "hidden_size": 4096,
                 "intermediate_size": 8192,
                 "num_hidden_layers": 4,
@@ -523,47 +400,10 @@ def test_unknown_model_uses_auditable_bootstrap_template(tmp_path):
 
     assert plan.capability.support_level == "bootstrap_template"
     assert plan.capability.template_id == "generic:moe_dsa"
-    assert plan.capability.attention_source == "dsa_module"
-    assert plan.population.source_name == "dsa_module"
-    assert plan.capability.allow_pure_tp is True
     assert {cell.parallel_strategy for cell in plan.cells} == {"dep", "pure_tp", "tep"}
 
 
-def test_minimax_m27_rejects_only_block_misaligned_pure_tp_widths():
-    plan = build_collection_plan(
-        backend="vllm",
-        model_path="MiniMaxAI/MiniMax-M2.7",
-        model_architecture="MiniMaxM2ForCausalLM",
-        system="b200_sxm",
-        selected_ops={"attention_context", "attention_generation"},
-        has_model_cases=False,
-        options=FPMCollectionOptions.from_args(
-            _args(
-                fpm_max_gpus=16,
-                fpm_gpu_counts=[2, 4, 8, 16],
-            )
-        ),
-    )
-
-    admitted_pure_tp = {
-        topology.tp
-        for topology in plan.topologies
-        if topology.tp == topology.moe_tp and topology.dp == topology.moe_ep == 1
-    }
-    rejected_pure_tp = {
-        decision.topology.tp: decision.reason
-        for decision in plan.capacity_decisions
-        if not decision.admitted
-        and decision.topology.tp == decision.topology.moe_tp
-        and decision.topology.dp == decision.topology.moe_ep == 1
-    }
-
-    assert admitted_pure_tp == {2, 4}
-    assert set(rejected_pure_tp) == {8, 16}
-    assert all("Invalid quantized MoE configuration" in reason for reason in rejected_pure_tp.values())
-
-
-def test_unregistered_phi4_mini_uses_dense_gqa_bootstrap_template(tmp_path):
+def test_unregistered_dense_model_keeps_gqa_bootstrap_template(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
@@ -589,7 +429,6 @@ def test_unregistered_phi4_mini_uses_dense_gqa_bootstrap_template(tmp_path):
         options=FPMCollectionOptions.from_args(_args()),
     )
 
-    assert plan.capability.architecture == "Phi3ForCausalLM"
     assert plan.capability.model_family is None
     assert plan.capability.support_level == "bootstrap_template"
     assert plan.capability.template_id == "generic:dense_gqa"
@@ -598,7 +437,7 @@ def test_unregistered_phi4_mini_uses_dense_gqa_bootstrap_template(tmp_path):
     assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
 
 
-def test_registered_model_without_case_file_uses_family_template():
+def test_registered_dense_model_without_case_file_keeps_family_template():
     plan = build_collection_plan(
         backend="vllm",
         model_path="Qwen/Qwen3-32B",
@@ -615,7 +454,7 @@ def test_registered_model_without_case_file_uses_family_template():
     assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
 
 
-def test_explicit_kv_dtype_requires_aic_attention_data():
+def test_explicit_kv_dtype_still_requires_aic_runtime_capability():
     options = FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["int8"]))
     with pytest.raises(ValueError, match="does not support KV-cache dtype"):
         build_collection_plan(
@@ -628,67 +467,26 @@ def test_explicit_kv_dtype_requires_aic_attention_data():
 
 
 def test_arbitrary_backend_variant_is_not_a_capability_declaration():
-    options = FPMCollectionOptions.from_args(_args())
     with pytest.raises(ValueError, match="no longer an admission mechanism"):
         build_collection_plan(
             backend="vllm",
             model_path="nvidia/GLM-5.2-NVFP4",
             system="b200_sxm",
             selected_ops={"dsa_context_module", "dsa_generation_module"},
-            options=options,
+            options=FPMCollectionOptions.from_args(_args()),
             collector_config={"backend_variants": {"moe": [{"id": "invented"}]}},
         )
 
 
-@pytest.mark.parametrize(
-    ("model_path", "expected_source"),
-    [
-        ("nvidia/GLM-5.2-NVFP4", "dsa_module"),
-        ("Qwen/Qwen3-32B", "dense_attention"),
-    ],
-)
-def test_population_uses_model_selected_aic_attention_family(model_path, expected_source):
-    case_plan = build_collection_case_plan(backend="vllm", model_path=model_path, gpu_type="b200_sxm")
-    population = build_attention_population(
-        backend="vllm",
-        model_path=model_path,
-        selected_ops=case_plan.selected_ops,
-        kv_block_size=64,
-    )
-    assert population.source_name == expected_source
-    assert population.prefill_points
-    assert population.decode_points
-    assert any(point.prefix_length > 0 for point in population.prefill_points)
-
-
 def _synthetic_plan_and_cell(tmp_path):
     topology = ParallelTopology(tp=1, pp=1, dp=2, moe_tp=1, moe_ep=2, cp=1)
-    point = FPMPoint("prefill", 2, 64, 128)
-    execution_profile = FPMExecutionProfile(
-        ordered_points=(point,),
-        selected_point_count=1,
-        max_batch_size=2,
-        max_num_tokens=128,
-        max_seq_len=193,
-        gpu_memory_utilization=0.8,
-        cudagraph_capture_sizes=(128,),
-        memory_source="test",
-        memory_fraction_ceiling=0.9,
-        kv_tolerance_fraction=0.05,
-        total_gpu_capacity_bytes=1,
-        non_kv_bytes=1,
-        required_kv_bytes=1,
-        decisions=(),
-    )
     cell = FPMCell(
         cell_id="fpm-test",
         workload_kind="prefill",
         topology=topology,
         weight_quantization="nvfp4",
-        kv_cache_dtype="fp8_e4m3",
+        kv_cache_dtype="fp8",
         backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
-        sampling_sha256="sampling",
-        execution_profile=execution_profile,
         parallel_strategy="dep",
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
@@ -708,104 +506,112 @@ def _synthetic_plan_and_cell(tmp_path):
             template_version=1,
             aic_database_version="0.24.0",
         ),
-        prefill_design=SimpleNamespace(selected=(point,)),
-        decode_design=SimpleNamespace(selected=()),
     )
+    point = {
+        "point_type": "prefill",
+        "benchmark_id": 1,
+        "total_prefill_tokens": 257,
+        "total_kv_read_tokens": 128,
+        "batch_size": 4,
+        "expected_cudagraph_mode": "PIECEWISE",
+        "expected_capture_size": 272,
+        "padding_tokens": 15,
+        "sample_reasons": ["post_capture"],
+    }
     cell_dir = tmp_path / "cell"
+    rank_fpms = []
     for rank, latency in ((0, 0.004), (1, 0.006)):
+        rank_fpms.append(
+            {
+                "counter_id": 1,
+                "dp_rank": rank,
+                "wall_time": latency,
+                "scheduled_requests": {
+                    "num_prefill_requests": 4,
+                    "sum_prefill_tokens": 257,
+                    "sum_prefill_kv_tokens": 128,
+                    "num_decode_requests": 0,
+                    "sum_decode_kv_tokens": 0,
+                },
+            }
+        )
+    iteration_group = {
+        "benchmark_id": 1,
+        "point": point,
+        "expected_dp_ranks": [0, 1],
+        "complete": True,
+        "wall_time": 0.006,
+        "rank_results": [{"dp_rank": rank, "fpms": [fpm]} for rank, fpm in enumerate(rank_fpms)],
+    }
+    for rank, fpm in enumerate(rank_fpms):
         output = cell_dir / "raw" / f"pod-{rank}" / ("benchmark.json" if rank == 0 else f"benchmark_dp{rank}.json")
         output.parent.mkdir(parents=True, exist_ok=True)
-        fpm = {
-            "dp_rank": rank,
-            "wall_time": latency,
-            "scheduled_requests": {
-                "num_prefill_requests": 2,
-                "sum_prefill_tokens": 128,
-                "sum_prefill_kv_tokens": 256,
-                "num_decode_requests": 0,
-                "sum_decode_kv_tokens": 0,
-            },
-        }
         output.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
+                    "artifact_type": "rank",
                     "status": "complete",
                     "valid": True,
-                    "collector": {
-                        "plan_sha256": "plan-sha",
-                        "cell_id": "fpm-test",
-                        "global_warmup_iterations": 0,
-                        "warmup_repeats": 0,
-                        "measured_repeats": 1,
+                    "usable": True,
+                    "timing_valid": True,
+                    "stop_reason": None,
+                    "error": None,
+                    "run_id": "run",
+                    "grid_digest": "grid",
+                    "config": {"mode": "prefill"},
+                    "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+                    "dp": {"rank": rank, "size": 2},
+                    "results": [{"point": point, "fpms": [fpm]}],
+                    "iteration_groups": [iteration_group],
+                    "skipped_points": [],
+                    "missing_phases": [],
+                    "timing": {
+                        "benchmark_elapsed_seconds": 1.0 + rank,
+                        "measured_iteration_seconds": 0.006,
                     },
-                    "campaign_results": [
-                        {
-                            "point": point.to_dict(),
-                            "warmup_fpms": [],
-                            "fpms": [fpm],
-                        }
-                    ],
                 }
             )
         )
     return plan, cell, cell_dir
 
 
-def test_single_measurement_dp_aggregation_uses_max_rank(tmp_path):
+def test_native_aggregation_preserves_iteration_totals(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    rows = aggregate_cell(plan, cell, cell_dir)
-    assert len(rows) == 1
-    assert rows[0]["latency_ms"] == pytest.approx(6.0)
-    assert rows[0]["measurement_policy"] == "single_sample_v1"
-    assert rows[0]["warmup_repeats"] == 0
-    assert rows[0]["parallel_strategy"] == "dep"
-    assert rows[0]["gemm_quant_mode"] == "nvfp4"
-    assert rows[0]["moe_quant_mode"] == "nvfp4"
-    assert rows[0]["fmha_quant_mode"] == "fp8"
-    assert rows[0]["comm_quant_mode"] == "half"
-    assert rows[0]["model_support_level"] == "exact"
-
-
-def test_single_measurement_aggregation_accepts_pr11509_rank_schema(tmp_path):
-    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    rank_paths = sorted((cell_dir / "raw").glob("**/benchmark*.json"))
-    for rank, path in enumerate(rank_paths):
-        payload = json.loads(path.read_text())
-        payload["schema_version"] = 2
-        payload["artifact_type"] = "rank"
-        payload["run_id"] = "run"
-        payload["grid_digest"] = "grid"
-        payload["dp"] = {"rank": rank, "size": 2}
-        payload["collector"]["runtime_contract"] = "dynamo_pr11509_schema_v2"
-        path.write_text(json.dumps(payload))
-    merged = json.loads(rank_paths[0].read_text())
-    merged["artifact_type"] = "merged"
-    (rank_paths[0].parent / "benchmark_merged.json").write_text(json.dumps(merged))
-
     rows = aggregate_cell(plan, cell, cell_dir)
 
     assert len(rows) == 1
     assert rows[0]["latency_ms"] == pytest.approx(6.0)
+    assert rows[0]["batch_size"] == 4
+    assert rows[0]["total_prefill_tokens"] == 257
+    assert rows[0]["total_kv_read_tokens"] == 128
+    assert rows[0]["partition_policy"] == "balanced_v1"
+    assert rows[0]["measurement_policy"] == "dynamo_native_single_sample_v1"
+    assert "suffix_length" not in rows[0]
+    assert "prefix_length" not in rows[0]
 
-    second_rank = rank_paths[1]
-    mismatched = json.loads(second_rank.read_text())
-    mismatched["run_id"] = "different-run"
-    second_rank.write_text(json.dumps(mismatched))
+
+def test_native_aggregation_rejects_rank_grid_drift(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    second_rank = next((cell_dir / "raw" / "pod-1").glob("benchmark*.json"))
+    payload = json.loads(second_rank.read_text())
+    payload["grid_digest"] = "different"
+    second_rank.write_text(json.dumps(payload))
+
     with pytest.raises(ValueError, match="different run identities"):
         aggregate_cell(plan, cell, cell_dir)
 
 
-def test_formal_database_is_idempotent_and_rejects_conflicts(tmp_path):
+def test_formal_database_uses_schema_v4_and_rejects_conflicts(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
     rows = aggregate_cell(plan, cell, cell_dir)
     parquet, metadata = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+
     assert parquet.exists()
     metadata_payload = json.loads(metadata.read_text())
-    assert metadata_payload["warmup_repeats"] == 0
-    assert metadata_payload["measurement_repeats"] == 1
-    assert metadata_payload["schema_version"] == 3
+    assert metadata_payload["schema_version"] == 4
+    assert metadata_payload["coordinate_system"] == "iteration_totals_balanced_v1"
 
     conflicting = [{**rows[0], "latency_ms": 7.0}]
     with pytest.raises(ValueError, match="conflicting"):

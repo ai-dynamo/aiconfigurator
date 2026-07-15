@@ -1,20 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Strict single-sample aggregation and formal FPM database publication."""
+"""Aggregate Dynamo-native iteration totals and publish the formal FPM database."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from collector.framework_manifest import get_collector_runtime
 
+from .native_artifact import validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
 
 _ROW_KEY = (
@@ -39,18 +38,10 @@ _ROW_KEY = (
     "backend_policy",
     "workload_kind",
     "batch_size",
-    "suffix_length",
-    "prefix_length",
+    "total_prefill_tokens",
+    "total_kv_read_tokens",
+    "partition_policy",
 )
-
-
-def _point_key(point: dict[str, Any]) -> tuple[str, int, int, int]:
-    return (
-        str(point["workload_kind"]),
-        int(point["batch_size"]),
-        int(point["suffix_length"]),
-        int(point["prefix_length"]),
-    )
 
 
 def _dotted_get(payload: object, path: str) -> object:
@@ -83,125 +74,20 @@ def _validate_backend_markers(cell: FPMCell, cell_dir: Path) -> None:
             raise ValueError(f"backend marker mismatch in {path}: {mismatches}")
 
 
-def _validate_fpm(point: tuple[str, int, int, int], fpm: dict[str, Any]) -> tuple[int, float]:
-    phase, batch, suffix, prefix = point
-    rank = int(fpm["dp_rank"])
-    latency = float(fpm["wall_time"])
-    if rank < 0 or not math.isfinite(latency) or latency <= 0:
-        raise ValueError(f"invalid FPM rank/latency: rank={rank}, wall_time={latency}")
-    scheduled = fpm.get("scheduled_requests")
-    if not isinstance(scheduled, dict):
-        raise TypeError("FPM scheduled_requests must be a mapping")
-    expected = (
-        {
-            "num_prefill_requests": batch,
-            "sum_prefill_tokens": batch * suffix,
-            "sum_prefill_kv_tokens": batch * prefix,
-            "num_decode_requests": 0,
-            "sum_decode_kv_tokens": 0,
-        }
-        if phase == "prefill"
-        else {
-            "num_prefill_requests": 0,
-            "sum_prefill_tokens": 0,
-            "sum_prefill_kv_tokens": 0,
-            "num_decode_requests": batch,
-            "sum_decode_kv_tokens": batch * prefix,
-        }
-    )
-    mismatches = {key: (scheduled.get(key), value) for key, value in expected.items() if scheduled.get(key) != value}
-    if mismatches:
-        raise ValueError(f"FPM scheduled workload mismatch: {mismatches}")
-    return rank, latency
-
-
 def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> list[dict[str, Any]]:
-    """Validate all rank files and take max-rank latency for the one repeat."""
+    """Validate native rank artifacts and take max-rank latency per grid point."""
 
     _validate_backend_markers(cell, cell_dir)
-    rank_payloads = []
-    for path in sorted((cell_dir / "raw").glob("**/benchmark*.json")):
-        payload = json.loads(path.read_text())
-        if payload.get("artifact_type") == "merged" or path.stem.endswith("_merged"):
-            continue
-        rank_payloads.append((path, payload))
-    if not rank_payloads:
-        raise ValueError(f"no benchmark result files found for {cell.cell_id}")
-    by_point: dict[tuple[str, int, int, int], dict[int, float]] = defaultdict(dict)
-    seen_schema_versions = set()
-    graph_aware_identity = None
-    for path, payload in rank_payloads:
-        schema_version = payload.get("schema_version")
-        if schema_version not in {1, 2} or payload.get("status") != "complete" or payload.get("valid") is not True:
-            raise ValueError(f"invalid terminal result envelope: {path}")
-        seen_schema_versions.add(schema_version)
-        if schema_version == 2 and payload.get("artifact_type") != "rank":
-            raise ValueError(f"schema-v2 result is not a rank artifact: {path}")
-        collector = payload.get("collector")
-        if not isinstance(collector, dict):
-            raise TypeError(f"missing collector envelope: {path}")
-        if collector.get("plan_sha256") != plan.sha256 or collector.get("cell_id") != cell.cell_id:
-            raise ValueError(f"result identity mismatch: {path}")
-        if schema_version == 2 and collector.get("runtime_contract") != "dynamo_pr11509_schema_v2":
-            raise ValueError(f"schema-v2 result has no PR11509 collector contract: {path}")
-        expected_global_warmup = int(getattr(plan.options, "warmup_iterations", 0))
-        if int(collector.get("global_warmup_iterations", 0)) != expected_global_warmup:
-            raise ValueError(f"FPM global warmup mismatch: {path}")
-        if collector.get("warmup_repeats") != 0 or collector.get("measured_repeats") != 1:
-            raise ValueError(f"FPM collection requires no warmup and exactly one measurement: {path}")
-        rows = payload.get("campaign_results")
-        if not isinstance(rows, list):
-            raise TypeError(f"campaign_results must be a list: {path}")
-        payload_ranks = set()
-        for row in rows:
-            point = _point_key(row["point"])
-            if point[0] != cell.workload_kind:
-                raise ValueError(f"mixed workload kind in {path}: {point[0]}")
-            warmups = row.get("warmup_fpms")
-            measurements = row.get("fpms")
-            if not isinstance(warmups, list) or warmups:
-                raise ValueError(f"expected no warmup FPMs for {point} in {path}")
-            if not isinstance(measurements, list) or len(measurements) != 1:
-                raise ValueError(f"expected one measured FPM for {point} in {path}")
-            rank, latency = _validate_fpm(point, measurements[0])
-            payload_ranks.add(rank)
-            if rank in by_point[point]:
-                raise ValueError(f"duplicate dp_rank={rank} for point={point}")
-            by_point[point][rank] = latency
-        if schema_version == 2:
-            if len(payload_ranks) != 1:
-                raise ValueError(f"schema-v2 rank artifact mixes DP ranks: {path}")
-            rank = payload_ranks.pop()
-            dp = payload.get("dp")
-            if not isinstance(dp, dict) or dp.get("rank") != rank or dp.get("size") != cell.topology.dp:
-                raise ValueError(f"schema-v2 DP metadata mismatch: {path}")
-            identity = (payload.get("run_id"), payload.get("grid_digest"))
-            if not all(isinstance(value, str) and value for value in identity):
-                raise ValueError(f"schema-v2 run identity is missing: {path}")
-            if graph_aware_identity is None:
-                graph_aware_identity = identity
-            elif identity != graph_aware_identity:
-                raise ValueError(f"schema-v2 rank artifacts have different run identities: {path}")
-
-    if len(seen_schema_versions) != 1:
-        raise ValueError(f"rank artifacts contain mixed result schemas: {seen_schema_versions}")
-    target_count = cell.execution_profile.selected_point_count
-    if len(by_point) != target_count:
-        raise ValueError(f"measured point count {len(by_point)} != selected count {target_count} for {cell.cell_id}")
-    ordered_population = {point.key for point in cell.execution_profile.ordered_points}
-    unexpected = sorted(set(by_point) - ordered_population)
-    if unexpected:
-        raise ValueError(f"measured points are outside the frozen ordered population for {cell.cell_id}: {unexpected}")
-    expected_ranks = set(range(cell.topology.dp))
+    collection = validate_native_collection(cell, cell_dir / "raw")
     backend_version = get_collector_runtime(plan.backend).version
-    capability = getattr(plan, "capability", None)
+    capability = plan.capability
     rows = []
-    for point, rank_latencies in sorted(by_point.items()):
-        if set(rank_latencies) != expected_ranks:
-            raise ValueError(
-                f"DP rank set mismatch for {point}: actual={sorted(rank_latencies)} expected={sorted(expected_ranks)}"
-            )
-        phase, batch, suffix, prefix = point
+    for measurement in collection.points:
+        point = measurement.point
+        phase = str(point["point_type"])
+        batch = int(point["batch_size"])
+        total_prefill = int(point["total_prefill_tokens"])
+        total_kv = int(point["total_kv_read_tokens"])
         rows.append(
             {
                 "cell_id": cell.cell_id,
@@ -226,16 +112,18 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 "backend_policy": cell.backend_policy.policy_id,
                 "workload_kind": phase,
                 "batch_size": batch,
-                "suffix_length": suffix,
-                "prefix_length": prefix,
-                "latency_ms": max(rank_latencies.values()) * 1000.0,
+                "total_prefill_tokens": total_prefill,
+                "total_kv_read_tokens": total_kv,
+                "partition_policy": "balanced_v1",
+                "latency_ms": max(latency for _rank, latency in measurement.rank_wall_times) * 1000.0,
+                "global_warmup_iterations": plan.options.warmup_iterations,
                 "warmup_repeats": 0,
                 "measurement_repeats": 1,
-                "measurement_policy": "single_sample_v1",
-                "model_support_level": getattr(capability, "support_level", "unknown"),
-                "model_template_id": getattr(capability, "template_id", "unknown"),
-                "model_template_version": getattr(capability, "template_version", 0),
-                "aic_database_version": getattr(capability, "aic_database_version", "unknown"),
+                "measurement_policy": "dynamo_native_single_sample_v1",
+                "model_support_level": capability.support_level,
+                "model_template_id": capability.template_id,
+                "model_template_version": capability.template_version,
+                "aic_database_version": capability.aic_database_version,
                 "source_plan_sha256": plan.sha256,
             }
         )
@@ -252,7 +140,7 @@ def write_formal_database(
     *,
     systems_root: Path | None = None,
 ) -> tuple[Path, Path]:
-    """Atomically merge conflict-free rows into the normal AIC data tree."""
+    """Atomically merge conflict-free native-grid rows into the AIC data tree."""
 
     if not rows:
         raise ValueError("refusing to write an empty FPM database")
@@ -272,7 +160,14 @@ def write_formal_database(
 
     merged = []
     if parquet_path.exists():
-        merged.extend(pq.read_table(parquet_path).to_pylist())
+        table = pq.read_table(parquet_path)
+        required = {"total_prefill_tokens", "total_kv_read_tokens", "partition_policy"}
+        if not required.issubset(table.column_names):
+            raise ValueError(
+                "existing FPM database uses the retired per-request P/S schema; "
+                f"publish schema-v4 output to a clean destination: {parquet_path}"
+            )
+        merged.extend(table.to_pylist())
     index = {tuple(row[key] for key in _ROW_KEY): row for row in merged}
     if len(index) != len(merged):
         raise ValueError(f"existing FPM database contains duplicate physical keys: {parquet_path}")
@@ -292,8 +187,9 @@ def write_formal_database(
     os.replace(temporary, parquet_path)
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
-        "schema_version": 3,
-        "measurement_policy": "single_sample_v1",
+        "schema_version": 4,
+        "coordinate_system": "iteration_totals_balanced_v1",
+        "measurement_policy": "dynamo_native_single_sample_v1",
         "warmup_repeats": 0,
         "measurement_repeats": 1,
         "row_count": len(merged),

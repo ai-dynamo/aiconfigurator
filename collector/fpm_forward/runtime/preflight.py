@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail before model loading when the runtime lacks the P>0 benchmark contract."""
+"""Fail before model loading unless the image provides PR11509 native FPM."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pathlib import Path
 
 from dynamo.vllm.instrumented_scheduler import BenchmarkPoint, InstrumentedScheduler
 
-LEGACY_FIELDS = {"point_type", "isl", "kv_read_tokens", "context_length", "batch_size"}
 GRAPH_AWARE_FIELDS = {
     "point_type",
     "benchmark_id",
@@ -18,13 +17,10 @@ GRAPH_AWARE_FIELDS = {
     "total_kv_read_tokens",
     "batch_size",
 }
-LEGACY_METHODS = {
+GRAPH_AWARE_METHODS = {
     "_bench_prefill_scheduled_tokens_per_req",
     "_bench_prefill_blocks_per_req",
     "_bench_blocks_per_req",
-}
-GRAPH_AWARE_METHODS = {
-    *LEGACY_METHODS,
     "_bench_available_blocks",
     "_bench_usable_blocks",
     "_bench_prefill_point_feasible",
@@ -37,26 +33,13 @@ GRAPH_AWARE_METHODS = {
 }
 
 
-def _contract(fields: set[str]) -> tuple[str, set[str], set[str]]:
-    if fields >= GRAPH_AWARE_FIELDS:
-        return "dynamo_pr11509_schema_v2", GRAPH_AWARE_FIELDS, GRAPH_AWARE_METHODS
-    if fields >= LEGACY_FIELDS:
-        return "dynamo_legacy_schema_v1", LEGACY_FIELDS, LEGACY_METHODS
-    candidates = (
-        ("dynamo_pr11509_schema_v2", GRAPH_AWARE_FIELDS, GRAPH_AWARE_METHODS),
-        ("dynamo_legacy_schema_v1", LEGACY_FIELDS, LEGACY_METHODS),
-    )
-    return min(candidates, key=lambda candidate: len(candidate[1] - fields))
-
-
 def main() -> None:
     fields = set(getattr(BenchmarkPoint, "__dataclass_fields__", {}))
-    runtime_contract, required_fields, required_methods = _contract(fields)
-    missing_fields = sorted(required_fields - fields)
-    missing_methods = sorted(name for name in required_methods if not hasattr(InstrumentedScheduler, name))
+    missing_fields = sorted(GRAPH_AWARE_FIELDS - fields)
+    missing_methods = sorted(name for name in GRAPH_AWARE_METHODS if not hasattr(InstrumentedScheduler, name))
     audit = {
         "schema_version": 1,
-        "runtime_contract": runtime_contract,
+        "runtime_contract": "dynamo_pr11509_native_schema_v2",
         "benchmark_point_fields": sorted(fields),
         "missing_fields": missing_fields,
         "missing_methods": missing_methods,
@@ -65,9 +48,9 @@ def main() -> None:
     Path("/results/runtime-preflight.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
     if missing_fields or missing_methods:
         raise RuntimeError(
-            "Dynamo runtime lacks the required FPM P>0 benchmark contract; "
+            "Dynamo runtime lacks the required PR11509 native FPM contract; "
             f"missing_fields={missing_fields}, missing_methods={missing_methods}. "
-            "Provide a compatible image or FpmCollector.runtime_overlay_dir."
+            "Provide a compatible Dynamo image."
         )
 
 

@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 
 from collector import case_generator
 
+from .model_capability import load_model_config, resolve_attention_source
 from .types import FPMPoint
 
 
@@ -60,31 +59,6 @@ def _model_path_filter(model_path: str) -> Iterator[None]:
         else:
             os.environ["COLLECTOR_MODEL_PATH"] = previous
         case_generator._load_model_cases_data.cache_clear()
-
-
-def _cached_model_config_path(model_path: str) -> Path | None:
-    direct = Path(model_path).expanduser()
-    if direct.is_dir() and (direct / "config.json").exists():
-        return direct / "config.json"
-    if direct.is_file():
-        return direct
-    root = Path(__file__).resolve().parents[2]
-    cached = root / "src" / "aiconfigurator" / "model_configs" / f"{model_path.replace('/', '--')}_config.json"
-    return cached if cached.exists() else None
-
-
-def load_model_config(model_path: str) -> tuple[dict[str, object], Path | None]:
-    path = _cached_model_config_path(model_path)
-    if path is None:
-        return {}, None
-    with open(path, encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, dict):
-        raise TypeError(f"model config must be a mapping: {path}")
-    text_config = payload.get("text_config")
-    if isinstance(text_config, dict):
-        payload = {**payload, **text_config}
-    return payload, path
 
 
 def _native_weight_quantization(config: dict[str, object], model_path: str) -> str:
@@ -304,27 +278,8 @@ _SOURCE_PROVIDERS = (
 
 
 def _resolve_provider(selected_ops: set[str], *, required: bool = True) -> _SourceProvider | None:
-    matches = [provider for provider in _SOURCE_PROVIDERS if provider.required_ops.issubset(selected_ops)]
-    if not matches:
-        if not required:
-            return None
-        raise ValueError(
-            "fpm_forward requires one supported AIC context/generation attention pair; "
-            f"selected ops were {sorted(selected_ops)}"
-        )
-    if len(matches) > 1:
-        raise ValueError(
-            "fpm_forward attention source is ambiguous; model cases must select one pair: "
-            + ", ".join(provider.name for provider in matches)
-        )
-    return matches[0]
-
-
-def resolve_attention_source(selected_ops: set[str], *, required: bool = True) -> str | None:
-    """Return the exact AIC attention source declared by model cases."""
-
-    provider = _resolve_provider(selected_ops, required=required)
-    return provider.name if provider is not None else None
+    source_name = resolve_attention_source(selected_ops, required=required)
+    return _provider_by_name(source_name) if source_name is not None else None
 
 
 def _provider_by_name(source_name: str) -> _SourceProvider:

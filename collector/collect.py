@@ -1530,9 +1530,7 @@ def main():
         if args.plan_only and fpm_requested:
             from collector.fpm_forward.entry import resolve_inputs
 
-            fpm_plan, _generator_overrides, _runtime_overlay_dir = _resolve_fpm_cli_inputs(
-                parser, lambda: resolve_inputs(args, case_plan)
-            )
+            fpm_plan, _generator_overrides = _resolve_fpm_cli_inputs(parser, lambda: resolve_inputs(args, case_plan))
             print(json.dumps(fpm_plan.to_dict(), indent=2, sort_keys=True))
             return
         if args.plan_only:
