@@ -14,12 +14,27 @@ first-level directory under a system dir that is neither a known legacy
 backend dir nor an existing catalog family dir, aborts the whole run with a
 clear error. The script never guesses a family and never skips silently.
 
+Count-verified workflow (recommended, three calls):
+    migrate_family_layout.py --data-root DATA --manifest M
+        # plan mode: prints the plan and writes the PRE-migration per-table
+        # count manifest (table filename -> count) to M.
+    migrate_family_layout.py --data-root DATA --execute
+        # performs the moves (has its own internal pre/post count self-check).
+    migrate_family_layout.py --data-root DATA --verify --manifest M
+        # structural checks plus: recomputes POST-migration per-table counts
+        # across the family dirs and compares against M, erroring on any
+        # table whose count differs or is missing.
+`--verify` without `--manifest` still runs the structural checks but prints
+a one-line notice that count verification was skipped — it never silently
+implies completeness.
+
 See docs/perf_database/collector-v3-op-centric-design.md §3.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import subprocess
@@ -306,10 +321,26 @@ def execute_plan(data_root: Path, scan: ScanResult) -> None:
         raise MigrationError("execute post-check failed: " + "; ".join(errors))
 
 
+# --- Manifest (pre-migration per-table counts, for --verify's count check) ----
+
+
+def write_manifest(path: Path, manifest: dict[str, int]) -> None:
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def load_manifest(path: Path) -> dict[str, int]:
+    return json.loads(path.read_text())
+
+
 # --- Verify --------------------------------------------------------------------
 
 
-def verify_tree(data_root: Path, family_map: dict[str, str], family_set: set[str]) -> list[str]:
+def verify_tree(
+    data_root: Path,
+    family_map: dict[str, str],
+    family_set: set[str],
+    manifest: dict[str, int] | None = None,
+) -> list[str]:
     errors: list[str] = []
     try:
         scan = scan_legacy_tree(data_root, family_map, family_set)
@@ -321,6 +352,7 @@ def verify_tree(data_root: Path, family_map: dict[str, str], family_set: set[str
     if scan.marker_actions:
         errors.append("legacy-shaped markers remain: " + ", ".join(sorted(str(a.src) for a in scan.marker_actions)))
 
+    post_counts: Counter[str] = Counter()
     for system_dir in _system_dirs(data_root):
         for family_dir in sorted(p for p in system_dir.iterdir() if p.is_dir()):
             family = family_dir.name
@@ -334,10 +366,21 @@ def verify_tree(data_root: Path, family_map: dict[str, str], family_set: set[str
                             continue
                         if f.stem not in family_map:
                             errors.append(f"table not in catalog: {f.relative_to(data_root)}")
-                        elif family_map[f.stem] != family:
+                            continue
+                        post_counts[f.name] += 1
+                        if family_map[f.stem] != family:
                             errors.append(
                                 f"table under wrong family (expected {family_map[f.stem]}): {f.relative_to(data_root)}"
                             )
+
+    if manifest is not None:
+        for name, pre_count in sorted(manifest.items()):
+            post_count = post_counts.get(name)
+            if post_count is None:
+                errors.append(f"count check: table missing after migration: {name} (pre-migration count={pre_count})")
+            elif post_count != pre_count:
+                errors.append(f"count check: table count mismatch: {name} (manifest={pre_count}, found={post_count})")
+
     return errors
 
 
@@ -351,14 +394,34 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--execute", action="store_true", help="perform the moves (default: print the plan)")
     mode.add_argument("--verify", action="store_true", help="check the tree is fully migrated")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help=(
+            "path to a JSON per-table count manifest. In plan mode (and --execute) the "
+            "PRE-migration manifest is written here. With --verify, the manifest is read back "
+            "and POST-migration per-table counts are checked against it; --verify without "
+            "--manifest skips this count check (prints a notice, does not fail)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     data_root = args.data_root.resolve()
+    if not data_root.is_dir():
+        print(f"ABORT: data root not found: {data_root}", file=sys.stderr)
+        return 1
+
     family_map = load_family_map(DEFAULT_CATALOG)
     family_set = set(family_map.values())
 
     if args.verify:
-        errors = verify_tree(data_root, family_map, family_set)
+        manifest = None
+        if args.manifest:
+            manifest = load_manifest(args.manifest)
+        else:
+            print("NOTICE: --verify without --manifest: per-table count check skipped", file=sys.stderr)
+        errors = verify_tree(data_root, family_map, family_set, manifest=manifest)
         if errors:
             for err in errors:
                 print(f"VERIFY FAIL: {err}", file=sys.stderr)
@@ -371,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
     except MigrationError as exc:
         print(f"ABORT: {exc}", file=sys.stderr)
         return 1
+
+    if args.manifest:
+        write_manifest(args.manifest, scan.manifest)
 
     if args.execute:
         try:

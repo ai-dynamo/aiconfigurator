@@ -238,7 +238,10 @@ class TestIncompleteMarker:
         assert action.targets == (Path("rtx_pro_6000_server/moe/vllm/0.14.0/INCOMPLETE.txt"),)
 
     def test_marker_only_dropped_and_logged(self, mod, family_map, family_set, repo, caplog):
-        _touch(repo, "gb300/vllm/0.14.0/INCOMPLETE.txt", b"Partial collector bring-up data only.")
+        """Hypothetical — no real marker-only INCOMPLETE dir exists in the tree today
+        (all 4 real INCOMPLETE.txt dirs carry data files alongside the marker; e.g.
+        gb300/vllm/0.14.0 has 5 parquet files + INCOMPLETE.txt, not a marker-only case)."""
+        _touch(repo, "h200_sxm/vllm/0.0.0test/INCOMPLETE.txt", b"Partial collector bring-up data only.")
         _track(repo)
         with caplog.at_level(logging.WARNING):
             scan = mod.scan_legacy_tree(repo, family_map, family_set)
@@ -306,6 +309,101 @@ class TestVerify:
         assert errors
         assert any("legacy-shaped" in e for e in errors)
 
+    def test_verify_fails_on_stray_legacy_marker(self, mod, family_map, family_set, repo):
+        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _track(repo)
+        assert mod.verify_tree(repo, family_map, family_set) == []
+
+        # Plant a stray legacy-level (marker-only, no sibling data file) SHARED_LAYER_REUSE.txt.
+        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt")
+        _track(repo)
+        errors = mod.verify_tree(repo, family_map, family_set)
+        assert errors
+        assert any("legacy-shaped markers remain" in e for e in errors)
+
+    def test_verify_fails_on_family_dir_outside_catalog(self, mod, family_map, family_set, repo):
+        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _track(repo)
+        assert mod.verify_tree(repo, family_map, family_set) == []
+
+        # Plant a top-level dir that is neither a known legacy backend dir nor a catalog family.
+        _touch(repo, "h200_sxm/not_a_real_family/vllm/1.0.0/moe_perf.parquet")
+        _track(repo)
+        errors = mod.verify_tree(repo, family_map, family_set)
+        assert errors
+        assert any("not_a_real_family" in e for e in errors)
+
+    def test_verify_fails_on_table_under_wrong_family(self, mod, family_map, family_set, repo):
+        # moe_perf.parquet's catalog family is "moe", not "gemm".
+        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/moe_perf.parquet")
+        _track(repo)
+        errors = mod.verify_tree(repo, family_map, family_set)
+        assert errors
+        assert any("wrong family" in e for e in errors)
+
+
+# --- Manifest: --manifest write (plan/execute) + count check (--verify) ------------
+
+
+class TestManifest:
+    def test_manifest_written_in_plan_mode(self, mod, repo, tmp_path, capsys):
+        manifest_path = tmp_path / "manifest.json"
+        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(repo, "h200_sxm/nccl/2.23/nccl_perf.parquet")
+        _track(repo)
+
+        rc = mod.main(["--data-root", str(repo), "--manifest", str(manifest_path)])
+        assert rc == 0
+        capsys.readouterr()
+
+        assert mod.load_manifest(manifest_path) == {"gemm_perf.parquet": 1, "nccl_perf.parquet": 1}
+
+    def test_manifest_roundtrip_plan_execute_verify(self, mod, repo, tmp_path, capsys):
+        manifest_path = tmp_path / "manifest.json"
+        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(repo, "a100_sxm/sglang/0.5.12/gemm_perf.parquet")
+        _track(repo)
+
+        assert mod.main(["--data-root", str(repo), "--manifest", str(manifest_path)]) == 0
+        capsys.readouterr()
+
+        assert mod.main(["--data-root", str(repo), "--execute"]) == 0
+        capsys.readouterr()
+
+        rc = mod.main(["--data-root", str(repo), "--verify", "--manifest", str(manifest_path)])
+        assert rc == 0
+        assert "VERIFY OK" in capsys.readouterr().out
+
+    def test_verify_without_manifest_prints_skip_notice(self, mod, repo, capsys):
+        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _track(repo)
+        rc = mod.main(["--data-root", str(repo), "--verify"])
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "NOTICE" in err
+        assert "skipped" in err
+
+    def test_verify_manifest_flags_table_after_deleting_one_copy(self, mod, repo, tmp_path, capsys):
+        manifest_path = tmp_path / "manifest.json"
+        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(repo, "a100_sxm/sglang/0.5.12/gemm_perf.parquet")
+        _track(repo)
+
+        assert mod.main(["--data-root", str(repo), "--manifest", str(manifest_path)]) == 0
+        capsys.readouterr()
+        assert mod.main(["--data-root", str(repo), "--execute"]) == 0
+        capsys.readouterr()
+
+        # Delete one of the two migrated gemm_perf.parquet copies out from under the tree.
+        (repo / "a100_sxm" / "gemm" / "sglang" / "0.5.12" / "gemm_perf.parquet").unlink()
+        _track(repo)
+
+        rc = mod.main(["--data-root", str(repo), "--verify", "--manifest", str(manifest_path)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "VERIFY FAIL" in err
+        assert "gemm_perf.parquet" in err
+
 
 # --- Idempotency: plan mode on an already-migrated tree ----------------------------
 
@@ -346,6 +444,13 @@ class TestFailClosed:
         assert rc == 1
         assert "ABORT" in capsys.readouterr().err
         assert target.exists()
+
+    def test_cli_missing_data_root_aborts_cleanly(self, mod, tmp_path, capsys):
+        missing = tmp_path / "does-not-exist"
+        rc = mod.main(["--data-root", str(missing)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert f"ABORT: data root not found: {missing.resolve()}" in err
 
 
 # --- CLI round trip ------------------------------------------------------------------
