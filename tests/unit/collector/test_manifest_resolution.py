@@ -137,3 +137,11 @@ def test_validator_reports_malformed_catalog_yaml(paths):
     errors = validate_resolution(manifest_path=manifest, catalog_path=catalog)
     assert len(errors) == 1
     assert errors[0].startswith("op catalog: ")
+
+
+def test_validator_reports_registry_import_failure(monkeypatch):
+    import collector.framework_manifest as fm
+
+    monkeypatch.setitem(fm._REGISTRY_MODULES, "sglang", "collector.nonexistent_registry")
+    errors = fm.validate_resolution()
+    assert any(error.startswith("sglang: registry import failed") for error in errors)

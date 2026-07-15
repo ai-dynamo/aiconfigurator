@@ -182,6 +182,10 @@ def require_collector_runtime(
     resolved: dict[str, CollectorRuntime] = {}
     for key, ops in ops_by_key.items():
         entries = [e for e in _registry_entries(key) if not ops or e.op in ops]
+        if ops:
+            missing = ops - {e.op for e in entries}
+            if missing:
+                raise KeyError(f"{key} registry has no op(s): {sorted(missing)}")
         by_version: dict[str, CollectorRuntime] = {}
         op_versions: dict[str, str] = {}
         for entry in entries:
@@ -195,7 +199,7 @@ def require_collector_runtime(
                 "run each version group in its own container"
             )
         if not by_version:
-            raise KeyError(f"{key} registry has none of the requested ops: {sorted(ops)}")
+            raise KeyError(f"{key} registry has no ops to resolve")
         resolved[key] = next(iter(by_version.values()))
 
     wideep_key = f"wideep_{normalized}"
@@ -242,7 +246,12 @@ def validate_resolution(
         if framework_key not in manifest["frameworks"]:
             errors.append(f"{framework_key}: registry exists but the manifest has no entry")
             continue
-        for entry in _registry_entries(framework_key):
+        try:
+            entries = _registry_entries(framework_key)
+        except ImportError as error:
+            errors.append(f"{framework_key}: registry import failed: {error}")
+            continue
+        for entry in entries:
             try:
                 _resolve_from(manifest, family_map, framework_key, entry)
             except (KeyError, LookupError, ValueError) as error:

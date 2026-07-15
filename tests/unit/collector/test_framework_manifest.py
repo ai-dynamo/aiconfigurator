@@ -171,8 +171,14 @@ def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, r
 
 
 def test_unknown_requested_op_fails_with_key_error():
-    with pytest.raises(KeyError, match="none of the requested ops"):
+    with pytest.raises(KeyError, match=r"has no op\(s\): \['not_a_real_op'\]"):
         require_collector_runtime("sglang", "0.5.14", requested_ops={"not_a_real_op"}, wideep_ops=set())
+
+
+def test_typo_mixed_with_real_op_fails_closed():
+    # A typo must not be silently dropped just because another requested op is valid.
+    with pytest.raises(KeyError, match=r"has no op\(s\): \['not_a_real_op'\]"):
+        require_collector_runtime("sglang", "0.5.14", requested_ops={"gemm", "not_a_real_op"}, wideep_ops=set())
 
 
 def test_wideep_registry_entries_are_separate_from_stock_backend_registries():

@@ -38,7 +38,7 @@ fails closed.
 
 One identity chain, single-sourced, three levels:
 
-```
+```text
 registry OpEntry.op  →  PerfFile table  →  family
 (collection unit)       (storage unit)     (management unit)
 ```
@@ -71,7 +71,7 @@ backends.
 
 ## 3. Physical data layout
 
-```
+```text
 aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/
     <table>_perf.parquet     # filenames unchanged (PerfFile enum untouched)
     collection_meta.yaml     # provenance sidecar (committed, required)
@@ -149,10 +149,11 @@ same family (sglang and wideep_sglang both feed `moe`); pins are therefore per
 *(framework, family)*, and each registry belongs to one framework.
 
 **Validation (fail-closed):** a validator run in CI and before collection
-asserts every registry op across all frameworks resolves to a version and image,
-and that every image is digest-pinned where the registry supports digests
-(public registries: mandatory; internal image names, e.g.
-`deepseek-v4-blackwell`: tag-only allowed). Unresolvable op or missing image =
+asserts every registry op across all frameworks resolves to a version and
+image, and enforces the digest rule syntactically: any image reference
+containing `/` must carry `@sha256:<64 hex>`; only bare internal image names
+(no `/`, e.g. `deepseek-v4-blackwell`) are exempt — in practice, every
+public-registry reference is digest-pinned. Unresolvable op or missing image =
 hard error.
 
 **Snapshots:** the manifest at a git revision *is* the snapshot. Each
@@ -225,7 +226,7 @@ list assembly in the shared-layer sourcing code); V3 does not change the merge
 The free, always-on channel. Example: requesting `sglang 0.5.14` gemm on
 h200_sxm where a few shapes were only ever collected at 0.5.12:
 
-```
+```text
 source order for (h200_sxm, gemm, sglang, requested=0.5.14):
   1. gemm/sglang/0.5.14/     ← primary
   2. gemm/sglang/0.5.12/     ← nearest EARLIER sibling, fills gaps only
@@ -463,8 +464,10 @@ data. V3 makes that cycle computed and mostly declarative:
 
 1. **Cadence** — quarterly (decided; see §11), with targeted mid-quarter
    upgrades for new models. The mechanism itself hard-codes no cadence.
-2. **Image digests** — mandatory for public registries, tag-only allowed for
-   internal image names; enforced by manifest validation.
+2. **Image digests** — mandatory for any image reference containing `/` (in
+   practice, every public-registry reference; multi-arch index digests, never
+   platform-child digests); bare internal image names are exempt. Enforced
+   syntactically by manifest validation.
 3. **Minimum bar to claim version support** — a *(framework, family, version)*
    is supported iff its data dir has complete provenance (`status: complete`
    for all the family's tables) or a valid `reuse.yaml` chain to one that does;

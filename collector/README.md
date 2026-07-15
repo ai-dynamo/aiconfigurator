@@ -169,9 +169,10 @@ table namespace its output is written under), and `collector_dir`.
 `collect.py` requires the exact public version for a run and rejects
 mixed-pin selections across ops.
 
-Image digests are policy, not decoration: any image reference that names a
-public registry path (contains `/`) must be pinned with `@sha256:<64 hex>`;
-bare internal image names (no `/`, e.g. `deepseek-v4-blackwell`) are exempt.
+Image digests are policy, not decoration: the rule is syntactic — any image
+reference containing `/` must be pinned with `@sha256:<64 hex>`; only bare
+internal image names (no `/`, e.g. `deepseek-v4-blackwell`) are exempt. In
+practice that means every public-registry reference is digest-pinned.
 When bumping a version pin, re-fetch and update the digest for every image
 variant touched — a stale digest silently keeps pulling the old image. Always
 pin the manifest-list (index) digest, never a platform-child digest —
