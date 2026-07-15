@@ -588,7 +588,6 @@ def get_database(
             logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
             continue
 
-        data_path = os.path.join(systems_root, data_dir, backend, version)
         paths = [
             p for v, p in _iter_backend_version_dirs(os.path.join(systems_root, data_dir), backend) if v == version
         ]
@@ -620,9 +619,14 @@ def get_database(
                 missing_data_candidate = (systems_root, cache_key)
         else:
             if is_incomplete:
-                logger.warning(f"data path {data_path} is marked incomplete, continuing searching")
+                logger.warning(
+                    f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
+                    "continuing searching"
+                )
             else:
-                logger.warning(f"data path {data_path} not found, continuing searching")
+                logger.warning(
+                    f"no data found for {system=}, {backend=}, {version=} in either layout, continuing searching"
+                )
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate

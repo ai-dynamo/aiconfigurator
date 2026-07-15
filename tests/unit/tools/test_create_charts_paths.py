@@ -111,3 +111,75 @@ def test_should_run_cli_smoke_test_passes_on_split_tree(create_charts_module, tm
     run_smoke, reason = create_charts_module.should_run_cli_smoke_test("h200_sxm", "sglang", "0.5.14")
 
     assert run_smoke, reason
+
+
+# --- main()'s changed-file parser: family-first (6-part) paths --------------
+#
+# main() groups PR-changed files by (system, backend, version) before calling
+# create_charts(). The legacy branch only recognizes 5-part
+# data/<system>/<backend>/<version>/<file> paths; family-first layout paths
+# are one segment longer (data/<system>/<family>/<backend>/<version>/<file>).
+# These tests drive main() end-to-end (mocking out git plumbing and the real
+# create_charts()) to confirm the 6-part branch is wired up.
+
+
+def _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, changed_files):
+    monkeypatch.setattr(create_charts_module, "get_changed_files", lambda base, head: changed_files)
+    monkeypatch.setattr(create_charts_module, "get_csv_to_parquet_conversion_files", lambda base, head: set())
+    monkeypatch.setattr(create_charts_module, "_systems_data_root", lambda: str(tmp_path))
+
+    calls = []
+
+    def fake_create_charts(backend, backend_version, system, perf_files, output_dir, output_md_file):
+        calls.append((system, backend, backend_version, sorted(perf_files)))
+
+    monkeypatch.setattr(create_charts_module, "create_charts", fake_create_charts)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "create_charts.py",
+            "--output-dir",
+            str(tmp_path / "charts_output"),
+            "--output-md-file",
+            str(tmp_path / "comment.md"),
+        ],
+    )
+
+    create_charts_module.main()
+    return calls
+
+
+def test_main_parses_family_layout_changed_file(create_charts_module, tmp_path, monkeypatch):
+    """A 6-part data/<system>/<family>/<backend>/<version>/<file> changed path is
+    parsed and grouped exactly like the 5-part legacy branch."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet"
+
+    calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
+
+    assert calls == [("h200_sxm", "sglang", "0.5.14", ["gemm_perf.parquet"])]
+
+
+def test_main_skips_nccl_family_layout_changed_file(create_charts_module, tmp_path, monkeypatch):
+    """The 6-part branch mirrors the legacy branch's nccl/oneccl pseudo-backend
+    skip: nccl/oneccl perf files are ignored, matching how the 5-part branch
+    treats data/<system>/nccl/<version>/nccl_perf.parquet."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/comm/nccl/2.20/nccl_perf.parquet"
+
+    calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
+
+    assert calls == []
+
+
+def test_main_suppresses_family_layout_incomplete_dir(create_charts_module, tmp_path, monkeypatch):
+    """An INCOMPLETE.txt marker in the FAMILY dir the changed file lives in
+    (data_root/system/family/backend/version) suppresses that entry, same as
+    the legacy branch's INCOMPLETE.txt check."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet"
+    incomplete_dir = tmp_path / "h200_sxm" / "gemm" / "sglang" / "0.5.14"
+    incomplete_dir.mkdir(parents=True)
+    (incomplete_dir / "INCOMPLETE.txt").write_bytes(b"")
+
+    calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
+
+    assert calls == []

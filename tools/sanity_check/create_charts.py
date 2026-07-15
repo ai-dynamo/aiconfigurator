@@ -623,6 +623,28 @@ def main():
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 
+        # data/<system>/<family>/<backend>/<backend_version>/*.parquet (family-first layout)
+        elif len(parts) == 6 and parts[0] == "data":
+            system = parts[1]
+            family = parts[2]
+            backend = parts[3]
+            backend_version = parts[4]
+
+            # data/<system>/<family>/nccl/<nccl_version>/nccl_perf.parquet
+            # data/<system>/<family>/oneccl/<oneccl_version>/oneccl_perf.parquet
+            if backend in ("nccl", "oneccl"):
+                # Ignore for now
+                continue
+
+            perf_file = parts[5]
+            if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
+                continue
+
+            data_dir = os.path.join(_systems_data_root(), system, family, backend, backend_version)
+            if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
+                continue
+            system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
+
         else:
             print(f"Unhandled changed file: {changed_file}")
             continue
