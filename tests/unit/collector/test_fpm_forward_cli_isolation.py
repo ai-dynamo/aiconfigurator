@@ -76,7 +76,6 @@ def test_normal_op_arguments_do_not_activate_fpm():
         fpm_pp_sizes=None,
         fpm_dp_sizes=None,
         fpm_moe_tp_sizes=None,
-        fpm_smoke_points=None,
         fpm_database_root=None,
         fpm_moe_ep_sizes=None,
         fpm_cp_sizes=None,
@@ -95,7 +94,6 @@ def test_fpm_only_arguments_are_rejected_for_normal_ops():
         fpm_pp_sizes=None,
         fpm_dp_sizes=None,
         fpm_moe_tp_sizes=None,
-        fpm_smoke_points=None,
         fpm_database_root=None,
         fpm_moe_ep_sizes=None,
         fpm_cp_sizes=None,
@@ -149,4 +147,4 @@ def test_resolved_execution_preserves_runtime_failure(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="cluster execution failed"):
-        run_resolved(args, (object(), {}, None))
+        run_resolved(args, (object(), {}))

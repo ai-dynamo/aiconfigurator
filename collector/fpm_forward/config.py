@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Typed options for the explicit FPM campaign collector."""
+"""Typed options for Dynamo-native FPM self-benchmark campaigns."""
 
 from __future__ import annotations
 
@@ -9,8 +9,11 @@ import argparse
 from dataclasses import dataclass
 
 FPM_FORWARD_OP = "fpm_forward"
-FPM_WARMUP_ITERATIONS = 0
+FPM_WARMUP_ITERATIONS = 5
 FPM_MEASUREMENT_REPEATS = 1
+FPM_MAX_PREFILL_ISL = 8192
+FPM_MAX_PREFILL_CUDAGRAPH_SIZE = 2048
+VLLM_AUTO_FIT_MAX_MODEL_LEN = -1
 
 PARALLEL_AXES = ("tp", "pp", "dp", "moe_tp", "moe_ep", "cp")
 PARALLEL_PRESETS = ("auto", "tp", "tep", "dep", "pure_tp")
@@ -23,13 +26,19 @@ BACKEND_AXES = (
     "tp_communication",
     "ep_communication",
 )
-SAMPLING_BUDGETS = ("one_eighth", "one_quarter", "one_half", "full")
 
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def _at_least_two_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 2:
+        raise argparse.ArgumentTypeError("value must be at least 2")
     return parsed
 
 
@@ -44,6 +53,109 @@ def _optional_size_list(values: list[int] | None) -> tuple[int, ...] | None:
     if values is None:
         return None
     return tuple(sorted(set(values)))
+
+
+def _powers_of_two_up_to(limit: int) -> tuple[int, ...]:
+    values = []
+    value = 1
+    while value <= limit:
+        values.append(value)
+        value *= 2
+    return tuple(values)
+
+
+def _prefill_cudagraph_capture_sizes(max_isl: int) -> tuple[int, ...]:
+    """Build the formal prefill capture axis from vLLM's balanced defaults."""
+
+    max_capture_size = min(max_isl, FPM_MAX_PREFILL_CUDAGRAPH_SIZE)
+    sizes = [value for value in (1, 2, 4) if value <= max_capture_size]
+    sizes.extend(range(8, min(max_capture_size + 1, 256), 8))
+    if max_capture_size >= 256:
+        sizes.extend(range(256, min(max_capture_size + 1, 513), 16))
+    if max_capture_size > 512:
+        sizes.extend(range(544, max_capture_size + 1, 32))
+    # vLLM requires an explicitly supplied max capture size to equal the
+    # largest explicit capture. Preserve an off-stride user endpoint exactly.
+    sizes.append(max_capture_size)
+    return tuple(sorted(set(sizes)))
+
+
+def _dynamo_cudagraph_axis_points(capture_sizes: tuple[int, ...], limit: int) -> tuple[int, ...]:
+    """Mirror PR11509's ``_cudagraph_axis_points`` candidate expansion."""
+
+    configured = tuple(sorted({size for size in capture_sizes if size >= 1}))
+    if not configured:
+        return tuple(sorted({*_powers_of_two_up_to(limit), limit}))
+
+    points: set[int] = set()
+    for capture_size in configured:
+        if capture_size > limit:
+            continue
+        points.add(capture_size)
+        if capture_size < limit:
+            points.add(capture_size + 1)
+
+    if configured[-1] <= limit:
+        value = configured[-1] * 2
+        while value < limit:
+            points.add(value)
+            value *= 2
+    points.add(limit)
+    return tuple(sorted(points))
+
+
+@dataclass(frozen=True, slots=True)
+class PrefillSamplingProfile:
+    """Collector-owned inputs to Dynamo's native prefill grid generator."""
+
+    max_isl: int
+    max_batch_size: int | None
+    max_total_prefill_tokens: int
+    cudagraph_capture_sizes: tuple[int, ...]
+    max_cudagraph_capture_size: int
+    new_token_axis_points: tuple[int, ...]
+    max_new_token_samples: int
+    max_kv_read_token_samples: int
+
+    @classmethod
+    def build(cls, *, max_isl: int, max_batch_size: int | None) -> PrefillSamplingProfile:
+        if max_isl < 2:
+            raise ValueError("FPM max prefill ISL must be at least 2")
+        if max_batch_size is not None and max_batch_size < 1:
+            raise ValueError("FPM max prefill batch size must be positive")
+
+        capture_sizes = _prefill_cudagraph_capture_sizes(max_isl)
+        new_token_points = _dynamo_cudagraph_axis_points(capture_sizes, max_isl)
+        batch_upper_bound = min(max_isl, max_batch_size or max_isl)
+        # PR11509's KV axis contains zero, a batch-aligned minimum, powers of
+        # two in block units, and an exact maximum. This upper bound prevents
+        # its uniform limiter from deleting any generated candidate.
+        max_total_kv_tokens = max_isl * batch_upper_bound
+        max_kv_read_samples = max_total_kv_tokens.bit_length() + 2
+        return cls(
+            max_isl=max_isl,
+            max_batch_size=max_batch_size,
+            max_total_prefill_tokens=max_isl,
+            cudagraph_capture_sizes=capture_sizes,
+            max_cudagraph_capture_size=capture_sizes[-1],
+            new_token_axis_points=new_token_points,
+            max_new_token_samples=max(2, len(new_token_points)),
+            max_kv_read_token_samples=max_kv_read_samples,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "max_isl": self.max_isl,
+            "max_batch_size": self.max_batch_size,
+            "max_total_prefill_tokens": self.max_total_prefill_tokens,
+            "cudagraph_capture_sizes": list(self.cudagraph_capture_sizes),
+            "cudagraph_capture_size_count": len(self.cudagraph_capture_sizes),
+            "max_cudagraph_capture_size": self.max_cudagraph_capture_size,
+            "new_token_axis_points": list(self.new_token_axis_points),
+            "new_token_axis_point_count": len(self.new_token_axis_points),
+            "prefill_max_new_token_samples": self.max_new_token_samples,
+            "prefill_max_kv_read_token_samples": self.max_kv_read_token_samples,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,17 +173,26 @@ class FPMCollectionOptions:
     backend_axes: tuple[str, ...]
     weight_quantizations: tuple[str, ...]
     kv_cache_dtypes: tuple[str, ...]
-    sampling_budget: str
     tp_sizes: tuple[int, ...] | None = None
     pp_sizes: tuple[int, ...] | None = None
     dp_sizes: tuple[int, ...] | None = None
     moe_tp_sizes: tuple[int, ...] | None = None
     moe_ep_sizes: tuple[int, ...] | None = None
     cp_sizes: tuple[int, ...] | None = None
-    kv_block_size: int = 64
     warmup_iterations: int = FPM_WARMUP_ITERATIONS
-    measurement_repeats: int = FPM_MEASUREMENT_REPEATS
-    smoke_points: int = 1
+    # Keep the model context independent from the scheduled new-token budget.
+    # vLLM 0.24 auto-fits this limit after model/CUDA-graph profiling, and
+    # Dynamo records the resolved value in ``limits.max_model_len``.
+    vllm_max_model_len: int = VLLM_AUTO_FIT_MAX_MODEL_LEN
+    max_prefill_isl: int = FPM_MAX_PREFILL_ISL
+    max_prefill_batch_size: int | None = None
+
+    @property
+    def prefill_sampling(self) -> PrefillSamplingProfile:
+        return PrefillSamplingProfile.build(
+            max_isl=self.max_prefill_isl,
+            max_batch_size=self.max_prefill_batch_size,
+        )
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> FPMCollectionOptions:
@@ -119,16 +240,19 @@ class FPMCollectionOptions:
                 dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
             ),
             kv_cache_dtypes=tuple(dict.fromkeys(getattr(args, "fpm_kv_cache_dtypes", None) or ("auto",))),
-            sampling_budget=getattr(args, "fpm_sampling_budget", None) or "one_eighth",
             tp_sizes=_optional_size_list(getattr(args, "fpm_tp_sizes", None)),
             pp_sizes=pp_sizes,
             dp_sizes=_optional_size_list(getattr(args, "fpm_dp_sizes", None)),
             moe_tp_sizes=_optional_size_list(getattr(args, "fpm_moe_tp_sizes", None)),
             moe_ep_sizes=_optional_size_list(getattr(args, "fpm_moe_ep_sizes", None)),
             cp_sizes=cp_sizes,
-            kv_block_size=getattr(args, "fpm_kv_block_size", None) or 64,
-            warmup_iterations=getattr(args, "fpm_warmup_iterations", None) or FPM_WARMUP_ITERATIONS,
-            smoke_points=getattr(args, "fpm_smoke_points", None) or 1,
+            warmup_iterations=(
+                FPM_WARMUP_ITERATIONS
+                if getattr(args, "fpm_warmup_iterations", None) is None
+                else args.fpm_warmup_iterations
+            ),
+            max_prefill_isl=getattr(args, "fpm_max_prefill_isl", None) or FPM_MAX_PREFILL_ISL,
+            max_prefill_batch_size=getattr(args, "fpm_max_prefill_batch_size", None),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -140,18 +264,18 @@ class FPMCollectionOptions:
             "backend_axes": list(self.backend_axes),
             "weight_quantizations": list(self.weight_quantizations),
             "kv_cache_dtypes": list(self.kv_cache_dtypes),
-            "sampling_budget": self.sampling_budget,
             "tp_sizes": list(self.tp_sizes) if self.tp_sizes is not None else None,
             "pp_sizes": list(self.pp_sizes) if self.pp_sizes is not None else None,
             "dp_sizes": list(self.dp_sizes) if self.dp_sizes is not None else None,
             "moe_tp_sizes": list(self.moe_tp_sizes) if self.moe_tp_sizes is not None else None,
             "moe_ep_sizes": list(self.moe_ep_sizes) if self.moe_ep_sizes is not None else None,
             "cp_sizes": list(self.cp_sizes) if self.cp_sizes is not None else None,
-            "kv_block_size": self.kv_block_size,
             "global_warmup_iterations": self.warmup_iterations,
+            "vllm_max_model_len": self.vllm_max_model_len,
             "warmup_repeats": 0,
-            "measurement_repeats": self.measurement_repeats,
-            "smoke_points": self.smoke_points,
+            "measurement_repeats": FPM_MEASUREMENT_REPEATS,
+            "point_source": "dynamo_native_self_benchmark",
+            "prefill_sampling": self.prefill_sampling.to_dict(),
         }
 
 
@@ -209,25 +333,32 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Runtime KV-cache dtypes to collect; defaults to the generator/model setting.",
     )
     group.add_argument(
-        "--fpm-sampling-budget",
-        choices=SAMPLING_BUDGETS,
-        default=None,
-        help="Nested sparse-design budget to measure (default: one_eighth).",
-    )
-    group.add_argument(
-        "--fpm-kv-block-size",
-        type=_positive_int,
-        default=None,
-        help="KV block size used to derive block-aligned P>0 candidates (default: 64).",
-    )
-    group.add_argument(
         "--fpm-warmup-iterations",
         type=_nonnegative_int,
         default=None,
         help=(
             "Dynamo scheduler global warmup decode iterations before the point sweep; "
-            "does not repeat warmup for each point (default: 0)."
+            "does not repeat warmup for each point "
+            f"(default: {FPM_WARMUP_ITERATIONS})."
         ),
+    )
+    group.add_argument(
+        "--fpm-max-prefill-isl",
+        dest="fpm_max_prefill_isl",
+        type=_at_least_two_int,
+        default=None,
+        help=(
+            "Maximum total scheduled prefill new-token axis; the batch=1 points also "
+            "cover this per-request new-token length "
+            f"(default: {FPM_MAX_PREFILL_ISL})."
+        ),
+    )
+    group.add_argument(
+        "--fpm-max-prefill-batch-size",
+        dest="fpm_max_prefill_batch_size",
+        type=_positive_int,
+        default=None,
+        help="Optional prefill max_num_seqs override; defaults to the Dynamo/vLLM runtime value.",
     )
     group.add_argument(
         "--fpm-artifact-root",
@@ -238,12 +369,6 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         "--fpm-database-root",
         default=None,
         help="Optional out-of-place systems/data root for formal database publication.",
-    )
-    group.add_argument(
-        "--fpm-smoke-points",
-        type=_positive_int,
-        default=None,
-        help="Points per workload cell in --smoke mode (default: 1).",
     )
     for axis, option in (
         ("tp", "--fpm-tp-sizes"),
@@ -323,12 +448,11 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_parallel_axes",
         "fpm_parallel_presets",
         "fpm_backend_axes",
-        "fpm_sampling_budget",
-        "fpm_kv_block_size",
         "fpm_warmup_iterations",
+        "fpm_max_prefill_isl",
+        "fpm_max_prefill_batch_size",
         "fpm_artifact_root",
         "fpm_database_root",
-        "fpm_smoke_points",
     ):
         if getattr(args, name, None) is not None:
             explicitly_set.append("--" + name.replace("_", "-"))

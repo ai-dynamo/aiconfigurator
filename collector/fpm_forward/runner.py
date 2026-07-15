@@ -22,18 +22,19 @@ from typing import Any
 
 import yaml
 
+from .native_artifact import validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
 
-CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v1"
+CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v2"
 DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
+RESULT_COPY_ATTEMPTS = 3
+RESULT_COPY_TIMEOUT_SECONDS = 300
 _FPM_VLLM_RUNTIME_ARGS = (
     "--distributed-executor-backend",
     "mp",
     "--distributed-timeout-seconds",
     "1800",
     "--no-async-scheduling",
-    "--enable-prefix-caching",
-    "--no-scheduler-reserve-full-isl",
     "--no-enable-log-requests",
 )
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
@@ -62,15 +63,23 @@ def _atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _file_metadata(path: Path) -> dict[str, int | str]:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "size": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
 def _file_manifest(root: Path) -> dict[str, dict[str, int | str]]:
     manifest: dict[str, dict[str, int | str]] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        manifest[str(path.relative_to(root))] = {
-            "size": path.stat().st_size,
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
+        manifest[str(path.relative_to(root))] = _file_metadata(path)
     return manifest
 
 
@@ -302,6 +311,61 @@ class KubernetesCellRunner:
         )
         return pod, completed
 
+    def _copy_result_file(
+        self,
+        pod: str,
+        remote_name: str,
+        expected: dict[str, int | str],
+        pod_root: Path,
+    ) -> None:
+        relative = PurePosixPath(remote_name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"pod {pod} returned an unsafe /results path: {remote_name!r}")
+        target = pod_root.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file() and _file_metadata(target) == expected:
+            return
+
+        partial = target.with_name(f".{target.name}.part")
+        failures = []
+        for attempt in range(1, RESULT_COPY_ATTEMPTS + 1):
+            partial.unlink(missing_ok=True)
+            try:
+                copied = self._kubectl(
+                    "cp",
+                    f"{self.namespace}/{pod}:/results/{relative.as_posix()}",
+                    str(partial),
+                    check=False,
+                    timeout=RESULT_COPY_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                failures.append(
+                    {
+                        "attempt": attempt,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
+                continue
+            actual = _file_metadata(partial) if partial.is_file() else None
+            if actual == expected:
+                os.replace(partial, target)
+                return
+            failures.append(
+                {
+                    "attempt": attempt,
+                    "local_exit": copied.returncode,
+                    "actual": actual,
+                    "output": (copied.stderr or copied.stdout).strip(),
+                }
+            )
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"failed to collect exact result file {remote_name!r} from {pod} "
+            f"after {RESULT_COPY_ATTEMPTS} attempts: expected={expected!r}, "
+            f"failures={failures!r}"
+        )
+
     def execute(self, pods: list[str], timeout_seconds: int = 14400) -> None:
         logs_dir = self.cell_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -332,31 +396,23 @@ class KubernetesCellRunner:
         results_root.mkdir(parents=True, exist_ok=True)
         logs_dir = self.cell_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
+        benchmark_observed = False
         for pod in pods:
-            if require_benchmark:
-                self._exec_checked(
-                    pod,
-                    [
-                        "bash",
-                        "-lc",
-                        "find /results -maxdepth 1 -type f -name 'benchmark*.json' -size +0c | grep -q .",
-                    ],
-                    timeout=60,
-                )
             remote_manifest = self._remote_result_manifest(pod)
-            if require_benchmark and not any(
-                Path(name).name.startswith("benchmark") and name.endswith(".json") for name in remote_manifest
-            ):
-                raise RuntimeError(f"pod {pod} result manifest contains no benchmark JSON files")
+            pod_has_benchmark = any(
+                Path(name).name.startswith("benchmark")
+                and name.endswith(".json")
+                and isinstance(metadata, dict)
+                and int(metadata.get("size", 0)) > 0
+                for name, metadata in remote_manifest.items()
+            )
+            benchmark_observed = benchmark_observed or pod_has_benchmark
             pod_root = results_root / pod
             pod_root.mkdir(parents=True, exist_ok=True)
-            copied = self._kubectl(
-                "cp",
-                f"{self.namespace}/{pod}:/results/.",
-                str(pod_root),
-                check=False,
-                timeout=300,
-            )
+            for remote_name, expected in sorted(remote_manifest.items()):
+                if not isinstance(expected, dict):
+                    raise TypeError(f"pod {pod} returned invalid metadata for {remote_name!r}: {expected!r}")
+                self._copy_result_file(pod, remote_name, expected, pod_root)
             local_manifest = _file_manifest(pod_root)
             if local_manifest != remote_manifest:
                 missing = sorted(set(remote_manifest) - set(local_manifest))
@@ -368,9 +424,8 @@ class KubernetesCellRunner:
                 )
                 raise RuntimeError(
                     f"failed to collect an exact /results copy from {pod}: "
-                    f"local_exit={copied.returncode}, missing={missing!r}, "
-                    f"unexpected={unexpected!r}, mismatched={mismatched!r}, "
-                    f"output={(copied.stderr or copied.stdout).strip()!r}"
+                    f"missing={missing!r}, unexpected={unexpected!r}, "
+                    f"mismatched={mismatched!r}"
                 )
             logs = self._kubectl(
                 "logs",
@@ -381,6 +436,8 @@ class KubernetesCellRunner:
                 timeout=120,
             )
             (logs_dir / f"{pod}.container.log").write_text(logs.stdout + logs.stderr)
+        if require_benchmark and not benchmark_observed:
+            raise RuntimeError("FPM cell result manifests contain no benchmark JSON files")
 
     def cleanup(self) -> None:
         self._kubectl(
@@ -398,51 +455,13 @@ class KubernetesCellRunner:
             raise RuntimeError(f"owned FPM pods remain after cleanup: {remaining}")
 
 
-def _case_payload(
-    plan: FPMCollectionPlan,
-    cell: FPMCell,
-    *,
-    selected_point_count: int | None = None,
-) -> dict[str, object]:
-    profile = cell.execution_profile
-    selected_point_count = profile.selected_point_count if selected_point_count is None else selected_point_count
-    if selected_point_count < 1 or selected_point_count > profile.selected_point_count:
-        raise ValueError(
-            f"selected_point_count={selected_point_count} is outside the frozen profile for {cell.cell_id}"
-        )
-    return {
-        "schema_name": "aic_fpm_case_manifest",
-        "schema_version": 1,
-        "plan_sha256": plan.sha256,
-        "cell_id": cell.cell_id,
-        "workload_kind": cell.workload_kind,
-        "global_warmup_iterations": plan.options.warmup_iterations,
-        "warmup_repeats": 0,
-        "measured_repeats": plan.options.measurement_repeats,
-        "selected_point_count": selected_point_count,
-        "ordered_shapes": [point.to_dict() for point in profile.ordered_points],
-        "sampling_sha256": cell.sampling_sha256,
-        "execution_profile": {
-            "max_batch_size": profile.max_batch_size,
-            "max_num_tokens": profile.max_num_tokens,
-            "max_seq_len": profile.max_seq_len,
-            "gpu_memory_utilization": profile.gpu_memory_utilization,
-        },
-    }
-
-
 def _cell_generator_overrides(
     plan: FPMCollectionPlan,
     cell: FPMCell,
     base: dict[str, Any],
     *,
-    selected_point_count: int | None = None,
+    smoke: bool = False,
 ) -> dict[str, Any]:
-    profile = cell.execution_profile
-    if selected_point_count is not None and not 1 <= selected_point_count <= profile.selected_point_count:
-        raise ValueError(
-            f"selected_point_count={selected_point_count} is outside the frozen profile for {cell.cell_id}"
-        )
     unsupported_base = set(base) - {"K8sConfig", "generator_dynamo_version"}
     if unsupported_base:
         raise ValueError(f"FPM runner accepts deployment-only Generator inputs, got {sorted(unsupported_base)}")
@@ -465,13 +484,54 @@ def _cell_generator_overrides(
             }
         )
     scheduler_args = [
-        "--scheduler-cls",
-        "fpm_scheduler.InstrumentedScheduler",
         "--benchmark-mode",
         cell.workload_kind,
         "--benchmark-warmup-iterations",
         str(plan.options.warmup_iterations),
+        "--max-model-len",
+        str(plan.options.vllm_max_model_len),
     ]
+    if cell.workload_kind == "prefill" and not smoke:
+        profile = plan.options.prefill_sampling
+        compilation_config = {
+            "cudagraph_capture_sizes": list(profile.cudagraph_capture_sizes),
+            "max_cudagraph_capture_size": profile.max_cudagraph_capture_size,
+        }
+        scheduler_args.extend(
+            [
+                "--max-num-batched-tokens",
+                str(profile.max_total_prefill_tokens),
+                "--compilation-config",
+                json.dumps(compilation_config, sort_keys=True, separators=(",", ":")),
+                "--prefill-max-new-token-samples",
+                str(profile.max_new_token_samples),
+                "--prefill-max-kv-read-token-samples",
+                str(profile.max_kv_read_token_samples),
+            ]
+        )
+        if profile.max_batch_size is not None:
+            scheduler_args.extend(["--max-num-seqs", str(profile.max_batch_size)])
+    elif smoke:
+        if cell.workload_kind == "prefill":
+            scheduler_args.extend(
+                [
+                    "--prefill-max-new-token-samples",
+                    "2",
+                    "--prefill-max-kv-read-token-samples",
+                    "2",
+                    "--prefix-max-batch-size-samples",
+                    "1",
+                ]
+            )
+        else:
+            scheduler_args.extend(
+                [
+                    "--decode-max-kv-read-token-samples",
+                    "2",
+                    "--decode-max-batch-size-samples",
+                    "2",
+                ]
+            )
     model_args = []
     architecture = getattr(getattr(plan, "capability", None), "architecture", None)
     if architecture == "GlmMoeDsaForCausalLM":
@@ -480,18 +540,11 @@ def _cell_generator_overrides(
         # native runtime initialization avoids measuring a different engine.
         model_args.extend(["--trust-remote-code", "--reasoning-parser=glm45"])
     env = [
-        {"name": "PYTHONPATH", "value": REMOTE_WORKDIR},
-        {"name": "DYN_FPM_CASE_CONFIG", "value": f"{REMOTE_WORKDIR}/cases.json"},
         {"name": "DYN_FPM_BENCHMARK_OUTPUT_PATH", "value": "/results/benchmark.json"},
         {"name": "FPM_RUN_ID", "value": cell.cell_id},
-        {"name": "FPM_RESULT_GRACE_SECONDS", "value": "0"},
     ]
     total_gpus = cell.topology.total_gpus
     generated = {
-        # FPM cases are capacity-planned against these explicit engine bounds.
-        # Letting Generator's SLA rules recompute them can silently make a
-        # frozen point illegal or change CUDA Graph coverage.
-        "preserve_engine_limits": True,
         "ServiceConfig": service,
         "DynConfig": {"mode": "agg"},
         "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": total_gpus},
@@ -512,13 +565,7 @@ def _cell_generator_overrides(
                 "moe_tensor_parallel_size": cell.topology.moe_tp,
                 "moe_expert_parallel_size": cell.topology.moe_ep,
                 "gpus_per_worker": total_gpus,
-                "max_batch_size": profile.max_batch_size,
-                "max_num_tokens": profile.max_num_tokens,
-                "max_seq_len": profile.max_seq_len,
-                "tokens_per_block": plan.options.kv_block_size,
                 "kv_cache_dtype": cell.kv_cache_dtype,
-                "gpu_memory_utilization": profile.gpu_memory_utilization,
-                "compilation_config": profile.compilation_config,
                 "extra_cli_args": [],
             }
         },
@@ -545,27 +592,32 @@ def _cell_generator_overrides(
         for argument in resolved_args
     )
     if not has_benchmark_timeout:
-        # Dynamo's engine-side default is 300 seconds. A formal sparse design
+        # Dynamo's engine-side default is 300 seconds. A formal native grid
         # can legitimately run longer even though the outer Kubernetes exec
         # timeout is four hours, so make the inner deadline campaign-safe.
         resolved_args.extend(["--benchmark-timeout", str(DEFAULT_BENCHMARK_TIMEOUT_SECONDS)])
-    resolved_args.extend(["--gpu-memory-utilization", str(profile.gpu_memory_utilization)])
-    compilation_value = json.dumps(profile.compilation_config, separators=(",", ":"), sort_keys=True)
-    resolved_args.extend(["--compilation-config", compilation_value])
     resolved_args.extend(scheduler_args)
     merged_agg = merged.setdefault("params", {}).setdefault("agg", {})
-    merged_agg.update(
-        {
-            "max_batch_size": profile.max_batch_size,
-            "max_num_tokens": profile.max_num_tokens,
-            "max_seq_len": profile.max_seq_len,
-            "tokens_per_block": plan.options.kv_block_size,
-            "gpu_memory_utilization": profile.gpu_memory_utilization,
-            "compilation_config": profile.compilation_config,
-            "extra_cli_args": resolved_args,
-        }
-    )
+    merged_agg.update({"extra_cli_args": resolved_args})
     return merged
+
+
+def _configured_sampling_metadata(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    *,
+    smoke: bool,
+) -> dict[str, int]:
+    if cell.workload_kind != "prefill":
+        return {}
+    if smoke:
+        return {"prefill_max_new_token_samples": 2}
+    profile = plan.options.prefill_sampling
+    return {
+        "prefill_cudagraph_capture_size_count": len(profile.cudagraph_capture_sizes),
+        "prefill_requested_new_token_axis_count": len(profile.new_token_axis_points),
+        "prefill_max_new_token_samples": profile.max_new_token_samples,
+    }
 
 
 def _render_cell(
@@ -574,7 +626,7 @@ def _render_cell(
     cell_dir: Path,
     generator_overrides: dict[str, Any],
     *,
-    selected_point_count: int | None = None,
+    smoke: bool = False,
 ) -> dict[str, Any]:
     from aiconfigurator.generator.api import generate_from_request
     from aiconfigurator.generator.naive import build_naive_generator_params
@@ -584,7 +636,7 @@ def _render_cell(
         plan,
         cell,
         generator_overrides,
-        selected_point_count=selected_point_count,
+        smoke=smoke,
     )
     params = build_naive_generator_params(
         model_name=plan.model_path,
@@ -595,11 +647,25 @@ def _render_cell(
         generator_dynamo_version=overrides.get("generator_dynamo_version"),
         generator_overrides=overrides,
     )
-    # ``build_naive_generator_params`` merges section and role overrides but
-    # intentionally does not propagate arbitrary top-level keys.  Carry this
-    # rule control explicitly across the typed request boundary so rendering
-    # cannot recompute limits after the FPM plan has been frozen.
+    # The Generator owns deployment rendering, but its naive serving defaults
+    # intentionally synthesize max batch/token/sequence limits from an SLA.
+    # Native self-benchmarking must instead observe the limits resolved by the
+    # target vLLM image.  Remove only those optional engine-policy fields and
+    # use the Generator's supported guard to keep its rule plugin from
+    # reintroducing them; topology, dtype, model identity, and Pod rendering
+    # continue through the normal typed request path.
     params["preserve_engine_limits"] = True
+    role_params = params.setdefault("params", {}).setdefault("agg", {})
+    for key in (
+        "max_batch_size",
+        "max_num_tokens",
+        "max_seq_len",
+        "tokens_per_block",
+        "gpu_memory_utilization",
+        "compilation_config",
+        "cuda_graph_batch_sizes",
+    ):
+        role_params.pop(key, None)
     request = from_legacy_params(params, plan.backend)
     request = replace(
         request,
@@ -613,23 +679,25 @@ def _render_cell(
     if errors:
         raise ValueError(f"invalid GeneratorRequest for {cell.cell_id}: {errors}")
     artifacts = generate_from_request(request, output_dir=str(cell_dir))
-    _allow_graph_aware_benchmark_results(cell_dir / "run.sh")
+    _require_native_schema_v2_benchmark_results(cell_dir / "run.sh")
     _atomic_json(cell_dir / "generator-request.json", params)
     return artifacts
 
 
-def _allow_graph_aware_benchmark_results(run_script: Path) -> None:
-    """Teach the generated strict result gate about Dynamo's schema-v2 rank artifact.
+def _require_native_schema_v2_benchmark_results(run_script: Path) -> None:
+    """Teach the generated strict result gate to require Dynamo's schema-v2 rank artifact.
 
     The Generator still owns process launch, timeout, validation, and teardown.
-    This compatibility shim changes only the accepted upstream schema version;
-    its existing complete/valid/coverage/rank checks remain unchanged.
+    This compatibility shim changes only the required upstream schema version;
+    its existing complete/valid/coverage/rank checks remain unchanged.  Schema
+    V1 is deliberately rejected because it does not carry PR11509's native
+    point and synchronized-iteration contract.
     """
 
     script = run_script.read_text()
     legacy = 'value.get("schema_version") != 1'
-    compatible = 'value.get("schema_version") not in {1, 2}'
-    if compatible in script:
+    native = 'value.get("schema_version") != 2'
+    if native in script:
         return
     occurrences = script.count(legacy)
     if occurrences != 1:
@@ -637,7 +705,7 @@ def _allow_graph_aware_benchmark_results(run_script: Path) -> None:
             "generated FPM run.sh has an unsupported benchmark result gate: "
             f"expected one legacy schema check, found {occurrences}"
         )
-    run_script.write_text(script.replace(legacy, compatible))
+    run_script.write_text(script.replace(legacy, native))
 
 
 def _expected_nodes(manifest: Path) -> int:
@@ -652,113 +720,24 @@ def _expected_nodes(manifest: Path) -> int:
 def _validate_runtime_collection(
     cell: FPMCell,
     raw_root: Path,
-    *,
-    selected_point_count: int | None = None,
-) -> None:
-    """Validate integrated runtime capacity, canary, and formal results across DP ranks."""
+) -> int:
+    """Validate PR11509 native rank artifacts and return the runtime point count."""
+    return _runtime_collection_summary(cell, raw_root)["measured_point_count"]
 
-    rank_payloads = []
-    for path in sorted(raw_root.glob("**/benchmark*.json")):
-        payload = json.loads(path.read_text())
-        if payload.get("artifact_type") == "merged" or path.stem.endswith("_merged"):
-            continue
-        rank_payloads.append((path, payload))
-    if not rank_payloads:
-        raise ValueError(f"integrated runtime emitted no benchmark results for {cell.cell_id}")
-    seen_ranks = set()
-    seen_schema_versions = set()
-    graph_aware_identity = None
-    ordered_population = [point.to_dict() for point in cell.execution_profile.ordered_points]
-    formal_points = None
-    target = cell.execution_profile.selected_point_count if selected_point_count is None else selected_point_count
 
-    def point_key(point: dict[str, object]) -> tuple[str, int, int, int]:
-        return (
-            str(point["workload_kind"]),
-            int(point["batch_size"]),
-            int(point["suffix_length"]),
-            int(point["prefix_length"]),
-        )
+def _runtime_collection_summary(cell: FPMCell, raw_root: Path) -> dict[str, int]:
+    """Return auditable unique-axis counts from a validated native grid."""
 
-    for path, payload in rank_payloads:
-        schema_version = payload.get("schema_version")
-        if schema_version not in {1, 2}:
-            raise ValueError(f"unsupported integrated result schema for {cell.cell_id}: {path}")
-        seen_schema_versions.add(schema_version)
-        if schema_version == 2 and payload.get("artifact_type") != "rank":
-            raise ValueError(f"schema-v2 integrated result is not a rank artifact for {cell.cell_id}: {path}")
-        if payload.get("status") != "complete" or payload.get("valid") is not True:
-            raise ValueError(f"invalid integrated result for {cell.cell_id}: {path}")
-        collector = payload.get("collector")
-        if not isinstance(collector, dict) or collector.get("cell_id") != cell.cell_id:
-            raise ValueError(f"integrated result identity mismatch for {cell.cell_id}: {path}")
-        if schema_version == 2 and collector.get("runtime_contract") != "dynamo_pr11509_schema_v2":
-            raise ValueError(
-                f"schema-v2 integrated result has no PR11509 collector contract for {cell.cell_id}: {path}"
-            )
-        if int(collector.get("selected_point_count", -1)) != target:
-            raise ValueError(f"integrated selected-count mismatch for {cell.cell_id}: {path}")
-        eligible = int(collector.get("capacity_eligible_count", -1))
-        if eligible < target:
-            raise ValueError(
-                f"runtime capacity admits only {eligible}/{target} frozen points for {cell.cell_id}; "
-                "formal collection was not started"
-            )
-        cancelled = payload.get("cancelled_points")
-        if not isinstance(cancelled, list):
-            raise TypeError(f"integrated result has no capacity decisions for {cell.cell_id}: {path}")
-        if int(collector.get("capacity_cancelled_count", -1)) != len(cancelled):
-            raise ValueError(f"integrated cancelled-count mismatch for {cell.cell_id}: {path}")
-        cancelled_keys = {point_key(item["point"]) for item in cancelled}
-        rank_eligible = [point for point in ordered_population if point_key(point) not in cancelled_keys]
-        if len(rank_eligible) != eligible:
-            raise ValueError(f"integrated eligible-count mismatch for {cell.cell_id}: {path}")
-        rank_formal_points = rank_eligible[:target]
-        if formal_points is None:
-            formal_points = rank_formal_points
-        elif rank_formal_points != formal_points:
-            raise ValueError(f"integrated DP ranks selected different formal point sets for {cell.cell_id}: {path}")
-        rows = payload.get("campaign_results")
-        if not isinstance(rows, list) or len(rows) != target:
-            raise ValueError(
-                f"integrated collection did not execute {target} runtime-admitted points for {cell.cell_id}: {path}"
-            )
-        if [row.get("point") for row in rows] != rank_formal_points:
-            raise ValueError(f"integrated formal point order mismatch for {cell.cell_id}: {path}")
-        row_ranks = set()
-        for row in rows:
-            warmups = row.get("warmup_fpms")
-            measurements = row.get("fpms")
-            if not isinstance(warmups, list) or warmups:
-                raise ValueError(f"integrated collection emitted warmup FPMs for {cell.cell_id}: {path}")
-            if not isinstance(measurements, list) or len(measurements) != 1:
-                raise ValueError(f"integrated collection did not emit one measured FPM for {cell.cell_id}: {path}")
-            row_ranks.add(int(measurements[0]["dp_rank"]))
-        if len(row_ranks) != 1:
-            raise ValueError(f"integrated result mixes DP ranks for {cell.cell_id}: {path}")
-        rank = row_ranks.pop()
-        if schema_version == 2:
-            dp = payload.get("dp")
-            if not isinstance(dp, dict) or dp.get("rank") != rank or dp.get("size") != cell.topology.dp:
-                raise ValueError(f"schema-v2 DP metadata mismatch for {cell.cell_id}: {path}")
-            identity = (payload.get("run_id"), payload.get("grid_digest"))
-            if not all(isinstance(value, str) and value for value in identity):
-                raise ValueError(f"schema-v2 run identity is missing for {cell.cell_id}: {path}")
-            if graph_aware_identity is None:
-                graph_aware_identity = identity
-            elif identity != graph_aware_identity:
-                raise ValueError(f"schema-v2 DP ranks have different run identities for {cell.cell_id}: {path}")
-        if rank in seen_ranks:
-            raise ValueError(f"duplicate integrated dp_rank={rank} for {cell.cell_id}: {path}")
-        seen_ranks.add(rank)
-    if len(seen_schema_versions) != 1:
-        raise ValueError(f"integrated DP ranks emitted mixed result schemas for {cell.cell_id}: {seen_schema_versions}")
-    expected_ranks = set(range(cell.topology.dp))
-    if seen_ranks != expected_ranks:
-        raise ValueError(
-            f"integrated DP rank set mismatch for {cell.cell_id}: "
-            f"actual={sorted(seen_ranks)} expected={sorted(expected_ranks)}"
-        )
+    collection = validate_native_collection(cell, raw_root)
+    points = tuple(measurement.point for measurement in collection.points)
+    summary = {
+        "measured_point_count": len(points),
+        "measured_batch_size_axis_count": len({int(point["batch_size"]) for point in points}),
+        "measured_kv_read_axis_count": len({int(point["total_kv_read_tokens"]) for point in points}),
+    }
+    if cell.workload_kind == "prefill":
+        summary["measured_new_token_axis_count"] = len({int(point["total_prefill_tokens"]) for point in points})
+    return summary
 
 
 def _load_checkpoint(path: Path, plan: FPMCollectionPlan, resume: bool) -> dict[str, Any]:
@@ -807,7 +786,6 @@ def run_collection(
     retry_failed: bool,
     smoke: bool = False,
     cell_limit: int | None = None,
-    runtime_overlay_dir: str | None = None,
     database_root: str | None = None,
 ) -> list[dict[str, object]]:
     """Render and run every cell, always tearing down owned resources."""
@@ -821,13 +799,8 @@ def run_collection(
     checkpoint_path = Path(checkpoint_dir).expanduser().resolve() / checkpoint_name
     checkpoint = _load_checkpoint(checkpoint_path, plan, resume)
     errors: list[dict[str, object]] = []
-    runtime_scheduler = Path(__file__).resolve().parent / "runtime" / "vllm_scheduler.py"
     runtime_wrapper = Path(__file__).resolve().parent / "runtime" / "run_with_etcd.sh"
     runtime_preflight = Path(__file__).resolve().parent / "runtime" / "preflight.py"
-    runtime_installer = Path(__file__).resolve().parent / "runtime" / "install_overlay.py"
-    overlay_source = Path(runtime_overlay_dir).expanduser().resolve() if runtime_overlay_dir else None
-    if bool(plan.runtime_overlay_files) != bool(overlay_source):
-        raise ValueError("runtime overlay source does not match the frozen plan")
     target_cells = plan.cells[: (cell_limit or (1 if smoke else len(plan.cells)))]
 
     checkpoint_changed = False
@@ -837,10 +810,12 @@ def run_collection(
             continue
         metadata = {
             "total_gpus": cell.topology.total_gpus,
-            "planned_point_count": cell.execution_profile.selected_point_count,
+            "point_source": "dynamo_native_self_benchmark",
             "global_warmup_iterations": plan.options.warmup_iterations,
+            **_configured_sampling_metadata(plan, cell, smoke=smoke),
             **_runtime_timing_summary(root / "cells" / cell.cell_id / "raw"),
         }
+        metadata.update(_runtime_collection_summary(cell, root / "cells" / cell.cell_id / "raw"))
         for key, value in metadata.items():
             if entry.get(key) != value:
                 entry[key] = value
@@ -860,39 +835,15 @@ def run_collection(
             shutil.rmtree(cell_dir)
         cell_dir.mkdir(parents=True, exist_ok=True)
         _atomic_json(cell_dir / "cell.json", cell.to_dict())
-        overlay_files: list[Path] = []
-        if overlay_source is not None:
-            overlay_manifest = {"schema_version": 1, "files": {}}
-            expected_base = dict(plan.runtime_overlay_base_files)
-            for name, expected_sha256 in plan.runtime_overlay_files:
-                source = overlay_source / name
-                actual_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
-                if actual_sha256 != expected_sha256:
-                    raise ValueError(f"runtime overlay changed after planning: {source}")
-                destination = cell_dir / f"runtime-overlay-{name}"
-                shutil.copy2(source, destination)
-                overlay_files.append(destination)
-                overlay_manifest["files"][name] = {
-                    "source_name": destination.name,
-                    "original_sha256": expected_base[name],
-                    "sha256": expected_sha256,
-                }
-            _atomic_json(cell_dir / "runtime-overlay-manifest.json", overlay_manifest)
-            overlay_files.append(cell_dir / "runtime-overlay-manifest.json")
-        selected_count = plan.options.smoke_points if smoke else None
-        planned_point_count = selected_count or cell.execution_profile.selected_point_count
-        _atomic_json(
-            cell_dir / "cases.json",
-            _case_payload(plan, cell, selected_point_count=selected_count),
-        )
         cell_started = time.monotonic()
         started_at = _utc_now()
         base_record = {
             "status": "running",
             "started_at": started_at,
             "total_gpus": cell.topology.total_gpus,
-            "planned_point_count": planned_point_count,
+            "point_source": "dynamo_native_self_benchmark",
             "global_warmup_iterations": plan.options.warmup_iterations,
+            **_configured_sampling_metadata(plan, cell, smoke=smoke),
         }
         checkpoint["cells"][cell.cell_id] = base_record
         _atomic_json(checkpoint_path, checkpoint)
@@ -903,9 +854,8 @@ def run_collection(
                 cell,
                 cell_dir,
                 generator_overrides,
-                selected_point_count=selected_count,
+                smoke=smoke,
             )
-            shutil.copy2(runtime_scheduler, cell_dir / "fpm_scheduler.py")
             manifest = cell_dir / "k8s_deploy.yaml"
             run_script = cell_dir / "run.sh"
             if not manifest.exists() or not run_script.exists():
@@ -916,27 +866,20 @@ def run_collection(
             resource.stage(
                 pods,
                 [
-                    cell_dir / "cases.json",
-                    cell_dir / "fpm_scheduler.py",
                     run_script,
                     runtime_wrapper,
                     runtime_preflight,
-                    runtime_installer,
-                    *overlay_files,
                 ],
             )
             resource.execute(pods)
             resource.collect(pods)
-            _validate_runtime_collection(
-                cell,
-                cell_dir / "raw",
-                selected_point_count=selected_count,
-            )
+            runtime_collection = _runtime_collection_summary(cell, cell_dir / "raw")
             checkpoint["cells"][cell.cell_id] = {
                 **base_record,
                 "status": "passed",
                 "artifact_dir": str(cell_dir),
                 "pods": pods,
+                **runtime_collection,
                 **_runtime_timing_summary(cell_dir / "raw"),
             }
         except KeyboardInterrupt:
@@ -996,7 +939,7 @@ def run_collection(
         checkpoint["smoke"] = {
             "status": "passed",
             "cell_count": len(target_cells),
-            "points_per_cell": plan.options.smoke_points,
+            "sampling_profile": "dynamo_native_minimal_axes",
             "formal_database_written": False,
         }
         _atomic_json(checkpoint_path, checkpoint)
