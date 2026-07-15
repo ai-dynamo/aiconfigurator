@@ -156,6 +156,7 @@ families:
         selector: "moe_config.backend (llmapi yaml; default AUTO)"
         default: "AUTO: DSV4/GptOss Blackwell -> TRTLLM(trtllm-gen); GptOss Hopper -> TRITON; fp8_block SM100f -> TRTLLM; else CUTLASS (_torch/model_config.py:317-355)"
         choices:
+          - {backend: trtllm_internal, framework_name: AUTO, constraints: "transitional (PR #1345 review, same decision as the attention family's trtllm_internal): AUTO resolves internally per quant/SM among the named choices below (see default above); collector label (moe_torch_flow) does not yet split by resolved kernel", source: "_torch/model_config.py:317-355"}
           - {backend: cutlass, framework_name: CUTLASS, constraints: "universal: bf16 SM>=80, fp8 SM>=89, fp8_block SM{90,120}, nvfp4 SM{100,103,120,121}, w4a16_mxfp4 SM90, w4a8_mxfp4_* SM100f", source: "_torch/modules/fused_moe/fused_moe_cutlass.py:137-210"}
           - {backend: trtllm_gen, framework_name: TRTLLM, constraints: "native trtllm-gen kernels (NOT flashinfer import); SM100/103 only, rejects SM>=120; quant {fp8_block,nvfp4,w4a16_mxfp4,w4a8_*}; bf16 path REQUIRES flashinfer fused MoE; TRTLLM_GEN_FUSED_MOE_USE_FLASHINFER=1 opt-in for quantized", source: "fused_moe_trtllm_gen.py:94-101,153-158,240-256,336-376"}
           - {backend: cutedsl, framework_name: CUTEDSL, constraints: "fp8_block or nvfp4; SM120/121 nvfp4 -> B12x hybrid (cutlass prefill + flashinfer decode)", source: "create_moe.py:76-108"}

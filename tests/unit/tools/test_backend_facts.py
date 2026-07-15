@@ -219,10 +219,96 @@ def test_catalog_inconsistencies(backend_facts_module, data_tree):
         ]
     }
     problems = backend_facts_module.catalog_inconsistencies(by_op, catalog)
-    # context_mla_perf has no family; observed triton is not in the enumerated attention space
+    # context_mla_perf has no family; observed triton is not in the enumerated
+    # (attention, sglang) choice space
     assert "op-file-without-family: context_mla_perf" in problems
-    assert any(p.startswith("backend-not-in-catalog: family=attention") and "triton" in p for p in problems)
+    assert any(
+        p.startswith("backend-not-in-catalog: family=attention framework=sglang") and "triton" in p for p in problems
+    )
 
     catalog["families"][0]["frameworks"]["sglang"]["choices"].append({"backend": "triton"})
     catalog["families"].append({"family": "mla", "op_files": ["context_mla_perf"]})
+    assert backend_facts_module.catalog_inconsistencies(by_op, catalog) == []
+
+
+def test_catalog_backend_vocab_keyed_by_family_and_framework(backend_facts_module):
+    catalog = {
+        "families": [
+            {
+                "family": "attention",
+                "op_files": ["context_attention_perf"],
+                "frameworks": {
+                    "sglang": {"choices": [{"backend": "fa3"}, {"backend": "triton"}]},
+                    "vllm": {"choices": [{"backend": "flash_attn"}]},
+                },
+            },
+            {"family": "mla", "op_files": ["context_mla_perf"]},  # no enumerated choice space
+        ]
+    }
+    vocab = backend_facts_module.catalog_backend_vocab(catalog)
+    assert vocab == {
+        ("attention", "sglang"): {"fa3", "triton"},
+        ("attention", "vllm"): {"flash_attn"},
+    }
+    assert ("mla", "sglang") not in vocab
+    assert ("attention", "trtllm") not in vocab
+
+
+def test_catalog_inconsistencies_does_not_merge_choice_spaces_across_frameworks(backend_facts_module):
+    # fa3 is valid for sglang but not for vllm within the same family: per-(family,
+    # framework) keying must not let one framework's vocab validate another's facts.
+    by_op = {
+        "context_attention_perf": [
+            {"framework": "sglang", "backends": ["fa3"]},
+            {"framework": "vllm", "backends": ["fa3"]},
+        ]
+    }
+    catalog = {
+        "families": [
+            {
+                "family": "attention",
+                "op_files": ["context_attention_perf"],
+                "frameworks": {
+                    "sglang": {"choices": [{"backend": "fa3"}]},
+                    "vllm": {"choices": [{"backend": "flash_attn"}]},
+                },
+            }
+        ]
+    }
+    problems = backend_facts_module.catalog_inconsistencies(by_op, catalog)
+    assert len(problems) == 1
+    assert "framework=vllm" in problems[0] and "fa3" in problems[0]
+
+
+def test_catalog_inconsistencies_validates_trtllm_internal(backend_facts_module):
+    # trtllm_internal is no longer a blanket exemption: it must appear in the
+    # catalog's choice list like any other backend.
+    by_op = {"moe_perf": [{"framework": "trtllm", "backends": ["trtllm_internal"]}]}
+    catalog = {
+        "families": [
+            {
+                "family": "moe",
+                "op_files": ["moe_perf"],
+                "frameworks": {"trtllm": {"choices": [{"backend": "cutlass"}]}},
+            }
+        ]
+    }
+    problems = backend_facts_module.catalog_inconsistencies(by_op, catalog)
+    assert any("trtllm_internal" in p for p in problems)
+
+    catalog["families"][0]["frameworks"]["trtllm"]["choices"].append({"backend": "trtllm_internal"})
+    assert backend_facts_module.catalog_inconsistencies(by_op, catalog) == []
+
+
+def test_catalog_inconsistencies_still_exempts_unverified(backend_facts_module):
+    by_op = {"moe_perf": [{"framework": "trtllm", "backends": ["unverified"]}]}
+    catalog = {
+        "families": [
+            {
+                "family": "moe",
+                "op_files": ["moe_perf"],
+                "frameworks": {"trtllm": {"choices": [{"backend": "cutlass"}]}},
+            }
+        ]
+    }
     assert backend_facts_module.catalog_inconsistencies(by_op, catalog) == []

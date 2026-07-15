@@ -242,28 +242,29 @@ def catalog_families(catalog: dict) -> dict[str, str]:
     return out
 
 
-def catalog_backend_vocab(catalog: dict) -> dict[str, set[str]]:
-    """family -> the set of catalog-listed canonical backend names (empty if the
-    family's choice space is not enumerated yet)."""
-    out: dict[str, set[str]] = {}
+def catalog_backend_vocab(catalog: dict) -> dict[tuple[str, str], set[str]]:
+    """(family, framework) -> the set of catalog-listed canonical backend names for
+    that framework (a (family, framework) pair is absent when its choice space is
+    not enumerated yet)."""
+    out: dict[tuple[str, str], set[str]] = {}
     for fam in catalog["families"]:
-        vocab: set[str] = set()
-        for fw_choices in (fam.get("frameworks") or {}).values():
+        for framework, fw_choices in (fam.get("frameworks") or {}).items():
+            vocab: set[str] = set()
             for choice in fw_choices.get("choices", []):
                 vocab.add(choice["backend"])
-        out[fam["family"]] = vocab
+            out[(fam["family"], framework)] = vocab
     return out
 
 
 # Backend values that are never listed as catalog choices.
-_NON_CHOICE_BACKENDS = {"unverified", "trtllm_internal"}
+_NON_CHOICE_BACKENDS = {"unverified"}
 
 
 def catalog_inconsistencies(by_op: dict[str, list[dict]], catalog: dict) -> list[str]:
     """Cross-check the generated facts against the catalog.
 
     Reports op_files with no family and observed backends missing from an
-    enumerated family choice space.
+    enumerated (family, framework) choice space.
     """
     families = catalog_families(catalog)
     vocab = catalog_backend_vocab(catalog)
@@ -273,11 +274,18 @@ def catalog_inconsistencies(by_op: dict[str, list[dict]], catalog: dict) -> list
         if family is None:
             problems.append(f"op-file-without-family: {op_file}")
             continue
-        if not vocab.get(family):
-            continue  # choice space not enumerated for this family yet
-        observed = {b for e in entries for b in e["backends"]} - _NON_CHOICE_BACKENDS
-        for backend in sorted(observed - vocab[family]):
-            problems.append(f"backend-not-in-catalog: family={family} op_file={op_file} backend={backend}")
+        observed_by_framework: dict[str, set[str]] = defaultdict(set)
+        for e in entries:
+            observed_by_framework[e["framework"]].update(e["backends"])
+        for framework in sorted(observed_by_framework):
+            choices = vocab.get((family, framework))
+            if not choices:
+                continue  # choice space not enumerated for this (family, framework) yet
+            observed = observed_by_framework[framework] - _NON_CHOICE_BACKENDS
+            for backend in sorted(observed - choices):
+                problems.append(
+                    f"backend-not-in-catalog: family={family} framework={framework} op_file={op_file} backend={backend}"
+                )
     return problems
 
 
