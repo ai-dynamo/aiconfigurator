@@ -140,3 +140,56 @@ def test_deepep_collectors_live_under_wideep_namespace():
     assert not (COLLECTOR_ROOT / "deep_collector").exists()
     assert not (COLLECTOR_ROOT / "sglang" / "collect_wideep_deepep_moe.py").exists()
     assert not (COLLECTOR_ROOT / "trtllm" / "collect_wideep_moe_compute.py").exists()
+
+
+def test_family_overrides_split_ops_across_runtimes(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    (tmp_path / "framework_manifest.yaml").write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+    families:
+      gemm:
+        version: "0.5.15"
+        images:
+          default: "lmsysorg/sglang:v0.5.15{digest}"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "op_backend_catalog.yaml").write_text(
+        """
+schema_version: 1
+families:
+  - family: gemm
+    op_files: [gemm_perf]
+  - family: attention
+    op_files: [context_attention_perf, generation_attention_perf]
+""",
+        encoding="utf-8",
+    )
+    # One container cannot serve two pins: fail closed with the op->version split.
+    with pytest.raises(RuntimeError, match="multiple runtime versions"):
+        require_collector_runtime(
+            "sglang",
+            "0.5.14",
+            requested_ops={"gemm", "attention_context"},
+            wideep_ops=set(),
+            path=tmp_path / "framework_manifest.yaml",
+            catalog_path=tmp_path / "op_backend_catalog.yaml",
+        )
+    # A single-family request against the matching container succeeds.
+    runtime = require_collector_runtime(
+        "sglang",
+        "0.5.15",
+        requested_ops={"gemm"},
+        wideep_ops=set(),
+        path=tmp_path / "framework_manifest.yaml",
+        catalog_path=tmp_path / "op_backend_catalog.yaml",
+    )
+    assert (runtime.family, runtime.version) == ("gemm", "0.5.15")

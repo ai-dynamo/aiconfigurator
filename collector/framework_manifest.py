@@ -159,21 +159,51 @@ def require_collector_runtime(
     requested_ops: set[str],
     wideep_ops: set[str] | None = None,
     path: str | Path = MANIFEST_PATH,
+    catalog_path: str | Path = CATALOG_PATH,
 ) -> CollectorRuntime:
-    """Select the requested workload runtime and enforce its exact public version."""
-    wideep_ops = wideep_ops or set()
-    requested_wideep = requested_ops & wideep_ops
-    requested_stock = not requested_ops or bool(requested_ops - wideep_ops)
-    runtime = get_collector_runtime(framework, path=path)
+    """Resolve the single runtime the requested ops pin, and enforce it exactly.
 
-    if requested_wideep:
-        wideep_runtime = get_collector_runtime(framework, workload="wideep", path=path)
-        if requested_stock and runtime.version != wideep_runtime.version:
+    Collector V3 semantics: every op resolves independently (family override or
+    framework default); one executor container serves exactly one runtime, so
+    any spread across versions is an error telling the caller to split the run.
+    """
+    wideep_ops = wideep_ops or set()
+    manifest = load_manifest(path)
+    family_map = load_family_map(catalog_path)
+    normalized = framework.lower()
+
+    ops_by_key: dict[str, set[str]] = {}
+    for op in requested_ops:
+        key = f"wideep_{normalized}" if op in wideep_ops else normalized
+        ops_by_key.setdefault(key, set()).add(op)
+    if not requested_ops:
+        ops_by_key[normalized] = set()  # empty selection = the whole stock registry
+
+    resolved: dict[str, CollectorRuntime] = {}
+    for key, ops in ops_by_key.items():
+        entries = [e for e in _registry_entries(key) if not ops or e.op in ops]
+        by_version: dict[str, CollectorRuntime] = {}
+        op_versions: dict[str, str] = {}
+        for entry in entries:
+            runtime = _resolve_from(manifest, family_map, key, entry)
+            by_version.setdefault(runtime.version, runtime)
+            op_versions[entry.op] = runtime.version
+        if len(by_version) > 1:
+            split = ", ".join(f"{op}→{ver}" for op, ver in sorted(op_versions.items()))
             raise RuntimeError(
-                f"Stock {framework} and WideEP ops require different runtime versions "
-                f"({runtime.version} != {wideep_runtime.version}); run them in separate containers"
+                f"{framework} ops resolve to multiple runtime versions ({split}); "
+                "run each version group in its own container"
             )
-        runtime = wideep_runtime
+        resolved[key] = next(iter(by_version.values()))
+
+    wideep_key = f"wideep_{normalized}"
+    if len({r.version for r in resolved.values()}) > 1:
+        raise RuntimeError(
+            f"Stock {framework} and WideEP ops require different runtime versions "
+            f"({resolved[normalized].version} != {resolved[wideep_key].version}); "
+            "run them in separate containers"
+        )
+    runtime = resolved.get(wideep_key) or resolved[normalized]
 
     try:
         installed_public = Version(installed_version).public
