@@ -272,15 +272,7 @@ def get_supported_databases(
                     continue
 
                 for backend in common.BackendName:
-                    backend_path = os.path.join(data_dir, backend.value)
-                    if not os.path.isdir(backend_path):
-                        continue
-
-                    versions = [
-                        v
-                        for v in os.listdir(backend_path)
-                        if not v.startswith(".") and _database_version_dir_is_declared(os.path.join(backend_path, v))
-                    ]
+                    versions = _declared_versions(data_dir, backend.value)
                     if versions:
                         supported_sets[system][backend.value].update(versions)
             except Exception as e:
@@ -316,9 +308,9 @@ def _iter_database_version_paths(
             logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
             continue
         data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
-        version_path = os.path.join(data_dir, backend, version)
-        if os.path.isdir(version_path):
-            yield version_path
+        for v, version_path in _iter_backend_version_dirs(data_dir, backend):
+            if v == version:
+                yield version_path
 
 
 def _database_version_dir_has_perf_files(version_path: str) -> bool:
@@ -346,6 +338,62 @@ def _database_version_dir_is_declared(version_path: str) -> bool:
     return _database_version_dir_has_perf_files(version_path) or _database_version_dir_has_shared_layer_marker(
         version_path
     )
+
+
+KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
+_LEGACY_LAYOUT_WARNED: set[str] = set()
+
+
+def _iter_backend_version_dirs(data_dir: str, backend: str):
+    """Yield (version, version_path) for a backend across BOTH tree layouts.
+
+    Family layout: <data_dir>/<family>/<backend>/<version> — any first-level
+    directory whose name is not a known backend dir is a family dir. Legacy
+    layout: <data_dir>/<backend>/<version> (deprecated; warns once per tree).
+    A (backend, version) may yield several paths — one per family dir holding
+    it — and callers aggregate.
+    """
+    try:
+        entries = os.listdir(data_dir)
+    except Exception:
+        return
+    for entry in entries:
+        entry_path = os.path.join(data_dir, entry)
+        if entry.startswith(".") or not os.path.isdir(entry_path):
+            continue
+        if entry == backend:  # legacy layout
+            if data_dir not in _LEGACY_LAYOUT_WARNED:
+                _LEGACY_LAYOUT_WARNED.add(data_dir)
+                logger.warning(
+                    "Legacy perf-data layout (<backend>/<version>) found under %s; "
+                    "migrate to <family>/<backend>/<version> (Collector V3 design §3)",
+                    data_dir,
+                )
+            yield from _iter_version_subdirs(entry_path)
+        elif entry not in KNOWN_BACKEND_DIRS:  # family dir
+            backend_path = os.path.join(entry_path, backend)
+            if os.path.isdir(backend_path):
+                yield from _iter_version_subdirs(backend_path)
+
+
+def _iter_version_subdirs(backend_path: str):
+    try:
+        versions = os.listdir(backend_path)
+    except Exception:
+        return
+    for version in versions:
+        version_path = os.path.join(backend_path, version)
+        if not version.startswith(".") and os.path.isdir(version_path):
+            yield version, version_path
+
+
+def _declared_versions(data_dir: str, backend: str) -> set[str]:
+    """Versions declared for a backend: >=1 path passes the per-dir check."""
+    declared: set[str] = set()
+    for version, version_path in _iter_backend_version_dirs(data_dir, backend):
+        if version not in declared and _database_version_dir_is_declared(version_path):
+            declared.add(version)
+    return declared
 
 
 def is_shared_layer_marker_only_version(
@@ -540,8 +588,11 @@ def get_database(
             continue
 
         data_path = os.path.join(systems_root, data_dir, backend, version)
-        is_incomplete = os.path.isfile(os.path.join(data_path, "INCOMPLETE.txt"))
-        if os.path.exists(data_path) and not is_incomplete:
+        paths = [
+            p for v, p in _iter_backend_version_dirs(os.path.join(systems_root, data_dir), backend) if v == version
+        ]
+        is_incomplete = bool(paths) and all(os.path.isfile(os.path.join(p, "INCOMPLETE.txt")) for p in paths)
+        if paths and not is_incomplete:
             try:
                 database = databases_cache[cache_key][backend][version]
                 return database
@@ -736,15 +787,13 @@ def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: 
 
     for backend in common.BackendName:
         backend_name = backend.value
-        backend_path = os.path.join(data_dir, backend_name)
-        if not os.path.isdir(backend_path):
-            continue
+        version_paths: dict[str, list[str]] = defaultdict(list)
+        for version, version_path in _iter_backend_version_dirs(data_dir, backend_name):
+            version_paths[version].append(version_path)
 
-        for version in sorted(os.listdir(backend_path)):
-            version_path = os.path.join(backend_path, version)
-            if version.startswith(".") or not os.path.isdir(version_path):
-                continue
-            if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+        for version in sorted(version_paths):
+            paths = version_paths[version]
+            if all(os.path.isfile(os.path.join(p, "INCOMPLETE.txt")) for p in paths):
                 continue
             yield system, backend_name, version, systems_root
 
