@@ -9,6 +9,13 @@ Builds a minimal fixture git repo (tmp_path) shaped like the real
 collector_code, case_plan), the `systems`/`tables` derivation, determinism,
 and the design-§8 output schema. One test also runs against the REAL repo
 with base=HEAD head=HEAD, which must report everything unchanged.
+
+Also covers: VersionRoute-versioned registry entries failing closed
+(NotImplementedError, FIX 1), SHARED_CORE being read per-revision from
+`collector/provenance.py` rather than imported live (FIX 2), a pre-Collector-V3
+`--base` exiting loudly on a dedicated code (FIX 2), and two frameworks
+sharing one physical `data_backend` directory disambiguating `systems` by
+table stem (FIX 4).
 """
 
 from __future__ import annotations
@@ -74,6 +81,31 @@ collector.sglang.collect_attn:
   - collector/cases/base_ops/attention.yaml
 """
 
+# collector/provenance.py's SHARED_CORE, mirrored exactly so the fixture's
+# collector_hash construction matches the real module's (changed_ops.py now
+# parses this per-revision via `ast` rather than importing the live module).
+PROVENANCE_PY = """SHARED_CORE = (
+    "collector/helper.py",
+    "collector/case_generator.py",
+    "collector/model_cases.py",
+    "collector/capabilities.py",
+    "collector/version_resolver.py",
+)
+"""
+
+# Same as PROVENANCE_PY but SHARED_CORE names one extra file — used to prove
+# SHARED_CORE is read from THIS revision's collector/provenance.py, not
+# imported from the live checkout (FIX 2 / revision purity).
+PROVENANCE_PY_WITH_EXTRA_SHARED_FILE = """SHARED_CORE = (
+    "collector/helper.py",
+    "collector/case_generator.py",
+    "collector/model_cases.py",
+    "collector/capabilities.py",
+    "collector/version_resolver.py",
+    "collector/extra_shared.py",
+)
+"""
+
 REGISTRY_PY = """from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
@@ -111,6 +143,22 @@ REGISTRY_INACTIVE: list[OpEntry] = [
 """
 )
 
+# A registry whose REGISTRY list contains a VersionRoute-versioned OpEntry
+# (no literal `module=`) — the shape _parse_registry_entries does not support
+# and must fail closed on (FIX 1) rather than silently skip.
+REGISTRY_PY_WITH_VERSION_ROUTE = """from collector.registry_types import OpEntry, PerfFile, VersionRoute
+
+REGISTRY: list[OpEntry] = [
+    OpEntry(
+        op="x",
+        get_func="get_x_test_cases",
+        run_func="run_x",
+        perf_filename=PerfFile.GEMM,
+        versions=(VersionRoute(min_version="1.0", module="m"),),
+    ),
+]
+"""
+
 
 def _manifest_yaml(*, version: str = "0.5.14", digest: str = "0" * 64, family_override: str | None = None) -> str:
     families_block = ""
@@ -135,6 +183,7 @@ frameworks:
 def _default_files() -> dict[str, str]:
     return {
         "collector/registry_types.py": REGISTRY_TYPES_PY,
+        "collector/provenance.py": PROVENANCE_PY,
         "collector/framework_manifest.yaml": _manifest_yaml(),
         "collector/op_backend_catalog.yaml": CATALOG_YAML,
         "collector/hash_closures.yaml": CLOSURES_YAML,
@@ -247,6 +296,35 @@ class TestCollectorCode:
         families = {d.family for d in (*changed, *unchanged) if d.framework == "sglang"}
         assert families == {"gemm", "attention"}
 
+    def test_shared_core_is_read_per_revision_not_from_live_checkout(self, mod, repo):
+        # collector/provenance.py's SHARED_CORE at HEAD names one extra file
+        # not present at BASE: collector_hash must reflect that revision's
+        # own SHARED_CORE (ast-parsed via `git show`), never the currently
+        # checked-out collector.provenance module's constant.
+        base_sha, head_sha = _base_and_head(
+            repo,
+            head_overrides={
+                "collector/provenance.py": PROVENANCE_PY_WITH_EXTRA_SHARED_FILE,
+                "collector/extra_shared.py": "# new shared file\n",
+            },
+        )
+        changed, _unchanged = mod.compute_changed_ops(repo, base_sha, head_sha)
+        assert _diff_for(changed, "sglang", "gemm").reasons == ("collector_code",)
+        assert _diff_for(changed, "sglang", "attention").reasons == ("collector_code",)
+
+
+# --------------------------------------------------------------------------
+# registry parsing: unsupported shapes (FIX 1)
+# --------------------------------------------------------------------------
+
+
+class TestVersionRouteUnsupported:
+    def test_version_route_entry_raises_not_implemented(self, mod, repo):
+        _write_tree(repo, _default_files() | {"collector/sglang/registry.py": REGISTRY_PY_WITH_VERSION_ROUTE})
+        base_sha = _commit_all(repo, "base")
+        with pytest.raises(NotImplementedError, match="VersionRoute"):
+            mod.compute_changed_ops(repo, base_sha, base_sha)
+
 
 # --------------------------------------------------------------------------
 # signal 3: case_plan
@@ -353,6 +431,98 @@ class TestTablesAndSystems:
 
 
 # --------------------------------------------------------------------------
+# FIX 4: two frameworks sharing one physical backend_dir (trtllm +
+# wideep_trtllm both resolve `data_backend: trtllm`) with disjoint table
+# stems in the same family — each framework's `systems`/`tables` must reflect
+# only ITS OWN tables, never the sibling framework's.
+# --------------------------------------------------------------------------
+
+_SHARED_BACKEND_DIR_MANIFEST_YAML = """schema_version: 2
+frameworks:
+  trtllm:
+    default:
+      version: "1.3.0"
+      images:
+        default: "example/trtllm:v1.3.0@sha256:{}"
+  wideep_trtllm:
+    collector_dir: "collector/wideep_trtllm"
+    data_backend: trtllm
+    default:
+      version: "1.3.0"
+      images:
+        default: "example/trtllm:v1.3.0@sha256:{}"
+""".format("1" * 64, "1" * 64)
+
+_SHARED_BACKEND_DIR_CATALOG_YAML = """schema_version: 1
+families:
+  - family: moe
+    op_files: [moe_perf, wideep_moe_perf]
+"""
+
+_SHARED_BACKEND_DIR_CLOSURES_YAML = """collector.trtllm.collect_moe: []
+collector.wideep_trtllm.collect_moe: []
+"""
+
+_TRTLLM_REGISTRY_PY = """from collector.registry_types import OpEntry
+
+REGISTRY: list[OpEntry] = [
+    OpEntry(
+        op="moe",
+        module="collector.trtllm.collect_moe",
+        get_func="get_moe_test_cases",
+        run_func="run_moe",
+        perf_filename="moe_perf.txt",
+    ),
+]
+"""
+
+_WIDEEP_TRTLLM_REGISTRY_PY = """from collector.registry_types import OpEntry
+
+REGISTRY: list[OpEntry] = [
+    OpEntry(
+        op="moe",
+        module="collector.wideep_trtllm.collect_moe",
+        get_func="get_moe_test_cases",
+        run_func="run_moe",
+        perf_filename="wideep_moe_perf.txt",
+    ),
+]
+"""
+
+
+class TestSharedBackendDirDisambiguation:
+    def test_stock_and_wideep_frameworks_disambiguate_by_table_stem(self, mod, repo):
+        files = {
+            "collector/registry_types.py": REGISTRY_TYPES_PY,
+            "collector/provenance.py": PROVENANCE_PY,
+            "collector/framework_manifest.yaml": _SHARED_BACKEND_DIR_MANIFEST_YAML,
+            "collector/op_backend_catalog.yaml": _SHARED_BACKEND_DIR_CATALOG_YAML,
+            "collector/hash_closures.yaml": _SHARED_BACKEND_DIR_CLOSURES_YAML,
+            "collector/trtllm/registry.py": _TRTLLM_REGISTRY_PY,
+            "collector/wideep_trtllm/registry.py": _WIDEEP_TRTLLM_REGISTRY_PY,
+            "collector/helper.py": "# helper v1\n",
+            "collector/case_generator.py": "# case_generator v1\n",
+            "collector/model_cases.py": "# model_cases v1\n",
+            "collector/capabilities.py": "# capabilities v1\n",
+            "collector/version_resolver.py": "# version_resolver v1\n",
+            "collector/trtllm/collect_moe.py": "# collect_moe v1\n",
+            "collector/wideep_trtllm/collect_moe.py": "# wideep collect_moe v1\n",
+            f"{mod.DATA_PREFIX}/h100_sxm/moe/trtllm/1.3.0/moe_perf.parquet": "x",
+            f"{mod.DATA_PREFIX}/gb200_nvl72/moe/trtllm/1.3.0/wideep_moe_perf.parquet": "x",
+        }
+        _write_tree(repo, files)
+        base_sha = _commit_all(repo, "shared-backend-dir base")
+        changed, unchanged = mod.compute_changed_ops(repo, base_sha, base_sha)
+        assert changed == []
+        trtllm_moe = _diff_for(unchanged, "trtllm", "moe")
+        wideep_moe = _diff_for(unchanged, "wideep_trtllm", "moe")
+        assert trtllm_moe.tables == ("moe_perf",)
+        assert trtllm_moe.systems == ("h100_sxm",)
+        assert wideep_moe.tables == ("wideep_moe_perf",)
+        assert wideep_moe.systems == ("gb200_nvl72",)
+
+
+# --------------------------------------------------------------------------
 # determinism
 # --------------------------------------------------------------------------
 
@@ -432,6 +602,55 @@ class TestCli:
         assert rc == 0
         doc = yaml.safe_load(capsys.readouterr().out)
         assert doc["changed"] == []
+
+
+# --------------------------------------------------------------------------
+# FIX 2: pre-Collector-V3 baseline handling. `--base` predating
+# collector/provenance.py, collector/hash_closures.yaml, or
+# collector/op_backend_catalog.yaml has no provenance metadata to diff
+# against — the tool must exit loudly with a dedicated exit code, not crash
+# on a missing-file git error or (worse) silently produce a wrong manifest.
+# --------------------------------------------------------------------------
+
+
+def _pre_v3_files(*, omit: str) -> dict[str, str]:
+    """The default fixture tree with one Collector-V3 metadata file removed —
+    simulates a --base revision that predates Collector V3.
+    """
+    return {rel: content for rel, content in _default_files().items() if rel != omit}
+
+
+class TestPreV3Baseline:
+    @pytest.mark.parametrize(
+        "omitted_path",
+        ["collector/provenance.py", "collector/hash_closures.yaml", "collector/op_backend_catalog.yaml"],
+    )
+    def test_compute_changed_ops_raises_when_base_is_missing_any_v3_metadata_file(self, mod, repo, omitted_path):
+        _write_tree(repo, _pre_v3_files(omit=omitted_path))
+        base_sha = _commit_all(repo, "pre-v3 base")
+        _write_tree(repo, _default_files())
+        head_sha = _commit_all(repo, "head (v3)")
+        with pytest.raises(mod.PreCollectorV3BaselineError, match="predates Collector V3"):
+            mod.compute_changed_ops(repo, base_sha, head_sha)
+
+    def test_main_exits_with_dedicated_code_and_loud_message(self, mod, repo, monkeypatch, capsys):
+        _write_tree(repo, _pre_v3_files(omit="collector/provenance.py"))
+        base_sha = _commit_all(repo, "pre-v3 base")
+        _write_tree(repo, _default_files())
+        head_sha = _commit_all(repo, "head (v3)")
+        monkeypatch.setattr(mod, "REPO_ROOT", repo)
+        rc = mod.main(["--base", base_sha, "--head", head_sha])
+        assert rc == mod.EXIT_PRE_V3_BASELINE == 3
+        err = capsys.readouterr().err
+        assert "predates Collector V3 provenance metadata" in err
+
+    def test_both_revisions_having_v3_metadata_is_unaffected(self, mod, repo):
+        base_sha, head_sha = _base_and_head(
+            repo, head_overrides={"collector/sglang/collect_gemm.py": "# collect_gemm v2 (changed)\n"}
+        )
+        changed, unchanged = mod.compute_changed_ops(repo, base_sha, head_sha)
+        assert _diff_for(changed, "sglang", "gemm").reasons == ("collector_code",)
+        assert _diff_for(unchanged, "sglang", "attention").reasons == ()
 
 
 # --------------------------------------------------------------------------

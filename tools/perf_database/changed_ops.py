@@ -30,11 +30,16 @@ never needs the frameworks it diffs to be installed.
 
 Standalone by design (mirrors, does not import, `parquet_diff.py`'s git
 plumbing: `_git`/`_read_git_file`/`_git_file_exists`/`_parse_diff` at
-parquet_diff.py:113-154) — except for the two building blocks the task brief
-calls out to REUSE from `collector/provenance.py`: the `SHARED_CORE` file
-tuple and the `MODEL_CASES_GROUP` sentinel (+ its directory), so the
-revision-aware hash stays byte-for-byte comparable with
-`provenance.collector_hash`'s on-disk construction.
+parquet_diff.py:113-154). Revision-purity extends to `collector/provenance.py`
+itself: `SHARED_CORE` is a file LIST (it changes what gets hashed), so it is
+parsed via `ast` from `git show <rev>:collector/provenance.py` independently
+at BASE and HEAD (`_shared_core_at_rev`) rather than imported from the live
+checkout — a rename or reshaping of `SHARED_CORE` on one side of the diff
+must be visible to that side's hash. `MODEL_CASES_GROUP` (a sentinel token
+used inside `hash_closures.yaml`) and its directory are naming/path
+CONVENTIONS, not a file list — like `MANIFEST_PATH`/`CATALOG_PATH`/
+`DATA_PREFIX` below, they are hardcoded literals here rather than re-parsed
+per revision.
 
 Registry module paths are derived from each revision's OWN
 `framework_manifest.yaml` content (`collector_dir` for wideep frameworks,
@@ -43,6 +48,29 @@ currently-checked-out `collector.framework_manifest._REGISTRY_MODULES` dict:
 this keeps the tool revision-safe (a framework's registry path is exactly
 what that revision's manifest says it is) and independently testable with
 small fixture trees that do not need to replicate all five real registries.
+
+Known gaps
+----------
+- ``REGISTRY_XPU`` (`collector/vllm/registry.py`, selected by `collect_vllm`
+  on Intel XPU — collect.py:1165-1170) is a second, XPU-only registry list
+  that neither this tool nor `provenance.enumerate_registry_modules` ever
+  reads (both resolve only the CUDA-path `.REGISTRY`). XPU-only collector
+  edits are therefore invisible to change tracking today. Tracked as a
+  follow-up (Linear issue to be filed: "Collector V3 follow-up: XPU registry
+  tracking").
+- VersionRoute-versioned registry entries (`OpEntry(..., versions=(...))`,
+  no literal `module=`) are not parsed: `_parse_registry_entries` raises
+  `NotImplementedError` rather than silently dropping them (fail-closed, not
+  a silent gap like the XPU one above). No registry uses this shape today.
+
+Exit codes
+----------
+0   success — report emitted to `--out` or stdout.
+3   `--base` predates Collector V3 provenance metadata (missing
+    `collector/provenance.py`, `collector/hash_closures.yaml`, or
+    `collector/op_backend_catalog.yaml` at that revision): the
+    changed-operation manifest cannot be computed against it. The CI
+    workflow maps this exit code to a neutral skip, not a failure.
 
     changed_ops.py --base origin/main --head HEAD [--out FILE]
 """
@@ -62,14 +90,25 @@ from typing import Any
 
 import yaml
 
-from collector.provenance import _MODEL_CASES_DIR as MODEL_CASES_DIR
-from collector.provenance import MODEL_CASES_GROUP, SHARED_CORE
-
 MANIFEST_PATH = "collector/framework_manifest.yaml"
 CATALOG_PATH = "collector/op_backend_catalog.yaml"
 HASH_CLOSURES_PATH = "collector/hash_closures.yaml"
 REGISTRY_TYPES_PATH = "collector/registry_types.py"
+PROVENANCE_PATH = "collector/provenance.py"
 DATA_PREFIX = "aic-core/src/aiconfigurator_core/systems/data"
+
+# Naming/path CONVENTIONS mirrored from collector/provenance.py, not a file
+# list — see module docstring. Kept as hardcoded literals (like the PATH
+# constants above) rather than re-parsed per revision.
+MODEL_CASES_GROUP = "__model_cases__"
+MODEL_CASES_DIR = "collector/cases/models"
+
+# collector/provenance.py, collector/hash_closures.yaml, and
+# collector/op_backend_catalog.yaml together are the Collector V3 provenance
+# baseline. If `--base` predates all three being introduced together, there
+# is nothing for this tool to diff against (see module docstring "Exit
+# codes").
+V3_BASELINE_PATHS = (PROVENANCE_PATH, HASH_CLOSURES_PATH, CATALOG_PATH)
 
 # case_plan's shared file set (design §8 T6 amendment): case_generator.py and
 # model_cases.py are already part of provenance.SHARED_CORE for collector_hash,
@@ -248,12 +287,17 @@ def _resolve_perf_filename(node: ast.expr | None, perf_file_map: dict[str, str])
     return _ast_str(node)
 
 
-def _assigns_registry(node: ast.stmt) -> bool:
+def _assigns_name(node: ast.stmt, name: str) -> bool:
+    """Whether `node` is a module-level `<name> = ...` / `<name>: T = ...`."""
     if isinstance(node, ast.Assign):
-        return any(isinstance(target, ast.Name) and target.id == "REGISTRY" for target in node.targets)
+        return any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
     if isinstance(node, ast.AnnAssign):
-        return isinstance(node.target, ast.Name) and node.target.id == "REGISTRY"
+        return isinstance(node.target, ast.Name) and node.target.id == name
     return False
+
+
+def _assigns_registry(node: ast.stmt) -> bool:
+    return _assigns_name(node, "REGISTRY")
 
 
 def _find_registry_list(tree: ast.Module) -> ast.List | ast.Tuple | None:
@@ -294,10 +338,15 @@ def _parse_registry_entries(repo_root: Path, rev: str, manifest: dict[str, Any],
         kwargs = {kw.arg: kw.value for kw in element.keywords if kw.arg}
         op = _ast_str(kwargs.get("op"))
         module = _ast_str(kwargs.get("module"))
+        if module is None and "versions" in kwargs:
+            # Versioned entries (module=None, versions=(VersionRoute(...), ...))
+            # are not parsed — fail closed rather than silently omitting the
+            # op from its family's module set (see "Known gaps" above).
+            raise NotImplementedError(
+                f"changed_ops does not support VersionRoute-versioned registry entries; extend the parser (op: {op})"
+            )
         perf_filename = _resolve_perf_filename(kwargs.get("perf_filename"), perf_file_map)
         if not (op and module and perf_filename):
-            # Versioned entries (module=None, versions=(VersionRoute(...), ...))
-            # are out of scope today: no registry currently uses VersionRoute.
             continue
         entries.append(RegistryEntry(op=op, module=module, table_stem=Path(perf_filename).stem))
     return entries
@@ -310,6 +359,31 @@ def _group_by_family(entries: list[RegistryEntry], family_map: dict[str, str], k
         if family:
             result[family].add(entry.module if key == "module" else entry.table_stem)
     return result
+
+
+# --------------------------------------------------------------------------
+# collector/provenance.py's SHARED_CORE at a revision — ast-parsed from
+# `git show <rev>:collector/provenance.py`, never imported from the live
+# checkout (see module docstring: SHARED_CORE is a file LIST, so it must be
+# read from the same revision whose collector_hash it feeds).
+# --------------------------------------------------------------------------
+
+
+@cache
+def _shared_core_at_rev(repo_root: Path, rev: str) -> tuple[str, ...]:
+    """SHARED_CORE (a module-level tuple-of-string-literals) at this revision."""
+    tree = ast.parse(_read_git_text(repo_root, rev, PROVENANCE_PATH))
+    for node in tree.body:
+        if not (isinstance(node, (ast.Assign, ast.AnnAssign)) and _assigns_name(node, "SHARED_CORE")):
+            continue
+        value = node.value
+        if isinstance(value, (ast.Tuple, ast.List)):
+            items = [_ast_str(elt) for elt in value.elts]
+            if all(isinstance(item, str) for item in items):
+                return tuple(items)
+    raise ValueError(
+        f"{PROVENANCE_PATH}@{rev}: SHARED_CORE not found as a module-level tuple-of-string-literals assignment"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -333,7 +407,8 @@ def _collector_hash_at_rev(repo_root: Path, rev: str, module: str, closures: dic
     if module not in closures:
         raise KeyError(f"{module}: no hash_closures.yaml entry at {rev} (fail-closed)")
     module_file = module.replace(".", "/") + ".py"
-    relpaths = {module_file, *SHARED_CORE, *_expand_closure_extras_at_rev(repo_root, rev, closures[module])}
+    shared_core = _shared_core_at_rev(repo_root, rev)
+    relpaths = {module_file, *shared_core, *_expand_closure_extras_at_rev(repo_root, rev, closures[module])}
     return _hash_files_at_rev(repo_root, rev, relpaths)
 
 
@@ -467,12 +542,36 @@ def _diff_framework(
     return diffs
 
 
+class PreCollectorV3BaselineError(RuntimeError):
+    """`--base` predates Collector V3 provenance metadata (see module
+    docstring "Exit codes") — there is nothing for this tool to diff against.
+    """
+
+
+PRE_V3_BASELINE_MESSAGE = (
+    "base revision predates Collector V3 provenance metadata; changed-operation manifest cannot be computed against it"
+)
+
+
+def _check_v3_baseline(repo_root: Path, rev: str) -> None:
+    if any(not _git_file_exists(repo_root, rev, path) for path in V3_BASELINE_PATHS):
+        raise PreCollectorV3BaselineError(PRE_V3_BASELINE_MESSAGE)
+
+
 def compute_changed_ops(repo_root: Path, base_rev: str, head_rev: str) -> tuple[list[FamilyDiff], list[FamilyDiff]]:
     """Pure function of (repo, base, head): returns (changed, unchanged), both
     sorted deterministically by (framework, family).
+
+    Raises `PreCollectorV3BaselineError` if `base_rev` predates Collector V3
+    provenance metadata (see module docstring "Exit codes") — the CLI (`main`)
+    maps this to exit code 3.
     """
-    base_ctx = _load_revision_context(repo_root, _resolve_rev(repo_root, base_rev))
-    head_ctx = _load_revision_context(repo_root, _resolve_rev(repo_root, head_rev))
+    base_sha = _resolve_rev(repo_root, base_rev)
+    head_sha = _resolve_rev(repo_root, head_rev)
+    _check_v3_baseline(repo_root, base_sha)
+
+    base_ctx = _load_revision_context(repo_root, base_sha)
+    head_ctx = _load_revision_context(repo_root, head_sha)
     frameworks = sorted(set(base_ctx.manifest.get("frameworks", {})) | set(head_ctx.manifest.get("frameworks", {})))
 
     changed: list[FamilyDiff] = []
@@ -525,6 +624,9 @@ def render_report(changed: list[FamilyDiff], unchanged: list[FamilyDiff]) -> str
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+EXIT_OK = 0
+EXIT_PRE_V3_BASELINE = 3  # see module docstring "Exit codes"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -533,7 +635,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    changed, unchanged = compute_changed_ops(REPO_ROOT, args.base, args.head)
+    try:
+        changed, unchanged = compute_changed_ops(REPO_ROOT, args.base, args.head)
+    except PreCollectorV3BaselineError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_PRE_V3_BASELINE
+
     report = render_report(changed, unchanged)
 
     if args.out:
@@ -541,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(report)
     else:
         sys.stdout.write(report)
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":
