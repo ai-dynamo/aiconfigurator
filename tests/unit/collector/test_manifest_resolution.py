@@ -95,3 +95,34 @@ def test_unknown_op_is_a_hard_error(paths):
     manifest, catalog = paths(MANIFEST_NO_OVERRIDES)
     with pytest.raises(KeyError, match="no op 'not_an_op'"):
         resolve_op_runtime("sglang", "not_an_op", manifest_path=manifest, catalog_path=catalog)
+
+
+from collector.framework_manifest import validate_resolution
+
+
+def test_real_manifest_resolves_every_registry_op():
+    # The fail-closed CI gate (spec §4): every op in every registry resolves to
+    # exactly one pinned runtime with the committed manifest (+ catalog, once
+    # PR #1345 lands). Runs in CI via the unit suite.
+    assert validate_resolution() == []
+
+
+def test_validator_reports_missing_framework_entry(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+""",
+        encoding="utf-8",
+    )
+    errors = validate_resolution(manifest_path=manifest, catalog_path=tmp_path / "op_backend_catalog.yaml")
+    assert any("trtllm" in error for error in errors)
+    assert any("wideep_sglang" in error for error in errors)

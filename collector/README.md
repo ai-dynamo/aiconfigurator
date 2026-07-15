@@ -139,8 +139,9 @@ ops cannot generate the needed data points.
 Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps ops to collector modules, and a **version resolver** (`version_resolver.py`) that picks the right module at runtime. Individual collector files declare their compatibility via `__compat__`. The current collector framework versions and runtime images are declared in `framework_manifest.yaml`.
 
 ```text
-framework_manifest.yaml — current collector framework versions and images
-framework_manifest.py   — manifest loader/validator
+framework_manifest.yaml — current collector framework versions and images (schema v2)
+framework_manifest.py   — manifest loader/validator/resolver
+op_catalog.py         — table→family identity map (op_backend_catalog.yaml)
 model_cases.py       — collector v2 model/SM case-plan resolver
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
@@ -152,8 +153,36 @@ wideep/*/registry.py — WideEP-only ops appended when the v2 plan requests them
 network/             — collective communication collectors and Slurm network jobs
 ```
 
-WideEP entries in `framework_manifest.yaml` describe independent runtimes.
-`collect.py` requires the exact public version and rejects mixed-pin runs.
+`framework_manifest.yaml` is `schema_version: 2`: each framework entry has a
+`default` runtime (`version` + `images`) plus an optional `families:` map of
+per-family overrides. Resolution for a given `(framework, op)` walks
+`table → catalog family → families[family] or default` — exactly one runtime
+per op, always. `families:` overrides require the op catalog
+(`op_backend_catalog.yaml`); without it, family-scoped pins fail closed rather
+than silently falling back to `default`.
+
+WideEP runtimes (`wideep_sglang`, `wideep_trtllm`) are flattened into peer
+framework entries rather than nested under a `wideep:` key, so the same
+per-op resolution logic applies uniformly. Each WideEP entry adds
+`base_framework` (the stock framework it forks from), `data_backend` (which
+table namespace its output is written under), and `collector_dir`.
+`collect.py` requires the exact public version for a run and rejects
+mixed-pin selections across ops.
+
+Image digests are policy, not decoration: any image reference that names a
+public registry path (contains `/`) must be pinned with `@sha256:<64 hex>`;
+bare internal image names (no `/`, e.g. `deepseek-v4-blackwell`) are exempt.
+When bumping a version pin, re-fetch and update the digest for every image
+variant touched — a stale digest silently keeps pulling the old image.
+
+Use `collector.framework_manifest.resolve_op_runtime(framework, op)` to
+resolve a single op's runtime, and
+`collector.framework_manifest.validate_resolution()` to check the whole
+manifest against every backend registry at once — it returns a list of error
+strings (empty = valid) and is the fail-closed CI gate asserting every
+registered op resolves to exactly one pinned runtime. See
+`docs/perf_database/collector-v3-op-centric-design.md` §4 for the full
+design.
 
 ## File Naming Convention
 

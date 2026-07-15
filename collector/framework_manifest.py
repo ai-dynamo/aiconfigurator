@@ -220,6 +220,34 @@ def require_collector_runtime(
     return runtime
 
 
+def validate_resolution(
+    *,
+    manifest_path: str | Path = MANIFEST_PATH,
+    catalog_path: str | Path = CATALOG_PATH,
+) -> list[str]:
+    """Return one error per registry op that does not resolve to a pinned runtime."""
+    try:
+        manifest = load_manifest(manifest_path)
+    except (TypeError, ValueError) as error:
+        return [f"manifest: {error}"]
+    try:
+        family_map = load_family_map(catalog_path)
+    except ValueError as error:
+        return [f"op catalog: {error}"]
+
+    errors: list[str] = []
+    for framework_key in _REGISTRY_MODULES:
+        if framework_key not in manifest["frameworks"]:
+            errors.append(f"{framework_key}: registry exists but the manifest has no entry")
+            continue
+        for entry in _registry_entries(framework_key):
+            try:
+                _resolve_from(manifest, family_map, framework_key, entry)
+            except (KeyError, LookupError, ValueError) as error:
+                errors.append(f"{framework_key}:{entry.op}: {error}")
+    return errors
+
+
 def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("schema_version") != 2:
         raise ValueError("collector framework manifest schema_version must be 2")
