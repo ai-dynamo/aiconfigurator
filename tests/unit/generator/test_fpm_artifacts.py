@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 import yaml
@@ -101,6 +102,91 @@ def _render(params: dict | None = None, backend: str = "vllm") -> dict[str, str]
         backend,
         version=_BACKEND_VERSION,
         deployment_target="fpm",
+    )
+
+
+def _set_benchmark_mode(params: dict, mode: str) -> None:
+    args = params["params"]["agg"]["extra_cli_args"]
+    args[args.index("--benchmark-mode") + 1] = mode
+
+
+def _benchmark_result(
+    *,
+    mode: str = "prefill",
+    dp_rank: int = 0,
+    point_types: list[str] | None = None,
+    status: str = "complete",
+    valid: bool = True,
+) -> dict:
+    if point_types is None:
+        point_types = ["prefill" if mode == "agg" else mode]
+    results = [
+        {
+            "point": {"point_type": point_type},
+            "fpms": [{"dp_rank": dp_rank, "wall_time": 0.001}],
+        }
+        for point_type in point_types
+    ]
+    return {
+        "schema_version": 1,
+        "status": status,
+        "valid": valid,
+        "coverage": {
+            "expected_points": len(results),
+            "completed_points": len(results),
+            "skipped_points": 0,
+        },
+        "config": {"mode": mode},
+        "results": results,
+        "skipped_points": [],
+        "errors": [] if valid else ["boom"],
+    }
+
+
+def _run_script_with_static_result(
+    tmp_path: Path,
+    result: object,
+    *,
+    benchmark_mode: str = "prefill",
+) -> subprocess.CompletedProcess[str]:
+    output_path = tmp_path / "benchmark.json"
+    params = _params()
+    _set_benchmark_mode(params, benchmark_mode)
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    serialized = json.dumps(result)
+    (fake_package / "__main__.py").write_text(
+        f"""\
+import pathlib
+import signal
+import sys
+import time
+
+path = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text({serialized!r})
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path / "fake-package")
+    return subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
     )
 
 
@@ -297,16 +383,41 @@ def test_fpm_rejects_conflicting_output_paths():
         _render(params)
 
 
+def _process_is_running(process_pid: int) -> bool:
+    """Return false for an exited process, including an unreaped Linux zombie."""
+    try:
+        os.kill(process_pid, 0)
+    except ProcessLookupError:
+        return False
+
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return True
+
+    try:
+        status_lines = (proc_root / str(process_pid) / "status").read_text().splitlines()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+    state = next((line for line in status_lines if line.startswith("State:")), None)
+    if state is None:
+        return True
+    state_parts = state.split()
+    return len(state_parts) < 2 or state_parts[1] not in {"Z", "X", "x"}
+
+
 def _assert_process_stopped(pid_path) -> None:
     process_pid = int(pid_path.read_text())
     exit_deadline = time.monotonic() + 2
     while time.monotonic() < exit_deadline:
-        try:
-            os.kill(process_pid, 0)
-        except ProcessLookupError:
+        if not _process_is_running(process_pid):
             return
         time.sleep(0.05)
 
+    if not _process_is_running(process_pid):
+        return
     try:
         os.kill(process_pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -358,7 +469,7 @@ def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
     assert yaml.safe_load((tmp_path / "k8s_deploy.yaml").read_text())["kind"] == "Pod"
 
 
-def test_fpm_run_script_completes_and_stops_fake_engine(tmp_path):
+def test_fpm_run_script_accepts_legacy_schema_v2_and_stops_fake_engine(tmp_path):
     output_path = tmp_path / "benchmark.json"
     params = _params()
     for entry in params["K8sConfig"]["extra_env"]:
@@ -420,9 +531,76 @@ while True:
     assert "Refusing to overwrite" in repeated.stderr
 
 
+@pytest.mark.parametrize(
+    ("benchmark_mode", "point_types"),
+    [
+        ("prefill", ["prefill"]),
+        ("decode", ["decode"]),
+        ("agg", ["prefill", "decode"]),
+    ],
+)
+def test_fpm_run_script_accepts_schema_v1_for_supported_benchmark_modes(
+    tmp_path,
+    benchmark_mode,
+    point_types,
+):
+    result = _benchmark_result(mode=benchmark_mode, point_types=point_types)
+
+    completed = _run_script_with_static_result(
+        tmp_path,
+        result,
+        benchmark_mode=benchmark_mode,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_message"),
+    [
+        ("schema", "unsupported schema_version 3"),
+        ("mode", "benchmark mode 'decode' != 'prefill'"),
+        ("coverage", "invalid coverage"),
+        ("result_count", "results count 0 != 1"),
+        ("point_type", "point type 'decode' is not valid for 'prefill'"),
+        ("dp_rank", "FPM dp_ranks [1] != [0]"),
+        ("non_object", "top-level JSON must be an object"),
+    ],
+)
+def test_fpm_run_script_rejects_invalid_schema_v1_result(
+    tmp_path,
+    case,
+    expected_message,
+):
+    result = _benchmark_result()
+    payload: object = result
+    if case == "schema":
+        result["schema_version"] = 3
+    elif case == "mode":
+        result["config"]["mode"] = "decode"
+    elif case == "coverage":
+        result["coverage"]["completed_points"] = 0
+    elif case == "result_count":
+        result["results"] = []
+    elif case == "point_type":
+        result["results"][0]["point"]["point_type"] = "decode"
+    elif case == "dp_rank":
+        result["results"][0]["fpms"][0]["dp_rank"] = 1
+    elif case == "non_object":
+        payload = []
+    else:  # pragma: no cover - protects the test table itself
+        raise AssertionError(f"unknown test case: {case}")
+
+    completed = _run_script_with_static_result(tmp_path, payload)
+
+    assert completed.returncode == 1
+    assert expected_message in completed.stderr
+
+
 def test_fpm_run_script_waits_for_every_single_node_dp_result(tmp_path):
     output_path = tmp_path / "benchmark.json"
     params = _params()
+    _set_benchmark_mode(params, "prefill")
     params["params"]["agg"].update(
         {
             "tensor_parallel_size": 1,
@@ -454,9 +632,13 @@ base.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(dp_size):
     path = base if rank == 0 else base.with_name(f"{base.stem}_dp{rank}{base.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": rank},
+        "schema_version": 1,
+        "status": "complete",
+        "valid": True,
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "config": {"mode": "prefill"},
+        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
+        "skipped_points": [],
         "rank": rank,
     }))
     time.sleep(1)
@@ -487,54 +669,14 @@ while True:
 
 
 def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
-    output_path = tmp_path / "benchmark.json"
-    params = _params()
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
-        """\
-import json
-import pathlib
-import signal
-import sys
-import time
-
-index = sys.argv.index("--benchmark-output-path")
-path = pathlib.Path(sys.argv[index + 1])
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({
-    "schema_version": 2,
-    "status": "failed",
-    "config": {"dp_rank": 0},
-    "errors": ["boom"],
-}))
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.1)
-"""
-    )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(tmp_path / "fake-package")
-
-    completed = subprocess.run(
-        ["bash", str(script_path)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=8,
-        check=False,
+    completed = _run_script_with_static_result(
+        tmp_path,
+        _benchmark_result(status="failed", valid=False),
     )
 
     assert completed.returncode == 1
     assert "status='failed'" in completed.stderr
+    assert "valid=False" in completed.stderr
     assert "boom" in completed.stderr
 
 
@@ -593,7 +735,9 @@ while True:
 """
     )
     script_path = tmp_path / "run.sh"
-    script = _render(params)["run.sh"].replace(
+    script = _render(params)["run.sh"]
+    assert script.count("engine_shutdown_grace_seconds=30") == 1
+    script = script.replace(
         "engine_shutdown_grace_seconds=30",
         "engine_shutdown_grace_seconds=1",
     )
@@ -660,7 +804,9 @@ raise SystemExit(23)
 """
     )
     script_path = tmp_path / "run.sh"
-    script = _render(params)["run.sh"].replace(
+    script = _render(params)["run.sh"]
+    assert script.count("engine_shutdown_grace_seconds=30") == 1
+    script = script.replace(
         "engine_shutdown_grace_seconds=30",
         "engine_shutdown_grace_seconds=1",
     )
@@ -980,6 +1126,7 @@ def test_fpm_multinode_dp_rank_executes_local_result_range(tmp_path):
     output_path = tmp_path / "run.v1" / "metrics.final.json"
     args_path = tmp_path / "engine-args.json"
     params = _params()
+    _set_benchmark_mode(params, "prefill")
     params["WorkerConfig"]["agg_gpus_per_worker"] = 16
     params["params"]["agg"].update(
         {
@@ -1013,9 +1160,13 @@ output.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(start, start + local):
     path = output if rank == 0 else output.with_name(f"{output.stem}_dp{rank}{output.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": rank},
+        "schema_version": 1,
+        "status": "complete",
+        "valid": True,
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "config": {"mode": "prefill"},
+        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
+        "skipped_points": [],
     }))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
@@ -1168,13 +1319,26 @@ def test_fpm_requires_benchmark_mode():
         _render(params)
 
 
-def test_fpm_requires_aggregated_benchmark_mode():
+@pytest.mark.parametrize("benchmark_mode", ["agg", "prefill", "decode"])
+def test_fpm_accepts_supported_benchmark_modes(benchmark_mode):
+    params = _params()
+    args = params["params"]["agg"]["extra_cli_args"]
+    index = args.index("--benchmark-mode")
+    args[index + 1] = benchmark_mode
+
+    artifacts = _render(params)
+
+    assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
+    assert f"--benchmark-mode {benchmark_mode}" in artifacts["run.sh"]
+
+
+def test_fpm_rejects_unsupported_benchmark_mode():
     params = _params()
     args = params["params"]["agg"]["extra_cli_args"]
     index = args.index("--benchmark-mode")
     args[index + 1] = "disagg"
 
-    with pytest.raises(ValueError, match="--benchmark-mode agg"):
+    with pytest.raises(ValueError, match="agg, prefill, decode"):
         _render(params)
 
 
