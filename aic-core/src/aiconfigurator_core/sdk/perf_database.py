@@ -237,6 +237,7 @@ from aiconfigurator_core.sdk.operations.base import (  # noqa: F401
     _read_filtered_rows,
     _read_perf_rows,
     _resolve_perf_data_path,
+    resolve_op_data_path,
 )
 
 
@@ -1781,20 +1782,17 @@ class PerfDatabase:
             return (1, parsed) if parsed is not None else (0, version)
 
         for framework in ordered_frameworks:
-            fw_dir = os.path.join(system_data_root, framework)
-            if not os.path.isdir(fw_dir):
-                continue
             ks_filter = per_framework_filter[framework]
             fallback_only = per_framework_fallback.get(framework, set())
             fw_versions = sorted(
-                (v for v in os.listdir(fw_dir) if not v.startswith("_")),
+                {v for v, _ in _iter_backend_version_dirs(system_data_root, framework)},
                 key=_newest_first,
                 reverse=True,
             )
             for sibling_version in fw_versions:
                 if framework == backend_lower and sibling_version == self.version:
                     continue  # Active source already added as the primary.
-                sibling_path = _resolve_perf_data_path(os.path.join(fw_dir, sibling_version, op_file_basename))
+                sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
                     continue
                 sources.append((sibling_path, ks_filter))

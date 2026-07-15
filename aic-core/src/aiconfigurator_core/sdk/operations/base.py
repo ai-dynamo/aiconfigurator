@@ -70,6 +70,35 @@ def _resolve_perf_data_path(perf_file: str) -> str:
     return perf_file
 
 
+_KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
+
+
+def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_filename: str) -> str:
+    """Resolve one op table under the family-first layout, legacy fallback.
+
+    Family dirs are discovered structurally (any first-level dir that is not
+    a known backend dir); dirs carrying INCOMPLETE.txt are skipped. Candidates
+    run through the .parquet->.txt fallback. When nothing exists, returns the
+    legacy-shaped path so callers keep their missing-file semantics.
+    """
+    op_filename = str(op_filename)
+    try:
+        entries = os.listdir(system_data_root)
+    except Exception:
+        entries = []
+    for entry in entries:
+        if entry.startswith(".") or entry in _KNOWN_BACKEND_DIRS:
+            continue
+        version_dir = os.path.join(system_data_root, entry, backend, version)
+        if not os.path.isdir(version_dir) or os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt")):
+            continue
+        candidate = _resolve_perf_data_path(os.path.join(version_dir, op_filename))
+        if os.path.exists(candidate):
+            return candidate
+    legacy = _resolve_perf_data_path(os.path.join(system_data_root, backend, version, op_filename))
+    return legacy
+
+
 def _read_filtered_rows(file_or_sources):
     """Read perf rows from one or more sources. Used by every ``load_*_data``
     in this package.

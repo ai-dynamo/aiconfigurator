@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -277,8 +277,9 @@ class ContextDSAModule(Operation):
 
         key = cls._cache_key(database)
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, database.backend, database.version)
-        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_context_module.value)
+        primary_path = resolve_op_data_path(
+            system_data_root, database.backend, database.version, PerfDataFilename.dsa_context_module.value
+        )
         sources = database._build_op_sources(PerfDataFilename.dsa_context_module, primary_path, system_data_root)
         if key not in cls._data_cache:
             cls._data_cache[key] = LoadedOpData(
@@ -919,10 +920,19 @@ class ContextDSAModule(Operation):
 
         import pandas as pd
 
-        data_dir = os.path.join(
-            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
-        )
         fp = _dsa_sparse_file_prefix(architecture)
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        # Resolve the version DIR once (family dir first, else legacy) via a
+        # representative filename, then apply the existing prefix-read logic
+        # within that dir -- the other glm5_*/dsv32_* siblings live alongside it.
+        data_dir = os.path.dirname(
+            resolve_op_data_path(
+                system_data_root,
+                database.backend,
+                database.version,
+                f"{fp}_mqa_logits_module_perf.parquet",
+            )
+        )
         # Grids keyed by batch_size -> {(isl, step): latency}. Keeping every
         # collected bs lets _query_cp look up the sparse deltas at the REAL
         # batch (real measured bs=b latency), instead of scaling a bs=1 value
@@ -1063,8 +1073,9 @@ class GenerationDSAModule(Operation):
 
         key = cls._cache_key(database)
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, database.backend, database.version)
-        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_generation_module.value)
+        primary_path = resolve_op_data_path(
+            system_data_root, database.backend, database.version, PerfDataFilename.dsa_generation_module.value
+        )
         sources = database._build_op_sources(PerfDataFilename.dsa_generation_module, primary_path, system_data_root)
         if key not in cls._data_cache:
             cls._data_cache[key] = LoadedOpData(

@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -111,8 +111,9 @@ class ContextMLA(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.context_mla.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.context_mla.value
+            )
             sources = database._build_op_sources(PerfDataFilename.context_mla, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
@@ -312,8 +313,9 @@ class GenerationMLA(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.generation_mla.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.generation_mla.value
+            )
             sources = database._build_op_sources(PerfDataFilename.generation_mla, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
@@ -480,8 +482,9 @@ class MLABmm(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.mla_bmm.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mla_bmm.value
+            )
             sources = database._build_op_sources(PerfDataFilename.mla_bmm, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_mla_bmm_data(sources), PerfDataFilename.mla_bmm, primary_path)
             cls._record_load()
@@ -666,9 +669,10 @@ class MLAModule(Operation):
         key = cls._cache_key(database)
         if key not in cls._context_data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
-            context_path = os.path.join(data_dir, PerfDataFilename.mla_context_module.value)
+            context_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mla_context_module.value
+            )
             context_sources = database._build_op_sources(
                 PerfDataFilename.mla_context_module, context_path, system_data_root
             )
@@ -676,7 +680,9 @@ class MLAModule(Operation):
                 load_context_mla_module_data(context_sources), PerfDataFilename.mla_context_module, context_path
             )
 
-            gen_path = os.path.join(data_dir, PerfDataFilename.mla_generation_module.value)
+            gen_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mla_generation_module.value
+            )
             gen_sources = database._build_op_sources(PerfDataFilename.mla_generation_module, gen_path, system_data_root)
             cls._generation_data_cache[key] = LoadedOpData(
                 load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
@@ -1018,8 +1024,9 @@ class WideEPGenerationMLA(Operation):
                 cls._data_cache[key] = None
             else:
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary_path = os.path.join(data_dir, PerfDataFilename.wideep_generation_mla.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_generation_mla.value
+                )
                 sources = database._build_op_sources(
                     PerfDataFilename.wideep_generation_mla, primary_path, system_data_root
                 )
@@ -1290,8 +1297,9 @@ class WideEPContextMLA(Operation):
                 cls._data_cache[key] = None
             else:
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary_path = os.path.join(data_dir, PerfDataFilename.wideep_context_mla.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_mla.value
+                )
                 sources = database._build_op_sources(
                     PerfDataFilename.wideep_context_mla, primary_path, system_data_root
                 )

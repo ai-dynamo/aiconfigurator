@@ -621,12 +621,14 @@ def _compute_perf_db_sources(database: Any) -> dict:
         return {}
     try:
         from aiconfigurator_core.sdk.common import PerfDataFilename
+        from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
 
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, database.backend, database.version)
         out: dict[str, list] = {}
         for filename_enum in PerfDataFilename:
-            primary_path = os.path.join(data_dir, filename_enum.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, filename_enum.value
+            )
             sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
             out[filename_enum.value] = [
                 [os.path.abspath(path), (sorted(ks) if ks is not None else None)] for path, ks in sources

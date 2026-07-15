@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.perf_database import (
+    _iter_database_refs_for_system,
     get_latest_database_version,
     get_supported_databases,
     is_shared_layer_marker_only_version,
@@ -93,3 +95,42 @@ def test_latest_version_spans_layouts(systems_root):
     _write(systems_root, "data/h200_sxm/sglang/0.5.12/gemm_perf.parquet")  # legacy
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")  # family
     assert get_latest_database_version("h200_sxm", "sglang", systems_paths=str(systems_root)) == "0.5.14"
+
+
+def test_resolve_op_path_family_first_then_legacy(systems_root):
+    root = str(systems_root / "data/h200_sxm")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write(systems_root, "data/h200_sxm/sglang/0.5.14/moe_perf.parquet")  # legacy straggler
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
+        "gemm/sglang/0.5.14/gemm_perf.parquet"
+    )
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "moe_perf.parquet").endswith("sglang/0.5.14/moe_perf.parquet")
+    # absent file: legacy-shaped path returned, existence not required
+    missing = resolve_op_data_path(root, "sglang", "0.5.14", "mla_bmm_perf.parquet")
+    assert missing.endswith("sglang/0.5.14/mla_bmm_perf.parquet")
+
+
+def test_resolve_op_path_skips_incomplete_family_dir(systems_root):
+    root = str(systems_root / "data/h200_sxm")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/INCOMPLETE.txt", b"x")
+    _write(systems_root, "data/h200_sxm/sglang/0.5.14/gemm_perf.parquet")  # legacy fallback
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
+        "sglang/0.5.14/gemm_perf.parquet"
+    )
+
+
+def test_resolve_op_path_txt_fallback_in_family_dir(systems_root):
+    root = str(systems_root / "data/h200_sxm")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.txt", b"csv")
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
+        "gemm/sglang/0.5.14/gemm_perf.txt"
+    )
+
+
+def test_database_refs_found_from_family_layout_only(systems_root):
+    # A database whose data lives ONLY under the family layout must still be
+    # discovered by ref-discovery (not just get_supported_databases).
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    refs = list(_iter_database_refs_for_system(str(systems_root), "h200_sxm", {"data_dir": "data/h200_sxm"}))
+    assert ("h200_sxm", "sglang", "0.5.14", str(systems_root)) in refs
