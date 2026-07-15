@@ -1,0 +1,150 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Authored per-module hash closures for collector_hash (Collector V3 design
+# §5: docs/perf_database/collector-v3-op-centric-design.md).
+#
+# Every module referenced by an OpEntry across the five registries enumerated
+# by collector.framework_manifest._REGISTRY_MODULES (sglang, trtllm, vllm,
+# wideep_sglang, wideep_trtllm) MUST have an entry below.
+# collector.provenance.load_closures() fails closed (KeyError) on any module
+# missing one — this file rides CI the same way the manifest-resolution gate
+# does (tests/unit/collector/test_provenance.py).
+#
+# Implicit in every closure (do not repeat below): the module's own .py file,
+# plus collector.provenance.SHARED_CORE (helper.py, case_generator.py,
+# model_cases.py, capabilities.py, version_resolver.py).
+#
+# Extras listed per module are additional files whose content changes the
+# op's collected data:
+#   - cases/base_ops/*.yaml sweep grids the module's get_func actually reads
+#     (traced through collector/case_generator.py at authoring time — see the
+#     module-to-file mapping notes in the PR3 task report).
+#   - the special group "__model_cases__", which expands to every
+#     collector/cases/models/*.yaml file. Per design's blast-radius-honesty
+#     default, __model_cases__ is included for every module below whether or
+#     not its get_func consumes model_case_values today: tracing every
+#     case_generator call chain to prune it precisely is not worth the
+#     precision — an over-inclusive closure only costs an occasional
+#     unnecessary recollection, never silently-stale data.
+
+# --- sglang -------------------------------------------------------------
+collector.sglang.collect_attn:
+  - collector/cases/base_ops/attention_context.yaml
+  - collector/cases/base_ops/attention_generation.yaml
+  - __model_cases__
+collector.sglang.collect_attn_encoder:
+  - collector/cases/base_ops/attention_encoder.yaml
+  - __model_cases__
+collector.sglang.collect_computescale:
+  # get_compute_scale_case_specs() reads the "trtllm" section of
+  # compute_scale.yaml unconditionally and falls back to gemm.yaml-derived
+  # shapes (via get_gemm_case_specs) when that section is empty.
+  - collector/cases/base_ops/compute_scale.yaml
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.sglang.collect_dsv4_attn:
+  - __model_cases__
+collector.sglang.collect_gdn:
+  - collector/cases/base_ops/gdn.yaml
+  - __model_cases__
+collector.sglang.collect_gemm:
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.sglang.collect_mhc_module:
+  - collector/cases/base_ops/mhc.yaml
+  - __model_cases__
+collector.sglang.collect_mla:
+  - collector/cases/base_ops/mla.yaml
+  - __model_cases__
+collector.sglang.collect_mla_bmm:
+  - collector/cases/base_ops/mla_bmm_gen_pre.yaml
+  - collector/cases/base_ops/mla_bmm_gen_post.yaml
+  - __model_cases__
+collector.sglang.collect_mla_module:
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
+collector.sglang.collect_moe:
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+collector.sglang.deepseekv4_sparse_modules:
+  - __model_cases__
+collector.sglang.glm5_dsa_sparse_modules:
+  # get_glm5_*_test_cases() calls case_generator.get_mla_module_sweep_spec.
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
+
+# --- trtllm ---------------------------------------------------------------
+collector.trtllm.collect_attn:
+  - collector/cases/base_ops/attention_context.yaml
+  - collector/cases/base_ops/attention_generation.yaml
+  - __model_cases__
+collector.trtllm.collect_attn_encoder:
+  - collector/cases/base_ops/attention_encoder.yaml
+  - __model_cases__
+collector.trtllm.collect_computescale:
+  - collector/cases/base_ops/compute_scale.yaml
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.trtllm.collect_gdn:
+  - collector/cases/base_ops/gdn.yaml
+  - __model_cases__
+collector.trtllm.collect_gemm:
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.trtllm.collect_mamba2:
+  - collector/cases/base_ops/mamba2.yaml
+  - __model_cases__
+collector.trtllm.collect_mla:
+  - collector/cases/base_ops/mla.yaml
+  - __model_cases__
+collector.trtllm.collect_mla_bmm:
+  - collector/cases/base_ops/mla_bmm_gen_pre.yaml
+  - collector/cases/base_ops/mla_bmm_gen_post.yaml
+  - __model_cases__
+collector.trtllm.collect_mla_module:
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
+collector.trtllm.collect_moe:
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+
+# --- vllm -------------------------------------------------------------
+collector.vllm.collect_attn:
+  - collector/cases/base_ops/attention_context.yaml
+  - collector/cases/base_ops/attention_generation.yaml
+  - __model_cases__
+collector.vllm.collect_attn_encoder:
+  - collector/cases/base_ops/attention_encoder.yaml
+  - __model_cases__
+collector.vllm.collect_computescale:
+  - collector/cases/base_ops/compute_scale.yaml
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.vllm.collect_dsv4_attn:
+  - __model_cases__
+collector.vllm.collect_gdn:
+  - collector/cases/base_ops/gdn.yaml
+  - __model_cases__
+collector.vllm.collect_gemm:
+  - collector/cases/base_ops/gemm.yaml
+  - __model_cases__
+collector.vllm.collect_mhc_module:
+  - collector/cases/base_ops/mhc.yaml
+  - __model_cases__
+collector.vllm.collect_mla_module:
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
+collector.vllm.collect_moe:
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+
+# --- wideep -----------------------------------------------------------
+collector.wideep.sglang.collect_deepep_moe:
+  # No collector/case_generator.py import in this module — cases are
+  # self-contained (get_wideep_moe_test_cases is defined locally).
+  - __model_cases__
+collector.wideep.trtllm.collect_moe_compute:
+  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model.
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
