@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,9 @@ from typing import Any
 
 import yaml
 from packaging.version import InvalidVersion, Version
+
+from collector.op_catalog import CATALOG_PATH, family_for_perf_file, load_family_map
+from collector.registry_types import OpEntry
 
 MANIFEST_PATH = Path(__file__).with_name("framework_manifest.yaml")
 
@@ -86,6 +90,66 @@ def _runtime_from_spec(
         family=family,
         workload="wideep" if framework_key.startswith("wideep_") else "default",
     )
+
+
+_REGISTRY_MODULES = {
+    "sglang": "collector.sglang.registry",
+    "trtllm": "collector.trtllm.registry",
+    "vllm": "collector.vllm.registry",
+    "wideep_sglang": "collector.wideep.sglang.registry",
+    "wideep_trtllm": "collector.wideep.trtllm.registry",
+}
+
+
+def _registry_entries(framework_key: str) -> list[OpEntry]:
+    module_path = _REGISTRY_MODULES.get(framework_key)
+    if module_path is None:
+        raise KeyError(f"No collector registry is known for framework {framework_key!r}")
+    return list(importlib.import_module(module_path).REGISTRY)
+
+
+def _resolve_from(
+    manifest: dict[str, Any],
+    family_map: dict[str, str] | None,
+    framework_key: str,
+    entry: OpEntry,
+) -> CollectorRuntime:
+    spec = manifest["frameworks"].get(framework_key)
+    if spec is None:
+        raise KeyError(f"No collector runtime is configured for {framework_key!r}")
+    families = spec.get("families") or {}
+    family: str | None = None
+    if family_map is not None:
+        family = family_for_perf_file(str(entry.perf_filename), family_map)
+        if family is None:
+            raise LookupError(
+                f"{framework_key}:{entry.op} table {entry.perf_filename} has no family in the "
+                "op catalog; add it before collecting (fail-closed identity gate, spec §2)"
+            )
+    elif families:
+        raise LookupError(
+            f"frameworks.{framework_key}.families overrides require the op catalog "
+            f"({CATALOG_PATH.name}), but the op catalog is missing"
+        )
+    runtime_spec = families.get(family) or spec["default"]
+    return _runtime_from_spec(framework_key, spec, runtime_spec, manifest, family=family)
+
+
+def resolve_op_runtime(
+    framework: str,
+    op: str,
+    *,
+    manifest_path: str | Path = MANIFEST_PATH,
+    catalog_path: str | Path = CATALOG_PATH,
+) -> CollectorRuntime:
+    """Resolve the exactly-one pinned runtime for (framework, op) — spec §4."""
+    manifest = load_manifest(manifest_path)
+    family_map = load_family_map(catalog_path)
+    framework_key = framework.lower()
+    for entry in _registry_entries(framework_key):
+        if entry.op == op:
+            return _resolve_from(manifest, family_map, framework_key, entry)
+    raise KeyError(f"{framework_key} registry has no op {op!r}")
 
 
 def require_collector_runtime(
