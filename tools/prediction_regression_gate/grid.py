@@ -21,13 +21,33 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "src" / "aiconfigurator" / "systems" / "data"
 MODEL_CONFIG_DIR = REPO_ROOT / "src" / "aiconfigurator" / "model_configs"
 
 # Non-engine data dirs living next to backend dirs in the data tree.
 NON_ENGINE_BACKENDS = {"nccl", "oneccl"}
-METADATA_FILES = {"SHARED_LAYER_REUSE.txt", "INCOMPLETE.txt"}
+METADATA_FILES = {"SHARED_LAYER_REUSE.txt", "INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"}
+
+
+def _dir_is_incomplete(path: str) -> bool:
+    """Yaml-first partial-dir check (collection_meta.yaml status:partial), with
+    INCOMPLETE.txt as the legacy fallback. Duplicated (not imported) from
+    aiconfigurator_core.sdk.perf_database._version_dir_state, the source of
+    truth for this semantic — kept local so this tool doesn't take an aic-core
+    dependency for one predicate."""
+    meta_path = os.path.join(path, "collection_meta.yaml")
+    if os.path.isfile(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = yaml.safe_load(f)
+        tables = meta.get("tables") if isinstance(meta, dict) else None
+        return isinstance(tables, dict) and any(
+            isinstance(t, dict) and t.get("status") == "partial" for t in tables.values()
+        )
+    return os.path.isfile(os.path.join(path, "INCOMPLETE.txt"))
+
 
 # Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
 # other first-level directory under a system dir as a family dir containing
@@ -158,8 +178,9 @@ def _version_dirs(system: str, backend: str) -> list[str]:
                 continue
             files = [f for f in os.listdir(vdir) if f not in METADATA_FILES]
             # Marker-only dirs have nothing to test with the shared layer off;
-            # INCOMPLETE dirs are excluded from loading entirely.
-            if files and not (vdir / "INCOMPLETE.txt").exists():
+            # partial dirs (collection_meta.yaml status:partial, or legacy
+            # INCOMPLETE.txt) are excluded from loading entirely.
+            if files and not _dir_is_incomplete(str(vdir)):
                 versions.add(v)
     return sorted(versions, key=_version_sort_key)
 

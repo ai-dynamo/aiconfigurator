@@ -1166,7 +1166,9 @@ def _ensure_backend_version_available(
         logger.error(
             "Fix: switch --backend-version to one of the available versions, "
             "remove --backend-version to use latest, "
-            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            "or add a declared version directory with %s (legacy: %s) when this version "
+            "intentionally reuses shared-layer data.",
+            perf_database.REUSE_YAML_MARKER,
             perf_database.SHARED_LAYER_REUSE_MARKER,
         )
     else:

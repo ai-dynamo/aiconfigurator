@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.perf_database import (
+    _declared_versions,
     _iter_database_refs_for_system,
     get_latest_database_version,
     get_supported_databases,
@@ -141,3 +144,128 @@ def test_underscore_prefixed_version_dirs_are_skipped(systems_root):
     _write(systems_root, "data/h200_sxm/gemm/sglang/_staging/gemm_perf.parquet")
     supported = get_supported_databases(str(systems_root))
     assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
+
+
+# --- Structured provenance markers (reuse.yaml / collection_meta.yaml) -------
+#
+# Collector V3 PR 3 (AIC-1502): the loader reads these yaml-first, falling back
+# to the legacy SHARED_LAYER_REUSE.txt / INCOMPLETE.txt marker files for one
+# transition window (design §5/§6.3).
+
+_REUSE_ENTRY = {
+    "table": "gemm_perf",
+    "from_version": "0.5.14",
+    "reason": "GEMM kernels unchanged 0.5.12->0.5.14",
+    "approved_by": "yimingl",
+}
+
+
+def _write_yaml(root: Path, rel: str, doc: dict) -> None:
+    _write(root, rel, yaml.safe_dump(doc).encode("utf-8"))
+
+
+def test_reuse_yaml_declared_version_discovered_and_marker_only(systems_root):
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write_yaml(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", {"reuse": [_REUSE_ENTRY]})
+
+    supported = get_supported_databases(str(systems_root))
+    assert supported["h200_sxm"]["sglang"] == ["0.5.12", "0.5.14"]
+    assert is_shared_layer_marker_only_version("h200_sxm", "sglang", "0.5.12", systems_paths=str(systems_root))
+    assert not is_shared_layer_marker_only_version("h200_sxm", "sglang", "0.5.14", systems_paths=str(systems_root))
+
+
+def test_reuse_yaml_with_zero_entries_is_not_declared(systems_root):
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write_yaml(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", {"reuse": []})
+
+    supported = get_supported_databases(str(systems_root))
+    assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
+
+
+def test_collection_meta_partial_table_excludes_that_family_path(systems_root):
+    # partial in ONE family dir hides that path; the version stays declared
+    # through the other family dir (per-path semantics preserved, mirrors the
+    # existing INCOMPLETE.txt behavior).
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write(systems_root, "data/h200_sxm/attention/sglang/0.5.14/context_attention_perf.parquet")
+    _write_yaml(
+        systems_root,
+        "data/h200_sxm/attention/sglang/0.5.14/collection_meta.yaml",
+        {"tables": {"context_attention_perf": {"status": "partial"}}},
+    )
+    supported = get_supported_databases(str(systems_root))
+    assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
+
+
+def test_collection_meta_partial_in_all_paths_means_undeclared(systems_root):
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        "data/h200_sxm/gemm/sglang/0.5.14/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    supported = get_supported_databases(str(systems_root))
+    assert supported["h200_sxm"].get("sglang", []) == []
+
+
+def test_shared_layer_reuse_txt_fallback_warns_once_per_data_dir(systems_root, caplog):
+    caplog.set_level(logging.WARNING)
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.11/SHARED_LAYER_REUSE.txt", b"")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/SHARED_LAYER_REUSE.txt", b"")
+
+    supported = get_supported_databases(str(systems_root))
+
+    assert supported["h200_sxm"]["sglang"] == ["0.5.11", "0.5.12", "0.5.14"]
+    legacy_warnings = [r for r in caplog.records if "SHARED_LAYER_REUSE.txt" in r.getMessage()]
+    assert len(legacy_warnings) == 1
+
+
+def test_incomplete_txt_fallback_warns_once_per_data_dir(systems_root, caplog):
+    caplog.set_level(logging.WARNING)
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    for v in ("0.5.11", "0.5.12"):
+        _write(systems_root, f"data/h200_sxm/gemm/sglang/{v}/gemm_perf.parquet")
+        _write(systems_root, f"data/h200_sxm/gemm/sglang/{v}/INCOMPLETE.txt", b"partial")
+
+    supported = get_supported_databases(str(systems_root))
+
+    assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
+    legacy_warnings = [r for r in caplog.records if "INCOMPLETE.txt" in r.getMessage()]
+    assert len(legacy_warnings) == 1
+
+
+def test_mixed_reuse_yaml_and_txt_marker_yaml_wins(systems_root, caplog):
+    caplog.set_level(logging.WARNING)
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write_yaml(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", {"reuse": [_REUSE_ENTRY]})
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/SHARED_LAYER_REUSE.txt", b"")
+
+    supported = get_supported_databases(str(systems_root))
+
+    assert supported["h200_sxm"]["sglang"] == ["0.5.12", "0.5.14"]
+    # yaml wins: the legacy fallback branch (and its deprecation warning) never fires.
+    assert not any("SHARED_LAYER_REUSE.txt" in r.getMessage() for r in caplog.records)
+
+
+def test_malformed_reuse_yaml_raises(systems_root):
+    data_dir = str(systems_root / "data" / "h200_sxm")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.12/reuse.yaml", b"reuse: [{table: gemm_perf}]\n")
+
+    with pytest.raises(ValueError, match="missing required key"):
+        _declared_versions(data_dir, "sglang")
+
+
+def test_resolve_op_path_skips_partial_collection_meta_family_dir(systems_root):
+    root = str(systems_root / "data/h200_sxm")
+    _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        "data/h200_sxm/gemm/sglang/0.5.14/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    _write(systems_root, "data/h200_sxm/sglang/0.5.14/gemm_perf.parquet")  # legacy fallback
+
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
+        "sglang/0.5.14/gemm_perf.parquet"
+    )

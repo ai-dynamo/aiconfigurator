@@ -66,7 +66,10 @@ _LATENCY_COLUMNS_PRIORITY = (
 )
 
 # Files to skip entirely (markers, already-shared layers, irregular formats).
-_SKIP_FILE_BASENAMES = {"INCOMPLETE.txt"}
+# reuse.yaml/collection_meta.yaml (Collector V3 structured markers) never match
+# the *.parquet/*.txt glob in _iter_data_files below, so listing them here is
+# defensive/documentation-only, not currently load-bearing.
+_SKIP_FILE_BASENAMES = {"INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"}
 
 # Backend directory names to skip — these are framework-agnostic by construction.
 _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}

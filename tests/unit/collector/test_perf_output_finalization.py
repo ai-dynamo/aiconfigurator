@@ -26,6 +26,19 @@ def test_find_perf_csv_outputs_is_non_recursive_by_default(tmp_path):
     assert find_perf_csv_outputs(tmp_path, recursive=True) == [top_level, nested]
 
 
+def test_find_perf_csv_outputs_ignores_structured_provenance_markers(tmp_path):
+    """collection_meta.yaml / reuse.yaml (Collector V3 design §5/§6.3) sit flat
+    beside the staged CSV outputs at finalize time but are not CSVs; the
+    `*_perf.txt` glob must not pick them up (they don't match the pattern, so
+    this is a regression guard, not new filtering logic)."""
+    top_level = tmp_path / "gemm_perf.txt"
+    _write_perf_csv(top_level)
+    (tmp_path / "collection_meta.yaml").write_text("schema_version: 1\n")
+    (tmp_path / "reuse.yaml").write_text("schema_version: 1\n")
+
+    assert find_perf_csv_outputs(tmp_path) == [top_level]
+
+
 def test_finalize_perf_outputs_does_not_recurse_into_checked_in_assets(tmp_path):
     top_level = tmp_path / "gemm_perf.txt"
     nested = tmp_path / "src" / "aiconfigurator" / "systems" / "data" / "gemm_perf.txt"
