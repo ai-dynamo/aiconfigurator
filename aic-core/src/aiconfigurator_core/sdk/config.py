@@ -32,10 +32,11 @@ class ModelConfig:
     # this in their op pipeline; GLM-5 DSA ignores it (handled in ContextDSAModule).
     cp_style: str = "none"
     workload_distribution: str = "power_law"
-    # EPD: when False, this worker does not host the vision encoder (a
-    # language-only prefill worker, e.g. SGLang --language-only). Vision
-    # tokens still extend its context; the ViT ops are simply not built.
-    encoder_colocated: bool = True
+    # EPD: this worker hosts only the language model -- the vision encoder
+    # is served elsewhere (mirrors SGLang --language-only).  Like tp_size,
+    # this describes the deployed worker, not the model: vision tokens still
+    # extend the context; the ViT ops are simply not hosted here.
+    language_only: bool = False
     # quantization options
     # MTP speculative decoding: draft length (compute/verification cost only).
     # Accepted-token progress belongs to the upper prediction/simulation layer.
