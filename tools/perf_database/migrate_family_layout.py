@@ -12,7 +12,11 @@ this is the only catalog consumer in this script — it is parsed directly with
 Fail-closed: a parquet/txt table whose stem is not in the catalog, or a
 first-level directory under a system dir that is neither a known legacy
 backend dir nor an existing catalog family dir, aborts the whole run with a
-clear error. The script never guesses a family and never skips silently.
+clear error. So does a legacy marker whose system+backend already has
+family-layout data (a partially migrated tree, e.g. an interrupted
+--execute): rescanning such a tree cannot derive the marker's scope from the
+legacy layout alone, so the run aborts instead of dropping the marker. The
+script never guesses a family and never skips silently.
 
 Count-verified workflow (recommended, three calls):
     migrate_family_layout.py --data-root DATA --manifest M
@@ -177,9 +181,19 @@ def scan_legacy_tree(data_root: Path, family_map: dict[str, str], family_set: se
     legacy_dirs: list[Path] = []
     unexpected_dirs: list[str] = []
     unknown_tables: list[str] = []
+    mixed_marker_dirs: list[str] = []
 
     for system_dir in _system_dirs(data_root):
         system = system_dir.name
+        # Backends that already hold family-layout data under this system. A
+        # legacy marker for such a backend means the tree is partially migrated
+        # (e.g. an interrupted --execute): the marker's replication scope can no
+        # longer be derived from the legacy layout alone, so treating it as
+        # marker-only would silently drop it. Fail closed instead.
+        migrated_backends: set[str] = set()
+        for entry in sorted(system_dir.iterdir()):
+            if entry.is_dir() and entry.name in family_set:
+                migrated_backends.update(b.name for b in entry.iterdir() if b.is_dir())
         for entry in sorted(system_dir.iterdir()):
             if not entry.is_dir():
                 continue  # e.g. stray .gitkeep directly under a system dir: leave alone
@@ -220,6 +234,11 @@ def scan_legacy_tree(data_root: Path, family_map: dict[str, str], family_set: se
                     moves.append(mv)
                     manifest[f.name] += 1
 
+                has_marker = (vdir / SHARED_LAYER_REUSE).is_file() or (vdir / INCOMPLETE).is_file()
+                if has_marker and backend in migrated_backends:
+                    mixed_marker_dirs.append(str(vdir.relative_to(data_root)))
+                    continue
+
                 if (vdir / SHARED_LAYER_REUSE).is_file():
                     scope = shared_layer_reuse_scope(version_family_index, vdir.name)
                     marker_actions.append(_plan_marker(system, backend, vdir.name, SHARED_LAYER_REUSE, scope))
@@ -229,7 +248,7 @@ def scan_legacy_tree(data_root: Path, family_map: dict[str, str], family_set: se
                     targets = incomplete_targets(own_stems, family_map)
                     marker_actions.append(_plan_marker(system, backend, vdir.name, INCOMPLETE, targets))
 
-    if unexpected_dirs or unknown_tables:
+    if unexpected_dirs or unknown_tables or mixed_marker_dirs:
         parts = []
         if unexpected_dirs:
             parts.append(
@@ -238,6 +257,12 @@ def scan_legacy_tree(data_root: Path, family_map: dict[str, str], family_set: se
             )
         if unknown_tables:
             parts.append("tables with no catalog family (fail-closed): " + ", ".join(sorted(set(unknown_tables))))
+        if mixed_marker_dirs:
+            parts.append(
+                "legacy marker in a partially migrated tree (family-layout data already exists for the same "
+                "system+backend, so the marker's scope cannot be derived from the legacy layout alone; restore "
+                "the tree with git before re-running): " + ", ".join(sorted(set(mixed_marker_dirs)))
+            )
         raise MigrationError("; ".join(parts))
 
     moves.sort(key=lambda m: str(m.src))

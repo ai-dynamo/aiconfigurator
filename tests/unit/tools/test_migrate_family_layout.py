@@ -325,7 +325,20 @@ class TestVerify:
         assert mod.verify_tree(tree, family_map, family_set) == []
 
         # Plant a stray legacy-level (marker-only, no sibling data file) SHARED_LAYER_REUSE.txt.
+        # Family-layout data already exists for the same system+backend, so this is
+        # a partially-migrated state: scan fails closed rather than classifying the
+        # marker as marker-only and dropping it.
         _touch(tree, "h200_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt")
+        errors = mod.verify_tree(tree, family_map, family_set)
+        assert errors
+        assert any("partially migrated" in e for e in errors)
+
+    def test_verify_fails_on_stray_legacy_marker_for_unmigrated_backend(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+
+        # Marker under a backend with NO family-layout data (vllm): the plain
+        # "legacy-shaped markers remain" verify error still fires.
+        _touch(tree, "h200_sxm/vllm/0.22.0/SHARED_LAYER_REUSE.txt")
         errors = mod.verify_tree(tree, family_map, family_set)
         assert errors
         assert any("legacy-shaped markers remain" in e for e in errors)
@@ -454,6 +467,37 @@ class TestFailClosed:
         assert rc == 1
         err = capsys.readouterr().err
         assert f"ABORT: data root not found: {missing.resolve()}" in err
+
+    def test_interrupted_rerun_marker_aborts_instead_of_dropping(self, mod, family_map, family_set, tree):
+        """Interrupted --execute state: tables already moved to family dirs, the
+        legacy INCOMPLETE.txt not yet acted on. Rescanning must NOT classify the
+        marker as marker-only (its data files are gone from the legacy dir) and
+        drop it — it must abort, keeping the marker on disk."""
+        _touch(tree, "gb300/moe/vllm/0.14.0/moe_perf.parquet")  # already-moved table
+        marker = _touch(tree, "gb300/vllm/0.14.0/INCOMPLETE.txt", b"Partial collector bring-up data only.")
+        with pytest.raises(mod.MigrationError, match="partially migrated"):
+            mod.scan_legacy_tree(tree, family_map, family_set)
+        assert marker.exists()
+
+    def test_interrupted_rerun_shared_layer_marker_aborts(self, mod, family_map, family_set, tree):
+        """Same interrupted state for SHARED_LAYER_REUSE.txt: the sibling-version
+        data that defines its replication scope has already moved to family dirs,
+        so the legacy-only scope would be empty (silent drop). Abort instead."""
+        _touch(tree, "a100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")  # already-moved sibling data
+        marker = _touch(tree, "a100_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt", b"lfs-pointer")
+        with pytest.raises(mod.MigrationError, match="partially migrated"):
+            mod.scan_legacy_tree(tree, family_map, family_set)
+        assert marker.exists()
+
+    def test_marker_for_other_backend_unaffected_by_migrated_family_data(self, mod, family_map, family_set, tree):
+        """Family-layout data for trtllm must not block normal marker handling
+        for a DIFFERENT backend (vllm) still fully on the legacy layout."""
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")  # migrated trtllm
+        _touch(tree, "h200_sxm/vllm/0.14.0/moe_perf.parquet")
+        _touch(tree, "h200_sxm/vllm/0.14.0/INCOMPLETE.txt", b"partial")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
+        [action] = [a for a in scan.marker_actions if a.marker == mod.INCOMPLETE]
+        assert action.targets == (Path("h200_sxm/moe/vllm/0.14.0/INCOMPLETE.txt"),)
 
 
 # --- CLI round trip ------------------------------------------------------------------
