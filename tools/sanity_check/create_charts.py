@@ -74,7 +74,7 @@ def _perf_file_paths(perf_root: str, system: str, backend: str, backend_version:
     legacy (<backend>/<version>) dir AND every family-first
     (<family>/<backend>/<version>) dir holding the same (backend, version).
 
-    Unlike `_data_dir`, this does not pick a single winning directory: one
+    This deliberately does not pick a single winning directory: one
     (backend, version) can legitimately split its perf files across multiple
     family dirs (e.g. gemm files under <system>/gemm/<backend>/<version>/ and
     attention files under <system>/attention/<backend>/<version>/), and callers
