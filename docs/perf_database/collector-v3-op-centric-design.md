@@ -196,6 +196,21 @@ tables:
 - `collector_hash` covers the registry-declared `collect_*.py` module plus its
   declared shared dependencies (e.g. `helper.py`, the family's
   `cases/base_ops/*.yaml`); it is content-based, so it survives rebases.
+- `status` is derived, never asserted: at finalize the collector marks a table
+  `complete` iff its producing ops' checkpoints hold zero unresolved failed
+  cases and no module-level collection failure was recorded — anything else is
+  `partial`. The run's observed failure records are the only input; the mere
+  presence of provenance fields implies nothing about coverage.
+  `case_plan_hash` attests the case set the run actually attempted, so a
+  filtered subset/healing run stays distinguishable from a full-plan run even
+  when both finish `complete`.
+- Scope of `status`: it asserts execution-completeness of the attempted plan
+  on that one system dir. Whether the *right* systems and cases were collected
+  for a given change is enforced one layer up — the §8 changed-op manifest
+  names the required systems and the §9 evidence gate (AIC-1214) demands the
+  corresponding evidence. CI deliberately never re-expands a case plan to
+  check per-dir coverage: case generation consults live device memory (§8),
+  so the attempted-set attestation is collection-time only.
 - "Missing provenance" = a parquet table present with no matching `tables`
   entry. CI fails closed on it (§8); the loader's strict mode refuses it (§7).
 - Transient run artifacts (`collection_summary_*.json`, `errors_*.json`) remain
