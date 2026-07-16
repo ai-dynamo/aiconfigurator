@@ -1852,7 +1852,7 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
 
 
 def _requested_version_reuse_entries(
-    system_data_root: str, backend: str, version: str, op_file_basename: str
+    system_data_root: str, backend: str, version: str, op_file_basename: str, *, strict: bool
 ) -> list[dict[str, str]]:
     """Declared-reuse entries (design §6.3) for one op file, scoped to the
     REQUESTED version dir(s) only.
@@ -1861,6 +1861,15 @@ def _requested_version_reuse_entries(
     ``_iter_backend_version_dirs``'s own contract); every ``reuse.yaml`` found
     at that pair is parsed and only entries whose ``table`` names this op file
     are kept, in file order.
+
+    A malformed ``reuse.yaml`` raises ``ValueError`` in strict mode (mirrors
+    ``_check_strict_provenance_for_request``'s load-time check). Non-strict
+    mode warns once per path -- the SAME dedupe key as that load-time check,
+    so a tree that already warned at load doesn't warn again here -- and
+    treats that path as declaring zero donors, instead of crashing. Without
+    this, a non-strict ``get_database()`` call would warn-and-continue at
+    load time only to crash on the very same malformed file the first time an
+    op is actually queried (AIC-1503 PR4 task 5, FIX 1).
     """
     matched: list[dict[str, str]] = []
     for candidate_version, version_path in _iter_backend_version_dirs(system_data_root, backend):
@@ -1869,7 +1878,14 @@ def _requested_version_reuse_entries(
         reuse_path = os.path.join(version_path, REUSE_YAML_MARKER)
         if not os.path.isfile(reuse_path):
             continue
-        for reuse_entry in _parse_reuse_yaml(reuse_path)["entries"]:
+        try:
+            entries = _parse_reuse_yaml(reuse_path)["entries"]
+        except ValueError as e:
+            if strict:
+                raise
+            _warn_strict_provenance_once("malformed-reuse", reuse_path, str(e))
+            continue
+        for reuse_entry in entries:
             if f"{reuse_entry['table']}.parquet" == op_file_basename:
                 matched.append(reuse_entry)
     return matched
@@ -2227,25 +2243,37 @@ class PerfDatabase:
         backend_lower = self.backend.lower()
 
         # Channel 2 (design §6.3): declared donors from the REQUESTED version
-        # dir's reuse.yaml, in file order.
+        # dir's reuse.yaml, in file order. Duplicate (table, from_version)
+        # entries in one reuse.yaml would otherwise admit the same source
+        # twice -- table is fixed to op_file_basename for this call, so
+        # `declared_donor_versions` membership alone is the (table,
+        # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
+        # task 5, FIX 2).
         declared_donor_versions: set[str] = set()
         for reuse_entry in _requested_version_reuse_entries(
-            system_data_root, backend_lower, self.version, op_file_basename
+            system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
         ):
-            donor_path = resolve_op_data_path(
-                system_data_root, backend_lower, reuse_entry["from_version"], op_file_basename
-            )
+            from_version = reuse_entry["from_version"]
+            if from_version in declared_donor_versions:
+                logger.debug(
+                    "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
+                    reuse_entry["table"],
+                    from_version,
+                    system_data_root,
+                )
+                continue
+            donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
             if not os.path.isfile(donor_path):
                 continue
             records.append(
                 {
-                    "version": reuse_entry["from_version"],
+                    "version": from_version,
                     "path": donor_path,
                     "channel": "declared_reuse",
                     "ks_filter": None,
                 }
             )
-            declared_donor_versions.add(reuse_entry["from_version"])
+            declared_donor_versions.add(from_version)
 
         # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
         # sibling versions can't be ordered against the requested version, so

@@ -32,6 +32,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from aiconfigurator.sdk import common
+from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
     _strict_provenance_enabled,
@@ -304,6 +306,69 @@ def test_non_strict_warns_on_malformed_reuse_yaml(systems_root: Path, caplog: py
 
     assert db is not None
     assert any("missing required key" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Malformed reuse.yaml: load-time warn must not leave a query-time crash
+# behind (AIC-1503 PR4 task 5, FIX 1). Before this fix, ``get_database()``'s
+# own load-time walk (above) warned and returned a usable non-strict
+# database, but ``_build_op_sources`` -> ``_requested_version_reuse_entries``
+# parsed the SAME malformed reuse.yaml with no strict/non-strict distinction
+# and always raised -- so the first real op query against that database
+# crashed anyway.
+# ---------------------------------------------------------------------------
+
+
+def test_non_strict_query_after_load_does_not_crash_on_malformed_reuse_yaml(
+    systems_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    requested, earlier = "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/trtllm/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/trtllm/{earlier}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/trtllm/{requested}/reuse.yaml",
+        {"reuse": [{"table": "gemm_perf"}]},  # missing from_version/reason/approved_by
+    )
+
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    primary_path = resolve_op_data_path(system_data_root, "trtllm", requested, "gemm_perf.parquet")
+
+    with caplog.at_level(logging.WARNING):
+        db = _get_db(systems_root, version=requested, strict_provenance=False)
+        assert db is not None
+        # Simulates the first real op query against the now-loaded database --
+        # must not raise, and the nearest-earlier fallback channel (design
+        # §6.2) must still admit rows despite the declared-reuse channel
+        # being unusable.
+        sources = db._build_op_sources(common.PerfDataFilename.gemm, primary_path, system_data_root)
+
+    assert [entry["channel"] for entry in db.data_provenance["gemm_perf.parquet"]] == ["primary", "fallback"]
+    assert sources[-1][0].endswith(f"gemm/trtllm/{earlier}/gemm_perf.parquet")
+    assert any("missing required key" in r.getMessage() for r in caplog.records)
+
+
+def test_strict_query_raises_on_malformed_reuse_yaml_even_with_bare_construction(systems_root: Path) -> None:
+    """The strict check inside ``_requested_version_reuse_entries`` itself
+    raises too, not just ``get_database()``'s separate load-time walk --
+    proven by constructing ``PerfDatabase`` directly (bare construction never
+    validates, see ``test_bare_construction_never_validates``) so
+    ``get_database()``'s own pre-check is bypassed entirely."""
+    requested, earlier = "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/trtllm/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/trtllm/{earlier}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/trtllm/{requested}/reuse.yaml",
+        {"reuse": [{"table": "gemm_perf"}]},
+    )
+
+    db = PerfDatabase("h100_sxm", "trtllm", requested, str(systems_root), strict_provenance=True)
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    primary_path = resolve_op_data_path(system_data_root, "trtllm", requested, "gemm_perf.parquet")
+
+    with pytest.raises(ValueError, match="missing required key"):
+        db._build_op_sources(common.PerfDataFilename.gemm, primary_path, system_data_root)
 
 
 # ---------------------------------------------------------------------------

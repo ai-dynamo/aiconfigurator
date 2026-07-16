@@ -257,6 +257,37 @@ def test_declared_donor_not_duplicated_in_fallback(systems_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Duplicate declared-reuse entries within one reuse.yaml (AIC-1503 PR4 task
+# 5, FIX 2)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_declared_reuse_entry_admitted_once(systems_root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Two identical (table, from_version) entries in one reuse.yaml (author
+    copy-paste) must not admit the same donor twice -- first occurrence wins,
+    logged at debug level."""
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{donor}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", donor), _reuse_entry("gemm_perf", donor)]},
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    with caplog.at_level(logging.DEBUG):
+        sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    donor_entries = [e for e in provenance if e["version"] == donor]
+    assert len(donor_entries) == 1
+    assert donor_entries[0]["channel"] == "declared_reuse"
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+    assert any("Duplicate declared-reuse entry" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Newer-only-via-declaration + full channel order
 # ---------------------------------------------------------------------------
 

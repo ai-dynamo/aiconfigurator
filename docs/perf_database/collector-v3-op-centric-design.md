@@ -331,10 +331,10 @@ The loader's source ordering (§7) in one list:
 
 Guardrails:
 
-- **Provenance surfacing:** the loader reports, per table, which versions
-  supplied rows and via which channel (`primary | declared_reuse | fallback`),
-  so the support-matrix health classifier can tell "natively collected" from "riding
-  on a declaration" without re-deriving anything.
+- **Provenance surfacing:** the loader reports, per table, the admitted
+  sources with channel tags (`primary | declared_reuse | fallback |
+  cross_backend`), so the support-matrix health classifier can tell "natively
+  collected" from "riding on a declaration" without re-deriving anything.
 - **CI audit:** a `reuse.yaml` pointing at data that does not exist, or any
   fill pattern outside these three channels, fails the PR — that is the
   operational definition of **unsupported silent fallback**.

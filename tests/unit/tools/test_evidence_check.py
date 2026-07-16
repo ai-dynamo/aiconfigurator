@@ -238,6 +238,26 @@ class TestUnmappedSystem:
 
 
 # --------------------------------------------------------------------------
+# fail-closed: a touched generation with no evidence_systems representative.
+# Distinct from TestInvalidGenerationPolicy below: here the policy loads
+# fine (a generation is simply absent from `evidence_systems`, which
+# `load_policy` does not require to be exhaustive) and the error only
+# surfaces at resolve time, when an entry actually touches that generation.
+# --------------------------------------------------------------------------
+
+
+class TestTouchedGenerationMissingRepresentative:
+    def test_resolve_requirements_raises_naming_generation(self, mod, tmp_path):
+        policy_path = tmp_path / "evidence_policy.yaml"
+        policy_path.write_text(POLICY_YAML.replace("  hopper: h200_sxm\n", ""))
+        policy = mod.load_policy(policy_path)
+        entries = [_entry(reasons=("pin_version",), systems=["h200_sxm"])]
+        changed = mod.load_manifest(_write_manifest(tmp_path, entries))
+        with pytest.raises(mod.EvidencePolicyError, match=r"hopper.*no representative"):
+            mod.resolve_requirements(policy, changed)
+
+
+# --------------------------------------------------------------------------
 # empty changed list
 # --------------------------------------------------------------------------
 
