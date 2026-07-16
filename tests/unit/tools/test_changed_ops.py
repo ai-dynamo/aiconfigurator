@@ -21,6 +21,7 @@ table stem (FIX 4).
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -658,7 +659,24 @@ class TestPreV3Baseline:
 # --------------------------------------------------------------------------
 
 
+def _repo_root_is_git_checkout() -> bool:
+    if shutil.which("git") is None:
+        return False
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0 and probe.stdout.strip() == "true"
+
+
 @pytest.mark.unit
+@pytest.mark.skipif(
+    not _repo_root_is_git_checkout(),
+    reason="needs the real repo checkout (the CI test image COPYs sources without .git)",
+)
 def test_real_repo_base_equals_head_is_all_unchanged(mod):
     changed, unchanged = mod.compute_changed_ops(REPO_ROOT, "HEAD", "HEAD")
     assert changed == []
