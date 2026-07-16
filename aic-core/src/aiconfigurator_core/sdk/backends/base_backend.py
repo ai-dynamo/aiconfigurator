@@ -226,7 +226,7 @@ class BaseBackend:
         RuntimeConfig + VisionEncoderConfig.
 
         Resolution order:
-            1. image_height + image_width (computed from patch/merge sizes)
+            1. image_height + image_width (smart-resized, then patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
@@ -234,11 +234,16 @@ class BaseBackend:
         """
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
         if has_image_dims:
+            # Upstream VL processors (Qwen smart_resize) round each raw
+            # dimension to the *nearest* multiple of patch_size * merge_size
+            # before patchify; plain floor under-counts tokens for
+            # non-aligned inputs.  The processor's min/max_pixels rescaling
+            # is a preprocessor knob AIC does not model.
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-            tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
-            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                runtime_config.image_width // enc_cfg.patch_size
-            )
+            h_bar = max(img_stride, round(runtime_config.image_height / img_stride) * img_stride)
+            w_bar = max(img_stride, round(runtime_config.image_width / img_stride) * img_stride)
+            tokens_per_image = (h_bar // img_stride) * (w_bar // img_stride)
+            pre_merge_per_image = (h_bar // enc_cfg.patch_size) * (w_bar // enc_cfg.patch_size)
         elif runtime_config.num_image_tokens > 0:
             tokens_per_image = runtime_config.num_image_tokens
             pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)

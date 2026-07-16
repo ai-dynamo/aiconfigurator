@@ -285,6 +285,13 @@ def _add_default_mode_arguments(parser):
         help="EPD encode-worker TP sizes to sweep (requires --enable-epd). Default: 1 2 4 8.",
     )
     parser.add_argument(
+        "--encoder-system",
+        type=str,
+        default=None,
+        help="System (GPU type) for EPD encode workers (requires --enable-epd). "
+        "Defaults to the prefill/agg side's system.",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -1148,6 +1155,7 @@ def build_default_tasks(
     num_images: int = 1,
     enable_epd: bool = False,
     encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1331,6 +1339,7 @@ def build_default_tasks(
             moe_backend=moe_backend_value,
             enable_epd=enable_epd,
             encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
             **global_kwargs,
         )
 
@@ -1352,6 +1361,7 @@ def build_default_tasks(
             moe_backend=moe_backend_value,
             enable_epd=enable_epd,
             encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
             **global_kwargs,
         )
 
@@ -2373,6 +2383,7 @@ def main(args):
             num_images=args.num_images,
             enable_epd=args.enable_epd,
             encoder_tp=args.encoder_tp,
+            encoder_system=args.encoder_system,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

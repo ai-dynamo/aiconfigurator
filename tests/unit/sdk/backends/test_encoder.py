@@ -542,3 +542,31 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["kvcache"] == 0.0
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
+
+
+class TestSmartResizeTokenResolution:
+    """_encoder_pre_merge_per_visual mirrors the upstream VL processor's
+    smart_resize: raw H/W round to the *nearest* multiple of
+    patch_size x spatial_merge_size (plain floor under-counted tokens for
+    non-aligned inputs)."""
+
+    def test_non_aligned_dims_round_to_nearest_factor(self):
+        from aiconfigurator.sdk.backends.base_backend import BaseBackend
+
+        enc_cfg = common.VisionEncoderConfig(
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
+        )
+        # 500 rounds to 512 (nearest multiple of 32; floor gave 480):
+        # post-merge 16^2, pre-merge (512/16)^2.
+        rc = RuntimeConfig(isl=1, osl=1, image_height=500, image_width=500, num_images_per_request=1)
+        assert BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg) == (256, 1024)
+        # Aligned dims are untouched.
+        rc_aligned = RuntimeConfig(isl=1, osl=1, image_height=448, image_width=448, num_images_per_request=1)
+        assert BaseBackend._encoder_pre_merge_per_visual(rc_aligned, enc_cfg) == (196, 784)

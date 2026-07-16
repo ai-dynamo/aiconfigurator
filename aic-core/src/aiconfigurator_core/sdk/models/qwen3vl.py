@@ -50,7 +50,7 @@ class Qwen3VLModel(LLAMAModel):
         self.encoder_config = encoder_config
         # EPD language-only workers keep encoder_config (vision tokens still
         # extend the LLM context) but never host the ViT ops.
-        if self.config.encoder_colocated:
+        if not self.config.language_only:
             self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
 
 
@@ -90,5 +90,5 @@ class Qwen3VLMoEModel(MOEModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        if self.config.encoder_colocated:
+        if not self.config.language_only:
             self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))

@@ -210,10 +210,12 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
     """EPD end-to-end semantics on synthetic candidates.
 
     Pins the three EPD invariants: (1) enable_epd flips the prefill workers
-    to language-only (encoder_colocated=False -> pure ttft 60 instead of the
-    colocated 100), (2) TTFT composes sequentially as encode latency +
-    corrected prefill ttft, (3) the encode pool is sized into the rate
-    matching and its GPUs dilute the per-GPU metrics.
+    to language-only (pure ttft 60 instead of the inline-encoder 100),
+    (2) TTFT composes sequentially with the same queueing correction applied
+    to both stages (corr x encode latency + corr x prefill ttft -- symmetric
+    with the inline PD path, whose full E+P ttft is corrected), (3) the
+    encode pool is sized into the rate matching and its GPUs dilute the
+    per-GPU metrics.
     """
     import pandas as pd
 
@@ -259,8 +261,8 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
         base.update(overrides)
         return base
 
-    # Colocated prefill (PD): ttft = 40ms encoder + 60ms context.  Language-only
-    # prefill (EPD, encoder_colocated=False): the same worker without the ViT.
+    # Inline-encoder prefill (PD): ttft = 40ms encoder + 60ms context.
+    # Language-only prefill (EPD): the same worker without the ViT.
     colocated_prefill_df = pd.DataFrame([_worker_row()])
     pure_prefill_df = pd.DataFrame(
         [
@@ -293,7 +295,7 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
     def _fake_candidates(*, role, model_config, **_kwargs):
         if role == "decode":
             return decode_df.copy()
-        return (colocated_prefill_df if model_config.encoder_colocated else pure_prefill_df).copy()
+        return (pure_prefill_df if model_config.language_only else colocated_prefill_df).copy()
 
     monkeypatch.setattr(sweep, "_get_disagg_worker_candidates", _fake_candidates)
     monkeypatch.setattr(
@@ -323,15 +325,19 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
         rate_matching_decode_degradation=1.0,
     )
 
-    # Plain PD: encoder stays colocated (ttft 100 * 1.8 correction).
+    # Plain PD: the inline encoder is part of the corrected prefill ttft
+    # (1.8 x (40 encoder + 60 context) = 180).
     pd_row = sweep_disagg(**common_kwargs).iloc[0]
     assert pd_row["(e)workers"] == 0
     assert pd_row["ttft"] == pytest.approx(180.0)
     assert pd_row["encoder_latency"] == pytest.approx(40.0)
 
-    # EPD: language-only prefill ttft = 60 -> corrected 108; + encode batch 50 = 158.
+    # EPD: language-only prefill ttft = 60 -> corrected 108; the encode stage
+    # carries the same correction (1.8 x 50 = 90) so the PD comparison stays
+    # apples-to-apples: ttft = 90 + 108 = 198.
     epd_row = sweep_disagg(**common_kwargs, enable_epd=True, encoder_tp_list=[2]).iloc[0]
-    assert epd_row["ttft"] == pytest.approx(158.0)
+    assert epd_row["ttft"] == pytest.approx(198.0)
+    # encoder_latency stays the raw stage latency, like the inline PD row.
     assert epd_row["encoder_latency"] == pytest.approx(50.0)
     # Rate matching: p 16.667/w (4 gpus), d 20/w (8 gpus), e 80/w * 0.9 deg (2 gpus)
     # -> optimum (4p, 3d, 1e): seq/s 60, gpus 16+24+2=42.
@@ -340,18 +346,20 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
     assert epd_row["seq/s"] == pytest.approx(60.0)
     assert epd_row["tokens/s/gpu"] == pytest.approx(6000.0 / 42, abs=1e-3)
     assert (epd_row["(e)tp"], epd_row["(e)bs"], epd_row["(e)parallel"]) == (2, 4, "tp2")
-    # request latency = corrected prefill ttft + tpot*(osl-1) + encode latency.
-    assert epd_row["request_latency"] == pytest.approx(108.0 + 8.0 * 99 + 50.0)
+    # request latency = corrected prefill ttft + tpot*(osl-1) + corrected encode stage.
+    assert epd_row["request_latency"] == pytest.approx(108.0 + 8.0 * 99 + 90.0)
 
 
 def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
     """E+agg end-to-end semantics on synthetic candidates.
 
     Pins the E+agg invariants: (1) enable_epd flips the agg workers to
-    language-only (encoder_colocated=False) while the default keeps the
-    encoder inline, (2) TTFT composes sequentially as encode latency + agg
-    ttft, (3) the cell rate match picks the best integer agg:encode worker
-    ratio (encode pool sized to not bottleneck, GPUs dilute per-GPU metrics).
+    language-only while the default keeps the encoder inline, (2) TTFT
+    composes sequentially as raw encode latency + agg ttft (mirroring
+    run_agg's inline convention, which adds the encoder before its queueing
+    factor), (3) the cell rate match picks the best integer agg:encode
+    worker ratio (encode pool sized to not bottleneck, GPUs dilute per-GPU
+    metrics).
     """
     import pandas as pd
 
@@ -402,7 +410,7 @@ def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
     captured: dict = {}
 
     def _fake_get_model(*, model_path, model_config, backend_name):
-        captured["encoder_colocated"] = model_config.encoder_colocated
+        captured["language_only"] = model_config.language_only
         return MagicMock()
 
     monkeypatch.setattr(sweep, "get_model", _fake_get_model)
@@ -429,13 +437,13 @@ def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
 
     # Default: encoder stays inline (colocated); rows pass through untouched.
     agg_df = sweep.sweep_agg(**common_kwargs)
-    assert captured["encoder_colocated"] is True
+    assert captured["language_only"] is False
     assert "(e)workers" not in agg_df.columns
     assert agg_df.iloc[0]["ttft"] == pytest.approx(100.0)
 
     # E+agg: language-only agg workers + encode pool.
     epd_df = sweep.sweep_agg(**common_kwargs, enable_epd=True, encoder_tp_list=[2])
-    assert captured["encoder_colocated"] is False
+    assert captured["language_only"] is True
     row = epd_df.iloc[0]
     # TTFT = agg ttft + encode batch latency; request latency follows.
     assert row["ttft"] == pytest.approx(150.0)

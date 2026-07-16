@@ -50,7 +50,7 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +79,13 @@ _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
 )
 
 # Default EPD encode-worker search space.  TP mirrors a real encode
-# instance's --tp-size choices; the batch schedule models cross-request
-# image batching (e.g. SGLang's encoder scheduler, default max batch 8),
-# swept wider so the TTFT budget decides what is affordable.
+# instance's --tp-size choices.  The batch schedule models cross-request
+# batching by the encode instance's greedy scheduler and is capped at
+# SGLang's default (SGLANG_ENCODER_MAX_BATCH_SIZE = 8) -- larger batches
+# do not exist in the deployed system, so sweeping them would credit the
+# encode pool with unreachable throughput.
 _DEFAULT_ENCODER_TP_LIST: list[int] = [1, 2, 4, 8]
-_DEFAULT_ENCODER_BATCH_SCHEDULE: list[int] = [1, 2, 4, 8, 16, 32]
+_DEFAULT_ENCODER_BATCH_SCHEDULE: list[int] = [1, 2, 4, 8]
 
 # E+agg: agg-worker replicas explored per rate-matched cell.  Mirrors the
 # disagg worker lists (range(1, 33)); the cell only exists to express the
@@ -297,7 +299,11 @@ def _sweep_one_parallel_agg(
     ``backend.find_best_agg_result_under_constraints``; parity is enforced by
     the integration test.
     """
-    isl = runtime_config.isl
+    # Vision tokens occupy the prefill context, so the ctx-token grid and the
+    # batch/ctx feasibility guards below run on the effective ISL -- same as
+    # the legacy find_best_agg_result_under_constraints (its isl_eff) and as
+    # run_agg's internal accounting.
+    isl = runtime_config.isl + BaseBackend._visual_context_tokens(model, runtime_config)
     osl = runtime_config.osl
     ttft_target = runtime_config.ttft
     tpot_target = runtime_config.tpot
@@ -391,6 +397,7 @@ def sweep_agg(
     encoder_tp_list: list[int] | None = None,
     encoder_batch_list: list[int] | None = None,
     encoder_latency_correction: float = 1.0,
+    encoder_database: PerfDatabase | None = None,
     predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
@@ -451,19 +458,21 @@ def sweep_agg(
     encoder_candidates: list[dict] | None = None
     if enable_epd:
         # E+agg: enumerate the encode-worker pool once (independent of the
-        # agg parallel choice), then sweep language-only agg workers.
+        # agg parallel choice), then sweep language-only agg workers.  The
+        # encode pool may live on its own system / GPU type (hetero
+        # encoder, ``encoder_database``); it defaults to the agg side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
             model_config=model_config,
             tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
             b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
             runtime_config=runtime_config,
-            database=database,
+            database=encoder_database or database,
             backend_name=backend_name,
             latency_correction=encoder_latency_correction,
         )
         model_config = copy.deepcopy(model_config)
-        model_config.encoder_colocated = False
+        model_config.language_only = True
 
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
@@ -733,7 +742,7 @@ def _get_encoder_worker_candidates(
         point_mc.cp_size = 1
         point_mc.moe_tp_size = etp
         point_mc.moe_ep_size = 1
-        point_mc.encoder_colocated = True  # the encode worker itself hosts the ViT
+        point_mc.language_only = False  # the encode worker itself hosts the ViT
         try:
             model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
         except ValueError as e:
@@ -778,31 +787,39 @@ def _overlay_encoder_stage(
     encoder_num_worker: int,
     prefill_power: float = 0.0,
     decode_power: float = 0.0,
+    ttft_scale: float = 1.0,
 ) -> dict:
-    """Overlay the encode stage onto a rate-matched P/D row (EPD).
+    """Overlay the encode stage onto a rate-matched P/D or agg row (EPD).
 
     Encode -> prefill is sequential per request (prefill starts only after
     the full image embedding arrives), so the encode batch latency adds to
-    TTFT and request latency.  ``seq/s`` is unchanged: the encode pool is
-    sized to at least the rate-matched P/D throughput; its GPUs only dilute
-    the per-GPU metrics.  ``power_w`` is re-weighted over the three-phase
-    timeline (encode + prefill + decode); the prefill phase reuses the
-    colocated worker's average power as an approximation.
+    TTFT and request latency.  ``ttft_scale`` keeps the queueing correction
+    symmetric with the non-EPD baseline: the disagg path passes the
+    autoscale TTFT correction factor (its inline-encoder prefill ttft is
+    corrected wholesale, so the disaggregated encode stage must be too),
+    while the agg path keeps 1.0 (run_agg adds the inline encoder outside
+    its queueing factor).  The ``encoder_latency`` column stays the raw
+    stage latency, like the inline rows.  ``seq/s`` is unchanged: the
+    encode pool is sized to at least the rate-matched throughput; its GPUs
+    only dilute the per-GPU metrics.  ``power_w`` is re-weighted over the
+    three-phase timeline (encode + prefill + decode); the prefill phase
+    reuses the colocated worker's average power as an approximation.
     """
     row = dict(disagg_dict)
     encoder_latency = encoder_worker["encoder_latency"]
+    encoder_ttft_share = encoder_latency * ttft_scale
     prefill_ttft = row["ttft"]
     decode_time = row["tpot"] * max(row["osl"] - 1, 0)
-    total_time = encoder_latency + prefill_ttft + decode_time
+    total_time = encoder_ttft_share + prefill_ttft + decode_time
     if total_time > 0:
         row["power_w"] = (
-            encoder_worker.get("power_w", 0.0) * encoder_latency
+            encoder_worker.get("power_w", 0.0) * encoder_ttft_share
             + prefill_power * prefill_ttft
             + decode_power * decode_time
         ) / total_time
     row["encoder_latency"] = encoder_latency
-    row["ttft"] = prefill_ttft + encoder_latency
-    row["request_latency"] = row["request_latency"] + encoder_latency
+    row["ttft"] = prefill_ttft + encoder_ttft_share
+    row["request_latency"] = row["request_latency"] + encoder_ttft_share
     num_total_gpus = row["num_total_gpus"] + encoder_worker["num_total_gpus"] * encoder_num_worker
     row["seq/s/gpu"] = row["seq/s"] / num_total_gpus
     row["tokens/s/gpu"] = row["tokens/s"] / num_total_gpus
@@ -924,13 +941,19 @@ def _find_best_disagg_under_constraint(
         )
 
     # EPD: encode -> prefill is sequential per request, so each encode choice
-    # consumes its latency from the TTFT budget.  Plain PD is the single
+    # consumes its latency from the TTFT budget -- under the same queueing
+    # correction as the prefill stage (the inline PD baseline corrects its
+    # whole E+P ttft, so correcting only P here would systematically favor
+    # EPD by the uncorrected encode share).  Plain PD is the single
     # no-encoder choice with the full budget.
     encoder_choices: list[dict | None] = [None]
     if encoder_records:
-        encoder_choices = [e for e in encoder_records if e["encoder_latency"] < ttft_target]
+        encoder_choices = [
+            e for e in encoder_records if e["encoder_latency"] * autoscale_ttft_correction_factor < ttft_target
+        ]
     p_records_per_choice = [
-        _prefill_records(ttft_target - (enc["encoder_latency"] if enc else 0.0)) for enc in encoder_choices
+        _prefill_records(ttft_target - (enc["encoder_latency"] * autoscale_ttft_correction_factor if enc else 0.0))
+        for enc in encoder_choices
     ]
     if not any(p_records_per_choice):
         logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)
@@ -1001,6 +1024,7 @@ def _find_best_disagg_under_constraint(
                             e_num,
                             prefill_power=p_worker.get("power_w", 0.0),
                             decode_power=d_worker.get("power_w", 0.0),
+                            ttft_scale=autoscale_ttft_correction_factor,
                         )
                     category_results.append(disagg_dict)
         if category_results:
@@ -1049,6 +1073,7 @@ def sweep_disagg(
     encoder_tp_list: list[int] | None = None,
     encoder_batch_list: list[int] | None = None,
     encoder_latency_correction: float = 1.0,
+    encoder_database: PerfDatabase | None = None,
     predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
@@ -1118,28 +1143,41 @@ def sweep_disagg(
     else:
         decode_batch_range = [b for b in _DEFAULT_DECODE_BATCH_SCHEDULE if b <= decode_max_num_tokens]
 
-    if prefill_max_num_tokens < runtime_config.isl:
-        logger.warning("prefill_max_num_tokens < runtime_config.isl, clamping to isl")
-        prefill_max_num_tokens = runtime_config.isl
-    max_prefill_batch_size = prefill_max_num_tokens // runtime_config.isl
+    # Vision tokens occupy the prefill context, so the per-request cost that
+    # divides the token budget is the effective ISL (mirrors the legacy
+    # DisaggInferenceSession and the agg sweep above).
+    try:
+        _enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+    except Exception:
+        logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
+        _enc_cfg = None
+    prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
+        _enc_cfg, runtime_config
+    )
+    if prefill_max_num_tokens < prefill_effective_isl:
+        logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective ISL")
+        prefill_max_num_tokens = prefill_effective_isl
+    max_prefill_batch_size = prefill_max_num_tokens // prefill_effective_isl
     prefill_batch_range = range(1, max_prefill_batch_size + 1)
 
     encoder_candidates: list[dict] | None = None
     if enable_epd:
+        # The encode pool may live on its own system / GPU type (hetero
+        # encoder, ``encoder_database``); it defaults to the prefill side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
             model_config=prefill_model_config,
             tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
             b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
             runtime_config=runtime_config,
-            database=prefill_database,
+            database=encoder_database or prefill_database,
             backend_name=prefill_backend_name,
             latency_correction=encoder_latency_correction,
         )
         # EPD prefill workers are language-only (e.g. SGLang --language-only):
         # vision tokens stay in their context, but they never host the ViT.
         prefill_model_config = copy.deepcopy(prefill_model_config)
-        prefill_model_config.encoder_colocated = False
+        prefill_model_config.language_only = True
 
     prefill_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
