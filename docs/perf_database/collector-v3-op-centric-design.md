@@ -336,7 +336,7 @@ Guardrails:
   cross_backend`), so the support-matrix health classifier can tell "natively
   collected" from "riding on a declaration" without re-deriving anything.
 - **CI audit:** a `reuse.yaml` pointing at data that does not exist, or any
-  fill pattern outside these three channels, fails the PR — that is the
+  fill pattern outside these channels, fails the PR — that is the
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
