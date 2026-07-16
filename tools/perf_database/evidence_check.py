@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,8 +97,15 @@ def load_policy(path: Path) -> Policy:
 
     thresholds = raw.get("thresholds")
     threshold_value = thresholds.get("parquet_diff_median_pct") if isinstance(thresholds, dict) else None
-    if not isinstance(threshold_value, (int, float)) or isinstance(threshold_value, bool):
-        raise EvidencePolicyError(f"evidence policy 'thresholds.parquet_diff_median_pct' must be a number: {path}")
+    if (
+        not isinstance(threshold_value, (int, float))
+        or isinstance(threshold_value, bool)
+        or not math.isfinite(threshold_value)
+        or threshold_value < 0
+    ):
+        raise EvidencePolicyError(
+            f"evidence policy 'thresholds.parquet_diff_median_pct' must be a finite non-negative number: {path}"
+        )
 
     system_generations = _resolve_system_generations(raw.get("system_generations"), path)
     evidence_systems = _resolve_evidence_systems(raw.get("evidence_systems"), system_generations, path)
@@ -129,8 +137,10 @@ def load_policy(path: Path) -> Policy:
 def _resolve_system_generations(raw_system_generations: Any, path: Path) -> dict[str, frozenset[str]]:
     """{SM generation: [system, ...]} -> {SM generation: frozenset(system, ...)}.
 
-    Fails closed when the mapping is empty/malformed, or a generation's
-    system list is missing, empty, or contains a non-string/blank entry.
+    Fails closed when the mapping is empty/malformed, a generation's
+    system list is missing, empty, or contains a non-string/blank entry, or
+    a system is listed under more than one generation (ambiguous ownership
+    would silently match every owning generation in ``_touched_generations``).
     """
     if not isinstance(raw_system_generations, dict) or not raw_system_generations:
         raise EvidencePolicyError(
@@ -138,6 +148,7 @@ def _resolve_system_generations(raw_system_generations: Any, path: Path) -> dict
             f"SM generation -> [system, ...]: {path}"
         )
     resolved: dict[str, frozenset[str]] = {}
+    owners: dict[str, str] = {}
     for generation, systems in raw_system_generations.items():
         if (
             not isinstance(systems, list)
@@ -147,6 +158,14 @@ def _resolve_system_generations(raw_system_generations: Any, path: Path) -> dict
             raise EvidencePolicyError(
                 f"evidence policy 'system_generations.{generation}' must be a non-empty list of system names: {path}"
             )
+        for system in systems:
+            if system in owners:
+                raise EvidencePolicyError(
+                    f"evidence policy 'system_generations' lists system {system!r} under both "
+                    f"{owners[system]!r} and {generation!r}; each system must belong to exactly "
+                    f"one SM generation: {path}"
+                )
+            owners[system] = generation
         resolved[generation] = frozenset(systems)
     return resolved
 
@@ -244,6 +263,10 @@ def _parse_changed_entry(item: Any, index: int, path: Path) -> ChangedEntry:
         raise EvidenceManifestError(
             f"changed_ops manifest 'changed[{index}]': 'tables'/'systems' must be lists: {path}"
         )
+    if not all(isinstance(table, str) for table in tables) or not all(isinstance(system, str) for system in systems):
+        raise EvidenceManifestError(
+            f"changed_ops manifest 'changed[{index}]': 'tables'/'systems' items must be strings: {path}"
+        )
 
     for reason in reasons:
         if reason not in KNOWN_REASONS:
@@ -291,11 +314,12 @@ def _requirement_for(reason: str, entry: ChangedEntry, policy: Policy) -> dict[s
     # evidence systems to the SM generations the entry's `systems` actually
     # touch — demanding e.g. Hopper evidence for a Blackwell-only (nvfp4)
     # family is both wasted and, per capabilities.yaml, sometimes impossible
-    # to satisfy.
+    # to satisfy. The unmapped-system fail-closed check runs for EVERY
+    # reason, case_plan included — only representative selection is skipped.
+    touched = _touched_generations(entry, policy)
     if reason == "case_plan":
         evidence_systems: tuple[str, ...] = ()
     else:
-        touched = _touched_generations(entry, policy)
         missing = touched - policy.evidence_systems.keys()
         if missing:
             raise EvidencePolicyError(

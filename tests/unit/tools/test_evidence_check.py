@@ -230,8 +230,12 @@ class TestGenerationScoping:
 
 
 class TestUnmappedSystem:
-    def test_resolve_requirements_raises(self, mod, tmp_path, policy_path):
-        entries = [_entry(reasons=("pin_version",), systems=["mystery_gpu"])]
+    # Every reason must fail closed on an unmapped system — including
+    # case_plan, which skips representative selection but must NOT skip the
+    # system-to-generation mapping validation.
+    @pytest.mark.parametrize("reason", ["pin_version", "collector_code", "case_plan"])
+    def test_resolve_requirements_raises(self, mod, tmp_path, policy_path, reason):
+        entries = [_entry(reasons=(reason,), systems=["mystery_gpu"])]
         manifest_path = _write_manifest(tmp_path, entries)
         policy = mod.load_policy(policy_path)
         changed = mod.load_manifest(manifest_path)
@@ -345,6 +349,20 @@ class TestMalformedPolicy:
 
 
 # --------------------------------------------------------------------------
+# fail-closed: negative / non-finite thresholds
+# --------------------------------------------------------------------------
+
+
+class TestInvalidThreshold:
+    @pytest.mark.parametrize("threshold", ["-1", ".nan", ".inf"], ids=["negative", "nan", "inf"])
+    def test_load_policy_raises(self, mod, tmp_path, threshold):
+        path = tmp_path / "evidence_policy.yaml"
+        path.write_text(POLICY_YAML.replace("parquet_diff_median_pct: 5", f"parquet_diff_median_pct: {threshold}"))
+        with pytest.raises(mod.EvidencePolicyError, match="finite non-negative"):
+            mod.load_policy(path)
+
+
+# --------------------------------------------------------------------------
 # fail-closed: unresolved evidence_system
 # --------------------------------------------------------------------------
 
@@ -404,6 +422,21 @@ class TestInvalidGenerationPolicy:
         with pytest.raises(mod.EvidencePolicyError, match="no entry in 'system_generations'"):
             mod.load_policy(path)
 
+    def test_system_listed_under_two_generations_raises(self, mod, tmp_path):
+        # h200_sxm under both hopper and blackwell would silently match BOTH
+        # owning generations in _touched_generations — ambiguous evidence scope.
+        policy_yaml = (
+            "schema_version: 1\nthresholds: {parquet_diff_median_pct: 5}\n"
+            "system_generations: {hopper: [h200_sxm], blackwell: [h200_sxm, b200_sxm]}\n"
+            "evidence_systems: {hopper: h200_sxm, blackwell: b200_sxm}\n"
+            "rules: {pin_version: {requirement: r}, collector_code: {requirement: r}, case_plan: {requirement: r}}\n"
+            "exceptions_file: e.yaml\n"
+        )
+        path = tmp_path / "evidence_policy.yaml"
+        path.write_text(policy_yaml)
+        with pytest.raises(mod.EvidencePolicyError, match=r"'h200_sxm'.*'hopper'.*'blackwell'"):
+            mod.load_policy(path)
+
 
 # --------------------------------------------------------------------------
 # fail-closed: malformed manifest
@@ -413,8 +446,30 @@ class TestInvalidGenerationPolicy:
 class TestMalformedManifest:
     @pytest.mark.parametrize(
         "raw_manifest",
-        ["not: a manifest\n", "changed: not-a-list\n", "changed:\n  - framework: sglang\n"],  # entry missing fields
-        ids=["missing-changed-key", "changed-not-a-list", "entry-missing-fields"],
+        [
+            "not: a manifest\n",
+            "changed: not-a-list\n",
+            "changed:\n  - framework: sglang\n",  # entry missing fields
+            "changed:\n"
+            "  - framework: sglang\n"
+            "    family: attention\n"
+            "    reasons: [pin_version]\n"
+            "    tables: [{}]\n"
+            "    systems: [h200_sxm]\n",  # non-string tables item
+            "changed:\n"
+            "  - framework: sglang\n"
+            "    family: attention\n"
+            "    reasons: [pin_version]\n"
+            "    tables: [context_attention_perf]\n"
+            "    systems: [[]]\n",  # non-string systems item
+        ],
+        ids=[
+            "missing-changed-key",
+            "changed-not-a-list",
+            "entry-missing-fields",
+            "tables-non-string-item",
+            "systems-non-string-item",
+        ],
     )
     def test_load_manifest_raises(self, mod, tmp_path, raw_manifest):
         path = tmp_path / "changed_ops.yaml"
