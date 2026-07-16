@@ -62,14 +62,16 @@ def _verify_core(*, exercise_engine: bool) -> str:
     if core._build_smoke() != 1:
         raise RuntimeError("native core extension returned an unexpected schema version")
 
-    for module in (
+    sdk = importlib.import_module("aiconfigurator_core.sdk")
+    protected_sdk_modules = {
         "aiconfigurator_core.sdk.engine",
         "aiconfigurator_core.sdk.memory",
-        "aiconfigurator_core.sdk.perf_database",
-    ):
-        importlib.import_module(module)
+        "aiconfigurator_core.sdk.rust_engine_step",
+    }
+    eagerly_loaded_modules = protected_sdk_modules.intersection(sys.modules)
+    if eagerly_loaded_modules:
+        raise RuntimeError(f"aiconfigurator_core.sdk eagerly loaded modules: {sorted(eagerly_loaded_modules)}")
 
-    sdk = importlib.import_module("aiconfigurator_core.sdk")
     expected_facade = {
         "EngineHandle",
         "ModelConfig",
@@ -84,6 +86,13 @@ def _verify_core(*, exercise_engine: bool) -> str:
     for public_name in expected_facade:
         if getattr(sdk, public_name, None) is None:
             raise RuntimeError(f"aiconfigurator_core.sdk is missing {public_name}")
+
+    for module in (
+        "aiconfigurator_core.sdk.engine",
+        "aiconfigurator_core.sdk.memory",
+        "aiconfigurator_core.sdk.perf_database",
+    ):
+        importlib.import_module(module)
 
     resources = importlib.resources.files("aiconfigurator_core")
     required_resources = (

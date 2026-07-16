@@ -34,6 +34,19 @@ the hot path never re-walks the model or re-enters Python.
   readiness/diagnostics on top of the compiled `Engine`, and is re-exported for
   native embedders and exposed to Python as `RustForwardPassPerfModel`.
 
+Standalone binaries that call `AicEngineBuilder::build()` must enable the
+crate's `embed-python` feature, which enables PyO3's `auto-initialize` support:
+
+```toml
+[dependencies]
+aiconfigurator-core = { version = "0.10.0", features = ["embed-python"] }
+```
+
+Applications that embed Python in an existing host may initialize the
+interpreter themselves instead. In either case, the matching
+`aiconfigurator-core` Python wheel and its bundled data must be available to the
+embedded interpreter.
+
 ```rust,no_run
 use aiconfigurator_core::{AicEngineBuilder, BackendKind};
 

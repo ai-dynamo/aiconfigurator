@@ -28,7 +28,7 @@ def _crate_version(path: Path) -> str:
 
 def _rust_u32_constant(path: Path, name: str) -> int:
     source = path.read_text()
-    match = re.search(rf"^pub const {name}: u32 = (\d+);$", source, re.MULTILINE)
+    match = re.search(rf"^pub const {re.escape(name)}: u32 = (\d+);$", source, re.MULTILINE)
     assert match is not None, f"missing public Rust constant {name}"
     return int(match.group(1))
 

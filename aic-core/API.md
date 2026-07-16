@@ -54,6 +54,18 @@ Python modules carry their own annotations.
 
 New embedded consumers should prefer `AicEngineBuilder`:
 
+Standalone binaries that call `AicEngineBuilder::build()` must enable the
+crate's `embed-python` feature, which enables PyO3's `auto-initialize` support:
+
+```toml
+[dependencies]
+aiconfigurator-core = { version = "0.10.0", features = ["embed-python"] }
+```
+
+Applications that embed Python in an existing host may initialize the Python
+interpreter themselves instead. The matching `aiconfigurator-core` wheel must
+also be importable by that interpreter.
+
 ```rust,no_run
 use aiconfigurator_core::{AicEngineBuilder, AicError, BackendKind};
 

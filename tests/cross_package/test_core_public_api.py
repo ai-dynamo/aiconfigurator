@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.resources
 import inspect
+import subprocess
+import sys
 
 import aiconfigurator_core
 import aiconfigurator_core.sdk as sdk
@@ -24,6 +26,23 @@ EXPECTED_FACADE = {
     "estimate_kv_cache",
     "estimate_num_gpu_blocks",
 }
+
+
+def test_sdk_facade_import_is_lazy_in_a_fresh_interpreter() -> None:
+    script = """
+import sys
+
+import aiconfigurator_core.sdk
+
+protected_modules = {
+    "aiconfigurator_core.sdk.engine",
+    "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.rust_engine_step",
+}
+loaded_modules = protected_modules.intersection(sys.modules)
+assert not loaded_modules, f"SDK facade eagerly loaded: {sorted(loaded_modules)}"
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_sdk_facade_exports_the_canonical_objects() -> None:
