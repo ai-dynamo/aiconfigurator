@@ -445,6 +445,76 @@ def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Partial version dirs are never admitted as the primary source.
+# resolve_op_data_path skips partial FAMILY dirs, but its final legacy-layout
+# fallback returns an existing file with no partial check — the admission
+# chokepoint (_build_op_sources) must refuse that primary itself.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("marker", ["incomplete_txt", "meta_yaml_partial"])
+def test_partial_legacy_primary_not_admitted_donors_still_fill(
+    systems_root: Path, caplog: pytest.LogCaptureFixture, marker: str
+) -> None:
+    """A legacy-layout dir holding the requested version's table but marked
+    partial (INCOMPLETE.txt legacy marker, or collection_meta.yaml with any
+    ``status: partial`` table) must NOT be admitted as the primary source.
+    Channels 2-4 still fill, and data_provenance lists admitted sources
+    only — no primary record for the refused file."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/gemm_perf.parquet")
+    if marker == "incomplete_txt":
+        _write(systems_root, f"data/h100_sxm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
+    else:
+        _write_yaml(
+            systems_root,
+            f"data/h100_sxm/{backend}/{requested}/collection_meta.yaml",
+            {
+                "schema_version": 1,
+                "runtime": {"framework": backend, "version": requested},
+                "tables": {"gemm_perf": {"status": "partial"}},
+            },
+        )
+    # A complete family-layout earlier sibling fills via channel 3 (fallback).
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    with caplog.at_level(logging.WARNING):
+        sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["fallback"]
+    assert provenance[0]["version"] == earlier
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+    assert not any(f"{backend}/{requested}/gemm_perf.parquet" in path for path, _ in sources)
+    assert any("partial" in r.getMessage() and requested in r.getMessage() for r in caplog.records)
+
+
+def test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard(systems_root: Path) -> None:
+    """Scope guard: a family-layout primary can never be partial, because
+    resolve_op_data_path already skips partial family dirs — the admission
+    guard in _build_op_sources only ever fires for the legacy-layout
+    fallback path. Here the partial family dir is skipped upstream, so the
+    primary resolves to the (nonexistent) legacy-shaped path and keeps its
+    provenance record with exists=False, per the usual missing-primary
+    semantics."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["primary", "fallback"]
+    assert provenance[0]["exists"] is False  # legacy-shaped path, not the partial family file
+    assert f"gemm/{backend}/{requested}" not in provenance[0]["path"]
+    assert provenance[1]["version"] == earlier
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+
+
+# ---------------------------------------------------------------------------
 # data_provenance shape + content
 # ---------------------------------------------------------------------------
 

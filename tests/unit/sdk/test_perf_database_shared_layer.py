@@ -391,9 +391,11 @@ def test_fallback_emits_warning(env: Path, caplog: pytest.LogCaptureFixture) -> 
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database"):
         db = _build_db(env)  # HYBRID mode
-    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
-    fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
-    assert len(fallback_warnings) == 1
+        # The lazy GEMM.load_data (triggered by _gemm_lookup) emits the
+        # warning, so it must run while capture is active.
+        assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+        fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
+        assert len(fallback_warnings) == 1
 
 
 def test_same_framework_outranks_other_framework(env: Path) -> None:

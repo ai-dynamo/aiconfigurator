@@ -667,6 +667,15 @@ def _shared_layer_enabled(database_mode: str | None) -> bool:
 
 _STRICT_PROVENANCE_WARNED: set[tuple[str, str]] = set()
 
+# (sorted primary paths, backend) pairs that already passed
+# ``_check_strict_provenance_for_request`` with ``strict=True`` this process.
+# ``get_database()`` consults it on strict cache HITS: ``databases_cache`` can
+# hold worker-imported instances that were never request-validated (see
+# ``_store_loaded_database``), so a strict hit must validate before returning —
+# this memo keeps repeated strict hits cheap. Cleared wherever
+# ``databases_cache`` entries are invalidated (``unload_database``).
+_STRICT_VALIDATED_REQUESTS: set[tuple[tuple[str, ...], str]] = set()
+
 
 def _strict_provenance_enabled(strict_provenance: bool | None) -> bool:
     """Resolve the effective strict-provenance flag. An explicit bool wins;
@@ -689,10 +698,14 @@ def _warn_strict_provenance_once(kind: str, key: str, message: str) -> None:
 
 def _version_dir_data_filenames(version_path: str) -> list[str]:
     """Real perf-data filenames physically present in a version dir (excludes
-    dotfiles and the structured/legacy provenance marker files themselves)."""
+    dotfiles and the structured/legacy provenance marker files themselves).
+
+    A nonexistent dir is a legitimate "no files" answer; any other ``OSError``
+    (e.g. permission denied) propagates so ``_check_strict_provenance_coverage``
+    can fail closed instead of silently treating an unreadable dir as empty."""
     try:
         entries = os.listdir(version_path)
-    except Exception:
+    except (FileNotFoundError, NotADirectoryError):
         return []
     names = []
     for entry in entries:
@@ -723,7 +736,17 @@ def _check_strict_provenance_coverage(version_path: str, *, strict: bool, only_t
     if only_table is not None:
         stems = {only_table}
     else:
-        data_filenames = _version_dir_data_filenames(version_path)
+        try:
+            data_filenames = _version_dir_data_filenames(version_path)
+        except OSError as e:
+            message = (
+                f"{version_path}: cannot inspect perf-data files ({e}); strict provenance "
+                "cannot verify sidecar coverage (Collector V3 design §5/§7.4)"
+            )
+            if strict:
+                raise ValueError(message) from e
+            _warn_strict_provenance_once("unreadable-version-dir", version_path, message)
+            return
         if not data_filenames:
             return
         stems = {os.path.splitext(name)[0] for name in data_filenames}
@@ -922,13 +945,15 @@ def get_database(
             _version_dir_partial_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
         )
         if paths and not is_incomplete:
+            request_key = (tuple(sorted(paths)), backend)
             try:
                 database = databases_cache[cache_key][backend][version]
-                return database
             except KeyError:
                 logger.info(f"Loading database for {system=}, {backend=}, {version=}")
                 try:
                     _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=effective_strict)
+                    if effective_strict:
+                        _STRICT_VALIDATED_REQUESTS.add(request_key)
                     database = PerfDatabase(
                         system,
                         backend,
@@ -946,6 +971,15 @@ def get_database(
                         f"failed to load {system=}, {backend=}, {version=}, continuing searching",
                         exc_info=True,
                     )
+            else:
+                # Cache HIT: the entry may be a worker-imported instance that
+                # was never request-validated (``_store_loaded_database``
+                # inserts under a strict key without validating). Strict mode
+                # must fail closed here too, not just on the miss path above.
+                if effective_strict and request_key not in _STRICT_VALIDATED_REQUESTS:
+                    _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=True)
+                    _STRICT_VALIDATED_REQUESTS.add(request_key)
+                return database
         elif allow_missing_data:
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
@@ -1294,6 +1328,9 @@ def unload_database(system: str, backend: str, version: str) -> None:
 
     clear_all_op_caches()
     _cached_configured_database_view.cache_clear()
+    # A future get_database() for this triple must re-validate under strict
+    # mode; the memo is coarse (keyed by primary paths), so drop it wholesale.
+    _STRICT_VALIDATED_REQUESTS.clear()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -2205,6 +2242,11 @@ class PerfDatabase:
         `self.data_provenance[op_file_basename]` — see that attribute's
         docstring for the granularity contract.
 
+        An existing primary whose containing version dir is marked partial
+        (legacy-layout fallback only — the resolver already skips partial
+        family dirs) is refused entirely: no record, no source tuple, only a
+        warning; channels 2-4 still fill.
+
         Returns just the primary tuple (still recorded) when the shared layer
         is disabled, when the op file is framework-agnostic (nccl / oneccl),
         or when the op's primary path resolves under the `comm` family dir
@@ -2217,9 +2259,28 @@ class PerfDatabase:
         filter, same as reading the active backend's own file.
         """
         op_file_basename = op_filename_enum.value
-        records: list[dict[str, object]] = [
-            {"version": self.version, "path": primary_path, "channel": "primary", "ks_filter": None}
-        ]
+        records: list[dict[str, object]] = []
+        primary_version_dir = os.path.dirname(primary_path)
+        if os.path.isfile(primary_path) and _version_dir_partial_for_request(
+            primary_version_dir, system_data_root, strict=self.strict_provenance
+        ):
+            # Only the LEGACY-layout fallback can get here: resolve_op_data_path
+            # already skips partial FAMILY dirs, so a family-layout primary is
+            # never partial (pinned by test_reuse_ordering.py's
+            # test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard).
+            # Partial dirs are excluded from discovery and every reuse channel
+            # (design §5/§6) — refuse the primary too; channels 2-4 below still
+            # fill, and data_provenance keeps listing admitted sources only.
+            logger.warning(
+                "Not admitting primary source %s for %s: version dir %s is marked partial "
+                "(collection_meta.yaml status: partial, or legacy INCOMPLETE.txt); partial "
+                "dirs are excluded from data loading (Collector V3 design §5/§6).",
+                primary_path,
+                op_file_basename,
+                primary_version_dir,
+            )
+        else:
+            records.append({"version": self.version, "path": primary_path, "channel": "primary", "ks_filter": None})
 
         def _finish() -> list[tuple[str, Optional[set[str]]]]:
             self.data_provenance[op_file_basename] = [

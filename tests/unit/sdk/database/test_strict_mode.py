@@ -27,6 +27,7 @@ from Task 1).
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,10 @@ import yaml
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.perf_database import (
+    _STRICT_VALIDATED_REQUESTS,
     PerfDatabase,
+    _new_database_dict,
+    _store_loaded_database,
     _strict_provenance_enabled,
     databases_cache,
     get_database,
@@ -85,8 +89,10 @@ def systems_root(tmp_path: Path) -> Path:
 @pytest.fixture(autouse=True)
 def _clear_databases_cache():
     databases_cache.clear()
+    _STRICT_VALIDATED_REQUESTS.clear()
     yield
     databases_cache.clear()
+    _STRICT_VALIDATED_REQUESTS.clear()
 
 
 def _get_db(systems_root: Path, *, backend: str = "trtllm", version: str = "1.0.0", **kwargs):
@@ -583,6 +589,66 @@ def test_strict_load_then_non_strict_load_are_distinct_cache_entries(systems_roo
     # other mode's -- no eviction/overwrite across the strict boundary.
     assert _get_db(systems_root, strict_provenance=True) is strict_db
     assert _get_db(systems_root, strict_provenance=False) is non_strict_db
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit path still validates under strict mode (worker-imported entries)
+# ---------------------------------------------------------------------------
+
+
+def test_strict_cache_hit_validates_worker_imported_unvalidated_entry(systems_root: Path) -> None:
+    """``get_all_databases()`` imports worker-created databases via
+    ``_store_loaded_database`` under a strict cache key WITHOUT any request
+    validation (direct construction validates nothing, see
+    ``test_bare_construction_never_validates``). A later strict
+    ``get_database()`` call that hits that cache entry must still run
+    ``_check_strict_provenance_for_request`` and raise on the coverage gap,
+    not hand back the unvalidated instance."""
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")  # no sidecar
+
+    db = PerfDatabase("h100_sxm", "trtllm", "1.0.0", str(systems_root), strict_provenance=True)
+    _store_loaded_database(_new_database_dict(), ("h100_sxm", "trtllm", "1.0.0", str(systems_root)), db)
+
+    with pytest.raises(ValueError, match=r"no collection_meta\.yaml"):
+        _get_db(systems_root, strict_provenance=True)
+
+
+# ---------------------------------------------------------------------------
+# Unreadable version dir: strict fails closed instead of silently accepting
+# an empty file list (the pre-fix _version_dir_data_filenames swallowed
+# os.listdir failures entirely)
+# ---------------------------------------------------------------------------
+
+
+def _chmod_000_or_skip(path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("chmod 000 does not restrict root")
+    path.chmod(0o000)
+
+
+def test_strict_raises_on_unreadable_version_dir(systems_root: Path) -> None:
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")
+    version_dir = systems_root / "data/h100_sxm/gemm/trtllm/1.0.0"
+    _chmod_000_or_skip(version_dir)
+    try:
+        with pytest.raises(ValueError, match="cannot inspect perf-data files"):
+            _get_db(systems_root, strict_provenance=True)
+    finally:
+        version_dir.chmod(0o755)
+
+
+def test_non_strict_warns_on_unreadable_version_dir(systems_root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")
+    version_dir = systems_root / "data/h100_sxm/gemm/trtllm/1.0.0"
+    _chmod_000_or_skip(version_dir)
+    try:
+        with caplog.at_level(logging.WARNING):
+            db = _get_db(systems_root, strict_provenance=False)
+    finally:
+        version_dir.chmod(0o755)
+
+    assert db is not None
+    assert any("cannot inspect perf-data files" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
