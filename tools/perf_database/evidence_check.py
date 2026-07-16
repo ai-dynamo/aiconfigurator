@@ -20,9 +20,10 @@ it dodge any single reason's evidence (design §9: "combined reasons emit the
 union of requirements").
 
 Fail-closed: an unknown `reasons` value in the manifest, a malformed manifest
-or policy file, or a policy that cannot resolve an evidence system for a rule
-that needs one, all abort with a loud error and exit 1 — never a silent
-partial answer.
+or policy file, a changed entry's `systems` naming a system the policy's
+`system_generations` doesn't map to any SM generation, or a policy that
+cannot resolve an evidence system for a rule that needs one, all abort with a
+loud error and exit 1 — never a silent partial answer.
 
 Usage:
     evidence_check.py --manifest changed_ops.yaml [--policy PATH] [--out FILE]
@@ -70,7 +71,8 @@ class EvidenceManifestError(ValueError):
 @dataclass(frozen=True)
 class Policy:
     threshold_pct: float
-    evidence_systems: tuple[str, ...]  # resolved from evidence_systems{generation: system}, sorted+deduped
+    system_generations: dict[str, frozenset[str]]  # SM generation -> member systems (authored fleet map)
+    evidence_systems: dict[str, str]  # SM generation -> representative system, validated against system_generations
     rule_types: dict[str, str]  # reason -> requirement type name (authored in the policy file)
     exceptions_file: str
 
@@ -97,7 +99,8 @@ def load_policy(path: Path) -> Policy:
     if not isinstance(threshold_value, (int, float)) or isinstance(threshold_value, bool):
         raise EvidencePolicyError(f"evidence policy 'thresholds.parquet_diff_median_pct' must be a number: {path}")
 
-    evidence_systems = _resolve_evidence_systems(raw.get("evidence_systems"), path)
+    system_generations = _resolve_system_generations(raw.get("system_generations"), path)
+    evidence_systems = _resolve_evidence_systems(raw.get("evidence_systems"), system_generations, path)
 
     rules = raw.get("rules")
     if not isinstance(rules, dict):
@@ -116,32 +119,71 @@ def load_policy(path: Path) -> Policy:
 
     return Policy(
         threshold_pct=float(threshold_value),
+        system_generations=system_generations,
         evidence_systems=evidence_systems,
         rule_types=rule_types,
         exceptions_file=exceptions_file,
     )
 
 
-def _resolve_evidence_systems(raw_evidence_systems: Any, path: Path) -> tuple[str, ...]:
-    """{SM generation: system name} -> sorted, deduped system names.
+def _resolve_system_generations(raw_system_generations: Any, path: Path) -> dict[str, frozenset[str]]:
+    """{SM generation: [system, ...]} -> {SM generation: frozenset(system, ...)}.
 
-    Fails closed (distinctly from generic malformed-policy errors) when a
-    generation cannot be resolved to a concrete system: an empty mapping, or
-    a blank/non-string value for some generation.
+    Fails closed when the mapping is empty/malformed, or a generation's
+    system list is missing, empty, or contains a non-string/blank entry.
+    """
+    if not isinstance(raw_system_generations, dict) or not raw_system_generations:
+        raise EvidencePolicyError(
+            f"evidence policy 'system_generations' must be a non-empty mapping of "
+            f"SM generation -> [system, ...]: {path}"
+        )
+    resolved: dict[str, frozenset[str]] = {}
+    for generation, systems in raw_system_generations.items():
+        if (
+            not isinstance(systems, list)
+            or not systems
+            or not all(isinstance(system, str) and system.strip() for system in systems)
+        ):
+            raise EvidencePolicyError(
+                f"evidence policy 'system_generations.{generation}' must be a non-empty list of system names: {path}"
+            )
+        resolved[generation] = frozenset(systems)
+    return resolved
+
+
+def _resolve_evidence_systems(
+    raw_evidence_systems: Any, system_generations: dict[str, frozenset[str]], path: Path
+) -> dict[str, str]:
+    """{SM generation: representative system} -> validated mapping.
+
+    Fails closed (distinctly from generic malformed-policy errors) when: the
+    mapping is empty/malformed; a value is blank/non-string; a generation key
+    has no entry in `system_generations` (unresolved evidence_system); or the
+    representative is not itself a member of its own generation.
     """
     if not isinstance(raw_evidence_systems, dict) or not raw_evidence_systems:
         raise EvidencePolicyError(
             f"unresolved evidence_system: evidence policy 'evidence_systems' must be a non-empty "
             f"mapping of SM generation -> system: {path}"
         )
-    resolved: set[str] = set()
+    resolved: dict[str, str] = {}
     for generation, system in raw_evidence_systems.items():
         if not isinstance(system, str) or not system.strip():
             raise EvidencePolicyError(
                 f"unresolved evidence_system for generation {generation!r}: value must be a non-empty string: {path}"
             )
-        resolved.add(system)
-    return tuple(sorted(resolved))
+        if generation not in system_generations:
+            raise EvidencePolicyError(
+                f"unresolved evidence_system: evidence policy 'evidence_systems' generation {generation!r} "
+                f"has no entry in 'system_generations': {path}"
+            )
+        if system not in system_generations[generation]:
+            raise EvidencePolicyError(
+                f"unresolved evidence_system: evidence policy 'evidence_systems.{generation}' representative "
+                f"{system!r} is not a member of system_generations.{generation!r}: {path}"
+            )
+        resolved[generation] = system
+    return resolved
 
 
 # --------------------------------------------------------------------------
@@ -224,11 +266,43 @@ def _parse_changed_entry(item: Any, index: int, path: Path) -> ChangedEntry:
 # --------------------------------------------------------------------------
 
 
+def _touched_generations(entry: ChangedEntry, policy: Policy) -> set[str]:
+    """The SM generations `entry.systems` belong to, per policy `system_generations`.
+
+    Fail-closed: a system not mapped to any generation aborts loudly (design
+    review AIC-1219) instead of silently omitting it from the evidence scope.
+    """
+    generations: set[str] = set()
+    for system in entry.systems:
+        matches = [generation for generation, members in policy.system_generations.items() if system in members]
+        if not matches:
+            raise EvidencePolicyError(
+                f"changed_ops entry ({entry.framework}/{entry.family}): system {system!r} is not mapped to "
+                f"any SM generation in evidence policy 'system_generations'"
+            )
+        generations.update(matches)
+    return generations
+
+
 def _requirement_for(reason: str, entry: ChangedEntry, policy: Policy) -> dict[str, Any]:
     # case_plan is additive/GPU-cheap by design (§9 row 3): it never needs a
     # designated evidence system, unlike pin_version's declared-reuse spot
-    # bench or collector_code's before/after diff.
-    evidence_systems = () if reason == "case_plan" else policy.evidence_systems
+    # bench or collector_code's before/after diff. For those two, scope the
+    # evidence systems to the SM generations the entry's `systems` actually
+    # touch — demanding e.g. Hopper evidence for a Blackwell-only (nvfp4)
+    # family is both wasted and, per capabilities.yaml, sometimes impossible
+    # to satisfy.
+    if reason == "case_plan":
+        evidence_systems: tuple[str, ...] = ()
+    else:
+        touched = _touched_generations(entry, policy)
+        missing = touched - policy.evidence_systems.keys()
+        if missing:
+            raise EvidencePolicyError(
+                f"changed_ops entry ({entry.framework}/{entry.family}) touches SM generation(s) "
+                f"{sorted(missing)} with no representative in evidence policy 'evidence_systems'"
+            )
+        evidence_systems = tuple(sorted(policy.evidence_systems[generation] for generation in touched))
 
     requirement: dict[str, Any] = {
         "type": policy.rule_types[reason],

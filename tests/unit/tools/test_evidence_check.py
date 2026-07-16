@@ -7,8 +7,12 @@ Exercises the pure resolver (`resolve_requirements`) against fixture
 `changed_ops.py`-shaped manifests and a fixture `evidence_policy.yaml`: one
 test per rule in isolation, combined reasons (asserting the UNION of
 requirements, never a single "strictest" pick), the empty-changed shortcut,
-fail-closed behavior (unknown reason, malformed policy, unresolved evidence
-system, malformed manifest), and determinism (byte-identical reruns).
+generation-scoped evidence systems (AIC-1219 review fix: pin_version/
+collector_code only demand evidence from the SM generations a changed
+entry's `systems` actually touch), fail-closed behavior (unknown reason,
+malformed policy, unresolved evidence system, a `systems` entry unmapped to
+any generation, invalid `system_generations`/`evidence_systems` policy
+authoring, malformed manifest), and determinism (byte-identical reruns).
 
 One integration test runs the real `changed_ops.py` against the real repo
 (base=HEAD head=HEAD, which reports nothing changed) and feeds that manifest
@@ -58,7 +62,12 @@ def changed_ops_mod():
 POLICY_YAML = """schema_version: 1
 thresholds:
   parquet_diff_median_pct: 5
+system_generations:
+  ada: [l40s]
+  hopper: [h100_sxm, h200_sxm]
+  blackwell: [b200_sxm, gb200]
 evidence_systems:
+  ada: l40s
   hopper: h200_sxm
   blackwell: b200_sxm
 rules:
@@ -114,6 +123,9 @@ def _resolve(mod, tmp_path, policy_path, entries: list[dict]) -> list[dict]:
 
 class TestRuleAlone:
     def test_pin_version(self, mod, tmp_path, policy_path):
+        # default entry systems (h200_sxm, b200_sxm, gb200) span BOTH the
+        # hopper and blackwell generations, so both representatives are
+        # required — not the full evidence_systems set regardless of scope.
         [item] = _resolve(mod, tmp_path, policy_path, [_entry(reasons=("pin_version",))])
         assert item["framework"] == "sglang"
         assert item["family"] == "attention"
@@ -126,13 +138,17 @@ class TestRuleAlone:
         assert "threshold" not in req
 
     def test_collector_code(self, mod, tmp_path, policy_path):
+        # systems=[h200_sxm] touches ONLY the hopper generation, so only the
+        # hopper representative is required — asserting the AIC-1219 review
+        # fix: the full evidence_systems set is no longer emitted regardless
+        # of which generations the entry's systems actually span.
         entries = [_entry(family="moe", reasons=("collector_code",), tables=["moe_perf"], systems=["h200_sxm"])]
         [item] = _resolve(mod, tmp_path, policy_path, entries)
         [req] = item["requirements"]
         assert req["type"] == "before_after_diff"
         assert req["tables"] == ["moe_perf"]
         assert req["systems"] == ["h200_sxm"]
-        assert req["evidence_systems"] == ["b200_sxm", "h200_sxm"]
+        assert req["evidence_systems"] == ["h200_sxm"]
         assert req["threshold"] == 5
 
     def test_case_plan(self, mod, tmp_path, policy_path):
@@ -169,6 +185,56 @@ class TestCombinedReasons:
         assert types == ["recollect_or_declared_reuse", "before_after_diff", "collect_new_cases_only"]
         # every reason's requirement is fully present — none dropped or merged
         assert len(item["requirements"]) == 3
+
+
+# --------------------------------------------------------------------------
+# generation-scoped evidence systems (AIC-1219 review fix): pin_version and
+# collector_code must demand evidence only from the SM generations the
+# entry's `systems` actually touch, never the full evidence_systems set.
+# --------------------------------------------------------------------------
+
+
+class TestGenerationScoping:
+    def test_hopper_only_entry_uses_only_hopper_representative(self, mod, tmp_path, policy_path):
+        entries = [_entry(reasons=("pin_version",), systems=["h100_sxm", "h200_sxm"])]
+        [item] = _resolve(mod, tmp_path, policy_path, entries)
+        [req] = item["requirements"]
+        assert req["evidence_systems"] == ["h200_sxm"]
+
+    def test_blackwell_only_entry_uses_only_blackwell_representative(self, mod, tmp_path, policy_path):
+        entries = [_entry(reasons=("pin_version",), systems=["b200_sxm", "gb200"])]
+        [item] = _resolve(mod, tmp_path, policy_path, entries)
+        [req] = item["requirements"]
+        assert req["evidence_systems"] == ["b200_sxm"]
+
+    def test_mixed_generation_entry_uses_both_representatives(self, mod, tmp_path, policy_path):
+        entries = [_entry(reasons=("pin_version",), systems=["h200_sxm", "b200_sxm"])]
+        [item] = _resolve(mod, tmp_path, policy_path, entries)
+        [req] = item["requirements"]
+        assert req["evidence_systems"] == ["b200_sxm", "h200_sxm"]
+
+    def test_ada_only_entry_uses_only_ada_representative(self, mod, tmp_path, policy_path):
+        # l40s (ada) has no hopper/blackwell kin in this entry, so the
+        # requirement must not drag in h200_sxm/b200_sxm.
+        entries = [_entry(reasons=("pin_version",), systems=["l40s"])]
+        [item] = _resolve(mod, tmp_path, policy_path, entries)
+        [req] = item["requirements"]
+        assert req["evidence_systems"] == ["l40s"]
+
+
+# --------------------------------------------------------------------------
+# fail-closed: a changed entry's system not mapped to any SM generation
+# --------------------------------------------------------------------------
+
+
+class TestUnmappedSystem:
+    def test_resolve_requirements_raises(self, mod, tmp_path, policy_path):
+        entries = [_entry(reasons=("pin_version",), systems=["mystery_gpu"])]
+        manifest_path = _write_manifest(tmp_path, entries)
+        policy = mod.load_policy(policy_path)
+        changed = mod.load_manifest(manifest_path)
+        with pytest.raises(mod.EvidencePolicyError, match=r"mystery_gpu.*not mapped to any SM generation"):
+            mod.resolve_requirements(policy, changed)
 
 
 # --------------------------------------------------------------------------
@@ -270,6 +336,7 @@ class TestUnresolvedEvidenceSystem:
     def test_load_policy_raises(self, mod, tmp_path, evidence_systems_block):
         policy_yaml = (
             "schema_version: 1\nthresholds: {parquet_diff_median_pct: 5}\n"
+            "system_generations: {hopper: [h200_sxm]}\n"
             + evidence_systems_block
             + "rules: {pin_version: {requirement: r}, collector_code: {requirement: r}, case_plan: {requirement: r}}\n"
             "exceptions_file: e.yaml\n"
@@ -277,6 +344,42 @@ class TestUnresolvedEvidenceSystem:
         path = tmp_path / "evidence_policy.yaml"
         path.write_text(policy_yaml)
         with pytest.raises(mod.EvidencePolicyError, match="unresolved evidence_system"):
+            mod.load_policy(path)
+
+
+# --------------------------------------------------------------------------
+# fail-closed: policy authoring errors between system_generations and
+# evidence_systems (AIC-1219 review fix's validate-at-load invariants)
+# --------------------------------------------------------------------------
+
+
+class TestInvalidGenerationPolicy:
+    def test_representative_not_in_its_own_generation_raises(self, mod, tmp_path):
+        # b200_sxm is a blackwell system, not hopper's — an authoring bug.
+        policy_yaml = (
+            "schema_version: 1\nthresholds: {parquet_diff_median_pct: 5}\n"
+            "system_generations: {hopper: [h200_sxm], blackwell: [b200_sxm]}\n"
+            "evidence_systems: {hopper: b200_sxm, blackwell: b200_sxm}\n"
+            "rules: {pin_version: {requirement: r}, collector_code: {requirement: r}, case_plan: {requirement: r}}\n"
+            "exceptions_file: e.yaml\n"
+        )
+        path = tmp_path / "evidence_policy.yaml"
+        path.write_text(policy_yaml)
+        with pytest.raises(mod.EvidencePolicyError, match="not a member of system_generations"):
+            mod.load_policy(path)
+
+    def test_evidence_systems_key_without_generation_raises(self, mod, tmp_path):
+        # 'ampere' has no entry in system_generations at all.
+        policy_yaml = (
+            "schema_version: 1\nthresholds: {parquet_diff_median_pct: 5}\n"
+            "system_generations: {hopper: [h200_sxm]}\n"
+            "evidence_systems: {hopper: h200_sxm, ampere: a100_sxm}\n"
+            "rules: {pin_version: {requirement: r}, collector_code: {requirement: r}, case_plan: {requirement: r}}\n"
+            "exceptions_file: e.yaml\n"
+        )
+        path = tmp_path / "evidence_policy.yaml"
+        path.write_text(policy_yaml)
+        with pytest.raises(mod.EvidencePolicyError, match="no entry in 'system_generations'"):
             mod.load_policy(path)
 
 
