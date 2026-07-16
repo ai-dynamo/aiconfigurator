@@ -223,6 +223,40 @@ def test_unparseable_sibling_version_excluded_and_warns_once(
 
 
 # ---------------------------------------------------------------------------
+# Declared donor dedup against fallback (AIC-1503 PR4 task 1, FIX 1)
+# ---------------------------------------------------------------------------
+
+
+def test_declared_donor_not_duplicated_in_fallback(systems_root: Path) -> None:
+    """The dominant real pattern (180 of 479 committed reuse.yaml entries):
+    reuse.yaml declares a donor that points BACKWARD at an earlier sibling
+    version which also physically exists on disk. That donor must be
+    admitted exactly once, via ``declared_reuse`` — not a second time via
+    the fallback nearest-earlier scan, which would list the same physical
+    source under two channels (doubling I/O and corrupting
+    data_provenance)."""
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{donor}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", donor)]},
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    paths = [e["path"] for e in provenance]
+    assert len(paths) == len(set(paths)), f"donor path listed more than once: {paths}"
+    donor_entries = [e for e in provenance if e["version"] == donor]
+    assert len(donor_entries) == 1
+    assert donor_entries[0]["channel"] == "declared_reuse"
+    assert [path for path, _ in sources] == paths
+
+
+# ---------------------------------------------------------------------------
 # Newer-only-via-declaration + full channel order
 # ---------------------------------------------------------------------------
 
@@ -339,6 +373,28 @@ def test_comm_family_custom_allreduce_gets_primary_only(systems_root: Path) -> N
     assert len(sources) == 1
     assert sources[0][0].endswith(f"comm/{backend}/{requested}/custom_allreduce_perf.parquet")
     assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+
+
+def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None:
+    """Pins the documented AIC-1503 PR4 task-1 FIX-2 exception
+    (``_op_file_family_from_path`` docstring): design §6.5 rule 5's comm
+    hard-exclusion is detected structurally off the primary path's family
+    component, which only exists in the family-first layout. A LEGACY-shaped
+    comm op (3-component path, no ``comm/`` family dir) therefore does NOT
+    get the exclusion applied — it keeps pre-V3 sibling-reuse behavior for
+    as long as its tree stays legacy-shaped. Contrast with
+    ``test_comm_family_custom_allreduce_gets_primary_only`` above, which
+    pins the family-shaped case (exclusion DOES apply, primary-only)."""
+    backend, requested, older = "trtllm", "1.3.0", "1.2.0"
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{older}/custom_allreduce_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
+
+    assert len(sources) == 2
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary", "fallback"]
+    assert _versions(db, "custom_allreduce_perf.parquet") == [requested, older]
 
 
 def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:

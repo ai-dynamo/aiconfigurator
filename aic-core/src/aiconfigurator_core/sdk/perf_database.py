@@ -1606,6 +1606,23 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
     paths (``<data_dir>/<backend>/<version>/<file>``, 3 components) or
     otherwise-unresolved paths — comm exclusion then simply does not trigger;
     detection is deliberately primary-path-only (see ``_build_op_sources``).
+
+    Deliberate exception, not a bug (AIC-1503 PR4 task 1, FIX 2): design
+    §6.5 rule 5's "comm" family is a structural concept that only exists in
+    the family-first layout. A comm op file (custom_allreduce_perf.parquet,
+    trtllm_alltoall_perf.parquet, wideep_deepep_*_perf.parquet, ...) resolved
+    under a legacy-shaped 3-component path has no family component to
+    detect, so this function returns ``None`` for it and `_build_op_sources`
+    does NOT apply the comm hard exclusion — that op keeps the pre-V3
+    sibling-reuse behavior for as long as its tree stays legacy-shaped. This
+    was adjudicated deliberately over the alternative of recognizing these
+    op files by table-name identity: that would smuggle catalog knowledge
+    ("which tables are comm") into a loader that must stay catalog-free. The
+    real committed tree is fully family-first today (zero live exposure);
+    this only matters for the transition window if a legacy-shaped tree is
+    ever loaded again. Pinned by
+    ``test_reuse_ordering.py::test_legacy_layout_comm_op_keeps_pre_v3_siblings``
+    — any future change to this behavior must update that test deliberately.
     """
     try:
         rel = os.path.relpath(primary_path, system_data_root)
@@ -1614,6 +1631,10 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
     parts = rel.split(os.sep)
     if len(parts) == 4 and parts[0] not in KNOWN_BACKEND_DIRS:
         return parts[0]
+    # Legacy-layout (3-component) or otherwise-unresolved path: no family
+    # component exists structurally, so we can't detect "comm" here. This is
+    # the transition-window exception described above, not a bug — legacy
+    # comm op files simply keep pre-V3 sibling-reuse behavior.
     return None
 
 
@@ -1984,6 +2005,7 @@ class PerfDatabase:
 
         # Channel 2 (design §6.3): declared donors from the REQUESTED version
         # dir's reuse.yaml, in file order.
+        declared_donor_versions: set[str] = set()
         for reuse_entry in _requested_version_reuse_entries(
             system_data_root, backend_lower, self.version, op_file_basename
         ):
@@ -2000,15 +2022,21 @@ class PerfDatabase:
                     "ks_filter": None,
                 }
             )
+            declared_donor_versions.add(reuse_entry["from_version"])
 
         # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
         # sibling versions can't be ordered against the requested version, so
         # they're excluded here (logged once) — an explicit declaration still
-        # works for them.
+        # works for them. Versions already admitted as declared donors above
+        # are excluded too — the dominant real reuse.yaml pattern points
+        # BACKWARD at an earlier sibling, and without this exclusion that same
+        # physical source would be listed twice (channels declared_reuse AND
+        # fallback), doubling I/O and duplicating data_provenance rows.
         requested_parsed = parse_support_matrix_version(self.version)
         if requested_parsed is not None:
             sibling_versions = {v for v, _ in _iter_backend_version_dirs(system_data_root, backend_lower)}
             sibling_versions.discard(self.version)
+            sibling_versions -= declared_donor_versions
             earlier_versions = []
             for sibling_version in sibling_versions:
                 parsed = parse_support_matrix_version(sibling_version)
