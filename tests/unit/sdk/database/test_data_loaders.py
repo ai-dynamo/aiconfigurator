@@ -55,6 +55,7 @@ class DummyPerfDatabase:
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
         self.enable_shared_layer = database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
+        self.strict_provenance = False
 
 
 def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
