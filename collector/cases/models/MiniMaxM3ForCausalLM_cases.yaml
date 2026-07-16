@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: MiniMaxM3ForCausalLM
+model_path: MiniMaxAI/MiniMax-M3
+model_paths:
+  - MiniMaxAI/MiniMax-M3
+include_base: true
+description: >
+  MiniMax-M3 model-centric collection plan. Base-op coverage only for now:
+  the MSA attention module has no collector op yet, so MSA-dependent support
+  stays HYBRID/estimated until that op and its model shapes are authored.
