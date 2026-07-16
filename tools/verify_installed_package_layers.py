@@ -71,6 +71,8 @@ def _verify_core(*, exercise_engine: bool) -> str:
         resources / "model_configs" / "meta-llama--Meta-Llama-3.1-8B_config.json",
         resources / "systems" / "h100_sxm.yaml",
         resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "gemm_perf.parquet",
+        resources / "systems" / "data" / "l40s" / "gemm" / "vllm" / "0.22.0" / "reuse.yaml",
+        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "collection_meta.yaml",
     )
     missing = [str(path) for path in required_resources if not path.is_file()]
     if missing:
