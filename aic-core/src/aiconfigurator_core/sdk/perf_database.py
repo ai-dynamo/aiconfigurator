@@ -907,7 +907,7 @@ def get_database(
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
             continue
-        cache_key = (systems_root, system, shared_flag)
+        cache_key = (systems_root, system, shared_flag, effective_strict)
         try:
             with open(system_yaml_path) as f:
                 system_spec = yaml.load(f, Loader=yaml.SafeLoader)
@@ -1226,7 +1226,7 @@ def _store_loaded_database(
     # that identity when importing a database from a worker; putting it in the
     # formula-only slot would make a later EMPIRICAL lookup reuse shared rows.
     shared_flag = database.enable_shared_layer
-    databases_cache[(systems_root, system, shared_flag)][backend][version] = database
+    databases_cache[(systems_root, system, shared_flag, database.strict_provenance)][backend][version] = database
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
@@ -1239,7 +1239,7 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
     """
     seen_database_ids: set[int] = set()
     for cache_key, systems_cache in databases_cache.items():
-        _, cached_system, _ = cache_key
+        _, cached_system, _, _ = cache_key
         if cached_system != system:
             continue
 
@@ -1272,7 +1272,7 @@ def unload_database(system: str, backend: str, version: str) -> None:
     pop.
     """
     for cache_key in list(databases_cache.keys()):
-        _, cached_system, _ = cache_key
+        _, cached_system, _, _ = cache_key
         if cached_system != system:
             continue
 

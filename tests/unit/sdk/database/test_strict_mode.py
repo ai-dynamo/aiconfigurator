@@ -465,6 +465,62 @@ def test_get_database_view_threads_strict_provenance(systems_root: Path) -> None
 
 
 # ---------------------------------------------------------------------------
+# Cache keying: strict_provenance must not collide with non-strict entries
+# (AIC-1503 review defect: databases_cache was keyed by
+# (systems_root, system, shared_flag) only -- not by strict_provenance -- so
+# a strict call for the same (system, backend, version) could silently
+# return an earlier, unvalidated non-strict instance instead of
+# re-validating and raising.)
+# ---------------------------------------------------------------------------
+
+
+def test_non_strict_load_then_strict_call_does_not_reuse_stale_cache_and_raises(
+    systems_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")
+
+    with caplog.at_level(logging.WARNING):
+        non_strict_db = _get_db(systems_root, strict_provenance=False)
+    assert non_strict_db is not None
+    assert non_strict_db.strict_provenance is False
+
+    # Same (system, backend, version) triple, strict this time: must
+    # re-validate against the coverage-gap tree and raise -- not return the
+    # cached non-strict instance.
+    with pytest.raises(ValueError, match=r"no collection_meta\.yaml"):
+        _get_db(systems_root, strict_provenance=True)
+
+
+def test_strict_load_then_non_strict_load_are_distinct_cache_entries(systems_root: Path) -> None:
+    """Control: a fully-covered tree loads cleanly under both modes; each
+    resolves to its own cache entry and both remain independently usable."""
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        "data/h100_sxm/gemm/trtllm/1.0.0/collection_meta.yaml",
+        {
+            "schema_version": 1,
+            "runtime": {"framework": "trtllm", "version": "1.0.0"},
+            "tables": {"gemm_perf": {"status": "complete"}},
+        },
+    )
+
+    strict_db = _get_db(systems_root, strict_provenance=True)
+    non_strict_db = _get_db(systems_root, strict_provenance=False)
+
+    assert strict_db is not None
+    assert non_strict_db is not None
+    assert strict_db is not non_strict_db
+    assert strict_db.strict_provenance is True
+    assert non_strict_db.strict_provenance is False
+
+    # Re-requesting each mode returns its own cached instance, not the
+    # other mode's -- no eviction/overwrite across the strict boundary.
+    assert _get_db(systems_root, strict_provenance=True) is strict_db
+    assert _get_db(systems_root, strict_provenance=False) is non_strict_db
+
+
+# ---------------------------------------------------------------------------
 # Real-tree smoke: post-PR3 tree is fully covered, strict ON loads clean
 # ---------------------------------------------------------------------------
 
