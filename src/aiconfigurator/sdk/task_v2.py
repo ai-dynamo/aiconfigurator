@@ -598,6 +598,11 @@ class Task:
     encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
     encoder_batch_candidates: list[int] | None = None  # None -> default schedule
     encoder_latency_correction: float = 1.0
+    # Encode workers may run on a different system (GPU type) than the
+    # P/agg side (hetero encoder, mirroring prefill_/decode_system_name);
+    # backend and version follow the prefill/agg side.  None inherits the
+    # P/agg system too.
+    encoder_system_name: str | None = None
 
     # ====== 8.5 Predictor strategy ======
     # Optional Predictor that decides how each single config point is
@@ -1501,6 +1506,17 @@ class Task:
             rt.batch_size = batch_size
         return rt
 
+    def _prefill_effective_isl(self) -> int:
+        """Text ISL + per-request vision context tokens (plain ISL for
+        text-only workloads or when the model config cannot be resolved)."""
+        from aiconfigurator.sdk.backends.base_backend import BaseBackend
+
+        try:
+            enc_cfg = get_model_config_from_model_path(self.primary_model_path).get("extra_params")
+        except Exception:
+            return self.isl
+        return self.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, self.build_runtime_config())
+
     def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
         """Build a ModelConfig template for the given role (parallelism unset).
 
@@ -1602,9 +1618,11 @@ class Task:
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         # EPD is switched on explicitly and only by enable_epd (both serving
-        # modes); the encoder candidate lists are pure search-space knobs.
-        if (self.encoder_tp_candidates or self.encoder_batch_candidates) and not self.enable_epd:
-            raise ValueError("encoder_tp_candidates/encoder_batch_candidates require enable_epd=True.")
+        # modes); every other encoder_* field is a pure search-space /
+        # placement knob and must not act as an implicit switch.
+        encoder_knobs_set = self.encoder_tp_candidates or self.encoder_batch_candidates or self.encoder_system_name
+        if encoder_knobs_set and not self.enable_epd:
+            raise ValueError("encoder_* settings require enable_epd=True.")
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":
@@ -1928,7 +1946,7 @@ class Task:
     # sweep.py kwargs builders
     # =====================================================================
 
-    def sweep_agg_kwargs(self, *, database) -> dict[str, Any]:
+    def sweep_agg_kwargs(self, *, database, encoder_database=None) -> dict[str, Any]:
         """Return the exact kwargs needed for sweep.sweep_agg.
 
         Caller is responsible for loading the perf database (so it can be
@@ -1954,9 +1972,10 @@ class Task:
             "encoder_tp_list": self.encoder_tp_candidates,
             "encoder_batch_list": self.encoder_batch_candidates,
             "encoder_latency_correction": self.encoder_latency_correction,
+            "encoder_database": encoder_database,
         }
 
-    def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
+    def sweep_disagg_kwargs(self, *, prefill_database, decode_database, encoder_database=None) -> dict[str, Any]:
         """Return the exact kwargs needed for sweep.sweep_disagg."""
         if self.serving_mode != "disagg":
             raise ValueError(f"sweep_disagg_kwargs requires serving_mode='disagg', got {self.serving_mode!r}")
@@ -1998,7 +2017,12 @@ class Task:
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
-            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
+            # Token budget for prefill_max_batch_size requests: VL requests
+            # spend effective-ISL tokens (text + vision) of the engine's
+            # max_num_tokens each, so the budget is derived from it too --
+            # sweep_disagg divides by the same effective ISL, preserving the
+            # user's batch intent for VL and text alike.
+            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self._prefill_effective_isl(),
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,
             "decode_num_worker_list": decode_worker_list,
@@ -2011,6 +2035,7 @@ class Task:
             "encoder_tp_list": self.encoder_tp_candidates,
             "encoder_batch_list": self.encoder_batch_candidates,
             "encoder_latency_correction": self.encoder_latency_correction,
+            "encoder_database": encoder_database,
         }
 
     def sweep_afd_kwargs(self, *, database) -> dict[str, Any]:
@@ -2118,8 +2143,9 @@ class Task:
             if autoscale:
                 raise ValueError("autoscale is only supported in disagg mode")
             database = self._load_database(self.system_name, self.backend_name, self.backend_version)
+            encoder_database = self._load_encoder_database(self.backend_name, self.backend_version)
             return sweep_agg(
-                **self.sweep_agg_kwargs(database=database),
+                **self.sweep_agg_kwargs(database=database, encoder_database=encoder_database),
                 predictor=self.predictor,
                 speculative_profile=self.build_speculative_profile(),
             )
@@ -2138,13 +2164,27 @@ class Task:
             decode_database = self._load_database(
                 self.decode_system_name, self.decode_backend_name, self.decode_backend_version
             )
+            encoder_database = self._load_encoder_database(self.prefill_backend_name, self.prefill_backend_version)
             return sweep_disagg(
-                **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
+                **self.sweep_disagg_kwargs(
+                    prefill_database=prefill_database,
+                    decode_database=decode_database,
+                    encoder_database=encoder_database,
+                ),
                 autoscale=autoscale,
                 predictor=self.predictor,
                 speculative_profile=self.build_speculative_profile(),
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+
+    def _load_encoder_database(self, default_backend: str, default_version: str | None):
+        """Load the encode-pool perf DB when EPD places it on its own system
+        (GPU type); backend/version follow the P/agg side.  None when EPD is
+        off or no encoder system is set -- the sweep then reuses the
+        P/agg-side database."""
+        if not (self.enable_epd and self.encoder_system_name):
+            return None
+        return self._load_database(self.encoder_system_name, default_backend, default_version)
 
     # =====================================================================
     # Single-point evaluation (subsumes cli_estimate)
