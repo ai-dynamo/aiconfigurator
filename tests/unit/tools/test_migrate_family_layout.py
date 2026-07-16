@@ -3,17 +3,21 @@
 
 """Unit tests for tools/perf_database/migrate_family_layout.py.
 
-Builds synthetic legacy-layout trees inside a real `git init` repo under
-tmp_path (the script shells out to `git mv`/`git rm`/`git add`), and exercises
-each rule (catalog lookup, table move, SHARED_LAYER_REUSE.txt replication
-scope, INCOMPLETE.txt handling, empty-dir cleanup) plus the plan/execute/
-verify CLI modes and the fail-closed abort paths.
+Builds synthetic legacy-layout trees under tmp_path and exercises each rule
+(catalog lookup, table move, SHARED_LAYER_REUSE.txt replication scope,
+INCOMPLETE.txt handling, empty-dir cleanup) plus the plan/execute/verify CLI
+modes and the fail-closed abort paths. scan/plan/verify are pure filesystem
+and use the plain `tree` fixture; only the execute-path tests need the `repo`
+fixture (a real `git init` repo — the script shells out to `git mv`/`git rm`/
+`git add`) and skip where the git binary is unavailable (e.g. the CI unit-test
+container).
 """
 
 from __future__ import annotations
 
 import importlib.util
 import logging
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +25,11 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.unit
+
+requires_git = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="execute path shells out to git mv/rm/add; git binary not on PATH",
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODULE_PATH = REPO_ROOT / "tools" / "perf_database" / "migrate_family_layout.py"
@@ -44,6 +53,12 @@ def family_map(mod):
 @pytest.fixture
 def family_set(family_map):
     return set(family_map.values())
+
+
+@pytest.fixture
+def tree(tmp_path):
+    """A plain synthetic tree root for the pure-filesystem scan/plan/verify paths."""
+    return tmp_path
 
 
 @pytest.fixture
@@ -161,10 +176,9 @@ class TestCleanupEmptyDirs:
 
 
 class TestScanAndPlan:
-    def test_normal_move_plan_line(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+    def test_normal_move_plan_line(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         assert scan.moves == [
             mod.TableMove(
                 src=Path("h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet"),
@@ -178,23 +192,21 @@ class TestScanAndPlan:
             "# manifest: gemm_perf.parquet=1",
         ]
 
-    def test_pseudo_backend_move(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/nccl/2.23/nccl_perf.parquet")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+    def test_pseudo_backend_move(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/nccl/2.23/nccl_perf.parquet")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         assert scan.moves[0].dst == Path("h200_sxm/comm/nccl/2.23/nccl_perf.parquet")
 
-    def test_plan_is_deterministic_and_sorted(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/moe_perf.parquet")
-        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _touch(repo, "b200_sxm/sglang/0.5.12/gemm_perf.parquet")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+    def test_plan_is_deterministic_and_sorted(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/trtllm/1.3.0rc15/moe_perf.parquet")
+        _touch(tree, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(tree, "b200_sxm/sglang/0.5.12/gemm_perf.parquet")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         lines = mod.render_plan(scan)
         move_lines = [ln for ln in lines if ln.startswith("git mv")]
         assert move_lines == sorted(move_lines)
         # Re-scanning must produce byte-identical output — no iteration-order flakiness.
-        scan2 = mod.scan_legacy_tree(repo, family_map, family_set)
+        scan2 = mod.scan_legacy_tree(tree, family_map, family_set)
         assert mod.render_plan(scan2) == lines
 
 
@@ -202,23 +214,21 @@ class TestScanAndPlan:
 
 
 class TestSharedLayerReuseMarker:
-    def test_replicates_into_other_version_families_excluding_own(self, mod, family_map, family_set, repo):
+    def test_replicates_into_other_version_families_excluding_own(self, mod, family_map, family_set, tree):
         # a100_sxm/trtllm: v1.0.0 has real gemm data; v1.3.0rc15 is a reuse slot that
         # also happens to carry its own moe data. Scope must come from v1.0.0 only.
-        _touch(repo, "a100_sxm/trtllm/1.0.0/gemm_perf.parquet")
-        _touch(repo, "a100_sxm/trtllm/1.3.0rc15/moe_perf.parquet")
-        _touch(repo, "a100_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt", b"lfs-pointer")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+        _touch(tree, "a100_sxm/trtllm/1.0.0/gemm_perf.parquet")
+        _touch(tree, "a100_sxm/trtllm/1.3.0rc15/moe_perf.parquet")
+        _touch(tree, "a100_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt", b"lfs-pointer")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         [action] = [a for a in scan.marker_actions if a.marker == mod.SHARED_LAYER_REUSE]
         assert action.src == Path("a100_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt")
         assert action.targets == (Path("a100_sxm/gemm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt"),)
 
-    def test_marker_only_dropped_when_no_sibling_versions(self, mod, family_map, family_set, repo, caplog):
-        _touch(repo, "l40s/vllm/0.22.0/SHARED_LAYER_REUSE.txt")
-        _track(repo)
+    def test_marker_only_dropped_when_no_sibling_versions(self, mod, family_map, family_set, tree, caplog):
+        _touch(tree, "l40s/vllm/0.22.0/SHARED_LAYER_REUSE.txt")
         with caplog.at_level(logging.WARNING):
-            scan = mod.scan_legacy_tree(repo, family_map, family_set)
+            scan = mod.scan_legacy_tree(tree, family_map, family_set)
         [action] = scan.marker_actions
         assert action.targets == ()
         assert "dropped" in action.reason
@@ -229,22 +239,20 @@ class TestSharedLayerReuseMarker:
 
 
 class TestIncompleteMarker:
-    def test_replicates_into_own_data_families(self, mod, family_map, family_set, repo):
-        _touch(repo, "rtx_pro_6000_server/vllm/0.14.0/moe_perf.parquet")
-        _touch(repo, "rtx_pro_6000_server/vllm/0.14.0/INCOMPLETE.txt", b"Partial collector bring-up data only.")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+    def test_replicates_into_own_data_families(self, mod, family_map, family_set, tree):
+        _touch(tree, "rtx_pro_6000_server/vllm/0.14.0/moe_perf.parquet")
+        _touch(tree, "rtx_pro_6000_server/vllm/0.14.0/INCOMPLETE.txt", b"Partial collector bring-up data only.")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         [action] = [a for a in scan.marker_actions if a.marker == mod.INCOMPLETE]
         assert action.targets == (Path("rtx_pro_6000_server/moe/vllm/0.14.0/INCOMPLETE.txt"),)
 
-    def test_marker_only_dropped_and_logged(self, mod, family_map, family_set, repo, caplog):
+    def test_marker_only_dropped_and_logged(self, mod, family_map, family_set, tree, caplog):
         """Hypothetical — no real marker-only INCOMPLETE dir exists in the tree today
         (all 4 real INCOMPLETE.txt dirs carry data files alongside the marker; e.g.
         gb300/vllm/0.14.0 has 5 parquet files + INCOMPLETE.txt, not a marker-only case)."""
-        _touch(repo, "h200_sxm/vllm/0.0.0test/INCOMPLETE.txt", b"Partial collector bring-up data only.")
-        _track(repo)
+        _touch(tree, "h200_sxm/vllm/0.0.0test/INCOMPLETE.txt", b"Partial collector bring-up data only.")
         with caplog.at_level(logging.WARNING):
-            scan = mod.scan_legacy_tree(repo, family_map, family_set)
+            scan = mod.scan_legacy_tree(tree, family_map, family_set)
         [action] = scan.marker_actions
         assert action.marker == mod.INCOMPLETE
         assert action.targets == ()
@@ -255,6 +263,7 @@ class TestIncompleteMarker:
 # --- execute_plan: real git mv / git add / git rm ---------------------------------
 
 
+@requires_git
 class TestExecutePlan:
     def test_execute_moves_files_and_cleans_up_empty_dirs(self, mod, family_map, family_set, repo):
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet", b"gemm-bytes")
@@ -287,6 +296,7 @@ class TestExecutePlan:
 
 
 class TestVerify:
+    @requires_git
     def test_verify_passes_after_execute(self, mod, family_map, family_set, repo):
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
         _touch(repo, "h200_sxm/nccl/2.23/nccl_perf.parquet")
@@ -295,6 +305,7 @@ class TestVerify:
         mod.execute_plan(repo, scan)
         assert mod.verify_tree(repo, family_map, family_set) == []
 
+    @requires_git
     def test_verify_fails_on_stray_legacy_parquet(self, mod, family_map, family_set, repo):
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
         _track(repo)
@@ -309,35 +320,30 @@ class TestVerify:
         assert errors
         assert any("legacy-shaped" in e for e in errors)
 
-    def test_verify_fails_on_stray_legacy_marker(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _track(repo)
-        assert mod.verify_tree(repo, family_map, family_set) == []
+    def test_verify_fails_on_stray_legacy_marker(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        assert mod.verify_tree(tree, family_map, family_set) == []
 
         # Plant a stray legacy-level (marker-only, no sibling data file) SHARED_LAYER_REUSE.txt.
-        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt")
-        _track(repo)
-        errors = mod.verify_tree(repo, family_map, family_set)
+        _touch(tree, "h200_sxm/trtllm/1.3.0rc15/SHARED_LAYER_REUSE.txt")
+        errors = mod.verify_tree(tree, family_map, family_set)
         assert errors
         assert any("legacy-shaped markers remain" in e for e in errors)
 
-    def test_verify_fails_on_family_dir_outside_catalog(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _track(repo)
-        assert mod.verify_tree(repo, family_map, family_set) == []
+    def test_verify_fails_on_family_dir_outside_catalog(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        assert mod.verify_tree(tree, family_map, family_set) == []
 
         # Plant a top-level dir that is neither a known legacy backend dir nor a catalog family.
-        _touch(repo, "h200_sxm/not_a_real_family/vllm/1.0.0/moe_perf.parquet")
-        _track(repo)
-        errors = mod.verify_tree(repo, family_map, family_set)
+        _touch(tree, "h200_sxm/not_a_real_family/vllm/1.0.0/moe_perf.parquet")
+        errors = mod.verify_tree(tree, family_map, family_set)
         assert errors
         assert any("not_a_real_family" in e for e in errors)
 
-    def test_verify_fails_on_table_under_wrong_family(self, mod, family_map, family_set, repo):
+    def test_verify_fails_on_table_under_wrong_family(self, mod, family_map, family_set, tree):
         # moe_perf.parquet's catalog family is "moe", not "gemm".
-        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/moe_perf.parquet")
-        _track(repo)
-        errors = mod.verify_tree(repo, family_map, family_set)
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/moe_perf.parquet")
+        errors = mod.verify_tree(tree, family_map, family_set)
         assert errors
         assert any("wrong family" in e for e in errors)
 
@@ -346,18 +352,18 @@ class TestVerify:
 
 
 class TestManifest:
-    def test_manifest_written_in_plan_mode(self, mod, repo, tmp_path, capsys):
+    def test_manifest_written_in_plan_mode(self, mod, tree, tmp_path, capsys):
         manifest_path = tmp_path / "manifest.json"
-        _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _touch(repo, "h200_sxm/nccl/2.23/nccl_perf.parquet")
-        _track(repo)
+        _touch(tree, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(tree, "h200_sxm/nccl/2.23/nccl_perf.parquet")
 
-        rc = mod.main(["--data-root", str(repo), "--manifest", str(manifest_path)])
+        rc = mod.main(["--data-root", str(tree), "--manifest", str(manifest_path)])
         assert rc == 0
         capsys.readouterr()
 
         assert mod.load_manifest(manifest_path) == {"gemm_perf.parquet": 1, "nccl_perf.parquet": 1}
 
+    @requires_git
     def test_manifest_roundtrip_plan_execute_verify(self, mod, repo, tmp_path, capsys):
         manifest_path = tmp_path / "manifest.json"
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
@@ -374,15 +380,15 @@ class TestManifest:
         assert rc == 0
         assert "VERIFY OK" in capsys.readouterr().out
 
-    def test_verify_without_manifest_prints_skip_notice(self, mod, repo, capsys):
-        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _track(repo)
-        rc = mod.main(["--data-root", str(repo), "--verify"])
+    def test_verify_without_manifest_prints_skip_notice(self, mod, tree, capsys):
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        rc = mod.main(["--data-root", str(tree), "--verify"])
         assert rc == 0
         err = capsys.readouterr().err
         assert "NOTICE" in err
         assert "skipped" in err
 
+    @requires_git
     def test_verify_manifest_flags_table_after_deleting_one_copy(self, mod, repo, tmp_path, capsys):
         manifest_path = tmp_path / "manifest.json"
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
@@ -409,38 +415,35 @@ class TestManifest:
 
 
 class TestIdempotency:
-    def test_plan_is_empty_on_already_migrated_tree(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
-        _touch(repo, "h200_sxm/comm/nccl/2.23/nccl_perf.parquet")
-        _track(repo)
-        scan = mod.scan_legacy_tree(repo, family_map, family_set)
+    def test_plan_is_empty_on_already_migrated_tree(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(tree, "h200_sxm/comm/nccl/2.23/nccl_perf.parquet")
+        scan = mod.scan_legacy_tree(tree, family_map, family_set)
         assert scan.moves == []
         assert scan.marker_actions == []
         assert mod.render_plan(scan) == []
-        assert mod.verify_tree(repo, family_map, family_set) == []
+        assert mod.verify_tree(tree, family_map, family_set) == []
 
 
 # --- Fail-closed aborts --------------------------------------------------------------
 
 
 class TestFailClosed:
-    def test_unknown_table_aborts_without_mutating(self, mod, family_map, family_set, repo):
-        target = _touch(repo, "h200_sxm/trtllm/1.3.0rc15/mystery_perf.parquet")
-        _track(repo)
+    def test_unknown_table_aborts_without_mutating(self, mod, family_map, family_set, tree):
+        target = _touch(tree, "h200_sxm/trtllm/1.3.0rc15/mystery_perf.parquet")
         with pytest.raises(mod.MigrationError, match="mystery_perf"):
-            mod.scan_legacy_tree(repo, family_map, family_set)
+            mod.scan_legacy_tree(tree, family_map, family_set)
         assert target.exists()
 
-    def test_unexpected_first_level_dir_aborts_listing_offender(self, mod, family_map, family_set, repo):
-        _touch(repo, "h200_sxm/weirdbackend/1.0/gemm_perf.parquet")
-        _track(repo)
+    def test_unexpected_first_level_dir_aborts_listing_offender(self, mod, family_map, family_set, tree):
+        _touch(tree, "h200_sxm/weirdbackend/1.0/gemm_perf.parquet")
         with pytest.raises(mod.MigrationError, match="weirdbackend"):
-            mod.scan_legacy_tree(repo, family_map, family_set)
+            mod.scan_legacy_tree(tree, family_map, family_set)
 
-    def test_cli_abort_returns_nonzero_and_does_not_mutate(self, mod, repo, capsys):
-        target = _touch(repo, "h200_sxm/trtllm/1.3.0rc15/mystery_perf.parquet")
-        _track(repo)
-        rc = mod.main(["--data-root", str(repo), "--execute"])
+    def test_cli_abort_returns_nonzero_and_does_not_mutate(self, mod, tree, capsys):
+        # Aborts during scan, before any git invocation — no repo needed.
+        target = _touch(tree, "h200_sxm/trtllm/1.3.0rc15/mystery_perf.parquet")
+        rc = mod.main(["--data-root", str(tree), "--execute"])
         assert rc == 1
         assert "ABORT" in capsys.readouterr().err
         assert target.exists()
@@ -456,6 +459,7 @@ class TestFailClosed:
 # --- CLI round trip ------------------------------------------------------------------
 
 
+@requires_git
 class TestCliRoundTrip:
     def test_plan_execute_verify(self, mod, repo, capsys):
         _touch(repo, "h200_sxm/trtllm/1.3.0rc15/gemm_perf.parquet")
