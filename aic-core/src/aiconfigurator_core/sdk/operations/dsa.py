@@ -925,14 +925,21 @@ class ContextDSAModule(Operation):
         # Resolve the version DIR once (family dir first, else legacy) via a
         # representative filename, then apply the existing prefix-read logic
         # within that dir -- the other glm5_*/dsv32_* siblings live alongside it.
-        data_dir = os.path.dirname(
+        # The three sparse tables are collected as independent ops, so anchor on
+        # whichever sibling exists first: a dir may hold topk/dsa_attn without
+        # mqa, and anchoring on mqa alone would fall back to the legacy dir and
+        # silently drop the present siblings.
+        candidates = [
             resolve_op_data_path(
                 system_data_root,
                 database.backend,
                 database.version,
-                f"{fp}_mqa_logits_module_perf.parquet",
+                f"{fp}_{table}_module_perf.parquet",
             )
-        )
+            for table in ("mqa_logits", "topk", "dsa_attn")
+        ]
+        anchor = next((path for path in candidates if os.path.exists(path)), candidates[0])
+        data_dir = os.path.dirname(anchor)
         # Grids keyed by batch_size -> {(isl, step): latency}. Keeping every
         # collected bs lets _query_cp look up the sparse deltas at the REAL
         # batch (real measured bs=b latency), instead of scaling a bs=1 value
