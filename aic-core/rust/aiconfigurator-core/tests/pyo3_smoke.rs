@@ -9,6 +9,8 @@
 //! `aiconfigurator_core` extension itself (that `.so` is not on `sys.path`
 //! during `cargo test`); it only exercises the embedded interpreter.
 
+#![cfg(feature = "embed-python")]
+
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 

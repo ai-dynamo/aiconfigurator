@@ -36,7 +36,7 @@
 //! under cargo's test cwd):
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
 //!   cargo test -p aiconfigurator-core --test embedded_round_trip -- --nocapture
 //! ```
 //! (run after `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml
@@ -50,6 +50,8 @@
 //! set `AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1`: then an import failure is a HARD
 //! failure (panic), so the test cannot false-pass. The documented run command
 //! below sets it.
+
+#![cfg(feature = "embed-python")]
 
 use aiconfigurator_core::build_aic_engine;
 use pyo3::prelude::*;
@@ -83,7 +85,8 @@ fn embedded_build_then_pure_rust_predict() {
             !required,
             "embedded_round_trip: AIC_REQUIRE_EMBEDDED_ROUND_TRIP is set but \
              `aiconfigurator.sdk.engine` is not importable — run after \
-             `maturin develop` with PYTHONPATH including the venv site-packages + src."
+             `maturin develop` with PYTHONPATH including aic-core/src, the venv \
+             site-packages, and src."
         );
         eprintln!(
             "embedded_round_trip: SKIP — `aiconfigurator.sdk.engine` not importable. \

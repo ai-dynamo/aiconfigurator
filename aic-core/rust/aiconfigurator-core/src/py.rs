@@ -35,7 +35,7 @@ use crate::common::error::AicError;
 use crate::engine::runtime::{
     Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
 };
-use crate::{DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
+use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
 /// Trivial smoke export: returns the engine-config schema version so callers
 /// can confirm the extension built and imported correctly.
@@ -286,6 +286,210 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     let spec: crate::engine::spec::EngineSpec = serde_json::from_str(spec_json)
         .map_err(|e| PyValueError::new_err(format!("engine spec JSON decode: {e}")))?;
     spec.to_bincode().map_err(aic_to_py)
+}
+
+/// Ergonomic builder for the Rust -> Python -> Rust compiled-engine entry point.
+///
+/// Only the model, system, and backend are required. Parallelism defaults to
+/// one, speculative decoding defaults to disabled, and all other options defer
+/// to Python's `compile_engine` defaults. [`build_aic_engine`] remains available
+/// for source compatibility with existing callers.
+#[derive(Clone, Debug)]
+pub struct AicEngineBuilder {
+    model_path: String,
+    system: String,
+    backend: BackendKind,
+    backend_version: Option<String>,
+    tp_size: u32,
+    pp_size: u32,
+    attention_dp_size: u32,
+    moe_tp_size: Option<u32>,
+    moe_ep_size: Option<u32>,
+    gemm_quant_mode: Option<String>,
+    moe_quant_mode: Option<String>,
+    kvcache_quant_mode: Option<String>,
+    fmha_quant_mode: Option<String>,
+    comm_quant_mode: Option<String>,
+    nextn: u32,
+    nextn_accept_rates: Option<Vec<f64>>,
+    kv_block_size: Option<u32>,
+    systems_path: Option<String>,
+}
+
+impl AicEngineBuilder {
+    /// Start an engine build for a model, target system, and backend.
+    pub fn new(
+        model_path: impl Into<String>,
+        system: impl Into<String>,
+        backend: BackendKind,
+    ) -> Self {
+        Self {
+            model_path: model_path.into(),
+            system: system.into(),
+            backend,
+            backend_version: None,
+            tp_size: 1,
+            pp_size: 1,
+            attention_dp_size: 1,
+            moe_tp_size: None,
+            moe_ep_size: None,
+            gemm_quant_mode: None,
+            moe_quant_mode: None,
+            kvcache_quant_mode: None,
+            fmha_quant_mode: None,
+            comm_quant_mode: None,
+            nextn: 0,
+            nextn_accept_rates: None,
+            kv_block_size: None,
+            systems_path: None,
+        }
+    }
+
+    /// Select a specific backend version.
+    pub fn backend_version(mut self, value: impl Into<String>) -> Self {
+        self.backend_version = Some(value.into());
+        self
+    }
+
+    /// Set tensor parallelism.
+    pub fn tp_size(mut self, value: u32) -> Self {
+        self.tp_size = value;
+        self
+    }
+
+    /// Set pipeline parallelism.
+    pub fn pp_size(mut self, value: u32) -> Self {
+        self.pp_size = value;
+        self
+    }
+
+    /// Set attention data parallelism.
+    pub fn attention_dp_size(mut self, value: u32) -> Self {
+        self.attention_dp_size = value;
+        self
+    }
+
+    /// Set optional MoE tensor and expert parallelism.
+    pub fn moe_parallelism(mut self, tp_size: Option<u32>, ep_size: Option<u32>) -> Self {
+        self.moe_tp_size = tp_size;
+        self.moe_ep_size = ep_size;
+        self
+    }
+
+    /// Override the GEMM quantization mode.
+    pub fn gemm_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.gemm_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the MoE quantization mode.
+    pub fn moe_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.moe_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the KV-cache quantization mode.
+    pub fn kvcache_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.kvcache_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the FMHA quantization mode.
+    pub fn fmha_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.fmha_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Override the communication quantization mode.
+    pub fn comm_quant_mode(mut self, value: impl Into<String>) -> Self {
+        self.comm_quant_mode = Some(value.into());
+        self
+    }
+
+    /// Configure speculative decoding.
+    pub fn speculative_decoding(mut self, nextn: u32, accept_rates: Option<Vec<f64>>) -> Self {
+        self.nextn = nextn;
+        self.nextn_accept_rates = accept_rates;
+        self
+    }
+
+    /// Override the KV-cache block size.
+    pub fn kv_block_size(mut self, value: u32) -> Self {
+        self.kv_block_size = Some(value);
+        self
+    }
+
+    /// Override the bundled systems-data root.
+    pub fn systems_path(mut self, value: impl Into<String>) -> Self {
+        self.systems_path = Some(value.into());
+        self
+    }
+
+    /// Compile the Python engine specification once and return a Rust handle.
+    pub fn build(self) -> Result<AicEngine, AicError> {
+        build_aic_engine(
+            &self.model_path,
+            &self.system,
+            self.backend.as_str(),
+            self.backend_version.as_deref(),
+            self.tp_size,
+            self.pp_size,
+            self.attention_dp_size,
+            self.moe_tp_size,
+            self.moe_ep_size,
+            self.gemm_quant_mode.as_deref(),
+            self.moe_quant_mode.as_deref(),
+            self.kvcache_quant_mode.as_deref(),
+            self.fmha_quant_mode.as_deref(),
+            self.comm_quant_mode.as_deref(),
+            self.nextn,
+            self.nextn_accept_rates,
+            self.kv_block_size,
+            self.systems_path.as_deref(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+
+    #[test]
+    fn builder_defaults_match_compile_engine_defaults() {
+        let builder = AicEngineBuilder::new("model", "system", BackendKind::Vllm);
+        assert_eq!(builder.tp_size, 1);
+        assert_eq!(builder.pp_size, 1);
+        assert_eq!(builder.attention_dp_size, 1);
+        assert_eq!(builder.nextn, 0);
+        assert!(builder.backend_version.is_none());
+        assert!(builder.moe_tp_size.is_none());
+        assert!(builder.moe_ep_size.is_none());
+        assert!(builder.kv_block_size.is_none());
+    }
+
+    #[test]
+    fn builder_retains_explicit_options() {
+        let builder = AicEngineBuilder::new("model", "system", BackendKind::Sglang)
+            .backend_version("0.5.9")
+            .tp_size(8)
+            .pp_size(2)
+            .attention_dp_size(4)
+            .moe_parallelism(Some(1), Some(8))
+            .speculative_decoding(2, Some(vec![0.8, 0.3]))
+            .kv_block_size(16)
+            .systems_path("/tmp/systems");
+        assert_eq!(builder.backend, BackendKind::Sglang);
+        assert_eq!(builder.backend_version.as_deref(), Some("0.5.9"));
+        assert_eq!((builder.tp_size, builder.pp_size), (8, 2));
+        assert_eq!(builder.attention_dp_size, 4);
+        assert_eq!(
+            (builder.moe_tp_size, builder.moe_ep_size),
+            (Some(1), Some(8))
+        );
+        assert_eq!(builder.nextn_accept_rates, Some(vec![0.8, 0.3]));
+        assert_eq!(builder.kv_block_size, Some(16));
+        assert_eq!(builder.systems_path.as_deref(), Some("/tmp/systems"));
+    }
 }
 
 /// Rust → Python → Rust embedded build entry point.
@@ -672,7 +876,7 @@ fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "embed-python"))]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

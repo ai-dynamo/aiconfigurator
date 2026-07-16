@@ -2,5 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
-members = ["aic-core/rust/aiconfigurator-core"]
+members = [
+  "aic-core/rust/aiconfigurator-core",
+  "aic-core/rust/public-api-tests",
+]
 resolver = "2"

@@ -343,10 +343,13 @@ mod tests {
     #[test]
     fn mem_op_latency_uses_empirical_formula() {
         let db = b200_vllm_db();
-        // b200_sxm.yaml: mem_bw=8e12, scaling=0.8, constant=3e-6.
-        // For 1MB: latency = (1e6 / (8e12 * 0.8) + 3e-6) * 1000 = 0.156... + 0.003 = 0.159ms.
+        // Validate against the loaded system spec so fixture calibration
+        // updates do not leave a stale duplicate constant in this test.
         let latency = mem_op_latency_ms(&db.system_spec, 1_000_000.0);
-        let expected = (1_000_000.0_f64 / (8e12 * 0.8) + 3e-6) * 1000.0;
+        let expected = (1_000_000.0_f64
+            / (db.system_spec.gpu.mem_bw * db.system_spec.gpu.mem_bw_empirical_scaling_factor)
+            + db.system_spec.gpu.mem_empirical_constant_latency)
+            * 1000.0;
         assert!((latency - expected).abs() < 1e-12);
     }
 }

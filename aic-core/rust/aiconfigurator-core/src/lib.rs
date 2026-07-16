@@ -56,7 +56,7 @@ pub use memory::{
 // for callers in OTHER crates (the Dynamo Mocker,
 // `tests/embedded_round_trip.rs`). They must be `pub`-re-exported here because
 // the `py` module itself is private.
-pub use py::{build_aic_engine, AicEngine};
+pub use py::{build_aic_engine, AicEngine, AicEngineBuilder};
 // Public wire/identity config types live in `config`. Re-exported at the crate
 // root so existing `crate::EngineConfig` / `crate::BackendKind` / ... paths
 // resolve unchanged across the crate and for external consumers.

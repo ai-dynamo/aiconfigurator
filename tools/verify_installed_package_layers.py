@@ -48,7 +48,9 @@ def _verify_core(*, exercise_engine: bool) -> str:
         "aiconfigurator-core",
         (
             "aiconfigurator_core/__init__.py",
+            "aiconfigurator_core/_aiconfigurator_core.pyi",
             "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
+            "aiconfigurator_core/py.typed",
             "aiconfigurator_core/sdk/__init__.py",
             "aiconfigurator_core/sdk/engine.py",
             "aiconfigurator_core/sdk/memory.py",
@@ -66,6 +68,22 @@ def _verify_core(*, exercise_engine: bool) -> str:
         "aiconfigurator_core.sdk.perf_database",
     ):
         importlib.import_module(module)
+
+    sdk = importlib.import_module("aiconfigurator_core.sdk")
+    expected_facade = {
+        "EngineHandle",
+        "ModelConfig",
+        "RuntimeConfig",
+        "RustForwardPassPerfModel",
+        "compile_engine",
+        "estimate_kv_cache",
+        "estimate_num_gpu_blocks",
+    }
+    if set(sdk.__all__) != expected_facade:
+        raise RuntimeError(f"unexpected aiconfigurator_core.sdk facade: {sdk.__all__!r}")
+    for public_name in expected_facade:
+        if getattr(sdk, public_name, None) is None:
+            raise RuntimeError(f"aiconfigurator_core.sdk is missing {public_name}")
 
     resources = importlib.resources.files("aiconfigurator_core")
     required_resources = (

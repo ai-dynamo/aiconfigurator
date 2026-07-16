@@ -22,10 +22,10 @@ interprets it — closer to a compiled query plan than a compiled executable. Th
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python.
 
-- `build_aic_engine(...)` is the Rust → Python (`compile_engine`) → Rust build
-  entry point for callers in other crates (the Dynamo Mocker,
-  `tests/embedded_round_trip.rs`). It embeds a Python interpreter only for the
-  one-time compile step.
+- `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
+  entry point for callers in other crates. The flat `build_aic_engine(...)`
+  function remains supported for existing consumers. Both embed a Python
+  interpreter only for the one-time compile step.
 - The returned `AicEngine` exposes GIL-free inherent methods
   (`prefill_latency_ms`, `decode_latency_ms`) for the pure-Rust hot path, plus
   `#[pymethods]` wrappers and an FPM-aggregate `estimate_forward_pass_time_ms`
@@ -34,30 +34,19 @@ the hot path never re-walks the model or re-enters Python.
   readiness/diagnostics on top of the compiled `Engine`, and is re-exported for
   native embedders and exposed to Python as `RustForwardPassPerfModel`.
 
-```rust
-use aiconfigurator_core::build_aic_engine;
+```rust,no_run
+use aiconfigurator_core::{AicEngineBuilder, BackendKind};
 
 // Rust -> Python (compile_engine) -> Rust (Engine build + perf-DB load).
-let engine = build_aic_engine(
+let engine = AicEngineBuilder::new(
     "Qwen/Qwen3-8B",
     "b200_sxm",
-    "vllm",
-    Some("0.19.0"),
-    8,       // tp_size
-    1,       // pp_size
-    1,       // attention_dp_size
-    Some(1), // moe_tp_size
-    Some(8), // moe_ep_size
-    None,    // gemm_quant_mode   (inferred by compile_engine when None)
-    None,    // moe_quant_mode
-    None,    // kvcache_quant_mode
-    None,    // fmha_quant_mode
-    None,    // comm_quant_mode
-    0,       // nextn (MTP depth; 0 disables)
-    None,    // nextn_accept_rates
-    None,    // kv_block_size
-    None,    // systems_path (None uses the bundled data root)
-)?;
+    BackendKind::Vllm,
+)
+.backend_version("0.19.0")
+.tp_size(8)
+.moe_parallelism(Some(1), Some(8))
+.build()?;
 
 // Pure-Rust hot path: no `py` token, so the GIL is never acquired here.
 let prefill = engine.prefill_latency_ms(/* bs */ 1, /* isl */ 1024, /* prefix */ 0)?;
@@ -139,8 +128,11 @@ code should not be "cleaned up" in ways that diverge from the pinned reference.
   dense and MLA CP paths are complete.
 - Request-level FPM v2 fields and further WideEP accuracy work are left for later
   PRs.
-- Unit and integration tests use fixture perf files so they can run without the
-  large AIC perf databases. `cargo test` targets that embed Python (e.g.
-  `embedded_round_trip`, `memory_round_trip`) require a Python interpreter and
-  run under the maturin/pytest harness; CI exercises the crate via pytest and
-  `cargo-deny`, not `cargo test`.
+- Unit and integration tests use fixture perf files so most can run without the
+  large AIC perf databases. CI runs the workspace both without Python embedding
+  and with all features; embedding-only tests such as `embedded_round_trip` and
+  `memory_round_trip` are feature-gated and also exercised by the installed-wheel
+  harness.
+
+See [`aic-core/API.md`](../../API.md) for the complete wheel/crate public API and
+compatibility contract.
