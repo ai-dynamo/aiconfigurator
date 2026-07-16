@@ -427,6 +427,9 @@ class TestRenderRoundTripsThroughRealLoader:
             mod.ReuseEntry(table="moe_perf", from_version="0.5.14"),
         )
         text = mod.render_reuse_yaml(entries)
+        # yaml.safe_load is comment-blind, so pin the SPDX header explicitly
+        # (the copyright CI check requires it on every committed sidecar).
+        assert text.startswith("# SPDX-FileCopyrightText:")
         raw = yaml.safe_load(text)
         assert raw["schema_version"] == 1
         assert isinstance(raw["reuse"][0]["from_version"], str)
@@ -456,7 +459,10 @@ class TestRenderRoundTripsThroughRealLoader:
             tables=("moe_perf",),
         )
         path = tmp_path / "collection_meta.yaml"
-        path.write_text(mod.render_collection_meta_yaml(action), encoding="utf-8")
+        rendered = mod.render_collection_meta_yaml(action)
+        # Covers the shared _render_legacy_collection_meta_yaml path (backfill included).
+        assert rendered.startswith("# SPDX-FileCopyrightText:")
+        path.write_text(rendered, encoding="utf-8")
         meta = _load_collection_meta_yaml(str(path))
         assert meta["provenance"] == "legacy"
         assert meta["runtime"] == {"framework": "vllm", "version": "0.14.0"}
