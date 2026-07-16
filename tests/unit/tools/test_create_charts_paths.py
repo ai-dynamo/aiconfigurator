@@ -8,8 +8,11 @@ across the legacy (<system>/<backend>/<version>) and family-first
 One (backend, version) can legitimately split its perf files across several
 family dirs (e.g. gemm files under <system>/gemm/<backend>/<version>/ and
 attention files under <system>/attention/<backend>/<version>/). `_perf_file_paths`
-must return the union of all of them rather than picking one winning directory
-(unlike `_data_dir`, which still picks a single dir for single-file lookups).
+must return the union of all of them rather than picking one winning directory.
+
+Also covers main()'s changed-file parser: a 5-part (legacy-shaped) changed path
+must validate its INCOMPLETE.txt marker against the exact legacy dir, never a
+family dir of the same (backend, version).
 """
 
 from __future__ import annotations
@@ -179,6 +182,38 @@ def test_main_suppresses_family_layout_incomplete_dir(create_charts_module, tmp_
     incomplete_dir = tmp_path / "h200_sxm" / "gemm" / "sglang" / "0.5.14"
     incomplete_dir.mkdir(parents=True)
     (incomplete_dir / "INCOMPLETE.txt").write_bytes(b"")
+
+    calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
+
+    assert calls == []
+
+
+def test_main_legacy_changed_path_ignores_family_dir_incomplete_marker(create_charts_module, tmp_path, monkeypatch):
+    """A 5-part (legacy-shaped) changed path validates INCOMPLETE.txt against
+    the exact legacy dir. An INCOMPLETE.txt in a SIBLING family dir of the same
+    (backend, version) — even one holding more perf files — must not suppress
+    the legacy change."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/sglang/0.5.14/gemm_perf.parquet"
+    _touch(tmp_path, "h200_sxm/sglang/0.5.14/gemm_perf.parquet")  # clean legacy dir
+    # Family dir with MORE perf files than the legacy dir, marked INCOMPLETE.
+    _touch(tmp_path, "h200_sxm/attention/sglang/0.5.14/context_attention_perf.parquet")
+    _touch(tmp_path, "h200_sxm/attention/sglang/0.5.14/generation_attention_perf.parquet")
+    _touch(tmp_path, "h200_sxm/attention/sglang/0.5.14/INCOMPLETE.txt")
+
+    calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
+
+    assert calls == [("h200_sxm", "sglang", "0.5.14", ["gemm_perf.parquet"])]
+
+
+def test_main_legacy_changed_path_suppressed_by_legacy_incomplete_marker(create_charts_module, tmp_path, monkeypatch):
+    """The converse: an INCOMPLETE.txt in the exact legacy dir suppresses the
+    5-part changed path even when clean, larger family dirs exist for the same
+    (backend, version)."""
+    changed_file = f"{create_charts_module.SYSTEMS_PREFIX}data/h200_sxm/sglang/0.5.14/gemm_perf.parquet"
+    _touch(tmp_path, "h200_sxm/sglang/0.5.14/gemm_perf.parquet")
+    _touch(tmp_path, "h200_sxm/sglang/0.5.14/INCOMPLETE.txt")
+    _touch(tmp_path, "h200_sxm/attention/sglang/0.5.14/context_attention_perf.parquet")
+    _touch(tmp_path, "h200_sxm/attention/sglang/0.5.14/generation_attention_perf.parquet")
 
     calls = _run_main_with_changed_files(create_charts_module, tmp_path, monkeypatch, [changed_file])
 

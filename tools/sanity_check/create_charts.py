@@ -68,54 +68,6 @@ def _legacy_data_dir(system: str, backend: str, backend_version: str) -> str:
     return os.path.join(_systems_data_root(), system, backend, backend_version)
 
 
-def _family_data_dirs(system: str, backend: str, backend_version: str) -> list[str]:
-    """<system>/<family>/<backend>/<backend_version> dirs that exist, for every
-    first-level entry under <system>/ that isn't a legacy backend dir."""
-    system_dir = os.path.join(_systems_data_root(), system)
-    try:
-        entries = os.listdir(system_dir)
-    except OSError:
-        return []
-    dirs = []
-    for entry in sorted(entries):
-        if entry in _KNOWN_BACKEND_DIRS:
-            continue
-        candidate = os.path.join(system_dir, entry, backend, backend_version)
-        if os.path.isdir(candidate):
-            dirs.append(candidate)
-    return dirs
-
-
-def _data_dir(system: str, backend: str, backend_version: str) -> str:
-    """Resolve a single best-guess data dir for a (system, backend, backend_version),
-    across both the legacy (<backend>/<version>) and family-first
-    (<family>/<backend>/<version>) tree layouts: among the legacy path and every
-    family dir holding this (backend, version), picks whichever exists and contains
-    the most *_perf.parquet files (ties favor the legacy path). Falls back to the
-    (possibly nonexistent) legacy path when nothing is found, matching the old
-    always-legacy behavior.
-
-    NOTE: a single (backend, version) can legitimately split its perf files across
-    several family dirs, so this "one winning directory" resolution is only
-    appropriate for single-directory lookups (e.g. an INCOMPLETE.txt marker for a
-    legacy-parsed change). For discovering perf files themselves, use
-    `_perf_file_paths`, which aggregates across all candidate dirs instead of
-    picking one.
-    """
-    legacy = _legacy_data_dir(system, backend, backend_version)
-    candidates = [legacy, *_family_data_dirs(system, backend, backend_version)]
-    existing = [d for d in candidates if os.path.isdir(d)]
-    if not existing:
-        return legacy
-    return max(existing, key=lambda d: len(_perf_files_present(d)))
-
-
-def _perf_files_present(data_dir: str) -> set[str]:
-    if not os.path.isdir(data_dir):
-        return set()
-    return {entry for entry in os.listdir(data_dir) if entry.endswith("_perf.parquet")}
-
-
 def _perf_file_paths(perf_root: str, system: str, backend: str, backend_version: str) -> dict[str, Path]:
     """Map each *_perf.parquet (and *_perf.txt) basename for this
     (system, backend, backend_version) to its full path, aggregated across the
@@ -618,7 +570,10 @@ def main():
             if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
                 continue
 
-            data_dir = _data_dir(system, backend, backend_version)
+            # A 5-part changed path is legacy-shaped, so its INCOMPLETE.txt
+            # marker lives in the exact legacy dir — a best-guess resolution
+            # across layouts could pick an unrelated family dir here.
+            data_dir = _legacy_data_dir(system, backend, backend_version)
             if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
