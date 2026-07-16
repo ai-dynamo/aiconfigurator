@@ -284,10 +284,13 @@ def test_write_collection_meta_omits_absent_optional_runtime_fields(tmp_path):
 def test_write_collection_meta_deterministic_key_order(tmp_path):
     meta_path = provenance.write_collection_meta(tmp_path, RUNTIME_META, TABLES)
     text = meta_path.read_text(encoding="utf-8")
-    lines = [line for line in text.splitlines() if line and not line.startswith(" ")]
+    assert text.startswith("# SPDX-FileCopyrightText:")
+    lines = [line for line in text.splitlines() if line and not line.startswith((" ", "#"))]
     assert lines == ["schema_version: 1", "runtime:", "tables:"]
 
-    runtime_lines = text.splitlines()[2:6]
+    all_lines = text.splitlines()
+    runtime_start = all_lines.index("runtime:") + 1
+    runtime_lines = all_lines[runtime_start : runtime_start + 4]
     assert [line.split(":")[0].strip() for line in runtime_lines] == ["framework", "version", "image", "image_digest"]
 
     # tables render in sorted (not insertion) order.

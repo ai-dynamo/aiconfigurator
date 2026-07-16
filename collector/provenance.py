@@ -22,6 +22,7 @@ MUST have a ``hash_closures.yaml`` entry, or loading raises ``KeyError``.
 from __future__ import annotations
 
 import hashlib
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,18 @@ def derive_table_status(*, unresolved_failed_count: int, had_module_failure: boo
     return STATUS_COMPLETE
 
 
+def spdx_header() -> str:
+    """The repo-standard copyright header, dated to the year of emission
+    (the copyright CI check requires the year to cover the file's last commit).
+    """
+    return (
+        f"# SPDX-FileCopyrightText: Copyright (c) {date.today().year} NVIDIA CORPORATION & AFFILIATES."
+        " All rights reserved.\n"
+        "# SPDX-License-Identifier: Apache-2.0\n"
+        "\n"
+    )
+
+
 def write_collection_meta(out_dir: str | Path, runtime_meta: dict[str, Any], tables: dict[str, dict[str, Any]]) -> Path:
     """Render ``collection_meta.yaml`` per design §5, with deterministic key order."""
     out_path = Path(out_dir)
@@ -172,5 +185,6 @@ def write_collection_meta(out_dir: str | Path, runtime_meta: dict[str, Any], tab
 
     meta_path = out_path / "collection_meta.yaml"
     with meta_path.open("w", encoding="utf-8") as meta_file:
+        meta_file.write(spdx_header())
         yaml.safe_dump(doc, meta_file, sort_keys=False, default_flow_style=False)
     return meta_path

@@ -73,6 +73,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -93,6 +94,19 @@ METADATA_NAMES = MARKER_NAMES | SIDECAR_NAMES
 
 APPROVED_BY = "yimingl"
 SHARED_REUSE_REASON = "migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)"
+
+
+def _spdx_header() -> str:
+    """Repo-standard copyright header for emitted sidecars, dated to the year of
+    emission (the copyright CI check requires the year to cover the last commit).
+    """
+    return (
+        f"# SPDX-FileCopyrightText: Copyright (c) {date.today().year} NVIDIA CORPORATION & AFFILIATES."
+        " All rights reserved.\n"
+        "# SPDX-License-Identifier: Apache-2.0\n"
+        "\n"
+    )
+
 
 # Design §6.5 rule 5: comm is excluded from sibling-version reuse entirely.
 COMM_FAMILY = "comm"
@@ -242,7 +256,7 @@ def render_reuse_yaml(entries: tuple[ReuseEntry, ...]) -> str:
             for entry in entries
         ],
     }
-    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    return _spdx_header() + yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
 # --- INCOMPLETE.txt -> collection_meta.yaml -----------------------------------------
@@ -258,7 +272,7 @@ def _render_legacy_collection_meta_yaml(framework: str, version: str, tables: tu
         },
         "tables": {table: {"status": status} for table in tables},
     }
-    return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    return _spdx_header() + yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
 def render_collection_meta_yaml(action: SidecarAction) -> str:
