@@ -207,6 +207,10 @@ def run_attention_torch(
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend_name_str == "FLASHINFER":
+        if use_fp8_kv_cache:
+            # FlashInferMetadataBuilder asserts kv_cache_spec.dtype ==
+            # model_config.dtype; KV spec uses fp8 while model_config stays bf16.
+            vllm_config.model_config.dtype = kv_cache_spec.dtype
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
