@@ -76,10 +76,6 @@ jobs:
         with:
           persist-credentials: false
           lfs: true
-          fetch-depth: 0
-
-      - name: Materialize Git LFS data
-        run: git lfs pull
 
       - name: Set up Docker Buildx
         if: matrix.build_method == 'docker'
