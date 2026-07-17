@@ -602,11 +602,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    # +117 vs pre-GLM-5.2: nvidia/GLM-5.2-NVFP4 registered in moe.model_paths
-    # (same MoE dims as GLM-5-NVFP4). The sglang collector's get_moe_test_cases
-    # dedups GLM-5-NVFP4 vs GLM-5.2-NVFP4; this backend-agnostic common layer
-    # keeps both.
-    assert len(moe_cases) == 4326
+    # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
+    # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
+    # registered in moe.yaml base_ops.
+    assert len(moe_cases) == 4911
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -931,6 +930,11 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "zai-org/GLM-5",
         "zai-org/GLM-5-FP8",
         "nvidia/GLM-5-NVFP4",
+        "zai-org/GLM-5.1",
+        "zai-org/GLM-5.1-FP8",
+        "nvidia/GLM-5.1-NVFP4",
+        "zai-org/GLM-5.2",
+        "zai-org/GLM-5.2-FP8",
         "nvidia/GLM-5.2-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
