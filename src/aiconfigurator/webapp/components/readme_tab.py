@@ -55,7 +55,7 @@ def create_readme_tab(app_config):
 
 
                 ### Sizing Recommender tab
-                    Given a model, system, backend, workload, and a throughput target (request rate or concurrency),
+                    Given a model, system, backend, workload, and a load target (request rate or concurrency),
                     find the minimum number of GPUs and optimal deployment configuration (agg vs disagg, TP/PP/DP).
                     Designed for procurement sizing — the output is unconstrained.
                 """,

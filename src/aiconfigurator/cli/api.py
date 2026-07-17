@@ -343,7 +343,7 @@ def cli_recommend(
     decode_system: str | None = None,
     backend: str = "trtllm",
     backend_version: str | None = None,
-    database_mode: str = "SILICON",
+    database_mode: str = "HYBRID",
     transfer_policy: str | list | None = None,
     isl: int = 4000,
     osl: int = 1000,
@@ -427,12 +427,17 @@ def cli_recommend(
         ... )
         >>> print(result.best_configs)
     """
+    import math
+
     from aiconfigurator.sdk.perf_database import load_system_spec
 
     has_rate = target_request_rate is not None
     has_conc = target_concurrency is not None
     if has_rate == has_conc:
         raise ValueError("Exactly one of target_request_rate or target_concurrency must be provided.")
+    load_target = target_request_rate if has_rate else target_concurrency
+    if not (math.isfinite(load_target) and load_target > 0):
+        raise ValueError(f"Load target must be a positive finite number, got {load_target}.")
 
     spec = load_system_spec(system)
     gpus_per_node = spec["node"]["num_gpus_per_node"]

@@ -445,10 +445,11 @@ def _add_recommend_mode_arguments(parser):
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
-        default=common.DatabaseMode.SILICON.name,
+        default=common.DatabaseMode.HYBRID.name,
         help="Database mode for performance estimation. "
-        "SILICON (default): uses silicon-collected data. "
-        "HYBRID (recommended for frontier/new models): extends SILICON with SOL+empirical estimates. "
+        "HYBRID (default for recommend): extends SILICON with SOL+empirical estimates — "
+        "produces results even for frontier/new models without full silicon data. "
+        "SILICON: silicon-collected data only; results are fully reproducible. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument(
@@ -1769,10 +1770,15 @@ def _execute_tasks(
                     if db_mode == common.DatabaseMode.SILICON.name
                     else ""
                 )
+                gpu_hint = (
+                    "(2) the model does not fit — try a quantized model; "
+                    if mode == "recommend"
+                    else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
+                )
                 msg = (
                     f"Experiment {exp_name} returned no results. Possible causes: "
                     "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
-                    "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
+                    f"{gpu_hint}"
                     f"(3) no perf data in the database for this configuration.{hybrid_hint}"
                 )
                 logger.warning(msg)
