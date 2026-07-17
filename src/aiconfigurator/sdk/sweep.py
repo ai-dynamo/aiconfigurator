@@ -200,6 +200,18 @@ def _rate_match_dict(
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
+        # Queueing (pass-calendar) columns — mirrors
+        # picking._build_disagg_summary_dict (see rationale there); guarded
+        # by the rate-match parity test.
+        "ttft_steady_mean": ttft,
+        "ttft_steady_p50": ttft,
+        "ttft_steady_p90": ttft,
+        "ttft_steady_p99": ttft,
+        "ttft_transient_mean": ttft,
+        "ttft_transient_max": ttft,
+        "itl_mean": tpot,
+        "itl_p50": tpot,
+        "itl_p99": tpot,
     }
 
 
