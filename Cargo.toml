@@ -4,6 +4,6 @@
 [workspace]
 members = [
   "aic-core/rust/aiconfigurator-core",
-  "aic-core/rust/public-api-tests",
+  "aic-core/rust/tests/public-api",
 ]
 resolver = "2"

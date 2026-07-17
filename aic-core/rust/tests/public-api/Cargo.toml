@@ -9,4 +9,4 @@ publish = false
 license = "Apache-2.0"
 
 [dependencies]
-aiconfigurator-core = { path = "../aiconfigurator-core" }
+aiconfigurator-core = { path = "../../aiconfigurator-core" }

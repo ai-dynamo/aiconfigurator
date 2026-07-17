@@ -343,8 +343,6 @@ mod tests {
     #[test]
     fn mem_op_latency_uses_empirical_formula() {
         let db = b200_vllm_db();
-        // Validate against the loaded system spec so fixture calibration
-        // updates do not leave a stale duplicate constant in this test.
         let latency = mem_op_latency_ms(&db.system_spec, 1_000_000.0);
         let expected = (1_000_000.0_f64
             / (db.system_spec.gpu.mem_bw * db.system_spec.gpu.mem_bw_empirical_scaling_factor)
