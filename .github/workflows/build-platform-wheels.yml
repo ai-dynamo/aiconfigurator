@@ -16,6 +16,7 @@ on:
       - "aic-core/**"
       - "src/**"
       - "tools/build_legacy_monolith_fixture.py"
+      - "tools/stage_wheels_in_artifactory.sh"
       - "tools/verify_installed_package_layers.py"
       - "tools/verify_release_wheels.py"
   push:
@@ -29,6 +30,7 @@ on:
       - "aic-core/**"
       - "src/**"
       - "tools/build_legacy_monolith_fixture.py"
+      - "tools/stage_wheels_in_artifactory.sh"
       - "tools/verify_installed_package_layers.py"
       - "tools/verify_release_wheels.py"
   workflow_dispatch:
@@ -145,7 +147,25 @@ jobs:
           python -c \
             'import aiconfigurator_core; assert aiconfigurator_core._build_smoke() == 1'
 
-      - name: Upload wheel to Artifactory
+      - name: Stage pull-request wheels in Artifactory
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+          UPLOAD_UPPER: ${{ matrix.upload_upper }}
+        shell: bash
+        run: |
+          if [ -z "${ARTIFACTORY_TOKEN}" ]; then
+            echo "::notice::ARTIFACTORY_PR_TOKEN is not configured; skipping PR staging"
+            exit 0
+          fi
+          bash tools/stage_wheels_in_artifactory.sh
+
+      - name: Stage post-merge wheels in Artifactory
         if: >-
           github.event_name == 'push' &&
           (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
@@ -153,41 +173,7 @@ jobs:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: post-merge/${{ github.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+          UPLOAD_UPPER: ${{ matrix.upload_upper }}
         shell: bash
-        run: |
-          set -euo pipefail
-          : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
-          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
-          : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
-
-          shopt -s nullglob
-          wheels=(wheelhouse/aiconfigurator_core-*.whl)
-          expected=1
-          if [ "${{ matrix.upload_upper }}" = "true" ]; then
-            wheels+=(wheelhouse/aiconfigurator-*.whl)
-            expected=2
-          fi
-          if [ "${#wheels[@]}" -ne "${expected}" ]; then
-            echo "::error::Did not find the expected core and upper wheels"
-            exit 1
-          fi
-
-          subpath="aiconfigurator/post-merge/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
-          {
-            echo "### Artifactory wheels"
-            echo
-            echo "- Platform: \`${{ matrix.platform_name }}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-          for wheel in "${wheels[@]}"; do
-            filename="$(basename "${wheel}")"
-            target="${ARTIFACTORY_URL%/}/${ARTIFACTORY_PYPI_REPO_NAME}/${subpath}/${filename}"
-            curl --fail-with-body --show-error --silent \
-              --connect-timeout 30 --max-time 900 \
-              --retry 3 --retry-delay 5 --retry-all-errors \
-              --header "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
-              --upload-file "${wheel}" \
-              "${target}"
-            echo "Uploaded ${filename} to ${subpath}/"
-            echo "- Path: \`${subpath}/${filename}\`" >> "${GITHUB_STEP_SUMMARY}"
-          done
+        run: bash tools/stage_wheels_in_artifactory.sh
