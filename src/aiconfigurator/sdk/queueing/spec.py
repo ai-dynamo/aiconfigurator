@@ -68,12 +68,18 @@ class EngineSpec:
     max_num_batched_tokens: int = 8192
     max_num_seqs: int = 256
     enable_chunked_prefill: bool = True
+    # KV accounting (all calendars): capacity gates admission and decode
+    # growth (block-counted, preemption-with-recompute on exhaustion).
+    # None disables the KV constraint. In AIC integrations this comes from
+    # the SDK's own KV-capacity estimate for the worker config.
+    kv_capacity_tokens: Optional[int] = None
+    block_size: int = 64
+    preemption_mode: str = "lifo"  # lifo (vLLM v1) | fifo
     # SGLang-specific (used by the sglang calendar only)
     max_prefill_tokens: Optional[int] = None  # defaults to max_num_batched_tokens
     chunked_prefill_size: Optional[int] = None  # defaults to max_num_batched_tokens
     # TRT-LLM-specific (used by the trtllm calendar only)
     guaranteed_no_evict: bool = False
-    kv_capacity_tokens: Optional[int] = None  # needed by guaranteed_no_evict
 
 
 @dataclass
@@ -161,6 +167,23 @@ class QueueingReport:
     # disagg decomposition (0 for agg)
     kv_transfer_ms: float = 0.0
     prefill_queue_ms: float = 0.0
+    # KV-pressure indicator: preemptions observed during the evaluation
+    # window (0 when capacity is not binding)
+    total_preemptions: int = 0
+    completions_observed: int = 0
+
+    @property
+    def kv_thrashing(self) -> bool:
+        """True when the config sits in the preemption-thrash regime
+        (recompute work per request exceeds one preemption). Metrics in
+        this regime are NOT quantitatively trustworthy — treat the config
+        as infeasible, like an OOM row. Rationale: real engines degrade
+        unstably here (the DES oracle measures order-of-magnitude
+        throughput collapse), so the correct model output is the flag,
+        not a number."""
+        if self.completions_observed <= 0:
+            return False
+        return self.total_preemptions / self.completions_observed > 1.0
 
     @property
     def ttft_mean_n(self) -> float:

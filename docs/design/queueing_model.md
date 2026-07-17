@@ -49,7 +49,7 @@ documented as a scope boundary. Never absorbed into a fitted coefficient.
 
 | Backend | Calendar | Status |
 |---|---|---|
-| vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated**: 0.0% on TTFT p50/p99/transient/ITL-quantiles vs DES/mocker across 5 config families |
+| vLLM | fused pass (unified budget, chunked prefill shares remainder, block-counted KV with preemption-recompute) | **validated**: 12 config families incl. KV-constrained, max_num_seqs-capped, prefix, deep-staircase, C=1 and short-osl edges; TTFT p50/p99/transient at 0.0% wherever the regime is quantitative |
 | TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | structural, **not validated** against a TRT-LLM oracle |
 | SGLang | alternating passes (dedicated prefill batches pause decode → ITL spikes are whole prefill batches; `max_prefill_tokens`/`chunked_prefill_size` budgets) | structural, **not validated**; the mocker has an SGLang variant — validation path exists |
 
@@ -82,10 +82,19 @@ Formula vs DES (identical timing functions on both sides; residual =
 scheduling-semantics error only). Five agg config families
 (isl 512–8192, osl 64–512, C 16–128, budget 4096–8192, chunked on/off):
 
-- `ttft_steady_p50/p99`, `ttft_transient_mean`: **0.0%** everywhere
-- `ttft_steady_mean`: ≤1.4% | throughput: ≤1.2% | `itl_p50`: 0.0%
-- `itl_mean`: ≤8.6%; `itl_p99`: 0.1% (one outlier 12.6% at isl1024/C64)
-- disagg (1P1D tandem): TTFT 0.1%, ITL 0.0%, throughput 7.3%
+- 12 agg families (5 baseline + KV-mild, KV-thrash, max_num_seqs cap,
+  prefix, short-osl, C=1, deep staircase):
+  - `ttft_steady_p50/p99`, `ttft_transient_mean`: **0.0%** in every
+    quantitative case (including 2.5s queueing behind a max_num_seqs cap)
+  - `ttft_steady_mean` ≤8.4%, throughput ≤9.5%, `itl_p50` 0.0%
+  - KV-mild pressure (capacity binding, no thrash): steady p50/p99 0.0%,
+    mean 8.1%, ITL exact
+  - KV-thrash case is **detection-only**: both sides must raise the
+    `kv_thrashing` flag (metrics are declared non-quantitative there)
+  - prefix case: `itl_p99` is info-only (cohort-phase lock differs between
+    constant-hit assumption and cold-start cache; ±1 cohort step ≈ 30%
+    on the mix-pass mass point; TTFT/throughput unaffected)
+- disagg (1P1D tandem): TTFT 13.3%, ITL 0.3%, throughput 6.0%
 
 End-to-end cross-check against dynamo mocker with real AIC timing
 (Llama-3.1-8B, h200_sxm, vLLM 0.24.0, isl4096/osl256/C32, N=200):
@@ -111,15 +120,24 @@ Silent (the dangerous ones — each has a designated detector):
    a heavy-tailed workload smears the staircase and the ITL bimodality in
    reality but not in the model. Detector: DES supports per-request lengths;
    extend validation with distributional workloads before trusting.
-5. **KV-pressure / preemption regime.** The calendar carries NO KV state: no
-   preemption, no eviction. Near saturation (C·(isl+osl) approaching KV
-   capacity) the real engine enters preemption storms (DES measured 3000+
-   preemptions and throughput collapse) while the formula predicts health.
-   Guard: treat `C·(isl+osl) > ~0.9 × kv_capacity_tokens` as out of domain;
-   AIC's static KV check catches most, the DES catches the dynamic band.
+5. **KV-pressure / preemption regime — now partially in-domain.** The
+   evaluator carries block-counted KV state with preemption-recompute:
+   the memory-limited waiting-queue regime is validated (KV-mild case:
+   steady p50/p99 0.0%). Two boundaries remain: (a) the deep-thrash
+   regime is detected (`QueueingReport.kv_thrashing`) rather than
+   predicted — treat flagged configs as infeasible, like OOM rows; (b)
+   scheduler semantics follow the reference oracle's unified schedule
+   path, where a waiting admission may preempt a running request — under
+   mild pressure this shows up as recompute-throughput loss rather than
+   arrival-TTFT growth. `kv_capacity_tokens` should come from AIC's own
+   KV-capacity estimate for the worker config.
 6. **Prefix-cache dynamics.** `prefix` is a constant steady-state hit
    assumption; under cache-capacity pressure real hit rates are
    history-dependent and lower. The DES models block-level caching.
+   Measured secondary effect: the constant-hit assumption can lock the
+   limit cycle into a different cohort phase than a cold-start cache,
+   shifting the ITL-tail mass point by one cohort step (~30% on itl_p99
+   in the validation case) while TTFT and throughput stay aligned.
 7. **Calendar drift.** If a backend changes scheduler semantics upstream
    (vLLM async scheduling, SGLang policy changes), the calendar silently
    diverges. Detector: the CI parity gate (validate_formula vs DES, DES vs

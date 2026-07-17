@@ -90,9 +90,14 @@ class _Pool:
         self.queues: list[list[_Req]] = [[] for _ in range(n)]
         self._rr = 0
 
-    def dispatch(self, req: _Req) -> None:
-        self.queues[self._rr % len(self.queues)].append(req)
+    def dispatch(self, req: _Req, now_ms: float) -> None:
+        widx = self._rr % len(self.queues)
+        self.queues[widx].append(req)
         self._rr += 1
+        # an idle worker's clock must not lag behind the arrival: passes for
+        # this request can only start once it exists
+        if self.busy_until[widx] < now_ms:
+            self.busy_until[widx] = now_ms
 
     def next_event(self) -> float:
         candidates = [t for t, q in zip(self.busy_until, self.queues, strict=True) if q]
@@ -108,7 +113,7 @@ def _tandem_recursion(wl, prefill_eng, decode_eng, timing, spec, backend):
 
     for _ in range(c):
         r = _Req(arrival_ms=0.0, remaining_prefill=wl.effective_isl, gaps=[], is_initial_burst=True)
-        prefill.dispatch(r)
+        prefill.dispatch(r, 0.0)
 
     completions = 0
     warmup = 4 * c
@@ -198,7 +203,7 @@ def _tandem_recursion(wl, prefill_eng, decode_eng, timing, spec, backend):
 
         while in_transfer and in_transfer[0][0] <= now:
             _, r = in_transfer.pop(0)
-            decode.dispatch(r)
+            decode.dispatch(r, now)
 
         for i, q in enumerate(prefill.queues):
             if q and prefill.busy_until[i] <= now:
@@ -218,7 +223,7 @@ def _tandem_recursion(wl, prefill_eng, decode_eng, timing, spec, backend):
                         if r.gaps:
                             tpot.add(sum(r.gaps) / len(r.gaps))
                     nxt = _Req(arrival_ms=end, remaining_prefill=wl.effective_isl, gaps=[])
-                    prefill.dispatch(nxt)
+                    prefill.dispatch(nxt, end)
     else:
         raise RuntimeError("disagg tandem recursion did not converge")
 
