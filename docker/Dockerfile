@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+ARG WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_x86_64
+
 FROM nvcr.io/nvidia/base/ubuntu:jammy-20250619 AS base
 
 WORKDIR /workspace
@@ -23,12 +25,9 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 # `manylinux_2_28_<arch>` tag. We add `uv` and a rustup toolchain so cargo can
 # fetch crates over TLS.
 #
-# TARGETARCH (amd64/arm64) selects the base per `--platform`; only the matching
-# stage builds. aarch64: `docker build --platform linux/arm64 --target build .`.
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux-amd64
-FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux-arm64
-ARG TARGETARCH
-FROM manylinux-${TARGETARCH} AS build
+# CI selects the architecture-matched PyPA image with WHEEL_BUILD_BASE. The
+# x86_64 default preserves existing local and build-test invocations.
+FROM ${WHEEL_BUILD_BASE} AS build
 WORKDIR /workspace
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -114,6 +113,10 @@ RUN "${UV_PYTHON}" tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     /tmp/aic-pip-migration/bin/pip install "${CORE_WHL}" "${AIC_WHL}" && \
     cd /tmp && /tmp/aic-pip-migration/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine
+
+# Export the verified upper and core wheels for CI staging jobs.
+FROM scratch AS wheel-out
+COPY --from=build /workspace/dist/ /
 
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
