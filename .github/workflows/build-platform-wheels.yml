@@ -177,3 +177,84 @@ jobs:
           UPLOAD_UPPER: ${{ matrix.upload_upper }}
         shell: bash
         run: bash tools/stage_wheels_in_artifactory.sh
+
+  finalize-pr:
+    name: Finalize pull-request wheel set
+    needs: build
+    if: >-
+      success() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Mark the validated matrix complete
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${ARTIFACTORY_TOKEN}" ]; then
+            echo "::notice::ARTIFACTORY_PR_TOKEN is not configured; skipping PR finalization"
+            exit 0
+          fi
+          : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
+          : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
+          if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
+            echo "::error::ARTIFACTORY_URL must use HTTPS"
+            exit 1
+          fi
+
+          target="${ARTIFACTORY_URL%/}/${ARTIFACTORY_PYPI_REPO_NAME}/${ARTIFACTORY_SUBPATH}/_COMPLETE.json"
+          payload="{\"status\":\"complete\",\"repository\":\"${GITHUB_REPOSITORY}\",\"run_id\":\"${GITHUB_RUN_ID}\",\"run_attempt\":\"${GITHUB_RUN_ATTEMPT}\"}"
+          curl --fail-with-body --show-error --silent \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --request PUT --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
+            --data-binary "${payload}" \
+            "${target}"
+          echo "Completed ${ARTIFACTORY_SUBPATH}/"
+
+  finalize-post-merge:
+    name: Finalize post-merge wheel set
+    needs: build
+    if: >-
+      success() &&
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Mark the validated matrix complete
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: post-merge/${{ github.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
+          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
+          : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
+          if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
+            echo "::error::ARTIFACTORY_URL must use HTTPS"
+            exit 1
+          fi
+
+          target="${ARTIFACTORY_URL%/}/${ARTIFACTORY_PYPI_REPO_NAME}/${ARTIFACTORY_SUBPATH}/_COMPLETE.json"
+          payload="{\"status\":\"complete\",\"repository\":\"${GITHUB_REPOSITORY}\",\"run_id\":\"${GITHUB_RUN_ID}\",\"run_attempt\":\"${GITHUB_RUN_ATTEMPT}\"}"
+          curl --fail-with-body --show-error --silent \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --request PUT --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
+            --data-binary "${payload}" \
+            "${target}"
+          echo "Completed ${ARTIFACTORY_SUBPATH}/"

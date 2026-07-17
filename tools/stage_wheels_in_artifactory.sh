@@ -10,6 +10,11 @@ set -euo pipefail
 : "${ARTIFACTORY_SUBPATH:?ARTIFACTORY_SUBPATH is not configured}"
 : "${UPLOAD_UPPER:?UPLOAD_UPPER is not configured}"
 
+if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
+    echo "::error::ARTIFACTORY_URL must use HTTPS"
+    exit 1
+fi
+
 if [[ "${ARTIFACTORY_SUBPATH}" == /* || "${ARTIFACTORY_SUBPATH}" == *..* ]]; then
     echo "::error::ARTIFACTORY_SUBPATH must be a relative path without parent traversal"
     exit 1
