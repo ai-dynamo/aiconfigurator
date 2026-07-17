@@ -46,14 +46,14 @@ flag to activate.
 **Always visible:**
 
 - **Readme** -- Embedded documentation and version info.
-- **Static** -- Single-point static latency exploration (select model, system, parallelism, and batch size to see estimated TTFT/TPOT).
-- **Agg Pareto** -- Aggregated serving Pareto frontier search (analogous to `cli default` in agg mode).
-- **Disagg Pareto** -- Disaggregated serving Pareto frontier search.
+- **Static Estimation** -- Single-point static latency exploration (select model, system, parallelism, and batch size to see estimated TTFT/TPOT).
+- **Agg(IFB) Pareto Estimation** -- Aggregated serving Pareto frontier search (analogous to `cli default` in agg mode).
+- **Disaggregation Pareto Estimation** -- Disaggregated serving Pareto frontier search.
 - **Pareto Comparison** -- Save and compare results from the Agg/Disagg Pareto tabs side by side.
 - **Support Matrix** -- Interactive support matrix for model/system/backend combinations.
 
 **Optional (flag-gated):**
 
-- **Agg** (`--enable-agg`) -- Aggregated serving configuration explorer.
-- **Disagg PD Ratio** (`--enable-disagg-pd-ratio`) -- Disaggregated prefill/decode ratio analysis.
+- **Agg Estimation** (`--enable-agg`) -- Aggregated serving configuration explorer.
+- **Disaggregation PD Ratio Analysis** (`--enable-disagg-pd-ratio`) -- Disaggregated prefill/decode ratio analysis.
 - **Profiling** (`--enable-profiling`) -- Per-operation latency breakdown visualization (GEMM, attention, communication, MoE, etc.) for understanding where inference time is spent.
