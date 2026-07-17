@@ -95,8 +95,6 @@ jobs:
           target: wheel-out
           build-args: WHEEL_BUILD_BASE=${{ matrix.wheel_base }}
           outputs: type=local,dest=./wheelhouse
-          cache-from: type=gha,scope=aic-wheel-${{ matrix.platform_name }}
-          cache-to: type=gha,mode=max,scope=aic-wheel-${{ matrix.platform_name }},ignore-error=true
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
