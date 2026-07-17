@@ -158,12 +158,7 @@ jobs:
           ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
           UPLOAD_UPPER: ${{ matrix.upload_upper }}
         shell: bash
-        run: |
-          if [ -z "${ARTIFACTORY_TOKEN}" ]; then
-            echo "::notice::ARTIFACTORY_PR_TOKEN is not configured; skipping PR staging"
-            exit 0
-          fi
-          bash tools/stage_wheels_in_artifactory.sh
+        run: bash tools/stage_wheels_in_artifactory.sh
 
       - name: Stage post-merge wheels in Artifactory
         if: >-
@@ -198,11 +193,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${ARTIFACTORY_TOKEN}" ]; then
-            echo "::notice::ARTIFACTORY_PR_TOKEN is not configured; skipping PR finalization"
-            exit 0
-          fi
           : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
+          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_PR_TOKEN is not configured}"
           : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
           if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
             echo "::error::ARTIFACTORY_URL must use HTTPS"
