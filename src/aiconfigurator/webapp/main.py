@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 from collections import defaultdict
 
 import aiconfigurator
@@ -51,8 +52,6 @@ def main(args):
     """
     Main function for the WebApp.
     """
-    import os
-
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
     try:
