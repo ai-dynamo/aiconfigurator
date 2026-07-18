@@ -357,9 +357,11 @@ class Task:
     # - sla_percentile: constraints are enforced at the requested percentiles
     #   using the closed form's stored quantiles (still O(1), CI-safe).
     #   Enabled implicitly by the CLI when any percentile / --itl arg is set.
-    # - sla_funnel: additionally resolve bracket-straddling candidates with
-    #   the limit-cycle evaluator and upgrade reported rows to quantitative
-    #   tier (--sla-refine). Implies sla_percentile.
+    # - sla_funnel (--sla-refine): a precision upgrade only — it never
+    #   changes the elimination semantics. Combined with sla_percentile it
+    #   resolves bracket-straddling candidates with the evaluator at the
+    #   requested percentile; alone it only upgrades reported rows to
+    #   quantitative-tier numbers.
     sla_percentile: bool = False
     sla_funnel: bool = False
     total_gpus: int | None = None
@@ -1440,7 +1442,7 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
-            "sla_percentile": self.sla_percentile or self.sla_funnel,
+            "sla_percentile": self.sla_percentile,
             "sla_funnel": self.sla_funnel,
         }
 

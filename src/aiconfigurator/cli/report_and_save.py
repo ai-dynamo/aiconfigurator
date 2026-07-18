@@ -677,7 +677,7 @@ def log_final_summary(
             exp_task.request_latency,
             ttft_percentile=(
                 getattr(exp_task, "ttft_percentile", 0.5)
-                if getattr(exp_task, "sla_percentile", False) or getattr(exp_task, "sla_funnel", False)
+                if getattr(exp_task, "sla_percentile", False) is True
                 else None
             ),
             itl_percentile=getattr(exp_task, "itl_percentile", None),

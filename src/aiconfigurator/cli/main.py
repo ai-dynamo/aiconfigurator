@@ -338,11 +338,11 @@ def _add_default_mode_arguments(parser):
         "--sla-refine",
         action="store_true",
         default=False,
-        help="Additionally resolve SLA-boundary candidates with the quantitative "
-        "queueing evaluator and upgrade reported rows to quantitative-tier numbers. "
-        "Costs extra sweep time near the SLA boundary; off by default. "
-        "Percentile constraints alone (--*-percentile / --itl) do NOT require this: "
-        "they are enforced with the O(1) screening quantiles.",
+        help="Precision upgrade only — never changes the elimination semantics "
+        "(those are set by --*-percentile / --itl; default is the legacy avg filter). "
+        "With percentile constraints, resolves SLA-boundary candidates with the "
+        "quantitative queueing evaluator; in all cases upgrades reported top-N rows "
+        "to quantitative-tier numbers. Costs extra time near the SLA boundary.",
     )
     parser.add_argument(
         "--strict-sla",

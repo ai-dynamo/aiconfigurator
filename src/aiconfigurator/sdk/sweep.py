@@ -377,7 +377,7 @@ def _sweep_one_parallel_agg(
             # --itl target is screened via its stored tail quantile.
             keep = bool(result_dict) and result_dict["tpot"] <= tpot_target
             if keep:
-                if sla_funnel:
+                if sla_funnel and sla_percentile:
                     ttft_screen = result_dict.get("ttft_steady_p99_lo", result_dict["ttft"])
                 elif sla_percentile:
                     ttft_screen = (
@@ -409,7 +409,10 @@ def _sweep_one_parallel_agg(
     # wide-kept set with the quantitative tier (limit-cycle evaluator).
     # Constraint percentiles come from runtime_config (defaults: p50 for
     # ttft/tpot/request_latency, p99 for itl).
-    if not sla_funnel:
+    if not (sla_funnel and sla_percentile):
+        # elimination semantics are set by the percentile args, never by
+        # --sla-refine alone (refine-only mode upgrades reported numbers at
+        # the report boundary instead)
         df = df.sort_values(by="seq/s", ascending=False).round(3)
         if top_k > 0:
             df = df.head(top_k)
