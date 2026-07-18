@@ -81,7 +81,9 @@ class FusedCalendar(BaseCalendar):
                 if budget <= 0:
                     continue
                 if not eng.enable_chunked_prefill and s.remaining_prefill > budget:
-                    break  # blocked: whole prompt must fit (core.rs semantics)
+                    # chunked prefill off: the whole prompt must fit the
+                    # remaining budget (vllm/v1/core/sched/scheduler.py:652)
+                    break
                 chunk = min(s.remaining_prefill, budget)
                 computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
                 s.remaining_prefill -= chunk
