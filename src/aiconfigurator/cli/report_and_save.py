@@ -87,7 +87,9 @@ def _itl_display(itl_percentile: float | None) -> tuple[str, str]:
     """(header, column) for the ITL table column. Only the two-mass anchors
     are stored (p50 = smooth decode pace, p99 = stutter tail); the ITL mean
     is deliberately not shown — for a bimodal distribution it is a value
-    that rarely occurs, and it duplicates TPOT / tokens-per-user anyway."""
+    that rarely occurs. TPOT is the opposite case: per-request averaging
+    makes its distribution narrow, so the displayed TPOT(avg) is
+    representative."""
     q = itl_percentile if isinstance(itl_percentile, (int, float)) else 0.99
     return ("ITL(P50)", "itl_p50") if q <= 0.5 else ("ITL(P99)", "itl_p99")
 
@@ -195,6 +197,7 @@ def _plot_worker_setup_table(
             "tokens/s/user",
             "req/s",
             _ttft_header(ttft_percentile),
+            "TPOT(avg)",
             _itl_display(itl_percentile)[0],
             "request_latency",
             "concurrency",
@@ -269,6 +272,7 @@ def _plot_worker_setup_table(
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     _ttft_cell(row, ttft_percentile),
+                    f"{row['tpot']:.2f}",
                     _itl_cell(row, itl_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
@@ -296,6 +300,7 @@ def _plot_worker_setup_table(
             "tokens/s/user",
             "req/s",
             _ttft_header(ttft_percentile),
+            "TPOT(avg)",
             _itl_display(itl_percentile)[0],
             "request_latency",
             "concurrency",
@@ -340,6 +345,7 @@ def _plot_worker_setup_table(
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     _ttft_cell(row, ttft_percentile),
+                    f"{row['tpot']:.2f}",
                     _itl_cell(row, itl_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
