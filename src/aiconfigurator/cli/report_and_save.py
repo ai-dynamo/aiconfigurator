@@ -71,6 +71,29 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     return power_ratio >= threshold
 
 
+# nearest STORED steady-TTFT percentile column for parenthetical display;
+# the label always names what is actually shown (enforcement uses the exact
+# requested quantile regardless — this is display only)
+_TTFT_PCTL_DISPLAY = {
+    0.5: ("p50", "ttft_steady_p50"),
+    0.75: ("p90", "ttft_steady_p90"),
+    0.9: ("p90", "ttft_steady_p90"),
+    0.95: ("p99", "ttft_steady_p99"),
+    0.99: ("p99", "ttft_steady_p99"),
+    0.999: ("p99", "ttft_steady_p99"),
+}
+
+
+def _ttft_cell(row: dict, ttft_percentile: float) -> str:
+    base = f"{row['ttft']:.2f}"
+    label, col = _TTFT_PCTL_DISPLAY.get(ttft_percentile, ("p50", "ttft_steady_p50"))
+    value = row.get(col)
+    tier = row.get("queueing_tier")
+    if value is not None and pd.notna(value) and tier in ("screening", "quantitative"):
+        return f"{base} ({label} {value:.1f})"
+    return base
+
+
 def _plot_worker_setup_table(
     exp_name: str,
     config_df: pd.DataFrame,
@@ -79,6 +102,7 @@ def _plot_worker_setup_table(
     top: int,
     is_moe: bool,
     request_latency_target: float | None,
+    ttft_percentile: float = 0.5,
     show_power: bool = True,
     preserve_ranking: bool = False,
     objective_target: str | None = None,
@@ -225,7 +249,7 @@ def _plot_worker_setup_table(
                     _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
-                    f"{row['ttft']:.2f}",
+                    _ttft_cell(row, ttft_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
                     f"{display_total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
@@ -294,7 +318,7 @@ def _plot_worker_setup_table(
                     _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
-                    f"{row['ttft']:.2f}",
+                    _ttft_cell(row, ttft_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
                     f"{display_total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
@@ -623,7 +647,8 @@ def log_final_summary(
             top_n,
             exp_task.is_moe,
             exp_task.request_latency,
-            show_power,
+            ttft_percentile=getattr(exp_task, "ttft_percentile", 0.5),
+            show_power=show_power,
             preserve_ranking=objective_aware,
             objective_target=objective_target,
         )

@@ -288,6 +288,53 @@ def _add_default_mode_arguments(parser):
         "Pass --strict-sla to only keep configs that meet the given tpot constraint.**",
     )
     parser.add_argument(
+        "--itl",
+        type=float,
+        default=None,
+        help="Optional inter-token-latency SLA target in ms (streaming smoothness; "
+        "constrains the ITL distribution tail, see --itl-percentile).",
+    )
+    percentile_values = {"p50": 0.5, "p75": 0.75, "p90": 0.9, "p95": 0.95, "p99": 0.99, "p999": 0.999}
+
+    def _percentile(value: str) -> float:
+        try:
+            return percentile_values[value.lower()]
+        except KeyError:
+            raise argparse.ArgumentTypeError(
+                f"invalid percentile {value!r}; choose from {', '.join(percentile_values)}"
+            ) from None
+
+    parser.add_argument(
+        "--ttft-percentile",
+        type=_percentile,
+        default=0.5,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Which percentile of the steady-state TTFT distribution --ttft constrains. "
+        "Default: p50 (typical request under sustained load).",
+    )
+    parser.add_argument(
+        "--tpot-percentile",
+        type=_percentile,
+        default=0.5,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the TPOT distribution that --tpot constrains. Default: p50.",
+    )
+    parser.add_argument(
+        "--itl-percentile",
+        type=_percentile,
+        default=0.99,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the ITL distribution that --itl constrains. Default: p99 "
+        "(the tail is the point of a smoothness SLA).",
+    )
+    parser.add_argument(
+        "--request-latency-percentile",
+        type=_percentile,
+        default=0.5,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the end-to-end latency distribution that --request-latency constrains. Default: p50.",
+    )
+    parser.add_argument(
         "--strict-sla",
         action="store_true",
         default=False,
@@ -1164,6 +1211,11 @@ def build_default_tasks(
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
+    itl: float | None = None,
+    ttft_percentile: float = 0.5,
+    tpot_percentile: float = 0.5,
+    itl_percentile: float = 0.99,
+    request_latency_percentile: float = 0.5,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
@@ -1310,6 +1362,11 @@ def build_default_tasks(
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
+        "itl": itl,
+        "ttft_percentile": ttft_percentile,
+        "tpot_percentile": tpot_percentile,
+        "itl_percentile": itl_percentile,
+        "request_latency_percentile": request_latency_percentile,
         "total_gpus": total_gpus,
         "database_mode": database_mode,
         "transfer_policy": transfer_policy,
@@ -2396,6 +2453,11 @@ def main(args):
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
+            itl=args.itl,
+            ttft_percentile=args.ttft_percentile,
+            tpot_percentile=args.tpot_percentile,
+            itl_percentile=args.itl_percentile,
+            request_latency_percentile=args.request_latency_percentile,
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],

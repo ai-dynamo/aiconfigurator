@@ -146,7 +146,7 @@ def refine_rows(
         refined[idx] = rep
 
     if skipped_budget or skipped_scope:
-        logger.info(
+        logger.debug(
             "queueing refine: %d refined, %d kept at screening tier (budget), "
             "%d out of evaluator scope (multimodal / complexity)",
             len(refined),

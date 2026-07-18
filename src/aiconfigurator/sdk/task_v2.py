@@ -343,6 +343,15 @@ class Task:
     # used by the Planner, where Pareto selection happens elsewhere.
     pareto_sweep: bool = True
     request_latency: float | None = None
+    # Optional inter-token-latency SLA target (streaming smoothness).
+    itl: float | None = None
+    # SLA percentile semantics (see sdk/queueing): which quantile of the
+    # steady-state distribution each target constrains. Supported:
+    # 0.5 / 0.75 / 0.9 / 0.95 / 0.99 / 0.999.
+    ttft_percentile: float = 0.5
+    tpot_percentile: float = 0.5
+    itl_percentile: float = 0.99
+    request_latency_percentile: float = 0.5
     total_gpus: int | None = None
     database_mode: str | None = None
     # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
@@ -1065,6 +1074,11 @@ class Task:
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,
+            itl=self.itl,
+            ttft_percentile=self.ttft_percentile,
+            tpot_percentile=self.tpot_percentile,
+            itl_percentile=self.itl_percentile,
+            request_latency_percentile=self.request_latency_percentile,
             engine_step_backend=self.engine_step_backend,
         )
         if batch_size is not None:
