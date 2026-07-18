@@ -49,6 +49,7 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
+from aiconfigurator.sdk.queueing import refine
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,9 @@ def _rate_match_dict(
         "itl_mean": tpot,
         "itl_p50": tpot,
         "itl_p99": tpot,
+        "ttft_steady_p99_lo": ttft,
+        "ttft_steady_p99_hi": ttft,
+        "queueing_tier": "composed",
     }
 
 
@@ -286,10 +290,14 @@ def _sweep_one_parallel_agg(
     a full recomputation per tpot, ~80x slowdown for an 80-element tpot
     sweep.
 
-    Returns ``(rows_df, saw_model_fit, saw_memory_fit)``.  Logic faithfully
-    reproduces the body of the legacy
-    ``backend.find_best_agg_result_under_constraints``; parity is enforced by
-    the integration test.
+    Returns ``(rows_df, saw_model_fit, saw_memory_fit)``.  The evaluation
+    grid and TPOT screen reproduce the legacy
+    ``backend.find_best_agg_result_under_constraints``; TTFT feasibility
+    deliberately diverges from legacy: it is resolved by the percentile SLA
+    funnel (wide-keep on the cohort bracket, then quantitative-tier
+    refinement — see sdk/queueing/refine.py). The legacy path
+    (pareto_analysis / InferenceSession.find_best_*) retains legacy
+    semantics.
     """
     isl = runtime_config.isl
     osl = runtime_config.osl
@@ -352,7 +360,17 @@ def _sweep_one_parallel_agg(
             if model_oom or kv_cache_oom:
                 break  # ctx_tokens monotonic → larger will also OOM
             result_dict = summary.get_result_dict()
-            if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
+            # SLA funnel stage 1 (wide-keep): reject on TTFT only when even
+            # the cohort-bracket lower bound violates the target — screening
+            # bias can then never falsely reject; straddlers are resolved by
+            # the quantitative tier below. TPOT keeps the mean-based screen.
+            if (
+                result_dict
+                and result_dict["tpot"] <= tpot_target
+                # fall back to the legacy scalar when the bracket is absent
+                # (e.g. externally-supplied result dicts)
+                and result_dict.get("ttft_steady_p99_lo", result_dict["ttft"]) <= ttft_target
+            ):
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
 
@@ -361,6 +379,30 @@ def _sweep_one_parallel_agg(
 
     df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
     df["_per_ops_source"] = results_per_ops_source
+
+    # SLA funnel stage 2: resolve percentile feasibility on the wide-kept
+    # set with the quantitative tier (limit-cycle evaluator). Constraint
+    # percentiles come from runtime_config (defaults: p50 for ttft/tpot/
+    # request_latency, p99 for itl).
+    constraints: dict = {"ttft": (ttft_target, getattr(runtime_config, "ttft_percentile", 0.5))}
+    if tpot_target is not None:
+        constraints["tpot"] = (tpot_target, getattr(runtime_config, "tpot_percentile", 0.5))
+    itl_target = getattr(runtime_config, "itl", None)
+    if itl_target is not None:
+        constraints["itl"] = (itl_target, getattr(runtime_config, "itl_percentile", 0.99))
+    e2e_target = getattr(runtime_config, "request_latency", None)
+    if e2e_target is not None:
+        constraints["e2e"] = (e2e_target, getattr(runtime_config, "request_latency_percentile", 0.5))
+    df = refine.apply_sla_funnel(
+        df,
+        model=model,
+        database=database,
+        backend=backend,
+        constraints=constraints,
+        enable_chunked_prefill=enable_chunked_prefill,
+        top_k=top_k,
+    )
+
     df = df.sort_values(by="seq/s", ascending=False).round(3)
     if top_k > 0:
         df = df.head(top_k)

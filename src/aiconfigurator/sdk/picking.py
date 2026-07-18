@@ -179,6 +179,9 @@ def _build_disagg_summary_dict(
         "itl_mean": tpot,
         "itl_p50": tpot,
         "itl_p99": tpot,
+        "ttft_steady_p99_lo": ttft,
+        "ttft_steady_p99_hi": ttft,
+        "queueing_tier": "composed",
     }
 
 

@@ -25,13 +25,25 @@ class DatabaseTimingModel:
             its phase runners are the authority for timing semantics
     """
 
+    #: timing inputs are quantized to this granularity before lookup so the
+    #: evaluator's per-pass queries (context grows by one token per pass)
+    #: hit the cache instead of issuing thousands of perf-DB queries; the
+    #: induced timing error is <= one grain over the sequence length
+    _GRAIN = 64
+
     def __init__(self, model, database, backend):
         self._model = model
         self._database = database
         self._backend = backend
         self._cache: dict = {}
 
+    @classmethod
+    def _q(cls, v: int) -> int:
+        return max(1, round(v / cls._GRAIN) * cls._GRAIN)
+
     def prefill_ms(self, batch_size: int, mean_isl: int, mean_prefix: int) -> float:
+        mean_isl = self._q(mean_isl)
+        mean_prefix = 0 if mean_prefix <= 0 else self._q(mean_prefix)
         key = ("pf", batch_size, mean_isl, mean_prefix)
         hit = self._cache.get(key)
         if hit is not None:
@@ -45,6 +57,7 @@ class DatabaseTimingModel:
         return total
 
     def decode_ms(self, batch_size: int, context_len: int) -> float:
+        context_len = self._q(context_len)
         key = ("dec", batch_size, context_len)
         hit = self._cache.get(key)
         if hit is not None:

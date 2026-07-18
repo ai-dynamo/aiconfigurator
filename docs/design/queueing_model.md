@@ -67,16 +67,51 @@ measurement/interpolation), which this package consumes as a black box.
   of disagg vs agg (agg `itl_p99` spikes to the mix-pass duration, e.g.
   190ms vs `itl_p50` 9.3ms for Llama-3.1-8B @ h200).
 
+Additionally: `ttft_steady_p99_{lo,hi}` (the cohort bracket — structural
+bounds on the steady distribution's support, used by the sweep funnel) and
+`queueing_tier` ("screening" | "quantitative" | "static" | "composed"),
+which makes the precision class of every row's numbers visible.
+
 `ttft_mean(N)` (benchmark-length-blended mean) is deliberately NOT a column:
 N is a property of the measurement, not the deployment. It is available as
 `QueueingReport.ttft_mean_n`.
 
-**SLA semantics recommendation**: constrain on `ttft_steady_p99` (industry
-norm), report `ttft_transient_max` as the cold-start / synchronized-burst
-envelope. The legacy blended `ttft` heuristic underestimated dynamic TTFT
-by ~30% on the reference workload while its N-dependence made
-recommendations a function of benchmark length (same deployment: mean
-456ms at N=200, 223ms at N=1000).
+## 4.1 Percentile SLA semantics and the sweep funnel
+
+SLA targets are (value, percentile) pairs on the steady-state
+distributions. `RuntimeConfig` gains `ttft_percentile` / `tpot_percentile`
+/ `itl_percentile` / `request_latency_percentile` (supported: 0.5, 0.75,
+0.9, 0.95, 0.99, 0.999) plus an optional `itl` target (streaming-smoothness
+SLA — the metric where the calendar is most accurate and where agg vs
+disagg differ most). Defaults: **p50 for ttft/tpot/request_latency**
+("typical request under sustained load"), **p99 for itl** (the tail is the
+point of a smoothness SLA). p999 is the *calendar* p999 (deterministic
+tail); real-deployment p999 adds stochastic effects outside the model.
+
+The legacy `ttft` scalar has no stable equivalent in these semantics: it
+behaves like `ttft_mean(N)` at an N implicitly baked into its fitted
+constants (~420 on the reference workload) and drifting per family. It
+remains emitted for reference; feasibility no longer uses it on the sweep
+path.
+
+Feasibility is resolved by a two-stage funnel (`sdk/queueing/refine.py`):
+
+1. **wide-keep**: reject a candidate only when the bracket lower bound
+   `ttft_steady_p99_lo` violates the target — screening bias can never
+   falsely reject (the bracket bounds the distribution support, so one
+   bracket serves every percentile);
+2. **lazy quantitative resolution**: candidates whose bracket straddles
+   the target are re-scored with the evaluator in throughput order until
+   `top_k` feasible rows are confirmed; every refined row is checked
+   against ALL requested constraints at their percentiles. Unresolved
+   straddlers are kept (conservative) with `queueing_tier == "screening"`
+   visible; skips are logged, never silent.
+
+Measured cost on the reference case: loose SLA (no straddlers) ~2x sweep
+time; boundary-tight SLA ~7x. Measured benefit: with `--ttft 210` the
+funnel rescued 16 configs — including the top-throughput one — that the
+legacy scalar (283ms) would have falsely rejected; their quantitative p50
+is 123ms.
 
 ## 5. Validation (2026-07-18, recorded)
 

@@ -159,3 +159,108 @@ class TestOperatingPointColumns:
         for schema in (common.ColumnsAgg, common.ColumnsStatic, common.ColumnsDisagg):
             for col in QUEUEING_COLUMNS:
                 assert col in schema
+
+
+class TestSlaFunnel:
+    """Funnel semantics with a stubbed evaluator (no perf DB needed)."""
+
+    def _df(self):
+        import pandas as pd
+
+        from aiconfigurator.sdk import common
+
+        rows = []
+        for i, (bs, hi, lo) in enumerate([(8, 100.0, 50.0), (16, 300.0, 80.0), (32, 900.0, 700.0)]):
+            r = dict.fromkeys(common.ColumnsAgg, 0)
+            r.update(
+                {
+                    "isl": 1024,
+                    "osl": 32,
+                    "prefix": 0,
+                    "bs": bs,
+                    "ctx_tokens": 4096,
+                    "seq/s": 100 - i,
+                    "encoder_latency": 0.0,
+                    "ttft_steady_p99_lo": lo,
+                    "ttft_steady_p99_hi": hi,
+                    "queueing_tier": "screening",
+                }
+            )
+            rows.append(r)
+        return pd.DataFrame(rows)
+
+    def test_funnel_decides_straddlers_with_evaluator(self, monkeypatch):
+        from aiconfigurator.sdk.queueing import refine as refine_mod
+
+        def fake_eval(wl, eng, timing, backend="vllm", **kw):
+            d = Distribution()
+            # bs=16 straddler resolves feasible; bs=32 infeasible
+            d.add(150.0 if wl.concurrency == 16 else 500.0)
+            itl = Distribution()
+            itl.add(5.0)
+            from aiconfigurator.sdk.queueing.spec import QueueingReport
+
+            return QueueingReport(
+                ttft_steady=d, ttft_transient=d, itl=itl, tpot=itl, throughput_rps=1.0, output_tokens_per_s=1.0, e2e=d
+            )
+
+        monkeypatch.setattr(refine_mod, "evaluate_closed_loop", fake_eval)
+        monkeypatch.setattr(refine_mod, "DatabaseTimingModel", lambda *a, **k: object())
+
+        class _B:  # bare backend stand-in for cache attachment
+            pass
+
+        class _Db:
+            backend = "vllm"
+
+        df = self._df()
+        out = refine_mod.apply_sla_funnel(
+            df, model=object(), database=_Db(), backend=_B(), constraints={"ttft": (200.0, 0.5)}, top_k=3
+        )
+        # bs=8: hi=100 <= 200 -> certain pass, stays screening
+        # bs=16: straddler, refined 150 <= 200 -> kept, quantitative
+        # bs=32: lo=700 would have been screened out upstream; here hi>200
+        #        -> refined 500 > 200 -> dropped
+        assert set(out["bs"]) == {8, 16}
+        tiers = dict(zip(out["bs"], out["queueing_tier"], strict=True))
+        assert tiers[8] == "screening"
+        assert tiers[16] == "quantitative"
+
+    def test_unsupported_percentile_rejected(self):
+        from aiconfigurator.sdk.queueing import refine as refine_mod
+
+        with pytest.raises(ValueError):
+            refine_mod.apply_sla_funnel(
+                self._df(), model=None, database=None, backend=None, constraints={"ttft": (200.0, 0.87)}
+            )
+
+    def test_percentile_defaults_in_runtime_config(self):
+        from aiconfigurator.sdk.config import RuntimeConfig
+
+        rc = RuntimeConfig(batch_size=1, isl=8, osl=8)
+        assert rc.ttft_percentile == 0.5
+        assert rc.itl_percentile == 0.99
+
+
+class TestBracketAndE2E:
+    def test_bracket_bounds_the_quantiles(self):
+        cols = operating_point_columns(
+            isl=1024,
+            osl=64,
+            batch_size=16,
+            ctx_tokens=8176,
+            mix_step_ms=90.0,
+            genonly_step_ms=8.0,
+            prefill_step_ms=82.0,
+            num_mix_steps=2,
+            num_genonly_steps=62,
+        )
+        assert cols["ttft_steady_p99_lo"] <= cols["ttft_steady_p50"]
+        assert cols["ttft_steady_p99_hi"] >= cols["ttft_steady_p99"]
+        assert cols["queueing_tier"] == "screening"
+
+    def test_evaluator_reports_e2e_distribution(self):
+        wl = WorkloadSpec(isl=1024, osl=16, concurrency=4)
+        rep = evaluate_closed_loop(wl, EngineSpec(), TIMING)
+        assert rep.e2e.values, "e2e distribution should be populated"
+        assert rep.e2e.mean > rep.ttft_steady.mean

@@ -158,6 +158,7 @@ class QueueingReport:
     tpot: Distribution
     throughput_rps: float
     output_tokens_per_s: float
+    e2e: Distribution = field(default_factory=Distribution)
     backend: str = ""
     mode: str = "agg"  # agg | disagg | static
     num_requests: Optional[int] = None

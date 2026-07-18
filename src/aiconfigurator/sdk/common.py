@@ -679,11 +679,14 @@ ColumnsStatic = [
     "ttft_steady_p50",
     "ttft_steady_p90",
     "ttft_steady_p99",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
     "ttft_transient_mean",
     "ttft_transient_max",
     "itl_mean",
     "itl_p50",
     "itl_p99",
+    "queueing_tier",
 ]
 
 """
@@ -742,11 +745,14 @@ ColumnsAgg = [
     "ttft_steady_p50",
     "ttft_steady_p90",
     "ttft_steady_p99",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
     "ttft_transient_mean",
     "ttft_transient_max",
     "itl_mean",
     "itl_p50",
     "itl_p99",
+    "queueing_tier",
 ]
 
 """
@@ -825,11 +831,14 @@ ColumnsDisagg = [
     "ttft_steady_p50",
     "ttft_steady_p90",
     "ttft_steady_p99",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
     "ttft_transient_mean",
     "ttft_transient_max",
     "itl_mean",
     "itl_p50",
     "itl_p99",
+    "queueing_tier",
 ]
 
 """

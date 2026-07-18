@@ -205,6 +205,7 @@ def evaluate_closed_loop(
     ttft_steady = Distribution()
     itl = Distribution()
     tpot = Distribution()
+    e2e = Distribution()
     steady_completions = 0
 
     max_passes = 200 * (warmup_generations + window_generations) * max(1, wl.osl)
@@ -245,6 +246,7 @@ def evaluate_closed_loop(
                     itl.add(g)
                 if s.gaps:
                     tpot.add(sum(s.gaps) / len(s.gaps))
+                e2e.add(now - s.arrival_ms)
             idx = slots.index(s)
             slots[idx : idx + 1] = []
             slots.append(_Slot(remaining_prefill=wl.effective_isl, arrival_ms=now))
@@ -259,6 +261,7 @@ def evaluate_closed_loop(
         ttft_transient=ttft_transient,
         itl=itl,
         tpot=tpot,
+        e2e=e2e,
         throughput_rps=throughput,
         output_tokens_per_s=throughput * wl.osl,
         backend=backend,

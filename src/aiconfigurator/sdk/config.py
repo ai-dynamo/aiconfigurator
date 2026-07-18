@@ -138,6 +138,17 @@ class RuntimeConfig:
     ttft: float = None
     tpot: Union[float, list] = None
     request_latency: float = None  # it works together with ttft. 1. <= req_lat 2. <= req_lat and <= ttft
+    itl: float = None  # optional inter-token-latency SLA target (streaming smoothness)
+    # SLA percentile semantics (queueing model): which quantile of the
+    # steady-state distribution each target constrains. Supported values:
+    # 0.5, 0.75, 0.9, 0.95, 0.99, 0.999. Defaults: p50 for ttft/tpot/
+    # request_latency ("typical request under sustained load"); p99 for itl
+    # (the tail IS the point of a smoothness SLA). The legacy scalar columns
+    # are unaffected; percentiles are resolved by the sweep funnel.
+    ttft_percentile: float = 0.5
+    tpot_percentile: float = 0.5
+    itl_percentile: float = 0.99
+    request_latency_percentile: float = 0.5
     seq_imbalance_correction_scale: float = 1.0
     # Separate correction scale for generation/decoding stage (do NOT reuse ctx scale).
     gen_seq_imbalance_correction_scale: float = 1.0

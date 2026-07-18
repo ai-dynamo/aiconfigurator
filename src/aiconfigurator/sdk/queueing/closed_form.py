@@ -145,16 +145,36 @@ def operating_point_columns(
     itl_p50 = t_mix if mix_frac >= 0.5 else t_gen
     itl_p99 = t_mix if mix_frac >= 0.01 else t_gen
 
+    # cohort bracket: the steady limit cycle can lock anywhere between solo
+    # prompts (one per pass) and full-budget packing — both extremes are
+    # computable from this operating point, and the true steady p99 lies
+    # inside the bracket by construction (cohort size is in [1, B_eff/isl]).
+    # Used by the sweep funnel: reject only when even `lo` violates the SLA;
+    # send straddlers (lo <= SLA < hi) to the quantitative tier.
+    p_step = max(0.0, float(prefill_step_ms))
+    if isl <= ctx_tokens:
+        # linear token scaling of the full-chunk prefill cost; prefill is
+        # superlinear in tokens, so this bounds the solo pass from ABOVE —
+        # conservative in the keep direction (lo never overshoots down)
+        own_lo = p_step * (isl / max(1, ctx_tokens)) + t_gen
+    else:
+        own_lo = own  # prompt spans full budget: the bracket collapses
+    ttft_p99_lo = min(own_lo, own)
+    ttft_p99_hi = own + 2.0 * t_mix  # max residual + one cohort-misalignment pass
+
     return {
         "ttft_steady_mean": ttft_steady_mean,
         "ttft_steady_p50": _q(0.50),
         "ttft_steady_p90": _q(0.90),
         "ttft_steady_p99": _q(0.99),
+        "ttft_steady_p99_lo": ttft_p99_lo,
+        "ttft_steady_p99_hi": ttft_p99_hi,
         "ttft_transient_mean": sum(stair) / len(stair),
         "ttft_transient_max": stair[-1],
         "itl_mean": itl_mean,
         "itl_p50": itl_p50,
         "itl_p99": itl_p99,
+        "queueing_tier": "screening",
     }
 
 
@@ -163,27 +183,34 @@ QUEUEING_COLUMNS = [
     "ttft_steady_p50",
     "ttft_steady_p90",
     "ttft_steady_p99",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
     "ttft_transient_mean",
     "ttft_transient_max",
     "itl_mean",
     "itl_p50",
     "itl_p99",
+    "queueing_tier",
 ]
 
 
-def static_degenerate_columns(ttft_ms: float, tpot_ms: float) -> dict:
+def static_degenerate_columns(ttft_ms: float, tpot_ms: float, tier: str = "static") -> dict:
     """Static batching / disagg-static mapping: no queueing, no interference
-    — all distributions collapse onto the legacy scalars by construction."""
+    — all distributions collapse onto the legacy scalars by construction
+    (the p99 bracket collapses to a point for the same reason)."""
     return {
         "ttft_steady_mean": ttft_ms,
         "ttft_steady_p50": ttft_ms,
         "ttft_steady_p90": ttft_ms,
         "ttft_steady_p99": ttft_ms,
+        "ttft_steady_p99_lo": ttft_ms,
+        "ttft_steady_p99_hi": ttft_ms,
         "ttft_transient_mean": ttft_ms,
         "ttft_transient_max": ttft_ms,
         "itl_mean": tpot_ms,
         "itl_p50": tpot_ms,
         "itl_p99": tpot_ms,
+        "queueing_tier": tier,
     }
 
 
