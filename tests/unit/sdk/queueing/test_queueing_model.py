@@ -7,6 +7,7 @@ results are documented in docs/design/queueing_model.md §5.
 """
 
 import math
+import typing
 
 import pytest
 
@@ -24,6 +25,9 @@ from aiconfigurator.sdk.queueing.closed_form import (
     operating_point_columns,
     static_degenerate_columns,
 )
+
+# CI gates on `-m "unit or build"` — unmarked tests never run there
+pytestmark = pytest.mark.unit
 
 
 class SyntheticTiming:
@@ -102,12 +106,34 @@ class TestClosedLoopEvaluator:
     def test_sglang_itl_spike_is_whole_prefill_batch(self):
         wl = WorkloadSpec(isl=4096, osl=64, concurrency=8)
         eng = EngineSpec(max_num_batched_tokens=8192)
+        # the alternating structure is the mixed-chunk-OFF mode
+        alt_eng = EngineSpec(max_num_batched_tokens=8192, enable_mixed_chunk=False)
         vllm = evaluate_closed_loop(wl, eng, TIMING, backend="vllm")
-        sglang = evaluate_closed_loop(wl, eng, TIMING, backend="sglang")
+        sglang = evaluate_closed_loop(wl, alt_eng, TIMING, backend="sglang")
         # alternating calendar: decode stalls behind dedicated prefill
         # batches, so the ITL tail cannot be milder than the fused calendar's
         assert sglang.itl.p99 >= vllm.itl.p99 * 0.9
         assert sglang.itl.p99 > sglang.itl.p50
+
+    def test_sglang_mixed_chunk_is_default_and_differs_from_alternating(self):
+        # AIC's generator deploys SGLang agg with enable_mixed_chunk=true
+        # (rule_plugin/sglang.rule) — the calendar defaults must match the
+        # deployed engine, not the dedicated-prefill-batch structure
+        assert EngineSpec().enable_mixed_chunk is True
+        wl = WorkloadSpec(isl=4096, osl=64, concurrency=8)
+        mixed = evaluate_closed_loop(wl, EngineSpec(max_num_batched_tokens=8192), TIMING, backend="sglang")
+        alt = evaluate_closed_loop(
+            wl, EngineSpec(max_num_batched_tokens=8192, enable_mixed_chunk=False), TIMING, backend="sglang"
+        )
+        assert mixed.itl.p99 > mixed.itl.p50  # chunk-bearing passes still spike
+        assert (mixed.ttft_steady.mean, mixed.itl.p99) != (alt.ttft_steady.mean, alt.itl.p99)
+
+    def test_fused_c1_ttft_excludes_decode_row(self):
+        # a prefill completer's first token is sampled off the final chunk's
+        # logits in the same fused pass — it is not an extra decode row
+        wl = WorkloadSpec(isl=2048, osl=16, concurrency=1)
+        rep = evaluate_closed_loop(wl, EngineSpec(), TIMING)
+        assert rep.ttft_steady.mean == pytest.approx(TIMING.prefill_ms(1, 2048, 0))
 
     def test_trtllm_guaranteed_no_evict_caps_concurrency(self):
         wl = WorkloadSpec(isl=2048, osl=64, concurrency=64)
@@ -159,6 +185,79 @@ class TestOperatingPointColumns:
         for schema in (common.ColumnsAgg, common.ColumnsStatic, common.ColumnsDisagg):
             for col in QUEUEING_COLUMNS:
                 assert col in schema
+
+
+class TestScreeningAdditiveStages:
+    """Encoder / dispatch-overhead stages and prefix effective-length —
+    the additive terms the legacy `ttft` carries must also reach the
+    screening columns, or percentile screens drift from what deploys."""
+
+    _KW: typing.ClassVar[dict] = dict(
+        isl=4096,
+        osl=256,
+        batch_size=32,
+        ctx_tokens=8192,
+        mix_step_ms=180.0,
+        genonly_step_ms=12.0,
+        prefill_step_ms=170.0,
+        num_mix_steps=16,
+        num_genonly_steps=240,
+    )
+
+    def test_encoder_and_dispatch_shift_ttft_only(self):
+        base = operating_point_columns(**self._KW)
+        shifted = operating_point_columns(**self._KW, encoder_ms=50.0, dispatch_overhead_ms=5.0)
+        for col in QUEUEING_COLUMNS:
+            if col == "queueing_tier":
+                continue
+            if col.startswith("ttft"):
+                assert shifted[col] == pytest.approx(base[col] + 55.0), col
+            else:
+                assert shifted[col] == base[col], col
+
+    def test_prefix_uses_effective_prompt_length(self):
+        kw = dict(
+            isl=8192,
+            osl=64,
+            batch_size=8,
+            ctx_tokens=2048,
+            mix_step_ms=100.0,
+            genonly_step_ms=10.0,
+            prefill_step_ms=95.0,
+            num_mix_steps=32,
+            num_genonly_steps=32,
+        )
+        cold = operating_point_columns(**kw)
+        cached = operating_point_columns(**kw, prefix=6144)
+        # cached tokens do not consume the token budget: 8192-6144=2048
+        # effective tokens -> 1 own chunk instead of 4
+        assert cached["ttft_steady_mean"] < cold["ttft_steady_mean"]
+        assert cached["ttft_transient_max"] == pytest.approx(math.ceil(8 * 2048 / 2048) * 100.0)
+        assert cold["ttft_transient_max"] == pytest.approx(math.ceil(8 * 8192 / 2048) * 100.0)
+
+    def test_prefix_bracket_lower_bound_holds_against_evaluator(self):
+        """Regression: chunk counts must use effective isl, or the funnel's
+        wide-keep bound (`ttft_steady_p99_lo`) can exceed the evaluator's
+        p99 for prefix rows and falsely reject feasible candidates."""
+        wl = WorkloadSpec(isl=4096, osl=32, prefix=3072, concurrency=8)
+        ctx_tokens = 2048
+        eng = EngineSpec(max_num_batched_tokens=ctx_tokens + wl.concurrency)
+        rep = evaluate_closed_loop(wl, eng, TIMING)
+        t_gen = TIMING.decode_ms(8, 4096 + 16)
+        t_mix = TIMING.prefill_ms(1, 4096, 3072) + t_gen
+        cols = operating_point_columns(
+            isl=4096,
+            osl=32,
+            batch_size=8,
+            ctx_tokens=ctx_tokens,
+            mix_step_ms=t_mix,
+            genonly_step_ms=t_gen,
+            prefill_step_ms=t_mix,
+            num_mix_steps=16,
+            num_genonly_steps=16,
+            prefix=3072,
+        )
+        assert cols["ttft_steady_p99_lo"] <= rep.ttft_steady.p99
 
 
 class TestSlaFunnel:

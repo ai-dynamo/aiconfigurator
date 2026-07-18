@@ -380,12 +380,10 @@ def _sweep_one_parallel_agg(
                 if sla_funnel and sla_percentile:
                     ttft_screen = result_dict.get("ttft_steady_p99_lo", result_dict["ttft"])
                 elif sla_percentile:
-                    ttft_screen = (
-                        queueing_closed_form.screening_quantile(
-                            result_dict, "ttft", getattr(runtime_config, "ttft_percentile", 0.5)
-                        )
-                        or result_dict["ttft"]
+                    _q_val = queueing_closed_form.screening_quantile(
+                        result_dict, "ttft", getattr(runtime_config, "ttft_percentile", 0.5)
                     )
+                    ttft_screen = _q_val if _q_val is not None else result_dict["ttft"]
                 else:
                     ttft_screen = result_dict["ttft"]
                 keep = ttft_screen <= ttft_target

@@ -142,14 +142,18 @@ def refine_rows(
                 wl, eng, timing, backend=calendar_backend, warmup_generations=2, window_generations=2
             )
             report_cache[cache_key] = rep
-        if encoder_ms > 0.0:
-            # additive encoder stage ahead of prefill (run_agg's own
-            # composition); shift copies so the cached report stays clean
+        # additive per-request TTFT stages ahead of / around the prefill —
+        # the encoder stage and the per-request CPU dispatch overhead, the
+        # same terms run_agg's legacy ttft and the screening columns carry;
+        # shift copies so the cached report stays clean
+        dispatch_ms = float(getattr(backend, "_prefill_dispatch_overhead_ms", lambda _m: 0.0)(model))
+        shift_ms = encoder_ms + dispatch_ms
+        if shift_ms > 0.0:
             rep = dataclasses.replace(
                 rep,
-                ttft_steady=rep.ttft_steady.shifted(encoder_ms),
-                ttft_transient=rep.ttft_transient.shifted(encoder_ms),
-                e2e=rep.e2e.shifted(encoder_ms),
+                ttft_steady=rep.ttft_steady.shifted(shift_ms),
+                ttft_transient=rep.ttft_transient.shifted(shift_ms),
+                e2e=rep.e2e.shifted(shift_ms),
             )
 
         p99 = rep.ttft_steady.p99
@@ -211,6 +215,14 @@ def apply_sla_funnel(
     3. optionally (``refine_top``) the top rows are also refined so their
        reported numbers are quantitative; every refined row is checked
        against ALL requested constraints.
+
+    Enforcement is deliberately asymmetric across tiers: rows that pass on
+    the bracket alone (``hi <= target``) keep only their screening-tier
+    screens for the other metrics (they have no evaluator distributions),
+    while refined rows face every requested constraint at its percentile.
+    A straddler can therefore be dropped on a non-TTFT constraint that a
+    certain-pass row was never tested against — conservative in the keep
+    direction, and visible via ``queueing_tier``.
     """
     if df.empty or not constraints:
         return df
@@ -246,8 +258,6 @@ def apply_sla_funnel(
                 confirmed += 1
             else:
                 to_refine.append(i)
-            if confirmed >= need and not to_refine:
-                break
             if confirmed >= need:
                 break
         reports = refine_rows(

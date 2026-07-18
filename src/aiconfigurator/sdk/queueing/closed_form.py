@@ -35,6 +35,9 @@ def operating_point_columns(
     prefill_step_ms: float,
     num_mix_steps: float,
     num_genonly_steps: float,
+    prefix: int = 0,
+    encoder_ms: float = 0.0,
+    dispatch_overhead_ms: float = 0.0,
 ) -> dict:
     """Queueing columns from quantities run_agg already computed — pure
     arithmetic, zero extra perf-database queries, safe on the sweep hot path.
@@ -45,16 +48,28 @@ def operating_point_columns(
       genonly_step_ms   <-> gen-only pass duration t_gen
       num_mix/gen_steps <-> pass-type frequencies over one request lifetime
 
-    TTFT_steady = W_res + ceil(isl/ctx_tokens) * t_mix, with W_res the
-    renewal residual over the pass-length mixture (time-weighted pass-type
-    hit probabilities, residual uniform within a pass). The transient block
-    is the admission staircase of `batch_size` simultaneous arrivals.
+    TTFT_steady = encoder + dispatch + W_res + ceil(isl_eff/ctx_tokens) * t_mix,
+    with W_res the renewal residual over the pass-length mixture (time-weighted
+    pass-type hit probabilities, residual uniform within a pass). The transient
+    block is the admission staircase of `batch_size` simultaneous arrivals.
+
+    Chunk count uses the EFFECTIVE prompt length (isl - prefix): cached prefix
+    tokens do not consume the scheduler token budget (vLLM v0.24.0
+    scheduler.py:710-712 subtracts num_computed_tokens before budgeting) —
+    the same convention the limit-cycle evaluator uses, keeping the funnel's
+    lo/hi bracket a valid bound on the evaluator's distribution for prefix
+    workloads. `encoder_ms` (vision encoder stage) and `dispatch_overhead_ms`
+    (per-request CPU dispatch cost) are the additive per-request TTFT stages
+    the legacy `ttft` column already carries; without them the percentile
+    screen would be systematically permissive for multimodal rows.
     """
     t_mix = float(mix_step_ms)
     t_gen = float(genonly_step_ms)
     n_mix = max(float(num_mix_steps), 1e-9)
     n_gen = max(float(num_genonly_steps), 0.0)
-    chunks = max(1, math.ceil(isl / max(1, ctx_tokens)))
+    extra = float(encoder_ms) + float(dispatch_overhead_ms)
+    eff_isl = max(1, isl - max(0, prefix))
+    chunks = max(1, math.ceil(eff_isl / max(1, ctx_tokens)))
     own = chunks * t_mix
 
     # residual life over the pass mixture: a pass of type i is hit with
@@ -71,7 +86,7 @@ def operating_point_columns(
             residual_vals.append((d + 0.5) / 10.0 * t_i)
             residual_wts.append(p_hit / 10.0)
 
-    ttft_vals = [r + own for r in residual_vals] or [own]
+    ttft_vals = [extra + r + own for r in residual_vals] or [extra + own]
     ttft_wts = residual_wts or [1.0]
 
     def _q(q: float) -> float:
@@ -86,7 +101,7 @@ def operating_point_columns(
     ttft_steady_mean = sum(v * w for v, w in zip(ttft_vals, ttft_wts, strict=True)) / sum(ttft_wts)
 
     # transient staircase for the initial burst of `batch_size` arrivals
-    stair = [math.ceil(k * isl / max(1, ctx_tokens)) * t_mix for k in range(1, max(1, batch_size) + 1)]
+    stair = [extra + math.ceil(k * eff_isl / max(1, ctx_tokens)) * t_mix for k in range(1, max(1, batch_size) + 1)]
     # ITL mixture: a gap equals the duration of the pass it spans. A mix
     # pass contributes gaps only for the (c-1)/c of the batch NOT being
     # prefilled in it (with c=1 there is nobody else to stall, so mix
@@ -107,15 +122,15 @@ def operating_point_columns(
     # Used by the sweep funnel: reject only when even `lo` violates the SLA;
     # send straddlers (lo <= SLA < hi) to the quantitative tier.
     p_step = max(0.0, float(prefill_step_ms))
-    if isl <= ctx_tokens:
+    if eff_isl <= ctx_tokens:
         # linear token scaling of the full-chunk prefill cost; prefill is
         # superlinear in tokens, so this bounds the solo pass from ABOVE —
         # conservative in the keep direction (lo never overshoots down)
-        own_lo = p_step * (isl / max(1, ctx_tokens)) + t_gen
+        own_lo = p_step * (eff_isl / max(1, ctx_tokens)) + t_gen
     else:
         own_lo = own  # prompt spans full budget: the bracket collapses
-    ttft_p99_lo = min(own_lo, own)
-    ttft_p99_hi = own + 2.0 * t_mix  # max residual + one cohort-misalignment pass
+    ttft_p99_lo = extra + min(own_lo, own)
+    ttft_p99_hi = extra + own + 2.0 * t_mix  # max residual + one cohort-misalignment pass
 
     return {
         "ttft_steady_mean": ttft_steady_mean,

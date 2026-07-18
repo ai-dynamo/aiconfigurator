@@ -11,10 +11,11 @@ KV manager, no RNG) and reads TTFT/ITL/TPOT distributions off the cycle.
 
 This is an evaluation of the scheduling algorithm's own arithmetic — not a
 statistical fit and not a per-request simulation. Step semantics are
-anchored to the vLLM v1 scheduler source (vllm/v1/core/sched/scheduler.py:
-unified token budget :334, running set first :346, chunked prefill cap
-:372); the full clause provenance table and validation record live in
-docs/design/queueing_model.md.
+anchored to the vLLM v1 scheduler source, pinned to tag v0.24.0
+(vllm/v1/core/sched/scheduler.py: unified token budget :408, running set
+first :432, chunked prefill cap :470); line anchors are version-specific —
+re-pin them when re-validating against a newer scheduler. The full clause
+provenance table and validation record live in docs/design/queueing_model.md.
 
 Backend calendars:
   - vllm    : fused pass — unified token budget, running decodes spend first,
@@ -22,8 +23,11 @@ Backend calendars:
   - trtllm  : fused pass like vllm (max_num_tokens budget); optional
               GUARANTEED_NO_EVICT admission cap (STRUCTURAL, not yet
               validated against a trtllm oracle)
-  - sglang  : alternating passes — dedicated prefill batches pause decode,
-              decode passes run alone; ITL spikes are whole prefill batches
+  - sglang  : mixed-chunk pass by default (prefill chunks share the iteration
+              with the running decodes — matches AIC's SGLang agg deployment
+              rule, which sets enable_mixed_chunk=true); with mixed chunk off,
+              alternating passes — dedicated prefill batches pause decode and
+              ITL spikes are whole prefill batches
               (STRUCTURAL, not yet validated against an SGLang reference)
 """
 
@@ -34,7 +38,10 @@ from dataclasses import dataclass, field
 from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 
 
-@dataclass
+# eq=False: slots are identity objects. Cohorts of identical requests reach
+# field-equal states in the limit cycle, and slots.index() must find THIS
+# slot, not the first field-equal one.
+@dataclass(eq=False)
 class _Slot:
     remaining_prefill: int
     generated: int = 0
@@ -71,7 +78,8 @@ class FusedCalendar(BaseCalendar):
 
     def step(self, slots, wl, eng, timing):
         budget = eng.max_num_batched_tokens
-        emitters: list[_Slot] = []
+        prefill_completers: list[_Slot] = []
+        decode_emitters: list[_Slot] = []
         batch_count = 0
         batch_total_isl = 0
         batch_total_prefix = 0
@@ -82,7 +90,8 @@ class FusedCalendar(BaseCalendar):
                     continue
                 if not eng.enable_chunked_prefill and s.remaining_prefill > budget:
                     # chunked prefill off: the whole prompt must fit the
-                    # remaining budget (vllm/v1/core/sched/scheduler.py:652)
+                    # remaining budget (vllm/v1/core/sched/scheduler.py:803-810
+                    # @ v0.24.0)
                     break
                 chunk = min(s.remaining_prefill, budget)
                 computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
@@ -92,12 +101,12 @@ class FusedCalendar(BaseCalendar):
                 batch_total_isl += computed_before + chunk
                 batch_total_prefix += computed_before
                 if s.remaining_prefill == 0:
-                    emitters.append(s)
+                    prefill_completers.append(s)
             elif s.generated < wl.osl:
                 if budget <= 0:
                     continue
                 budget -= 1
-                emitters.append(s)
+                decode_emitters.append(s)
 
         prefill_ms = 0.0
         if batch_count > 0:
@@ -105,10 +114,13 @@ class FusedCalendar(BaseCalendar):
             mean_prefix = batch_total_prefix // batch_count
             prefill_ms = timing.prefill_ms(batch_count, mean_isl, mean_prefix)
         decode_ms = 0.0
-        if emitters:
-            ctx = sum(wl.isl + s.generated for s in emitters) // len(emitters)
-            decode_ms = timing.decode_ms(len(emitters), ctx)
-        return prefill_ms + decode_ms, emitters
+        if decode_emitters:
+            # prefill completers are NOT decode rows: the fused pass samples
+            # their first token off the final chunk's logits (gpu_model_runner
+            # logits_indices) — no extra decode-row cost, no budget token
+            ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
+            decode_ms = timing.decode_ms(len(decode_emitters), ctx)
+        return prefill_ms + decode_ms, prefill_completers + decode_emitters
 
 
 class TrtllmCalendar(FusedCalendar):
@@ -127,38 +139,75 @@ class TrtllmCalendar(FusedCalendar):
 
 
 class AlternatingCalendar(BaseCalendar):
-    """SGLang-style calendar: prefill batches run as dedicated iterations
-    (decode paused — the structural source of SGLang ITL spikes), decode
-    iterations run alone. Budgets are max_prefill_tokens per prefill batch
-    with per-request chunks capped at chunked_prefill_size."""
+    """SGLang calendar, two modes selected by ``EngineSpec.enable_mixed_chunk``:
+
+    - mixed chunk (default — AIC's generator deploys SGLang agg with
+      ``enable_mixed_chunk=true``): prefill chunks and the running decodes
+      share one iteration (SGLang merges the extend batch with the decode
+      batch). Structurally fused like vLLM, except decodes do not debit the
+      prefill token budget.
+    - mixed chunk off: prefill batches run as dedicated iterations (decode
+      paused — the structural source of SGLang ITL spikes), decode iterations
+      run alone.
+
+    Budgets are max_prefill_tokens per prefill batch with per-request chunks
+    capped at chunked_prefill_size."""
 
     name = "sglang"
     validated = False
 
     def step(self, slots, wl, eng, timing):
+        if eng.enable_mixed_chunk:
+            return self._mixed_step(slots, wl, eng, timing)
+        return self._alternating_step(slots, wl, eng, timing)
+
+    def _prefill_batch(self, prefilling, wl, eng):
+        """Consume prefill budget over `prefilling` slots in admission order;
+        return (batch_count, mean_isl, mean_prefix, completers)."""
+        budget = eng.max_prefill_tokens or eng.max_num_batched_tokens
+        chunk_cap = eng.chunked_prefill_size or budget
+        completers = []
+        batch_count = 0
+        batch_total_isl = 0
+        batch_total_prefix = 0
+        for s in prefilling:
+            if budget <= 0:
+                break
+            chunk = min(s.remaining_prefill, budget, chunk_cap)
+            computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
+            s.remaining_prefill -= chunk
+            budget -= chunk
+            batch_count += 1
+            batch_total_isl += computed_before + chunk
+            batch_total_prefix += computed_before
+            if s.remaining_prefill == 0:
+                completers.append(s)
+        mean_isl = batch_total_isl // batch_count if batch_count else 0
+        mean_prefix = batch_total_prefix // batch_count if batch_count else 0
+        return batch_count, mean_isl, mean_prefix, completers
+
+    def _mixed_step(self, slots, wl, eng, timing):
+        # snapshot decode-ready BEFORE consuming prefill: a slot completing
+        # its prefill in this pass emits once (as a completer), not twice
+        prefilling = [s for s in slots if s.remaining_prefill > 0]
+        decode_emitters = [s for s in slots if s.remaining_prefill == 0 and s.generated < wl.osl]
+        prefill_ms = 0.0
+        completers: list[_Slot] = []
+        if prefilling:
+            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
+            if batch_count:
+                prefill_ms = timing.prefill_ms(batch_count, mean_isl, mean_prefix)
+        decode_ms = 0.0
+        if decode_emitters:
+            ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
+            decode_ms = timing.decode_ms(len(decode_emitters), ctx)
+        return prefill_ms + decode_ms, completers + decode_emitters
+
+    def _alternating_step(self, slots, wl, eng, timing):
         prefilling = [s for s in slots if s.remaining_prefill > 0]
         if prefilling:
-            budget = eng.max_prefill_tokens or eng.max_num_batched_tokens
-            chunk_cap = eng.chunked_prefill_size or budget
-            emitters = []
-            batch_count = 0
-            batch_total_isl = 0
-            batch_total_prefix = 0
-            for s in prefilling:
-                if budget <= 0:
-                    break
-                chunk = min(s.remaining_prefill, budget, chunk_cap)
-                computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
-                s.remaining_prefill -= chunk
-                budget -= chunk
-                batch_count += 1
-                batch_total_isl += computed_before + chunk
-                batch_total_prefix += computed_before
-                if s.remaining_prefill == 0:
-                    emitters.append(s)
-            mean_isl = batch_total_isl // batch_count
-            mean_prefix = batch_total_prefix // batch_count
-            return timing.prefill_ms(batch_count, mean_isl, mean_prefix), emitters
+            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
+            return timing.prefill_ms(batch_count, mean_isl, mean_prefix), completers
 
         emitters = [s for s in slots if s.generated < wl.osl]
         if not emitters:

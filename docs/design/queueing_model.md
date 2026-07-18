@@ -37,6 +37,8 @@ One model, two precision tiers:
 | residual wait `E[T²]/(2E[T])` | renewal-theory residual life (inspection paradox) |
 | transient window = initial concurrency burst | closed-loop dispatch semantics (all C arrive at t=0) |
 | ITL gap weights `(c−1)/c` for mix passes | a mix pass stalls only the requests not being prefilled in it |
+| `isl_eff = isl − prefix` in chunk counts | cached tokens do not consume the scheduler token budget (scheduler.py:710-712 @ v0.24.0) — also what keeps the funnel bracket a valid bound on the evaluator's distribution for prefix rows |
+| additive TTFT stages: encoder, per-request dispatch overhead | the same additive terms the legacy `ttft` carries (run_agg's own composition); omitting them would make percentile screens permissive for multimodal rows |
 | static degenerate mapping | static batching has no admission queue and no phase interference, by construction |
 
 Policy: residuals against the oracle must be traced to a *nameable
@@ -51,7 +53,7 @@ measurement/interpolation), which this package consumes as a black box.
 |---|---|---|
 | vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated** across 9 config families (§5) |
 | TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | structural, **not validated** against a TRT-LLM reference |
-| SGLang | alternating passes (dedicated prefill batches pause decode → ITL spikes are whole prefill batches) | structural, **not validated** against an SGLang reference |
+| SGLang | mixed-chunk pass by default (prefill chunks share the iteration with running decodes; decodes do not debit the prefill budget) — matching AIC's own SGLang agg deployment rule (`rule_plugin/sglang.rule`: `enable_mixed_chunk = true`); with `EngineSpec.enable_mixed_chunk=False`, alternating passes (dedicated prefill batches pause decode → ITL spikes are whole prefill batches) | structural, **not validated** against an SGLang reference |
 
 ## 4. New summary columns (additive; legacy `ttft`/`tpot` untouched)
 
@@ -125,17 +127,22 @@ Methodology: a development-time DES oracle — a discrete-event simulation of
 vLLM v1 iteration-level scheduling — was driven with timing functions
 IDENTICAL to the model's, so residuals isolate scheduling semantics. The
 oracle's own semantics were audited clause-by-clause against the vLLM v1
-scheduler source:
+scheduler source. Line anchors are pinned to **tag v0.24.0**
+(`releases/v0.24.0`) — the version the perf database ships — and are
+version-specific: re-pin them (and re-run the gate) when re-validating
+against a newer scheduler.
 
-| Clause | vllm/v1/core/sched/scheduler.py |
+| Clause | vllm/v1/core/sched/scheduler.py @ v0.24.0 |
 |---|---|
-| unified token budget | `token_budget = max_num_scheduled_tokens` (:334) |
-| running set scheduled first | `while req_index < len(self.running) and token_budget > 0` (:346) |
-| chunked prefill budget cap | `num_new_tokens = min(num_new_tokens, token_budget)` (:372) |
-| chunked-off whole-prompt gate | break when `num_new_tokens > token_budget` (:652) |
-| admission concurrency cap | `len(self.running) == max_num_running_reqs` (:534) |
-| waiting-admission alloc failure | put back + break — no preemption (:716-723) |
-| running-path alloc failure | preempt (LIFO pop) with recompute (:437-471) |
+| unified token budget | `token_budget = self.max_num_scheduled_tokens` (:408) |
+| running set scheduled first | `while req_index < len(self.running) and token_budget > 0` (:432) |
+| chunked prefill budget cap | `num_new_tokens = min(num_new_tokens, token_budget)` (:470) |
+| chunked-off whole-prompt gate | break when `num_new_tokens > token_budget` (:803-810) |
+| admission concurrency cap | `len(self.running) == max_num_running_reqs` (:630) |
+| waiting-admission alloc failure | no preemption — request stays queued, break (:888-895) |
+| running-path alloc failure | preempt (LIFO `self.running.pop()`) with recompute (:562-565, `_preempt_request` :1107) |
+| prefix-cached tokens skip the budget | `num_computed_tokens` subtracted before budgeting (:710-712) |
+| fused execution (one pass = one forward) | decode tokens + prefill chunks form a single varlen batch; first token sampled off the final chunk's logits (`gpu_model_runner.py` `execute_model`/`logits_indices`) |
 
 Battery: 9 agg config families (isl 512–8192, osl 16–512, C 1–128, budget
 2048–8192, chunked on/off, prefix). Recorded results:
@@ -200,3 +207,28 @@ Silent (each with a designated detector):
 10. **Metric-definition mismatch.** `ttft_steady_*` must be compared against
    warmup-excluded benchmarks; blended means against full-run benchmarks
    with matching N.
+11. **Speculative decoding (`nextn > 0`).** The engine emits up to nextn+1
+   tokens per verified step (vLLM: `num_tokens_with_spec`), breaking the
+   1-token-per-pass invariant. AIC models MTP by amortized per-op scaling
+   (`_mtp_scale_factor`), so throughput and TPOT stay consistent — but
+   `itl_*` for nextn rows describes the amortized cadence, not the real
+   lumpy gap distribution (a full step gap followed by zero-gaps).
+   Detector: compare against a token-timestamped benchmark of an MTP model.
+12. **Attention-DP prefill cadence (`dp > 1`).** vLLM defers new prefills on
+   non-cadence steps under data parallelism (`throttle_prefills` /
+   `defer_prefills`, scheduler.py:424-428, 786-790 @ v0.24.0); the per-rank
+   calendar assumes every pass may mix. TTFT distributions for dp>1 rows
+   can shift by the cadence interval.
+13. **Closed-loop admission boundary convention.** The evaluator admits a
+   replacement request into the pass that starts at its arrival instant
+   (arrival = completion pass boundary). A real closed-loop client's next
+   request typically arrives after the engine has already scheduled the
+   following iteration and waits ~one extra pass. The DES oracle shares the
+   evaluator's convention, so §5 residuals cannot see this term; its
+   direction matches the recorded −2.5% end-to-end underestimate. Nameable
+   mechanism, kept as a documented boundary until the real-scheduler oracle
+   (which owns the true `schedule()` boundary) can measure it.
+14. **Async scheduling / overlapped batches.** `max_concurrent_batches > 1`
+   and async scheduling overlap step N+1's schedule with step N's execute —
+   the "one pass = one gap" mapping blurs. Not active in the validated
+   v0.24.0 configuration; watch item for newer engine defaults.

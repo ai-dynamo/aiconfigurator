@@ -7,6 +7,8 @@ Unit tests for CLI argument parsing functionality.
 Tests CLI argument validation, choices, and default values.
 """
 
+import typing
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -424,3 +426,49 @@ class TestCLIArgumentParsing:
             ]
         )
         assert args.nextn_accept_rates == "0.9,0.5,0.2,0.1,0"
+
+
+class TestPercentileSlaArguments:
+    """Percentile SLA flags (queueing model): parsing, defaults, rejection."""
+
+    _BASE: typing.ClassVar[list] = [
+        "default",
+        "--model-path",
+        "Qwen/Qwen3-32B",
+        "--total-gpus",
+        "8",
+        "--system",
+        "h200_sxm",
+    ]
+
+    def test_defaults_keep_legacy_filter_semantics(self, cli_parser):
+        """All percentile args default to None (and --sla-refine to False):
+        main() derives sla_percentile from their presence, so bare
+        invocations must stay on the legacy avg filter."""
+        args = cli_parser.parse_args(self._BASE)
+        assert args.itl is None
+        assert args.ttft_percentile is None
+        assert args.tpot_percentile is None
+        assert args.itl_percentile is None
+        assert args.request_latency_percentile is None
+        assert args.sla_refine is False
+
+    def test_percentile_labels_parse_to_floats(self, cli_parser):
+        args = cli_parser.parse_args(
+            self._BASE + ["--ttft-percentile", "p99", "--itl", "100", "--itl-percentile", "p50"]
+        )
+        assert args.ttft_percentile == 0.99
+        assert args.itl == 100.0
+        assert args.itl_percentile == 0.5
+
+    def test_percentile_labels_case_insensitive(self, cli_parser):
+        args = cli_parser.parse_args(self._BASE + ["--ttft-percentile", "P95"])
+        assert args.ttft_percentile == 0.95
+
+    def test_invalid_percentile_rejected(self, cli_parser):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(self._BASE + ["--ttft-percentile", "p42"])
+
+    def test_sla_refine_flag(self, cli_parser):
+        args = cli_parser.parse_args(self._BASE + ["--sla-refine"])
+        assert args.sla_refine is True

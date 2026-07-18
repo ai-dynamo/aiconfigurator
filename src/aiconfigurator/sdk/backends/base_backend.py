@@ -1392,6 +1392,9 @@ class BaseBackend:
                 prefill_step_ms=_prefill_step_ms,
                 num_mix_steps=num_mix_steps,
                 num_genonly_steps=num_genonly_steps,
+                prefix=prefix,
+                encoder_ms=encoder_latency_ms,
+                dispatch_overhead_ms=self._prefill_dispatch_overhead_ms(model),
             )
         )
         result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)

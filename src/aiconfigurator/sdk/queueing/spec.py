@@ -74,6 +74,10 @@ class EngineSpec:
     # SGLang-specific (used by the sglang calendar only)
     max_prefill_tokens: Optional[int] = None  # defaults to max_num_batched_tokens
     chunked_prefill_size: Optional[int] = None  # defaults to max_num_batched_tokens
+    # default True: AIC's generator deploys SGLang agg with mixed chunk ON
+    # (rule_plugin/sglang.rule), so the calendar matches the deployed engine;
+    # False selects the alternating (dedicated prefill batch) calendar
+    enable_mixed_chunk: bool = True
     # TRT-LLM-specific (used by the trtllm calendar only)
     guaranteed_no_evict: bool = False
     kv_capacity_tokens: Optional[int] = None  # needed by guaranteed_no_evict
