@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|---|
 | **Status** | Implemented (`src/aiconfigurator/sdk/queueing/`) |
 | **Replaces** | the empirical `_ttft_queuing_factor` heuristic and, for reporting, the blended-mean-only TTFT/TPOT columns |
-| **Oracle** | `tools/queueing_oracle/` — Python DES verified to 0.0% against dynamo.replay on every reported metric |
+| **Oracle** | `tools/queueing_oracle/` — DES anchored clause-by-clause to the vLLM v1 scheduler source |
 
 ## 1. What it is
 
@@ -29,8 +29,8 @@ One model, two precision tiers:
 | **quantitative** (limit-cycle evaluator) | `evaluate_closed_loop` | ~ms–10ms | the same model evaluated numerically: a deterministic pass-level recursion (no RNG, no event heap, no per-token events) that captures the cohort effects the closed form approximates. Validated ≤10–15% (mostly 0.0%) against the DES oracle across 9 config families |
 
 The DES oracle (`tools/queueing_oracle/`, dev/CI tool, not shipped in the
-wheel) anchors both tiers and was itself verified to 0.0% against
-`dynamo.replay` offline results.
+wheel) anchors both tiers; its scheduling semantics carry a clause-by-clause
+provenance table against the vLLM v1 scheduler source.
 
 ## 2. Term provenance (no fitted constants)
 
@@ -84,13 +84,15 @@ recommendations a function of benchmark length (same deployment: mean
 
 ## 5. Validation (2026-07-18)
 
-Chain: closed form / evaluator ↔ DES oracle ↔ `dynamo.replay`, with
-identical timing functions at each link so residuals isolate scheduling
-semantics. Battery: 9 agg config families (isl 512–8192, osl 16–512,
-C 1–128, budget 2048–8192, chunked on/off, prefix).
+Chain: closed form / evaluator ↔ DES oracle ↔ vLLM v1 source, with
+identical timing functions between model and oracle so residuals isolate
+scheduling semantics. Battery: 9 agg config families (isl 512–8192,
+osl 16–512, C 1–128, budget 2048–8192, chunked on/off, prefix).
 
-- **Oracle vs `dynamo.replay`**: 0.0% on every reported metric (means and
-  all percentiles of TTFT/TTST/ITL/TPOT/E2E, throughput).
+- **Oracle vs vLLM v1 source**: clause-by-clause semantic audit with
+  file:line provenance (see `tools/queueing_oracle/vllm_sim.py`); during
+  development the oracle was additionally cross-checked against an
+  independent replay implementation as an experimental baseline.
 - **Evaluator vs oracle** (gated): within 10% on TTFT steady/transient
   mean/p50/p99 and blended mean — most metrics 0.0%; ITL within 15%.
   One documented exemption: prefix workloads' `itl_p99` (constant-hit
@@ -102,8 +104,9 @@ C 1–128, budget 2048–8192, chunked on/off, prefix).
   initial-condition dependent) is exactly what the evaluator exists to
   capture. Screening/ranking role per §1.
 - **End-to-end** (real perf DB, Llama-3.1-8B / h200_sxm / vLLM 0.24.0,
-  isl4096/osl256/C32): legacy `ttft` −30% vs replay ground truth; this
-  model −6.9% (blended), `itl_p50` exact, `itl_p99` −4%.
+  isl4096/osl256/C32, measured against the development-time replay
+  baseline): legacy `ttft` −30%; closed form −6.9% (blended); evaluator
+  −2.5%, `itl_p50` exact, `itl_p99` 0.1%.
 
 Run: `PYTHONPATH=src:tools/queueing_oracle python3 tools/queueing_oracle/validate_formula.py`
 

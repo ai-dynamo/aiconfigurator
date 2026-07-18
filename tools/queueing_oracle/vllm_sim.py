@@ -1,26 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal discrete-event replica of Dynamo mocker's vLLM-style scheduler.
+"""Reference discrete-event simulation of vLLM v1 iteration-level scheduling.
 
-Semantics transcribed from dynamo `lib/mocker/src/scheduler/vllm/core.rs`
-(local checkout, v1.3.0). One `execute_pass` models one engine iteration:
+Semantics are anchored to the vLLM v1 scheduler source
+(vllm/v1/core/sched/scheduler.py); clause provenance:
 
-  1. spend the token budget over the *running* set first (chunked prefill
-     continuation + one decode token of budget per caught-up request),
-  2. admit from *waiting* while `len(running) < max_num_seqs`, no preemption
-     happened this pass, and budget remains,
-  3. pass duration = prefill_time(batch aggregates) + decode_time(ready set),
-     both from a pluggable perf model (default: mocker's polynomial),
-  4. every caught-up request emits exactly one token at pass end; KV pressure
-     triggers LIFO/FIFO preemption with full recompute (vLLM v1 style).
+  - unified token budget:            token_budget = max_num_scheduled_tokens (:334)
+  - running set scheduled first:     while req_index < len(self.running)
+                                     and token_budget > 0 (:346)
+  - chunked prefill budget cap:      num_new_tokens = min(num_new_tokens,
+                                     token_budget) (:372)
+  - chunked-off whole-prompt gate:   break when num_new_tokens > budget (:652)
+  - admission concurrency cap:       len(self.running) == max_num_running_reqs (:534)
+  - WAITING admission alloc failure: put back + break — no preemption (:716-723)
+  - RUNNING alloc failure:           preempt (LIFO pop) with recompute (:437-471)
 
-KV accounting is block-based with hash-shared full prompt blocks, an LRU
-inactive pool for prefix reuse, and anonymous partial/generated blocks.
-`kv_mode="token"` disables sharing + prefix caching (pure token counting) so
-the fidelity delta of simplified accounting can be measured directly.
-
-Deliberately out of scope (v0): disagg P/D handoff, KV events, routers,
-SGLang retraction semantics, multi-turn generated-block reuse.
+One engine pass = prefill chunk scheduling followed by one decode emission
+for caught-up requests; pass duration = prefill(batch) + decode(ready) from
+a pluggable perf model, so scheduling fidelity is separable from timing
+fidelity. Block-level KV accounting with hash sharing + LRU inactive pool.
 """
 
 from __future__ import annotations
@@ -344,6 +342,9 @@ class VllmSimCore:
 
             target = eff_before + desired
             actual_after = target
+            entry_hashed = len(req.held_hashed)
+            entry_anon = req.anon_blocks
+            entry_computed = req.computed
             while True:
                 need = math.ceil(target / self.kv.block_size) - req.total_blocks()
                 if need <= 0:
@@ -353,6 +354,19 @@ class VllmSimCore:
                 if got == need:
                     req.computed = actual_after
                     break
+                if from_waiting:
+                    # vLLM v1 semantics (vllm/v1/core/sched/scheduler.py:716-723):
+                    # a WAITING admission whose allocation fails is put back
+                    # intact and admission stops — it does NOT preempt running
+                    # requests. Roll back this attempt's partial allocation.
+                    while len(req.held_hashed) > entry_hashed:
+                        self.kv.free_hashed(req.held_hashed.pop())
+                    extra_anon = req.anon_blocks - entry_anon
+                    if extra_anon > 0:
+                        self.kv.free_anon(extra_anon)
+                        req.anon_blocks = entry_anon
+                    req.computed = entry_computed
+                    return _Outcome.BLOCKED, 0
                 committed_tokens = req.total_blocks() * self.kv.block_size
                 req.computed = min(actual_after, committed_tokens)
                 victim = self._preempt_one()
@@ -364,8 +378,9 @@ class VllmSimCore:
                 if undone is not None:
                     budget += undone
                     # note: batch aggregate rollback for preempted prefills
-                    # (core.rs also subtracts isl/prefix; matched below via
-                    # recording aggregates only after the loop settles)
+                    # (scheduler also releases the victim's scheduled work;
+                    # matched below via recording aggregates only after the
+                    # loop settles)
                 if victim is req:
                     return _Outcome.CURRENT_PREEMPTED, 0
 

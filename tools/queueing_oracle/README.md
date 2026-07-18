@@ -11,14 +11,15 @@ pass-calendar model): the oracle executes the actual scheduling loop
 event-by-event, so any residual between the analytical model and the oracle
 is a scheduling-semantics error in the model, not a timing error.
 
-Scheduler semantics follow vLLM v1 iteration-level scheduling, transcribed
-from the Dynamo mocker's vLLM scheduler (`lib/mocker/src/scheduler/vllm/
-core.rs`, v1.3.0): unified token budget over running-then-waiting, chunked
-prefill, LIFO/FIFO preemption with recompute, block-level KV accounting with
-hash sharing + LRU inactive pool, and per-pass timing = prefill(batch) +
-decode(ready) from a pluggable perf model. The oracle itself was verified
-against `dynamo.replay` (see below), which anchors the whole validation
-chain: analytical model ↔ this oracle ↔ dynamo mocker replay.
+Scheduler semantics are anchored to the vLLM v1 scheduler source, with a
+clause-by-clause provenance table in `vllm_sim.py`'s module docstring
+(unified token budget :334, running-set-first :346, chunked prefill cap
+:372, admission cap :534, waiting-admission allocation failure = put back +
+break with no preemption :716-723, running-path preemption :437-471, all in
+`vllm/v1/core/sched/scheduler.py`). Per-pass timing = prefill(batch) +
+decode(ready) from a pluggable perf model, so scheduling fidelity is
+separable from timing fidelity. Validation chain: analytical model ↔ this
+oracle ↔ vLLM v1 source.
 
 ## Files
 
@@ -29,7 +30,6 @@ chain: analytical model ↔ this oracle ↔ dynamo mocker replay.
 | `metrics.py` | TTFT/ITL/E2E/queue percentile summaries |
 | `run.py` | standalone CLI |
 | `validate_formula.py` | **the gate**: `sdk.queueing` vs this oracle, identical timing on both sides |
-| `compare_mocker.py` | column-for-column check of this oracle vs a `dynamo.replay` report JSON |
 
 Stdlib only — no numpy, no torch, no dynamo required to run the oracle.
 
@@ -44,28 +44,6 @@ budget 2048–8192, chunked prefill on/off, prefix). Two tiers per case:
 the limit-cycle evaluator is GATED (within 10–15%, mostly 0.0%); the
 closed-form screening tier is reported with sanity checks (its role is
 within-sweep candidate ranking — see docs/design/queueing_model.md §1).
-
-## Oracle fidelity vs dynamo.replay
-
-With identical timing functions, this oracle reproduces `dynamo.replay`
-offline results on uniform closed-loop workloads to 0.0% on every reported
-metric (TTFT/TTST/ITL/TPOT/E2E mean and percentiles, throughput; 200 and
-1000 requests; polynomial and database-backed timing):
-
-```bash
-python -m dynamo.replay --input-tokens 4096 --output-tokens 256 \
-    --request-count 1000 --replay-mode offline --replay-concurrency 32 \
-    --num-workers 1 --extra-engine-args '{"block_size":64}' \
-    --report-json /tmp/replay.json
-python3 compare_mocker.py /tmp/replay.json --request-count 1000
-```
-
-For disagg, the oracle matches replay on ITL (0.1%), throughput (0.4%) and
-TTFT min/p99 once first-token semantics are aligned (the user-visible first
-token is emitted by the decode stage; the KV handoff delay defers decode
-enqueue). Residual TTFT-mean differences under `kv_router` dispatch stem
-from router-side admission queueing, which the oracle intentionally does not
-model (round-robin dispatch only).
 
 ## Standalone CLI examples
 

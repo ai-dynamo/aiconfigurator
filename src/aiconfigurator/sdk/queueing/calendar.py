@@ -10,20 +10,21 @@ that recursion at pass granularity (aggregate slot state, no event heap, no
 KV manager, no RNG) and reads TTFT/ITL/TPOT distributions off the cycle.
 
 This is an evaluation of the scheduling algorithm's own arithmetic — not a
-statistical fit and not a per-request simulation. Provenance of the step
-semantics: dynamo lib/mocker scheduler/vllm/core.rs, transcribed via the
-parity-verified DES oracle in tools/queueing_oracle (0.0% error vs mocker on
-every reported metric for uniform closed-loop workloads).
+statistical fit and not a per-request simulation. Step semantics are
+anchored to the vLLM v1 scheduler source (vllm/v1/core/sched/scheduler.py:
+unified token budget :334, running set first :346, chunked prefill cap
+:372); the DES oracle in tools/queueing_oracle carries the full clause
+provenance table and is the validation gate.
 
 Backend calendars:
   - vllm    : fused pass — unified token budget, running decodes spend first,
-              chunked prefill shares the remainder (VALIDATED vs mocker/DES)
+              chunked prefill shares the remainder (VALIDATED vs the DES oracle)
   - trtllm  : fused pass like vllm (max_num_tokens budget); optional
               GUARANTEED_NO_EVICT admission cap (STRUCTURAL, not yet
               validated against a trtllm oracle)
   - sglang  : alternating passes — dedicated prefill batches pause decode,
               decode passes run alone; ITL spikes are whole prefill batches
-              (STRUCTURAL, not yet validated against the sglang mocker)
+              (STRUCTURAL, not yet validated against an SGLang reference)
 """
 
 from __future__ import annotations

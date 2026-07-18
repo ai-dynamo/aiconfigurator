@@ -16,9 +16,13 @@ from typing import Optional, Protocol
 class TimingModel(Protocol):
     """Timing provider interface.
 
-    Signature-identical to the perf callbacks used by the Dynamo mocker
-    bridge (dynamo _internal/aic.py) and the parity-verified DES oracle
-    (tools/queueing_oracle), so all three consumers share one timing basis.
+    (batch_size, mean_isl, mean_prefix) is the native parameterization of
+    the SDK's own phase estimators (`BaseBackend._run_context_phase`), i.e.
+    the minimal description of one prefill batch; `DatabaseTimingModel`
+    delegates to them directly. The Protocol exists so the evaluator can
+    also be driven by synthetic timing functions during validation — the
+    DES oracle accepts the identical callables, which cancels timing out
+    of the validation residual.
     """
 
     def prefill_ms(self, batch_size: int, mean_isl: int, mean_prefix: int) -> float:
