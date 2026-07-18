@@ -6,10 +6,12 @@
 # FlashMLA sparse kernels, whose sparse_prefill_fwd asserts
 # kv.dtype()==kBFloat16 (flashmla-src/csrc/pybind.cpp:404) — FP8-KV DSA is
 # genuinely Blackwell-only (trtllm-gen sparseMla), matching the SM>=100 combo
-# floor in _get_precision_combos. MLA half partially verified: FP8-KV MLA
-# modules pass on SM90/rc20; the "fails on SM100/103/120" claim remains
-# hardware-unvalidated until the Blackwell phase. Never move this back into
-# YAML.
+# floor in _get_precision_combos. MLA half RESOLVED on 1.3.0rc20/SM100
+# (2026-07-18, B200): FP8-KV MLA modules pass on SM90 AND SM100 (trtllm-gen
+# MLA, tokens_per_block=32) — the "fails on SM100/103/120" claim is refuted
+# for SM100 and the combo is now open for sm>86 except 120/121 (see
+# _get_precision_combos). SM120/121 remain hardware-unvalidated. Never move
+# this back into YAML.
 
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
@@ -182,13 +184,20 @@ def _get_precision_combos(phase: str, attn_type: str):
     if sm >= 100:
         gemm_types.append("nvfp4")
 
-    # FIXME: FP8 KV cache and platform combinations are incomplete.
     attn_combos = [("bfloat16", "bfloat16")]
     if is_dsa:
         if sm >= 100:
             attn_combos.append(("bfloat16", "fp8"))
     else:
-        if 86 < sm < 100:
+        # FP8-KV MLA: Hopper FMHA variants (86 < sm < 100) plus Blackwell
+        # datacenter trtllm-gen MLA — hardware-validated on B200/SM100
+        # 2026-07-18 (rc20, gen+ctx probes b=4/s=2048/h=128 via --quick),
+        # refuting the retired "fails on SM100" sm_exceptions claim.
+        # SM120/121 stay excluded: the framework does not select trtllm-gen
+        # kernels there (attention_backend/trtllm.py:1105@1.3.0rc20
+        # `is_sm_version_trtllm_gen_kernel`), and no SM120 hardware has
+        # validated an alternative fp8-KV MLA module path yet.
+        if sm > 86 and sm not in (120, 121):
             attn_combos.append(("bfloat16", "fp8"))
 
     return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]

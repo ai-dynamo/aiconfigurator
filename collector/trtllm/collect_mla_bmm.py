@@ -1,12 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
-# against TRT-LLM source. TRT-LLM reportedly emits FP8 MLA BMM variants only
-# for 86 < SM < 100 (Ada/Hopper); the fp8 dtype axis currently fails at
-# runtime on SM100/103/120. On the next version bump: verify, then filter the
-# dtype axis by a framework probe (or raise) or delete this note. Never move
-# this back into YAML.
+# Verified against 1.3.0rc20 serving source (2026-07-18, B200/SM100 phase).
+# Serving's MLA absorption BMM wrapper `fp8_block_scaling_bmm_out`
+# (tensorrt_llm/_torch/modules/attention.py:1151-1191@1.3.0rc20) dispatches:
+#   SM90/89  -> torch.ops.trtllm.fp8_block_scaling_bmm_out (measured here);
+#   SM120    -> the same torch op with per_token_quant_and_transform;
+#   SM100/103 (is_sm_100f) -> plain bf16 torch.bmm on dequantized weights by
+#              default (opt-in cute_dsl_fp8_bmm_blackwell only).
+# So the fp8 axis of THIS op (the Hopper quantize+bmm pair) is correctly
+# closed on SM100/103: serving never invokes that torch op there, and the
+# bf16 axis (torch.ops.trtllm.bmm_out, attention.py:2507) remains the honest
+# SM100 measurement.
+# FIXME(kernel-limit): the SM120 exclusion below is now contradicted by the
+# rc20 source (SM120 serving DOES use the fp8 torch op, different quant
+# helper) but stays hardware-unvalidated — re-audit in the SM120 phase before
+# opening the axis. Never move this back into YAML.
 
 """TensorRT-LLM MLA generation BMM micro-collector.
 
