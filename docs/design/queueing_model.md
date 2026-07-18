@@ -180,9 +180,13 @@ the evaluator with plain prefill/decode callbacks); the recorded
 end-to-end figure above predates this delegation — re-measure at the next
 replay session.
 
-The oracle and its gate script are development tooling and are not part of
-this change; they are preserved on a development branch for future
-re-validation (e.g. after upstream scheduler changes).
+The oracle and its gate live in `tools/queueing_oracle/` (stdlib-only DES
+of vLLM v1 iteration-level scheduling + the 9-family gate), and the gate
+runs in CI as a marked test (`tests/unit/sdk/queueing/test_oracle_gate.py`,
+~1s) — so scheduler-semantics drift (§6.7) has a standing executable
+detector, and future extensions (disagg gate families, variable-length
+workloads, a real-`Scheduler` driver as semantic authority) build on the
+same harness.
 
 ## 6. Failure modes
 
