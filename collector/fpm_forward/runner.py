@@ -205,7 +205,7 @@ class KubernetesCellRunner:
         ):
             raise RuntimeError(f"kubectl apply returned the wrong object for {self.kind}/{self.name}: {payload!r}")
 
-    def pods(self) -> list[str]:
+    def pods(self, *, include_terminating: bool = True) -> list[str]:
         result = self._kubectl(
             "get",
             "pods",
@@ -218,7 +218,14 @@ class KubernetesCellRunner:
             timeout=60,
         )
         payload = json.loads(result.stdout)
-        return sorted(item["metadata"]["name"] for item in payload.get("items", []))
+        items = payload.get("items", [])
+        if not include_terminating:
+            items = [
+                item
+                for item in items
+                if not isinstance(item.get("metadata"), dict) or not item["metadata"].get("deletionTimestamp")
+            ]
+        return sorted(item["metadata"]["name"] for item in items)
 
     def wait_ready(self, expected_nodes: int, timeout_seconds: int = 900) -> list[str]:
         deadline = time.monotonic() + timeout_seconds
@@ -505,6 +512,7 @@ class KubernetesCellRunner:
             "-f",
             str(self.manifest),
             "--ignore-not-found=true",
+            "--cascade=foreground",
             "--wait=true",
             "--timeout=180s",
             check=False,
@@ -542,7 +550,11 @@ class KubernetesCellRunner:
                 f"could not verify deletion of {self.kind}/{self.name}: "
                 f"delete_exit={deleted.returncode}, get_exit={observed.returncode}, output={detail!r}"
             )
-        remaining = self.pods()
+        # Foreground cascading keeps the parent alive until its dependants are
+        # deleted.  An eventually-consistent list may still expose Pod objects
+        # that already carry deletionTimestamp; those no longer represent a
+        # live reservation and must not downgrade a successful cell.
+        remaining = self.pods(include_terminating=False)
         if remaining:
             raise RuntimeError(f"owned FPM pods remain after cleanup: {remaining}")
 
@@ -771,33 +783,8 @@ def _render_cell(
     if errors:
         raise ValueError(f"invalid GeneratorRequest for {cell.cell_id}: {errors}")
     artifacts = generate_from_request(request, output_dir=str(cell_dir))
-    _require_native_schema_v2_benchmark_results(cell_dir / "run.sh")
     _atomic_json(cell_dir / "generator-request.json", params)
     return artifacts
-
-
-def _require_native_schema_v2_benchmark_results(run_script: Path) -> None:
-    """Teach the generated strict result gate to require Dynamo's schema-v2 rank artifact.
-
-    The Generator still owns process launch, timeout, validation, and teardown.
-    This compatibility shim changes only the required upstream schema version;
-    its existing complete/valid/coverage/rank checks remain unchanged.  Schema
-    V1 is deliberately rejected because it does not carry PR11509's native
-    point and synchronized-iteration contract.
-    """
-
-    script = run_script.read_text()
-    legacy = 'value.get("schema_version") != 1'
-    native = 'value.get("schema_version") != 2'
-    if native in script:
-        return
-    occurrences = script.count(legacy)
-    if occurrences != 1:
-        raise RuntimeError(
-            "generated FPM run.sh has an unsupported benchmark result gate: "
-            f"expected one legacy schema check, found {occurrences}"
-        )
-    run_script.write_text(script.replace(legacy, native))
 
 
 def _expected_nodes(manifest: Path) -> int:
@@ -858,6 +845,13 @@ def _load_checkpoint(path: Path, plan: FPMCollectionPlan, resume: bool) -> dict[
             raise ValueError("FPM checkpoint does not match the current frozen plan")
         return payload
     return {"schema": CHECKPOINT_SCHEMA, "plan_sha256": plan.sha256, "cells": {}}
+
+
+def _required_attempt_id(entry: dict[str, Any], cell_id: str) -> str:
+    attempt_id = entry.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise ValueError(f"passed FPM checkpoint cell {cell_id!r} has no attempt identity")
+    return attempt_id
 
 
 def _runtime_timing_summary(raw_root: Path) -> dict[str, int | float]:
@@ -931,7 +925,7 @@ def run_collection(
                 cell,
                 root / "cells" / cell.cell_id / "raw",
                 expected_plan_sha256=plan.sha256,
-                expected_attempt_id=entry.get("attempt_id"),
+                expected_attempt_id=_required_attempt_id(entry, cell.cell_id),
             )
         )
         for key, value in metadata.items():
@@ -1086,7 +1080,17 @@ def run_collection(
         try:
             formal_rows = []
             for cell in plan.cells:
-                formal_rows.extend(aggregate_cell(plan, cell, root / "cells" / cell.cell_id))
+                entry = checkpoint["cells"].get(cell.cell_id)
+                if not isinstance(entry, dict) or entry.get("status") != "passed":
+                    raise ValueError(f"cannot publish non-passed FPM cell {cell.cell_id!r}")
+                formal_rows.extend(
+                    aggregate_cell(
+                        plan,
+                        cell,
+                        root / "cells" / cell.cell_id,
+                        expected_attempt_id=_required_attempt_id(entry, cell.cell_id),
+                    )
+                )
             systems_root = Path(database_root).expanduser().resolve() if database_root else None
             parquet_path, metadata_path = write_formal_database(plan, formal_rows, systems_root=systems_root)
             checkpoint["database"] = {

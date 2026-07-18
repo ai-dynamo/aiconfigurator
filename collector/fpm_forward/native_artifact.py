@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aiconfigurator.fpm_contract import FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION
+
 from .planner import FPMCell
 
 COLLECTOR_PROVENANCE_FILENAME = "collector-provenance.json"
@@ -28,6 +30,8 @@ class NativeCollection:
     rank_timings: tuple[tuple[int, float, float], ...]
     backend_version: str
     collector_attempt_id: str
+    runtime_run_id: str
+    runtime_grid_digest: str
 
 
 def _validate_collector_provenance(
@@ -183,7 +187,10 @@ def validate_native_collection(
     rank_timings: list[tuple[int, float, float]] = []
 
     for path, payload in rank_payloads:
-        if payload.get("schema_version") != 2 or payload.get("artifact_type") != "rank":
+        if (
+            payload.get("schema_version") != FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION
+            or payload.get("artifact_type") != "rank"
+        ):
             raise ValueError(f"result is not a PR11509 native rank artifact: {path}")
         if (
             payload.get("status") != "complete"
@@ -281,7 +288,7 @@ def validate_native_collection(
 
     if seen_ranks != set(expected_ranks):
         raise ValueError(f"native DP rank set mismatch: actual={sorted(seen_ranks)} expected={expected_ranks}")
-    assert canonical_points is not None and canonical_groups is not None
+    assert canonical_points is not None and canonical_groups is not None and run_identity is not None
 
     measurements = []
     measured_iteration_seconds = 0.0
@@ -329,4 +336,6 @@ def validate_native_collection(
         rank_timings=tuple(sorted(rank_timings)),
         backend_version=backend_version,
         collector_attempt_id=collector_attempt_id,
+        runtime_run_id=run_identity[0],
+        runtime_grid_digest=run_identity[1],
     )

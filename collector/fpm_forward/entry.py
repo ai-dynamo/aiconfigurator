@@ -130,6 +130,7 @@ def resolve_inputs(args: argparse.Namespace, case_plan) -> ResolvedFPMInputs:
         options=options,
         model_architecture=case_plan.model_architecture,
         has_model_cases=bool(case_plan.model_cases_paths),
+        model_config_path=getattr(args, "fpm_model_config", None),
         collector_config={},
         generator_overrides=generator_overrides,
     )

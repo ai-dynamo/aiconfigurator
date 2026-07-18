@@ -14,6 +14,8 @@ import re
 import shlex
 from typing import Any
 
+from aiconfigurator.fpm_contract import FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION
+
 from .dgd_model import DGD, DGDService, MainContainer, _dump_k8s_yaml
 from .k8s_builder import build_dgd
 
@@ -93,6 +95,7 @@ def build_fpm_artifacts(
         benchmark_output_path,
         wait_timeout_seconds,
         topology,
+        benchmark_result_schema_version=FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION,
     )
     workload = _lower_worker_to_resource(
         context,
@@ -393,7 +396,11 @@ def _render_run_script(
     benchmark_output_path: str,
     wait_timeout_seconds: int,
     topology: dict[str, int],
+    *,
+    benchmark_result_schema_version: int,
 ) -> str:
+    if benchmark_result_schema_version < 1:
+        raise ValueError("benchmark_result_schema_version must be positive")
     lines = [
         "#!/usr/bin/env bash",
         "set -Eeuo pipefail",
@@ -490,10 +497,23 @@ def _render_run_script(
             '    print(f"Invalid FPM benchmark result {path}: {message}", file=sys.stderr)',
             "    raise SystemExit(20)",
             "",
-            "def validate_schema_v1(path, value, expected_rank):",
-            '    if value.get("status") != "complete" or value.get("valid") is not True:',
+            "for offset, raw_path in enumerate(sys.argv[3:]):",
+            "    path = pathlib.Path(raw_path)",
+            "    if not path.is_file() or path.stat().st_size == 0:",
+            "        raise SystemExit(10)",
+            "    try:",
+            '        value = json.loads(path.read_text(encoding="utf-8"))',
+            "    except (OSError, json.JSONDecodeError):",
+            "        raise SystemExit(10)",
+            "    if not isinstance(value, dict):",
+            '        invalid(path, f"top-level JSON must be an object, got {type(value).__name__}")',
+            "    expected_rank = start_rank + offset",
+            f'    if (value.get("schema_version") != {benchmark_result_schema_version} '
+            'or value.get("status") != "complete"',
+            '            or value.get("valid") is not True):',
             "        invalid(path,",
-            "                f\"schema_version=1 status={value.get('status')!r} \"",
+            "                f\"schema_version={value.get('schema_version')!r} \"",
+            "                f\"status={value.get('status')!r} \"",
             "                f\"valid={value.get('valid')!r} errors={value.get('errors')!r}\")",
             '    config = value.get("config")',
             '    actual_mode = config.get("mode") if isinstance(config, dict) else None',
@@ -531,35 +551,6 @@ def _render_run_script(
             "            observed_ranks.add(rank)",
             "    if observed_ranks != {expected_rank}:",
             '        invalid(path, f"FPM dp_ranks {sorted(observed_ranks)!r} != [{expected_rank}]")',
-            "",
-            "def validate_legacy_schema_v2(path, value, expected_rank):",
-            '    if value.get("status") != "passed":',
-            "        invalid(path,",
-            "                f\"schema_version=2 status={value.get('status')!r} \"",
-            "                f\"errors={value.get('errors')!r}\")",
-            '    config = value.get("config")',
-            '    actual_rank = config.get("dp_rank") if isinstance(config, dict) else None',
-            "    if actual_rank != expected_rank:",
-            '        invalid(path, f"FPM dp_rank {actual_rank!r} != {expected_rank}")',
-            "",
-            "for offset, raw_path in enumerate(sys.argv[3:]):",
-            "    path = pathlib.Path(raw_path)",
-            "    if not path.is_file() or path.stat().st_size == 0:",
-            "        raise SystemExit(10)",
-            "    try:",
-            '        value = json.loads(path.read_text(encoding="utf-8"))',
-            "    except (OSError, json.JSONDecodeError):",
-            "        raise SystemExit(10)",
-            "    if not isinstance(value, dict):",
-            '        invalid(path, f"top-level JSON must be an object, got {type(value).__name__}")',
-            "    expected_rank = start_rank + offset",
-            '    schema_version = value.get("schema_version")',
-            "    if schema_version == 1:",
-            "        validate_schema_v1(path, value, expected_rank)",
-            "    elif schema_version == 2:",
-            "        validate_legacy_schema_v2(path, value, expected_rank)",
-            "    else:",
-            '        invalid(path, f"unsupported schema_version {schema_version!r}")',
             "PY",
             "}",
             "",

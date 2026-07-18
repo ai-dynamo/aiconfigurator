@@ -43,6 +43,12 @@ _ROW_KEY = (
     "total_kv_read_tokens",
     "partition_policy",
 )
+_RUN_IDENTITY_FIELDS = (
+    "source_plan_sha256",
+    "collector_attempt_id",
+    "runtime_run_id",
+    "runtime_grid_digest",
+)
 
 
 def _dotted_get(payload: object, path: str) -> object:
@@ -75,14 +81,23 @@ def _validate_backend_markers(cell: FPMCell, cell_dir: Path) -> None:
             raise ValueError(f"backend marker mismatch in {path}: {mismatches}")
 
 
-def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> list[dict[str, Any]]:
+def aggregate_cell(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    cell_dir: Path,
+    *,
+    expected_attempt_id: str,
+) -> list[dict[str, Any]]:
     """Validate native rank artifacts and take max-rank latency per grid point."""
 
+    if not expected_attempt_id:
+        raise ValueError(f"cannot aggregate {cell.cell_id} without an expected Collector attempt identity")
     _validate_backend_markers(cell, cell_dir)
     collection = validate_native_collection(
         cell,
         cell_dir / "raw",
         expected_plan_sha256=plan.sha256,
+        expected_attempt_id=expected_attempt_id,
     )
     backend_version = collection.backend_version
     capability = plan.capability
@@ -130,9 +145,33 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
                 "model_template_version": capability.template_version,
                 "aic_database_version": capability.aic_database_version,
                 "source_plan_sha256": plan.sha256,
+                "collector_attempt_id": collection.collector_attempt_id,
+                "runtime_run_id": collection.runtime_run_id,
+                "runtime_grid_digest": collection.runtime_grid_digest,
             }
         )
     return rows
+
+
+def _run_identities_by_cell(rows: list[dict[str, Any]], *, source: str) -> dict[str, tuple[str, ...]]:
+    identities: dict[str, tuple[str, ...]] = {}
+    for row in rows:
+        cell_id = row.get("cell_id")
+        if not isinstance(cell_id, str) or not cell_id:
+            raise ValueError(f"{source} FPM row has no cell identity")
+        values = tuple(row.get(field) for field in _RUN_IDENTITY_FIELDS)
+        if not all(isinstance(value, str) and value for value in values):
+            invalid = [
+                field
+                for field, value in zip(_RUN_IDENTITY_FIELDS, values, strict=True)
+                if not isinstance(value, str) or not value
+            ]
+            raise ValueError(f"{source} FPM row for {cell_id} has invalid run identity fields: {invalid}")
+        typed_values = tuple(str(value) for value in values)
+        existing = identities.setdefault(cell_id, typed_values)
+        if existing != typed_values:
+            raise ValueError(f"{source} FPM rows mix run identities for cell_id={cell_id!r}")
+    return identities
 
 
 def _sha256(path: Path) -> str:
@@ -166,6 +205,7 @@ def write_formal_database(
 
     if not rows:
         raise ValueError("refusing to write an empty FPM database")
+    incoming_identities = _run_identities_by_cell(rows, source="incoming")
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -188,11 +228,16 @@ def write_formal_database(
         merged = []
         if parquet_path.exists():
             table = pq.read_table(parquet_path)
-            required = {"total_prefill_tokens", "total_kv_read_tokens", "partition_policy"}
+            required = {
+                "total_prefill_tokens",
+                "total_kv_read_tokens",
+                "partition_policy",
+                *_RUN_IDENTITY_FIELDS,
+            }
             if not required.issubset(table.column_names):
                 raise ValueError(
-                    "existing FPM database uses the retired per-request P/S schema; "
-                    f"publish schema-v4 output to a clean destination: {parquet_path}"
+                    "existing FPM database predates the attempt-bound schema-v5 contract; "
+                    f"publish to a clean destination: {parquet_path}"
                 )
             merged.extend(table.to_pylist())
         existing_versions = {str(row.get("backend_version") or "") for row in merged}
@@ -201,6 +246,14 @@ def write_formal_database(
                 f"existing FPM database runtime version mismatch: actual={sorted(existing_versions)!r} "
                 f"expected={version!r}"
             )
+        existing_identities = _run_identities_by_cell(merged, source="existing")
+        for cell_id, incoming_identity in incoming_identities.items():
+            existing_identity = existing_identities.get(cell_id)
+            if existing_identity is not None and existing_identity != incoming_identity:
+                raise ValueError(
+                    f"refusing to mix FPM run identities for cell_id={cell_id!r}: "
+                    f"existing={existing_identity!r}, incoming={incoming_identity!r}"
+                )
         index = {tuple(row[key] for key in _ROW_KEY): row for row in merged}
         if len(index) != len(merged):
             raise ValueError(f"existing FPM database contains duplicate physical keys: {parquet_path}")
@@ -221,7 +274,7 @@ def write_formal_database(
             pq.write_table(pa.Table.from_pylist(merged), temporary, compression="zstd")
             metadata = {
                 "schema_name": "aic_fpm_forward_perf",
-                "schema_version": 4,
+                "schema_version": 5,
                 "coordinate_system": "iteration_totals_balanced_v1",
                 "measurement_policy": "dynamo_native_single_sample_v1",
                 "warmup_repeats": 0,
@@ -229,6 +282,9 @@ def write_formal_database(
                 "row_count": len(merged),
                 "parquet_sha256": _sha256(temporary),
                 "source_plan_sha256": sorted({str(row["source_plan_sha256"]) for row in merged}),
+                "collector_attempt_ids": sorted({str(row["collector_attempt_id"]) for row in merged}),
+                "runtime_run_ids": sorted({str(row["runtime_run_id"]) for row in merged}),
+                "runtime_grid_digests": sorted({str(row["runtime_grid_digest"]) for row in merged}),
                 "aic_revision": plan.aic_revision,
                 "model_paths": sorted({str(row["model_path"]) for row in merged}),
                 "system": plan.system,

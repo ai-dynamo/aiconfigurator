@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from collector.fpm_forward.config import reject_fpm_arguments_without_fpm
-from collector.fpm_forward.entry import _load_generator_overrides, run_resolved
+from collector.fpm_forward.entry import _load_generator_overrides, resolve_inputs, run_resolved
 
 pytestmark = pytest.mark.unit
 
@@ -100,6 +100,40 @@ def test_fpm_only_arguments_are_rejected_for_normal_ops():
     )
     with pytest.raises(ValueError, match="require --ops fpm_forward"):
         reject_fpm_arguments_without_fpm(args)
+
+
+def test_fpm_model_config_is_rejected_for_normal_ops():
+    args = argparse.Namespace(ops=["gemm"], fpm_model_config="/tmp/config.json")
+
+    with pytest.raises(ValueError, match="--fpm-model-config"):
+        reject_fpm_arguments_without_fpm(args)
+
+
+def test_resolve_inputs_passes_explicit_model_config_to_planner(monkeypatch):
+    captured = {}
+
+    def build_plan(**kwargs):
+        captured.update(kwargs)
+        return "plan"
+
+    monkeypatch.setattr("collector.fpm_forward.entry.build_collection_plan", build_plan)
+    args = _generator_args()
+    args.backend = "vllm"
+    args.gpu = "b200_sxm"
+    args.fpm_max_gpus = 4
+    args.fpm_model_config = "/configs/private-model.json"
+    case_plan = SimpleNamespace(
+        model_path="private-org/model",
+        model_architecture="UnknownForCausalLM",
+        selected_ops={"attention_context", "attention_generation"},
+        model_cases_paths=[],
+    )
+
+    plan, overrides = resolve_inputs(args, case_plan)
+
+    assert plan == "plan"
+    assert overrides == {}
+    assert captured["model_config_path"] == "/configs/private-model.json"
 
 
 @pytest.mark.parametrize("plan_only", [False, True])

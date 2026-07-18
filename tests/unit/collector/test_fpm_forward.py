@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from aiconfigurator.sdk.utils import HuggingFaceDownloadError
 from collector.fpm_forward.config import FPMCollectionOptions, PrefillSamplingProfile, add_fpm_arguments
 from collector.fpm_forward.database import aggregate_cell, write_formal_database
+from collector.fpm_forward.model_capability import load_model_config
 from collector.fpm_forward.planner import BackendPolicy, FPMCell, build_collection_plan
 from collector.fpm_forward.topology import enumerate_fpm_topologies
 from collector.fpm_forward.types import ParallelTopology
@@ -50,6 +52,7 @@ def _args(**overrides):
         "fpm_backend_axes": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
+        "fpm_model_config": None,
         "fpm_tp_sizes": None,
         "fpm_pp_sizes": None,
         "fpm_dp_sizes": None,
@@ -99,6 +102,7 @@ def test_prefill_limits_expose_no_cli_aliases():
     help_text = parser.format_help()
     assert "--fpm-max-prefill-isl" in help_text
     assert "--fpm-max-prefill-batch-size" in help_text
+    assert "--fpm-model-config" in help_text
     assert "--fpm-max-isl" not in help_text
     assert "--fpm-max-prefill-bs" not in help_text
 
@@ -183,7 +187,10 @@ def test_plan_contains_only_cell_matrix_and_native_point_contract():
     assert {cell.workload_kind for cell in first.cells} == {"prefill", "decode"}
     assert {cell.parallel_strategy for cell in first.cells} == {"dep"}
     payload = first.to_dict()
-    assert payload["schema_version"] == 9
+    assert payload["schema_version"] == 10
+    assert payload["capability"]["model_config"]["source_kind"] == "aic_cache"
+    assert len(payload["capability"]["model_config"]["sha256"]) == 64
+    assert payload["capability"]["model_config"]["payload"]["architectures"] == ["GlmMoeDsaForCausalLM"]
     point_generation = dict(payload["point_generation"])
     prefill_sampling = point_generation.pop("prefill_sampling")
     assert point_generation == {
@@ -421,21 +428,31 @@ def test_dsv4_fp8_keeps_exact_capabilities_and_applies_max_new_token_memory_admi
         "deepseek-ai/DeepSeek-V4-Flash",
     ],
 )
-def test_dsv4_native_fp4_is_rejected_by_vllm_dtype_capability(model_path):
-    with pytest.raises(ValueError, match="does not support moe dtype 'w4a8_mxfp4_mxfp8'"):
-        build_collection_plan(
-            backend="vllm",
-            model_path=model_path,
-            model_architecture="DeepseekV4ForCausalLM",
-            system="b200_sxm",
-            selected_ops=_DSV4_ATTENTION_OPS,
-            options=FPMCollectionOptions.from_args(
-                _args(
-                    fpm_max_gpus=16,
-                    fpm_gpu_counts=[16],
-                )
-            ),
-        )
+def test_dsv4_native_fp4_uses_vllm_sm100_dtype_capability(model_path):
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path=model_path,
+        model_architecture="DeepseekV4ForCausalLM",
+        system="b200_sxm",
+        selected_ops=_DSV4_ATTENTION_OPS,
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_max_gpus=16,
+                fpm_gpu_counts=[16],
+            )
+        ),
+    )
+
+    assert plan.capability.support_level == "exact"
+    assert plan.capability.template_id == "aic_exact:dsv4_module"
+    assert plan.capability.attention_kind == "moe_dsv4"
+    assert plan.capability.allow_pure_tp is True
+    assert plan.dtype_profile.gemm_quant_mode == "fp8_block"
+    assert plan.dtype_profile.moe_quant_mode == "w4a8_mxfp4_mxfp8"
+    assert plan.dtype_profile.fmha_quant_mode == "bfloat16"
+    assert plan.dtype_profile.kv_cache_dtypes == ("fp8",)
+    assert {cell.parallel_strategy for cell in plan.cells} == {"pure_tp", "tep", "dep"}
+    assert all(cell.to_dict()["point_source"] == "dynamo_native_self_benchmark" for cell in plan.cells)
 
 
 def test_unknown_model_keeps_auditable_capability_template(tmp_path):
@@ -469,6 +486,143 @@ def test_unknown_model_keeps_auditable_capability_template(tmp_path):
     assert plan.capability.support_level == "bootstrap_template"
     assert plan.capability.template_id == "generic:moe_dsa"
     assert {cell.parallel_strategy for cell in plan.cells} == {"dep", "pure_tp", "tep"}
+
+
+def _unknown_fp8_moe_config(*, hidden_size: int = 4096) -> dict[str, object]:
+    return {
+        "architectures": ["NewMoeDsaForCausalLM"],
+        "num_attention_heads": 32,
+        "num_key_value_heads": 32,
+        "hidden_size": hidden_size,
+        "intermediate_size": 8192,
+        "num_hidden_layers": 4,
+        "vocab_size": 32000,
+        "n_routed_experts": 8,
+        "kv_lora_rank": 512,
+        "qk_rope_head_dim": 64,
+        "max_position_embeddings": 4096,
+    }
+
+
+def test_explicit_real_config_keeps_unregistered_fp8_moe_bootstrap(monkeypatch, tmp_path):
+    config_dir = tmp_path / "private-model-config"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(json.dumps(_unknown_fp8_moe_config()))
+    (config_dir / "hf_quant_config.json").write_text(
+        json.dumps({"quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"}})
+    )
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("the checkpoint is accessible only inside the runtime Pod")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        unavailable,
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="private-org/runtime-only-model",
+        model_config_path=str(config_dir),
+        model_architecture="NewMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=False,
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    evidence = plan.capability.model_config
+    assert evidence.source_kind == "explicit"
+    assert len(evidence.sha256) == 64
+    assert evidence.payload["hf_quant_config"]["quantization"]["quant_algo"] == "FP8"
+    detached = evidence.payload
+    detached["architectures"] = ["MutatedForCausalLM"]
+    assert evidence.payload["architectures"] == ["NewMoeDsaForCausalLM"]
+    assert plan.capability.support_level == "bootstrap_template"
+    assert plan.capability.is_moe is True
+    assert plan.dtype_profile.gemm_quant_mode == "fp8_static"
+    assert plan.dtype_profile.moe_quant_mode == "fp8"
+    assert plan.dtype_profile.kv_cache_dtypes == ("fp8",)
+
+
+def test_huggingface_config_is_used_when_model_is_not_in_aic_cache(monkeypatch):
+    calls = []
+
+    def download(model_path, filename, *, raise_on_404):
+        calls.append((model_path, filename, raise_on_404))
+        if filename == "config.json":
+            return _unknown_fp8_moe_config()
+        return None
+
+    monkeypatch.setattr("collector.fpm_forward.model_capability._download_hf_json", download)
+
+    resolved = load_model_config("new-org/New-MoE-Model")
+
+    assert resolved.source_kind == "huggingface"
+    assert resolved.payload["architectures"] == ["NewMoeDsaForCausalLM"]
+    assert calls == [
+        ("new-org/New-MoE-Model", "config.json", True),
+        ("new-org/New-MoE-Model", "hf_quant_config.json", False),
+    ]
+
+
+def test_unresolvable_model_config_fails_loudly(monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise HuggingFaceDownloadError("Hugging Face returned HTTP error 404")
+
+    monkeypatch.setattr("collector.fpm_forward.model_capability._download_hf_json", missing)
+
+    with pytest.raises(ValueError, match="cannot resolve a real model config"):
+        build_collection_plan(
+            backend="vllm",
+            model_path="missing-org/does-not-exist",
+            model_architecture="MissingForCausalLM",
+            system="b200_sxm",
+            selected_ops={"attention_context", "attention_generation"},
+            has_model_cases=False,
+            options=FPMCollectionOptions.from_args(_args()),
+        )
+
+
+def test_empty_explicit_model_config_is_rejected(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text("{}\n")
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_model_config("private-org/model", explicit_config_path=str(config))
+
+
+def test_model_config_content_changes_the_frozen_plan_hash(monkeypatch, tmp_path):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    same_as_first = tmp_path / "same-as-first.json"
+    first.write_text(json.dumps(_unknown_fp8_moe_config(hidden_size=4096)))
+    second.write_text(json.dumps(_unknown_fp8_moe_config(hidden_size=5120)))
+    same_as_first.write_text(json.dumps(_unknown_fp8_moe_config(hidden_size=4096)))
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("memory estimate intentionally unavailable")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        unavailable,
+    )
+    common = {
+        "backend": "vllm",
+        "model_path": "private-org/runtime-only-model",
+        "model_architecture": "NewMoeDsaForCausalLM",
+        "system": "b200_sxm",
+        "selected_ops": {"attention_context", "attention_generation"},
+        "has_model_cases": False,
+        "options": FPMCollectionOptions.from_args(_args()),
+    }
+
+    first_plan = build_collection_plan(**common, model_config_path=str(first))
+    second_plan = build_collection_plan(**common, model_config_path=str(second))
+    same_content_plan = build_collection_plan(**common, model_config_path=str(same_as_first))
+
+    assert first_plan.capability.model_config.sha256 != second_plan.capability.model_config.sha256
+    assert first_plan.sha256 != second_plan.sha256
+    assert first_plan.sha256 == same_content_plan.sha256
 
 
 def test_unregistered_dense_model_keeps_gqa_bootstrap_template(tmp_path):
@@ -680,7 +834,7 @@ def _synthetic_plan_and_cell(tmp_path):
 
 def test_native_aggregation_preserves_iteration_totals(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    rows = aggregate_cell(plan, cell, cell_dir)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
 
     assert len(rows) == 1
     assert rows[0]["latency_ms"] == pytest.approx(6.0)
@@ -690,6 +844,9 @@ def test_native_aggregation_preserves_iteration_totals(tmp_path):
     assert rows[0]["partition_policy"] == "balanced_v1"
     assert rows[0]["measurement_policy"] == "dynamo_native_single_sample_v1"
     assert rows[0]["backend_version"] == "0.24.0"
+    assert rows[0]["collector_attempt_id"] == "attempt"
+    assert rows[0]["runtime_run_id"] == "run"
+    assert rows[0]["runtime_grid_digest"] == "grid"
     assert "suffix_length" not in rows[0]
     assert "prefix_length" not in rows[0]
 
@@ -702,31 +859,41 @@ def test_native_aggregation_rejects_rank_grid_drift(tmp_path):
     second_rank.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="different run identities"):
-        aggregate_cell(plan, cell, cell_dir)
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
 
 
 def test_native_aggregation_rejects_stale_collector_attempt(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    second_provenance = cell_dir / "raw" / "pod-1" / "collector-provenance.json"
-    payload = json.loads(second_provenance.read_text())
-    payload["attempt_id"] = "stale-attempt"
-    second_provenance.write_text(json.dumps(payload))
+    for provenance in (cell_dir / "raw").glob("*/collector-provenance.json"):
+        payload = json.loads(provenance.read_text())
+        payload["attempt_id"] = "stale-attempt"
+        provenance.write_text(json.dumps(payload))
 
-    with pytest.raises(ValueError, match="provenance differs across pods"):
-        aggregate_cell(plan, cell, cell_dir)
+    with pytest.raises(ValueError, match="attempt mismatch"):
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
 
 
-def test_formal_database_uses_schema_v4_and_rejects_conflicts(tmp_path):
+def test_native_aggregation_requires_attempt_identity(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    rows = aggregate_cell(plan, cell, cell_dir)
+
+    with pytest.raises(ValueError, match="without an expected Collector attempt"):
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="")
+
+
+def test_formal_database_uses_schema_v5_and_rejects_conflicts(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
     parquet, metadata = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     write_formal_database(plan, rows, systems_root=tmp_path / "systems")
 
     assert parquet.exists()
     metadata_payload = json.loads(metadata.read_text())
-    assert metadata_payload["schema_version"] == 4
+    assert metadata_payload["schema_version"] == 5
     assert metadata_payload["coordinate_system"] == "iteration_totals_balanced_v1"
     assert metadata_payload["backend_version"] == "0.24.0"
+    assert metadata_payload["collector_attempt_ids"] == ["attempt"]
+    assert metadata_payload["runtime_run_ids"] == ["run"]
+    assert metadata_payload["runtime_grid_digests"] == ["grid"]
     assert parquet.parent.name == "0.24.0"
 
     conflicting = [{**rows[0], "latency_ms": 7.0}]
@@ -734,9 +901,27 @@ def test_formal_database_uses_schema_v4_and_rejects_conflicts(tmp_path):
         write_formal_database(plan, conflicting, systems_root=tmp_path / "systems")
 
 
+def test_formal_database_rejects_disjoint_rows_from_a_different_attempt(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    systems_root = tmp_path / "systems"
+    write_formal_database(plan, rows, systems_root=systems_root)
+
+    disjoint_stale_row = [
+        {
+            **rows[0],
+            "total_prefill_tokens": rows[0]["total_prefill_tokens"] + 1,
+            "collector_attempt_id": "different-attempt",
+            "runtime_run_id": "different-run",
+        }
+    ]
+    with pytest.raises(ValueError, match="refusing to mix FPM run identities"):
+        write_formal_database(plan, disjoint_stale_row, systems_root=systems_root)
+
+
 def test_formal_database_serializes_concurrent_publishers(tmp_path):
     plan, _cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
-    base_row = aggregate_cell(plan, _cell, cell_dir)[0]
+    base_row = aggregate_cell(plan, _cell, cell_dir, expected_attempt_id="attempt")[0]
     rows = [
         {
             **base_row,
