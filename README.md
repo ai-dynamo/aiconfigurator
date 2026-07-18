@@ -183,6 +183,19 @@ agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
 
+### Web App
+
+AIConfigurator includes an interactive Gradio web interface for exploring
+configurations visually:
+
+```bash
+pip install 'aiconfigurator[webapp]'   # or pip install -e '.[webapp]' for dev
+python -m aiconfigurator.webapp.main
+```
+
+The app binds to `0.0.0.0:7860` by default (all interfaces). Use `--server-name 127.0.0.1` for local-only access.
+Refer to the [Web App User Guide](docs/webapp_user_guide.md) for flags and tab descriptions.
+
 An example here,
 ```bash
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
