@@ -76,3 +76,32 @@ class DatabaseTimingModel:
         total = max(float(sum(latency_dict.values())), 1e-6)
         self._cache[key] = total
         return total
+
+    def mixed_pass_ms(self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int) -> float:
+        """Duration of one mixed (prefill chunk + decode) pass.
+
+        Thin delegation to ``BaseBackend._get_mix_step_latency`` — the same
+        runner behind run_agg's mix-step estimate, including its batching
+        efficiency factor — so the evaluator's mixed passes cost exactly
+        what the screening tier's ``t_mix`` costs at the same operating
+        point. A prefill_ms + decode_ms sum would double-count the
+        non-attention cost (weights are loaded from HBM once for the
+        combined batch). The calendar falls back to the sum when a timing
+        model does not provide this hook.
+
+        Args mirror the runner: ctx_tokens = prefill compute tokens this
+        pass, gen_tokens = decode rows this pass, (isl, osl, prefix) = the
+        workload shape the runner uses for attention sizing.
+        """
+        ctx_tokens = ctx_tokens if ctx_tokens < self._GRAIN else self._q(ctx_tokens)
+        key = ("mix", ctx_tokens, gen_tokens, isl, osl, prefix)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        runtime_config = RuntimeConfig(batch_size=max(1, gen_tokens), beam_width=1, isl=isl, osl=osl, prefix=prefix)
+        latency_ms, _, _, _ = self._backend._get_mix_step_latency(
+            self._model, self._database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix
+        )
+        total = max(float(latency_ms) * self._backend._mix_step_efficiency(ctx_tokens, gen_tokens), 1e-6)
+        self._cache[key] = total
+        return total

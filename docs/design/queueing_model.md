@@ -171,6 +171,15 @@ evaluator tier; the C1 family is now exact (0.0% on every metric — it
 previously carried a spurious decode-row term on both sides). The prefix
 family keeps its documented `itl_p99` exemption; TTFT residuals unchanged.
 
+Timing-layer note: the evaluator's mixed passes now delegate to the same
+mix-step runner run_agg uses (`DatabaseTimingModel.mixed_pass_ms` →
+`_get_mix_step_latency`, batching efficiency included) instead of a
+prefill+decode sum that double-counts the shared non-attention cost. The
+scheduling-semantics gate is timing-independent and unaffected (it drives
+the evaluator with plain prefill/decode callbacks); the recorded
+end-to-end figure above predates this delegation — re-measure at the next
+replay session.
+
 The oracle and its gate script are development tooling and are not part of
 this change; they are preserved on a development branch for future
 re-validation (e.g. after upstream scheduler changes).

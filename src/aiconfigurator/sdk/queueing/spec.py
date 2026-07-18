@@ -22,6 +22,13 @@ class TimingModel(Protocol):
     delegates to them directly. The Protocol exists so the evaluator can
     also be driven by synthetic timing functions during validation, which
     cancels timing out of the validation residual.
+
+    Implementations MAY additionally provide
+    ``mixed_pass_ms(ctx_tokens, gen_tokens, isl, osl, prefix) -> float``
+    for the duration of one fused prefill+decode pass; the calendar prefers
+    it when present and otherwise composes ``prefill_ms + decode_ms``
+    (which double-counts the shared non-attention cost — see
+    ``DatabaseTimingModel.mixed_pass_ms``).
     """
 
     def prefill_ms(self, batch_size: int, mean_isl: int, mean_prefix: int) -> float:

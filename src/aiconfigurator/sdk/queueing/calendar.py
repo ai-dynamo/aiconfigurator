@@ -108,6 +108,15 @@ class FusedCalendar(BaseCalendar):
                 budget -= 1
                 decode_emitters.append(s)
 
+        emitters = prefill_completers + decode_emitters
+        # a genuinely mixed pass prefers the fused mixed-pass timing hook
+        # (one combined batch — shared non-attention cost paid once); the
+        # prefill+decode sum is the fallback for timing models without it
+        mixed = getattr(timing, "mixed_pass_ms", None)
+        if mixed is not None and batch_count > 0 and decode_emitters:
+            chunk_tokens = batch_total_isl - batch_total_prefix
+            return mixed(chunk_tokens, len(decode_emitters), wl.isl, wl.osl, wl.prefix), emitters
+
         prefill_ms = 0.0
         if batch_count > 0:
             mean_isl = batch_total_isl // batch_count
@@ -120,7 +129,7 @@ class FusedCalendar(BaseCalendar):
             # logits_indices) — no extra decode-row cost, no budget token
             ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
             decode_ms = timing.decode_ms(len(decode_emitters), ctx)
-        return prefill_ms + decode_ms, prefill_completers + decode_emitters
+        return prefill_ms + decode_ms, emitters
 
 
 class TrtllmCalendar(FusedCalendar):
@@ -191,17 +200,26 @@ class AlternatingCalendar(BaseCalendar):
         # its prefill in this pass emits once (as a completer), not twice
         prefilling = [s for s in slots if s.remaining_prefill > 0]
         decode_emitters = [s for s in slots if s.remaining_prefill == 0 and s.generated < wl.osl]
-        prefill_ms = 0.0
+        batch_count = 0
+        mean_isl = mean_prefix = 0
         completers: list[_Slot] = []
         if prefilling:
             batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
-            if batch_count:
-                prefill_ms = timing.prefill_ms(batch_count, mean_isl, mean_prefix)
+        emitters = completers + decode_emitters
+
+        mixed = getattr(timing, "mixed_pass_ms", None)
+        if mixed is not None and batch_count > 0 and decode_emitters:
+            chunk_tokens = batch_count * max(0, mean_isl - mean_prefix)
+            return mixed(chunk_tokens, len(decode_emitters), wl.isl, wl.osl, wl.prefix), emitters
+
+        prefill_ms = 0.0
+        if batch_count:
+            prefill_ms = timing.prefill_ms(batch_count, mean_isl, mean_prefix)
         decode_ms = 0.0
         if decode_emitters:
             ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
             decode_ms = timing.decode_ms(len(decode_emitters), ctx)
-        return prefill_ms + decode_ms, completers + decode_emitters
+        return prefill_ms + decode_ms, emitters
 
     def _alternating_step(self, slots, wl, eng, timing):
         prefilling = [s for s in slots if s.remaining_prefill > 0]

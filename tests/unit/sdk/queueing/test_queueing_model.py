@@ -135,6 +135,33 @@ class TestClosedLoopEvaluator:
         rep = evaluate_closed_loop(wl, EngineSpec(), TIMING)
         assert rep.ttft_steady.mean == pytest.approx(TIMING.prefill_ms(1, 2048, 0))
 
+    def test_mixed_pass_hook_preferred_over_sum(self):
+        """A timing model exposing mixed_pass_ms prices genuinely mixed
+        passes through it (fused batch, shared cost paid once); pure-decode
+        and pure-prefill passes keep the dedicated estimators."""
+
+        class HookTiming(SyntheticTiming):
+            def __init__(self):
+                self.mixed_calls = []
+
+            def mixed_pass_ms(self, ctx_tokens, gen_tokens, isl, osl, prefix):
+                self.mixed_calls.append((ctx_tokens, gen_tokens, isl, osl, prefix))
+                # cheaper than the sum by construction: shared cost once
+                return 0.5 * (self.prefill_ms(1, ctx_tokens, 0) + self.decode_ms(gen_tokens, isl))
+
+        wl = WorkloadSpec(isl=2048, osl=32, concurrency=8)
+        eng = EngineSpec(max_num_batched_tokens=4096)
+        hook = HookTiming()
+        rep_hook = evaluate_closed_loop(wl, eng, hook, backend="vllm")
+        rep_sum = evaluate_closed_loop(wl, eng, SyntheticTiming(), backend="vllm")
+        assert hook.mixed_calls, "mixed passes must route through the hook"
+        # every recorded call is a genuinely mixed pass with workload shape
+        for ctx_tokens, gen_tokens, isl, osl, prefix in hook.mixed_calls:
+            assert ctx_tokens > 0 and gen_tokens > 0
+            assert (isl, osl, prefix) == (2048, 32, 0)
+        # cheaper mixed passes -> strictly better steady TTFT than the sum
+        assert rep_hook.ttft_steady.mean < rep_sum.ttft_steady.mean
+
     def test_trtllm_guaranteed_no_evict_caps_concurrency(self):
         wl = WorkloadSpec(isl=2048, osl=64, concurrency=64)
         eng = EngineSpec(guaranteed_no_evict=True, kv_capacity_tokens=4 * (2048 + 64))
@@ -363,6 +390,29 @@ class TestBracketAndE2E:
         rep = evaluate_closed_loop(wl, EngineSpec(), TIMING)
         assert rep.e2e.values, "e2e distribution should be populated"
         assert rep.e2e.mean > rep.ttft_steady.mean
+
+
+class TestDatabaseTimingMixedPass:
+    def test_delegates_to_mix_step_runner_with_efficiency(self):
+        from aiconfigurator.sdk.queueing.timing import DatabaseTimingModel
+
+        calls = []
+
+        class _Backend:
+            def _get_mix_step_latency(self, model, database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix):
+                calls.append((ctx_tokens, gen_tokens, isl, osl, prefix))
+                return 100.0, 0.0, {}, {}
+
+            def _mix_step_efficiency(self, ctx_tokens, gen_tokens):
+                return 0.8
+
+        timing = DatabaseTimingModel(model=object(), database=object(), backend=_Backend())
+        # 4096 is grain-aligned -> passed through unchanged
+        assert timing.mixed_pass_ms(4096, 7, 2048, 32, 0) == pytest.approx(80.0)
+        assert calls == [(4096, 7, 2048, 32, 0)]
+        # second call hits the cache — the runner is not consulted again
+        assert timing.mixed_pass_ms(4096, 7, 2048, 32, 0) == pytest.approx(80.0)
+        assert len(calls) == 1
 
 
 class TestMultimodalRefine:

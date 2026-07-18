@@ -32,6 +32,7 @@ the corresponding flag is not specified:
 | OSL (Output Sequence Length) | 1000 | `--osl` | Assumed output generation length |
 | TTFT (Time to First Token) | 2000 ms | `--ttft` | Max acceptable time to first token |
 | TPOT (Time per Output Token) | 30 ms | `--tpot` | Max acceptable time per output token |
+| SLA percentile semantics | off (legacy avg filter) | `--ttft-percentile` / `--itl` / `--sla-refine` | Enforce SLA targets at steady-state distribution percentiles |
 | Strict SLA | off | `--strict-sla` | Pre-filter Pareto frontier to only SLA-compliant configs |
 | Inclusive TPOT | off | `--inclusive-tpot` | Report TPOT inclusive of TTFT |
 | Backend | trtllm | `--backend` | Inference backend used for estimation |
@@ -377,7 +378,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
 
-The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accept-rates`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
+The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, the percentile SLA family `--ttft-percentile` / `--tpot-percentile` / `--itl` / `--itl-percentile` / `--request-latency-percentile` / `--sla-refine`, `--nextn`, `--nextn-accept-rates`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 
 #### Backend Selection
 
@@ -872,6 +873,77 @@ result = cli_default(
     strict_sla=True,
 )
 ```
+
+#### Percentile SLA targets (`--ttft-percentile`, `--itl`, `--sla-refine`)
+
+By default, `--ttft` / `--tpot` filter on AIC's legacy average estimates. The
+queueing (pass-calendar) model additionally produces steady-state
+**distributions** of TTFT and ITL, so SLA targets can be enforced at a
+percentile — "p99 TTFT under 300 ms" instead of "average TTFT under 300 ms".
+
+| Flag | Values | Default | Meaning |
+|------|--------|---------|---------|
+| `--ttft-percentile` | `p50 p75 p90 p95 p99 p999` | p50 | Which quantile of steady-state TTFT `--ttft` constrains |
+| `--tpot-percentile` | same | p50 | Quantile for `--tpot` (needs `--sla-refine`) |
+| `--itl <ms>` | float | off | Inter-token-latency target (streaming smoothness) |
+| `--itl-percentile` | same | p99 | Quantile for `--itl` — the tail is the point of a smoothness SLA |
+| `--request-latency-percentile` | same | p50 | Quantile for `--request-latency` (needs `--sla-refine`) |
+| `--sla-refine` | flag | off | Resolve SLA-boundary candidates with the quantitative evaluator |
+
+Three modes, in increasing precision and cost:
+
+1. **Legacy (no flags)**: the historical average filters, byte-compatible
+   output, zero added cost.
+2. **Percentile screening**: passing *any* percentile flag or `--itl`
+   switches the whole filter family to percentile semantics (unset metrics
+   use the defaults above — note TTFT then screens at p50, not the legacy
+   average). Screening uses closed-form quantiles stored on every swept
+   row — still O(1), no extra perf-database queries. Available for TTFT
+   (full quantile set) and ITL (p50/p99); TPOT and request-latency
+   percentiles require `--sla-refine`.
+3. **`--sla-refine`**: a precision upgrade only — it never changes which
+   metric/percentile eliminates a config. Candidates whose screening
+   bracket straddles the target are re-scored with the quantitative
+   limit-cycle evaluator (in throughput order, until the top rows are
+   confirmed), and the finally-reported rows are upgraded to
+   quantitative-tier numbers. Cost: ~2x sweep time with loose targets,
+   ~7x when the target sits on the feasibility boundary.
+
+The report table headers name the active semantics: `TTFT(avg)` in legacy
+mode becomes `TTFT(P50)` (or the requested quantile), alongside `TPOT(avg)`
+and `ITL(P99)`. Saved CSVs carry the full distribution columns
+(`ttft_steady_p50..p999`, `ttft_transient_*`, `itl_p50/p99`) plus
+`queueing_tier`, which shows each row's precision class
+(`screening` / `quantitative` / `static` / `composed`).
+
+ITL is where agg and disagg differ most: on agg workers a decode token can
+stall behind another request's prefill chunk, so agg `itl_p99` spikes to
+the mix-pass duration, while disagg decode workers have no prefill
+interference. A `--itl` target makes that difference actionable.
+
+Example: p50 TTFT under 210 ms with a p99 ITL smoothness bound, resolving
+boundary candidates precisely:
+
+```bash
+aiconfigurator cli default \
+  --model-path meta-llama/Meta-Llama-3.1-8B \
+  --total-gpus 8 \
+  --system h200_sxm \
+  --backend vllm \
+  --isl 4096 --osl 256 \
+  --ttft 210 --ttft-percentile p50 \
+  --itl 100 \
+  --sla-refine
+```
+
+The same fields are available per-experiment in `exp` mode YAML
+(`sla_percentile`, `sla_funnel`, `ttft_percentile`, `itl`, `itl_percentile`,
+...) — see the commented block in `src/aiconfigurator/cli/example.yaml`.
+
+> **Note:** percentile enforcement applies to the agg sweep path. Disagg
+> rows currently carry composed (static-semantics) distribution columns —
+> their TTFT side follows the prefill stage and their ITL side is a single
+> mass at decode TPOT.
 
 #### Database Mode
 
