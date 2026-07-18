@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "trtllm>=1.2.0rc6"
+# 1.3.0rc20: the TorchBind run_moe call is padded for the grown C++ schema
+# (see _SlotLoraPaddedRunner) — that padding is invalid on older runtimes.
+__compat__ = "trtllm>=1.3.0rc20"
 
 """
 WideEPMoE compute-only collector (excluding AlltoAll communication).
@@ -73,6 +75,47 @@ aic_debug = int(os.getenv("AIC_MOE_DEBUG", "0"))
 # AIC_ACCURATE_WIDEEP_SIM=1 (default): Accurate mode - DP split + rank0 filter
 # AIC_ACCURATE_WIDEEP_SIM=0: Simple mode - all tokens directly
 aic_accurate_wideep_sim = os.getenv("AIC_ACCURATE_WIDEEP_SIM", "1") == "1"
+
+
+class _SlotLoraPaddedRunner:
+    """Pad the trailing TorchBind ``run_moe`` args dropped by 1.3.0rc20.
+
+    The C++ ``FusedMoeRunner::runMoe`` grew seven trailing optionals — the
+    slot-level routed-expert LoRA inputs and ``token_to_slot``
+    (cpp/tensorrt_llm/thop/moeOp.cpp:415-421@v1.3.0rc20, all defaulting to
+    ``nullopt`` = feature off) — but TorchBind schemas do not honor C++
+    defaults and the wheel's own ``moe_op_cutlass.compute_moe`` still
+    assembles the pre-growth 37-argument call, so every invocation fails
+    with "missing value for argument '_37'". Serving never hits this path
+    (CutlassFusedMoE serves through ``torch.ops.trtllm.fused_moe``). Padding
+    ``None`` reproduces the C++ defaults exactly: same kernel, LoRA off.
+    Re-verify on the next version bump — if upstream fixes their call
+    assembly, this pad must be removed (the arity mismatch fails loudly).
+    """
+
+    _TRAILING_OPTIONALS = 7
+
+    def __init__(self, fused_moe_runner):
+        self._fused_moe_runner = fused_moe_runner
+
+    def __getattr__(self, name):
+        return getattr(self._fused_moe_runner, name)
+
+    def run_moe(self, *args):
+        return self._fused_moe_runner.run_moe(*args, *([None] * self._TRAILING_OPTIONALS))
+
+
+_original_cutlass_compute_moe = CutlassMoEOp.compute_moe
+
+
+def _cutlass_compute_moe_with_slot_lora_pad(self, *args, **kwargs):
+    runner = getattr(self.moe_runner, "fused_moe_runner", None)
+    if runner is not None and not isinstance(runner, _SlotLoraPaddedRunner):
+        self.moe_runner.fused_moe_runner = _SlotLoraPaddedRunner(runner)
+    return _original_cutlass_compute_moe(self, *args, **kwargs)
+
+
+CutlassMoEOp.compute_moe = _cutlass_compute_moe_with_slot_lora_pad
 
 moe_tune_path = os.path.join(THIS_DIR, "wideep_moe_compute_tuned_cache_path")
 
@@ -572,8 +615,14 @@ def get_wideep_moe_compute_all_test_cases():
         eplb_configs = [
             (False, num_experts),  # EPLB OFF
             (True, num_experts),  # EPLB ON, baseline slots
-            (True, 288),  # EPLB ON, 288 slots
         ]
+        # EPLB ON with the fixed 288-slot production layout. Expert
+        # replication requires num_slots >= num_experts (helper.py
+        # compute_expert_replication identity), so this configuration only
+        # exists for models with <= 288 experts — e.g. Kimi-K2.5's 384
+        # experts cannot be laid out on 288 slots.
+        if num_experts <= 288:
+            eplb_configs.append((True, 288))
 
         for moe_type in moe_list:
             for use_eplb, num_slots in eplb_configs:
