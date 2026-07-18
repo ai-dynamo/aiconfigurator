@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from aiconfigurator.fpm_contract import FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION
 from aiconfigurator.generator.aggregators import generate_config_from_input_dict
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.main import main as generator_main
@@ -115,6 +116,7 @@ def _benchmark_result(
     mode: str = "prefill",
     dp_rank: int = 0,
     point_types: list[str] | None = None,
+    schema_version: int = FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION,
     status: str = "complete",
     valid: bool = True,
 ) -> dict:
@@ -128,7 +130,7 @@ def _benchmark_result(
         for point_type in point_types
     ]
     return {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "status": status,
         "valid": valid,
         "coverage": {
@@ -221,6 +223,7 @@ def test_fpm_render_returns_only_resource_pod_and_run_script():
     artifacts = _render()
 
     assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
+    assert f'value.get("schema_version") != {FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION}' in artifacts["run.sh"]
 
 
 def test_fpm_pinned_vllm_024_uses_floor_template_and_preserves_fpm_overlay():
@@ -469,7 +472,7 @@ def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
     assert yaml.safe_load((tmp_path / "k8s_deploy.yaml").read_text())["kind"] == "Pod"
 
 
-def test_fpm_run_script_accepts_legacy_schema_v2_and_stops_fake_engine(tmp_path):
+def test_fpm_run_script_rejects_legacy_schema_v2_envelope_and_stops_fake_engine(tmp_path):
     output_path = tmp_path / "benchmark.json"
     params = _params()
     for entry in params["K8sConfig"]["extra_env"]:
@@ -512,7 +515,8 @@ while True:
         check=False,
     )
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 1
+    assert "status='passed' valid=None" in completed.stderr
     assert json.loads(output_path.read_text()) == {
         "schema_version": 2,
         "status": "passed",
@@ -539,7 +543,7 @@ while True:
         ("agg", ["prefill", "decode"]),
     ],
 )
-def test_fpm_run_script_accepts_schema_v1_for_supported_benchmark_modes(
+def test_fpm_run_script_accepts_schema_v2_for_supported_benchmark_modes(
     tmp_path,
     benchmark_mode,
     point_types,
@@ -558,7 +562,7 @@ def test_fpm_run_script_accepts_schema_v1_for_supported_benchmark_modes(
 @pytest.mark.parametrize(
     ("case", "expected_message"),
     [
-        ("schema", "unsupported schema_version 3"),
+        ("schema", "schema_version=3"),
         ("mode", "benchmark mode 'decode' != 'prefill'"),
         ("coverage", "invalid coverage"),
         ("result_count", "results count 0 != 1"),
@@ -567,7 +571,7 @@ def test_fpm_run_script_accepts_schema_v1_for_supported_benchmark_modes(
         ("non_object", "top-level JSON must be an object"),
     ],
 )
-def test_fpm_run_script_rejects_invalid_schema_v1_result(
+def test_fpm_run_script_rejects_invalid_schema_v2_result(
     tmp_path,
     case,
     expected_message,
@@ -632,7 +636,7 @@ base.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(dp_size):
     path = base if rank == 0 else base.with_name(f"{base.stem}_dp{rank}{base.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "valid": True,
         "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
@@ -681,21 +685,76 @@ def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("result_status", "expected_returncode"),
+    ("result", "expected_message"),
     [
-        ("passed", 0),
-        ("failed", 1),
+        (_benchmark_result(schema_version=1), "schema_version=1"),
+        (_benchmark_result(mode="decode"), "benchmark mode 'decode' != 'prefill'"),
+        (_benchmark_result(dp_rank=1), "FPM dp_ranks [1] != [0]"),
+    ],
+)
+def test_fpm_run_script_rejects_mismatched_result_identity(tmp_path, result, expected_message):
+    output_path = tmp_path / "benchmark.json"
+    params = _params()
+    _set_benchmark_mode(params, "prefill")
+    for entry in params["K8sConfig"]["extra_env"]:
+        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
+            entry["value"] = str(output_path)
+
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(
+        f"""\
+import pathlib
+import signal
+import sys
+import time
+
+path = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text({json.dumps(result)!r})
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    time.sleep(0.1)
+"""
+    )
+    script_path = tmp_path / "run.sh"
+    script_path.write_text(_render(params)["run.sh"])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(tmp_path / "fake-package")
+
+    completed = subprocess.run(
+        ["bash", str(script_path)],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert expected_message in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("result_valid", "expected_returncode"),
+    [
+        (True, 0),
+        (False, 1),
     ],
 )
 def test_fpm_run_script_bounds_stubborn_engine_shutdown(
     tmp_path,
-    result_status,
+    result_valid,
     expected_returncode,
 ):
     output_path = tmp_path / "benchmark.json"
+    result = _benchmark_result(valid=result_valid)
     pid_path = tmp_path / "engine.pid"
     child_pid_path = tmp_path / "engine-child.pid"
     params = _params()
+    _set_benchmark_mode(params, "prefill")
     for entry in params["K8sConfig"]["extra_env"]:
         if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
             entry["value"] = str(output_path)
@@ -725,11 +784,7 @@ pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid)
 index = sys.argv.index("--benchmark-output-path")
 path = pathlib.Path(sys.argv[index + 1])
 path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({{
-    "schema_version": 2,
-    "status": "{result_status}",
-    "config": {{"dp_rank": 0}},
-}}))
+path.write_text({json.dumps(result)!r})
 while True:
     time.sleep(0.1)
 """
@@ -1160,7 +1215,7 @@ output.parent.mkdir(parents=True, exist_ok=True)
 for rank in range(start, start + local):
     path = output if rank == 0 else output.with_name(f"{output.stem}_dp{rank}{output.suffix}")
     path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "valid": True,
         "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},

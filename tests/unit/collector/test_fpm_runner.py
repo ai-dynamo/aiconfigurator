@@ -21,6 +21,7 @@ from collector.fpm_forward.runner import (
     _cell_generator_overrides,
     _configured_sampling_metadata,
     _render_cell,
+    _required_attempt_id,
     _runtime_collection_summary,
     _runtime_timing_summary,
     _validate_runtime_collection,
@@ -235,6 +236,11 @@ def test_prepare_attempt_clears_results_and_writes_runtime_provenance(tmp_path):
     assert calls[1][1][4] == "collector-provenance.json"
 
 
+def test_passed_checkpoint_requires_attempt_identity():
+    with pytest.raises(ValueError, match="has no attempt identity"):
+        _required_attempt_id({"status": "passed"}, "cell-prefill")
+
+
 def test_cleanup_verifies_workload_and_pods_are_deleted(tmp_path):
     runner = _runner(tmp_path)
     runner.manifest = tmp_path / "k8s_deploy.yaml"
@@ -251,10 +257,86 @@ def test_cleanup_verifies_workload_and_pods_are_deleted(tmp_path):
             ),
         ]
     )
-    runner._kubectl = lambda *args, **kwargs: next(responses)
-    runner.pods = lambda: []
+    calls = []
+
+    def kubectl(*args, **kwargs):
+        calls.append(args)
+        return next(responses)
+
+    runner._kubectl = kubectl
+    runner.pods = lambda **_kwargs: []
 
     runner.cleanup()
+
+    assert "--cascade=foreground" in calls[0]
+
+
+def test_cleanup_ignores_pods_already_terminating_after_foreground_delete(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.kind = "LeaderWorkerSet"
+    runner.name = "cell"
+    runner.selector = "app.kubernetes.io/name=cell"
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="leaderworkerset/cell deleted\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='Error from server (NotFound): leaderworkersets "cell" not found',
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "name": "cell-0",
+                                    "deletionTimestamp": "2026-07-19T00:00:00Z",
+                                }
+                            }
+                        ]
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+    )
+    runner._kubectl = lambda *args, **kwargs: next(responses)
+
+    runner.cleanup()
+
+
+def test_cleanup_rejects_nonterminating_pod_after_foreground_delete(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.kind = "LeaderWorkerSet"
+    runner.name = "cell"
+    runner.selector = "app.kubernetes.io/name=cell"
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="leaderworkerset/cell deleted\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='Error from server (NotFound): leaderworkersets "cell" not found',
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"items": [{"metadata": {"name": "cell-0"}}]}),
+                stderr="",
+            ),
+        ]
+    )
+    runner._kubectl = lambda *args, **kwargs: next(responses)
+
+    with pytest.raises(RuntimeError, match="owned FPM pods remain"):
+        runner.cleanup()
 
 
 def test_cleanup_rejects_a_remaining_workload(tmp_path):

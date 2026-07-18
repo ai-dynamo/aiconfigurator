@@ -204,7 +204,7 @@ class FPMCollectionPlan:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_name": "aic_fpm_collection_plan",
-            "schema_version": 9,
+            "schema_version": 10,
             "backend": self.backend,
             "model_path": self.model_path,
             "system": self.system,
@@ -291,6 +291,7 @@ def build_collection_plan(
     options: FPMCollectionOptions,
     model_architecture: str | None = None,
     has_model_cases: bool = True,
+    model_config_path: str | None = None,
     collector_config: dict[str, Any] | None = None,
     generator_overrides: dict[str, Any] | None = None,
 ) -> FPMCollectionPlan:
@@ -307,6 +308,7 @@ def build_collection_plan(
         system=system,
         requested_weight_quantizations=options.weight_quantizations,
         requested_kv_cache_dtypes=options.kv_cache_dtypes,
+        model_config_path=model_config_path,
         database_version=(
             str(collector_config["aic_database_version"]) if "aic_database_version" in collector_config else None
         ),

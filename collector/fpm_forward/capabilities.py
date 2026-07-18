@@ -13,7 +13,7 @@ from aiconfigurator.sdk.models.helpers import _infer_quant_modes_from_raw_config
 from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
 from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
 
-from .model_capability import load_model_config, resolve_attention_source
+from .model_capability import ResolvedModelConfig, load_model_config, resolve_attention_source
 
 TEMPLATE_VERSION = 1
 
@@ -106,6 +106,7 @@ class ModelCapabilityProfile:
     support_reason: str
     allow_pure_tp: bool
     aic_database_version: str
+    model_config: ResolvedModelConfig
     dtype: ResolvedDTypeProfile
 
     def to_dict(self) -> dict[str, object]:
@@ -121,6 +122,7 @@ class ModelCapabilityProfile:
             "support_reason": self.support_reason,
             "allow_pure_tp": self.allow_pure_tp,
             "aic_database_version": self.aic_database_version,
+            "model_config": self.model_config.to_dict(),
             "dtype": self.dtype.to_dict(),
         }
 
@@ -167,12 +169,13 @@ def resolve_model_capability(
     system: str,
     requested_weight_quantizations: tuple[str, ...],
     requested_kv_cache_dtypes: tuple[str, ...],
+    model_config_path: str | None = None,
     database_version: str | None = None,
 ) -> ModelCapabilityProfile:
     """Resolve a conservative matrix profile from AIC code and perf data."""
 
-    raw_config, _config_path = load_model_config(model_path)
-    config = dict(raw_config)
+    resolved_config = load_model_config(model_path, explicit_config_path=model_config_path)
+    config = resolved_config.effective_payload
     _attach_inferred_quant_fields(config)
     architecture = _architecture(config, model_architecture)
     model_family = common.ARCHITECTURE_TO_MODEL_FAMILY.get(architecture) if architecture else None
@@ -280,6 +283,7 @@ def resolve_model_capability(
         support_reason=support_reason,
         allow_pure_tp=allow_pure_tp,
         aic_database_version=str(version),
+        model_config=resolved_config,
         dtype=ResolvedDTypeProfile(
             gemm_quant_mode=gemm,
             moe_quant_mode=moe,

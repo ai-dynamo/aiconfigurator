@@ -338,6 +338,15 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Runtime KV-cache dtypes to collect; defaults to the generator/model setting.",
     )
     group.add_argument(
+        "--fpm-model-config",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Explicit local config.json (or directory containing it) for a model whose checkpoint is not "
+            "locally accessible; the model remains identified by --model-path."
+        ),
+    )
+    group.add_argument(
         "--fpm-warmup-iterations",
         type=_nonnegative_int,
         default=None,
@@ -444,6 +453,7 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_gpu_counts",
         "fpm_weight_quantizations",
         "fpm_kv_cache_dtypes",
+        "fpm_model_config",
         "fpm_tp_sizes",
         "fpm_pp_sizes",
         "fpm_dp_sizes",
