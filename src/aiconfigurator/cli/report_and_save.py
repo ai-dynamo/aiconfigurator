@@ -78,13 +78,30 @@ _TTFT_PCTL_LABEL = {0.5: "P50", 0.75: "P75", 0.9: "P90", 0.95: "P95", 0.99: "P99
 
 
 def _ttft_header(ttft_percentile: float | None) -> str:
-    if ttft_percentile is None:
+    if not isinstance(ttft_percentile, (int, float)):
         return "TTFT(avg)"
     return f"TTFT({_TTFT_PCTL_LABEL.get(ttft_percentile, 'P50')})"
 
 
+def _itl_display(itl_percentile: float | None) -> tuple[str, str]:
+    """(header, column) for the ITL table column. Only the two-mass anchors
+    are stored (p50 = smooth decode pace, p99 = stutter tail); the ITL mean
+    is deliberately not shown — for a bimodal distribution it is a value
+    that rarely occurs, and it duplicates TPOT / tokens-per-user anyway."""
+    q = itl_percentile if isinstance(itl_percentile, (int, float)) else 0.99
+    return ("ITL(P50)", "itl_p50") if q <= 0.5 else ("ITL(P99)", "itl_p99")
+
+
+def _itl_cell(row: dict, itl_percentile: float | None) -> str:
+    _, col = _itl_display(itl_percentile)
+    value = row.get(col)
+    if value is not None and pd.notna(value):
+        return f"{value:.2f}"
+    return "-"  # rows without queueing distributions
+
+
 def _ttft_cell(row: dict, ttft_percentile: float | None) -> str:
-    if ttft_percentile is None:  # legacy mode: blended-mean estimate
+    if not isinstance(ttft_percentile, (int, float)):  # legacy mode
         return f"{row['ttft']:.2f}"
     from aiconfigurator.sdk.queueing.closed_form import ttft_quantile_column
 
@@ -103,6 +120,7 @@ def _plot_worker_setup_table(
     is_moe: bool,
     request_latency_target: float | None,
     ttft_percentile: float | None = None,
+    itl_percentile: float | None = None,
     show_power: bool = True,
     preserve_ranking: bool = False,
     objective_target: str | None = None,
@@ -177,6 +195,7 @@ def _plot_worker_setup_table(
             "tokens/s/user",
             "req/s",
             _ttft_header(ttft_percentile),
+            _itl_display(itl_percentile)[0],
             "request_latency",
             "concurrency",
             "total_gpus (used)",
@@ -250,6 +269,7 @@ def _plot_worker_setup_table(
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     _ttft_cell(row, ttft_percentile),
+                    _itl_cell(row, itl_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
                     f"{display_total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
@@ -276,6 +296,7 @@ def _plot_worker_setup_table(
             "tokens/s/user",
             "req/s",
             _ttft_header(ttft_percentile),
+            _itl_display(itl_percentile)[0],
             "request_latency",
             "concurrency",
             "total_gpus (used)",
@@ -319,6 +340,7 @@ def _plot_worker_setup_table(
                     f"{row['tokens/s/user']:.2f}",
                     f"{row['cluster_request_rate']:.2f}",
                     _ttft_cell(row, ttft_percentile),
+                    _itl_cell(row, itl_percentile),
                     f"{row['request_latency']:.2f}",
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
                     f"{display_total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
@@ -652,6 +674,7 @@ def log_final_summary(
                 if getattr(exp_task, "sla_percentile", False) or getattr(exp_task, "sla_funnel", False)
                 else None
             ),
+            itl_percentile=getattr(exp_task, "itl_percentile", None),
             show_power=show_power,
             preserve_ranking=objective_aware,
             objective_target=objective_target,
