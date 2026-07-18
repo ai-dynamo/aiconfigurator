@@ -13,6 +13,15 @@
 # _get_precision_combos). SM120/121 remain hardware-unvalidated. Never move
 # this back into YAML.
 
+# FIXME(kernel-limit): SM100 DSA with reduced local heads (h in {1,2,4},
+# i.e. high-TP shards) fails in the framework's own dispatch with the C++
+# assert "Num. rows must be a multiple of 8 <h>" (forward_dsa_attn →
+# fmha/fallback.py:75 thop.attention @1.3.0rc20). Hardware-observed on B200
+# 2026-07-18: generation gate 38/38 failures were exactly this cluster while
+# every h>=8 case passed; context shows the same signature. Framework
+# kernel limit, not collector dummy setup — cases stay as classified
+# runtime failures. Re-verify on the next version bump.
+
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
 __compat__ = ">=1.3.0rc20"
