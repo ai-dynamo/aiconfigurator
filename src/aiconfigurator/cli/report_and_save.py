@@ -71,27 +71,27 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     return power_ratio >= threshold
 
 
-# nearest STORED steady-TTFT percentile column for parenthetical display;
-# the label always names what is actually shown (enforcement uses the exact
-# requested quantile regardless — this is display only)
-_TTFT_PCTL_DISPLAY = {
-    0.5: ("p50", "ttft_steady_p50"),
-    0.75: ("p90", "ttft_steady_p90"),
-    0.9: ("p90", "ttft_steady_p90"),
-    0.95: ("p99", "ttft_steady_p99"),
-    0.99: ("p99", "ttft_steady_p99"),
-    0.999: ("p99", "ttft_steady_p99"),
-}
+# TTFT display: the header names the semantics of the values shown.
+# Legacy mode -> "TTFT(avg)" with the legacy blended-mean estimate;
+# percentile mode -> "TTFT(P<q>)" with the exact stored steady quantile.
+_TTFT_PCTL_LABEL = {0.5: "P50", 0.75: "P75", 0.9: "P90", 0.95: "P95", 0.99: "P99", 0.999: "P999"}
 
 
-def _ttft_cell(row: dict, ttft_percentile: float) -> str:
-    base = f"{row['ttft']:.2f}"
-    label, col = _TTFT_PCTL_DISPLAY.get(ttft_percentile, ("p50", "ttft_steady_p50"))
-    value = row.get(col)
-    tier = row.get("queueing_tier")
-    if value is not None and pd.notna(value) and tier in ("screening", "quantitative"):
-        return f"{base} ({label} {value:.1f})"
-    return base
+def _ttft_header(ttft_percentile: float | None) -> str:
+    if ttft_percentile is None:
+        return "TTFT(avg)"
+    return f"TTFT({_TTFT_PCTL_LABEL.get(ttft_percentile, 'P50')})"
+
+
+def _ttft_cell(row: dict, ttft_percentile: float | None) -> str:
+    if ttft_percentile is None:  # legacy mode: blended-mean estimate
+        return f"{row['ttft']:.2f}"
+    from aiconfigurator.sdk.queueing.closed_form import ttft_quantile_column
+
+    value = row.get(ttft_quantile_column(ttft_percentile))
+    if value is not None and pd.notna(value):
+        return f"{value:.2f}"
+    return f"{row['ttft']:.2f}"  # rows without queueing columns
 
 
 def _plot_worker_setup_table(
@@ -102,7 +102,7 @@ def _plot_worker_setup_table(
     top: int,
     is_moe: bool,
     request_latency_target: float | None,
-    ttft_percentile: float = 0.5,
+    ttft_percentile: float | None = None,
     show_power: bool = True,
     preserve_ranking: bool = False,
     objective_target: str | None = None,
@@ -176,7 +176,7 @@ def _plot_worker_setup_table(
             _cli_bold("tokens/s/gpu"),
             "tokens/s/user",
             "req/s",
-            "TTFT",
+            _ttft_header(ttft_percentile),
             "request_latency",
             "concurrency",
             "total_gpus (used)",
@@ -275,7 +275,7 @@ def _plot_worker_setup_table(
             _cli_bold("tokens/s/gpu"),
             "tokens/s/user",
             "req/s",
-            "TTFT",
+            _ttft_header(ttft_percentile),
             "request_latency",
             "concurrency",
             "total_gpus (used)",
@@ -647,7 +647,11 @@ def log_final_summary(
             top_n,
             exp_task.is_moe,
             exp_task.request_latency,
-            ttft_percentile=getattr(exp_task, "ttft_percentile", 0.5),
+            ttft_percentile=(
+                getattr(exp_task, "ttft_percentile", 0.5)
+                if getattr(exp_task, "sla_percentile", False) or getattr(exp_task, "sla_funnel", False)
+                else None
+            ),
             show_power=show_power,
             preserve_ranking=objective_aware,
             objective_target=objective_target,

@@ -307,7 +307,7 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--ttft-percentile",
         type=_percentile,
-        default=0.5,
+        default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
         help="Which percentile of the steady-state TTFT distribution --ttft constrains. "
         "Default: p50 (typical request under sustained load).",
@@ -315,14 +315,14 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--tpot-percentile",
         type=_percentile,
-        default=0.5,
+        default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
         help="Percentile of the TPOT distribution that --tpot constrains. Default: p50.",
     )
     parser.add_argument(
         "--itl-percentile",
         type=_percentile,
-        default=0.99,
+        default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
         help="Percentile of the ITL distribution that --itl constrains. Default: p99 "
         "(the tail is the point of a smoothness SLA).",
@@ -330,9 +330,19 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--request-latency-percentile",
         type=_percentile,
-        default=0.5,
+        default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
         help="Percentile of the end-to-end latency distribution that --request-latency constrains. Default: p50.",
+    )
+    parser.add_argument(
+        "--sla-refine",
+        action="store_true",
+        default=False,
+        help="Additionally resolve SLA-boundary candidates with the quantitative "
+        "queueing evaluator and upgrade reported rows to quantitative-tier numbers. "
+        "Costs extra sweep time near the SLA boundary; off by default. "
+        "Percentile constraints alone (--*-percentile / --itl) do NOT require this: "
+        "they are enforced with the O(1) screening quantiles.",
     )
     parser.add_argument(
         "--strict-sla",
@@ -1216,6 +1226,8 @@ def build_default_tasks(
     tpot_percentile: float = 0.5,
     itl_percentile: float = 0.99,
     request_latency_percentile: float = 0.5,
+    sla_percentile: bool = False,
+    sla_funnel: bool = False,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
@@ -1367,6 +1379,8 @@ def build_default_tasks(
         "tpot_percentile": tpot_percentile,
         "itl_percentile": itl_percentile,
         "request_latency_percentile": request_latency_percentile,
+        "sla_percentile": sla_percentile,
+        "sla_funnel": sla_funnel,
         "total_gpus": total_gpus,
         "database_mode": database_mode,
         "transfer_policy": transfer_policy,
@@ -1707,12 +1721,13 @@ def _execute_tasks(
             max_total_gpus=max_total_gpus,
             strict_sla=strict_sla,
         )
-        # report-boundary tier upgrade: the handful of rows a human will
-        # read get quantitative-tier queueing numbers (feasibility was
-        # already resolved by the sweep funnel; nothing is dropped here)
-        from aiconfigurator.sdk.queueing.refine import refine_report_rows
+        # report-boundary tier upgrade (only when the evaluator was opted
+        # in): the handful of rows a human reads get quantitative-tier
+        # queueing numbers; nothing is dropped here
+        if getattr(task, "sla_funnel", False):
+            from aiconfigurator.sdk.queueing.refine import refine_report_rows
 
-        best_config_df = refine_report_rows(best_config_df)
+            best_config_df = refine_report_rows(best_config_df)
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
         best_latencies[name] = latencies
@@ -2454,10 +2469,23 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             itl=args.itl,
-            ttft_percentile=args.ttft_percentile,
-            tpot_percentile=args.tpot_percentile,
-            itl_percentile=args.itl_percentile,
-            request_latency_percentile=args.request_latency_percentile,
+            ttft_percentile=args.ttft_percentile if args.ttft_percentile is not None else 0.5,
+            tpot_percentile=args.tpot_percentile if args.tpot_percentile is not None else 0.5,
+            itl_percentile=args.itl_percentile if args.itl_percentile is not None else 0.99,
+            request_latency_percentile=(
+                args.request_latency_percentile if args.request_latency_percentile is not None else 0.5
+            ),
+            sla_percentile=any(
+                v is not None
+                for v in (
+                    args.ttft_percentile,
+                    args.tpot_percentile,
+                    args.itl_percentile,
+                    args.request_latency_percentile,
+                    args.itl,
+                )
+            ),
+            sla_funnel=args.sla_refine,
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],

@@ -132,8 +132,11 @@ def refine_rows(
         p99 = rep.ttft_steady.p99
         df.loc[idx, "ttft_steady_mean"] = rep.ttft_steady.mean
         df.loc[idx, "ttft_steady_p50"] = rep.ttft_steady.p50
+        df.loc[idx, "ttft_steady_p75"] = rep.ttft_steady.quantile(0.75)
         df.loc[idx, "ttft_steady_p90"] = rep.ttft_steady.p90
+        df.loc[idx, "ttft_steady_p95"] = rep.ttft_steady.quantile(0.95)
         df.loc[idx, "ttft_steady_p99"] = p99
+        df.loc[idx, "ttft_steady_p999"] = rep.ttft_steady.quantile(0.999)
         # the bracket collapses once the quantitative tier has spoken
         df.loc[idx, "ttft_steady_p99_lo"] = p99
         df.loc[idx, "ttft_steady_p99_hi"] = p99

@@ -352,6 +352,16 @@ class Task:
     tpot_percentile: float = 0.5
     itl_percentile: float = 0.99
     request_latency_percentile: float = 0.5
+    # Two independent opt-ins (both default off => legacy scalar filtering,
+    # byte-compatible with main, zero added cost):
+    # - sla_percentile: constraints are enforced at the requested percentiles
+    #   using the closed form's stored quantiles (still O(1), CI-safe).
+    #   Enabled implicitly by the CLI when any percentile / --itl arg is set.
+    # - sla_funnel: additionally resolve bracket-straddling candidates with
+    #   the limit-cycle evaluator and upgrade reported rows to quantitative
+    #   tier (--sla-refine). Implies sla_percentile.
+    sla_percentile: bool = False
+    sla_funnel: bool = False
     total_gpus: int | None = None
     database_mode: str | None = None
     # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
@@ -1430,6 +1440,8 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "sla_percentile": self.sla_percentile or self.sla_funnel,
+            "sla_funnel": self.sla_funnel,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:

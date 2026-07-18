@@ -165,8 +165,11 @@ def operating_point_columns(
     return {
         "ttft_steady_mean": ttft_steady_mean,
         "ttft_steady_p50": _q(0.50),
+        "ttft_steady_p75": _q(0.75),
         "ttft_steady_p90": _q(0.90),
+        "ttft_steady_p95": _q(0.95),
         "ttft_steady_p99": _q(0.99),
+        "ttft_steady_p999": _q(0.999),
         "ttft_steady_p99_lo": ttft_p99_lo,
         "ttft_steady_p99_hi": ttft_p99_hi,
         "ttft_transient_mean": sum(stair) / len(stair),
@@ -178,11 +181,46 @@ def operating_point_columns(
     }
 
 
+TTFT_QUANTILE_COLUMNS = {
+    0.5: "ttft_steady_p50",
+    0.75: "ttft_steady_p75",
+    0.9: "ttft_steady_p90",
+    0.95: "ttft_steady_p95",
+    0.99: "ttft_steady_p99",
+    0.999: "ttft_steady_p999",
+}
+
+
+def ttft_quantile_column(q: float) -> str:
+    """Exact stored column for a supported TTFT percentile."""
+    return TTFT_QUANTILE_COLUMNS.get(q, "ttft_steady_p50")
+
+
+def screening_quantile(row: dict, metric: str, q: float):
+    """Screening-tier quantile lookup from stored columns.
+
+    ttft quantiles are stored exactly for every supported percentile. itl
+    is a two-mass distribution: p50 reads the low mass, anything above
+    maps to the tail mass (conservative — every intermediate quantile of a
+    two-mass distribution equals one of the two masses). tpot / e2e have no screening
+    distribution — quantile enforcement for those requires the evaluator
+    (returns None so callers fall back to the legacy scalar screen).
+    """
+    if metric == "ttft":
+        return row.get(ttft_quantile_column(q))
+    if metric == "itl":
+        return row.get("itl_p50" if q <= 0.5 else "itl_p99")
+    return None
+
+
 QUEUEING_COLUMNS = [
     "ttft_steady_mean",
     "ttft_steady_p50",
+    "ttft_steady_p75",
     "ttft_steady_p90",
+    "ttft_steady_p95",
     "ttft_steady_p99",
+    "ttft_steady_p999",
     "ttft_steady_p99_lo",
     "ttft_steady_p99_hi",
     "ttft_transient_mean",
@@ -201,8 +239,11 @@ def static_degenerate_columns(ttft_ms: float, tpot_ms: float, tier: str = "stati
     return {
         "ttft_steady_mean": ttft_ms,
         "ttft_steady_p50": ttft_ms,
+        "ttft_steady_p75": ttft_ms,
         "ttft_steady_p90": ttft_ms,
+        "ttft_steady_p95": ttft_ms,
         "ttft_steady_p99": ttft_ms,
+        "ttft_steady_p999": ttft_ms,
         "ttft_steady_p99_lo": ttft_ms,
         "ttft_steady_p99_hi": ttft_ms,
         "ttft_transient_mean": ttft_ms,
