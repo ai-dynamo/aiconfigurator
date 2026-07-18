@@ -53,12 +53,12 @@ def operating_point_columns(
     pass-type hit probabilities, residual uniform within a pass). The transient
     block is the admission staircase of `batch_size` simultaneous arrivals.
 
-    Chunk count uses the EFFECTIVE prompt length (isl - prefix): cached prefix
-    tokens do not consume the scheduler token budget (vLLM v0.24.0
-    scheduler.py:710-712 subtracts num_computed_tokens before budgeting) —
-    the same convention the limit-cycle evaluator uses, keeping the funnel's
-    lo/hi bracket a valid bound on the evaluator's distribution for prefix
-    workloads. `encoder_ms` (vision encoder stage) and `dispatch_overhead_ms`
+    Chunk count uses the EFFECTIVE prompt length (isl - prefix): the
+    scheduler budgets only tokens that still need compute, so cached prefix
+    tokens never consume the token budget — the same convention the
+    limit-cycle evaluator uses, keeping the funnel's lo/hi bracket a valid
+    bound on the evaluator's distribution for prefix workloads.
+    `encoder_ms` (vision encoder stage) and `dispatch_overhead_ms`
     (per-request CPU dispatch cost) are the additive per-request TTFT stages
     the legacy `ttft` column already carries; without them the percentile
     screen would be systematically permissive for multimodal rows.

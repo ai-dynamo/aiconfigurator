@@ -37,7 +37,7 @@ One model, two precision tiers:
 | residual wait `E[T²]/(2E[T])` | renewal-theory residual life (inspection paradox) |
 | transient window = initial concurrency burst | closed-loop dispatch semantics (all C arrive at t=0) |
 | ITL gap weights `(c−1)/c` for mix passes | a mix pass stalls only the requests not being prefilled in it |
-| `isl_eff = isl − prefix` in chunk counts | cached tokens do not consume the scheduler token budget (scheduler.py:710-712 @ v0.24.0) — also what keeps the funnel bracket a valid bound on the evaluator's distribution for prefix rows |
+| `isl_eff = isl − prefix` in chunk counts | the scheduler budgets only tokens that still need compute, so cached tokens never consume the token budget — also what keeps the funnel bracket a valid bound on the evaluator's distribution for prefix rows |
 | additive TTFT stages: encoder, per-request dispatch overhead | the same additive terms the legacy `ttft` carries (run_agg's own composition); omitting them would make percentile screens permissive for multimodal rows |
 | static degenerate mapping | static batching has no admission queue and no phase interference, by construction |
 
@@ -127,22 +127,21 @@ Methodology: a development-time DES oracle — a discrete-event simulation of
 vLLM v1 iteration-level scheduling — was driven with timing functions
 IDENTICAL to the model's, so residuals isolate scheduling semantics. The
 oracle's own semantics were audited clause-by-clause against the vLLM v1
-scheduler source. Line anchors are pinned to **tag v0.24.0**
-(`releases/v0.24.0`) — the version the perf database ships — and are
-version-specific: re-pin them (and re-run the gate) when re-validating
-against a newer scheduler.
+scheduler source (v0.24.0, the version the perf database ships, at audit
+time). The clauses are semantic, not line references — upstream scheduling
+changes surface as validation-gate drift (§6):
 
-| Clause | vllm/v1/core/sched/scheduler.py @ v0.24.0 |
+| Clause | vLLM v1 scheduler behavior |
 |---|---|
-| unified token budget | `token_budget = self.max_num_scheduled_tokens` (:408) |
-| running set scheduled first | `while req_index < len(self.running) and token_budget > 0` (:432) |
-| chunked prefill budget cap | `num_new_tokens = min(num_new_tokens, token_budget)` (:470) |
-| chunked-off whole-prompt gate | break when `num_new_tokens > token_budget` (:803-810) |
-| admission concurrency cap | `len(self.running) == max_num_running_reqs` (:630) |
-| waiting-admission alloc failure | no preemption — request stays queued, break (:888-895) |
-| running-path alloc failure | preempt (LIFO `self.running.pop()`) with recompute (:562-565, `_preempt_request` :1107) |
-| prefix-cached tokens skip the budget | `num_computed_tokens` subtracted before budgeting (:710-712) |
-| fused execution (one pass = one forward) | decode tokens + prefill chunks form a single varlen batch; first token sampled off the final chunk's logits (`gpu_model_runner.py` `execute_model`/`logits_indices`) |
+| unified token budget | one per-step budget (`max_num_scheduled_tokens`) is shared by decode tokens and prefill chunks |
+| running set scheduled first | the running set is served before the waiting queue, in admission order; each decode consumes one budget token |
+| chunked prefill budget cap | a prefill chunk is `min(remaining_prompt, remaining_budget)` |
+| chunked-off whole-prompt gate | with chunked prefill disabled, admission stops once a whole prompt no longer fits the remaining budget |
+| admission concurrency cap | waiting-queue admission stops at `max_num_seqs` running requests |
+| waiting-admission alloc failure | a waiting request whose KV cannot be allocated stays queued (no preemption); admission stops for the step |
+| running-path alloc failure | KV pressure on the running path preempts the newest request (LIFO) with full recompute |
+| prefix-cached tokens skip the budget | the scheduler budgets only tokens that still need compute; cached tokens are subtracted first |
+| fused execution (one pass = one forward) | decode tokens + prefill chunks form a single varlen batch; a completing prefill's first token is sampled off the final chunk's logits in the same pass |
 
 Battery: 9 agg config families (isl 512–8192, osl 16–512, C 1–128, budget
 2048–8192, chunked on/off, prefix). Recorded results:
@@ -161,6 +160,16 @@ Battery: 9 agg config families (isl 512–8192, osl 16–512, C 1–128, budget
   isl4096/osl256/C32, measured against a development-time replay baseline):
   legacy `ttft` −30%; closed form −6.9% (blended); evaluator −2.5%,
   `itl_p50` exact, `itl_p99` 0.1%.
+
+Re-validated 2026-07-19 after two semantics corrections (prefill completers
+are not decode rows — the fused-execution clause above; effective-isl chunk
+counts). The oracle shared the completer-as-decode-row convention with the
+evaluator — both sides wrong together, invisible to the gate, exactly the
+shared-convention blind spot §6.13 describes — and was corrected against
+the engine first. All 9 families then re-gate within tolerance on the
+evaluator tier; the C1 family is now exact (0.0% on every metric — it
+previously carried a spurious decode-row term on both sides). The prefix
+family keeps its documented `itl_p99` exemption; TTFT residuals unchanged.
 
 The oracle and its gate script are development tooling and are not part of
 this change; they are preserved on a development branch for future
@@ -214,11 +223,11 @@ Silent (each with a designated detector):
    `itl_*` for nextn rows describes the amortized cadence, not the real
    lumpy gap distribution (a full step gap followed by zero-gaps).
    Detector: compare against a token-timestamped benchmark of an MTP model.
-12. **Attention-DP prefill cadence (`dp > 1`).** vLLM defers new prefills on
-   non-cadence steps under data parallelism (`throttle_prefills` /
-   `defer_prefills`, scheduler.py:424-428, 786-790 @ v0.24.0); the per-rank
-   calendar assumes every pass may mix. TTFT distributions for dp>1 rows
-   can shift by the cadence interval.
+12. **Attention-DP prefill cadence (`dp > 1`).** Under data parallelism
+   vLLM defers new prefills on non-cadence steps (prefill throttling, so
+   ranks batch prefills on cadence-aligned steps); the per-rank calendar
+   assumes every pass may mix. TTFT distributions for dp>1 rows can shift
+   by the cadence interval.
 13. **Closed-loop admission boundary convention.** The evaluator admits a
    replacement request into the pass that starts at its arrival instant
    (arrival = completion pass boundary). A real closed-loop client's next
@@ -231,4 +240,4 @@ Silent (each with a designated detector):
 14. **Async scheduling / overlapped batches.** `max_concurrent_batches > 1`
    and async scheduling overlap step N+1's schedule with step N's execute —
    the "one pass = one gap" mapping blurs. Not active in the validated
-   v0.24.0 configuration; watch item for newer engine defaults.
+   configuration; watch item for newer engine defaults.

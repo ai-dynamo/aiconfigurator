@@ -11,11 +11,12 @@ KV manager, no RNG) and reads TTFT/ITL/TPOT distributions off the cycle.
 
 This is an evaluation of the scheduling algorithm's own arithmetic — not a
 statistical fit and not a per-request simulation. Step semantics are
-anchored to the vLLM v1 scheduler source, pinned to tag v0.24.0
-(vllm/v1/core/sched/scheduler.py: unified token budget :408, running set
-first :432, chunked prefill cap :470); line anchors are version-specific —
-re-pin them when re-validating against a newer scheduler. The full clause
-provenance table and validation record live in docs/design/queueing_model.md.
+anchored to the vLLM v1 scheduler's behavior: one token budget shared by
+decode tokens and prefill chunks, the running set served before the waiting
+queue in admission order, and chunked prefill consuming whatever budget the
+decodes leave. The full clause provenance table and validation record live
+in docs/design/queueing_model.md; upstream scheduling changes surface as
+validation-gate drift (design doc §6).
 
 Backend calendars:
   - vllm    : fused pass — unified token budget, running decodes spend first,
@@ -89,9 +90,8 @@ class FusedCalendar(BaseCalendar):
                 if budget <= 0:
                     continue
                 if not eng.enable_chunked_prefill and s.remaining_prefill > budget:
-                    # chunked prefill off: the whole prompt must fit the
-                    # remaining budget (vllm/v1/core/sched/scheduler.py:803-810
-                    # @ v0.24.0)
+                    # chunked prefill off: the scheduler stops admitting once
+                    # a whole prompt no longer fits the remaining budget
                     break
                 chunk = min(s.remaining_prefill, budget)
                 computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
