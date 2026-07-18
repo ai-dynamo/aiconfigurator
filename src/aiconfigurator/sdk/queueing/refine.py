@@ -249,3 +249,65 @@ def apply_sla_funnel(
             )
             df = _enforce(reports)
     return df
+
+
+def refine_report_rows(df: pd.DataFrame, max_refines: int = 32) -> pd.DataFrame:
+    """Report-boundary tier upgrade: refine the rows a human will read.
+
+    Feasibility was already resolved by the sweep funnel; this pass only
+    upgrades the remaining screening-tier rows of a final (top-N) frame to
+    quantitative numbers. No rows are dropped here — for certain-pass rows
+    the bracket guarantees the refined p99 also complies (p99 <= hi <=
+    target by construction).
+
+    Self-contained: (model, database, backend) are rebuilt from each row's
+    own metadata (model/backend/version/system + parallelism columns), so
+    it can run at the report boundary where sweep-time objects are gone.
+    Any per-group rebuild failure is logged and skipped — the report path
+    must never crash on a tier upgrade.
+    """
+    if df is None or df.empty or "queueing_tier" not in df.columns:
+        return df
+    mask = df["queueing_tier"] == "screening"
+    if not mask.any():
+        return df
+
+    from aiconfigurator.sdk import config as sdk_config
+    from aiconfigurator.sdk.backends.factory import get_backend
+    from aiconfigurator.sdk.models import get_model
+    from aiconfigurator.sdk.perf_database import get_database
+
+    group_cols = ["model", "backend", "version", "system", "tp", "pp", "dp", "moe_tp", "moe_ep", "cp"]
+    budget = max_refines
+    for key, group in df[mask].groupby(group_cols, dropna=False):
+        if budget <= 0:
+            logger.info("report tier upgrade: refine budget exhausted, %d rows left at screening tier", int(mask.sum()))
+            break
+        (model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp) = key
+        try:
+            database = get_database(system=system, backend=backend_name, version=str(version))
+            model_config = sdk_config.ModelConfig(
+                tp_size=int(tp),
+                pp_size=int(pp),
+                moe_tp_size=int(moe_tp) if moe_tp else None,
+                moe_ep_size=int(moe_ep) if moe_ep else None,
+                attention_dp_size=int(dp) if dp else 1,
+                cp_size=int(cp) if cp else 1,
+            )
+            model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
+            backend = get_backend(backend_name)
+        except Exception:
+            logger.warning(
+                "report tier upgrade skipped for %s/%s tp%s pp%s (rebuild failed)",
+                model_path,
+                backend_name,
+                tp,
+                pp,
+                exc_info=True,
+            )
+            continue
+        reports = refine_rows(
+            df, list(group.index), model=model, database=database, backend=backend, max_refines=budget
+        )
+        budget -= len(reports)
+    return df.round(3)

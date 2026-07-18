@@ -1650,6 +1650,12 @@ def _execute_tasks(
             max_total_gpus=max_total_gpus,
             strict_sla=strict_sla,
         )
+        # report-boundary tier upgrade: the handful of rows a human will
+        # read get quantitative-tier queueing numbers (feasibility was
+        # already resolved by the sweep funnel; nothing is dropped here)
+        from aiconfigurator.sdk.queueing.refine import refine_report_rows
+
+        best_config_df = refine_report_rows(best_config_df)
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
         best_latencies[name] = latencies

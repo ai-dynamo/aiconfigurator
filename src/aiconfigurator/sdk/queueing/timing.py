@@ -42,8 +42,13 @@ class DatabaseTimingModel:
         return max(1, round(v / cls._GRAIN) * cls._GRAIN)
 
     def prefill_ms(self, batch_size: int, mean_isl: int, mean_prefix: int) -> float:
-        mean_isl = self._q(mean_isl)
+        # quantize the EFFECTIVE length (isl - prefix), not isl and prefix
+        # independently — independent rounding can collapse the difference
+        # to zero for small trailing chunks
+        eff = max(1, mean_isl - mean_prefix)
+        eff = eff if eff < self._GRAIN else self._q(eff)
         mean_prefix = 0 if mean_prefix <= 0 else self._q(mean_prefix)
+        mean_isl = mean_prefix + eff
         key = ("pf", batch_size, mean_isl, mean_prefix)
         hit = self._cache.get(key)
         if hit is not None:
