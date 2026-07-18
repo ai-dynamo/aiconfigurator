@@ -177,7 +177,9 @@ def resolve_model_capability(
     architecture = _architecture(config, model_architecture)
     model_family = common.ARCHITECTURE_TO_MODEL_FAMILY.get(architecture) if architecture else None
     exact_source = resolve_attention_source(selected_ops, required=False)
-    is_moe = _is_moe(config) or exact_source in {"dsa_module", "mla_module"}
+    # DSA is currently an MoE-only exact source in AIC. MLA is not: dense MLA
+    # models must remain on the dense topology path.
+    is_moe = _is_moe(config) or exact_source == "dsa_module"
     template_source, template_kind = _attention_template(
         config=config,
         architecture=architecture,

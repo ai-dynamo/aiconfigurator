@@ -65,7 +65,12 @@ def _powers_of_two_up_to(limit: int) -> tuple[int, ...]:
 
 
 def _prefill_cudagraph_capture_sizes(max_isl: int) -> tuple[int, ...]:
-    """Build the formal prefill capture axis from vLLM's balanced defaults."""
+    """Build the formal prefill capture axis for the FPM Scheduler sweep.
+
+    Sizes through 512 mirror vLLM 0.24's balanced defaults. The 32-token
+    stride above 512 is an explicit FPM collection policy that extends capture
+    coverage to 2048 without inheriting an unbounded runtime default.
+    """
 
     max_capture_size = min(max_isl, FPM_MAX_PREFILL_CUDAGRAPH_SIZE)
     sizes = [value for value in (1, 2, 4) if value <= max_capture_size]

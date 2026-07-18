@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,27 @@ from collector.fpm_forward.topology import enumerate_fpm_topologies
 from collector.fpm_forward.types import ParallelTopology
 
 pytestmark = pytest.mark.unit
+
+
+def _write_provenance(path, *, cell_id: str, plan_sha256: str = "plan-sha", attempt_id: str = "attempt"):
+    path.write_text(
+        json.dumps(
+            {
+                "schema_name": "aic_fpm_collector_provenance",
+                "schema_version": 1,
+                "cell_id": cell_id,
+                "plan_sha256": plan_sha256,
+                "attempt_id": attempt_id,
+                "runtime": {"backend": "vllm", "backend_version": "0.24.0"},
+            }
+        )
+    )
+
+
+def _concurrent_database_writer(root: str, row: dict, start_event) -> None:
+    start_event.wait(timeout=10)
+    plan = SimpleNamespace(system="b200_sxm", backend="vllm", aic_revision="revision")
+    write_formal_database(plan, [row], systems_root=Path(root))
 
 
 def _args(**overrides):
@@ -188,6 +211,18 @@ def test_plan_contains_only_cell_matrix_and_native_point_contract():
     assert "runtime_overlay" not in payload
 
 
+def test_backend_policy_is_deeply_immutable():
+    source = {"nested": {"values": [1, 2]}}
+    policy = BackendPolicy("baseline", "baseline", source, {"runtime.mode": "FULL"})
+    original = policy.to_dict()
+
+    source["nested"]["values"].append(3)
+    detached = policy.generator_overrides
+    detached["nested"]["values"].append(4)
+
+    assert policy.to_dict() == original
+
+
 def test_glm_auto_matrix_keeps_aic_parallel_and_dtype_resolution():
     plan = build_collection_plan(
         backend="vllm",
@@ -274,6 +309,39 @@ def test_memory_admission_keeps_unknown_estimates_for_runtime_verification(monke
 
     assert len(plan.topologies) == 3
     assert {decision.disposition for decision in plan.topology_memory_admission} == {"unknown"}
+
+
+def test_memory_admission_drops_only_the_rejected_dtype_cells(monkeypatch):
+    class Estimate:
+        def __init__(self, *, admitted: bool):
+            self.breakdown = {
+                "non_kv_bytes": 50 if admitted else 150,
+                "gpu_memory_capacity_bytes": 100,
+            }
+
+    def estimate(*_args, **kwargs):
+        return Estimate(admitted=kwargs["kvcache_quant_mode"] == "fp8")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        estimate,
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["bfloat16", "fp8"])),
+    )
+
+    assert {cell.kv_cache_dtype for cell in plan.cells} == {"fp8"}
+    assert {
+        estimate.kv_cache_dtype
+        for decision in plan.topology_memory_admission
+        for estimate in decision.estimates
+        if estimate.disposition == "rejected"
+    } == {"bfloat16"}
 
 
 def test_minimax_m3_keeps_family_dtype_and_parallel_capabilities():
@@ -454,6 +522,39 @@ def test_registered_dense_model_without_case_file_keeps_family_template():
     assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
 
 
+def test_exact_dense_mla_model_does_not_become_moe(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepSeekForCausalLM"],
+                "hidden_size": 2048,
+                "intermediate_size": 8192,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 16,
+                "kv_lora_rank": 512,
+                "vocab_size": 32000,
+                "max_position_embeddings": 4096,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path=str(tmp_path),
+        model_architecture="DeepSeekForCausalLM",
+        system="b200_sxm",
+        selected_ops={"mla_context_module", "mla_generation_module"},
+        has_model_cases=True,
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert plan.capability.support_level == "exact"
+    assert plan.capability.attention_kind == "dense_mla"
+    assert plan.capability.is_moe is False
+    assert {cell.parallel_strategy for cell in plan.cells} == {"tp"}
+
+
 def test_explicit_kv_dtype_still_requires_aic_runtime_capability():
     options = FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["int8"]))
     with pytest.raises(ValueError, match="does not support KV-cache dtype"):
@@ -546,6 +647,7 @@ def _synthetic_plan_and_cell(tmp_path):
     for rank, fpm in enumerate(rank_fpms):
         output = cell_dir / "raw" / f"pod-{rank}" / ("benchmark.json" if rank == 0 else f"benchmark_dp{rank}.json")
         output.parent.mkdir(parents=True, exist_ok=True)
+        _write_provenance(output.parent / "collector-provenance.json", cell_id=cell.cell_id)
         output.write_text(
             json.dumps(
                 {
@@ -587,6 +689,7 @@ def test_native_aggregation_preserves_iteration_totals(tmp_path):
     assert rows[0]["total_kv_read_tokens"] == 128
     assert rows[0]["partition_policy"] == "balanced_v1"
     assert rows[0]["measurement_policy"] == "dynamo_native_single_sample_v1"
+    assert rows[0]["backend_version"] == "0.24.0"
     assert "suffix_length" not in rows[0]
     assert "prefix_length" not in rows[0]
 
@@ -602,6 +705,17 @@ def test_native_aggregation_rejects_rank_grid_drift(tmp_path):
         aggregate_cell(plan, cell, cell_dir)
 
 
+def test_native_aggregation_rejects_stale_collector_attempt(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    second_provenance = cell_dir / "raw" / "pod-1" / "collector-provenance.json"
+    payload = json.loads(second_provenance.read_text())
+    payload["attempt_id"] = "stale-attempt"
+    second_provenance.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="provenance differs across pods"):
+        aggregate_cell(plan, cell, cell_dir)
+
+
 def test_formal_database_uses_schema_v4_and_rejects_conflicts(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
     rows = aggregate_cell(plan, cell, cell_dir)
@@ -612,7 +726,52 @@ def test_formal_database_uses_schema_v4_and_rejects_conflicts(tmp_path):
     metadata_payload = json.loads(metadata.read_text())
     assert metadata_payload["schema_version"] == 4
     assert metadata_payload["coordinate_system"] == "iteration_totals_balanced_v1"
+    assert metadata_payload["backend_version"] == "0.24.0"
+    assert parquet.parent.name == "0.24.0"
 
     conflicting = [{**rows[0], "latency_ms": 7.0}]
     with pytest.raises(ValueError, match="conflicting"):
         write_formal_database(plan, conflicting, systems_root=tmp_path / "systems")
+
+
+def test_formal_database_serializes_concurrent_publishers(tmp_path):
+    plan, _cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    base_row = aggregate_cell(plan, _cell, cell_dir)[0]
+    rows = [
+        {
+            **base_row,
+            "cell_id": f"fpm-concurrent-{index}",
+            "source_plan_sha256": f"plan-{index}",
+        }
+        for index in range(4)
+    ]
+    systems_root = tmp_path / "systems"
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    processes = [
+        context.Process(
+            target=_concurrent_database_writer,
+            args=(str(systems_root), row, start_event),
+        )
+        for row in rows
+    ]
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=30)
+        assert [process.exitcode for process in processes] == [0] * len(processes)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    import pyarrow.parquet as pq
+
+    destination = systems_root / "b200_sxm" / "vllm" / "0.24.0"
+    table = pq.read_table(destination / "fpm_forward_perf.parquet")
+    metadata = json.loads((destination / "fpm_forward_perf.metadata.json").read_text())
+    assert table.num_rows == len(rows)
+    assert metadata["row_count"] == len(rows)

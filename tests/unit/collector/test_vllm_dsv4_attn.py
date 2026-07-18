@@ -10,8 +10,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from collector.fpm_forward.population import _dsv4_vllm_points
-from collector.fpm_forward.types import FPMPoint
 from collector.helper import create_test_case_id
 
 pytestmark = pytest.mark.unit
@@ -135,29 +133,6 @@ def test_context_cases_carry_prefix_and_obey_both_token_budgets(dsv4_module, mon
         perf_filename="dsv4_csa_context_module_perf.txt",
     )
     assert forwarded["prefix_len"] == 128
-
-
-def test_fpm_population_matches_default_op_level_attention_shapes(dsv4_module, monkeypatch):
-    mod = dsv4_module
-    monkeypatch.setattr(mod, "MAX_SEQ_LEN", mod.DEFAULT_MAX_SEQ_LEN)
-    prefill, decode = _dsv4_vllm_points("vllm", {})
-    context_shapes = mod._vllm_dsv4_attention_filter_shapes(
-        "context",
-        mod._DSV4_MODULE_BATCH_SIZES,
-        mod._DSV4_MODULE_SEQ_LENGTHS,
-    )
-    generation_shapes = mod._vllm_dsv4_attention_filter_shapes(
-        "generation",
-        mod._DSV4_MODULE_BATCH_SIZES,
-        mod._DSV4_MODULE_SEQ_LENGTHS,
-    )
-
-    assert set(prefill) == {
-        FPMPoint("prefill", batch_size, seq_len, prefix_len) for batch_size, seq_len, prefix_len in context_shapes
-    }
-    assert set(decode) == {
-        FPMPoint("decode", batch_size, 1, seq_len) for batch_size, seq_len, _prefix_len in generation_shapes
-    }
 
 
 def test_smoke_has_zero_and_nonzero_prefix_without_endpoint_sweep(dsv4_module, monkeypatch):

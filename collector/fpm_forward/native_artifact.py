@@ -13,6 +13,8 @@ from typing import Any
 
 from .planner import FPMCell
 
+COLLECTOR_PROVENANCE_FILENAME = "collector-provenance.json"
+
 
 @dataclass(frozen=True, slots=True)
 class NativePointMeasurement:
@@ -24,6 +26,68 @@ class NativePointMeasurement:
 class NativeCollection:
     points: tuple[NativePointMeasurement, ...]
     rank_timings: tuple[tuple[int, float, float], ...]
+    backend_version: str
+    collector_attempt_id: str
+
+
+def _validate_collector_provenance(
+    cell: FPMCell,
+    raw_root: Path,
+    rank_payloads: list[tuple[Path, dict[str, Any]]],
+    *,
+    expected_plan_sha256: str | None,
+    expected_attempt_id: str | None,
+) -> tuple[str, str]:
+    pod_names = set()
+    for path, _payload in rank_payloads:
+        relative = path.relative_to(raw_root)
+        if len(relative.parts) < 2:
+            raise ValueError(f"native rank artifact is not scoped to a collected pod: {path}")
+        pod_names.add(relative.parts[0])
+
+    canonical: dict[str, Any] | None = None
+    for pod_name in sorted(pod_names):
+        path = raw_root / pod_name / COLLECTOR_PROVENANCE_FILENAME
+        if not path.is_file():
+            raise ValueError(f"native result is missing Collector provenance: {path}")
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, dict):
+            raise TypeError(f"Collector provenance must be a mapping: {path}")
+        if payload.get("schema_name") != "aic_fpm_collector_provenance" or payload.get("schema_version") != 1:
+            raise ValueError(f"unsupported Collector provenance schema: {path}")
+        if payload.get("cell_id") != cell.cell_id:
+            raise ValueError(
+                f"Collector provenance cell mismatch: actual={payload.get('cell_id')!r} expected={cell.cell_id!r}"
+            )
+        plan_sha256 = payload.get("plan_sha256")
+        attempt_id = payload.get("attempt_id")
+        if not isinstance(plan_sha256, str) or not plan_sha256:
+            raise ValueError(f"Collector provenance has no plan identity: {path}")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise ValueError(f"Collector provenance has no attempt identity: {path}")
+        if expected_plan_sha256 is not None and plan_sha256 != expected_plan_sha256:
+            raise ValueError(
+                f"Collector provenance plan mismatch: actual={plan_sha256!r} expected={expected_plan_sha256!r}"
+            )
+        if expected_attempt_id is not None and attempt_id != expected_attempt_id:
+            raise ValueError(
+                f"Collector provenance attempt mismatch: actual={attempt_id!r} expected={expected_attempt_id!r}"
+            )
+        runtime = payload.get("runtime")
+        if (
+            not isinstance(runtime, dict)
+            or runtime.get("backend") != "vllm"
+            or not isinstance(runtime.get("backend_version"), str)
+            or not runtime["backend_version"]
+        ):
+            raise ValueError(f"Collector provenance has invalid runtime identity: {path}")
+        if canonical is None:
+            canonical = payload
+        elif payload != canonical:
+            raise ValueError(f"Collector provenance differs across pods: {path}")
+
+    assert canonical is not None
+    return str(canonical["runtime"]["backend_version"]), str(canonical["attempt_id"])
 
 
 def _expected_scheduled(point: dict[str, Any]) -> dict[str, int]:
@@ -91,12 +155,25 @@ def _rank_artifacts(raw_root: Path) -> list[tuple[Path, dict[str, Any]]]:
     return artifacts
 
 
-def validate_native_collection(cell: FPMCell, raw_root: Path) -> NativeCollection:
+def validate_native_collection(
+    cell: FPMCell,
+    raw_root: Path,
+    *,
+    expected_plan_sha256: str | None = None,
+    expected_attempt_id: str | None = None,
+) -> NativeCollection:
     """Validate a complete native rank set and return synchronized measurements."""
 
     rank_payloads = _rank_artifacts(raw_root)
     if not rank_payloads:
         raise ValueError(f"integrated runtime emitted no benchmark results for {cell.cell_id}")
+    backend_version, collector_attempt_id = _validate_collector_provenance(
+        cell,
+        raw_root,
+        rank_payloads,
+        expected_plan_sha256=expected_plan_sha256,
+        expected_attempt_id=expected_attempt_id,
+    )
     expected_ranks = list(range(cell.topology.dp))
     seen_ranks: set[int] = set()
     canonical_points: list[dict[str, Any]] | None = None
@@ -250,4 +327,6 @@ def validate_native_collection(cell: FPMCell, raw_root: Path) -> NativeCollectio
     return NativeCollection(
         points=tuple(measurements),
         rank_timings=tuple(sorted(rank_timings)),
+        backend_version=backend_version,
+        collector_attempt_id=collector_attempt_id,
     )

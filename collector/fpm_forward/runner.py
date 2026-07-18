@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -22,10 +23,10 @@ from typing import Any
 
 import yaml
 
-from .native_artifact import validate_native_collection
+from .native_artifact import COLLECTOR_PROVENANCE_FILENAME, validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
 
-CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v2"
+CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v3"
 DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
 RESULT_COPY_ATTEMPTS = 3
 RESULT_COPY_TIMEOUT_SECONDS = 300
@@ -130,6 +131,7 @@ class KubernetesCellRunner:
         self.name = str(metadata["name"])
         self.namespace = str(metadata.get("namespace") or "default")
         self.kind = str(workload["kind"])
+        self.expected_labels = dict(metadata.get("labels") or {})
         self.selector = f"app.kubernetes.io/name={self.name}"
         self.kubectl = _kubectl_command()
 
@@ -174,29 +176,33 @@ class KubernetesCellRunner:
             "--validate=false",
             "-f",
             str(self.manifest),
-            check=False,
-            timeout=120,
-        )
-        observed = self._kubectl(
-            "get",
-            f"{self.kind}/{self.name}",
-            "-n",
-            self.namespace,
             "-o",
             "json",
             check=False,
-            timeout=60,
+            timeout=120,
         )
-        try:
-            payload = json.loads(observed.stdout)
-        except json.JSONDecodeError as error:
-            detail = (applied.stderr or applied.stdout or observed.stderr or observed.stdout).strip()
+        if applied.returncode != 0:
+            detail = (applied.stderr or applied.stdout).strip()
             raise RuntimeError(
-                f"kubectl apply did not create {self.kind}/{self.name}: "
-                f"apply_exit={applied.returncode}, get_exit={observed.returncode}, output={detail!r}"
+                f"kubectl apply failed for {self.kind}/{self.name}: apply_exit={applied.returncode}, output={detail!r}"
+            )
+        try:
+            payload = json.loads(applied.stdout)
+        except json.JSONDecodeError as error:
+            detail = (applied.stderr or applied.stdout).strip()
+            raise RuntimeError(
+                f"kubectl apply returned no verifiable object for {self.kind}/{self.name}: output={detail!r}"
             ) from error
         metadata = payload.get("metadata") if isinstance(payload, dict) else None
-        if not isinstance(metadata, dict) or metadata.get("name") != self.name:
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("kind") != self.kind
+            or not isinstance(metadata, dict)
+            or metadata.get("name") != self.name
+            or not isinstance(labels, dict)
+            or any(labels.get(key) != value for key, value in self.expected_labels.items())
+        ):
             raise RuntimeError(f"kubectl apply returned the wrong object for {self.kind}/{self.name}: {payload!r}")
 
     def pods(self) -> list[str]:
@@ -280,6 +286,60 @@ class KubernetesCellRunner:
                         f"local_exit={copied.returncode}, "
                         f"output={(copied.stderr or copied.stdout).strip()!r}"
                     ) from error
+
+    def prepare_attempt(
+        self,
+        pods: list[str],
+        *,
+        cell_id: str,
+        plan_sha256: str,
+        attempt_id: str,
+    ) -> None:
+        """Clear stale results and bind every Pod to this Collector attempt."""
+
+        payload = json.dumps(
+            {
+                "schema_name": "aic_fpm_collector_provenance",
+                "schema_version": 1,
+                "cell_id": cell_id,
+                "plan_sha256": plan_sha256,
+                "attempt_id": attempt_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        script = (
+            "import importlib.metadata, json, pathlib, sys; "
+            "payload = json.loads(sys.argv[1]); "
+            "payload['runtime'] = {'backend': 'vllm', "
+            "'backend_version': importlib.metadata.version('vllm')}; "
+            "path = pathlib.Path('/results') / sys.argv[2]; "
+            "path.write_text(json.dumps(payload, sort_keys=True) + '\\n')"
+        )
+        for pod in pods:
+            self._exec_checked(
+                pod,
+                [
+                    "find",
+                    "/results",
+                    "-mindepth",
+                    "1",
+                    "-maxdepth",
+                    "1",
+                    "-exec",
+                    "rm",
+                    "-rf",
+                    "--",
+                    "{}",
+                    "+",
+                ],
+                timeout=60,
+            )
+            self._exec_checked(
+                pod,
+                ["python3", "-c", script, payload, COLLECTOR_PROVENANCE_FILENAME],
+                timeout=60,
+            )
 
     def _remote_result_manifest(self, pod: str) -> dict[str, dict[str, int | str]]:
         script = (
@@ -440,7 +500,7 @@ class KubernetesCellRunner:
             raise RuntimeError("FPM cell result manifests contain no benchmark JSON files")
 
     def cleanup(self) -> None:
-        self._kubectl(
+        deleted = self._kubectl(
             "delete",
             "-f",
             str(self.manifest),
@@ -450,6 +510,38 @@ class KubernetesCellRunner:
             check=False,
             timeout=240,
         )
+        observed = self._kubectl(
+            "get",
+            f"{self.kind}/{self.name}",
+            "-n",
+            self.namespace,
+            "-o",
+            "json",
+            check=False,
+            timeout=60,
+        )
+        detail = (observed.stderr or observed.stdout).strip()
+        if observed.returncode == 0:
+            try:
+                payload = json.loads(observed.stdout)
+            except json.JSONDecodeError as error:
+                if "notfound" not in detail.replace(" ", "").lower():
+                    raise RuntimeError(
+                        f"could not verify deletion of {self.kind}/{self.name}: "
+                        f"delete_exit={deleted.returncode}, output={detail!r}"
+                    ) from error
+            else:
+                metadata = payload.get("metadata") if isinstance(payload, dict) else None
+                if isinstance(metadata, dict) and metadata.get("name") == self.name:
+                    raise RuntimeError(f"owned FPM resource remains after cleanup: {self.kind}/{self.name}")
+                raise RuntimeError(
+                    f"kubectl returned an unexpected deletion probe for {self.kind}/{self.name}: {payload!r}"
+                )
+        elif "notfound" not in detail.replace(" ", "").lower():
+            raise RuntimeError(
+                f"could not verify deletion of {self.kind}/{self.name}: "
+                f"delete_exit={deleted.returncode}, get_exit={observed.returncode}, output={detail!r}"
+            )
         remaining = self.pods()
         if remaining:
             raise RuntimeError(f"owned FPM pods remain after cleanup: {remaining}")
@@ -720,15 +812,34 @@ def _expected_nodes(manifest: Path) -> int:
 def _validate_runtime_collection(
     cell: FPMCell,
     raw_root: Path,
+    *,
+    expected_plan_sha256: str | None = None,
+    expected_attempt_id: str | None = None,
 ) -> int:
     """Validate PR11509 native rank artifacts and return the runtime point count."""
-    return _runtime_collection_summary(cell, raw_root)["measured_point_count"]
+    return _runtime_collection_summary(
+        cell,
+        raw_root,
+        expected_plan_sha256=expected_plan_sha256,
+        expected_attempt_id=expected_attempt_id,
+    )["measured_point_count"]
 
 
-def _runtime_collection_summary(cell: FPMCell, raw_root: Path) -> dict[str, int]:
+def _runtime_collection_summary(
+    cell: FPMCell,
+    raw_root: Path,
+    *,
+    expected_plan_sha256: str | None = None,
+    expected_attempt_id: str | None = None,
+) -> dict[str, int]:
     """Return auditable unique-axis counts from a validated native grid."""
 
-    collection = validate_native_collection(cell, raw_root)
+    collection = validate_native_collection(
+        cell,
+        raw_root,
+        expected_plan_sha256=expected_plan_sha256,
+        expected_attempt_id=expected_attempt_id,
+    )
     points = tuple(measurement.point for measurement in collection.points)
     summary = {
         "measured_point_count": len(points),
@@ -815,7 +926,14 @@ def run_collection(
             **_configured_sampling_metadata(plan, cell, smoke=smoke),
             **_runtime_timing_summary(root / "cells" / cell.cell_id / "raw"),
         }
-        metadata.update(_runtime_collection_summary(cell, root / "cells" / cell.cell_id / "raw"))
+        metadata.update(
+            _runtime_collection_summary(
+                cell,
+                root / "cells" / cell.cell_id / "raw",
+                expected_plan_sha256=plan.sha256,
+                expected_attempt_id=entry.get("attempt_id"),
+            )
+        )
         for key, value in metadata.items():
             if entry.get(key) != value:
                 entry[key] = value
@@ -827,19 +945,24 @@ def run_collection(
         previous = checkpoint["cells"].get(cell.cell_id, {})
         if resume and previous.get("status") == "passed":
             continue
-        if resume and previous.get("status") == "failed" and not retry_failed:
+        if resume and previous.get("status") in {"failed", "cleanup_failed"} and not retry_failed:
             continue
 
         cell_dir = root / "cells" / cell.cell_id
         if cell_dir.exists() and not resume:
             shutil.rmtree(cell_dir)
         cell_dir.mkdir(parents=True, exist_ok=True)
+        for stale_dir in (cell_dir / "raw", cell_dir / "logs"):
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
         _atomic_json(cell_dir / "cell.json", cell.to_dict())
         cell_started = time.monotonic()
         started_at = _utc_now()
+        attempt_id = uuid.uuid4().hex
         base_record = {
             "status": "running",
             "started_at": started_at,
+            "attempt_id": attempt_id,
             "total_gpus": cell.topology.total_gpus,
             "point_source": "dynamo_native_self_benchmark",
             "global_warmup_iterations": plan.options.warmup_iterations,
@@ -871,9 +994,20 @@ def run_collection(
                     runtime_preflight,
                 ],
             )
+            resource.prepare_attempt(
+                pods,
+                cell_id=cell.cell_id,
+                plan_sha256=plan.sha256,
+                attempt_id=attempt_id,
+            )
             resource.execute(pods)
             resource.collect(pods)
-            runtime_collection = _runtime_collection_summary(cell, cell_dir / "raw")
+            runtime_collection = _runtime_collection_summary(
+                cell,
+                cell_dir / "raw",
+                expected_plan_sha256=plan.sha256,
+                expected_attempt_id=attempt_id,
+            )
             checkpoint["cells"][cell.cell_id] = {
                 **base_record,
                 "status": "passed",
@@ -921,6 +1055,9 @@ def run_collection(
                 try:
                     resource.cleanup()
                 except Exception as cleanup_error:
+                    record = checkpoint["cells"][cell.cell_id]
+                    if record.get("status") == "passed":
+                        record["status"] = "cleanup_failed"
                     checkpoint["cells"][cell.cell_id]["cleanup_error"] = str(cleanup_error)
                     errors.append(
                         {

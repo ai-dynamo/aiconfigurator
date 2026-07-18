@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-
-from collector.framework_manifest import get_collector_runtime
 
 from .native_artifact import validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
@@ -78,8 +79,12 @@ def aggregate_cell(plan: FPMCollectionPlan, cell: FPMCell, cell_dir: Path) -> li
     """Validate native rank artifacts and take max-rank latency per grid point."""
 
     _validate_backend_markers(cell, cell_dir)
-    collection = validate_native_collection(cell, cell_dir / "raw")
-    backend_version = get_collector_runtime(plan.backend).version
+    collection = validate_native_collection(
+        cell,
+        cell_dir / "raw",
+        expected_plan_sha256=plan.sha256,
+    )
+    backend_version = collection.backend_version
     capability = plan.capability
     rows = []
     for measurement in collection.points:
@@ -134,6 +139,23 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@contextmanager
+def _publication_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _temporary_path(destination: Path) -> Path:
+    descriptor, raw_path = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+    os.close(descriptor)
+    return Path(raw_path)
+
+
 def write_formal_database(
     plan: FPMCollectionPlan,
     rows: list[dict[str, Any]],
@@ -150,7 +172,10 @@ def write_formal_database(
     except ImportError as error:
         raise RuntimeError("writing fpm_forward_perf.parquet requires pyarrow") from error
 
-    version = get_collector_runtime(plan.backend).version
+    versions = {str(row.get("backend_version") or "") for row in rows}
+    if len(versions) != 1 or not next(iter(versions)):
+        raise ValueError(f"FPM rows must contain one non-empty runtime backend_version, got {sorted(versions)!r}")
+    version = next(iter(versions))
     if systems_root is None:
         systems_root = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "systems" / "data"
     destination = systems_root / plan.system / plan.backend / version
@@ -158,50 +183,64 @@ def write_formal_database(
     parquet_path = destination / "fpm_forward_perf.parquet"
     metadata_path = destination / "fpm_forward_perf.metadata.json"
 
-    merged = []
-    if parquet_path.exists():
-        table = pq.read_table(parquet_path)
-        required = {"total_prefill_tokens", "total_kv_read_tokens", "partition_policy"}
-        if not required.issubset(table.column_names):
+    lock_path = destination / ".fpm_forward_perf.lock"
+    with _publication_lock(lock_path):
+        merged = []
+        if parquet_path.exists():
+            table = pq.read_table(parquet_path)
+            required = {"total_prefill_tokens", "total_kv_read_tokens", "partition_policy"}
+            if not required.issubset(table.column_names):
+                raise ValueError(
+                    "existing FPM database uses the retired per-request P/S schema; "
+                    f"publish schema-v4 output to a clean destination: {parquet_path}"
+                )
+            merged.extend(table.to_pylist())
+        existing_versions = {str(row.get("backend_version") or "") for row in merged}
+        if existing_versions and existing_versions != {version}:
             raise ValueError(
-                "existing FPM database uses the retired per-request P/S schema; "
-                f"publish schema-v4 output to a clean destination: {parquet_path}"
+                f"existing FPM database runtime version mismatch: actual={sorted(existing_versions)!r} "
+                f"expected={version!r}"
             )
-        merged.extend(table.to_pylist())
-    index = {tuple(row[key] for key in _ROW_KEY): row for row in merged}
-    if len(index) != len(merged):
-        raise ValueError(f"existing FPM database contains duplicate physical keys: {parquet_path}")
-    for row in rows:
-        key = tuple(row[name] for name in _ROW_KEY)
-        existing = index.get(key)
-        if existing is not None:
-            if existing != row:
-                raise ValueError(f"conflicting FPM database row for key={key}")
-            continue
-        index[key] = row
-        merged.append(row)
-    merged.sort(key=lambda row: tuple(row[name] for name in _ROW_KEY))
+        index = {tuple(row[key] for key in _ROW_KEY): row for row in merged}
+        if len(index) != len(merged):
+            raise ValueError(f"existing FPM database contains duplicate physical keys: {parquet_path}")
+        for row in rows:
+            key = tuple(row[name] for name in _ROW_KEY)
+            existing = index.get(key)
+            if existing is not None:
+                if existing != row:
+                    raise ValueError(f"conflicting FPM database row for key={key}")
+                continue
+            index[key] = row
+            merged.append(row)
+        merged.sort(key=lambda row: tuple(row[name] for name in _ROW_KEY))
 
-    temporary = parquet_path.with_name(f".{parquet_path.name}.tmp")
-    pq.write_table(pa.Table.from_pylist(merged), temporary, compression="zstd")
-    os.replace(temporary, parquet_path)
-    metadata = {
-        "schema_name": "aic_fpm_forward_perf",
-        "schema_version": 4,
-        "coordinate_system": "iteration_totals_balanced_v1",
-        "measurement_policy": "dynamo_native_single_sample_v1",
-        "warmup_repeats": 0,
-        "measurement_repeats": 1,
-        "row_count": len(merged),
-        "parquet_sha256": _sha256(parquet_path),
-        "source_plan_sha256": sorted({str(row["source_plan_sha256"]) for row in merged}),
-        "aic_revision": plan.aic_revision,
-        "model_paths": sorted({str(row["model_path"]) for row in merged}),
-        "system": plan.system,
-        "backend": plan.backend,
-        "backend_version": version,
-    }
-    temporary_metadata = metadata_path.with_name(f".{metadata_path.name}.tmp")
-    temporary_metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary_metadata, metadata_path)
+        temporary = _temporary_path(parquet_path)
+        temporary_metadata = _temporary_path(metadata_path)
+        try:
+            pq.write_table(pa.Table.from_pylist(merged), temporary, compression="zstd")
+            metadata = {
+                "schema_name": "aic_fpm_forward_perf",
+                "schema_version": 4,
+                "coordinate_system": "iteration_totals_balanced_v1",
+                "measurement_policy": "dynamo_native_single_sample_v1",
+                "warmup_repeats": 0,
+                "measurement_repeats": 1,
+                "row_count": len(merged),
+                "parquet_sha256": _sha256(temporary),
+                "source_plan_sha256": sorted({str(row["source_plan_sha256"]) for row in merged}),
+                "aic_revision": plan.aic_revision,
+                "model_paths": sorted({str(row["model_path"]) for row in merged}),
+                "system": plan.system,
+                "backend": plan.backend,
+                "backend_version": version,
+            }
+            temporary_metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, parquet_path)
+            # Metadata is the commit record: readers must validate its parquet
+            # digest and ignore an unmatched pair after an interrupted writer.
+            os.replace(temporary_metadata, metadata_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+            temporary_metadata.unlink(missing_ok=True)
     return parquet_path, metadata_path
