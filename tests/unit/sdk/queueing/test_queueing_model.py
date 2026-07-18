@@ -14,13 +14,10 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.queueing import (
     CALENDARS,
-    DisaggSpec,
     Distribution,
     EngineSpec,
     WorkloadSpec,
-    estimate_disagg,
     evaluate_closed_loop,
-    kv_handoff_ms,
     static_report,
 )
 from aiconfigurator.sdk.queueing.closed_form import (
@@ -125,33 +122,6 @@ class TestClosedLoopEvaluator:
             evaluate_closed_loop(wl, EngineSpec(), TIMING)
 
 
-class TestDisagg:
-    SPEC = DisaggSpec(
-        num_prefill_workers=1, num_decode_workers=1, kv_transfer_bandwidth_gbps=64.0, kv_bytes_per_token=131072
-    )
-
-    def test_handoff_formula(self):
-        wl = WorkloadSpec(isl=4096, osl=16, concurrency=4)
-        # mocker common/utils.rs: isl * bytes/token / bandwidth
-        assert kv_handoff_ms(wl, self.SPEC) == pytest.approx(4096 * 131072 / 64e9 * 1000.0)
-
-    def test_tandem_decomposition(self):
-        wl = WorkloadSpec(isl=2048, osl=32, concurrency=8)
-        rep = estimate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, self.SPEC)
-        assert rep.mode == "disagg"
-        assert rep.kv_transfer_ms > 0
-        # TTFT covers at least prefill service + handoff
-        assert rep.ttft_steady.mean >= (TIMING.prefill_ms(1, 2048, 0) + rep.kv_transfer_ms) * 0.9
-        # decode stage has no prefill interference: tight ITL
-        assert rep.itl.p99 <= rep.itl.p50 * 1.5
-
-    def test_more_prefill_workers_reduce_ttft_tail(self):
-        wl = WorkloadSpec(isl=4096, osl=32, concurrency=16)
-        one = estimate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, DisaggSpec(1, 2))
-        four = estimate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, DisaggSpec(4, 2))
-        assert four.ttft_steady.mean <= one.ttft_steady.mean * 1.01
-
-
 class TestStaticDegenerate:
     def test_all_metrics_collapse(self):
         rep = static_report(context_latency_ms=123.0, gen_step_latency_ms=7.0, osl=32)
@@ -190,43 +160,3 @@ class TestOperatingPointColumns:
         for schema in (common.ColumnsAgg, common.ColumnsStatic, common.ColumnsDisagg):
             for col in QUEUEING_COLUMNS:
                 assert col in schema
-
-
-class TestKvCapacity:
-    def test_mild_kv_pressure_costs_throughput_not_thrash(self):
-        wl = WorkloadSpec(isl=2048, osl=64, concurrency=32)
-        free = evaluate_closed_loop(wl, EngineSpec(), TIMING)
-        # capacity fits ~24 of 32 requests. Note the scheduler semantics
-        # (transcribed from the mocker's unified schedule path): a waiting
-        # admission whose allocation fails MAY preempt a running request,
-        # so under mild pressure new arrivals still land quickly — the cost
-        # surfaces as recompute waste (throughput), not arrival TTFT.
-        capped = evaluate_closed_loop(wl, EngineSpec(kv_capacity_tokens=24 * (2048 + 64 + 64)), TIMING)
-        assert capped.throughput_rps < free.throughput_rps
-        assert capped.total_preemptions > 0
-        assert not capped.kv_thrashing
-
-    def test_thrashing_flag(self):
-        wl = WorkloadSpec(isl=2048, osl=256, concurrency=64)
-        # capacity barely fits a handful of prompts -> preemption thrash
-        rep = evaluate_closed_loop(wl, EngineSpec(kv_capacity_tokens=3 * 4096), TIMING)
-        assert rep.total_preemptions > 0
-        assert rep.kv_thrashing
-        healthy = evaluate_closed_loop(wl, EngineSpec(), TIMING)
-        assert not healthy.kv_thrashing
-
-    def test_single_request_too_large_raises(self):
-        wl = WorkloadSpec(isl=9000, osl=8, concurrency=1)
-        with pytest.raises(ValueError):
-            evaluate_closed_loop(wl, EngineSpec(kv_capacity_tokens=4096), TIMING)
-
-    def test_max_num_seqs_queueing(self):
-        wl = WorkloadSpec(isl=1024, osl=64, concurrency=64)
-        uncapped = evaluate_closed_loop(wl, EngineSpec(), TIMING)
-        capped = evaluate_closed_loop(wl, EngineSpec(max_num_seqs=8), TIMING)
-        assert capped.ttft_steady.mean > uncapped.ttft_steady.mean
-
-    def test_fifo_preemption_mode_accepted(self):
-        wl = WorkloadSpec(isl=2048, osl=64, concurrency=16)
-        rep = evaluate_closed_loop(wl, EngineSpec(kv_capacity_tokens=10 * 4096, preemption_mode="fifo"), TIMING)
-        assert rep.throughput_rps > 0

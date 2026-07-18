@@ -132,10 +132,18 @@ def operating_point_columns(
 
     # transient staircase for the initial burst of `batch_size` arrivals
     stair = [math.ceil(k * isl / max(1, ctx_tokens)) * t_mix for k in range(1, max(1, batch_size) + 1)]
-    # ITL mixture: gaps are pass durations, weighted by pass-type frequency
-    itl_mean = (n_mix * t_mix + n_gen * t_gen) / (n_mix + n_gen)
-    itl_p50 = t_gen if n_gen >= n_mix else t_mix
-    itl_p99 = t_mix if n_mix / (n_mix + n_gen) >= 0.01 else t_gen
+    # ITL mixture: a gap equals the duration of the pass it spans. A mix
+    # pass contributes gaps only for the (c-1)/c of the batch NOT being
+    # prefilled in it (with c=1 there is nobody else to stall, so mix
+    # passes never appear as gaps). Weights are gap counts, not pass counts.
+    c = max(1, batch_size)
+    w_mix = n_mix * (c - 1) / c
+    w_gen = n_gen + n_mix / c
+    total_w = w_mix + w_gen
+    itl_mean = (w_mix * t_mix + w_gen * t_gen) / total_w
+    mix_frac = w_mix / total_w
+    itl_p50 = t_mix if mix_frac >= 0.5 else t_gen
+    itl_p99 = t_mix if mix_frac >= 0.01 else t_gen
 
     return {
         "ttft_steady_mean": ttft_steady_mean,

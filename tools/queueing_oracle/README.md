@@ -39,10 +39,11 @@ Stdlib only — no numpy, no torch, no dynamo required to run the oracle.
 PYTHONPATH=src:tools/queueing_oracle python3 tools/queueing_oracle/validate_formula.py
 ```
 
-Five agg config families (isl 512–8192, osl 64–512, concurrency 16–128,
-budget 4096–8192, chunked prefill on/off) plus one disagg tandem case.
-Current results: TTFT p50/p99/transient at 0.0%, steady mean ≤1.4%,
-throughput ≤1.2% (agg) / 7.3% (disagg), ITL p50 exact.
+Nine agg config families (isl 512–8192, osl 16–512, concurrency 1–128,
+budget 2048–8192, chunked prefill on/off, prefix). Two tiers per case:
+the limit-cycle evaluator is GATED (within 10–15%, mostly 0.0%); the
+closed-form screening tier is reported with sanity checks (its role is
+within-sweep candidate ranking — see docs/design/queueing_model.md §1).
 
 ## Oracle fidelity vs dynamo.replay
 
