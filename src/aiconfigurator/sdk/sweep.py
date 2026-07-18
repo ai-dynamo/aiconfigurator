@@ -435,6 +435,7 @@ def _sweep_one_parallel_agg(
         constraints=constraints,
         enable_chunked_prefill=enable_chunked_prefill,
         top_k=top_k,
+        runtime_config=runtime_config,
     )
 
     df = df.sort_values(by="seq/s", ascending=False).round(3)

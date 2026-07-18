@@ -14,19 +14,16 @@ Two precision tiers of the same model:
     closed_form.static_degenerate_columns static-batching mapping
     DatabaseTimingModel                   timing adapter over (model, database)
 
-Scope: stationary workloads (fixed isl/osl/prefix + closed-loop concurrency
-or open-loop rate); timestamped traces are out of scope. Validation
-methodology and recorded results: docs/design/queueing_model.md §5.
+Scope: stationary closed-loop workloads (fixed isl/osl/prefix +
+concurrency). Open-loop rates and timestamped traces are out of scope.
+Validation methodology and recorded results: docs/design/queueing_model.md §5.
 """
 
 from .calendar import CALENDARS, evaluate_closed_loop
 from .closed_form import (
     QUEUEING_COLUMNS,
-    open_loop_queue_wait,
     operating_point_columns,
     static_degenerate_columns,
-    ttft_steady_mean,
-    ttft_transient_mean,
 )
 from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 from .timing import DatabaseTimingModel
@@ -41,12 +38,9 @@ __all__ = [
     "TimingModel",
     "WorkloadSpec",
     "evaluate_closed_loop",
-    "open_loop_queue_wait",
     "operating_point_columns",
     "static_degenerate_columns",
     "static_report",
-    "ttft_steady_mean",
-    "ttft_transient_mean",
 ]
 
 

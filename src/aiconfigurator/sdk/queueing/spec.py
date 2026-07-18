@@ -131,6 +131,15 @@ class Distribution:
     def maximum(self) -> float:
         return max(self.values) if self.values else float("nan")
 
+    def shifted(self, delta_ms: float) -> Distribution:
+        """New distribution with every mass point shifted by delta_ms
+        (used for additive latency stages, e.g. a vision encoder ahead of
+        the LLM prefill)."""
+        out = Distribution()
+        out.values = [v + delta_ms for v in self.values]
+        out.weights = list(self.weights)
+        return out
+
     def scaled_mix(self, other: Distribution, self_weight: float, other_weight: float) -> Distribution:
         out = Distribution()
         s_total = sum(self.weights) or 1.0

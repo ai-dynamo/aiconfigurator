@@ -29,6 +29,7 @@ no silent drops.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import pandas as pd
@@ -61,13 +62,19 @@ def refine_rows(
     backend,
     enable_chunked_prefill: bool = True,
     max_refines: int = 8,
+    runtime_config=None,
 ) -> dict:
     """Re-score `indices` rows in place with the evaluator.
 
     Returns {index: QueueingReport} for the rows actually refined. Rows
-    beyond `max_refines`, multimodal rows (encoder latency is outside the
-    queueing model), and rows above the evaluator complexity cap are left
-    at screening tier and logged.
+    beyond `max_refines` and rows above the evaluator complexity cap are
+    left at screening tier and logged.
+
+    Multimodal rows are supported when `runtime_config` (carrying the image
+    parameters) is provided: the vision tokens join the prefill length and
+    the encoder latency shifts the TTFT/e2e distributions additively —
+    matching run_agg's own composition. Without `runtime_config` such rows
+    are skipped (screening tier stays visible).
     """
     # both caches live on the backend instance so they survive across the
     # per-(ttft,tpot)-pair sweep calls for the same parallel config
@@ -91,12 +98,19 @@ def refine_rows(
         row = df.loc[idx]
         bs = int(row["bs"])
         osl = int(row["osl"])
-        if float(row.get("encoder_latency", 0.0) or 0.0) > 0.0 or bs * osl > _MAX_EVAL_COMPLEXITY:
+        encoder_ms = float(row.get("encoder_latency", 0.0) or 0.0)
+        if bs * osl > _MAX_EVAL_COMPLEXITY:
             skipped_scope += 1
             continue
+        visual_tokens = 0
+        if encoder_ms > 0.0:
+            if runtime_config is None:
+                skipped_scope += 1
+                continue
+            visual_tokens = int(backend._visual_context_tokens(model, runtime_config))
 
         wl = WorkloadSpec(
-            isl=int(row["isl"]),
+            isl=int(row["isl"]) + visual_tokens,
             osl=osl,
             prefix=int(row.get("prefix", 0) or 0),
             concurrency=bs,
@@ -128,6 +142,15 @@ def refine_rows(
                 wl, eng, timing, backend=calendar_backend, warmup_generations=2, window_generations=2
             )
             report_cache[cache_key] = rep
+        if encoder_ms > 0.0:
+            # additive encoder stage ahead of prefill (run_agg's own
+            # composition); shift copies so the cached report stays clean
+            rep = dataclasses.replace(
+                rep,
+                ttft_steady=rep.ttft_steady.shifted(encoder_ms),
+                ttft_transient=rep.ttft_transient.shifted(encoder_ms),
+                e2e=rep.e2e.shifted(encoder_ms),
+            )
 
         p99 = rep.ttft_steady.p99
         df.loc[idx, "ttft_steady_mean"] = rep.ttft_steady.mean
@@ -151,7 +174,7 @@ def refine_rows(
     if skipped_budget or skipped_scope:
         logger.debug(
             "queueing refine: %d refined, %d kept at screening tier (budget), "
-            "%d out of evaluator scope (multimodal / complexity)",
+            "%d out of evaluator scope (complexity / multimodal without runtime context)",
             len(refined),
             skipped_budget,
             skipped_scope,
@@ -170,6 +193,7 @@ def apply_sla_funnel(
     top_k: int = 0,
     max_refines: int = 8,
     refine_top: bool = False,
+    runtime_config=None,
 ) -> pd.DataFrame:
     """Resolve percentile SLA feasibility on a wide-kept candidate set.
 
@@ -234,6 +258,7 @@ def apply_sla_funnel(
             backend=backend,
             enable_chunked_prefill=enable_chunked_prefill,
             max_refines=budget,
+            runtime_config=runtime_config,
         )
         budget -= len(reports)
         df = _enforce(reports)
@@ -249,12 +274,13 @@ def apply_sla_funnel(
                 backend=backend,
                 enable_chunked_prefill=enable_chunked_prefill,
                 max_refines=budget,
+                runtime_config=runtime_config,
             )
             df = _enforce(reports)
     return df
 
 
-def refine_report_rows(df: pd.DataFrame, max_refines: int = 32) -> pd.DataFrame:
+def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=None) -> pd.DataFrame:
     """Report-boundary tier upgrade: refine the rows a human will read.
 
     Feasibility was already resolved by the sweep funnel; this pass only
@@ -310,7 +336,13 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32) -> pd.DataFrame:
             )
             continue
         reports = refine_rows(
-            df, list(group.index), model=model, database=database, backend=backend, max_refines=budget
+            df,
+            list(group.index),
+            model=model,
+            database=database,
+            backend=backend,
+            max_refines=budget,
+            runtime_config=runtime_config,
         )
         budget -= len(reports)
     return df.round(3)

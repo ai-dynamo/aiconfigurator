@@ -14,60 +14,15 @@ Terms:
               ceil(C*isl_eff/B_eff) chunk-passes deep (chunked-prefill loop)
   W_res       renewal residual life E[T^2]/(2E[T]) — inspection paradox;
               long passes are likelier to be hit by an arrival
-  W_q (open)  M/D/1 Pollaczek-Khinchine wait with prefill-pass service
+
+Scope: closed-loop (concurrency) operating points — the shape run_agg
+sweeps. Open-loop (request-rate) queueing terms are future work and are
+deliberately not exposed until validated.
 """
 
 from __future__ import annotations
 
 import math
-
-from .spec import EngineSpec, TimingModel, WorkloadSpec
-
-
-def effective_budget(wl: WorkloadSpec, eng: EngineSpec, concurrency: int) -> int:
-    return max(1, eng.max_num_batched_tokens - concurrency)
-
-
-def steady_pass_times(wl: WorkloadSpec, eng: EngineSpec, timing: TimingModel, concurrency: int) -> dict:
-    """Characteristic pass durations at the steady operating point."""
-    c = concurrency
-    ctx = wl.isl + wl.osl // 2
-    b_eff = effective_budget(wl, eng, c)
-    t_gen = timing.decode_ms(c, ctx)
-    # a mix pass carrying one full-budget prefill chunk
-    chunk = min(wl.effective_isl, b_eff)
-    t_mix = timing.prefill_ms(1, wl.prefix + chunk, wl.prefix) + t_gen
-    return {"t_gen": t_gen, "t_mix": t_mix, "b_eff": b_eff, "ctx": ctx}
-
-
-def ttft_steady_mean(wl: WorkloadSpec, eng: EngineSpec, timing: TimingModel) -> float:
-    """Closed-loop steady TTFT: residual of the pass in flight at arrival
-    plus the request's own prefill chunk passes."""
-    c = wl.concurrency or 1
-    p = steady_pass_times(wl, eng, timing, c)
-    chunks = math.ceil(wl.effective_isl / p["b_eff"])
-    # pass-type frequencies per completion epoch (token conservation):
-    # each completion implies osl decode emissions and isl_eff prefill tokens
-    n_mix = max(1.0, wl.effective_isl / p["b_eff"])
-    n_gen = max(0.0, wl.osl - n_mix)
-    t1, t2 = p["t_mix"], p["t_gen"]
-    mean_t = (n_mix * t1 + n_gen * t2) / (n_mix + n_gen)
-    mean_t2 = (n_mix * t1 * t1 + n_gen * t2 * t2) / (n_mix + n_gen)
-    w_res = mean_t2 / (2.0 * mean_t) if mean_t > 0 else 0.0
-    return w_res + chunks * p["t_mix"]
-
-
-def ttft_transient_mean(wl: WorkloadSpec, eng: EngineSpec, timing: TimingModel) -> float:
-    """Initial burst staircase: the k-th of C simultaneous arrivals waits
-    ceil(k*isl_eff/B_eff) full-chunk passes (first-order; cohort echo after
-    the first generation is captured only by the limit-cycle evaluator)."""
-    c = wl.concurrency or 1
-    p = steady_pass_times(wl, eng, timing, c)
-    total = 0.0
-    for k in range(1, c + 1):
-        passes = math.ceil(k * wl.effective_isl / p["b_eff"])
-        total += passes * p["t_mix"]
-    return total / c
 
 
 def operating_point_columns(
@@ -253,25 +208,3 @@ def static_degenerate_columns(ttft_ms: float, tpot_ms: float, tier: str = "stati
         "itl_p99": tpot_ms,
         "queueing_tier": tier,
     }
-
-
-def open_loop_queue_wait(wl: WorkloadSpec, eng: EngineSpec, timing: TimingModel) -> float:
-    """Open-loop (Poisson rate) prefill queue wait, M/D/1 P-K form.
-
-    Service = the request's own prefill chunk passes; utilization from
-    prefill-token conservation. Returns inf when the rate exceeds prefill
-    capacity. Approximation: deterministic service, single queue."""
-    if wl.request_rate is None:
-        raise ValueError("open_loop_queue_wait requires request_rate")
-    lam = wl.request_rate / 1000.0  # req/ms
-    # decode batch at the operating point via Little's law estimate
-    b = max(
-        1, min(eng.max_num_seqs, round(wl.request_rate * wl.osl * timing.decode_ms(eng.max_num_seqs, wl.isl) / 1000.0))
-    )
-    p = steady_pass_times(wl, eng, timing, b)
-    chunks = math.ceil(wl.effective_isl / p["b_eff"])
-    service = chunks * p["t_mix"]
-    rho = lam * service
-    if rho >= 1.0:
-        return float("inf")
-    return rho * service / (2.0 * (1.0 - rho))

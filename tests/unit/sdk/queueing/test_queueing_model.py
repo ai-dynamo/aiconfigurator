@@ -264,3 +264,88 @@ class TestBracketAndE2E:
         rep = evaluate_closed_loop(wl, EngineSpec(), TIMING)
         assert rep.e2e.values, "e2e distribution should be populated"
         assert rep.e2e.mean > rep.ttft_steady.mean
+
+
+class TestMultimodalRefine:
+    def test_encoder_latency_shifts_ttft(self, monkeypatch):
+        import pandas as pd
+
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.queueing import refine as refine_mod
+        from aiconfigurator.sdk.queueing.spec import QueueingReport
+
+        def fake_eval(wl, eng, timing, backend="vllm", **kw):
+            # visual tokens must have joined the prefill length
+            assert wl.isl == 1024 + 128
+            d = Distribution()
+            d.add(100.0)
+            itl = Distribution()
+            itl.add(5.0)
+            return QueueingReport(
+                ttft_steady=d, ttft_transient=d, itl=itl, tpot=itl, throughput_rps=1.0, output_tokens_per_s=1.0, e2e=d
+            )
+
+        monkeypatch.setattr(refine_mod, "evaluate_closed_loop", fake_eval)
+        monkeypatch.setattr(refine_mod, "DatabaseTimingModel", lambda *a, **k: object())
+
+        class _Backend:
+            def _visual_context_tokens(self, model, runtime_config):
+                return 128
+
+        class _Db:
+            backend = "vllm"
+
+        row = dict.fromkeys(common.ColumnsAgg, 0)
+        row.update(
+            {
+                "isl": 1024,
+                "osl": 32,
+                "prefix": 0,
+                "bs": 8,
+                "ctx_tokens": 4096,
+                "seq/s": 1.0,
+                "encoder_latency": 50.0,
+                "queueing_tier": "screening",
+            }
+        )
+        df = pd.DataFrame([row])
+        reports = refine_mod.refine_rows(
+            df, [0], model=object(), database=_Db(), backend=_Backend(), runtime_config=object()
+        )
+        assert 0 in reports
+        # encoder latency shifts the TTFT distribution additively
+        assert df.at[0, "ttft_steady_p50"] == pytest.approx(150.0)
+        assert df.at[0, "queueing_tier"] == "quantitative"
+
+    def test_multimodal_without_runtime_config_skipped(self, monkeypatch):
+        import pandas as pd
+
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.queueing import refine as refine_mod
+
+        monkeypatch.setattr(refine_mod, "DatabaseTimingModel", lambda *a, **k: object())
+
+        class _Db:
+            backend = "vllm"
+
+        row = dict.fromkeys(common.ColumnsAgg, 0)
+        row.update(
+            {
+                "isl": 1024,
+                "osl": 32,
+                "prefix": 0,
+                "bs": 8,
+                "ctx_tokens": 4096,
+                "seq/s": 1.0,
+                "encoder_latency": 50.0,
+                "queueing_tier": "screening",
+            }
+        )
+
+        class _Backend:
+            pass
+
+        df = pd.DataFrame([row])
+        reports = refine_mod.refine_rows(df, [0], model=object(), database=_Db(), backend=_Backend())
+        assert reports == {}
+        assert df.at[0, "queueing_tier"] == "screening"

@@ -317,7 +317,9 @@ def _add_default_mode_arguments(parser):
         type=_percentile,
         default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
-        help="Percentile of the TPOT distribution that --tpot constrains. Default: p50.",
+        help="Percentile of the TPOT distribution that --tpot constrains. Default: p50. "
+        "NOTE: takes effect only with --sla-refine (no screening-tier TPOT distribution); "
+        "without it the legacy mean screen applies.",
     )
     parser.add_argument(
         "--itl-percentile",
@@ -332,7 +334,9 @@ def _add_default_mode_arguments(parser):
         type=_percentile,
         default=None,
         metavar="{p50,p75,p90,p95,p99,p999}",
-        help="Percentile of the end-to-end latency distribution that --request-latency constrains. Default: p50.",
+        help="Percentile of the end-to-end latency distribution that --request-latency "
+        "constrains. Default: p50. NOTE: takes effect only with --sla-refine "
+        "(no screening-tier e2e distribution).",
     )
     parser.add_argument(
         "--sla-refine",
@@ -1727,7 +1731,11 @@ def _execute_tasks(
         if getattr(task, "sla_funnel", False):
             from aiconfigurator.sdk.queueing.refine import refine_report_rows
 
-            best_config_df = refine_report_rows(best_config_df)
+            try:
+                report_runtime_config = task.build_runtime_config()
+            except Exception:
+                report_runtime_config = None
+            best_config_df = refine_report_rows(best_config_df, runtime_config=report_runtime_config)
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
         best_latencies[name] = latencies

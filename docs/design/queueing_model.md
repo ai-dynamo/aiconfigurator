@@ -36,7 +36,6 @@ One model, two precision tiers:
 | prefill staircase `ceil(k·isl_eff/B_eff)` | chunked-prefill scheduling loop |
 | residual wait `E[T²]/(2E[T])` | renewal-theory residual life (inspection paradox) |
 | transient window = initial concurrency burst | closed-loop dispatch semantics (all C arrive at t=0) |
-| open-loop `W_q` | M/D/1 Pollaczek–Khinchine |
 | ITL gap weights `(c−1)/c` for mix passes | a mix pass stalls only the requests not being prefilled in it |
 | static degenerate mapping | static batching has no admission queue and no phase interference, by construction |
 
@@ -93,6 +92,13 @@ behaves like `ttft_mean(N)` at an N implicitly baked into its fitted
 constants (~420 on the reference workload) and drifting per family. It
 remains emitted for reference; feasibility no longer uses it on the sweep
 path.
+
+**Screening-tier scope**: without `--sla-refine`, percentile enforcement
+is available only for the metrics with stored screening distributions —
+**TTFT** (full quantile set) and **ITL** (two-mass anchors). TPOT and
+request-latency percentiles require the evaluator (`--sla-refine`); until
+then their legacy mean screens apply unchanged. Open-loop (request-rate)
+queueing is future work and not exposed.
 
 Feasibility is resolved by a two-stage funnel (`sdk/queueing/refine.py`):
 
@@ -186,6 +192,11 @@ Silent (each with a designated detector):
 8. **Router-layer effects.** Multi-worker deployments assume balanced
    round-robin dispatch; affinity/queue-depth routing policies are out of
    scope for the analytical model.
-9. **Metric-definition mismatch.** `ttft_steady_*` must be compared against
+9. **Multimodal rows** are refinable when the runtime image context is
+   available (vision tokens join the prefill length; encoder latency
+   shifts the TTFT/e2e distributions additively, matching run_agg's own
+   composition). Where it is not (e.g. rows re-scored purely from
+   metadata), they stay at screening tier — visibly.
+10. **Metric-definition mismatch.** `ttft_steady_*` must be compared against
    warmup-excluded benchmarks; blended means against full-run benchmarks
    with matching N.
