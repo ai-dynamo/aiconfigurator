@@ -123,7 +123,7 @@ def test_fpm_entry_reports_missing_generator_config_without_traceback(tmp_path, 
     if plan_only:
         command.append("--plan-only")
 
-    completed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, check=False)
+    completed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=30, check=False)
 
     assert completed.returncode == 2
     assert "collect.py: error:" in completed.stderr

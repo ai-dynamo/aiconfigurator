@@ -35,7 +35,23 @@ def _runner(tmp_path) -> KubernetesCellRunner:
     runner = object.__new__(KubernetesCellRunner)
     runner.namespace = "test"
     runner.cell_dir = tmp_path
+    runner.expected_labels = {}
     return runner
+
+
+def _write_provenance(path: Path, *, cell_id: str, plan_sha256: str = "plan-sha", attempt_id: str = "attempt"):
+    path.write_text(
+        json.dumps(
+            {
+                "schema_name": "aic_fpm_collector_provenance",
+                "schema_version": 1,
+                "cell_id": cell_id,
+                "plan_sha256": plan_sha256,
+                "attempt_id": attempt_id,
+                "runtime": {"backend": "vllm", "backend_version": "0.24.0"},
+            }
+        )
+    )
 
 
 def _cell(*, phase: str = "prefill", dp: int = 1, strategy: str = "dep") -> FPMCell:
@@ -149,15 +165,19 @@ def test_apply_skips_client_validation_and_verifies_created_object(tmp_path):
 
     def kubectl(*args, **kwargs):
         calls.append(args)
-        if args[0] == "get":
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"metadata": {"name": "pod-0"}}), stderr="")
-        return subprocess.CompletedProcess(args, 0, stdout="pod/pod-0 created\n", stderr="")
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps({"kind": "Pod", "metadata": {"name": "pod-0", "labels": {}}}),
+            stderr="",
+        )
 
     runner._kubectl = kubectl
     runner.apply()
 
     assert calls[0][:2] == ("apply", "--validate=false")
-    assert calls[1][:2] == ("get", "Pod/pod-0")
+    assert len(calls) == 1
+    assert calls[0][-2:] == ("-o", "json")
 
 
 def test_apply_rejects_masked_failure_without_created_object(tmp_path):
@@ -173,7 +193,7 @@ def test_apply_rejects_masked_failure_without_created_object(tmp_path):
         stderr="error: context deadline exceeded\n",
     )
 
-    with pytest.raises(RuntimeError, match="did not create Pod/pod-0"):
+    with pytest.raises(RuntimeError, match="no verifiable object"):
         runner.apply()
 
 
@@ -188,6 +208,75 @@ def test_exec_checked_rejects_masked_remote_failure(tmp_path):
 
     with pytest.raises(RuntimeError, match="remote_exit=127"):
         runner._exec_checked("pod-0", ["bash", f"{REMOTE_WORKDIR}/run_with_etcd.sh"], timeout=10)
+
+
+def test_prepare_attempt_clears_results_and_writes_runtime_provenance(tmp_path):
+    runner = _runner(tmp_path)
+    calls = []
+    runner._exec_checked = lambda pod, command, timeout: calls.append((pod, command, timeout))
+
+    runner.prepare_attempt(
+        ["pod-0"],
+        cell_id="cell-prefill",
+        plan_sha256="plan-sha",
+        attempt_id="attempt-1",
+    )
+
+    assert calls[0][1][:2] == ["find", "/results"]
+    assert calls[1][1][:2] == ["python3", "-c"]
+    payload = json.loads(calls[1][1][3])
+    assert payload == {
+        "schema_name": "aic_fpm_collector_provenance",
+        "schema_version": 1,
+        "cell_id": "cell-prefill",
+        "plan_sha256": "plan-sha",
+        "attempt_id": "attempt-1",
+    }
+    assert calls[1][1][4] == "collector-provenance.json"
+
+
+def test_cleanup_verifies_workload_and_pods_are_deleted(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.kind = "Pod"
+    runner.name = "pod-0"
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="pod/pod-0 deleted\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='Error from server (NotFound): pods "pod-0" not found',
+            ),
+        ]
+    )
+    runner._kubectl = lambda *args, **kwargs: next(responses)
+    runner.pods = lambda: []
+
+    runner.cleanup()
+
+
+def test_cleanup_rejects_a_remaining_workload(tmp_path):
+    runner = _runner(tmp_path)
+    runner.manifest = tmp_path / "k8s_deploy.yaml"
+    runner.kind = "Pod"
+    runner.name = "pod-0"
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="pod/pod-0 deleted\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps({"kind": "Pod", "metadata": {"name": "pod-0"}}),
+                stderr="",
+            ),
+        ]
+    )
+    runner._kubectl = lambda *args, **kwargs: next(responses)
+
+    with pytest.raises(RuntimeError, match="resource remains"):
+        runner.cleanup()
 
 
 def test_collect_rejects_masked_copy_without_benchmark_files(tmp_path):
@@ -408,6 +497,7 @@ def test_native_collection_validation_accepts_balanced_total_points(tmp_path):
     for rank in range(2):
         path = tmp_path / f"pod-{rank}" / ("benchmark.json" if rank == 0 else "benchmark_dp1.json")
         path.parent.mkdir()
+        _write_provenance(path.parent / "collector-provenance.json", cell_id=cell.cell_id)
         path.write_text(json.dumps(_native_payload(phase="prefill", rank=rank, dp=2)))
 
     assert _validate_runtime_collection(cell, tmp_path) == 1
@@ -432,6 +522,7 @@ def test_native_collection_validation_rejects_group_local_divergence(tmp_path):
         payload = _native_payload(phase="prefill", rank=rank, dp=2)
         path = tmp_path / f"pod-{rank}" / ("benchmark.json" if rank == 0 else "benchmark_dp1.json")
         path.parent.mkdir()
+        _write_provenance(path.parent / "collector-provenance.json", cell_id=cell.cell_id)
         path.write_text(json.dumps(payload))
 
     path = tmp_path / "pod-1" / "benchmark_dp1.json"
@@ -440,6 +531,17 @@ def test_native_collection_validation_rejects_group_local_divergence(tmp_path):
     path.write_text(json.dumps(payload))
 
     with pytest.raises(ValueError, match="differs from synchronized group"):
+        _validate_runtime_collection(cell, tmp_path)
+
+
+def test_native_collection_validation_rejects_wrong_cell_provenance(tmp_path):
+    cell = _cell()
+    path = tmp_path / "pod-0" / "benchmark.json"
+    path.parent.mkdir()
+    _write_provenance(path.parent / "collector-provenance.json", cell_id="other-cell")
+    path.write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
+
+    with pytest.raises(ValueError, match="provenance cell mismatch"):
         _validate_runtime_collection(cell, tmp_path)
 
 
@@ -481,6 +583,9 @@ def test_run_collection_stages_no_explicit_scheduler_or_case_manifest(monkeypatc
 
         def stage(self, _pods, files):
             staged_names.extend(path.name for path in files)
+
+        def prepare_attempt(self, _pods, **_kwargs):
+            events.append("prepare_attempt")
 
         def execute(self, _pods):
             events.append("execute")
@@ -527,6 +632,74 @@ def test_run_collection_stages_no_explicit_scheduler_or_case_manifest(monkeypatc
     assert checkpoint["cells"][cell.cell_id]["prefill_max_new_token_samples"] == 2
     assert checkpoint["cells"][cell.cell_id]["measured_new_token_axis_count"] == 2
     assert "prefill_requested_new_token_axis_count" not in checkpoint["cells"][cell.cell_id]
+
+
+def test_cleanup_failure_marks_passed_cell_retryable(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+
+    def render_cell(*args, **kwargs):
+        cell_dir = args[2]
+        (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: cell\n")
+        (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            pass
+
+        def apply(self):
+            pass
+
+        def wait_ready(self, _expected_nodes):
+            return ["pod-0"]
+
+        def stage(self, _pods, _files):
+            pass
+
+        def prepare_attempt(self, _pods, **_kwargs):
+            pass
+
+        def execute(self, _pods):
+            pass
+
+        def collect(self, _pods, *, require_benchmark=True):
+            pass
+
+        def cleanup(self):
+            raise RuntimeError("owned pod remains")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    monkeypatch.setattr(
+        fpm_runner,
+        "_runtime_collection_summary",
+        lambda *_args, **_kwargs: {
+            "measured_point_count": 1,
+            "measured_batch_size_axis_count": 1,
+            "measured_kv_read_axis_count": 1,
+            "measured_new_token_axis_count": 1,
+        },
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(tmp_path / "artifacts"),
+        resume=False,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert [error["classification"] for error in errors] == ["resource_cleanup_failed"]
+    checkpoint = json.loads((checkpoint_dir / "fpm_forward_smoke.json").read_text())
+    record = checkpoint["cells"][cell.cell_id]
+    assert record["status"] == "cleanup_failed"
+    assert record["cleanup_error"] == "owned pod remains"
+    assert "smoke" not in checkpoint
 
 
 def test_typed_generator_render_uses_collector_prefill_axis(tmp_path):

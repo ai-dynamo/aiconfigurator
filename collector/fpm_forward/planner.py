@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,14 +36,69 @@ def _git_revision() -> str:
     return completed.stdout.strip()
 
 
-@dataclass(frozen=True, slots=True)
+def _canonical_mapping(payload: dict[str, Any], *, field_name: str) -> str:
+    if not isinstance(payload, dict):
+        raise TypeError(f"BackendPolicy.{field_name} must be a mapping")
+    try:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"BackendPolicy.{field_name} must be JSON serializable") from error
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class BackendPolicy:
     axis: str
     policy_id: str
-    generator_overrides: dict[str, Any]
-    expected_markers: dict[str, str]
-    aic_fields: dict[str, object] = field(default_factory=dict)
-    admission_reason: str = ""
+    _generator_overrides_json: str
+    _expected_markers_json: str
+    _aic_fields_json: str
+    admission_reason: str
+
+    def __init__(
+        self,
+        axis: str,
+        policy_id: str,
+        generator_overrides: dict[str, Any],
+        expected_markers: dict[str, str],
+        aic_fields: dict[str, object] | None = None,
+        admission_reason: str = "",
+    ) -> None:
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(
+            self,
+            "_generator_overrides_json",
+            _canonical_mapping(generator_overrides, field_name="generator_overrides"),
+        )
+        object.__setattr__(
+            self,
+            "_expected_markers_json",
+            _canonical_mapping(expected_markers, field_name="expected_markers"),
+        )
+        object.__setattr__(
+            self,
+            "_aic_fields_json",
+            _canonical_mapping(aic_fields or {}, field_name="aic_fields"),
+        )
+        object.__setattr__(self, "admission_reason", admission_reason)
+
+    @property
+    def generator_overrides(self) -> dict[str, Any]:
+        """Return a detached copy so callers cannot mutate the frozen policy."""
+
+        return json.loads(self._generator_overrides_json)
+
+    @property
+    def expected_markers(self) -> dict[str, str]:
+        """Return a detached copy so validation cannot alter plan identity."""
+
+        return json.loads(self._expected_markers_json)
+
+    @property
+    def aic_fields(self) -> dict[str, object]:
+        """Return a detached copy of the structured AIC capability fields."""
+
+        return json.loads(self._aic_fields_json)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -272,6 +327,12 @@ def build_collection_plan(
     )
     policies = _backend_policies(options, collector_config, backend=backend)
     weight_quantization = capability.dtype.gemm_quant_mode
+    runnable_dtype_pairs = {
+        (decision.topology, estimate.kv_cache_dtype)
+        for decision in topology_memory_admission
+        for estimate in decision.estimates
+        if estimate.disposition != "rejected"
+    }
     cells = tuple(
         FPMCell(
             cell_id=_cell_id(
@@ -298,6 +359,7 @@ def build_collection_plan(
         for phase in ("prefill", "decode")
         for topology in topologies
         for kv_cache_dtype in capability.dtype.kv_cache_dtypes
+        if (topology, kv_cache_dtype) in runnable_dtype_pairs
         for policy in policies
     )
     revision = _git_revision()
