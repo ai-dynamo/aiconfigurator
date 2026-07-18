@@ -20,9 +20,8 @@ class TimingModel(Protocol):
     the SDK's own phase estimators (`BaseBackend._run_context_phase`), i.e.
     the minimal description of one prefill batch; `DatabaseTimingModel`
     delegates to them directly. The Protocol exists so the evaluator can
-    also be driven by synthetic timing functions during validation — the
-    DES oracle accepts the identical callables, which cancels timing out
-    of the validation residual.
+    also be driven by synthetic timing functions during validation, which
+    cancels timing out of the validation residual.
     """
 
     def prefill_ms(self, batch_size: int, mean_isl: int, mean_prefix: int) -> float:
@@ -42,8 +41,8 @@ class WorkloadSpec:
 
     The model covers stationary regimes only: fixed (isl, osl, prefix) with
     either a closed-loop concurrency cap or an open-loop Poisson rate.
-    Timestamped traces / non-stationary arrivals are out of scope — use the
-    DES oracle (tools/queueing_oracle) for those.
+    Timestamped traces / non-stationary arrivals are out of scope for the
+    analytical correction — use simulation-level tooling for those.
     """
 
     isl: int

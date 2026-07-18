@@ -4,12 +4,12 @@
 
 Used on the sweep hot path (30k-100k evaluations) where the limit-cycle
 evaluator's O(passes) cost is unnecessary. Every term is annotated with its
-provenance. The limit-cycle evaluator is the in-package reference; the DES
-oracle (tools/queueing_oracle) is the external one.
+provenance; the limit-cycle evaluator is the in-package reference, and the
+validation methodology is recorded in docs/design/queueing_model.md §5.
 
 Terms:
   B_eff       running decodes spend the unified budget first
-              (mocker core.rs: running set scheduled before waiting)
+              (vLLM v1 scheduler: running set scheduled before waiting)
   staircase   initial burst of C simultaneous arrivals admitted
               ceil(C*isl_eff/B_eff) chunk-passes deep (chunked-prefill loop)
   W_res       renewal residual life E[T^2]/(2E[T]) — inspection paradox;

@@ -15,8 +15,8 @@ Two precision tiers of the same model:
     DatabaseTimingModel                   timing adapter over (model, database)
 
 Scope: stationary workloads (fixed isl/osl/prefix + closed-loop concurrency
-or open-loop rate). Timestamped traces are out of scope; the DES oracle in
-tools/queueing_oracle is the validation gate for both tiers.
+or open-loop rate); timestamped traces are out of scope. Validation
+methodology and recorded results: docs/design/queueing_model.md §5.
 """
 
 from .calendar import CALENDARS, evaluate_closed_loop

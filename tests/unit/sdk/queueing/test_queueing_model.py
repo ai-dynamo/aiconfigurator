@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the queueing (pass-calendar) model.
 
-Structural assertions only — accuracy against the DES oracle is covered by
-tools/queueing_oracle/validate_formula.py (run manually / in slow CI since it
-executes the discrete-event simulation).
+Structural assertions only — accuracy validation methodology and recorded
+results are documented in docs/design/queueing_model.md §5.
 """
 
 import math

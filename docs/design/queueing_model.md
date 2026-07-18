@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
 |---|---|
 | **Status** | Implemented (`src/aiconfigurator/sdk/queueing/`) |
 | **Replaces** | the empirical `_ttft_queuing_factor` heuristic and, for reporting, the blended-mean-only TTFT/TPOT columns |
-| **Oracle** | `tools/queueing_oracle/` — DES anchored clause-by-clause to the vLLM v1 scheduler source |
+| **Validation** | development-time DES oracle anchored clause-by-clause to the vLLM v1 scheduler source; recorded results in §5 |
 
 ## 1. What it is
 
@@ -26,11 +26,7 @@ One model, two precision tiers:
 | Tier | Entry point | Cost | Accuracy role |
 |---|---|---|---|
 | **screening** (closed form) | `closed_form.operating_point_columns` | µs — pure arithmetic on quantities `run_agg` already computed, zero extra DB queries | populates the summary columns on the sweep hot path. Within one sweep the workload is fixed and candidates differ only in engine/parallel config, so its per-workload bias is shared across candidates and **ranking is preserved**; cross-workload quantitative use should go through the evaluator |
-| **quantitative** (limit-cycle evaluator) | `evaluate_closed_loop` | ~ms–10ms | the same model evaluated numerically: a deterministic pass-level recursion (no RNG, no event heap, no per-token events) that captures the cohort effects the closed form approximates. Validated ≤10–15% (mostly 0.0%) against the DES oracle across 9 config families |
-
-The DES oracle (`tools/queueing_oracle/`, dev/CI tool, not shipped in the
-wheel) anchors both tiers; its scheduling semantics carry a clause-by-clause
-provenance table against the vLLM v1 scheduler source.
+| **quantitative** (limit-cycle evaluator) | `evaluate_closed_loop` | ~ms–10ms | the same model evaluated numerically: a deterministic pass-level recursion (no RNG, no event heap, no per-token events) that captures the cohort effects the closed form approximates. Validated ≤10–15% (mostly 0.0%) across 9 config families — recorded results in §5 |
 
 ## 2. Term provenance (no fitted constants)
 
@@ -54,7 +50,7 @@ measurement/interpolation), which this package consumes as a black box.
 
 | Backend | Calendar | Status |
 |---|---|---|
-| vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated** vs DES oracle across 9 config families |
+| vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated** across 9 config families (§5) |
 | TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | structural, **not validated** against a TRT-LLM reference |
 | SGLang | alternating passes (dedicated prefill batches pause decode → ITL spikes are whole prefill batches) | structural, **not validated** against an SGLang reference |
 
@@ -82,33 +78,45 @@ by ~30% on the reference workload while its N-dependence made
 recommendations a function of benchmark length (same deployment: mean
 456ms at N=200, 223ms at N=1000).
 
-## 5. Validation (2026-07-18)
+## 5. Validation (2026-07-18, recorded)
 
-Chain: closed form / evaluator ↔ DES oracle ↔ vLLM v1 source, with
-identical timing functions between model and oracle so residuals isolate
-scheduling semantics. Battery: 9 agg config families (isl 512–8192,
-osl 16–512, C 1–128, budget 2048–8192, chunked on/off, prefix).
+Methodology: a development-time DES oracle — a discrete-event simulation of
+vLLM v1 iteration-level scheduling — was driven with timing functions
+IDENTICAL to the model's, so residuals isolate scheduling semantics. The
+oracle's own semantics were audited clause-by-clause against the vLLM v1
+scheduler source:
 
-- **Oracle vs vLLM v1 source**: clause-by-clause semantic audit with
-  file:line provenance (see `tools/queueing_oracle/vllm_sim.py`); during
-  development the oracle was additionally cross-checked against an
-  independent replay implementation as an experimental baseline.
-- **Evaluator vs oracle** (gated): within 10% on TTFT steady/transient
-  mean/p50/p99 and blended mean — most metrics 0.0%; ITL within 15%.
-  One documented exemption: prefix workloads' `itl_p99` (constant-hit
-  assumption locks a different cohort phase than a cold-start cache; the
-  mix-pass mass point shifts by one cohort step; TTFT unaffected).
-- **Closed form vs oracle** (reported, sanity-enforced): family-dependent
-  bias, small on long-prompt families and up to ~2× on cohort-dominated
-  short-prompt families — the mechanism (cohort locking is
-  initial-condition dependent) is exactly what the evaluator exists to
-  capture. Screening/ranking role per §1.
+| Clause | vllm/v1/core/sched/scheduler.py |
+|---|---|
+| unified token budget | `token_budget = max_num_scheduled_tokens` (:334) |
+| running set scheduled first | `while req_index < len(self.running) and token_budget > 0` (:346) |
+| chunked prefill budget cap | `num_new_tokens = min(num_new_tokens, token_budget)` (:372) |
+| chunked-off whole-prompt gate | break when `num_new_tokens > token_budget` (:652) |
+| admission concurrency cap | `len(self.running) == max_num_running_reqs` (:534) |
+| waiting-admission alloc failure | put back + break — no preemption (:716-723) |
+| running-path alloc failure | preempt (LIFO pop) with recompute (:437-471) |
+
+Battery: 9 agg config families (isl 512–8192, osl 16–512, C 1–128, budget
+2048–8192, chunked on/off, prefix). Recorded results:
+
+- **Evaluator**: within 10% on TTFT steady/transient mean/p50/p99 and
+  blended mean — most metrics 0.0%; ITL within 15%. One documented
+  exemption: prefix workloads' `itl_p99` (the constant-hit assumption locks
+  a different cohort phase than a cold-start cache; the mix-pass mass point
+  shifts by one cohort step; TTFT unaffected).
+- **Closed-form screening tier**: family-dependent bias, small on
+  long-prompt families and up to ~2× on cohort-dominated short-prompt
+  families — the mechanism (cohort locking is initial-condition dependent)
+  is exactly what the evaluator exists to capture. Screening/ranking role
+  per §1.
 - **End-to-end** (real perf DB, Llama-3.1-8B / h200_sxm / vLLM 0.24.0,
-  isl4096/osl256/C32, measured against the development-time replay
-  baseline): legacy `ttft` −30%; closed form −6.9% (blended); evaluator
-  −2.5%, `itl_p50` exact, `itl_p99` 0.1%.
+  isl4096/osl256/C32, measured against a development-time replay baseline):
+  legacy `ttft` −30%; closed form −6.9% (blended); evaluator −2.5%,
+  `itl_p50` exact, `itl_p99` 0.1%.
 
-Run: `PYTHONPATH=src:tools/queueing_oracle python3 tools/queueing_oracle/validate_formula.py`
+The oracle and its gate script are development tooling and are not part of
+this change; they are preserved on a development branch for future
+re-validation (e.g. after upstream scheduler changes).
 
 ## 6. Failure modes
 

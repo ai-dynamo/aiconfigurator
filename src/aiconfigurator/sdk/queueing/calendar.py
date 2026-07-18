@@ -13,12 +13,12 @@ This is an evaluation of the scheduling algorithm's own arithmetic — not a
 statistical fit and not a per-request simulation. Step semantics are
 anchored to the vLLM v1 scheduler source (vllm/v1/core/sched/scheduler.py:
 unified token budget :334, running set first :346, chunked prefill cap
-:372); the DES oracle in tools/queueing_oracle carries the full clause
-provenance table and is the validation gate.
+:372); the full clause provenance table and validation record live in
+docs/design/queueing_model.md.
 
 Backend calendars:
   - vllm    : fused pass — unified token budget, running decodes spend first,
-              chunked prefill shares the remainder (VALIDATED vs the DES oracle)
+              chunked prefill shares the remainder (VALIDATED, see design doc §5)
   - trtllm  : fused pass like vllm (max_num_tokens budget); optional
               GUARANTEED_NO_EVICT admission cap (STRUCTURAL, not yet
               validated against a trtllm oracle)
