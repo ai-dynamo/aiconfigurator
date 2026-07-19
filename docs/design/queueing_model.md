@@ -62,11 +62,18 @@ measurement/interpolation), which this package consumes as a black box.
 
 - **agg**: screening tier at the `run_agg` operating point.
 - **static**: degenerate — `ttft_steady_* == ttft`, `itl_* == tpot`.
-- **disagg**: TTFT side follows the prefill stage (static batch semantics on
-  the prefill worker); ITL side is a single mass at decode `tpot` — decode
-  workers have no prefill interference, which is the measurable signature
-  of disagg vs agg (agg `itl_p99` spikes to the mix-pass duration, e.g.
-  190ms vs `itl_p50` 9.3ms for Llama-3.1-8B @ h200).
+- **disagg**: composed tier by default — TTFT side follows the prefill
+  stage (static batch semantics on the prefill worker); ITL side is a
+  single mass at decode `tpot` — decode workers have no prefill
+  interference, which is the measurable signature of disagg vs agg (agg
+  `itl_p99` spikes to the mix-pass duration, e.g. 190ms vs `itl_p50` 9.3ms
+  for Llama-3.1-8B @ h200). With `--sla-refine`, the report boundary
+  upgrades disagg rows to the TANDEM-RECURSION quantitative tier
+  (`sdk/queueing/disagg.py`): both pools rebuilt from the row's (p)/(d)
+  metadata with their own timing models (heterogeneous P/D supported),
+  KV handoff computed on a max-min-fair per-NIC transfer fabric wired from
+  the system spec, first token emitted prefill-side (the handoff lands in
+  the first ITL gap), and phase-mixed output (see §6.15).
 
 Additionally: `ttft_steady_p99_{lo,hi}` (the cohort bracket — structural
 bounds on the steady distribution's support, used by the sweep funnel) and
@@ -180,6 +187,13 @@ the evaluator with plain prefill/decode callbacks); the recorded
 end-to-end figure above predates this delegation — re-measure at the next
 replay session.
 
+Disagg (P/D tandem) families added 2026-07-19: the tandem recursion vs
+the DES `DisaggSimulator`, identical timing and transfer fabric on both
+sides, same-phase initial conditions. Four gated families (1P1D, fan-in
+2P1D, bandwidth-tight 2P1D, 2P2D): TTFT steady mean/p50/p99 and ITL
+p50/p99 essentially exact (mostly 0.0%; itl_mean <= 2.6%), including the
+fan-in transfer spike in `itl_p99` reproduced to 0.0%.
+
 The oracle and its gate live in `tools/queueing_oracle/` (stdlib-only DES
 of vLLM v1 iteration-level scheduling + the 9-family gate), and the gate
 runs in CI as a marked test (`tests/unit/sdk/queueing/test_oracle_gate.py`,
@@ -254,3 +268,12 @@ Silent (each with a designated detector):
    and async scheduling overlap step N+1's schedule with step N's execute —
    the "one pass = one gap" mapping blurs. Not active in the validated
    configuration; watch item for newer engine defaults.
+15. **Disagg cohort-phase multi-stability.** The P/D tandem system has
+   multiple steady limit cycles selected by the initial cohort phase — a
+   simultaneous burst locks a large-batch prefill cycle, spread arrivals
+   lock a small-batch pipeline cycle, with TTFTs differing by multiples.
+   Which cycle a real deployment lands in is set by arrival jitter outside
+   the model. Structural handling: `evaluate_disagg_mixed` reports an
+   equal-weight mixture over a deterministic set of initial-arrival
+   staggers (no RNG; each component is a valid limit cycle); the gate
+   compares single phases with matched initial conditions.

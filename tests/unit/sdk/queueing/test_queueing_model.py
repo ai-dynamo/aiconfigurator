@@ -392,6 +392,125 @@ class TestBracketAndE2E:
         assert rep.e2e.mean > rep.ttft_steady.mean
 
 
+class TestDisaggTandem:
+    """Tandem-recursion structural semantics (accuracy is gated by the
+    oracle's disagg families — see tools/queueing_oracle)."""
+
+    def _spec(self, **kw):
+        from aiconfigurator.sdk.queueing import DisaggSpec
+
+        base = dict(
+            num_prefill_workers=1,
+            num_decode_workers=1,
+            kv_bytes_per_token=100_000,
+            egress_bytes_per_s=1e9,
+            ingress_bytes_per_s=1e9,
+            bw_efficiency=1.0,
+        )
+        base.update(kw)
+        return DisaggSpec(**base)
+
+    def test_first_token_prefill_side_and_handoff_in_first_gap(self):
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        wl = WorkloadSpec(isl=1024, osl=8, concurrency=4)
+        rep = evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        handoff_ms = 1024 * 100_000 / 1e9 * 1000.0  # 102.4 solo
+        assert rep.mode == "disagg"
+        # the measured mean transfer is at least the solo time (fan-in can
+        # only slow it down), and the handoff lands in the ITL tail — the
+        # first gap — not in TTFT
+        assert rep.kv_transfer_ms >= handoff_ms * 0.999
+        assert rep.itl.maximum >= handoff_ms
+        # TTFT is prefill-side: no transfer term (solo prefill of this
+        # shape is ~30ms; give queueing headroom but stay below handoff)
+        assert rep.ttft_steady.mean < handoff_ms
+
+    def test_osl1_completes_without_decode_stage(self):
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        wl = WorkloadSpec(isl=512, osl=1, concurrency=2)
+        rep = evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        assert rep.throughput_rps > 0
+        assert not rep.itl.values  # single-token requests have no gaps
+
+    def test_mixed_phases_is_phase_robust_mixture(self):
+        from aiconfigurator.sdk.queueing import evaluate_disagg_mixed
+
+        wl = WorkloadSpec(isl=1024, osl=8, concurrency=4)
+        rep = evaluate_disagg_mixed(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec(), phases=3)
+        assert rep.mode == "disagg"
+        assert rep.ttft_steady.values and rep.itl.values
+        assert rep.throughput_rps > 0
+
+    def test_open_loop_rejected(self):
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        wl = WorkloadSpec(isl=128, osl=8, request_rate=5.0)
+        with pytest.raises(ValueError):
+            evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+
+
+class TestDisaggReportUpgrade:
+    def test_composed_rows_upgrade_to_quantitative(self, monkeypatch):
+        import pandas as pd
+
+        from aiconfigurator.sdk import common as sdk_common
+        from aiconfigurator_core.sdk.queueing import refine as refine_mod
+        from aiconfigurator_core.sdk.queueing import timing as timing_mod
+
+        class _FakeModel:
+            def get_kvcache_bytes_per_sequence(self, seq_len):
+                return 1000.0 * seq_len
+
+        class _FakeDb:
+            system_spec: typing.ClassVar[dict] = {"node": {"inter_node_bw": 50e9, "intra_node_bw": 450e9}}
+
+        monkeypatch.setattr(refine_mod, "_rebuild_stage", lambda *a, **k: (_FakeModel(), _FakeDb(), object()))
+        monkeypatch.setattr(timing_mod, "DatabaseTimingModel", lambda m, d, b: TIMING)
+
+        row = dict.fromkeys(sdk_common.ColumnsDisagg, 0.0)
+        row.update(
+            {
+                "model": "test/model",
+                "isl": 1024,
+                "osl": 8,
+                "prefix": 0,
+                "concurrency": 4,
+                "encoder_latency": 0.0,
+                "(p)bs": 2,
+                "(p)workers": 1,
+                "(d)bs": 8,
+                "(d)workers": 1,
+                "(p)backend": "vllm",
+                "(d)backend": "vllm",
+                "queueing_tier": "composed",
+            }
+        )
+        df = pd.DataFrame([row])
+        out = refine_mod.refine_report_rows(df)
+        assert out.at[0, "queueing_tier"] == "quantitative"
+        assert out.at[0, "ttft_steady_p50"] > 0
+        assert out.at[0, "itl_p99"] > 0
+
+    def test_multimodal_composed_rows_stay_visible(self, monkeypatch):
+        import pandas as pd
+
+        from aiconfigurator.sdk import common as sdk_common
+        from aiconfigurator_core.sdk.queueing import refine as refine_mod
+
+        monkeypatch.setattr(
+            refine_mod, "_rebuild_stage", lambda *a, **k: pytest.fail("must not rebuild for multimodal rows")
+        )
+        row = dict.fromkeys(sdk_common.ColumnsDisagg, 0.0)
+        row.update(
+            {"model": "m", "isl": 64, "osl": 8, "concurrency": 2, "encoder_latency": 5.0, "queueing_tier": "composed"}
+        )
+        df = pd.DataFrame([row])
+        out = refine_mod.refine_report_rows(df)
+        assert out.at[0, "queueing_tier"] == "composed"
+
+
 class TestDatabaseTimingMixedPass:
     def test_delegates_to_mix_step_runner_with_efficiency(self):
         from aiconfigurator.sdk.queueing.timing import DatabaseTimingModel

@@ -25,6 +25,7 @@ from .closed_form import (
     operating_point_columns,
     static_degenerate_columns,
 )
+from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
 from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 from .timing import DatabaseTimingModel
 
@@ -32,12 +33,15 @@ __all__ = [
     "CALENDARS",
     "QUEUEING_COLUMNS",
     "DatabaseTimingModel",
+    "DisaggSpec",
     "Distribution",
     "EngineSpec",
     "QueueingReport",
     "TimingModel",
     "WorkloadSpec",
     "evaluate_closed_loop",
+    "evaluate_disagg",
+    "evaluate_disagg_mixed",
     "operating_point_columns",
     "static_degenerate_columns",
     "static_report",

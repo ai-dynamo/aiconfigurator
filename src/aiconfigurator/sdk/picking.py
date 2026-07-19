@@ -164,9 +164,9 @@ def _build_disagg_summary_dict(
         #   staircase (all requests share the batch) — steady == ttft. The
         #   transient (burst) case is bounded by queueing behind (p)bs-deep
         #   batches; without the worker's chunk budget here we report the
-        #   static value; tandem-level distributions (prefill queueing,
-        #   KV handoff) are planned follow-up work — see
-        #   docs/design/queueing_model.md §3.
+        #   static value; with --sla-refine the report boundary upgrades
+        #   these rows to the tandem-recursion quantitative tier
+        #   (sdk.queueing.evaluate_disagg).
         # - ITL side follows the decode stage: decode workers have NO
         #   prefill interference, so the ITL distribution is structurally a
         #   single mass at tpot (the measurable signature of disagg vs agg,

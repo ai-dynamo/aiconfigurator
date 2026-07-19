@@ -308,43 +308,25 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=N
     if df is None or df.empty or "queueing_tier" not in df.columns:
         return df
     mask = df["queueing_tier"] == "screening"
-    if not mask.any():
+    mask_composed = df["queueing_tier"] == "composed"
+    if not mask.any() and not mask_composed.any():
         return df
 
-    from aiconfigurator_core.sdk import config as sdk_config
-    from aiconfigurator_core.sdk.backends.factory import get_backend
-    from aiconfigurator_core.sdk.models import get_model
-    from aiconfigurator_core.sdk.perf_database import get_database
-
-    group_cols = ["model", "backend", "version", "system", "tp", "pp", "dp", "moe_tp", "moe_ep", "cp"]
     budget = max_refines
-    for key, group in df[mask].groupby(group_cols, dropna=False):
+    agg_group_cols = ["model", "backend", "version", "system", "tp", "pp", "dp", "moe_tp", "moe_ep", "cp"]
+    if not mask.any() or any(col not in df.columns for col in agg_group_cols):
+        agg_groups = []
+    else:
+        agg_groups = df[mask].groupby(agg_group_cols, dropna=False)
+    for key, group in agg_groups:
         if budget <= 0:
             logger.info("report tier upgrade: refine budget exhausted, %d rows left at screening tier", int(mask.sum()))
             break
         (model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp) = key
-        try:
-            database = get_database(system=system, backend=backend_name, version=str(version))
-            model_config = sdk_config.ModelConfig(
-                tp_size=int(tp),
-                pp_size=int(pp),
-                moe_tp_size=int(moe_tp) if moe_tp else None,
-                moe_ep_size=int(moe_ep) if moe_ep else None,
-                attention_dp_size=int(dp) if dp else 1,
-                cp_size=int(cp) if cp else 1,
-            )
-            model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
-            backend = get_backend(backend_name)
-        except Exception:
-            logger.warning(
-                "report tier upgrade skipped for %s/%s tp%s pp%s (rebuild failed)",
-                model_path,
-                backend_name,
-                tp,
-                pp,
-                exc_info=True,
-            )
+        rebuilt = _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp)
+        if rebuilt is None:
             continue
+        model, database, backend = rebuilt
         reports = refine_rows(
             df,
             list(group.index),
@@ -355,4 +337,166 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=N
             runtime_config=runtime_config,
         )
         budget -= len(reports)
+
+    if mask_composed.any() and budget > 0:
+        budget = _refine_disagg_report_rows(df, mask_composed, budget)
     return df.round(3)
+
+
+def _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp):
+    """Rebuild (model, database, backend) from row metadata; None on failure
+    (the report path must never crash on a tier upgrade)."""
+    from aiconfigurator_core.sdk import config as sdk_config
+    from aiconfigurator_core.sdk.backends.factory import get_backend
+    from aiconfigurator_core.sdk.models import get_model
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    try:
+        database = get_database(system=system, backend=backend_name, version=str(version))
+        model_config = sdk_config.ModelConfig(
+            tp_size=int(tp),
+            pp_size=int(pp),
+            moe_tp_size=int(moe_tp) if moe_tp else None,
+            moe_ep_size=int(moe_ep) if moe_ep else None,
+            attention_dp_size=int(dp) if dp else 1,
+            cp_size=int(cp) if cp else 1,
+        )
+        model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
+        return model, database, get_backend(backend_name)
+    except Exception:
+        logger.warning(
+            "report tier upgrade skipped for %s/%s tp%s pp%s (rebuild failed)",
+            model_path,
+            backend_name,
+            tp,
+            pp,
+            exc_info=True,
+        )
+        return None
+
+
+_P_COLS = ("(p)backend", "(p)version", "(p)system", "(p)tp", "(p)pp", "(p)dp", "(p)moe_tp", "(p)moe_ep", "(p)cp")
+_D_COLS = ("(d)backend", "(d)version", "(d)system", "(d)tp", "(d)pp", "(d)dp", "(d)moe_tp", "(d)moe_ep")
+
+
+def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budget: int) -> int:
+    """Upgrade disagg rows from the composed (static-scalar) tier to the
+    tandem-recursion quantitative tier.
+
+    Both stages are rebuilt from the row's own (p)/(d) metadata and priced
+    with their own timing models (heterogeneous P/D supported). The
+    KV-transfer fabric is wired rank-locally: per-GPU KV bytes per token
+    (``get_kvcache_bytes_per_sequence(1)``) over the per-GPU
+    ``node.inter_node_bw`` of each stage's system spec (cross-node
+    placement assumption). Phase-mixed output (``evaluate_disagg_mixed``)
+    keeps the reported numbers robust to the tandem system's cohort-phase
+    multi-stability. Multimodal rows stay composed (visible tier).
+    """
+    from .disagg import DisaggSpec, evaluate_disagg_mixed
+    from .spec import EngineSpec, WorkloadSpec
+    from .timing import DatabaseTimingModel
+
+    group_cols = ["model", *_P_COLS, *_D_COLS]
+    if any(col not in df.columns for col in group_cols):
+        return budget
+
+    for key, group in df[mask_composed].groupby(group_cols, dropna=False):
+        if budget <= 0:
+            logger.info("report tier upgrade: refine budget exhausted, disagg rows left at composed tier")
+            break
+        eligible = [
+            idx
+            for idx in group.index
+            if float(df.at[idx, "encoder_latency"] or 0.0) <= 0.0  # multimodal stays composed, visibly
+            and int(df.at[idx, "concurrency"]) * int(df.at[idx, "osl"]) <= _MAX_EVAL_COMPLEXITY
+        ]
+        if not eligible:
+            continue
+        model_path = key[0]
+        p_meta = dict(zip(_P_COLS, key[1 : 1 + len(_P_COLS)], strict=True))
+        d_meta = dict(zip(_D_COLS, key[1 + len(_P_COLS) :], strict=True))
+        p_rebuilt = _rebuild_stage(
+            model_path,
+            p_meta["(p)backend"],
+            p_meta["(p)version"],
+            p_meta["(p)system"],
+            p_meta["(p)tp"],
+            p_meta["(p)pp"],
+            p_meta["(p)dp"],
+            p_meta["(p)moe_tp"],
+            p_meta["(p)moe_ep"],
+            p_meta["(p)cp"],
+        )
+        d_rebuilt = _rebuild_stage(
+            model_path,
+            d_meta["(d)backend"],
+            d_meta["(d)version"],
+            d_meta["(d)system"],
+            d_meta["(d)tp"],
+            d_meta["(d)pp"],
+            d_meta["(d)dp"],
+            d_meta["(d)moe_tp"],
+            d_meta["(d)moe_ep"],
+            1,
+        )
+        if p_rebuilt is None or d_rebuilt is None:
+            continue
+        p_model, p_db, p_backend = p_rebuilt
+        d_model, d_db, d_backend = d_rebuilt
+        p_timing = DatabaseTimingModel(p_model, p_db, p_backend)
+        d_timing = DatabaseTimingModel(d_model, d_db, d_backend)
+        try:
+            kv_bpt = int(p_model.get_kvcache_bytes_per_sequence(1))
+            egress = float(p_db.system_spec["node"]["inter_node_bw"])
+            ingress = float(d_db.system_spec["node"]["inter_node_bw"])
+        except Exception:
+            logger.warning("disagg tier upgrade skipped (no transfer spec derivable)", exc_info=True)
+            continue
+
+        for idx in group.index:
+            if budget <= 0:
+                break
+            row = df.loc[idx]
+            if float(row.get("encoder_latency", 0.0) or 0.0) > 0.0:
+                continue  # multimodal disagg out of the tandem model's scope
+            c = int(row["concurrency"])
+            osl = int(row["osl"])
+            if c * osl > _MAX_EVAL_COMPLEXITY:
+                continue
+            wl = WorkloadSpec(isl=int(row["isl"]), osl=osl, prefix=int(row.get("prefix", 0) or 0), concurrency=c)
+            # the disagg prefill worker runs static batches of (p)bs prompts:
+            # a per-pass token budget of (p)bs * effective_isl reproduces that
+            p_eng = EngineSpec(max_num_batched_tokens=max(1, int(row["(p)bs"])) * wl.effective_isl)
+            d_eng = EngineSpec(max_num_seqs=max(1, int(row["(d)bs"])))
+            spec = DisaggSpec(
+                num_prefill_workers=max(1, int(row["(p)workers"])),
+                num_decode_workers=max(1, int(row["(d)workers"])),
+                kv_bytes_per_token=kv_bpt,
+                egress_bytes_per_s=egress,
+                ingress_bytes_per_s=ingress,
+            )
+            try:
+                rep = evaluate_disagg_mixed(
+                    wl, p_eng, d_eng, p_timing, d_timing, spec, backend=str(d_meta["(d)backend"])
+                )
+            except Exception:
+                logger.warning("disagg tier upgrade failed for row %s", idx, exc_info=True)
+                continue
+            p99 = rep.ttft_steady.p99
+            df.loc[idx, "ttft_steady_mean"] = rep.ttft_steady.mean
+            df.loc[idx, "ttft_steady_p50"] = rep.ttft_steady.p50
+            df.loc[idx, "ttft_steady_p75"] = rep.ttft_steady.quantile(0.75)
+            df.loc[idx, "ttft_steady_p90"] = rep.ttft_steady.p90
+            df.loc[idx, "ttft_steady_p95"] = rep.ttft_steady.quantile(0.95)
+            df.loc[idx, "ttft_steady_p99"] = p99
+            df.loc[idx, "ttft_steady_p999"] = rep.ttft_steady.quantile(0.999)
+            df.loc[idx, "ttft_steady_p99_lo"] = p99
+            df.loc[idx, "ttft_steady_p99_hi"] = p99
+            df.loc[idx, "ttft_transient_mean"] = rep.ttft_transient.mean
+            df.loc[idx, "ttft_transient_max"] = rep.ttft_transient.maximum
+            df.loc[idx, "itl_mean"] = rep.itl.mean
+            df.loc[idx, "itl_p50"] = rep.itl.p50
+            df.loc[idx, "itl_p99"] = rep.itl.p99
+            df.loc[idx, "queueing_tier"] = "quantitative"
+            budget -= 1
+    return budget

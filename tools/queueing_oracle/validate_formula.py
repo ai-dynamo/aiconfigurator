@@ -193,6 +193,69 @@ def evaluator_stats(isl, osl, c, budget, chunked=True, prefix=0, n_mult=10, **_)
     }
 
 
+# ---------------------------------------------------------------------------
+# disagg (P/D tandem) side
+# ---------------------------------------------------------------------------
+
+
+def des_disagg_stats(isl, osl, c, n_prefill, n_decode, kv_bytes=0, bw=0.0, n_mult=10):
+    from vllm_sim import DisaggSimulator, EngineArgs, TransferSpec
+
+    n = n_mult * c
+    reqs = wl_gen.synthetic(request_count=n, isl=isl, osl=osl, block_size=64)
+    spec = TransferSpec(kv_bytes, bw, bw, bw_efficiency=0.8) if kv_bytes else None
+    DisaggSimulator(
+        n_prefill,
+        n_decode,
+        EngineArgs(worker_type="prefill"),
+        EngineArgs(worker_type="decode"),
+        DES_PERF,
+        concurrency=c,
+        transfer=spec,
+    ).run(reqs)
+    by_dispatch = sorted(reqs, key=lambda r: (r.dispatch_ms, r.rid))
+    transient = by_dispatch[:c]
+    steady = by_dispatch[5 * c :]
+    t_ttft = [r.token_times[0] - r.dispatch_ms for r in transient]
+    s_ttft = sorted(r.token_times[0] - r.dispatch_ms for r in steady)
+    itl = sorted(g for r in steady for g in (b - a for a, b in zip(r.token_times, r.token_times[1:], strict=False)))
+    return {
+        "ttft_steady_mean": mean(s_ttft),
+        "ttft_steady_p50": pct(s_ttft, 0.5),
+        "ttft_steady_p99": pct(s_ttft, 0.99),
+        "ttft_transient_mean": mean(t_ttft),
+        "ttft_transient_max": max(t_ttft),
+        "itl_p50": pct(itl, 0.5),
+        "itl_p99": pct(itl, 0.99),
+        "itl_mean": mean(itl),
+    }
+
+
+def disagg_evaluator_stats(isl, osl, c, n_prefill, n_decode, kv_bytes=0, bw=0.0, n_mult=10):
+    from aiconfigurator.sdk.queueing import DisaggSpec, EngineSpec, WorkloadSpec, evaluate_disagg
+
+    class _Timing:
+        def prefill_ms(self, b, mean_isl, mean_prefix):
+            return f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix)
+
+        def decode_ms(self, b, ctx):
+            return f_decode(b, ctx)
+
+    wl = WorkloadSpec(isl=isl, osl=osl, concurrency=c, num_requests=n_mult * c)
+    spec = DisaggSpec(n_prefill, n_decode, kv_bytes_per_token=kv_bytes, egress_bytes_per_s=bw, ingress_bytes_per_s=bw)
+    rep = evaluate_disagg(wl, EngineSpec(), EngineSpec(), _Timing(), _Timing(), spec)
+    return {
+        "ttft_steady_mean": rep.ttft_steady.mean,
+        "ttft_steady_p50": rep.ttft_steady.p50,
+        "ttft_steady_p99": rep.ttft_steady.p99,
+        "ttft_transient_mean": rep.ttft_transient.mean,
+        "ttft_transient_max": rep.ttft_transient.maximum,
+        "itl_p50": rep.itl.p50,
+        "itl_p99": rep.itl.p99,
+        "itl_mean": rep.itl.mean,
+    }
+
+
 # evaluator: same model evaluated numerically — tight tolerances
 EVALUATOR_TOLERANCES = dict.fromkeys(TOLERANCES, 10.0)
 EVALUATOR_TOLERANCES["itl_mean"] = 15.0
@@ -237,6 +300,44 @@ def main():
         assert formula["ttft_steady_p99"] >= formula["ttft_steady_p50"] > 0
         assert formula["ttft_transient_max"] >= formula["ttft_transient_mean"] > 0
         assert formula["itl_p99"] >= formula["itl_p50"] > 0
+
+    # disagg (P/D tandem) families: the sdk tandem recursion vs the DES
+    # DisaggSimulator, identical timing and TransferSpec on both sides.
+    # Same-phase comparison (simultaneous initial burst): the tandem system
+    # is multi-stable in cohort phase, so both sides are driven from the
+    # same initial condition; phase-robust output is evaluate_disagg_mixed.
+    disagg_cases = [
+        ("DA 1P1D isl2048 osl64 C8", dict(isl=2048, osl=64, c=8, n_prefill=1, n_decode=1)),
+        (
+            "DB fan-in 2P1D isl4096 bw50G",
+            dict(isl=4096, osl=64, c=16, n_prefill=2, n_decode=1, kv_bytes=100_000, bw=50e9),
+        ),
+        (
+            "DC bw-tight 2P1D isl4096 bw1G",
+            dict(isl=4096, osl=64, c=16, n_prefill=2, n_decode=1, kv_bytes=100_000, bw=1e9),
+        ),
+        (
+            "DD 2P2D isl1024 osl128 C32",
+            dict(isl=1024, osl=128, c=32, n_prefill=2, n_decode=2, kv_bytes=100_000, bw=50e9),
+        ),
+    ]
+    disagg_tol = dict.fromkeys(
+        (
+            "ttft_steady_mean",
+            "ttft_steady_p50",
+            "ttft_steady_p99",
+            "ttft_transient_mean",
+            "ttft_transient_max",
+        ),
+        10.0,
+    )
+    disagg_tol.update({"itl_p50": 10.0, "itl_p99": 15.0, "itl_mean": 15.0})
+    for name, kw in disagg_cases:
+        des = des_disagg_stats(**kw)
+        ev = disagg_evaluator_stats(**kw)
+        failures = compare(f"{name} [tandem evaluator, GATED]", des, ev, tolerances=disagg_tol)
+        if failures:
+            all_failures.append((f"{name} [tandem]", failures))
 
     print("\n" + ("ALL WITHIN TOLERANCE" if not all_failures else f"FAILURES: {all_failures}"))
     return 1 if all_failures else 0

@@ -65,7 +65,7 @@ class TestTransferFabric:
         f.submit(0, 0, 1e8, 0.0, "a")
         f.submit(1, 0, 1e8, 0.0, "b")  # two sources, one destination
         assert f.next_completion_ms() == pytest.approx(200.0)
-        assert set(f.pop_completed(200.0)) == {"a", "b"}
+        assert {p for _, p in f.pop_completed(200.0)} == {"a", "b"}
 
     def test_fan_out_shares_egress(self, oracle):
         f = self._fabric(oracle)
@@ -84,8 +84,19 @@ class TestTransferFabric:
         f.submit(0, 0, 1e8, 0.0, "a")
         f.submit(1, 0, 1e8, 50.0, "b")  # joins after a already moved 50 MB
         # a: 50 MB left at half rate -> done at 150; b then runs solo
-        assert f.pop_completed(150.0) == ["a"]
+        assert f.pop_completed(150.0) == [(150.0, "a")]
         assert f.next_completion_ms() == pytest.approx(200.0)
+
+    def test_future_submit_does_not_swallow_completions(self, oracle):
+        # a caller may submit with a FUTURE timestamp (a pass computed in
+        # one loop iteration timestamps its outputs at the pass end); the
+        # piecewise advance must still complete in-flight flows at their
+        # true times instead of dragging them to the submit time
+        f = self._fabric(oracle)
+        f.submit(0, 0, 1e8, 0.0, "a")  # solo -> done at 100
+        f.submit(1, 1, 1e8, 300.0, "b")  # future submit past a's completion
+        done = f.pop_completed(300.0)
+        assert done == [(pytest.approx(100.0), "a")]
 
     def test_bw_efficiency_derates_line_rate(self, oracle):
         f = self._fabric(oracle, eff=0.5)

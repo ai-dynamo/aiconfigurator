@@ -831,8 +831,9 @@ ColumnsDisagg = [
     # follows the prefill stage (static batch semantics on the prefill
     # worker), itl_* follows the decode stage (single mass: no prefill
     # interference on decode workers — the structural selling point of
-    # disagg). Tandem-level distributions (prefill queueing, KV handoff)
-    # are planned follow-up work — see docs/design/queueing_model.md §3.
+    # disagg). With --sla-refine, the report boundary upgrades these rows
+    # to the tandem-recursion quantitative tier (sdk.queueing.evaluate_disagg:
+    # prefill queueing, KV handoff with fabric contention, phase-mixed).
     "ttft_steady_mean",
     "ttft_steady_p50",
     "ttft_steady_p75",

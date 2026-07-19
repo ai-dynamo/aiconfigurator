@@ -311,6 +311,7 @@ class TransferFabric:
     """
 
     _EPS_BYTES = 1e-6
+    _EPS_MS = 1e-6  # sub-ns: absorbs float dust at large virtual times
 
     def __init__(self, spec: TransferSpec):
         assert spec.egress_bytes_per_s > 0 and spec.ingress_bytes_per_s > 0
@@ -318,18 +319,46 @@ class TransferFabric:
         self._ingress = spec.ingress_bytes_per_s * spec.bw_efficiency
         # fid -> [src, dst, remaining_bytes, rate_bytes_per_s, payload]
         self._flows: dict[int, list] = {}
+        self._finished: list = []  # (finish_ms, payload)
         self._next_fid = 0
         self._t_ms = 0.0  # time of the last fluid-state update
 
     def has_flows(self) -> bool:
-        return bool(self._flows)
+        return bool(self._flows) or bool(self._finished)
+
+    def _internal_next_ms(self):
+        times = [f[2] / f[3] for f in self._flows.values() if f[3] > 0]
+        if not times:
+            return None
+        return self._t_ms + max(min(times) * 1000.0, self._EPS_MS)
 
     def _advance(self, now_ms: float) -> None:
-        dt_s = max(0.0, now_ms - self._t_ms) / 1000.0
-        if dt_s:
-            for f in self._flows.values():
-                f[2] = max(0.0, f[2] - f[3] * dt_s)
-        self._t_ms = max(self._t_ms, now_ms)
+        """Piecewise fluid advance: rates change at every completion, so
+        the clock stops at each internal completion point (collecting the
+        finished flow with its TRUE finish time and recomputing rates)
+        before continuing — a single linear step would mis-share bandwidth
+        past a completion point. Completions within the time epsilon also
+        finish here (float absorption guard: at large virtual times the
+        clock cannot resolve byte dust)."""
+        while self._t_ms < now_ms:
+            t_star = self._internal_next_ms()
+            step_to = now_ms if (t_star is None or t_star > now_ms) else t_star
+            dt_s = (step_to - self._t_ms) / 1000.0
+            if dt_s > 0:
+                for f in self._flows.values():
+                    f[2] = max(0.0, f[2] - f[3] * dt_s)
+            self._t_ms = step_to
+            done = sorted(
+                fid
+                for fid, f in self._flows.items()
+                if f[2] <= self._EPS_BYTES or (f[3] > 0 and f[2] / f[3] * 1000.0 <= self._EPS_MS)
+            )
+            if done:
+                for fid in done:
+                    self._finished.append((self._t_ms, self._flows.pop(fid)[4]))
+                self._recompute()
+            elif step_to >= now_ms:
+                break
 
     def _recompute(self) -> None:
         """Max-min water-filling: repeatedly fix the flows crossing the
@@ -366,20 +395,17 @@ class TransferFabric:
         self._recompute()
 
     def pop_completed(self, now_ms: float) -> list:
-        """Advance the fluid state to now_ms and return the payloads of
-        flows that have finished (in submission order)."""
+        """Advance to now_ms and return [(finish_ms, payload)] for flows
+        completed by then (finish_ms = the flow's true completion time)."""
         self._advance(now_ms)
-        done = sorted(fid for fid, f in self._flows.items() if f[2] <= self._EPS_BYTES)
-        out = [self._flows.pop(fid)[4] for fid in done]
-        if out:
-            self._recompute()
-        return out
+        ready = [(t, p) for t, p in self._finished if t <= now_ms]
+        self._finished = [(t, p) for t, p in self._finished if t > now_ms]
+        return ready
 
     def next_completion_ms(self) -> Optional[float]:
-        times = [f[2] / f[3] for f in self._flows.values() if f[3] > 0]
-        if not times:
-            return None
-        return self._t_ms + min(times) * 1000.0
+        if self._finished:
+            return min(t for t, _ in self._finished)
+        return self._internal_next_ms()
 
 
 @dataclass
@@ -838,7 +864,7 @@ class DisaggSimulator:
                                 nxt.dispatch_ms = self.now
                                 self._dispatch("prefill", nxt)
             if self.fabric is not None:
-                for dst, req in self.fabric.pop_completed(self.now):
+                for _t_done, (dst, req) in self.fabric.pop_completed(self.now):
                     self._dispatch_to("decode", dst, req)
                 t = self.fabric.next_completion_ms()
                 if t is not None:
