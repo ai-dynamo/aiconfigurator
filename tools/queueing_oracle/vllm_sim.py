@@ -276,15 +276,116 @@ class EngineArgs:
     # delta of naive token-count KV accounting against block-level accounting
     kv_mode: str = "block"  # block | token
     worker_type: str = "agg"  # agg | prefill | decode
-    # disagg KV handoff delay = isl * bytes_per_token / bandwidth
-    kv_transfer_bandwidth_gbps: float = 0.0  # 0 disables
-    kv_bytes_per_token: int = 0
+
+
+@dataclass(frozen=True)
+class TransferSpec:
+    """KV-transfer fabric parameters for disagg (see ``TransferFabric``).
+
+    Bandwidths are nominal single-direction Byte/s per worker NIC — the
+    same units as the AIC system spec (``node.inter_node_bw`` /
+    ``node.intra_node_bw``; see ``sysspec.transfer_spec_from_system``).
+    ``bw_efficiency`` de-rates the nominal line rate to what transfers
+    actually achieve (protocol/packetization/scatter-gather overheads);
+    the 0.8 default follows the same convention as the system spec's own
+    ``mem_bw_empirical_scaling_factor``.
+    """
+
+    kv_bytes_per_token: int
+    egress_bytes_per_s: float  # per prefill-worker NIC
+    ingress_bytes_per_s: float  # per decode-worker NIC
+    bw_efficiency: float = 0.8
+
+
+class TransferFabric:
+    """Max-min fair sharing of per-worker NIC bandwidth for KV transfers.
+
+    Transfers are NOT independent: each is a fluid flow from a prefill
+    worker's egress to a decode worker's ingress, and concurrent flows
+    share endpoint capacity max-min fairly (the multi-stream RDMA
+    behaviour). Rates are recomputed whenever a flow starts or finishes,
+    so fan-out (one prefill worker's completions racing out of one NIC)
+    and fan-in (several prefill workers landing on one decode worker)
+    slow each other down by exactly the computed fair share instead of a
+    configured constant.
+    """
+
+    _EPS_BYTES = 1e-6
+
+    def __init__(self, spec: TransferSpec):
+        assert spec.egress_bytes_per_s > 0 and spec.ingress_bytes_per_s > 0
+        self._egress = spec.egress_bytes_per_s * spec.bw_efficiency
+        self._ingress = spec.ingress_bytes_per_s * spec.bw_efficiency
+        # fid -> [src, dst, remaining_bytes, rate_bytes_per_s, payload]
+        self._flows: dict[int, list] = {}
+        self._next_fid = 0
+        self._t_ms = 0.0  # time of the last fluid-state update
+
+    def has_flows(self) -> bool:
+        return bool(self._flows)
+
+    def _advance(self, now_ms: float) -> None:
+        dt_s = max(0.0, now_ms - self._t_ms) / 1000.0
+        if dt_s:
+            for f in self._flows.values():
+                f[2] = max(0.0, f[2] - f[3] * dt_s)
+        self._t_ms = max(self._t_ms, now_ms)
+
+    def _recompute(self) -> None:
+        """Max-min water-filling: repeatedly fix the flows crossing the
+        currently most-contended endpoint at that endpoint's fair share,
+        deduct their consumption from the other endpoint they traverse."""
+        if not self._flows:
+            return
+        caps: dict = {}
+        members: dict = {}
+        for fid, f in self._flows.items():
+            for ep, cap in ((("e", f[0]), self._egress), (("i", f[1]), self._ingress)):
+                caps.setdefault(ep, cap)
+                members.setdefault(ep, []).append(fid)
+        unfixed = set(self._flows)
+        while unfixed:
+            share, ep = min(
+                (caps[ep] / sum(1 for x in m if x in unfixed), ep)
+                for ep, m in members.items()
+                if any(x in unfixed for x in m)
+            )
+            for fid in [x for x in members[ep] if x in unfixed]:
+                f = self._flows[fid]
+                f[3] = max(share, 0.0)
+                unfixed.discard(fid)
+                other = ("i", f[1]) if ep[0] == "e" else ("e", f[0])
+                if other != ep:
+                    caps[other] = max(0.0, caps[other] - share)
+            caps[ep] = 0.0
+
+    def submit(self, src: int, dst: int, num_bytes: float, now_ms: float, payload) -> None:
+        self._advance(now_ms)
+        self._flows[self._next_fid] = [src, dst, max(1.0, float(num_bytes)), 0.0, payload]
+        self._next_fid += 1
+        self._recompute()
+
+    def pop_completed(self, now_ms: float) -> list:
+        """Advance the fluid state to now_ms and return the payloads of
+        flows that have finished (in submission order)."""
+        self._advance(now_ms)
+        done = sorted(fid for fid, f in self._flows.items() if f[2] <= self._EPS_BYTES)
+        out = [self._flows.pop(fid)[4] for fid in done]
+        if out:
+            self._recompute()
+        return out
+
+    def next_completion_ms(self) -> Optional[float]:
+        times = [f[2] / f[3] for f in self._flows.values() if f[3] > 0]
+        if not times:
+            return None
+        return self._t_ms + min(times) * 1000.0
 
 
 @dataclass
 class PassResult:
     end_ms: float
-    emissions: list  # [(Request, completed: bool, handoff_delay_ms)]
+    emissions: list  # [(Request, completed: bool)]
     made_progress: bool
     num_prefill_batched: int
     num_ready_decode: int
@@ -525,23 +626,19 @@ class VllmSimCore:
                     break
             if not emitted:
                 continue
-            handoff_ms = 0.0
             if self.args.worker_type == "prefill":
                 # disagg flow: the prefill worker produces the first token
-                # (user-visible — it IS the TTFT token) and streams the KV
-                # cache to a decode worker; its part of the request ends here
+                # (user-visible — it IS the TTFT token) and hands the KV
+                # cache to a decode worker; its part of the request ends
+                # here (the transfer itself is the driver's concern)
                 completed = True
-                bw = self.args.kv_transfer_bandwidth_gbps
-                bpt = self.args.kv_bytes_per_token
-                if bw > 0 and bpt > 0:
-                    handoff_ms = req.isl * bpt / (bw * 1e9) * 1000.0
             req.token_times.append(decode_end)
             if completed:
                 req.status = Status.DONE
                 req.completed_ms = decode_end
                 req.free_all_blocks(self.kv)
                 self.running.remove(req)
-            emissions.append((req, completed, handoff_ms))
+            emissions.append((req, completed))
         return decode_ms, emissions
 
 
@@ -612,7 +709,7 @@ class Simulator:
                 elif kind == "pass_done":
                     wid, emissions = payload
                     self.busy[wid] = False
-                    for req, done, _handoff in emissions:
+                    for req, done in emissions:
                         if done:
                             completed += 1
                             if self.concurrency is not None and backlog:
@@ -636,12 +733,22 @@ class Simulator:
 class DisaggSimulator:
     """P/D-disaggregated driver, following the disagg serving flow: the
     prefill pool computes the prompt and produces the FIRST token (that IS
-    the TTFT token, streamed to the user), the KV cache is handed off after
-    a transfer delay (isl * kv_bytes_per_token / bandwidth), and the decode
-    pool continues from token 2 — so the handoff shows up as the first ITL
-    gap, not in TTFT. Dispatch is round-robin per pool (a degenerate
-    kv_router: no affinity or queue-depth admission). Closed-loop
-    concurrency only."""
+    the TTFT token, streamed to the user), the KV cache is handed off to a
+    decode worker, and the decode pool continues from token 2 — so the
+    handoff shows up as the first ITL gap, not in TTFT.
+
+    KV-transfer time is COMPUTED, not configured: each handoff is a flow on
+    the ``TransferFabric``, where concurrent transfers share per-worker NIC
+    bandwidth max-min fairly — a clump of completions fanning out of one
+    prefill worker, or several prefill workers fanning in on one decode
+    worker, slow each other down accordingly. The destination decode worker
+    is chosen when the transfer STARTS (that is when the flow joins the
+    ingress contention). Bandwidths come from a ``TransferSpec`` (see
+    ``sysspec.transfer_spec_from_system`` for wiring the AIC system spec);
+    ``transfer=None`` disables transfer modeling (zero-delay handoff).
+
+    Dispatch is round-robin per pool (a degenerate kv_router: no affinity
+    or queue-depth admission). Closed-loop concurrency only."""
 
     def __init__(
         self,
@@ -651,6 +758,7 @@ class DisaggSimulator:
         decode_args: EngineArgs,
         perf_model=None,
         concurrency: int = 32,
+        transfer: Optional[TransferSpec] = None,
     ):
         self.pools = {
             "prefill": [VllmSimCore(prefill_args, perf_model) for _ in range(num_prefill)],
@@ -660,6 +768,8 @@ class DisaggSimulator:
         self.stalled = {s: [False] * len(cores) for s, cores in self.pools.items()}
         self._rr = {"prefill": 0, "decode": 0}
         self.concurrency = concurrency
+        self.fabric = TransferFabric(transfer) if transfer and transfer.kv_bytes_per_token > 0 else None
+        self._bytes_per_token = transfer.kv_bytes_per_token if transfer else 0
         self._events: list = []
         self._seq = 0
         self.now = 0.0
@@ -668,11 +778,27 @@ class DisaggSimulator:
         heapq.heappush(self._events, (t, self._seq, kind, payload))
         self._seq += 1
 
-    def _dispatch(self, stage: str, req: Request) -> None:
+    def _dispatch(self, stage: str, req: Request) -> int:
         wid = self._rr[stage] % len(self.pools[stage])
         self._rr[stage] += 1
+        self._dispatch_to(stage, wid, req)
+        return wid
+
+    def _dispatch_to(self, stage: str, wid: int, req: Request) -> None:
         self.pools[stage][wid].receive(req)
         self.stalled[stage][wid] = False
+
+    def _handoff(self, src_wid: int, req: Request) -> None:
+        """Start the KV handoff of `req` from prefill worker `src_wid`.
+        The decode-side KV-connector jump re-registers the transferred KV,
+        so computed resets here."""
+        req.computed = 0
+        if self.fabric is None:
+            self._dispatch("decode", req)
+            return
+        dst = self._rr["decode"] % len(self.pools["decode"])
+        self._rr["decode"] += 1
+        self.fabric.submit(src_wid, dst, req.isl * self._bytes_per_token, self.now, (dst, req))
 
     def run(self, requests: list[Request]) -> list[Request]:
         backlog = sorted(requests, key=lambda r: r.arrival_ms)
@@ -690,23 +816,19 @@ class DisaggSimulator:
             self.now = self._events[0][0]
             while self._events and self._events[0][0] <= self.now:
                 _, _, kind, payload = heapq.heappop(self._events)
-                if kind == "kv_ready":
-                    self._dispatch("decode", payload)
+                if kind == "xfer_tick":
+                    pass  # wake-up only; completions are drained below
                 elif kind == "pass_done":
                     stage, wid, emissions = payload
                     self.busy[stage][wid] = False
-                    for req, done, handoff in emissions:
+                    for req, done in emissions:
                         if not done:
                             continue
                         if stage == "prefill" and req.generated < req.osl:
                             # first token already emitted by the prefill
                             # worker; the decode worker continues the same
-                            # sequence from its transferred KV (computed
-                            # resets — the KV-connector jump on the decode
-                            # side re-registers it). Handoff delay defers
-                            # the decode-side enqueue.
-                            req.computed = 0
-                            self._push(self.now + handoff, "kv_ready", req)
+                            # sequence from the transferred KV
+                            self._handoff(wid, req)
                         else:
                             # decode-side completion, or osl == 1 finishing
                             # on the prefill worker outright
@@ -715,6 +837,12 @@ class DisaggSimulator:
                                 nxt = backlog.pop(0)
                                 nxt.dispatch_ms = self.now
                                 self._dispatch("prefill", nxt)
+            if self.fabric is not None:
+                for dst, req in self.fabric.pop_completed(self.now):
+                    self._dispatch_to("decode", dst, req)
+                t = self.fabric.next_completion_ms()
+                if t is not None:
+                    self._push(t, "xfer_tick", None)
             self._drive()
         return requests
 

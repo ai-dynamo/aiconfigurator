@@ -52,13 +52,25 @@ not a stale doc claim.
 
 `DisaggSimulator` follows the disagg serving flow: the prefill pool
 computes the prompt and produces the first token (the TTFT token), the KV
-cache is handed off after a transfer delay
-(`isl × kv_bytes_per_token / bandwidth`), and the decode pool continues
+cache is handed off to a decode worker, and the decode pool continues
 from token 2 — the handoff appears as the first ITL gap, not in TTFT. On
 the decode worker the transferred KV counts as computed tokens (the
 KV-connector convention), so decode-side passes never bill prefill
 compute. Dispatch is round-robin per pool; router-level policies
 (affinity, queue-depth admission) are out of scope.
+
+KV-transfer time is **computed, not configured**: each handoff is a flow
+on the `TransferFabric`, and concurrent flows share per-worker NIC
+bandwidth max-min fairly — fan-out (a clump of completions leaving one
+prefill worker's egress) and fan-in (several prefill workers landing on
+one decode worker's ingress) slow each other down by the computed fair
+share. Nominal bandwidths come from the AIC system spec
+(`node.inter_node_bw` / `node.intra_node_bw`, Byte/s per GPU) via
+`sysspec.transfer_spec_from_system(system, kv_bytes_per_token)`, de-rated
+by `bw_efficiency` (default 0.8, following the spec's own
+`mem_bw_empirical_scaling_factor` convention). Not modeled: shared-fabric
+topology beyond per-worker NICs, and transfer/compute interference on the
+GPU itself.
 
 ## Standalone CLI examples
 
