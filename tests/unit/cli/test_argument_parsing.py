@@ -443,8 +443,9 @@ class TestPercentileSlaArguments:
 
     def test_defaults_keep_legacy_filter_semantics(self, cli_parser):
         """All percentile args default to None (and --sla-refine to False):
-        main() derives sla_percentile from their presence, so bare
-        invocations must stay on the legacy avg filter."""
+        percentile semantics are presence-activated (Task.sla_percentile
+        derives from these), so bare invocations stay on the legacy avg
+        filter."""
         args = cli_parser.parse_args(self._BASE)
         assert args.itl is None
         assert args.ttft_percentile is None

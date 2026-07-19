@@ -937,8 +937,10 @@ aiconfigurator cli default \
 ```
 
 The same fields are available per-experiment in `exp` mode YAML
-(`sla_percentile`, `sla_funnel`, `ttft_percentile`, `itl`, `itl_percentile`,
-...) — see the commented block in `src/aiconfigurator/cli/example.yaml`.
+(`ttft_percentile`, `itl`, `itl_percentile`, ..., `sla_refine`) with the
+same presence rule: setting any percentile field or an `itl` target
+activates percentile semantics — see the commented block in
+`src/aiconfigurator/cli/example.yaml`.
 
 > **Note:** percentile enforcement applies to the agg sweep path. Disagg
 > rows currently carry composed (static-semantics) distribution columns —

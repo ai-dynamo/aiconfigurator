@@ -1226,12 +1226,11 @@ def build_default_tasks(
     tpot: float = 30.0,
     request_latency: float | None = None,
     itl: float | None = None,
-    ttft_percentile: float = 0.5,
-    tpot_percentile: float = 0.5,
-    itl_percentile: float = 0.99,
-    request_latency_percentile: float = 0.5,
-    sla_percentile: bool = False,
-    sla_funnel: bool = False,
+    ttft_percentile: float | None = None,
+    tpot_percentile: float | None = None,
+    itl_percentile: float | None = None,
+    request_latency_percentile: float | None = None,
+    sla_refine: bool = False,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
@@ -1383,8 +1382,7 @@ def build_default_tasks(
         "tpot_percentile": tpot_percentile,
         "itl_percentile": itl_percentile,
         "request_latency_percentile": request_latency_percentile,
-        "sla_percentile": sla_percentile,
-        "sla_funnel": sla_funnel,
+        "sla_refine": sla_refine,
         "total_gpus": total_gpus,
         "database_mode": database_mode,
         "transfer_policy": transfer_policy,
@@ -1728,7 +1726,7 @@ def _execute_tasks(
         # report-boundary tier upgrade (only when the evaluator was opted
         # in): the handful of rows a human reads get quantitative-tier
         # queueing numbers; nothing is dropped here
-        if getattr(task, "sla_funnel", False):
+        if getattr(task, "sla_refine", False):
             from aiconfigurator.sdk.queueing.refine import refine_report_rows
 
             try:
@@ -2477,23 +2475,13 @@ def main(args):
             tpot=args.tpot,
             request_latency=args.request_latency,
             itl=args.itl,
-            ttft_percentile=args.ttft_percentile if args.ttft_percentile is not None else 0.5,
-            tpot_percentile=args.tpot_percentile if args.tpot_percentile is not None else 0.5,
-            itl_percentile=args.itl_percentile if args.itl_percentile is not None else 0.99,
-            request_latency_percentile=(
-                args.request_latency_percentile if args.request_latency_percentile is not None else 0.5
-            ),
-            sla_percentile=any(
-                v is not None
-                for v in (
-                    args.ttft_percentile,
-                    args.tpot_percentile,
-                    args.itl_percentile,
-                    args.request_latency_percentile,
-                    args.itl,
-                )
-            ),
-            sla_funnel=args.sla_refine,
+            # percentile semantics are presence-activated (Task.sla_percentile
+            # derives from these) — pass through unmodified
+            ttft_percentile=args.ttft_percentile,
+            tpot_percentile=args.tpot_percentile,
+            itl_percentile=args.itl_percentile,
+            request_latency_percentile=args.request_latency_percentile,
+            sla_refine=args.sla_refine,
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],

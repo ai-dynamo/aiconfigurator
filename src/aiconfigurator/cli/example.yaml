@@ -30,12 +30,13 @@ agg_minimal:
   # osl: 1000
   # ttft: 1000.0
   # tpot: 50.0
-  # --- percentile SLA semantics (optional; defaults keep legacy filtering) ---
-  # sla_percentile: true          # enforce targets at percentiles (screening quantiles)
-  # sla_funnel: true              # + quantitative evaluator refinement (--sla-refine)
+  # --- percentile SLA semantics (optional; omitting all keeps legacy filtering) ---
+  # setting ANY percentile field (or an itl target) switches filtering to
+  # percentile semantics — the same presence rule as the CLI flags
   # ttft_percentile: 0.5          # 0.5 / 0.75 / 0.9 / 0.95 / 0.99 / 0.999
-  # itl: 100.0                    # optional inter-token-latency SLA target (ms)
+  # itl: 100.0                    # optional inter-token-latency SLA target (ms; tail-constrained)
   # itl_percentile: 0.99
+  # sla_refine: true              # precision upgrade only (--sla-refine): never changes elimination
 
 
 # ============================================================

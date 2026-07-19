@@ -283,7 +283,7 @@ def _sweep_one_parallel_agg(
     ctx_stride: int,
     enable_chunked_prefill: bool,
     sla_percentile: bool = False,
-    sla_funnel: bool = False,
+    sla_refine: bool = False,
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
     predictor: Any = None,
@@ -377,7 +377,7 @@ def _sweep_one_parallel_agg(
             # --itl target is screened via its stored tail quantile.
             keep = bool(result_dict) and result_dict["tpot"] <= tpot_target
             if keep:
-                if sla_funnel and sla_percentile:
+                if sla_refine and sla_percentile:
                     ttft_screen = result_dict.get("ttft_steady_p99_lo", result_dict["ttft"])
                 elif sla_percentile:
                     _q_val = queueing_closed_form.screening_quantile(
@@ -407,7 +407,7 @@ def _sweep_one_parallel_agg(
     # wide-kept set with the quantitative tier (limit-cycle evaluator).
     # Constraint percentiles come from runtime_config (defaults: p50 for
     # ttft/tpot/request_latency, p99 for itl).
-    if not (sla_funnel and sla_percentile):
+    if not (sla_refine and sla_percentile):
         # elimination semantics are set by the percentile args, never by
         # --sla-refine alone (refine-only mode upgrades reported numbers at
         # the report boundary instead)
@@ -425,7 +425,7 @@ def _sweep_one_parallel_agg(
     e2e_target = getattr(runtime_config, "request_latency", None)
     if e2e_target is not None:
         constraints["e2e"] = (e2e_target, getattr(runtime_config, "request_latency_percentile", 0.5))
-    df = refine.apply_sla_funnel(
+    df = refine.apply_sla_refine(
         df,
         model=model,
         database=database,
@@ -455,7 +455,7 @@ def sweep_agg(
     ctx_stride: int = 512,
     enable_chunked_prefill: bool = False,
     sla_percentile: bool = False,
-    sla_funnel: bool = False,
+    sla_refine: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     predictor: Any = None,
@@ -573,7 +573,7 @@ def sweep_agg(
                     ctx_stride=ctx_stride,
                     enable_chunked_prefill=enable_chunked_prefill,
                     sla_percentile=sla_percentile,
-                    sla_funnel=sla_funnel,
+                    sla_refine=sla_refine,
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
                     predictor=predictor,

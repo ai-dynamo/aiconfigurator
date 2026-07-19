@@ -676,7 +676,8 @@ def log_final_summary(
             exp_task.is_moe,
             exp_task.request_latency,
             ttft_percentile=(
-                getattr(exp_task, "ttft_percentile", 0.5)
+                # unset falls back to the evaluation-time default (p50)
+                (getattr(exp_task, "ttft_percentile", None) or 0.5)
                 if getattr(exp_task, "sla_percentile", False) is True
                 else None
             ),

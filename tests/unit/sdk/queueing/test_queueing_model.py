@@ -367,6 +367,22 @@ class TestSlaFunnel:
         assert rc.ttft_percentile == 0.5
         assert rc.itl_percentile == 0.99
 
+    def test_task_percentile_semantics_are_presence_activated(self):
+        """One rule for CLI and exp YAML: setting any percentile field (or
+        an itl target) activates percentile filtering; sla_refine is the
+        only explicit boolean and never changes elimination semantics."""
+        from aiconfigurator.sdk.task_v2 import Task
+
+        model = "Qwen/Qwen3-32B"  # resolved from the local model_configs cache
+        assert Task(model_path=model).sla_percentile is False
+        assert Task(model_path=model, ttft_percentile=0.99).sla_percentile is True
+        task = Task(model_path=model, itl=100.0)
+        assert task.sla_percentile is True
+        rc = task.build_runtime_config()
+        # unset percentiles fall back to evaluation-time defaults
+        assert rc.ttft_percentile == 0.5
+        assert rc.itl_percentile == 0.99
+
 
 class TestBracketAndE2E:
     def test_bracket_bounds_the_quantiles(self):
