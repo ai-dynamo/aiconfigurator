@@ -42,6 +42,11 @@ case failed
 ├─ Out of memory?                                   → treat as unclassified until it
 │    reproduces on a clean GPU; if real, the collector's generation-time memory
 │    filter may exclude it (see layer_permissions.md — the one sanctioned filter)
+├─ Crash inside framework code, framework suspected? → serving-parity audit FIRST
+│    (diff every collector-built metadata/input field against the serving
+│    population site for the failing shape — layer_permissions.md
+│    "Metadata/input parity"); a FIXME(kernel-limit) or framework-bug report
+│    is only legitimate after the audit finds no collector-side divergence
 └─ Proven collector-code bug?                       → fix the code; never fix via skip;
                                                       re-check the dispatch/skip rule
 ```

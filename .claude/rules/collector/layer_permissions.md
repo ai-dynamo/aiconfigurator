@@ -83,6 +83,37 @@ wrong data, which is worse than a crash.
    kernel is constructed, never WHICH kernel runs — version-divergent
    selection belongs in registry version forks.
 
+## Metadata/input parity: serving truth, never reconstruction
+
+The rule above covers WHICH kernel runs; this one covers WHAT state it
+receives. A collector that hand-builds framework metadata or input tensors
+(attention metadata fields, KV-cache params, position ids, workspace
+shapes) is replicating serving-internal state, and every replicated field
+is a contract that can silently drift. Origin: the SM100 DSA cached-KV IMA
+(2026-07-19) — one uncited `prompt_lens` semantics change (full length vs
+serving's chunk-local length, f027123f) crashed every prefix>0 DSA context
+case on B200 while staying invisible on H20, because only the SM100 kernel
+path consumes that field for dense-input walking.
+
+1. **Every hand-constructed metadata field / input tensor needs a serving
+   citation** (file:line at the pinned framework version) showing the
+   population site it mirrors — the same standard as pinned backends. A
+   metadata field changed without a citation is a review finding even when
+   the change makes cases pass.
+2. **Serving-parity audit before framework blame.** Before concluding a
+   crash is a framework bug — and before writing any FIXME(kernel-limit)
+   for it — diff EVERY collector-constructed field against the serving
+   population code (`model_engine._prepare_tp_inputs` and friends) for the
+   failing request shape, field by field. Kernel localization (traceback,
+   compute-sanitizer) tells you WHERE it faulted, never WHOSE contract was
+   violated; comparing which module function is routed to is not the audit.
+3. **Platform-green ≠ field-correct.** A pass on SM A validates only the
+   fields SM A's kernel path consumes. A failure exclusive to SM B should
+   FIRST suspect fields only SM B's path reads.
+4. **Version bumps re-verify the metadata contract**, not just kernel
+   dispatch: the upgrade audit re-checks every serving citation on
+   metadata/input construction against the new framework source.
+
 ## The one sanctioned in-collector filter: memory feasibility
 
 Device memory is a permanent hardware fact, but its expression needs
