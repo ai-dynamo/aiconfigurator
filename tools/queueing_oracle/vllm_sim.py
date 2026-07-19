@@ -662,8 +662,14 @@ class VllmSimCore:
             if completed:
                 req.status = Status.DONE
                 req.completed_ms = decode_end
-                req.free_all_blocks(self.kv)
                 self.running.remove(req)
+                if self.args.worker_type != "prefill":
+                    req.free_all_blocks(self.kv)
+                # prefill workers HOLD their KV blocks past completion: in
+                # the pull model the decode side reads the KV remotely, so
+                # the blocks stay resident until the transfer finishes —
+                # slow transfers therefore squeeze prefill admission. The
+                # disagg driver frees them when the handoff completes.
             emissions.append((req, completed))
         return decode_ms, emissions
 
@@ -814,17 +820,24 @@ class DisaggSimulator:
         self.pools[stage][wid].receive(req)
         self.stalled[stage][wid] = False
 
+    def _release_prefill_kv(self, src_wid: int, req: Request) -> None:
+        """Free the prefill-side KV once the decode side has pulled it, and
+        wake the worker: it may have stalled on block allocation."""
+        req.free_all_blocks(self.pools["prefill"][src_wid].kv)
+        self.stalled["prefill"][src_wid] = False
+
     def _handoff(self, src_wid: int, req: Request) -> None:
         """Start the KV handoff of `req` from prefill worker `src_wid`.
         The decode-side KV-connector jump re-registers the transferred KV,
         so computed resets here."""
         req.computed = 0
         if self.fabric is None:
+            self._release_prefill_kv(src_wid, req)  # zero-delay pull
             self._dispatch("decode", req)
             return
         dst = self._rr["decode"] % len(self.pools["decode"])
         self._rr["decode"] += 1
-        self.fabric.submit(src_wid, dst, req.isl * self._bytes_per_token, self.now, (dst, req))
+        self.fabric.submit(src_wid, dst, req.isl * self._bytes_per_token, self.now, (src_wid, dst, req))
 
     def run(self, requests: list[Request]) -> list[Request]:
         backlog = sorted(requests, key=lambda r: r.arrival_ms)
@@ -857,14 +870,18 @@ class DisaggSimulator:
                             self._handoff(wid, req)
                         else:
                             # decode-side completion, or osl == 1 finishing
-                            # on the prefill worker outright
+                            # on the prefill worker outright (nothing to
+                            # transfer -> release its KV here)
+                            if stage == "prefill":
+                                self._release_prefill_kv(wid, req)
                             completed += 1
                             if backlog:
                                 nxt = backlog.pop(0)
                                 nxt.dispatch_ms = self.now
                                 self._dispatch("prefill", nxt)
             if self.fabric is not None:
-                for _t_done, (dst, req) in self.fabric.pop_completed(self.now):
+                for _t_done, (src, dst, req) in self.fabric.pop_completed(self.now):
+                    self._release_prefill_kv(src, req)
                     self._dispatch_to("decode", dst, req)
                 t = self.fabric.next_completion_ms()
                 if t is not None:

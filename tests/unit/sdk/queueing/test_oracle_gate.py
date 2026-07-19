@@ -177,6 +177,38 @@ class TestDisaggFlow:
         ).run(solo)
         assert solo[0].token_times[1] - solo[0].token_times[0] < 1.5 * _SOLO_XFER_MS
 
+    def test_kv_hold_until_transfer_gates_prefill_admission(self, oracle):
+        """Pull-model KV hold: prefill-side blocks stay resident until the
+        decode side has pulled them, so slow transfers + tight prefill KV
+        squeeze prefill admission (the degradation mechanism); ample KV or
+        fast transfers do not."""
+        vs = oracle["vllm_sim"]
+        wl_mod = oracle["workload"]
+
+        def mean_steady_ttft(bw_bytes_per_s, num_blocks):
+            reqs = wl_mod.synthetic(request_count=12, isl=1024, osl=4, block_size=64)
+            spec = vs.TransferSpec(100_000, bw_bytes_per_s, bw_bytes_per_s, bw_efficiency=1.0)
+            vs.DisaggSimulator(
+                1,
+                1,
+                vs.EngineArgs(worker_type="prefill", num_gpu_blocks=num_blocks, block_size=64),
+                vs.EngineArgs(worker_type="decode"),
+                _perf(oracle),
+                concurrency=4,
+                transfer=spec,
+            ).run(reqs)
+            steady = sorted(reqs, key=lambda r: (r.dispatch_ms, r.rid))[8:]
+            return sum(r.token_times[0] - r.dispatch_ms for r in steady) / len(steady)
+
+        # ~17 blocks per prompt (16 full + 1 for the emitted token): 36
+        # blocks fit ~2 prompts, so held-by-transfer KV blocks the next wave
+        slow, fast = 1e9, 100e9  # 102.4 ms vs ~1 ms per solo transfer
+        tight_slow = mean_steady_ttft(slow, num_blocks=36)
+        tight_fast = mean_steady_ttft(fast, num_blocks=36)
+        ample_slow = mean_steady_ttft(slow, num_blocks=10_000)
+        assert tight_slow > tight_fast + 50.0  # admission gated by the pull
+        assert tight_slow > ample_slow + 50.0  # only when KV is tight
+
     def test_osl1_completes_on_the_prefill_worker(self, oracle):
         vs = oracle["vllm_sim"]
         reqs = oracle["workload"].synthetic(request_count=4, isl=512, osl=1, block_size=64)

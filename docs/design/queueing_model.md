@@ -187,6 +187,16 @@ the evaluator with plain prefill/decode callbacks); the recorded
 end-to-end figure above predates this delegation — re-measure at the next
 replay session.
 
+End-to-end (real perf DB, Llama-3.1-8B / h200_sxm / vLLM 0.24.0, disagg
+report upgrade): the tandem tier's first measurement of composed-tier
+optimism — a rate-matched 5P3D deployment at C=252 shows composed
+TTFT 183.8ms (single static prefill batch) vs tandem p50 1185.7ms
+(prefill-pool queueing dominates at deep closed-loop concurrency), while
+ITL stays a tight single mass (13.6ms, no prefill interference; the
+handoff carries 1/(osl-1) of the gap mass and is invisible at p99 for
+osl=256). Elimination semantics unchanged — the row's tier makes the
+precision class visible.
+
 Disagg (P/D tandem) families added 2026-07-19: the tandem recursion vs
 the DES `DisaggSimulator`, identical timing and transfer fabric on both
 sides, same-phase initial conditions. Four gated families (1P1D, fan-in
