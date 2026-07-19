@@ -56,14 +56,6 @@ logger = logging.getLogger(__name__)
 ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
 
 
-_DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
-
-# Families that natively ship MTP (nextn=1) -- used only as a fallback when the
-# checkpoint's HF config does NOT declare ``num_nextn_predict_layers`` at all.
-# A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
-_MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
-
-
 def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
     """Default prefill/agg ``cp_list`` for the CP auto-sweep; ``[1]`` otherwise.
 
@@ -361,8 +353,12 @@ class Task:
     enable_wideep: bool = False
     enable_chunked_prefill: bool = False
     enable_eplb: bool = False
-    nextn: int | None = None
-    nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
+    # MTP speculative decoding is OFF unless explicitly requested: nextn is the
+    # draft length (compute cost), nextn_accepted the average accepted draft tokens
+    # per step (generation benefit, 0 <= nextn_accepted <= nextn). nextn_accepted is
+    # required when nextn > 0 -- there is no built-in acceptance assumption.
+    nextn: int = 0
+    nextn_accepted: float | None = None
     moe_backend: str | None = None
     attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
@@ -658,24 +654,30 @@ class Task:
 
         text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(self._architecture)
         cfg = self._raw_config[text_key] if text_key and text_key in self._raw_config else self._raw_config
-        # ``None`` distinguishes "field absent" from an explicit 0 (e.g. Kimi-K2.5).
+        # MTP is never auto-enabled: nextn defaults to 0 and must be set
+        # explicitly. Surface a hint when the checkpoint ships MTP layers.
         hf_nextn = cfg.get("num_nextn_predict_layers")
-        if self.nextn is not None:
-            # User-supplied value wins. Warn when it diverges from the checkpoint --
-            # nextn can stack extra MTP layers beyond what the checkpoint ships, so
-            # an override is a deliberate choice worth surfacing.
+        if self.nextn > 0:
+            if self.nextn_accepted is None:
+                raise ValueError(
+                    f"nextn={self.nextn} requires 'nextn_accepted' (average accepted draft tokens per step, "
+                    f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
+                )
+            if not 0 <= self.nextn_accepted <= self.nextn:
+                raise ValueError(f"nextn_accepted ({self.nextn_accepted}) must be within [0, nextn={self.nextn}].")
             if hf_nextn is not None and self.nextn != hf_nextn:
                 logger.warning(
-                    "nextn=%d overrides the checkpoint's num_nextn_predict_layers=%d (stacking additional MTP layers).",
+                    "nextn=%d differs from the checkpoint's num_nextn_predict_layers=%d "
+                    "(the single MTP module is reused for extra draft steps).",
                     self.nextn,
                     hf_nextn,
                 )
-        elif hf_nextn is not None:
-            # Checkpoint declares it explicitly (including 0) -- respect it.
-            self.nextn = hf_nextn
-        else:
-            # Field absent -> fall back to family-based default inference.
-            self.nextn = 1 if self._model_family in _MTP_DEFAULT_FAMILIES else 0
+        elif hf_nextn:
+            logger.info(
+                "Checkpoint ships MTP (num_nextn_predict_layers=%d) but nextn is not set; "
+                "modeling WITHOUT speculative decoding. Pass nextn/nextn_accepted to model it.",
+                hf_nextn,
+            )
 
     def _resolve_backend_version(self) -> None:
         def _resolve(system: str, backend: str, current: str | None) -> str | None:
@@ -1084,8 +1086,8 @@ class Task:
             kvcache_quant_mode=self._role_attr(role, "kvcache_quant_mode"),
             fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
-            nextn=self.nextn or 0,
-            nextn_accept_rates=self.nextn_accept_rates,
+            nextn=self.nextn,
+            nextn_accepted=self.nextn_accepted,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
             # moe_backend / attention_backend / wideep_num_slots are shared across roles

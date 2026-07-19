@@ -333,18 +333,18 @@ def _add_default_mode_arguments(parser):
         "--nextn",
         type=int,
         default=0,
-        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. "
-        "When set > 0, enables speculative decoding in the configuration search. "
-        "Requires the model to support MTP. Default: 0 (disabled).",
+        help="MTP (Multi-Token Prediction) draft length. When set > 0, enables speculative "
+        "decoding in the configuration search (requires --nextn-accepted). Default: 0 (disabled); "
+        "MTP is never auto-enabled, even for models that ship MTP layers.",
     )
     parser.add_argument(
-        "--nextn-accept-rates",
-        type=str,
-        default="0.85,0.3,0,0,0",
-        help="Comma-separated acceptance rates for MTP draft tokens (5 values). "
-        "Each value is the acceptance probability of the i-th draft token; only the first "
-        "--nextn values are used. Example: '0.85,0.3,0,0,0' means the 1st draft token has "
-        "85%% acceptance, 2nd has 30%%, rest unused. Default: '0.85,0.3,0,0,0'.",
+        "--nextn-accepted",
+        type=float,
+        default=None,
+        help="Average accepted draft tokens per decode step (0 <= nextn_accepted <= nextn). "
+        "Required when --nextn > 0; there is no built-in acceptance assumption — "
+        "use a measured value from your deployment (e.g. the engine's reported "
+        "average acceptance length minus 1).",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -837,17 +837,17 @@ def _add_estimate_mode_arguments(parser):
         "--nextn",
         type=int,
         default=0,
-        help="(common) Number of MTP/speculative draft tokens. Default: 0 (disabled). "
-        "Applied to agg, disagg, and all static modes. "
-        "Note: unlike `cli default`, `cli estimate` does NOT auto-set nextn=1 for "
-        "DeepSeek/Qwen3.5 — pass --nextn 1 explicitly when you want MTP.",
+        help="(common) MTP draft length (compute cost side). Default: 0 (disabled); "
+        "MTP is never auto-enabled. Applied to agg, disagg, and all static modes. "
+        "Requires --nextn-accepted when > 0.",
     )
     parser.add_argument(
-        "--nextn-accept-rates",
-        type=str,
-        default="0.85,0.3,0,0,0",
-        help="(common) Comma-separated acceptance rates for the MTP draft tokens "
-        "(only the first --nextn are used). Default: '0.85,0.3,0,0,0'.",
+        "--nextn-accepted",
+        type=float,
+        default=None,
+        help="(common) Average accepted draft tokens per decode step "
+        "(0 <= nextn_accepted <= nextn). Required when --nextn > 0; there is no "
+        "built-in acceptance assumption — use a measured value from your deployment.",
     )
     parser.add_argument(
         "--stride",
@@ -1166,7 +1166,7 @@ def build_default_tasks(
     request_latency: float | None = None,
     prefix: int = 0,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -1191,8 +1191,9 @@ def build_default_tasks(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: Number of draft tokens for MTP speculative decoding.
-        nextn_accept_rates: Acceptance rates for MTP draft tokens.
+        nextn: MTP draft length. Default 0 (disabled); never auto-enabled.
+        nextn_accepted: Average accepted draft tokens per decode step
+            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
@@ -1203,7 +1204,6 @@ def build_default_tasks(
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
-    nextn_accept_rates = nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0]
     decode_system = decode_system or system
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -1319,7 +1319,7 @@ def build_default_tasks(
     }
     if nextn and nextn > 0:
         global_kwargs["nextn"] = nextn
-        global_kwargs["nextn_accept_rates"] = nextn_accept_rates
+        global_kwargs["nextn_accepted"] = nextn_accepted
 
     if image_height or image_width or (num_images and num_images != 1):
         global_kwargs["image_height"] = image_height
@@ -2003,15 +2003,11 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    # Parse nextn accept rates (string form on CLI -> list of floats for API).
-    nextn_accept_rates = None
-    if args.nextn_accept_rates:
-        try:
-            nextn_accept_rates = [float(x) for x in args.nextn_accept_rates.split(",") if x.strip() != ""]
-        except ValueError as exc:
-            raise SystemExit(
-                f"Invalid --nextn-accept-rates {args.nextn_accept_rates!r}; expected comma-separated floats."
-            ) from exc
+    if args.nextn > 0 and args.nextn_accepted is None:
+        raise SystemExit(
+            f"--nextn {args.nextn} requires --nextn-accepted (average accepted draft tokens per step, "
+            f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
+        )
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2052,7 +2048,7 @@ def _run_estimate_mode(args):
         engine_step_backend=args.engine_step_backend,
         prefix=args.prefix,
         nextn=args.nextn,
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=args.nextn_accepted,
         stride=args.stride,
     )
 
@@ -2121,7 +2117,7 @@ def _run_estimate_mode(args):
     if args.prefix:
         print(f"  Prefix:           {args.prefix}")
     if args.nextn:
-        print(f"  MTP nextn:        {args.nextn} (accept_rates={args.nextn_accept_rates})")
+        print(f"  MTP nextn:        {args.nextn} (nextn_accepted={args.nextn_accepted})")
 
     if result.mode == "disagg":
         raw = result.raw
@@ -2302,6 +2298,11 @@ def _validate_default_mode_inputs(args) -> None:
             + ", ".join(missing)
             + " unless --thorough-config provides a native Spica SmartSearchConfig."
         )
+    if args.nextn > 0 and args.nextn_accepted is None:
+        raise SystemExit(
+            f"--nextn {args.nextn} requires --nextn-accepted (average accepted draft tokens per step, "
+            f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
+        )
 
 
 def main(args):
@@ -2392,7 +2393,7 @@ def main(args):
             request_latency=args.request_latency,
             prefix=args.prefix,
             nextn=args.nextn,
-            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            nextn_accepted=args.nextn_accepted,
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,

@@ -78,11 +78,11 @@ def test_static_estimate_memory_capacity_context():
     assert seq_len_used == 2048 + 1 * 512  # isl + beam_width * osl
 
 
-def test_static_estimate_with_nextn_accept_rates_list():
-    """Passing nextn + accept rates as a Python list should not error."""
+def test_static_estimate_with_nextn_accepted():
+    """Passing nextn + nextn_accepted should not error."""
     kwargs = _common_kwargs()
     kwargs["nextn"] = 1
-    kwargs["nextn_accept_rates"] = [0.85, 0.3, 0.0, 0.0, 0.0]
+    kwargs["nextn_accepted"] = 0.85
     result = cli_estimate(mode="static", **kwargs)
     assert result.summary is not None
 
@@ -250,7 +250,7 @@ def test_agg_estimate_responds_to_common_nextn():
     with_mtp = cli_estimate(
         mode="agg",
         nextn=1,
-        nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        nextn_accepted=0.85,
         **_common_kwargs(),
     )
     # Some metric must change — MTP affects activation memory, generation
@@ -307,7 +307,7 @@ def test_disagg_estimate_responds_to_common_nextn():
     base = cli_estimate(nextn=0, **_disagg_kwargs())
     with_mtp = cli_estimate(
         nextn=1,
-        nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+        nextn_accepted=0.85,
         **_disagg_kwargs(),
     )
     assert (

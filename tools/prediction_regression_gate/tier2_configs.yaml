@@ -60,14 +60,18 @@ configs:
              decode_tp_size: 4, decode_batch_size: 64, decode_num_workers: 2}
 
   # --- speculative decoding acceptance math (MTP) ---
+  # nextn_accepted values reproduce the legacy default accept-rate curve
+  # ([0.85, 0.3, ...] chain-folded: nextn1 -> 0.85, nextn2 -> 1.105) so the
+  # old-vs-new comparison stays numerically continuous across the
+  # nextn_accept_rates -> nextn_accepted migration.
   - id: mtp_nextn1
     kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
              mode: agg, tp_size: 1, attention_dp_size: 8, moe_tp_size: 1, moe_ep_size: 8,
-             batch_size: 64, isl: 4096, osl: 1024, nextn: 1}
+             batch_size: 64, isl: 4096, osl: 1024, nextn: 1, nextn_accepted: 0.85}
   - id: mtp_nextn2
     kwargs: {model_path: deepseek-ai/DeepSeek-R1, system_name: b200_sxm, backend_name: trtllm,
              mode: agg, tp_size: 1, attention_dp_size: 8, moe_tp_size: 1, moe_ep_size: 8,
-             batch_size: 64, isl: 4096, osl: 1024, nextn: 2}
+             batch_size: 64, isl: 4096, osl: 1024, nextn: 2, nextn_accepted: 1.105}
 
   # --- prefix caching ---
   - id: prefix_cache

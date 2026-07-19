@@ -1316,7 +1316,9 @@ def _spica_generator_task(task: _SpicaTraceTask, row: pd.Series) -> argparse.Nam
         prefix=0,
         is_moe=task.is_moe,
         nextn=nextn,
-        nextn_accept_rates=[0.85, 0.8, 0.6, 0.0, 0.0],
+        # Spica trace rows don't carry the sweep's acceptance value; leave it
+        # unset (the generator does not consume it -- modeling-only).
+        nextn_accepted=None,
         serving_mode=str(row.get("deployment_mode") or task.serving_mode),
         total_gpus=_spica_first_int(row.get("total_gpus"), row.get("num_total_gpus"), task.total_gpus),
         system_name=task.primary_system_name,

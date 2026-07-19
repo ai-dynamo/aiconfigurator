@@ -644,7 +644,7 @@ def cli_estimate(
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     stride: int = 32,
     # AFD-specific parameters (ignored when mode != 'afd')
     n_a_nodes: int | None = None,
@@ -728,15 +728,10 @@ def cli_estimate(
         engine_step_backend: Experimental static latency backend ("python" or "rust").
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
-        nextn: (common) Number of MTP/speculative draft tokens. Applied to
-            agg, disagg, and all static modes. Default 0 (disabled).
-            **Note:** unlike :func:`cli_default`, this entrypoint does **not**
-            auto-set ``nextn=1`` for DeepSeek/Qwen3.5 models — pass
-            ``nextn=1`` explicitly when you want MTP to mirror the default-mode
-            behavior.
-        nextn_accept_rates: (common) Acceptance rates for the MTP draft tokens
-            (only the first ``nextn`` entries are used).
-            Default ``[0.85, 0.3, 0, 0, 0]``.
+        nextn: (common) MTP draft length. Applied to agg, disagg, and all
+            static modes. Default 0 (disabled); MTP is never auto-enabled.
+        nextn_accepted: (common) Average accepted draft tokens per decode step
+            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
         stride: (static-only) Stride used by ``run_static`` to accelerate the
             OSL sweep. Ignored by agg / disagg. Default 32.
         n_a_nodes: (afd-only) Number of A-Worker (attention) nodes. Required
@@ -871,7 +866,7 @@ def cli_estimate(
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             stride=stride,
             engine_step_backend=engine_step_backend,
             load_database=_load_database,
@@ -911,7 +906,7 @@ def cli_estimate(
             engine_step_backend=engine_step_backend,
             prefix=prefix,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
         )
     elif mode == "disagg":
         prefill_resolved_version = _resolve_version_for(system_name)
@@ -975,7 +970,7 @@ def cli_estimate(
             engine_step_backend=engine_step_backend,
             prefix=prefix,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
         )
     elif mode == "afd":
         for name, val in [
@@ -1031,7 +1026,7 @@ def cli_estimate(
             max_seq_len=max_seq_len,
             prefix=prefix,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
         )
         # ``phase == "both"`` covers prefill+decode inside AFD; no static
         # complement is needed. When ``combined_with_pd`` is False the
@@ -1067,7 +1062,7 @@ def cli_estimate(
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             stride=stride,
             engine_step_backend=engine_step_backend,
             load_database=_load_database,
@@ -1123,7 +1118,7 @@ def _run_agg_estimate(
     # Common (also accepted by disagg / static)
     prefix: int = 0,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
 ) -> EstimateResult:
     """Run aggregated (IFB) estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1145,7 +1140,7 @@ def _run_agg_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
-    _apply_nextn(model_config, nextn, nextn_accept_rates)
+    _apply_nextn(model_config, nextn, nextn_accepted)
     # Agg workers run context attention → resolve fmha against the perf data
     # before building the model (mirrors the sweep/task_v2 path).
     resolve_context_fmha_by_data(
@@ -1243,7 +1238,7 @@ def _run_static_estimate(
     moe_quant_mode,
     comm_quant_mode,
     nextn,
-    nextn_accept_rates,
+    nextn_accepted,
     stride,
     engine_step_backend,
     load_database,
@@ -1279,7 +1274,7 @@ def _run_static_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
-    _apply_nextn(model_config, nextn, nextn_accept_rates)
+    _apply_nextn(model_config, nextn, nextn_accepted)
     # static / static_ctx run context attention; static_gen is generation-only
     # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
     resolve_context_fmha_by_data(
@@ -1386,7 +1381,7 @@ def _run_disagg_estimate(
     # Common (also accepted by agg / static)
     prefix: int = 0,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
 ) -> EstimateResult:
     """Run disaggregated estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1434,8 +1429,8 @@ def _run_disagg_estimate(
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
-    _apply_nextn(prefill_model_config, nextn, nextn_accept_rates)
-    _apply_nextn(decode_model_config, nextn, nextn_accept_rates)
+    _apply_nextn(prefill_model_config, nextn, nextn_accepted)
+    _apply_nextn(decode_model_config, nextn, nextn_accepted)
     # Prefill runs context attention → resolve fmha against the perf data. Decode
     # is generation-only and keeps fp8, so it needs no adjustment.
     resolve_context_fmha_by_data(
@@ -1655,7 +1650,7 @@ def _run_afd_estimate(
     max_seq_len,
     prefix: int = 0,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
 ) -> EstimateResult:
     """Run AFD (Attention-FFN Disaggregated) estimation.
 
@@ -1724,8 +1719,8 @@ def _run_afd_estimate(
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
     # MTP transfer amplification once the serving semantics are finalized.
-    _apply_nextn(a_model_config, nextn, nextn_accept_rates)
-    _apply_nextn(f_model_config, nextn, nextn_accept_rates)
+    _apply_nextn(a_model_config, nextn, nextn_accepted)
+    _apply_nextn(f_model_config, nextn, nextn_accepted)
     # The A-worker runs context attention whenever the phase covers prefill
     # ("prefill" or "both"); resolve fmha against the perf data then. The
     # F-worker is FFN/MoE only and never touches FMHA. The decode-phase static

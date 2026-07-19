@@ -182,7 +182,7 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
 
     def _fake_get_model(model_path, model_config, backend):
         captured["nextn"] = model_config.nextn
-        captured["rates"] = model_config.nextn_accept_rates
+        captured["nextn_accepted"] = model_config.nextn_accepted
 
         class _StubModel:
             def get_kvcache_bytes_per_sequence(self, seq_len):
@@ -217,11 +217,11 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
         max_num_tokens=8192,
         max_batch_size=256,
         nextn=2,
+        nextn_accepted=1.1,
         systems_path="/tmp/aic-core-systems",
     )
     assert captured["nextn"] == 2
-    # No explicit rates -> the project-wide MTP default is applied.
-    assert captured["rates"] == [0.85, 0.3, 0.0, 0.0, 0.0]
+    assert captured["nextn_accepted"] == 1.1
     assert captured["systems_paths"] == "/tmp/aic-core-systems"
 
 

@@ -5,10 +5,9 @@
 Unit tests for MTP (Multi-Token Prediction) speculative decoding scaling.
 
 Tests that verify:
-1. context_p2p is NOT scaled by mtp_scale_factor (bug fix verification)
-2. generation_p2p IS scaled by mtp_scale_factor
-3. MTP scale factor calculation for non-DeepSeek models
-4. Qwen3.5 MTP support (hybrid GDN + full_attention architecture)
+1. the mtp_scale_factor helper (formula + nextn/nextn_accepted validation)
+2. generation ops ARE scaled by mtp_scale_factor while context ops are NOT
+   (context_p2p bug-fix regression), incl. the Qwen3.5 hybrid GDN arch
 """
 
 import pytest
@@ -23,112 +22,41 @@ pytestmark = pytest.mark.unit
 class TestMTPScaling:
     """Tests for MTP speculative decoding scaling behavior."""
 
-    def _create_model_config(self, nextn=0):
+    def _create_model_config(self, nextn=0, nextn_accepted=None):
         """Helper to create a ModelConfig for testing."""
+        if nextn_accepted is None and nextn > 0:
+            nextn_accepted = 0.5 * nextn
         return sdk_config.ModelConfig(
             tp_size=1,
             pp_size=1,
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             nextn=nextn,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=nextn_accepted,
         )
-
-    def test_mtp_scale_factor_with_nextn_zero(self):
-        """
-        Test that mtp_scale_factor is 1.0 when nextn=0 (MTP disabled).
-
-        Backward compatibility: nextn=0 should produce identical results as before.
-        """
-        model_config_zero = self._create_model_config(nextn=0)
-        model_zero = models.get_model("Qwen/Qwen3-32B", model_config_zero, "trtllm")
-
-        # When nextn=0, mtp_scale_factor should be 1.0 (no scaling)
-        assert model_zero._mtp_scale_factor == 1.0, "mtp_scale_factor should be 1.0 when nextn=0"
 
     def test_mtp_scale_factor_calculation(self):
         """
-        Test that mtp_scale_factor is calculated correctly.
+        Test the mtp_scale_factor helper.
 
-        Formula: (1.0 / (1 + calc_expectation(nextn, accept_rates))) * (nextn + num_layers) / num_layers
+        Formula: (nextn + num_layers) / num_layers / (1 + nextn_accepted)
         """
-        from aiconfigurator.sdk.models import calc_expectation
+        from aiconfigurator.sdk.models import mtp_scale_factor
 
-        # Test calc_expectation function
-        # With accept_rates [0.85, 0.3, 0, 0, 0]:
-        # - nextn=0: expectation = 0.0
-        # - nextn=1: expectation = 0.85 (1st token only)
-        # - nextn=2: expectation = 0.85 + 0.85*0.3 = 0.85 + 0.255 = 1.105
-        assert calc_expectation(0, [0.85, 0.3, 0.0, 0.0, 0.0]) == 0.0
-        assert calc_expectation(1, [0.85, 0.3, 0.0, 0.0, 0.0]) == 0.85
+        assert mtp_scale_factor(0, None, 64) == 1.0
+        assert mtp_scale_factor(1, 0.85, 64) == pytest.approx((1 + 64) / 64 / 1.85)
+        assert mtp_scale_factor(3, 2.0, 61) == pytest.approx((3 + 61) / 61 / 3.0)
 
-    def test_llama_model_supports_mtp(self):
-        """
-        Test that LLAMAModel supports MTP (does not assert nextn==0).
-        """
-        # Should not raise any assertion error
-        model_config = self._create_model_config(nextn=3)
-        model = models.get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+    def test_mtp_scale_factor_validation(self):
+        """nextn_accepted is required when nextn > 0, and must lie in [0, nextn]."""
+        from aiconfigurator.sdk.models import mtp_scale_factor
 
-        # Verify model was created successfully with nextn > 0
-        assert model is not None
-        assert model.config.nextn == 3
-        assert hasattr(model, "_mtp_scale_factor")
-
-    def test_moe_model_supports_mtp(self):
-        """
-        Test that MOEModel supports MTP (does not assert nextn==0).
-        """
-        try:
-            # Create a minimal MOE model config with required fields
-            model_config = sdk_config.ModelConfig(
-                tp_size=2,
-                pp_size=1,
-                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-                nextn=2,
-                nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
-                moe_tp_size=2,
-                moe_ep_size=1,
-                attention_dp_size=1,
-            )
-            # Use a known MOE model or skip if not available
-            model = models.get_model("Qwen/Qwen3-30B-A3B", model_config, "trtllm")
-
-            # Verify model was created successfully with nextn > 0
-            assert model is not None
-            assert model.config.nextn == 2
-            assert hasattr(model, "_mtp_scale_factor")
-        except (FileNotFoundError, KeyError, ValueError, TypeError, HuggingFaceDownloadError) as e:
-            # Model config file not found or missing required keys
-            pytest.skip(f"MOE model test skipped due to missing config: {e}")
-
-    def test_mtp_scale_factor_exists_for_all_models(self):
-        """
-        Test that all models have _mtp_scale_factor attribute.
-        """
-        # LLAMA model
-        llama_config = self._create_model_config(nextn=0)
-        llama_model = models.get_model("Qwen/Qwen3-32B", llama_config, "trtllm")
-        assert hasattr(llama_model, "_mtp_scale_factor")
-
-        # DeepSeek model (if available) - requires moe config
-        try:
-            deepseek_config = sdk_config.ModelConfig(
-                tp_size=2,
-                pp_size=1,
-                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-                nextn=1,
-                nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
-                moe_tp_size=2,
-                moe_ep_size=1,
-                attention_dp_size=1,
-            )
-            deepseek_model = models.get_model("deepseek-ai/DeepSeek-V3", deepseek_config, "trtllm")
-            assert hasattr(deepseek_model, "_mtp_scale_factor")
-        except (FileNotFoundError, KeyError, ValueError, TypeError):
-            pass  # DeepSeek model config might not be available
+        with pytest.raises(ValueError, match="required"):
+            mtp_scale_factor(2, None, 64)
+        with pytest.raises(ValueError, match="within"):
+            mtp_scale_factor(2, 2.5, 64)
+        with pytest.raises(ValueError, match="within"):
+            mtp_scale_factor(2, -0.1, 64)
 
     def test_generation_ops_scaled_by_mtp(self):
         """
@@ -198,21 +126,6 @@ class TestMTPScaling:
         assert ctx_op_zero._scale_factor == ctx_op_mtp._scale_factor, (
             "Context ops should NOT be scaled by mtp_scale_factor"
         )
-
-    def test_qwen35_model_supports_mtp(self):
-        """
-        Test that Qwen35Model accepts nextn > 0 without assertion error.
-        """
-        try:
-            model_config = self._create_model_config(nextn=1)
-            model = models.get_model("Qwen/Qwen3.5-27B", model_config, "trtllm")
-
-            assert model is not None
-            assert model.config.nextn == 1
-            assert hasattr(model, "_mtp_scale_factor")
-            assert model._mtp_scale_factor != 1.0, "mtp_scale_factor should differ from 1.0 when nextn > 0"
-        except (FileNotFoundError, KeyError, ValueError, TypeError, HuggingFaceDownloadError) as e:
-            pytest.skip(f"Qwen3.5 model test skipped due to missing config: {e}")
 
     def test_qwen35_generation_ops_scaled_by_mtp(self):
         """

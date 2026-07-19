@@ -603,7 +603,7 @@ mod tests {
             },
             speculative: nextn.map(|n| crate::SpeculativeConfig {
                 nextn: Some(n),
-                nextn_accept_rates: None,
+                nextn_accepted: None,
             }),
             perf_db_sources: Default::default(),
             extra: BTreeMap::new(),

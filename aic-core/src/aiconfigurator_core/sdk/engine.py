@@ -646,7 +646,7 @@ def _engine_config_dict(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accept_rates: list[float] | None,
+    nextn_accepted: float | None,
     database: Any = None,
 ) -> dict:
     """Build the ``EngineConfig`` JSON (matches the Rust modularised struct).
@@ -664,7 +664,7 @@ def _engine_config_dict(
     if effective_nextn:
         speculative = {
             "nextn": effective_nextn,
-            "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
+            "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
         }
     # The Rust ``EngineConfig`` flattens ``parallel`` / ``quantization`` /
     # ``speculative`` via ``#[serde(flatten)]``, so their fields live at the
@@ -695,12 +695,12 @@ def _engine_config_dict(
         "perf_db_sources": _compute_perf_db_sources(database),
         "extra": {},
     }
-    # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
+    # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accepted at
     # the top level when MTP is active. When inactive, omit both keys so the
     # flattened Option deserializes to None.
     if speculative is not None:
         engine["nextn"] = speculative["nextn"]
-        engine["nextn_accept_rates"] = speculative["nextn_accept_rates"]
+        engine["nextn_accepted"] = speculative["nextn_accepted"]
     return engine
 
 
@@ -730,7 +730,7 @@ def compile_engine(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
 ) -> bytes:
@@ -774,7 +774,7 @@ def compile_engine(
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=nextn,
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=nextn_accepted,
         database=database,
     )
 
@@ -791,7 +791,7 @@ def build_engine_spec_json(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accept_rates: list[float] | None,
+    nextn_accepted: float | None,
     database: Any = None,
 ) -> str:
     """Walk a built model's op lists into an ``EngineSpec`` JSON string.
@@ -830,7 +830,7 @@ def build_engine_spec_json(
             kv_block_size=kv_block_size,
             systems_path=systems_path,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             database=database,
         ),
         "context_ops": context_ops,

@@ -262,7 +262,7 @@ class KVCacheEstimator:
         fmha_quant_mode: str | None = None,
         comm_quant_mode: str | None = None,
         nextn: int = 0,
-        nextn_accept_rates: list[float] | None = None,
+        nextn_accepted: float | None = None,
         systems_path: str | None = None,
     ) -> KVCacheEstimator:
         """Build the model/backend/perf-DB and the non-KV memory breakdown.
@@ -302,7 +302,7 @@ class KVCacheEstimator:
         # spec-decode aware (e.g. for any draft-module weights). This does NOT scale
         # the capacity activation by (nextn+1); that multiplier is suppressed below
         # (see mtp_activation_scaling). Mirrors the agg/disagg/static estimate paths.
-        apply_nextn(model_config, nextn, nextn_accept_rates)
+        apply_nextn(model_config, nextn, nextn_accepted)
         model = get_model(model_path, model_config, backend)
         backend_obj = get_backend(backend)
         database = perf_database.get_database(system, backend, backend_version, systems_paths=systems_path)
@@ -855,7 +855,7 @@ def estimate_kv_cache(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     systems_path: str | None = None,
     gpu_memory_capacity_bytes_override: int | None = None,
     tolerance_fraction: float | None = None,
@@ -932,7 +932,7 @@ def estimate_kv_cache(
             fmha_quant_mode=fmha_quant_mode,
             comm_quant_mode=comm_quant_mode,
             nextn=int(nextn),
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             systems_path=systems_path,
         )
     except Exception as exc:  # native model build unsupported (model/backend/perf DB)
@@ -990,7 +990,7 @@ def estimate_num_gpu_blocks(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     systems_path: str | None = None,
     gpu_memory_capacity_bytes_override: int | None = None,
     tolerance_fraction: float | None = None,
@@ -1045,7 +1045,7 @@ def estimate_num_gpu_blocks(
         fmha_quant_mode=fmha_quant_mode,
         comm_quant_mode=comm_quant_mode,
         nextn=int(nextn),
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=nextn_accepted,
         systems_path=systems_path,
         gpu_memory_capacity_bytes_override=gpu_memory_capacity_bytes_override,
         tolerance_fraction=tolerance_fraction,

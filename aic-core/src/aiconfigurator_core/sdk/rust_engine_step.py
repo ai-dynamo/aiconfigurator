@@ -387,7 +387,7 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
         kv_block_size=None,
         systems_path=systems_path,
         nextn=int(nextn) if nextn is not None else 0,
-        nextn_accept_rates=getattr(model, "_nextn_accept_rates", None),
+        nextn_accepted=getattr(model, "_nextn_accepted", None),
         database=database,
     )
     spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
@@ -398,14 +398,14 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
 
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
-    # Forward MTP speculative-decoding params so the Rust DeepSeek-family +
-    # Qwen3.5 model builders can compute the same `_mtp_scale_factor` Python
-    # applies (`sdk/models/base.py:105-110`). Python sets `nextn=1` for
-    # DeepSeek/DSv32/DSv4/Kimi-K2.5/Qwen3.5 by default (`sdk/task.py:448-449`)
-    # and stores it on the model object via `BaseModel._nextn`. Rust treats
-    # `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
+    # Forward MTP speculative-decoding params (`nextn` draft length, `nextn_accepted`
+    # average accepted draft tokens per step) so the Rust model builders can
+    # compute the same `_mtp_scale_factor` Python applies. MTP is never
+    # auto-enabled; both values come from the user's explicit config and are
+    # stored on the model object via `BaseModel._nextn` / `_nextn_accepted`. Rust
+    # treats `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
     nextn = getattr(model, "_nextn", None)
-    nextn_accept_rates = getattr(model, "_nextn_accept_rates", None)
+    nextn_accepted = getattr(model, "_nextn_accepted", None)
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
@@ -426,7 +426,7 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
-        "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
+        "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))

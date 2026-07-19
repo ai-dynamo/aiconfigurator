@@ -145,6 +145,7 @@ def test_from_yaml_flat_agg():
         "ttft": 1000.0,
         "tpot": 40.0,
         "nextn": 1,
+        "nextn_accepted": 0.85,
         "gemm_quant_mode": "fp8_block",
         "kvcache_quant_mode": "bfloat16",
         "agg_num_gpu_candidates": [4, 8],
@@ -598,21 +599,46 @@ def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
     assert any("context_mla_granular" in r.message for r in caplog.records)
 
 
-def test_nextn_default_respects_hf_then_family_fallback():
-    """nextn: HF num_nextn_predict_layers wins (incl. explicit 0, e.g. Kimi-K2.5);
-    field absent -> family-based fallback (Qwen3.5 -> 1, DeepSeek -> 1).
-    """
+def test_nextn_never_auto_enabled(caplog):
+    """MTP is never auto-enabled: nextn stays 0 even for checkpoints that ship
+    MTP layers; a hint log surfaces the unused capability."""
+    import logging
 
     def mk(mp):
         return Task(serving_mode="agg", model_path=mp, system_name="h200_sxm", backend_name="trtllm").nextn
 
-    assert mk("deepseek-ai/DeepSeek-V3") == 1  # HF declares 1
-    assert mk("moonshotai/Kimi-K2.5") == 0  # HF declares 0 -- respected, not forced to 1
-    assert mk("Qwen/Qwen3.5-27B") == 1  # HF field absent -> family fallback
+    with caplog.at_level(logging.INFO, logger="aiconfigurator.sdk.task_v2"):
+        assert mk("deepseek-ai/DeepSeek-V3") == 0  # HF declares 1 -- still off by default
+        assert mk("moonshotai/Kimi-K2.5") == 0
+        assert mk("Qwen/Qwen3.5-27B") == 0
+    assert any("ships MTP" in r.message for r in caplog.records)
+
+
+def test_nextn_requires_nextn_accepted():
+    """nextn > 0 without nextn_accepted is a hard error -- no built-in acceptance assumption."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=1.5,
+        )
 
 
 def test_nextn_explicit_override_warns(caplog):
-    """An explicit nextn diverging from the checkpoint warns (MTP layer stacking)."""
+    """An explicit nextn diverging from the checkpoint warns (MTP module reuse)."""
     import logging
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
@@ -622,9 +648,11 @@ def test_nextn_explicit_override_warns(caplog):
             system_name="h200_sxm",
             backend_name="trtllm",
             nextn=3,
+            nextn_accepted=1.8,
         )
     assert t.nextn == 3
-    assert any("overrides" in r.message for r in caplog.records)
+    assert t.nextn_accepted == 1.8
+    assert any("differs from" in r.message for r in caplog.records)
 
 
 def test_moe_backend_flows_into_model_config():

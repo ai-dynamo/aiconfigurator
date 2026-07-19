@@ -49,16 +49,21 @@ def build_model_config(
 def apply_nextn(
     model_config: ModelConfig,
     nextn: int | None,
-    nextn_accept_rates: list[float] | None,
+    nextn_accepted: float | None,
 ) -> None:
-    """Apply common ``nextn`` / ``nextn_accept_rates`` overrides onto a ModelConfig.
+    """Apply MTP speculative-decoding overrides onto a ModelConfig.
 
-    Mirrors the static-mode path so agg / disagg / static all respond to the
-    same CLI flags. When ``nextn>0`` and no explicit accept rates are given,
-    fall back to the project-wide default ``[0.85, 0.3, 0, 0, 0]``.
+    ``nextn`` is the draft length, ``nextn_accepted`` the average accepted draft
+    tokens per step. ``nextn_accepted`` is required when ``nextn > 0`` -- there is
+    no built-in acceptance assumption.
     """
     model_config.nextn = int(nextn or 0)
-    if nextn_accept_rates is not None:
-        model_config.nextn_accept_rates = list(nextn_accept_rates)
-    elif model_config.nextn > 0:
-        model_config.nextn_accept_rates = [0.85, 0.3, 0.0, 0.0, 0.0]
+    if model_config.nextn > 0:
+        if nextn_accepted is None:
+            raise ValueError(
+                f"nextn={model_config.nextn} requires 'nextn_accepted' (average accepted draft tokens "
+                f"per step, 0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
+            )
+        if not 0 <= nextn_accepted <= model_config.nextn:
+            raise ValueError(f"nextn_accepted ({nextn_accepted}) must be within [0, nextn={model_config.nextn}].")
+        model_config.nextn_accepted = float(nextn_accepted)
