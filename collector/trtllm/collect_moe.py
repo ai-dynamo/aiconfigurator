@@ -27,6 +27,7 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
+from tensorrt_llm._utils import is_sm_100f
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
@@ -271,10 +272,12 @@ def get_moe_test_cases():
             ):
                 continue
 
-            # Blackwell DeepGEMM fp8_block has an additional TP-shard alignment requirement.
-            # Skip shapes that are known to trigger layout assert:
+            # SM100/103 DeepGEMM fp8_block has an additional TP-shard alignment
+            # requirement. Skip shapes that are known to trigger layout assert:
             #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
-            if moe_type == "fp8_block" and sm_version >= 100 and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
+            # (SM120 fp8_block runs CUTLASS — the DeepGEMM constraint does not apply.)
+            fp8_block_deepgemm = moe_type == "fp8_block" and is_sm_100f(sm_version)
+            if fp8_block_deepgemm and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
                 continue
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
@@ -473,25 +476,39 @@ def run_moe_torch(
         if 86 < get_sm_version() < 100:
             # Hopper: use triton backend for best performance
             model_config.moe_backend = "triton"
-        elif get_sm_version() >= 100:
-            # Blackwell: production uses TRTLLMGenFusedMoE (Bf16MxE2m1BlockScaleMoeRunner)
+        elif 100 <= get_sm_version() < 120:
+            # Datacenter Blackwell: production uses TRTLLMGenFusedMoE
+            # (Bf16MxE2m1BlockScaleMoeRunner)
             model_config.moe_backend = "trtllm"
         else:
+            # SM120 and below-Hopper: serving's AUTO resolution routes GptOss
+            # to CUTLASS (resolve_moe_backend, model_config.py:329-335
+            # @1.3.0rc20: TRTLLM only for 100<=sm<120; TRTLLMGenFusedMoE
+            # itself rejects SM120+). Hardware-observed on RTX PRO 6000
+            # 2026-07-19: the trtllm pin fails "does not support SM120".
             model_config.moe_backend = "cutlass"
     else:
         # Select backend based on platform and quant mode.
         if min_latency_mode:
             model_config.moe_backend = "trtllm"
-        elif moe_type in _MXFP4_MOE_TYPES and sm_version >= 100:
-            # Blackwell MXFP4 MoE is implemented by TRTLLMGenFusedMoE; CUTLASS
-            # rejects WFP4A16 on SM100.
+        elif moe_type in _MXFP4_MOE_TYPES and 100 <= sm_version < 120:
+            # Datacenter Blackwell MXFP4 MoE is implemented by
+            # TRTLLMGenFusedMoE; CUTLASS rejects WFP4A16 on SM100. On SM120
+            # TRTLLMGenFusedMoE refuses ("does not support SM120 and above")
+            # and serving AUTO falls through to CUTLASS
+            # (resolve_moe_backend, model_config.py:345@1.3.0rc20).
             model_config.moe_backend = "trtllm"
         elif moe_type == "fp8_block":
-            if sm_version >= 100:
-                # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
+            if is_sm_100f(sm_version):
+                # SM100/103: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
                 model_config.moe_backend = "deepgemm"
             else:
-                # Hopper: CUTLASS uses FP32 scale.
+                # Hopper AND SM120: CUTLASS with FP32 scale — serving AUTO
+                # resolves fp8_block to TRTLLM only when is_sm_100f
+                # (resolve_moe_backend, model_config.py:339-343@1.3.0rc20),
+                # everything else lands on CUTLASS; DeepGEMM has no SM120
+                # grouped-GEMM recipe (layout.hpp:76 "Unknown recipe",
+                # hardware-observed 2026-07-19).
                 model_config.moe_backend = "cutlass"
         else:
             model_config.moe_backend = "cutlass"
@@ -542,12 +559,13 @@ def run_moe_torch(
     moe = create_moe(**create_moe_kwargs)
     moe.to(torch.device(device))
 
-    # SM100 (Blackwell) DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
+    # SM100/103 DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
     # but create_moe() initializes them as float32. TRT-LLM's post_load_weights()
     # normally handles this conversion after loading real weights, but AIC uses
     # random weights without calling load_weights() for fp8_block. We must do
     # the conversion here to avoid cudaErrorIllegalAddress from TMA OOB access.
-    if moe_type == "fp8_block" and sm_version >= 100:
+    # (SM120 takes the CUTLASS backend with FP32 scales — no transform.)
+    if moe_type == "fp8_block" and is_sm_100f(sm_version):
         from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
 
         moe_backend = getattr(moe, "backend", moe)
@@ -765,7 +783,7 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        if moe_type == "fp8_block" and sm_version >= 100:
+        if moe_type == "fp8_block" and is_sm_100f(sm_version):
             source = "deepgemm"
         elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
