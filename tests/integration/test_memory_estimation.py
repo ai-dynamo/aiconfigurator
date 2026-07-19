@@ -243,7 +243,7 @@ def test_eagle_prefill_kv_budget_nonnegative_kimi_gb200(nextn):
     """
     try:
         baseline = memory.estimate_kv_cache(**_EAGLE_PREFILL_CASE, nextn=0)
-        est = memory.estimate_kv_cache(**_EAGLE_PREFILL_CASE, nextn=nextn)
+        est = memory.estimate_kv_cache(**_EAGLE_PREFILL_CASE, nextn=nextn, nextn_accepted=0.85)
     except ValueError as exc:
         # A genuinely-missing perf DB / model soft-skips; the "no KV budget" regression
         # (any other ValueError) is re-raised by the helper and fails the test.

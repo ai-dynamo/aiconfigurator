@@ -180,6 +180,18 @@ parameters:
   sglang: speculative-num-steps
   trtllm: null
 
+# SGLang requires the full (num-steps, eagle-topk, num-draft-tokens) triple when
+# num-steps is set explicitly (auto-derivation only runs when it is None).
+- param_key: speculative_eagle_topk
+  vllm: null
+  sglang: speculative-eagle-topk
+  trtllm: null
+
+- param_key: speculative_num_draft_tokens
+  vllm: null
+  sglang: speculative-num-draft-tokens
+  trtllm: null
+
 # Others
 - param_key: disable_overlap_scheduler
   vllm: null
