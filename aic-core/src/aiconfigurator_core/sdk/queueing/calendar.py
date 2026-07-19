@@ -251,6 +251,7 @@ def evaluate_closed_loop(
     backend: str = "vllm",
     warmup_generations: int = 4,
     window_generations: int = 4,
+    ttft_anchor: str = "none",
 ) -> QueueingReport:
     """Run the pass-calendar recursion for a closed-loop workload.
 
@@ -258,6 +259,14 @@ def evaluate_closed_loop(
     arrivals produces the transient admission staircase; after
     `warmup_generations` request generations (staircase + cohort echo
     decay) the limit cycle is sampled for `window_generations`.
+
+    ttft_anchor: "none" (default) reports the recursion's own steady TTFT —
+    exact for the idealized zero-turnaround client the DES oracle models.
+    "identity" relocates the steady TTFT distribution onto the Little's-law
+    accounting identity E[TTFT] = C/X - (osl-1)E[TPOT] - turnaround (shape
+    from the calendar, location from the identity) — the phase-robust
+    estimate for real closed-loop clients, whose measured steady TTFT is
+    invariant to client turnaround (see design doc §6.16).
     """
     if wl.concurrency is None:
         raise ValueError("evaluate_closed_loop requires a closed-loop workload")
@@ -357,6 +366,30 @@ def evaluate_closed_loop(
 
     window_ms = now - (steady_start_ms if steady_start_ms is not None else 0.0)
     throughput = steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
+
+    if ttft_anchor == "identity" and throughput > 0 and ttft_steady.values:
+        # Little's-law anchor for the saturated closed loop. Each of the C
+        # slots cycles through (TTFT + (osl-1) ITL gaps + client turnaround),
+        # so cycle time == C / X exactly, and the steady TTFT MEAN is the
+        # accounting identity
+        #     E[TTFT] = C/X - (osl-1) * E[TPOT] - turnaround
+        # -- independent of arrival phase. The deterministic recursion locks
+        # arrivals to one phase of the pass structure; the phase choice only
+        # REDISTRIBUTES time between TTFT and TPOT under this identity (it
+        # cannot change their sum), and real engines with ms-scale timing
+        # jitter do not stay on any single phase (measured: adding +15 ms of
+        # client turnaround on a live vLLM 0.24 server moved steady TTFT p50
+        # by 0.1 ms). So the calendar contributes the distribution SHAPE and
+        # the identity pins its location; no client-side parameter survives.
+        identity_mean = (
+            wl.concurrency / throughput * 1000.0
+            - max(0, wl.osl - 1) * tpot.mean
+            - wl.turnaround_ms
+        )
+        if identity_mean > 0:
+            delta = identity_mean - ttft_steady.mean
+            ttft_steady = ttft_steady.shifted(delta)
+            e2e = e2e.shifted(delta) if e2e.values else e2e
 
     return QueueingReport(
         ttft_steady=ttft_steady,

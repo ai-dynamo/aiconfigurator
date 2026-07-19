@@ -38,8 +38,9 @@ One model, two precision tiers:
 | transient window = initial concurrency burst | closed-loop dispatch semantics (all C arrive at t=0) |
 | ITL gap weights `(c−1)/c` for mix passes | a mix pass stalls only the requests not being prefilled in it |
 | `isl_eff = isl − prefix` in chunk counts | the scheduler budgets only tokens that still need compute, so cached tokens never consume the token budget — also what keeps the funnel bracket a valid bound on the evaluator's distribution for prefix rows |
-| `WorkloadSpec.turnaround_ms` arrival-visibility delay | client/frontend per-request turnaround (HTTP → tokenize → IPC → waiting queue). At 0 a closed-loop replacement lands exactly on the pass boundary and always catches the next pass — a knife edge real deployments never hit; any ε > 0 makes arrivals wait out the pass in flight and cohorts clump. Timing-layer quantity: MEASURED (e.g. c=1 TTFT minus perf-DB prefill), never fitted to loaded-TTFT results. Validated on b300/vllm-0.24 (Qwen3-32B TP4, isl4096/osl256): ε≈16 ms moves evaluator TTFT p50 @C=32 from 178 → 508 ms vs 503 ms measured (sync scheduler), with throughput/ITL unchanged — the same run the ε=0 evaluator misses by 3.8x |
-| `EngineSpec.async_scheduling` one-pass lookahead | vLLM `AsyncScheduler` (default ON since vLLM 0.24): pass k+1 is built while pass k executes, so an arrival during pass k joins pass k+2 at the earliest and every admission pays up to one extra pass of TTFT. Measured A/B @C=32: +176 ms TTFT p50; evaluator reproduces +126 ms. Decode-side effect (async hides per-step CPU gap; measured TPOT 13.06 vs 14.48 sync) is a timing-layer property of the perf database, not a calendar term |
+| `WorkloadSpec.turnaround_ms` arrival-visibility delay | client/frontend per-request turnaround (HTTP → tokenize → IPC → waiting queue). ε = 0 (default) reproduces the DES oracle's idealized same-instant client; any ε > 0 selects the causal regime (a replacement can never catch the pass built at the completion instant). CAUTION — do not tune this to match measured loaded TTFT: within the deterministic recursion, ε beyond 0⁺ only moves the cycle along a phase staircase (tread ≈ decode-pass, riser ≈ mix-pass) that REDISTRIBUTES time between TTFT and TPOT under the Little's-law identity; the real engine is phase-mixed and measured steady TTFT is ε-invariant (§6.16). Use 0⁺ for the causal shape; use `ttft_anchor="identity"` for location |
+| `EngineSpec.async_scheduling` one-pass lookahead | vLLM `AsyncScheduler` (default ON since vLLM 0.24): pass k+1 is built while pass k executes, so an arrival during pass k joins pass k+2 at the earliest. Measured A/B @C=32 (b300, Qwen3-32B TP4): +176 ms TTFT p50, and sync-mode TPOT matches the calendar exactly (14.48 vs 14.48) while async runs faster (13.06 — the timing layer's per-step CPU component is hidden by the overlap, a perf-database property, not a calendar term) |
+| `ttft_anchor="identity"` Little's-law location | saturated closed loop: each of C slots cycles in exactly C/X, so E[TTFT] = C/X − (osl−1)·E[TPOT] − turnaround, an accounting identity independent of arrival phase (verified: +15 ms injected client delay on a live server moved measured steady TTFT p50 by 0.1 ms). The calendar provides the distribution shape; the identity pins its location. Corollary: steady TTFT is the small residual of two large terms — its precision is bounded by osl × (TPOT error), an ill-conditioning of the QUANTITY, not of the model |
 | additive TTFT stages: encoder, per-request dispatch overhead | the same additive terms the legacy `ttft` carries (run_agg's own composition); omitting them would make percentile screens permissive for multimodal rows |
 | static degenerate mapping | static batching has no admission queue and no phase interference, by construction |
 
@@ -289,3 +290,29 @@ Silent (each with a designated detector):
    equal-weight mixture over a deterministic set of initial-arrival
    staggers (no RNG; each component is a valid limit cycle); the gate
    compares single phases with matched initial conditions.
+16. **Closed-loop steady TTFT is ill-conditioned at saturation — measured
+   resolution of items 13/14.** Validated against live vLLM 0.24.0 on
+   b300_sxm (Qwen3-32B bf16 TP4, dummy weights, isl4096/osl256, closed
+   loop C∈{1,8,32,128}; `vllm bench serve`). Throughput/TPOT/ITL/e2e match
+   the evaluator within ≤12% (mostly ≤5%), including the agg mix-pass
+   `itl_p99` spike (137 measured vs 127 predicted @C=32). Steady TTFT does
+   not: measured p50 680 ms vs 178 predicted @C=32. Decomposition:
+   (a) item 13's boundary convention: any client turnaround ε > 0 leaves
+   the same-instant knife edge — the causal 0⁺ regime costs ~+1 mix pass;
+   (b) item 14's async lookahead (vLLM ≥ 0.24 default ON): +176 ms measured
+   A/B, now a calendar term (`EngineSpec.async_scheduling`);
+   (c) the remainder is NOT a mechanism to model: within the deterministic
+   recursion ε traces a staircase (tread ≈ decode-pass, riser ≈ mix-pass,
+   evaluator: 381/508/634/885 ms at ε=1/8/16/32 @C=32) but the staircase
+   only redistributes time between TTFT and TPOT under the Little's-law
+   cycle identity E[TTFT] = C/X − (osl−1)·E[TPOT] − ε_client; the real
+   phase-mixed engine sits at ONE split and is ε-invariant — injecting
+   +15 ms of client delay through a request-path proxy moved measured
+   steady TTFT p50 by 0.1 ms (679.9 → 679.8). Fitting ε to loaded TTFT is
+   therefore phase-compensation, i.e. overfitting, and is rejected.
+   Consequence: report closed-loop steady TTFT via `ttft_anchor="identity"`
+   (shape from the causal 0⁺ calendar, location from the identity) and
+   carry its honest error bar, osl × (timing-layer TPOT error) — at
+   osl=256, a 3% TPOT bias is ~±100 ms of TTFT. Improving saturated-TTFT
+   precision is a TIMING-layer problem (per-step CPU cost under async
+   overlap), not a calendar problem.
