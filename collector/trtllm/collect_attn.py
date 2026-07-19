@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302). SM100 half
-# REFUTED on B200 hardware (1.3.0rc20, 2026-07-18): out-of-plan probes of
-# every non-multiple-of-32 GQA ratio >= 32 reachable from the head grids
-# (h/kv = 48/1, 40/1, 96/2; hd=128; context AND generation) all pass through
-# the framework's own dispatch — no such rejection exists on SM100/rc20.
-# SM103/120 remain hardware-unvalidated; re-check there before deleting this
-# note entirely. Never move this back into YAML
+# The retired sm_exceptions "Blackwell rejects GQA ratio >= 32 unless
+# divisible by 32" claim (PR #1302) is fully REFUTED on 1.3.0rc20: v3a
+# out-of-plan probes (h/kv = 48/1, 40/1, 96/2; hd=128; ctx+gen) pass 6/6
+# through framework dispatch on SM100 (B200, 2026-07-18), SM103 (B300,
+# 2026-07-19) and SM120 (RTX PRO 6000, 2026-07-19). FIXME(kernel-limit)
+# deleted per its lifecycle; never move this back into YAML
 # (see .claude/rules/collector/layer_permissions.md).
 
 """TensorRT-LLM dense attention collector.
