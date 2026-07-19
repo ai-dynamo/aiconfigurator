@@ -28,14 +28,14 @@ from vllm_sim import TransferSpec
 
 
 def load_system_spec(system: str) -> dict:
-    """Load ``src/aiconfigurator/systems/<system>.yaml`` (requires the
-    aiconfigurator package + PyYAML; the oracle core itself stays
+    """Load the AIC system spec yaml for `system` (requires the
+    aiconfigurator_core package + PyYAML; the oracle core itself stays
     stdlib-only)."""
     from importlib import resources
 
     import yaml
 
-    path = resources.files("aiconfigurator") / "systems" / f"{system}.yaml"
+    path = resources.files("aiconfigurator_core") / "systems" / f"{system}.yaml"
     with path.open() as f:
         return yaml.safe_load(f)
 

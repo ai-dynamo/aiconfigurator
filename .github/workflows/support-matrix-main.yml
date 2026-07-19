@@ -41,14 +41,14 @@ jobs:
 
       - name: Backup old support matrix
         run: |
-          rm -rf src/aiconfigurator/systems/support_matrix_old
-          cp -R src/aiconfigurator/systems/support_matrix src/aiconfigurator/systems/support_matrix_old
+          rm -rf aic-core/src/aiconfigurator_core/systems/support_matrix_old
+          cp -R aic-core/src/aiconfigurator_core/systems/support_matrix aic-core/src/aiconfigurator_core/systems/support_matrix_old
 
       - name: Generate new support matrix
         run: |
           docker run --rm \
             --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
-            -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
+            -v ${{ github.workspace }}/aic-core/src/aiconfigurator_core/systems:/app/src/aiconfigurator/systems \
             aiconfigurator:matrix \
             python3 tools/support_matrix/generate_support_matrix.py \
               --output /app/src/aiconfigurator/systems/support_matrix
@@ -61,7 +61,7 @@ jobs:
           set +e
           docker run --rm \
             --memory "${SUPPORT_MATRIX_DOCKER_MEMORY_LIMIT}" \
-            -v ${{ github.workspace }}/src/aiconfigurator/systems:/app/src/aiconfigurator/systems \
+            -v ${{ github.workspace }}/aic-core/src/aiconfigurator_core/systems:/app/src/aiconfigurator/systems \
             -v ${{ github.workspace }}/diff_output:/app/diff_output \
             aiconfigurator:matrix \
             python3 tools/support_matrix/compare_support_matrix.py \
@@ -88,7 +88,7 @@ jobs:
 
       - name: Cleanup old support matrix backup
         run: |
-          rm -rf src/aiconfigurator/systems/support_matrix_old
+          rm -rf aic-core/src/aiconfigurator_core/systems/support_matrix_old
 
       - name: Extract PR description
         if: steps.compare.outputs.needs_pr == 'true'
@@ -126,7 +126,7 @@ jobs:
           base: ${{ env.TARGET_BRANCH }}
           delete-branch: true
           add-paths: |
-            src/aiconfigurator/systems/support_matrix
+            aic-core/src/aiconfigurator_core/systems/support_matrix
           labels: |
             automated
             support-matrix

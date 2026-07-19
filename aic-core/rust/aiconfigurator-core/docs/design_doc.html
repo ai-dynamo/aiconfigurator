@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AIC Perf Engine — Python + Rust Split (Design Doc)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --bg: #fdfdfd;
+    --fg: #222;
+    --muted: #6a6a6a;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --warn: #c2410c;
+    --warn-soft: #fff7ed;
+    --good: #047857;
+    --good-soft: #ecfdf5;
+    --code-bg: #f5f5f4;
+    --border: #e5e5e5;
+    --sidebar-bg: #fafafa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+                 "Microsoft YaHei", sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.65;
+    font-size: 15.5px;
+  }
+  .layout { display: flex; max-width: 1200px; margin: 0 auto; }
+  aside.toc {
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    width: 260px;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 28px 18px;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  aside.toc h2 {
+    margin-top: 0;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  aside.toc ol { padding-left: 22px; margin: 0; }
+  aside.toc ol ol { padding-left: 16px; margin-top: 4px; }
+  aside.toc li { margin: 4px 0; }
+  aside.toc a { color: var(--fg); text-decoration: none; }
+  aside.toc a:hover { color: var(--accent); }
+  main { padding: 36px 48px 80px; max-width: 920px; }
+  h1 { font-size: 2.1em; margin: 0 0 8px; line-height: 1.2; }
+  h1 + .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 1.05em; }
+  h2 { font-size: 1.5em; margin-top: 52px; padding-bottom: 6px;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.18em; margin-top: 32px; color: #1a1a1a; }
+  h4 { font-size: 1.0em; margin-top: 22px; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.04em; }
+  p, ul, ol { margin: 12px 0; }
+  ul, ol { padding-left: 28px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 1.5px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    border: 1px solid var(--border);
+  }
+  pre code { background: transparent; padding: 0; font-size: inherit; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  blockquote {
+    margin: 16px 0;
+    padding: 12px 16px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    color: #1d4ed8;
+  }
+  .callout {
+    margin: 18px 0;
+    padding: 12px 16px 12px 18px;
+    border-radius: 6px;
+    border-left: 3px solid;
+  }
+  .callout .label {
+    display: block;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .callout.tldr { background: var(--accent-soft); border-color: var(--accent); }
+  .callout.tldr .label { color: var(--accent); }
+  .callout.warn { background: var(--warn-soft); border-color: var(--warn); }
+  .callout.warn .label { color: var(--warn); }
+  .callout.good { background: var(--good-soft); border-color: var(--good); }
+  .callout.good .label { color: var(--good); }
+  .ascii {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.35;
+    background: #fbfaf6;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    margin: 16px 0;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  .pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--code-bg);
+    color: var(--muted);
+    margin-left: 6px;
+  }
+  .pill.ok { background: var(--good-soft); color: var(--good); }
+  .pill.tbd { background: var(--warn-soft); color: var(--warn); }
+  footer { margin-top: 60px; padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 13px; }
+  @media (max-width: 900px) {
+    .layout { flex-direction: column; }
+    aside.toc { position: static; width: 100%; height: auto;
+                border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 20px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<aside class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#tldr">TL;DR</a></li>
+    <li><a href="#motivation">Motivation</a>
+      <ol>
+        <li><a href="#current-state">Current state</a></li>
+        <li><a href="#pain-points">Pain points</a></li>
+      </ol>
+    </li>
+    <li><a href="#proposal">Proposal: Python + Rust Split</a>
+      <ol>
+        <li><a href="#layers">Three-layer architecture</a></li>
+        <li><a href="#engine">The Engine abstraction</a></li>
+        <li><a href="#two-callers">Two callers, one Rust core</a></li>
+      </ol>
+    </li>
+    <li><a href="#poc">PoC Implementation</a>
+      <ol>
+        <li><a href="#poc-layout">Layout</a></li>
+        <li><a href="#poc-flow">End-to-end flow</a></li>
+        <li><a href="#poc-build">Build / run</a></li>
+      </ol>
+    </li>
+    <li><a href="#validation">Validation Results</a></li>
+    <li><a href="#decisions">Open Decisions</a></li>
+    <li><a href="#roadmap">Roadmap</a></li>
+    <li><a href="#appendix">Appendix: Naming Notes</a></li>
+  </ol>
+</aside>
+
+<main>
+
+<h1>AIC Perf Engine — Python + Rust Split</h1>
+<div class="subtitle">Design doc &middot; greenfield PoC validated locally &middot; June 2026</div>
+
+<div class="callout tldr">
+  <span class="label">TL;DR</span>
+  <p>Split AIC's perf engine into two layers: <strong>Python</strong> owns model
+  building (HF parsing, op-list composition, quant resolution), <strong>Rust</strong>
+  owns execution (compiled artifact + per-op latency math, hot path). Both
+  Python sweep callers and external Rust callers (e.g. Dynamo Mocker) use
+  the <strong>same</strong> Rust core function via two binding paths
+  (PyO3 / direct crate use).</p>
+  <p>The model-building knowledge stays in Python (one source of truth), but
+  the hot path runs in Rust at GIL-free, rayon-friendly speed.</p>
+  <p>A throwaway PoC under <code>poc/</code> validates the architecture
+  end-to-end: 14/14 parity tests pass bit-identical against a pure-Python
+  reference; an external Rust binary loads the same artifact and runs
+  multi-threaded.</p>
+</div>
+
+<!-- ======================================================================= -->
+<h2 id="motivation">1. Motivation</h2>
+
+<h3 id="current-state">1.1 Current state</h3>
+
+<p>AIConfigurator predicts LLM serving performance for many <em>(parallel
+config, batch_size, ctx_tokens, quant_mode, ...)</em> combinations under SLA
+targets. Today the entire pipeline is Python:</p>
+
+<div class="ascii">
+Task spec  →  sweep loop  →  Predictor strategy  →  backend.run_static
+                                                       ↓
+                                                   for op in model.context_ops:
+                                                       op.query(database, ...)
+                                                       ↓
+                                                   sum, scale, return
+</div>
+
+<p>Two Rust hooks already exist:</p>
+<ul>
+  <li><code>aic-core/rust/aiconfigurator-core/</code> — a ctypes-backed sidecar for
+    Dynamo Mocker. Receives a model identity via JSON; internally
+    <em>re-derives</em> the op list from name + parallel sizes.</li>
+  <li><code>sdk/rust_engine_step.py</code> — Python wrapper for the above.</li>
+</ul>
+
+<h3 id="pain-points">1.2 Pain points</h3>
+
+<table>
+  <thead><tr><th>Pain point</th><th>Cost today</th></tr></thead>
+  <tbody>
+    <tr><td>Python GIL serializes sweep evaluation</td>
+        <td>Sweep with ~2,250 points takes ~0.6s; mostly DB look-ups + DataFrame ops on a single core.</td></tr>
+    <tr><td>Model knowledge duplicated in Python and Rust</td>
+        <td><code>aiconfigurator-core/model.rs</code> (~350 lines) re-derives the op list. Every new Python model needs a parallel Rust update.</td></tr>
+    <tr><td>External Rust callers (Mocker) must round-trip through Python for build</td>
+        <td>JSON ↔ struct conversion every per-point call; coupled to Python interpreter lifecycle.</td></tr>
+    <tr><td>DataFrame-heavy hot loop</td>
+        <td>pandas/concat ops dominate wallclock at low op counts; type drift bugs (object vs int64) caught only at parity.</td></tr>
+  </tbody>
+</table>
+
+<!-- ======================================================================= -->
+<h2 id="proposal">2. Proposal: Python + Rust Split</h2>
+
+<h3 id="layers">2.1 Three-layer architecture</h3>
+
+<p>The new design separates <strong>what to compute</strong> (Python's
+job — model topology, quant semantics, layer counts) from
+<strong>how fast / how multi-threaded to compute it</strong> (Rust's job).
+Between them sits a <strong>compiled artifact</strong> — a plain-data
+representation of the op list — that both languages share.</p>
+
+<div class="ascii">
+                Python                                          Rust
+   ─────────────────────────────                  ─────────────────────────────
+   parse HF config (model arch)
+   ↓
+   instantiate Operation objects
+   (one per layer-level op)
+   ↓
+   produce list[OpSpec]
+
+   ─────── compile/build ─────────►   build Engine: Vec&lt;OpSpec&gt; + metadata
+                                                    │
+                                                    ↓
+   for (batch, seq, mode) in sweep:       run_static_internal(engine, db, batch, seq, mode)
+       call into Engine ────────►           for op in engine.op_list:
+                                                lookup db, scale, accumulate
+                                            return HashMap&lt;op_name, latency&gt;
+   ◄────── result ──────────────────
+</div>
+
+<h3 id="engine">2.2 The Engine abstraction</h3>
+
+<p>The new central object is the <strong>Engine</strong>: a Rust
+struct holding a compiled op list plus metadata. Its sole runtime
+method is <code>run_static_internal(db, batch, seq, mode) → HashMap&lt;name, latency&gt;</code>.</p>
+
+<table>
+  <thead><tr><th>Property</th><th>Engine</th><th>V1 InferenceSession (deleted)</th><th>V2 stateless Predictor (current)</th></tr></thead>
+  <tbody>
+    <tr><td>State held</td><td>Compiled op list + metadata</td><td>model + db + backend</td><td>None (everything passed per call)</td></tr>
+    <tr><td>Hot path location</td><td>Rust</td><td>Python</td><td>Python (delegates to backend)</td></tr>
+    <tr><td>Bound to one model?</td><td>Yes (the compiled one)</td><td>Yes</td><td>No</td></tr>
+    <tr><td>Sweep methods?</td><td>No (sweep lives in Python sweep.py)</td><td>Yes (<code>find_best_*</code>)</td><td>No</td></tr>
+    <tr><td>Callable from Rust?</td><td>Yes (Mocker, future tools)</td><td>No</td><td>No</td></tr>
+  </tbody>
+</table>
+
+<p>The Engine is conceptually the <em>execution unit</em> that V1's
+InferenceSession <em>tried</em> to be. V2 went stateless as an overcorrection
+against V1's three-things-in-one design; the PoC shows that
+<strong>strategy</strong> (stateless Predictor) and <strong>execution unit</strong>
+(stateful Engine) are different layers and both belong.</p>
+
+<h3 id="two-callers">2.3 Two callers, one Rust core</h3>
+
+<div class="ascii">
+                    ┌──────────────────────────────────┐
+                    │  Engine::run_static_internal     │
+                    │  (rust/aic-step/src/engine.rs)   │   ◄── single source of truth
+                    │  pure Rust, zero Python          │
+                    └──────────────▲───────────────────┘
+                                   │
+                  ┌────────────────┴───────────────┐
+                  │                                │
+        ┌─────────┴───────────┐         ┌──────────┴──────────┐
+        │ PyO3 binding        │         │ Rust crate direct   │
+        │ Engine.run_static   │         │ engine.run_static_  │
+        │   (PyEngine wrap)   │         │   internal(...)     │
+        └─────────┬───────────┘         └──────────┬──────────┘
+                  │                                │
+        Python: Task / sweep              External Rust callers
+        (releases GIL on call)            (Mocker, future tools)
+</div>
+
+<p>Both bindings hit the same <code>run_static_internal</code>. The PyO3
+wrapper releases the GIL during execution, so Python-side multithreading
+(or batch entry points) parallelizes without the GIL bottleneck.</p>
+
+<!-- ======================================================================= -->
+<h2 id="poc">3. PoC Implementation</h2>
+
+<h3 id="poc-layout">3.1 Layout</h3>
+
+<p>Greenfield, self-contained under <code>poc/</code>. Zero changes to
+<code>src/aiconfigurator/</code>.</p>
+
+<pre><code>poc/
+├── Cargo.toml                # standalone workspace
+├── pyproject.toml            # maturin config
+├── pytest.ini                # pytest scope isolation
+├── README.md
+├── src/
+│   ├── lib.rs                # crate entry; pyo3 gated behind `python` feature
+│   ├── op.rs                 # OpSpec enum (Gemm only in PoC)
+│   ├── db.rs                 # Database + arrow-rs parquet loader
+│   ├── engine.rs             # Engine + run_static_internal (hot path)
+│   ├── py.rs                 # PyO3 bindings (gated by feature)
+│   └── bin/mocker_demo.rs    # external Rust caller demo
+├── python/
+│   ├── aic_step/             # facade re-exporting Rust symbols
+│   └── aic_poc/              # MockLLMModel + pure-Python reference impl
+├── data/
+│   ├── build_gemm_parquet.py
+│   └── gemm_perf.parquet     # (generated)
+└── tests/
+    └── test_e2e.py           # 14 parity + round-trip tests
+</code></pre>
+
+<h3 id="poc-flow">3.2 End-to-end flow</h3>
+
+<h4>Python path</h4>
+<pre><code>from aic_poc import MockLLMModel
+from aic_step import build_engine, DbHandle
+
+model = MockLLMModel(hidden=4096, n_layers=32)  # Python: build op list
+
+engine = build_engine(model)                     # PyO3: Python → Rust
+db = DbHandle.load("data/gemm_perf.parquet")     # arrow-rs: load DB
+
+# Hot path: PyO3 wrapper releases GIL, executes pure-Rust core,
+# returns Python dict[str, float].
+result = engine.run_static(db, batch_size=8, seq_len=2048, mode="static")
+</code></pre>
+
+<h4>External Rust caller (mocker_demo)</h4>
+<pre><code>use aic_step::{Database, Engine, StaticMode};
+
+let engine = Arc::new(Engine::load_bin("compiled.bin")?);
+let db = Arc::new(Database::load_gemm_parquet("data/gemm_perf.parquet")?);
+
+// Same hot path as Python; no PyO3 in the picture.
+let result = engine.run_static_internal(&amp;db, 8, 2048, StaticMode::Full)?;
+
+// Trivial rayon fan-out across many points:
+points.par_iter().for_each(|p| {
+    let _ = engine.run_static_internal(&amp;db, p.batch, p.seq, StaticMode::Full);
+});
+</code></pre>
+
+<h3 id="poc-build">3.3 Build / run</h3>
+
+<pre><code># one-time
+brew install rust
+python3.12 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install maturin pyarrow pytest
+
+# build PyO3 extension into the venv
+cd poc/
+maturin develop --release
+
+# generate test data and run parity tests
+python data/build_gemm_parquet.py
+pytest                                          # 14/14 pass
+
+# build the pure-Rust binary (no libpython)
+cargo build --release --bin mocker_demo --no-default-features
+./target/release/mocker_demo compiled.bin data/gemm_perf.parquet
+</code></pre>
+
+<div class="callout warn">
+  <span class="label">Design Note</span>
+  <p><code>pyo3</code> is an <em>optional</em> dependency behind a
+  <code>python</code> Cargo feature. With it, the lib outputs a Python
+  extension (<code>aic_step._native.so</code>). Without it (the binary
+  build), the lib is a plain Rust crate and the binary links zero
+  Python symbols. This is the cleanest way to dual-purpose one crate
+  for both callers.</p>
+</div>
+
+<!-- ======================================================================= -->
+<h2 id="validation">4. Validation Results</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Claim</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>PyO3 binding builds, Python imports cleanly</td>
+      <td><span class="pill ok">PASS</span> <code>import aic_step</code> works after <code>maturin develop</code></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Python model → Rust Engine round-trip works</td>
+      <td><span class="pill ok">PASS</span> <code>build_engine(MockLLMModel(...))</code> produces a usable Engine with 3 ops</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Rust execution bit-identical to Python reference</td>
+      <td><span class="pill ok">PASS</span> 14/14 tests; rel_tol = abs_tol = 1e-12 across {static_ctx, static_gen, static} × {1, 8, 32 batch} × {1024, 2048, 4096 seq}</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Engine save/load .bin round-trip</td>
+      <td><span class="pill ok">PASS</span> bincode artifact reloads to identical Engine</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>External Rust caller runs the same Engine</td>
+      <td><span class="pill ok">PASS</span> <code>mocker_demo</code> loads <code>compiled.bin</code>, runs 8 points, output matches Python</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Multi-threading via rayon works</td>
+      <td><span class="pill ok">PASS</span> <code>rayon::par_iter</code> across points; outputs identical to sequential. Wallclock not yet meaningful at N=8 (thread-spawn overhead dominates); stress N at next iteration.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout good">
+  <span class="label">Bit-Identical</span>
+  <p>Every parameterization of the parity test asserts
+  <code>math.isclose(rust_val, py_val, rel_tol=1e-12, abs_tol=1e-12)</code>
+  per op. All 27 (op × test) checks passed on first build. The
+  arithmetic is simple enough that Rust f64 and Python float
+  match exactly.</p>
+</div>
+
+<!-- ======================================================================= -->
+<h2 id="decisions">5. Open Decisions</h2>
+
+<h3>5.1 Naming</h3>
+
+<p>Picked <strong>Engine</strong> (over <code>CompiledModel</code> /
+<code>InferenceSession</code> / <code>PerfModel</code>) because:</p>
+<ul>
+  <li>Aligns with existing <code>rust_engine_step.py</code> in the repo.</li>
+  <li>TensorRT/vLLM call compiled artifacts "engine" — pattern match.</li>
+  <li>Avoids resurrecting <code>InferenceSession</code>, which V2 just
+    deleted, and which falsely implies "running inference"
+    (we predict perf, we don't run the model).</li>
+  <li>Short. Clean. <code>Engine.run_static(...)</code> reads well.</li>
+</ul>
+
+<p>If "engine" ever conflicts with real LLM-runtime "engine" in shared
+docs, escalate to <strong>PerfEngine</strong>; rename cost is trivial.</p>
+
+<h3>5.2 Predictor vs Engine</h3>
+
+<p>The current Phase 1 SDK has a <code>Predictor</code> Protocol
+(stateless strategy). The Engine is a different layer — stateful
+execution unit. Both belong:</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>Statefulness</th><th>Role</th><th>Examples</th></tr></thead>
+  <tbody>
+    <tr><td>Predictor</td><td>stateless</td><td>How to evaluate one point</td>
+        <td><code>AnalyticPredictor</code>, <code>MockerPredictor</code> (future)</td></tr>
+    <tr><td>Engine</td><td>stateful (compiled artifact)</td><td>Concrete execution unit</td>
+        <td><code>Engine</code> (Rust), wrapped by <code>EnginePredictor</code></td></tr>
+  </tbody>
+</table>
+
+<p>The integration path: an <code>EnginePredictor</code> implements
+the Predictor Protocol; internally it caches Engines per
+<code>(model_id, parallel_config)</code>. Caller-side API is unchanged.</p>
+
+<h3>5.3 Artifact format</h3>
+<p>PoC uses <code>bincode</code> for the Engine serialization (fast,
+compact, Rust-native). Considered Arrow IPC and JSON; bincode wins on
+size/speed. JSON debugging is achievable via a dump tool if needed.</p>
+
+<h3>5.4 DB layout</h3>
+<p>PoC's DB is per-op (GEMM only). Production DB has ~10 op kinds
+(attention, MoE, comm, MLA, etc.). The PoC's table abstraction
+(<code>Database { gemm: GemmTable, ... }</code>) maps each op kind to
+its own Rust struct, matching today's "<em>op owns its data</em>" Python
+layout. Extending: one new struct per op, ~50–200 lines each.</p>
+
+<!-- ======================================================================= -->
+<h2 id="roadmap">6. Roadmap (if we proceed)</h2>
+
+<ol>
+  <li>
+    <strong>Decide</strong>: Adopt the Engine architecture? Or keep PoC
+    on the shelf? Inputs to the decision: the validation results above,
+    plus a stress bench (next item).
+  </li>
+  <li>
+    <strong>Stress bench</strong>: extend the PoC to N=10k points
+    sequential vs rayon. Measure real wallclock speedup. (Expected:
+    near-linear up to core count.)
+  </li>
+  <li>
+    <strong>Op coverage</strong>: incrementally port the remaining ~9 op
+    kinds (attention, MoE, comm, MLA, custom_allreduce, ...). One PR
+    per op; parity test per op.
+  </li>
+  <li>
+    <strong>DB completeness</strong>: extend <code>DbHandle</code> to
+    cover non-GEMM tables; interpolation/extrapolation logic moves to
+    Rust (current Python <code>perf_database.py</code> arithmetic
+    ports cleanly).
+  </li>
+  <li>
+    <strong>Integration into Task.run()</strong>: introduce an
+    <code>EnginePredictor</code> that the existing Phase 1
+    <code>Predictor</code> Protocol can return; gate behind a Task
+    field for opt-in (parity tests both paths).
+  </li>
+  <li>
+    <strong>Production wheels</strong>: maturin CI for
+    macOS / Linux / Windows × Python 3.10–3.12. <code>uv add aic_step</code>-friendly.
+  </li>
+</ol>
+
+<p>Estimated effort (single dev with LLM assist): items 2–3 are
+~3–4 weeks; item 4 is ~2 weeks; item 5 is ~1 week; item 6 is ~1 week.</p>
+
+<!-- ======================================================================= -->
+<h2 id="appendix">7. Appendix: Naming Notes</h2>
+
+<p>For internal sanity, the four words floating in this design:</p>
+
+<table>
+  <thead><tr><th>Word</th><th>Meaning here</th><th>What it is NOT</th></tr></thead>
+  <tbody>
+    <tr><td><code>Predictor</code></td>
+        <td>Strategy (stateless interface) — Phase 1 V2 abstraction</td>
+        <td>The thing that holds the compiled model</td></tr>
+    <tr><td><code>Engine</code></td>
+        <td>Execution unit — holds compiled op list, runs <code>run_static</code></td>
+        <td>An LLM runtime; the predictor strategy itself</td></tr>
+    <tr><td><code>compile_model()</code> / <code>build_engine()</code></td>
+        <td>Marshal Python <code>Operation</code> objects into a Rust
+            <code>Engine</code> (PyO3 type conversion + struct construction)</td>
+        <td>"Compile" in the LLVM/JIT sense — there's no codegen</td></tr>
+    <tr><td><code>OpSpec</code></td>
+        <td>Plain-data Rust representation of one op (enum variant + params)</td>
+        <td>An <code>Operation</code> Python class — that lives in Python</td></tr>
+  </tbody>
+</table>
+
+<footer>
+  PoC source: <code>poc/</code> on branch <code>rust_poc</code>.
+  All 14 parity tests pass locally; pushed to <code>origin/rust_poc</code>
+  for review.
+</footer>
+
+</main>
+</div>
+</body>
+</html>

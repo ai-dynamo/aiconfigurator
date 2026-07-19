@@ -9,11 +9,12 @@ approval; new rule files MUST carry `paths:` frontmatter.
 
 | Path | What it is |
 |---|---|
-| `src/aiconfigurator/sdk/` | performance modeling core (perf DB, interpolation, models) |
+| `aic-core/src/aiconfigurator_core/sdk/` | performance modeling core (perf DB, interpolation, models) |
+| `src/aiconfigurator/sdk/` | upper-layer orchestration and legacy core import compatibility |
 | `src/aiconfigurator/generator/` | **the "generator"**: renders deployment configs (cli_args, k8s manifests, engine YAML) from task results |
 | `collector/` | GPU perf data collection (standalone; NOT part of the wheel runtime) |
 | `tools/support_matrix/` | daily end-to-end support matrix generation/compare |
-| `rust/aiconfigurator-core/` | Rust port of modeling operators |
+| `aic-core/rust/aiconfigurator-core/` | Rust port of modeling operators |
 
 Disambiguation: `collector/case_generator.py` expands collection test cases —
 it has NOTHING to do with `src/aiconfigurator/generator/`. Do not apply

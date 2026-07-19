@@ -1,37 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Perf-table interpolation/extrapolation engine (v2).
 
-``config`` declares the per-op records; ``engine.query(cfg, data, x, y, z)``
-resolves a query. See ``config.py`` for the full design.
-"""
+"""Compatibility facade for aiconfigurator_core.sdk.perf_interp."""
 
-from aiconfigurator.sdk.perf_interp.config import (
-    OP_CONFIG_FACTORIES,
-    Grid,
-    OpInterpConfig,
-    ScatteredSites,
-    ValueTransform,
-    context_attention_config,
-    context_grid_config,
-    gemm_config,
-    generation_attention_config,
-    generation_grid_config,
-)
-from aiconfigurator.sdk.perf_interp.engine import clear_caches, get_value, query
+from __future__ import annotations
 
-__all__ = [
-    "OP_CONFIG_FACTORIES",
-    "Grid",
-    "OpInterpConfig",
-    "ScatteredSites",
-    "ValueTransform",
-    "clear_caches",
-    "context_attention_config",
-    "context_grid_config",
-    "gemm_config",
-    "generation_attention_config",
-    "generation_grid_config",
-    "get_value",
-    "query",
-]
+from aiconfigurator.sdk._compat import export_public_package as _export_public_package
+
+_canonical_module, __all__ = _export_public_package("aiconfigurator_core.sdk.perf_interp", globals())
+
+
+def __getattr__(name: str) -> object:
+    """Delegate private and future attributes to the canonical package."""
+    return getattr(_canonical_module, name)
+
+
+def __dir__() -> list[str]:
+    """Expose both facade and canonical attributes to introspection."""
+    return sorted(set(globals()) | set(dir(_canonical_module)))
