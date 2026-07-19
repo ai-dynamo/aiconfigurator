@@ -687,7 +687,22 @@ def create_kv_cache_and_metadata(
         ),
         cross=None,
         request_ids=request_ids,
-        prompt_lens=[prefix_len + seq_len_q if is_context else kv_cache_len] * batch_size,
+        # Serving sets a context request's prompt_lens to the CURRENT-CHUNK
+        # token count only — prompt_tokens = all_prompt_tokens[begin_compute:
+        # end_compute]; prompt_lengths.append(len(prompt_tokens)) — while the
+        # cached prefix travels separately via num_cached_tokens_per_seq
+        # (model_engine.py:2986-3017@1.3.0rc20). kv_lens is then derived as
+        # cached_token_lens + seq_lens_kv (attention_backend/trtllm.py:525),
+        # so prompt_lens must NOT be inflated by the prefix: it feeds
+        # host_context_lengths, which the SM100 MLA context rope kernel
+        # (applyMLARopeAndAssignQKVKernelOptContext via
+        # AttentionOp::enqueueContext) uses to walk the new-tokens-sized
+        # dense q/latent input. Passing prefix+seq here made that kernel
+        # read prefix tokens past the input (compute-sanitizer-verified OOB
+        # on B200 2026-07-19, every prefix>0 DSA context case); SM90 was
+        # blind to it only because FlashMLA doesn't walk the dense input by
+        # host_context_lengths.
+        prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
         # Serving computes enable_context_mla_with_cached_kv = is_mla &&
         # (cache_reuse || chunked_prefill) (model_engine.py:1762@1.3.0rc20);
         # a prefix-cached context request only exists under cache reuse, so
@@ -695,27 +710,6 @@ def create_kv_cache_and_metadata(
         # no-cache alias branch for slot_mapping_*_fullkv (dsa.py
         # "_need_full_kv_gathering") and its table — sized for new tokens
         # only — overflows once batch*(prefix+seq) exceeds it.
-        #
-        # FIXME(kernel-limit): SM100 DSA context with cached KV IMAs inside
-        # TRT-LLM 1.3.0rc20 itself. Hardware-verified on B200 2026-07-19:
-        # every prefix>0 DSA context case aborts (0/18 on the same
-        # b{2,8,32} x prefix{1024,8192,32768} x s{32,2048} matrix that
-        # passes 17/18 on H20/SM90 post-fix; also prefix=128, both KV
-        # dtypes, gemm bf16/fp8_block/nvfp4, DeepSeek-V3.2 + GLM-5 family).
-        # compute-sanitizer pins an OOB __global__ read in
-        # applyMLARopeAndAssignQKVKernelOptContext<bf16,256,512,64>
-        # (invokeMLARopeContext <- AttentionOp::enqueueContext). Plain-MLA
-        # prefix>0 context PASSES on SM100: serving routes it through
-        # forward_context_with_cached_kv, which ropes/appends via a
-        # dedicated op and calls the attention op with latent_cache=None
-        # precisely to skip that kernel (modules/attention.py:2164,2215
-        # @1.3.0rc20). The SM100-only DSA absorption path
-        # (forward_context_dsa -> forward_absorption_context,
-        # attention.py:2121) instead passes latent_cache != None with the
-        # cached-KV metadata set — that combination is what faults, so this
-        # is framework-reachable, not a collector-metadata gap. SM90 is
-        # unaffected (FlashMLA path). No guard here: the cases fail loudly
-        # into the classified log. Re-verify on the next version bump.
         enable_context_mla_with_cached_kv=bool(is_context and prefix_len > 0),
         runtime_features=AttentionRuntimeFeatures(
             chunked_prefill=False,
