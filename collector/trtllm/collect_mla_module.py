@@ -6,12 +6,16 @@
 # FlashMLA sparse kernels, whose sparse_prefill_fwd asserts
 # kv.dtype()==kBFloat16 (flashmla-src/csrc/pybind.cpp:404) — FP8-KV DSA is
 # genuinely Blackwell-only (trtllm-gen sparseMla), matching the SM>=100 combo
-# floor in _get_precision_combos. MLA half RESOLVED on 1.3.0rc20/SM100
-# (2026-07-18, B200): FP8-KV MLA modules pass on SM90 AND SM100 (trtllm-gen
-# MLA, tokens_per_block=32) — the "fails on SM100/103/120" claim is refuted
-# for SM100 and the combo is now open for sm>86 except 120/121 (see
-# _get_precision_combos). SM120/121 remain hardware-unvalidated. Never move
-# this back into YAML.
+# floor in _get_precision_combos; floor VALIDATED on SM103 (2026-07-19, B300):
+# fp8-KV DSA probes pass 9/9 (DSv3.2 + GLM-5, ctx+gen, prefix 0/128). MLA half
+# RESOLVED on 1.3.0rc20/SM100 (2026-07-18, B200): FP8-KV MLA modules pass on
+# SM90 AND SM100 (trtllm-gen MLA, tokens_per_block=32) — the "fails on
+# SM100/103/120" claim is refuted for SM100, for SM103 on B300 (2026-07-19:
+# fp8-KV MLA probes 5/5, ctx+gen, prefix 0/128), and for SM120 on RTX PRO
+# 6000 (2026-07-19: fp8-KV MLA probes 4/4, ctx+gen, prefix 0/128, via the
+# framework's non-trtllm-gen dispatch); the combo is open for sm>86 except
+# 121 (see _get_precision_combos). SM121 remains hardware-unvalidated.
+# Never move this back into YAML.
 
 # FIXME(kernel-limit): SM100 DSA with reduced local heads (h in {1,2,4},
 # i.e. high-TP shards) fails in the framework's own dispatch with the C++
@@ -32,8 +36,12 @@
 # native/TP) into the same op — GLM-5 (64 heads) hits it from TP16
 # (h=4), DeepSeek-V3.2 (128 heads) from TP32 — so this is a genuine,
 # serving-reachable framework limit on SM100, not a collector dummy-setup
-# artifact; SM90 is immune via FlashMLA. Upstream-reportable. Cases stay
-# as classified runtime failures. Re-verify on the next version bump.
+# artifact; SM90 is immune via FlashMLA. Upstream-reportable. Also
+# hardware-observed on SM103 (2026-07-19, B300): identical signature
+# (SmemTile.cpp:53 "Num. rows must be a multiple of 8 <h>") for h in
+# {1,2,4} while h=8 ctx+gen pass — the limit covers the trtllm-gen path on
+# both SM100 and SM103. Cases stay as classified runtime failures.
+# Re-verify on the next version bump.
 
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
@@ -212,15 +220,18 @@ def _get_precision_combos(phase: str, attn_type: str):
         if sm >= 100:
             attn_combos.append(("bfloat16", "fp8"))
     else:
-        # FP8-KV MLA: Hopper FMHA variants (86 < sm < 100) plus Blackwell
+        # FP8-KV MLA: Hopper FMHA variants (86 < sm < 100), Blackwell
         # datacenter trtllm-gen MLA — hardware-validated on B200/SM100
         # 2026-07-18 (rc20, gen+ctx probes b=4/s=2048/h=128 via --quick),
-        # refuting the retired "fails on SM100" sm_exceptions claim.
-        # SM120/121 stay excluded: the framework does not select trtllm-gen
-        # kernels there (attention_backend/trtllm.py:1105@1.3.0rc20
-        # `is_sm_version_trtllm_gen_kernel`), and no SM120 hardware has
-        # validated an alternative fp8-KV MLA module path yet.
-        if sm > 86 and sm not in (120, 121):
+        # refuting the retired "fails on SM100" sm_exceptions claim — and
+        # SM120 via the framework's non-trtllm-gen dispatch
+        # (`is_sm_version_trtllm_gen_kernel` excludes 120/121,
+        # attention_backend/trtllm.py:1105@1.3.0rc20): hardware-validated on
+        # RTX PRO 6000 2026-07-19 (rc20, DeepSeek-V3 ctx+gen, prefix 0/128,
+        # b=4/s=2048/h=128, finite latencies through the module collector's
+        # framework-dispatch path). SM121 stays excluded: no SM121 hardware
+        # has validated any fp8-KV MLA module path yet.
+        if sm > 86 and sm != 121:
             attn_combos.append(("bfloat16", "fp8"))
 
     return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
