@@ -17,6 +17,7 @@ The test runner is **just pytest** (no custom wrapper scripts).
 The E2E CLI tests execute the installed `aiconfigurator` console script, so make sure you have an editable install:
 
 ```bash
+python3 -m pip install -e ./aic-core
 python3 -m pip install -e ".[dev]"
 ```
 
@@ -73,7 +74,7 @@ The Python SDK keeps using the existing Python latency path by default. To run P
 
 ```bash
 # Build manually, then run any pytest target with the Rust path enabled
-cargo build --manifest-path rust/aiconfigurator-core/Cargo.toml
+cargo build --manifest-path aic-core/rust/aiconfigurator-core/Cargo.toml
 python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
 
 # Or let the test harness build the shared library when needed

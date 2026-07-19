@@ -31,6 +31,7 @@ name = "aiconfigurator"
 version = "0.10.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiconfigurator-core" },
     { name = "bokeh" },
     { name = "jinja2" },
     { name = "matplotlib" },
@@ -46,8 +47,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tqdm" },
 ]
 
@@ -87,6 +86,7 @@ webapp = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiconfigurator-core", editable = "aic-core" },
     { name = "bokeh" },
     { name = "chex", marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.1.87" },
     { name = "fastapi", marker = "extra == 'service'", specifier = ">=0.115.12" },
@@ -122,13 +122,37 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = "==3.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.1" },
-    { name = "scipy", specifier = ">=1.13.1" },
     { name = "tensorflow-probability", extras = ["jax"], marker = "python_full_version < '3.13' and extra == 'spica'", specifier = "==0.25.0" },
     { name = "tqdm", specifier = ">=4.0.0" },
     { name = "uv", marker = "extra == 'dev'" },
     { name = "uvicorn", marker = "extra == 'service'", specifier = ">=0.34.2" },
 ]
 provides-extras = ["dev", "webapp", "service", "spica"]
+
+[[package]]
+name = "aiconfigurator-core"
+version = "0.10.0"
+source = { editable = "aic-core" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or python_full_version >= '3.14'" },
+    { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = "~=1.26.4" },
+    { name = "packaging", specifier = ">=20.0" },
+    { name = "pandas", specifier = ">=2.2.3" },
+    { name = "pyarrow", specifier = ">=15.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "scipy", specifier = ">=1.13.1" },
+]
 
 [[package]]
 name = "aiofiles"

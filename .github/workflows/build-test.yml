@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install and run cargo-deny
-        working-directory: rust/aiconfigurator-core
+        working-directory: aic-core/rust/aiconfigurator-core
         # Default log level (warn) surfaces "license inferred from file" notes
         # so any crate that may need a [[licenses.clarify]] entry is named.
         # --show-stats prints a per-license usage summary at the end.
@@ -82,7 +82,7 @@ jobs:
         run: |
           echo "CPU cores: $(nproc)"
           free -h
-      - name: Build wheel in container
+      - name: Build wheels and verify SDK import namespaces
         run: |
           docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
       - name: Run tests in container
@@ -214,7 +214,7 @@ jobs:
           fetch-depth: 0
       - name: Git LFS Pull
         # The parity suite reads the collected perf parquet tables under
-        # src/aiconfigurator/systems/data (stored via Git LFS).
+        # aic-core/src/aiconfigurator_core/systems/data (stored via Git LFS).
         run: git lfs pull
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -228,21 +228,22 @@ jobs:
       - name: Build the aiconfigurator_core Rust extension
         # The AICONFIGURATOR_RUST_CORE_AUTOBUILD env var is a no-op; the compiled
         # aiconfigurator_core extension must be built explicitly with maturin so
-        # the parity suite exercises the current Rust source. The maturin project
-        # is the repo root (see root pyproject.toml [tool.maturin]).
+        # the parity suite exercises the current Rust source. The Maturin project
+        # is the standalone core wheel under aic-core.
         run: |
+          cd aic-core
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop --release
       - name: Run Rust/Python engine-step parity suite
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
-            rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+            aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
       - name: Run compile-engine (EngineHandle) parity suite
         # Parity for the compile_engine -> EngineHandle path: op-transfer bincode
         # round-trip fidelity plus integration parity vs the Python BaseBackend.
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
-            rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
+            aic-core/rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
       - name: Run Rust/Python engine-step perf gate
         # Guards against Rust hot-path perf regressions (e.g. an O(n log n)
         # per-query resolve). Compares Rust-vs-Python p50 back-to-back on the
@@ -255,4 +256,4 @@ jobs:
           MKL_NUM_THREADS: "1"
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rA \
-            rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py
+            aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py

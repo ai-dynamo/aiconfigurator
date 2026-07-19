@@ -203,7 +203,12 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
 
     monkeypatch.setattr(memory, "get_model", _fake_get_model)
     monkeypatch.setattr(memory, "get_backend", lambda backend: _StubBackend())
-    monkeypatch.setattr(memory.perf_database, "get_database", lambda *a, **k: _StubDB())
+
+    def _fake_get_database(*args, **kwargs):
+        captured["systems_paths"] = kwargs.get("systems_paths")
+        return _StubDB()
+
+    monkeypatch.setattr(memory.perf_database, "get_database", _fake_get_database)
 
     memory.KVCacheEstimator.from_request(
         "Qwen/Qwen3-32B",
@@ -212,10 +217,12 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
         max_num_tokens=8192,
         max_batch_size=256,
         nextn=2,
+        systems_path="/tmp/aic-core-systems",
     )
     assert captured["nextn"] == 2
     # No explicit rates -> the project-wide MTP default is applied.
     assert captured["rates"] == [0.85, 0.3, 0.0, 0.0, 0.0]
+    assert captured["systems_paths"] == "/tmp/aic-core-systems"
 
 
 def test_native_capacity_override_wins():

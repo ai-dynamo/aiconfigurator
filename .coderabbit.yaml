@@ -30,7 +30,7 @@ reviews:
     - "collector/**"
     - "docker/**"
     - "docs/**"
-    - "rust/**"
+    - "aic-core/**"
     - "src/**"
     - "tests/**"
     - "tools/**"
@@ -86,6 +86,10 @@ reviews:
       instructions: |
         - Verify SDK API changes remain compatible with generator inputs, profiler data flow, and documented examples.
         - Flag silent schema or field-name drift between SDK models and generator/module bridge code.
+    - path: "aic-core/src/aiconfigurator_core/sdk/**"
+      instructions: |
+        - Verify core SDK API changes remain compatible with legacy aiconfigurator.sdk imports, generator inputs, profiler data flow, and documented examples.
+        - Flag upper-layer dependencies or silent schema drift introduced into the minimal core distribution.
     - path: "src/aiconfigurator/generator/module_bridge.py"
       instructions: |
         - Treat this as a compatibility bridge between profiler/SDK outputs and generator inputs.
@@ -102,7 +106,7 @@ reviews:
       instructions: |
         - Check support-matrix logic for deterministic ordering, duplicate-row handling, runtime/version matching, and clear PASS/FAIL semantics.
         - Verify changes distinguish collector/probe failures from actual model/backend support failures.
-    - path: "src/aiconfigurator/systems/support_matrix/**"
+    - path: "aic-core/src/aiconfigurator_core/systems/support_matrix/**"
       instructions: |
         - Review support-matrix CSV updates as source-of-truth compatibility data, not generated noise.
         - Check that model, backend, runtime version, GPU system, quantization, tensor/pipeline/expert parallelism, and PASS/FAIL wording are internally consistent.
