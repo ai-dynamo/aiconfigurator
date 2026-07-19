@@ -109,6 +109,7 @@ except ImportError:
 from tensorrt_llm.bindings.internal.batch_manager import CacheType
 from tensorrt_llm.functional import AllReduceStrategy
 from tensorrt_llm.mapping import Mapping
+from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -382,7 +383,22 @@ def _apply_gemm_type_quant(model_config, gemm_type: str, use_fp8_kv_cache: bool)
                 quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
                 group_size=128,
                 kv_cache_quant_algo=kv_algo,
-                exclude_modules=None,
+                # Serving ALWAYS excludes these from FP8_BLOCK_SCALES: every
+                # translation of an fp8 weight_block_size checkpoint appends
+                # ["*kv_b_proj*", "*k_b_proj*", "*eh_proj"] to exclude_modules
+                # (model_config.py:481-490@1.3.0rc20, merged with the HF
+                # modules_to_not_convert; same list at :436-440 for the
+                # TRTLLM-MoE default), because 128x128 block boundaries need
+                # not align with per-head dims (GLM-5 qk_nope_head_dim=192),
+                # and the weight loader then routes kv_b_proj through the
+                # dequant path so k_b_proj_trans stays bf16
+                # (modeling_deepseekv3.py:378-385@1.3.0rc20). Passing None
+                # here made k_b_proj_trans fp8 — a bmm path serving never
+                # takes for these checkpoints — which crashed every GLM
+                # fp8_block DSA context case on H20 ("Scale tensor size
+                # mismatch", expected/got = 192-per-head blocks 2 vs 1.5)
+                # and silently mis-measured the DeepSeek ones that passed.
+                exclude_modules=["*kv_b_proj*", "*k_b_proj*", "*eh_proj"],
             ),
         )
     elif gemm_type == "nvfp4":
@@ -541,6 +557,32 @@ def create_attention_layer(
         layer_idx=0,
         aux_stream_dict=aux_stream_dict,
     )
+
+    # Serving applies QuantConfig.exclude_modules in
+    # DecoderModelForCausalLM.__post_init__ via
+    # apply_quant_config_exclude_modules() (_torch/models/
+    # modeling_utils.py:488-541@1.3.0rc20): every named module matching an
+    # exclusion pattern has its quant_config replaced by a fresh QuantConfig
+    # carrying only kv_cache_quant_algo, before weights are (re)created.
+    # This bare-layer build skips __post_init__, which left kv_b_proj
+    # quantized even though every fp8 weight_block_size checkpoint
+    # translation force-excludes *kv_b_proj*/*k_b_proj*
+    # (model_config.py:481-490@1.3.0rc20, GLM-5's qk_nope_head_dim=192
+    # cannot tile into 128x128 scale blocks) — so MLA.create_weights
+    # (attention.py:1558,1571-1584) built an fp8 k_b_proj_trans and routed
+    # the absorption bmm down a path serving never takes for these
+    # checkpoints. Mirror the pass here, before create_weights, so weight
+    # dtypes come out serving-identical. The serving loop's fused-gate_up/
+    # fused-qkv alias candidates are irrelevant for this op family: its
+    # exclusion patterns only name plain Linears.
+    quant_config = model_config.quant_config
+    if quant_config is not None and quant_config.exclude_modules is not None:
+        excluded_replacement = QuantConfig(kv_cache_quant_algo=quant_config.kv_cache_quant_algo)
+        for module_name, module in layer.named_modules():
+            if getattr(module, "quant_config", None) is None:
+                continue
+            if quant_config.is_module_excluded_from_quantization(module_name):
+                module.quant_config = excluded_replacement
 
     for module in layer.modules():
         if callable(getattr(module, "create_weights", None)):
