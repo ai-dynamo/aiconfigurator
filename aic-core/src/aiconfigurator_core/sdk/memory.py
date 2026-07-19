@@ -42,7 +42,7 @@ from typing import Any
 from aiconfigurator_core.sdk import perf_database
 from aiconfigurator_core.sdk.backends.factory import get_backend
 from aiconfigurator_core.sdk.common import DefaultHFModels
-from aiconfigurator_core.sdk.config_builders import apply_nextn, build_model_config
+from aiconfigurator_core.sdk.config_builders import apply_nextn, build_model_config, validate_nextn
 from aiconfigurator_core.sdk.models import get_model
 from aiconfigurator_core.sdk.utils import (
     _download_hf_config,
@@ -912,6 +912,10 @@ def estimate_kv_cache(
     _validate_naive_reservation(naive_kv_reservation)
     fraction = float(memory_fraction_value)
     is_of_free = memory_fraction_kind == "of_free"
+
+    # Validate MTP inputs up front: a user-input error must surface as-is, not
+    # be swallowed by the naive fallback below (which ignores MTP entirely).
+    validate_nextn(nextn, nextn_accepted)
 
     try:
         native = KVCacheEstimator.from_request(

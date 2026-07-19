@@ -1331,12 +1331,12 @@ class EventFn:
 
     @staticmethod
     def update_model_related_components(model_path):
-        # nextn, nextn_accepted, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
+        # Output order: nextn, nextn_accepted, enable_wideep, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size
         model_family = models.get_model_family(model_path)
         if check_is_moe(model_path):
             return (
                 gr.update(value=0, visible=True),
-                gr.update(visible=True),
+                gr.update(value=None, visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
@@ -1347,7 +1347,7 @@ class EventFn:
             # LLAMA supports MTP (Multi-Token Prediction) speculative decoding
             return (
                 gr.update(value=0, visible=True),
-                gr.update(visible=True),
+                gr.update(value=None, visible=True),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
@@ -1358,7 +1358,7 @@ class EventFn:
             # GPT, NEMOTRONNAS, NEMOTRONH do not support nextn/MTP
             return (
                 gr.update(value=0, visible=False),
-                gr.update(visible=False),
+                gr.update(value=None, visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),

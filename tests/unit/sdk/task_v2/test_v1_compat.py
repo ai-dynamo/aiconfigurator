@@ -182,7 +182,7 @@ class TestUnmappable:
         out = convert_v1_to_v2(v1_no_rates)
         assert out["nextn_accepted"] == pytest.approx(0.85)
 
-        # nextn absent/0 -> rates dropped, no nextn_accepted emitted.
+        # nextn absent -> rates dropped, no nextn_accepted emitted.
         v1_off = {
             "serving_mode": "agg",
             "model_path": "x",
@@ -191,6 +191,27 @@ class TestUnmappable:
         out = convert_v1_to_v2(v1_off)
         assert "nextn_accepted" not in out
         assert "nextn_accept_rates" not in out
+
+        # Explicit nextn: 0 (disabled) behaves the same as absent.
+        v1_zero = {
+            "serving_mode": "agg",
+            "model_path": "x",
+            "config": {"nextn": 0, "nextn_accept_rates": [0.85, 0.3, 0.0, 0.0, 0.0]},
+        }
+        out = convert_v1_to_v2(v1_zero)
+        assert out["nextn"] == 0
+        assert "nextn_accepted" not in out
+        assert "nextn_accept_rates" not in out
+
+        # nextn beyond the historic 5-element list stays defined (missing
+        # positions fold as zero acceptance).
+        v1_long = {
+            "serving_mode": "agg",
+            "model_path": "x",
+            "config": {"nextn": 6},
+        }
+        out = convert_v1_to_v2(v1_long)
+        assert out["nextn_accepted"] == pytest.approx(0.85 + 0.85 * 0.3)
 
     def test_attention_backend_and_wideep_num_slots_map(self):
         """attention_backend (config-level) and wideep_num_slots (top-level) now map to

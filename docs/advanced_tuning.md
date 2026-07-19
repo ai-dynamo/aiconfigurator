@@ -38,7 +38,8 @@ agg_full:
   ttft: 1000.0
   tpot: 40.0
   enable_wideep: false
-  # Speculative decoding (MTP)
+  # Speculative decoding (MTP): opt-in only; nextn_accepted is required
+  # when nextn > 0 and must lie in [0, nextn].
   nextn: 1
   nextn_accepted: 0.85
   # Quantization of each component (default: inferred from HF config)
@@ -63,6 +64,7 @@ disagg_full:
   osl: 1000
   ttft: 1000.0
   tpot: 40.0
+  # MTP is opt-in; nextn_accepted required when nextn > 0, in [0, nextn].
   nextn: 1
   nextn_accepted: 0.85
 

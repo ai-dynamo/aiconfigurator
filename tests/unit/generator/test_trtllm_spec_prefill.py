@@ -88,6 +88,14 @@ def test_disagg_mtp_spec_config_on_both_roles():
         assert spec["num_nextn_predict_layers"] == 1
 
 
+def test_disagg_mtp_preserves_exact_nextn_value():
+    """num_nextn_predict_layers must carry the exact draft length (no cap)."""
+    artifacts = _render(nextn=6)
+    for role in ("prefill", "decode"):
+        engine = yaml.safe_load(artifacts[f"extra_engine_args_{role}.yaml"])
+        assert engine["speculative_config"]["num_nextn_predict_layers"] == 6
+
+
 def test_disagg_nextn_zero_emits_no_spec_config():
     artifacts = _render(nextn=0)
     for role in ("prefill", "decode"):

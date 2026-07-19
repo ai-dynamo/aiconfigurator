@@ -38,7 +38,7 @@ import os
 from typing import Any
 
 import aiconfigurator_core
-from aiconfigurator_core.sdk.config_builders import build_model_config
+from aiconfigurator_core.sdk.config_builders import apply_nextn, build_model_config
 from aiconfigurator_core.sdk.models import get_model
 from aiconfigurator_core.sdk.operations import (
     GEMM,
@@ -758,6 +758,10 @@ def compile_engine(
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
     )
+    # Apply MTP BEFORE get_model so the walked op lists carry the
+    # 1/(1+nextn_accepted)*(L+nextn)/L generation scale; the spec's top-level
+    # nextn only drives the Rust (nextn+1) decode-batch multiplier.
+    apply_nextn(model_config, nextn, nextn_accepted)
     model = get_model(model_path, model_config, backend)
 
     # The database is only needed to pre-bake the WideEP MoE kernel selection

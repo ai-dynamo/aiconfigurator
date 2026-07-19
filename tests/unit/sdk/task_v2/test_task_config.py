@@ -319,10 +319,13 @@ def test_build_model_config_agg_uses_resolved_quant():
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        nextn=2,
+        nextn_accepted=1.2,
     )
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-    assert mc.nextn == t.nextn
+    assert mc.nextn == t.nextn == 2
+    assert mc.nextn_accepted == t.nextn_accepted == 1.2
 
 
 def test_sweep_agg_kwargs_shape():
@@ -634,6 +637,36 @@ def test_nextn_requires_nextn_accepted():
             backend_name="trtllm",
             nextn=1,
             nextn_accepted=1.5,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=-0.1,
+        )
+    # Validation must not depend on model-identity resolution (which is skipped
+    # when no primary model path is set).
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn=1)
+    with _pytest.raises(ValueError, match=">= 0"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=-1,
+        )
+    with _pytest.raises(ValueError, match="integer"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1.5,
+            nextn_accepted=0.5,
         )
 
 

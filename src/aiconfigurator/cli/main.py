@@ -24,6 +24,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.config_builders import validate_nextn
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
@@ -2003,11 +2004,10 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    if args.nextn > 0 and args.nextn_accepted is None:
-        raise SystemExit(
-            f"--nextn {args.nextn} requires --nextn-accepted (average accepted draft tokens per step, "
-            f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
-        )
+    try:
+        validate_nextn(args.nextn, args.nextn_accepted)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2298,11 +2298,10 @@ def _validate_default_mode_inputs(args) -> None:
             + ", ".join(missing)
             + " unless --thorough-config provides a native Spica SmartSearchConfig."
         )
-    if args.nextn > 0 and args.nextn_accepted is None:
-        raise SystemExit(
-            f"--nextn {args.nextn} requires --nextn-accepted (average accepted draft tokens per step, "
-            f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
-        )
+    try:
+        validate_nextn(args.nextn, args.nextn_accepted)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def main(args):

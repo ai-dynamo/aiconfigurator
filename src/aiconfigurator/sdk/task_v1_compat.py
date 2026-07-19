@@ -312,6 +312,8 @@ def _fold_accept_rates(nextn: int, rates: list[float]) -> float:
     expectation = 0.0
     prob = 1.0
     for i in range(nextn):
-        prob *= rates[i]
+        # V1 rate lists carried 5 positions; treat positions beyond the list as
+        # zero acceptance so nextn > len(rates) stays defined.
+        prob *= rates[i] if i < len(rates) else 0.0
         expectation += prob
     return expectation

@@ -79,12 +79,16 @@ def test_static_estimate_memory_capacity_context():
 
 
 def test_static_estimate_with_nextn_accepted():
-    """Passing nextn + nextn_accepted should not error."""
+    """nextn + nextn_accepted must actually change the estimate (not be silently
+    ignored): MTP trades a slightly costlier verify step for ~(1+accepted)
+    tokens per step, so tokens/s/user must improve vs the nextn=0 baseline."""
     kwargs = _common_kwargs()
+    baseline = cli_estimate(mode="static", **kwargs)
     kwargs["nextn"] = 1
     kwargs["nextn_accepted"] = 0.85
     result = cli_estimate(mode="static", **kwargs)
     assert result.summary is not None
+    assert result.tokens_per_second_per_user > baseline.tokens_per_second_per_user
 
 
 def test_cli_short_aliases_parse_to_same_dest():

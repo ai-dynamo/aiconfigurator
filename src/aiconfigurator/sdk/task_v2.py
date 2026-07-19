@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.config_builders import validate_nextn
 from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
@@ -552,6 +553,10 @@ class Task:
 
     def __post_init__(self) -> None:
         self._check_prefix_discipline()
+        # Validate the MTP pair BEFORE model-identity resolution: the latter is
+        # skipped when no primary model path is set, and the check must not
+        # depend on it (non-negative integer nextn; finite acceptance in range).
+        validate_nextn(self.nextn, self.nextn_accepted)
         self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
         self._resolve_backend_version()
@@ -658,13 +663,7 @@ class Task:
         # explicitly. Surface a hint when the checkpoint ships MTP layers.
         hf_nextn = cfg.get("num_nextn_predict_layers")
         if self.nextn > 0:
-            if self.nextn_accepted is None:
-                raise ValueError(
-                    f"nextn={self.nextn} requires 'nextn_accepted' (average accepted draft tokens per step, "
-                    f"0 <= nextn_accepted <= nextn); there is no built-in acceptance assumption."
-                )
-            if not 0 <= self.nextn_accepted <= self.nextn:
-                raise ValueError(f"nextn_accepted ({self.nextn_accepted}) must be within [0, nextn={self.nextn}].")
+            # Range/required-ness already validated in __post_init__ (validate_nextn).
             if hf_nextn is not None and self.nextn != hf_nextn:
                 logger.warning(
                     "nextn=%d differs from the checkpoint's num_nextn_predict_layers=%d "

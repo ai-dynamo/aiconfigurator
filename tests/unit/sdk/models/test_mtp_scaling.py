@@ -127,6 +127,30 @@ class TestMTPScaling:
             "Context ops should NOT be scaled by mtp_scale_factor"
         )
 
+    def test_p2p_scaling_split_between_phases(self):
+        """context_p2p must NOT carry the MTP scale while generation_p2p must
+        (the original context-P2P regression), asserted on the P2P ops directly."""
+
+        def build(nextn):
+            mc = sdk_config.ModelConfig(
+                tp_size=1,
+                pp_size=2,
+                gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+                kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+                nextn=nextn,
+                nextn_accepted=(0.85 if nextn else None),
+            )
+            return models.get_model("Qwen/Qwen3-32B", mc, "trtllm")
+
+        def p2p_scale(model, name):
+            ops_list = model.context_ops if name == "context_p2p" else model.generation_ops
+            op = next(op for op in ops_list if getattr(op, "_name", "") == name)
+            return op._scale_factor
+
+        baseline, mtp = build(0), build(2)
+        assert p2p_scale(mtp, "context_p2p") == p2p_scale(baseline, "context_p2p")
+        assert p2p_scale(mtp, "generation_p2p") != p2p_scale(baseline, "generation_p2p")
+
     def test_qwen35_generation_ops_scaled_by_mtp(self):
         """
         Test that Qwen35Model generation ops are scaled by mtp_scale_factor
