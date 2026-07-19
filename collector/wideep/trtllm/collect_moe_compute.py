@@ -822,7 +822,17 @@ def run_wideep_moe_compute(
     cleanup_empty_json_files(moe_tune_path)
     inter_local = inter_size // moe_tp_size
     slots_local = num_slots // moe_ep_size
-    cache_path = f"{moe_tune_path}/wideep_compute_{moe_kernel}_{moe_type}_{hidden_size}_{inter_local}_{slots_local}"
+    # The tuned-tactic cache MUST be SM-scoped: tactic indices are positions
+    # in the runner's per-arch config table, and replaying another arch's
+    # indices overruns the table (hardware-observed on RTX PRO 6000
+    # 2026-07-19: SM100-tuned indices up to 40+ into SM120's size-8 table →
+    # "vector::_M_range_check" in FusedMoeRunner.run_moe, 93/100 gate
+    # failures). Pre-fix cache files without the sm prefix are dead — their
+    # tuning SM is not recorded, so they are never trusted again.
+    cache_path = (
+        f"{moe_tune_path}/wideep_compute_sm{get_sm_version()}_"
+        f"{moe_kernel}_{moe_type}_{hidden_size}_{inter_local}_{slots_local}"
+    )
     existing_files = glob.glob(f"{cache_path}*")
     cache_loaded = False
     if existing_files:
