@@ -46,6 +46,9 @@ SUPPORTED_PERCENTILES = (0.5, 0.75, 0.9, 0.95, 0.99, 0.999)
 # above this the refine would dominate sweep time, so we keep the screening
 # estimate (conservative direction: the row stays, tier stays visible)
 _MAX_EVAL_COMPLEXITY = 120_000
+# the disagg tandem upgrade runs only at the report boundary (a handful of
+# top rows, once), so it affords a higher ceiling than the sweep-path cap
+_MAX_TANDEM_COMPLEXITY = 1_000_000
 
 
 def _report_quantile(rep: QueueingReport, metric: str, q: float) -> float:
@@ -290,7 +293,15 @@ def apply_sla_funnel(
     return df
 
 
-def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=None) -> pd.DataFrame:
+def refine_report_rows(
+    df: pd.DataFrame,
+    max_refines: int = 32,
+    runtime_config=None,
+    nextn: int | None = None,
+    nextn_accept_rates=None,
+    prefill_latency_correction: float = 1.0,
+    decode_latency_correction: float = 1.0,
+) -> pd.DataFrame:
     """Report-boundary tier upgrade: refine the rows a human will read.
 
     Feasibility was already resolved by the sweep funnel; this pass only
@@ -302,8 +313,12 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=N
     Self-contained: (model, database, backend) are rebuilt from each row's
     own metadata (model/backend/version/system + parallelism columns), so
     it can run at the report boundary where sweep-time objects are gone.
-    Any per-group rebuild failure is logged and skipped — the report path
-    must never crash on a tier upgrade.
+    Task-level resolution that is NOT recoverable from row metadata must be
+    passed in: ``nextn`` / ``nextn_accept_rates`` (MTP changes the decode
+    op graph) and the disagg ``prefill/decode_latency_correction`` factors
+    the disagg sweep applies to its static estimates. Any per-group rebuild
+    failure is logged and skipped — the report path must never crash on a
+    tier upgrade.
     """
     if df is None or df.empty or "queueing_tier" not in df.columns:
         return df
@@ -323,7 +338,20 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=N
             logger.info("report tier upgrade: refine budget exhausted, %d rows left at screening tier", int(mask.sum()))
             break
         (model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp) = key
-        rebuilt = _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp)
+        rebuilt = _rebuild_stage(
+            model_path,
+            backend_name,
+            version,
+            system,
+            tp,
+            pp,
+            dp,
+            moe_tp,
+            moe_ep,
+            cp,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+        )
         if rebuilt is None:
             continue
         model, database, backend = rebuilt
@@ -339,13 +367,25 @@ def refine_report_rows(df: pd.DataFrame, max_refines: int = 32, runtime_config=N
         budget -= len(reports)
 
     if mask_composed.any() and budget > 0:
-        budget = _refine_disagg_report_rows(df, mask_composed, budget)
+        budget = _refine_disagg_report_rows(
+            df,
+            mask_composed,
+            budget,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
+            prefill_latency_correction=prefill_latency_correction,
+            decode_latency_correction=decode_latency_correction,
+        )
     return df.round(3)
 
 
-def _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp):
+def _rebuild_stage(
+    model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp, nextn=None, nextn_accept_rates=None
+):
     """Rebuild (model, database, backend) from row metadata; None on failure
-    (the report path must never crash on a tier upgrade)."""
+    (the report path must never crash on a tier upgrade). ``nextn`` /
+    ``nextn_accept_rates`` come from the task (MTP is not recoverable from
+    row metadata but changes the decode op graph)."""
     from aiconfigurator_core.sdk import config as sdk_config
     from aiconfigurator_core.sdk.backends.factory import get_backend
     from aiconfigurator_core.sdk.models import get_model
@@ -361,6 +401,10 @@ def _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp
             attention_dp_size=int(dp) if dp else 1,
             cp_size=int(cp) if cp else 1,
         )
+        if nextn is not None:
+            model_config.nextn = int(nextn)
+            if nextn_accept_rates is not None:
+                model_config.nextn_accept_rates = list(nextn_accept_rates)
         model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
         return model, database, get_backend(backend_name)
     except Exception:
@@ -379,7 +423,41 @@ _P_COLS = ("(p)backend", "(p)version", "(p)system", "(p)tp", "(p)pp", "(p)dp", "
 _D_COLS = ("(d)backend", "(d)version", "(d)system", "(d)tp", "(d)pp", "(d)dp", "(d)moe_tp", "(d)moe_ep")
 
 
-def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budget: int) -> int:
+class _ScaledTiming:
+    """Latency-correction and attention-DP adapter over a timing model.
+
+    ``scale`` is the multiplicative correction the disagg sweep applies to
+    its static estimates, so the tandem tier prices passes on the same
+    basis as the numbers it replaces. ``decode_dp`` mirrors the sweep's
+    attention-DP pricing convention, which is ASYMMETRIC: prefill passes
+    are priced at the worker-GLOBAL batch, while decode passes are priced
+    at the PER-RANK batch (the DP ranks decode their shards in parallel;
+    verified against the disagg sweep's own static numbers). The tandem
+    recursion tracks worker-global slots, so decode pricing divides by dp.
+    """
+
+    def __init__(self, inner, scale: float, decode_dp: int = 1):
+        self._inner = inner
+        self._scale = float(scale)
+        self._decode_dp = max(1, int(decode_dp))
+
+    def prefill_ms(self, batch_size, mean_isl, mean_prefix):
+        return self._inner.prefill_ms(batch_size, mean_isl, mean_prefix) * self._scale
+
+    def decode_ms(self, batch_size, context_len):
+        per_rank = -(-int(batch_size) // self._decode_dp)  # ceil division
+        return self._inner.decode_ms(max(1, per_rank), context_len) * self._scale
+
+
+def _refine_disagg_report_rows(
+    df: pd.DataFrame,
+    mask_composed: pd.Series,
+    budget: int,
+    nextn: int | None = None,
+    nextn_accept_rates=None,
+    prefill_latency_correction: float = 1.0,
+    decode_latency_correction: float = 1.0,
+) -> int:
     """Upgrade disagg rows from the composed (static-scalar) tier to the
     tandem-recursion quantitative tier.
 
@@ -404,12 +482,19 @@ def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budge
         if budget <= 0:
             logger.info("report tier upgrade: refine budget exhausted, disagg rows left at composed tier")
             break
-        eligible = [
-            idx
-            for idx in group.index
-            if float(df.at[idx, "encoder_latency"] or 0.0) <= 0.0  # multimodal stays composed, visibly
-            and int(df.at[idx, "concurrency"]) * int(df.at[idx, "osl"]) <= _MAX_EVAL_COMPLEXITY
-        ]
+        eligible = []
+        for idx in group.index:
+            enc = df.at[idx, "encoder_latency"]
+            if not pd.isna(enc) and float(enc) > 0.0:
+                continue  # multimodal stays composed, visibly
+            if int(df.at[idx, "concurrency"]) * int(df.at[idx, "osl"]) > _MAX_TANDEM_COMPLEXITY:
+                logger.info(
+                    "disagg tier upgrade skipped for row %s (concurrency x osl above %d)",
+                    idx,
+                    _MAX_TANDEM_COMPLEXITY,
+                )
+                continue
+            eligible.append(idx)
         if not eligible:
             continue
         model_path = key[0]
@@ -426,6 +511,8 @@ def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budge
             p_meta["(p)moe_tp"],
             p_meta["(p)moe_ep"],
             p_meta["(p)cp"],
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
         )
         d_rebuilt = _rebuild_stage(
             model_path,
@@ -438,13 +525,18 @@ def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budge
             d_meta["(d)moe_tp"],
             d_meta["(d)moe_ep"],
             1,
+            nextn=nextn,
+            nextn_accept_rates=nextn_accept_rates,
         )
         if p_rebuilt is None or d_rebuilt is None:
             continue
         p_model, p_db, p_backend = p_rebuilt
         d_model, d_db, d_backend = d_rebuilt
-        p_timing = DatabaseTimingModel(p_model, p_db, p_backend)
-        d_timing = DatabaseTimingModel(d_model, d_db, d_backend)
+        p_timing = _ScaledTiming(DatabaseTimingModel(p_model, p_db, p_backend), prefill_latency_correction)
+        d_dp = max(1, int(d_meta["(d)dp"]) if d_meta["(d)dp"] else 1)
+        d_timing = _ScaledTiming(
+            DatabaseTimingModel(d_model, d_db, d_backend), decode_latency_correction, decode_dp=d_dp
+        )
         try:
             kv_bpt = int(p_model.get_kvcache_bytes_per_sequence(1))
             egress = float(p_db.system_spec["node"]["inter_node_bw"])
@@ -453,21 +545,24 @@ def _refine_disagg_report_rows(df: pd.DataFrame, mask_composed: pd.Series, budge
             logger.warning("disagg tier upgrade skipped (no transfer spec derivable)", exc_info=True)
             continue
 
-        for idx in group.index:
+        for idx in eligible:
             if budget <= 0:
                 break
             row = df.loc[idx]
-            if float(row.get("encoder_latency", 0.0) or 0.0) > 0.0:
-                continue  # multimodal disagg out of the tandem model's scope
             c = int(row["concurrency"])
             osl = int(row["osl"])
-            if c * osl > _MAX_EVAL_COMPLEXITY:
-                continue
             wl = WorkloadSpec(isl=int(row["isl"]), osl=osl, prefix=int(row.get("prefix", 0) or 0), concurrency=c)
-            # the disagg prefill worker runs static batches of (p)bs prompts:
-            # a per-pass token budget of (p)bs * effective_isl reproduces that
-            p_eng = EngineSpec(max_num_batched_tokens=max(1, int(row["(p)bs"])) * wl.effective_isl)
-            d_eng = EngineSpec(max_num_seqs=max(1, int(row["(d)bs"])))
+            # WORKER-GLOBAL batch semantics: with attention DP, (p)bs/(d)bs
+            # are per-rank and the worker serves global_bs = bs * dp requests
+            # per pass. The phase runners price a dp worker's pass at its
+            # global batch (verified against the disagg sweep's own static
+            # numbers), so both the pass capacity and the timing use
+            # global_bs. The prefill worker runs static batches: a per-pass
+            # token budget of global_bs * effective_isl reproduces that.
+            p_bs = max(1, int(row.get("(p)global_bs", row["(p)bs"]) or row["(p)bs"]))
+            d_bs = max(1, int(row.get("(d)global_bs", row["(d)bs"]) or row["(d)bs"]))
+            p_eng = EngineSpec(max_num_batched_tokens=p_bs * wl.effective_isl)
+            d_eng = EngineSpec(max_num_seqs=d_bs)
             spec = DisaggSpec(
                 num_prefill_workers=max(1, int(row["(p)workers"])),
                 num_decode_workers=max(1, int(row["(d)workers"])),

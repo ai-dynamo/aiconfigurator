@@ -1733,7 +1733,15 @@ def _execute_tasks(
                 report_runtime_config = task.build_runtime_config()
             except Exception:
                 report_runtime_config = None
-            best_config_df = refine_report_rows(best_config_df, runtime_config=report_runtime_config)
+            best_config_df = refine_report_rows(
+                best_config_df,
+                runtime_config=report_runtime_config,
+                # task-level resolution not recoverable from row metadata
+                nextn=getattr(task, "nextn", None),
+                nextn_accept_rates=getattr(task, "nextn_accept_rates", None),
+                prefill_latency_correction=getattr(task, "prefill_latency_correction", 1.0),
+                decode_latency_correction=getattr(task, "decode_latency_correction", 1.0),
+            )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
         best_latencies[name] = latencies
