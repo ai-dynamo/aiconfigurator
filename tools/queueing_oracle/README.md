@@ -109,7 +109,23 @@ python3 run.py --trace trace.jsonl --trace-block-size 512
 ## Extending
 
 The intended growth direction is more gate coverage, not more simulator:
-disagg config families in `validate_formula.py`, variable-length
-workloads, and — when a GPU-free driver over the real vLLM `Scheduler`
-class lands — swapping the semantic authority from this hand-written core
-to the engine's own scheduler while keeping the same gate harness.
+variable-length workloads, more disagg families, and — the highest-value
+step — swapping the semantic authority from this hand-written core to the
+engine's own scheduler while keeping the same gate harness.
+
+**Real-`Scheduler` driver (assessed, deferred to a follow-up):** vLLM's
+own unit tests construct a live `Scheduler` GPU-free
+(`tests/v1/core/utils.py::create_scheduler`: `ModelConfig` +
+`SchedulerConfig` + `CacheConfig`, no model weights, tokenizer skippable).
+The driver is ~300 lines: `add_request` → `schedule()` → read
+`num_scheduled_tokens` per request (the exact prefill-chunk/decode-row
+split) → price the pass with the same pluggable perf model → advance a
+virtual clock → feed a fabricated `ModelRunnerOutput` to
+`update_from_output` → repeat. Output shape matches `des_agg_stats`, so
+the gate swaps oracle backends without changing tolerances. What it
+needs that this repo's unit CI deliberately does not have: an importable
+`vllm` (+ torch) pinned to the perf-DB version, and a cached HF config
+for the placeholder model — i.e. a separate CI job on a vLLM image, the
+`tools/generator_validator` pattern. Until then, this DES core remains
+the reference, with its semantics audited clause-by-clause against the
+scheduler source (§5 of the design doc).
