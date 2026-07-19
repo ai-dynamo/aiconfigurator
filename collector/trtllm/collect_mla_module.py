@@ -18,9 +18,22 @@
 # assert "Num. rows must be a multiple of 8 <h>" (forward_dsa_attn →
 # fmha/fallback.py:75 thop.attention @1.3.0rc20). Hardware-observed on B200
 # 2026-07-18: generation gate 38/38 failures were exactly this cluster while
-# every h>=8 case passed; context shows the same signature. Framework
-# kernel limit, not collector dummy setup — cases stay as classified
-# runtime failures. Re-verify on the next version bump.
+# every h>=8 case passed; context shows the same signature (2026-07-19
+# post-prompt_lens-fix gates: ctx 42/44 and gen 38/38 residual errors are
+# all this cluster). Root cause located 2026-07-19: the message comes from
+# the trtllm-gen JIT kernel generator inside libtensorrt_llm.so
+# (trtllm::gen::SmemTile layout codegen; the STSM.MT88.x4 store path
+# requires NumRows % 8 == 0, cf. the exported static_assert in
+# trtllmGenKernels/fmha/trtllmGen_fmha_export/trtllm/dev/StoreSmemP.h) —
+# the generator refuses to emit the sparse-MLA kernel when the row dim,
+# equal to the LOCAL q-head count, is not a multiple of 8. Serving-parity
+# audited (layer_permissions.md "Metadata/input parity"): serving TP
+# sharding passes the identical local head count (num_heads_tp =
+# native/TP) into the same op — GLM-5 (64 heads) hits it from TP16
+# (h=4), DeepSeek-V3.2 (128 heads) from TP32 — so this is a genuine,
+# serving-reachable framework limit on SM100, not a collector dummy-setup
+# artifact; SM90 is immune via FlashMLA. Upstream-reportable. Cases stay
+# as classified runtime failures. Re-verify on the next version bump.
 
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
