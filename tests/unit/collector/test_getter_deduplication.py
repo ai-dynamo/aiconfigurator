@@ -77,6 +77,11 @@ def _install_trtllm_stubs(monkeypatch):
         create_moe=_noop,
     )
     _stub_module(monkeypatch, "tensorrt_llm.mapping", Mapping=_Dummy)
+    _stub_module(
+        monkeypatch,
+        "tensorrt_llm._utils",
+        is_sm_100f=lambda sm_version=None: sm_version in (100, 103),
+    )
     _stub_module(monkeypatch, "tensorrt_llm.models.modeling_utils", QuantAlgo=_Dummy(), QuantConfig=_Dummy)
     _stub_module(
         monkeypatch,
