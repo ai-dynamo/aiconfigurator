@@ -1025,6 +1025,10 @@ class PerfDataFilename(Enum):
     dsv4_csa_attn_module = "dsv4_csa_attn_module_perf.parquet"
     dsv4_csa_topk_calib = "dsv4_csa_topk_calib_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
+    # Whole-model forward-pass data (forward_model="fpm"). Paired with a
+    # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
+    # ``operations.fpm_forward``, never through the shared layer.
+    fpm_forward = "fpm_forward_perf.parquet"
 
 
 QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])

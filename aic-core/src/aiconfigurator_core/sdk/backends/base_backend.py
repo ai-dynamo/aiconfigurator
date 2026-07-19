@@ -419,7 +419,9 @@ class BaseBackend:
         context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
-        if should_use_rust_engine_step(runtime_config, database):
+        # FPM models compile to no Rust op variant yet; force the Python phases
+        # (which handle the single whole-model op naturally).
+        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
             rust_runtime_config = runtime_config
             if img_ctx_tokens:
                 rust_runtime_config = copy.copy(runtime_config)
@@ -930,6 +932,14 @@ class BaseBackend:
         caller stores them under the "mix_step" key of the run_agg
         per-ops summary.
         """
+        if model.forward_model == "fpm":
+            # The 3-pass split below recognizes granular attention op NAMES
+            # ("context_attention"/"generation_attention"); a whole-model op
+            # matches neither and would be mis-accounted. FPM must take the
+            # explicit pure-prefill + pure-decode branch instead.
+            return self._get_fpm_mix_step_latency(
+                model, database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix
+            )
         if should_use_rust_engine_step(runtime_config, database):
             latency_ms = estimate_mixed_step_latency_with_rust(
                 model,
@@ -1040,6 +1050,98 @@ class BaseBackend:
         total_energy_wms = non_attention_energy_wms + ctx_attention_energy_wms + gen_attention_energy_wms
         return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
 
+    def _get_fpm_mix_step_latency(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int,
+    ) -> tuple[float, float, dict, dict]:
+        """Mixed step for FPM models: pure-prefill query plus the decode
+        work's MARGINAL cost. No mixed database row exists or is synthesized.
+
+        A mixed step is one shared forward pass: weight reads, kernel
+        launches, and per-step fixed overheads are paid once, by the prefill
+        component. Summing a full pure-decode step would pay them twice, so
+        the decode component is composed as
+        ``decode(B, KV) - decode_pass_baseline(B)`` — the KV-axis floor of the
+        decode curve cancels the shared-pass part, keeping only the
+        KV-read/attention cost that genuinely adds to the iteration. A
+        generation-only step (``ctx_tokens == 0``) has no pass to ride on and
+        keeps the full decode latency.
+
+        The workload mapping mirrors the op-level passes: the prefill
+        component runs ``ceil(ctx_tokens/isl)`` requests of ``isl`` tokens and
+        is divided by the chunk count when ``ctx_tokens < isl`` (average
+        per-chunk cost); the decode component runs ``gen_tokens`` requests at
+        the average sequence length ``isl + osl//2``.
+        """
+        per_ops_step_data: dict[str, float] = {}
+        per_ops_step_source: dict[str, str] = {}
+        total_latency_ms = 0.0
+        total_energy_wms = 0.0
+
+        if ctx_tokens > 0:
+            summary = self.run_static(
+                model,
+                database,
+                RuntimeConfig(
+                    batch_size=np.ceil(ctx_tokens / isl),
+                    beam_width=1,
+                    isl=isl,
+                    osl=1,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                ),
+                mode="static_ctx",
+            )
+            chunk_scale = np.ceil(isl / ctx_tokens)
+            energy_dict = summary.get_context_energy_wms_dict()
+            source_dict = summary.get_context_source_dict()
+            for op_name, latency in summary.get_context_latency_dict().items():
+                latency = latency / chunk_scale
+                per_ops_step_data[op_name] = latency
+                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
+                total_latency_ms += latency
+                total_energy_wms += energy_dict.get(op_name, 0.0) / chunk_scale
+
+        if gen_tokens > 0:
+            summary = self.run_static(
+                model,
+                database,
+                RuntimeConfig(
+                    batch_size=gen_tokens,
+                    beam_width=1,
+                    isl=isl + osl // 2,
+                    osl=2,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                ),
+                mode="static_gen",
+            )
+            pass_baseline_ms = 0.0
+            if ctx_tokens > 0:
+                # _run_generation_phase scaled the batch by (nextn + 1); the
+                # baseline must be sampled at the same effective batch.
+                pass_baseline_ms = float(
+                    model.generation_ops[0].query_pass_baseline(
+                        database, batch_size=gen_tokens * (model._nextn + 1)
+                    )
+                )
+            energy_dict = summary.get_generation_energy_wms_dict()
+            source_dict = summary.get_generation_source_dict()
+            for op_name, latency in summary.get_generation_latency_dict().items():
+                latency = max(latency - pass_baseline_ms, 0.0)
+                per_ops_step_data[op_name] = per_ops_step_data.get(op_name, 0.0) + latency
+                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
+                total_latency_ms += latency
+                total_energy_wms += energy_dict.get(op_name, 0.0)
+
+        return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
+
     def _get_genonly_step_latency(
         self,
         model: BaseModel,
@@ -1056,7 +1158,7 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        if should_use_rust_engine_step(runtime_config, database):
+        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
             latency_ms = estimate_decode_step_latency_with_rust(
                 model,
                 database,

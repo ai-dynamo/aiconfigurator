@@ -345,6 +345,10 @@ class Task:
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
+    # Forward-pass modeling mode: "op_level" (default) or "fpm" (whole-model
+    # forward op backed by collected fpm_forward data). Threaded into every
+    # ModelConfig this task builds; validated in models.get_model.
+    forward_model: str = "op_level"
 
     # ====== 2. Agg worker spec (serving_mode='agg') ======
     model_path: str = ""
@@ -1129,6 +1133,7 @@ class Task:
             # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
+            forward_model=self.forward_model or "op_level",
         )
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:

@@ -81,6 +81,7 @@ _TOP_PASSTHROUGH: frozenset[str] = frozenset(
         "free_gpu_memory_fraction",
         "max_seq_len",
         "engine_step_backend",
+        "forward_model",
         "nextn",
         "nextn_accept_rates",
         "moe_backend",

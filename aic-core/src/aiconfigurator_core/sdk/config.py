@@ -43,6 +43,11 @@ class ModelConfig:
     enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
+    # Forward-pass modeling switch. "op_level" (default) keeps the granular op
+    # lists; "fpm" replaces each phase list with a single whole-model
+    # fpm_forward op backed by collected forward-pass data (see
+    # operations/fpm_forward.py). Validated in models.get_model.
+    forward_model: str = "op_level"
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.

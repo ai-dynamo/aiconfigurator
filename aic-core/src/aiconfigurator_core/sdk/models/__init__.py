@@ -53,6 +53,33 @@ for _, _name, _ in pkgutil.iter_modules(__path__):
 del _SKIP
 
 
+_FORWARD_MODELS = ("op_level", "fpm")
+
+
+def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
+    """Centralized fpm rewrite: each phase list becomes exactly one whole-model
+    op. No model class rewrites its own lists; metadata, parallelism, and the
+    public model type are unchanged."""
+    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp, build_fpm_sol_fns
+
+    if model.encoder_ops:
+        raise NotImplementedError(
+            f"forward_model='fpm' does not support encoder/multimodal models "
+            f"(model_family={model.model_family!r} has encoder ops). Use forward_model='op_level'."
+        )
+    # Derive the whole-model rooflines and weight bytes from the ORIGINAL
+    # op-level lists before replacing them.
+    prefill_sol, decode_sol, weight_bytes = build_fpm_sol_fns(model)
+    model.context_ops = [
+        FPMForwardOp("prefill", model.config, model.model_path, sol_fn=prefill_sol, weight_bytes=weight_bytes)
+    ]
+    model.generation_ops = [
+        FPMForwardOp("decode", model.config, model.model_path, sol_fn=decode_sol, weight_bytes=weight_bytes)
+    ]
+    model.forward_model = "fpm"
+    return model
+
+
 def get_model(
     model_path: str,
     model_config: config.ModelConfig,
@@ -65,7 +92,15 @@ def get_model(
     classmethod. Per-family construction details (MoE prefix args, WideEP
     dispatch, post-construction hooks) live inside each model's
     ``create()``.
+
+    ``model_config.forward_model`` selects the forward-pass modeling mode:
+    the default "op_level" returns the granular op lists unchanged; "fpm"
+    rewrites each phase list to a single whole-model ``FPMForwardOp``.
     """
+    forward_model = getattr(model_config, "forward_model", "op_level") or "op_level"
+    if forward_model not in _FORWARD_MODELS:
+        raise ValueError(f"Unknown forward_model: {forward_model!r}. Valid values: {', '.join(_FORWARD_MODELS)}")
+
     # Shallow-copy so mutations below don't poison the @cache'd original.
     model_info = dict(_get_model_info(model_path))
     raw_config = model_info.get("raw_config", {})
@@ -112,7 +147,10 @@ def get_model(
     else:
         model_config.cp_style = "none"
 
-    return cls.create(model_info, model_config, backend_name)
+    model = cls.create(model_info, model_config, backend_name)
+    if forward_model == "fpm":
+        model = _apply_forward_model_fpm(model)
+    return model
 
 
 # Re-export concrete model classes for backward compatibility. Auto-discovery

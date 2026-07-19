@@ -74,6 +74,11 @@ class BaseModel:
     Base model class.
     """
 
+    # Forward-pass modeling mode of this instance. ``get_model``'s fpm rewrite
+    # flips it to "fpm"; consumers branch on it (base_backend mixed-step FPM
+    # path, Rust engine-step gate).
+    forward_model: str = "op_level"
+
     def __init__(
         self,
         model_path: str,
