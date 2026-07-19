@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | | |
 |---|---|
-| **Status** | Implemented (`src/aiconfigurator/sdk/queueing/`) |
+| **Status** | Implemented (`aic-core/src/aiconfigurator_core/sdk/queueing/`, compat alias `aiconfigurator.sdk.queueing`) |
 | **Replaces** | the empirical `_ttft_queuing_factor` heuristic and, for reporting, the blended-mean-only TTFT/TPOT columns |
 | **Validation** | development-time DES oracle anchored clause-by-clause to the vLLM v1 scheduler source; recorded results in §5 |
 
