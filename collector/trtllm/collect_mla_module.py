@@ -688,9 +688,17 @@ def create_kv_cache_and_metadata(
         cross=None,
         request_ids=request_ids,
         prompt_lens=[prefix_len + seq_len_q if is_context else kv_cache_len] * batch_size,
+        # Serving computes enable_context_mla_with_cached_kv = is_mla &&
+        # (cache_reuse || chunked_prefill) (model_engine.py:1762@1.3.0rc20);
+        # a prefix-cached context request only exists under cache reuse, so
+        # mirror that state here. Without the flag the DSA indexer takes the
+        # no-cache alias branch for slot_mapping_*_fullkv (dsa.py
+        # "_need_full_kv_gathering") and its table — sized for new tokens
+        # only — overflows once batch*(prefix+seq) exceeds it.
+        enable_context_mla_with_cached_kv=bool(is_context and prefix_len > 0),
         runtime_features=AttentionRuntimeFeatures(
             chunked_prefill=False,
-            cache_reuse=False,
+            cache_reuse=bool(is_context and prefix_len > 0),
         ),
         all_rank_num_tokens=None,
         workspace=torch.tensor([], device=device, dtype=torch.int8),
