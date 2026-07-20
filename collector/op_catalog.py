@@ -3,9 +3,10 @@
 
 """Table→family identity map from the op-backend catalog (Collector V3 §2).
 
-The catalog file is introduced by the op-backend-facts registry (PR #1345).
-Until it lands on main, ``load_family_map`` returns ``None`` and callers must
-reject configurations that need family identity (fail-closed, spec §4).
+The catalog file comes from the op-backend-facts registry (PR #1345, on main).
+``load_family_map`` returns ``None`` when the catalog is absent (e.g. a
+stripped or partial checkout); callers must then reject configurations that
+need family identity (fail-closed, spec §4).
 """
 
 from __future__ import annotations

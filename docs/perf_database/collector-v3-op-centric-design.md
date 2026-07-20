@@ -1,9 +1,8 @@
 # Collector V3: Op-Centric Collector Management — Design
 
-- **Status:** Draft for review (AIC-1217)
+- **Status:** In review
 - **Last updated:** 2026-07-15
 - **Source proposal:** *Per-Op Collector Version Management* (Google Doc, 2026-06-28)
-- **Linear:** [Feature: Collector V3](https://linear.app/nvidia/project/feature-collector-v3-op-centric-collector-management-4392c878361a) — AIC-1217 (this design), AIC-1218 (implementation), AIC-1219 (evidence policy)
 - **Release:** v0.11.0 (code freeze 2026-07-28)
 
 ## 1. Goal
@@ -18,7 +17,7 @@ backward-safe rules. CI and the support-matrix healer decide from manifest +
 provenance alone whether required silicon evidence exists — anything unknown
 fails closed.
 
-### Success criteria (from the Linear project)
+### Success criteria
 
 1. A collector change identifies exactly which operations and data slices require
    recollection.
@@ -60,8 +59,8 @@ V3 splits.
 
 **Fail-closed identity gate:** a registry op whose `perf_filename` table appears
 in no catalog family is a hard validation error — no family means no pin, no
-home directory, and no evidence rule. This is the "unknown identity" gate of
-AIC-1217.
+home directory, and no evidence rule. This is the design's "unknown identity"
+gate.
 
 **Relationship to #1345:** op-backend facts are observational (which backend an
 op actually ran on / can run on) and never gate collection. V3 is normative
@@ -207,7 +206,7 @@ tables:
 - Scope of `status`: it asserts execution-completeness of the attempted plan
   on that one system dir. Whether the *right* systems and cases were collected
   for a given change is enforced one layer up — the §8 changed-op manifest
-  names the required systems and the §9 evidence gate (AIC-1214) demands the
+  names the required systems and the §9 evidence gate demands the
   corresponding evidence. CI deliberately never re-expands a case plan to
   check per-dir coverage: case generation consults live device memory (§8),
   so the attempted-set attestation is collection-time only.
@@ -259,8 +258,9 @@ reproducibility; forward fill silently answers "how fast is 0.5.14" with
 
 When we *know* data is valid for a version we never collected — typically a
 framework upgrade where a family's kernels did not change — we say so
-explicitly. Replaces the presence-only `SHARED_LAYER_REUSE.txt`. A
-declared-reuse version dir contains no parquet of its own, only:
+explicitly. Replaces the presence-only `SHARED_LAYER_REUSE.txt`. In the
+typical case a declared-reuse version dir carries no parquet of its own, only
+a `reuse.yaml`:
 
 ```yaml
 # data/h200_sxm/moe/sglang/0.5.12/reuse.yaml
@@ -277,6 +277,12 @@ after the primary), because it is a vetted claim rather than a heuristic. This
 is the only way to borrow *forward* (from a newer version) — which is exactly
 what today's blank marker dirs do implicitly; V3 keeps the capability but
 makes it per-table, reviewable, and reasoned.
+
+A dir may also hold BOTH its own parquet and a declaration for the same
+table (self-overlap): per §6.1 the dir's own rows always win the shapes they
+cover, so such a declaration only forward-fills shapes the dir's own data is
+missing. The migrated tree carries a small set of these (l40s), each with a
+`reason` field disclosing exactly that mechanical derivation.
 
 This channel is also what makes per-op pinning cheap: on a scheduled upgrade
 to 0.5.15, families whose kernels did not move are not recollected — each gets
@@ -320,7 +326,7 @@ Guardrails:
 
 - **Provenance surfacing:** the loader reports, per table, which versions
   supplied rows and via which channel (`primary | declared_reuse | fallback`),
-  so AIC-1087's health classifier can tell "natively collected" from "riding
+  so the support-matrix health classifier can tell "natively collected" from "riding
   on a declaration" without re-deriving anything.
 - **CI audit:** a `reuse.yaml` pointing at data that does not exist, or any
   fill pattern outside these three channels, fails the PR — that is the
@@ -336,7 +342,7 @@ In increasing order of semantic weight:
    fallback for one transition window.
 2. **Effective-source provenance** — per table, expose which versions supplied
    rows and via which path (`primary | declared_reuse | fallback`), consumed by
-   support-matrix health (AIC-1087) and diagnostics.
+   support-matrix health and diagnostics.
 3. **Reuse rules** — implement §6 ordering. `get_database(system, backend,
    version)` keeps `version` as the *requested* framework version; per-op
    resolution happens inside.
@@ -377,7 +383,7 @@ unchanged:
 ```
 
 This file is the single input consumed by the evidence resolver (§9), the CI
-gate (AIC-1214), and the support-matrix healer — same manifest in, same
+gate, and the support-matrix healer — same manifest in, same
 requirements out.
 
 ### CI audit (fail-closed surface)
@@ -393,7 +399,7 @@ One audit tool (sibling of `audit_kernel_source.py`), run on every PR touching
 
 The CI audit is the primary gate; loader strict mode is the backstop.
 
-## 9. Evidence policy (AIC-1219)
+## 9. Evidence policy
 
 Policy-as-code: `collector/evidence_policy.yaml` plus a pure-function resolver
 `tools/perf_database/evidence_check.py --manifest changed_ops.yaml` → required
@@ -415,16 +421,15 @@ identical manifests.
 
 ## 10. Delivery plan (v0.11.0, freeze 2026-07-28)
 
-AIC-1218 is the umbrella; the implementation is split into four sub-issues
-AIC-1500–AIC-1503, delivered as exactly four PRs (one per sub-issue) to bound
-CI time and review load.
+The implementation is split into four sub-scopes, delivered as exactly four
+PRs (one per sub-scope) to bound CI time and review load.
 
-| PR | Content | Issues closed | Depends on |
-|---|---|---|---|
-| 1 | This design doc + manifest v2 + resolver + validation; wideep flattened | AIC-1217, AIC-1500 | — |
-| 2 | Physical reorg: scripted `git mv` + dual-read loader + tools path sweep | AIC-1501 | #1345 catalog |
-| 3 | Provenance writer + `reuse.yaml` + marker migration + `changed_ops.py` + CI audit | AIC-1502 | PR 2 |
-| 4 | Loader reuse rules + strict mode + source diagnostics + evidence policy/resolver | AIC-1503, AIC-1219 | PR 3, regression gate |
+| PR | Content | Depends on |
+|---|---|---|
+| 1 | This design doc + manifest v2 + resolver + validation; wideep flattened | — |
+| 2 | Physical reorg: scripted `git mv` + dual-read loader + tools path sweep | #1345 catalog |
+| 3 | Provenance writer + `reuse.yaml` + marker migration + `changed_ops.py` + CI audit | PR 2 |
+| 4 | Loader reuse rules + strict mode + source diagnostics + evidence policy/resolver | PR 3, regression gate |
 
 - PR 1 proceeds immediately and carries the reviewed design doc; PRs 2→3→4
   are sequential.
@@ -457,8 +462,17 @@ data. V3 makes that cycle computed and mostly declarative:
    `data/<system>/<family>/<backend>/<new_version>/` dirs with provenance), or
    declare reuse (`reuse.yaml` ← previous quarter's version) backed by
    kernel-identity evidence from the #1345 facts plus a spot benchmark per SM
-   generation. The quarter's GPU bill is proportional to what the framework
-   actually changed, not to the size of the support matrix.
+   generation. Precedence is decided at plan time, not runtime: the DEFAULT
+   move is recollect, and there is no runtime fallback between the two — the
+   quarter's data PR ships one or the other per family, and the evidence gate
+   checks whichever was chosen. Declaring reuse is the exception, permitted
+   only when the kernel-identity facts show the family's kernels did not
+   change across the pin bump and the per-generation spot benchmark confirms
+   it. (On pure data quality, fresh collection is never worse — declared
+   reuse exists because unchanged kernels mean statistically identical rows,
+   so recollecting them buys nothing at fleet-wide GPU cost. The quarter's
+   GPU bill stays proportional to what the framework actually changed, not
+   to the size of the support matrix.)
 3. **Per-family progress; partial upgrades are first-class.** Each
    *(framework, family)* is an independently ownable task. A family that
    breaks on the new baseline keeps an explicit `families:` override on the

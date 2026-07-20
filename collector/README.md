@@ -59,13 +59,17 @@ Today we only collect intra-node comm. This script will collect custom allreduce
 It will also collect nccl allreduce, all_gather, all2all, reduce_scatter using nccl.
 The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_perf.txt.
 
-# Collector v2: model-centric cases
+# Model-centric cases and healing runs
 
-Collector v2 is model-centric. A healing run collects cases for a specific
-model/GPU pair instead of running every op bucket and hoping the support
-matrix improves. Use `--model-cases-full` when you want collector v2 YAML to
-define a full model-centric run. Omitting all model-case flags runs the
-backend registry directly without a collector v2 case plan.
+The model-centric case layer (introduced as "collector v2") is how collection
+coverage is declared, and it is unchanged under Collector V3 — V3 adds
+op-centric *management* on top (per-family runtime pins, provenance sidecars,
+declared reuse; see `docs/perf_database/collector-v3-op-centric-design.md`),
+it does not replace how cases are declared or healed. A healing run collects
+cases for a specific model/GPU pair instead of running every op bucket and
+hoping the support matrix improves. Use `--model-cases-full` when you want
+the case YAML to define a full model-centric run. Omitting all model-case
+flags runs the backend registry directly without a model-centric case plan.
 
 ```bash
 # Heal one model on one GPU type.
@@ -85,10 +89,10 @@ python3 collect.py --backend trtllm \
   --gpu b200_sxm \
   --plan-only
 
-# Collector v2 full run: aggregate base ops plus every model case YAML file.
+# Full model-centric run: aggregate base ops plus every model case YAML file.
 python3 collect.py --backend trtllm --model-cases-full
 
-# Raw backend registry run: no collector v2 case plan.
+# Raw backend registry run: no model-centric case plan.
 python3 collect.py --backend trtllm
 
 # Ephemeral subset filter (healing): substring match, repeatable.
@@ -142,7 +146,7 @@ Each backend (trtllm, vllm, sglang) has a **registry** (`registry.py`) that maps
 framework_manifest.yaml — current collector framework versions and images (schema v2)
 framework_manifest.py   — manifest loader/validator/resolver
 op_catalog.py         — table→family identity map (op_backend_catalog.yaml)
-model_cases.py       — collector v2 model/SM case-plan resolver
+model_cases.py       — model-centric model/SM case-plan resolver
 registry.py          — declares which module handles which version range
 version_resolver.py  — routes runtime version → module (packaging.version)
 collect.py/collect_ops — validates __compat__ and fails incompatible ops
