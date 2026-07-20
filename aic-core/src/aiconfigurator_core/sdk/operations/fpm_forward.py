@@ -309,6 +309,13 @@ def fpm_prefill_config(sol_fn: Callable[[float, float, float], float]) -> OpInte
         resolver=ScatteredSites(
             site_axes=("batch_size", "total_kv_read_tokens"),
             curve_axis="total_prefill_tokens",
+            # The runtime grid emits orphan coordinates (max-batch stragglers,
+            # capacity-endpoint KV) whose "curves" are a few stray points; they
+            # must answer only inside their own coverage, never anchor far
+            # extrapolation. The distance gate also keeps P=0 queries on P=0
+            # neighbour sites (KV=0 is ~40 log2-units from any KV>0 site).
+            own_curve_coverage_fallback=True,
+            max_site_distance=2.0,
         ),
         sol_fn=sol_fn,
     )
@@ -319,7 +326,12 @@ def fpm_decode_config(sol_fn: Callable[[float, float], float]) -> OpInterpConfig
     KV curve (0 + block-aligned powers of two + max)."""
     return OpInterpConfig(
         axes=("batch_size", "total_kv_read_tokens"),
-        resolver=ScatteredSites(site_axes=("batch_size",), curve_axis="total_kv_read_tokens"),
+        resolver=ScatteredSites(
+            site_axes=("batch_size",),
+            curve_axis="total_kv_read_tokens",
+            own_curve_coverage_fallback=True,
+            max_site_distance=2.0,
+        ),
         sol_fn=sol_fn,
     )
 

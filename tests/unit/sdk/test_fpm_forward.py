@@ -273,6 +273,34 @@ class TestFPMForwardOpQuery:
             _make_op("prefill").query_pass_baseline(fake_db(), batch_size=1)
 
 
+class TestDegenerateSiteCoverageFallback:
+    """The runtime grid emits orphan coordinates (e.g. batch=3 exists only at
+    total_prefill_tokens=3, a max-batch straggler). A collected-but-degenerate
+    site must answer only inside its own curve coverage; outside it, the
+    query falls through to covering neighbour sites."""
+
+    def _rows_with_degenerate_site(self):
+        return _default_rows() + [_row("prefill", 3, 3, 0, 1.0)]
+
+    def test_out_of_coverage_query_uses_neighbours(self, fake_db):
+        db = fake_db(self._rows_with_degenerate_site())
+        # (B=3, s=256 -> totals (3, 768, 0)): site (3,0) covers only TP=3.
+        # Must transfer from the (1,0)/(2,0) neighbour curves (10-27ms range),
+        # not extrapolate 256x from the 1.0ms orphan point.
+        result = _make_op("prefill").query(db, batch_size=3, s=256, prefix=0)
+        assert 5.0 < float(result) < 60.0
+
+    def test_in_coverage_degenerate_site_still_answers_exactly(self, fake_db):
+        db = fake_db(self._rows_with_degenerate_site())
+        result = _make_op("prefill").query(db, batch_size=3, s=1, prefix=0)
+        assert float(result) == pytest.approx(1.0)
+
+    def test_default_engine_behavior_unchanged(self):
+        from aiconfigurator_core.sdk.perf_interp import ScatteredSites
+
+        assert ScatteredSites(site_axes=("n", "k"), curve_axis="m").own_curve_coverage_fallback is False
+
+
 class TestFPMForwardLoaderValidation:
     def _query(self, db):
         return _make_op("decode").query(db, batch_size=2, s=1024)
