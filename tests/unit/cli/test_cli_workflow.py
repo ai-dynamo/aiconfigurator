@@ -221,6 +221,17 @@ class TestCLIIntegration:
 
         mock_execute.assert_not_called()
 
+    def test_cli_default_missing_required_inputs_raises(self, capsys):
+        """Default mode still requires model, system, and GPU inputs."""
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["default"])
+
+        assert exc_info.value.code == 2
+        assert "the following arguments are required" in capsys.readouterr().err
+
     @pytest.mark.parametrize(
         "builder_patch",
         [
