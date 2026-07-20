@@ -426,7 +426,7 @@ generation) plus the pure-function resolver `tools/perf_database/evidence_check.
 generations the change actually touches (an unmapped system fails closed).
 Deterministic: CI and the healer get identical answers from identical
 manifests. Exception WAIVERS (`evidence_exceptions.yaml`, approver + expiry)
-are applied by the AIC-1214 gate, not the resolver — expiry needs a clock,
+are applied by the evidence-gate CI check, not the resolver — expiry needs a clock,
 which would break the resolver's purity. *(Shipped in PR 4.)*
 
 | Change | Required evidence |
