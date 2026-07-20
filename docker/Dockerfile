@@ -12,6 +12,8 @@ RUN mkdir /opt/aiconfigurator && \
     uv venv --python 3.12 ${VIRTUAL_ENV} && \
     chmod a+rx /root && \
     chmod -R a+rX /root/.local
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
