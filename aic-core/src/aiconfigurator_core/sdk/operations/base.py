@@ -70,6 +70,16 @@ def _resolve_perf_data_path(perf_file: str) -> str:
     return perf_file
 
 
+# CANONICAL definition of the first-level dirs under <system>/ that are
+# backend dirs (legacy layout) rather than family dirs. The SDK loader
+# imports this (perf_database.KNOWN_BACKEND_DIRS is an alias); the standalone
+# copies that cannot import aic-core must stay textually identical and each
+# cross-reference this site:
+#   tools/perf_database/migrate_family_layout.py  (KNOWN_BACKEND_DIRS)
+#   tools/sanity_check/create_charts.py           (_KNOWN_BACKEND_DIRS)
+#   aic-core/rust/aiconfigurator-core/src/perf_database/mod.rs (KNOWN_BACKEND_DIRS)
+# (tools/perf_database/audit_kernel_source.py's _LEGACY_BACKEND_DIRS is a
+# deliberate 3-entry variant — consumer backends only, no comm pseudo-backends.)
 _KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
 
 

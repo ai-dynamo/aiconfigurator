@@ -55,8 +55,9 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 
 # Legacy top-level backend dirs (family-first layout treats any other first-level
 # directory under <system>/ as a family dir containing <backend>/<version>
-# subtrees). Keep textually identical to the SDK loader's KNOWN_BACKEND_DIRS
-# (aic-core/src/aiconfigurator_core/sdk/perf_database.py).
+# subtrees). Keep textually identical to the CANONICAL _KNOWN_BACKEND_DIRS in
+# aic-core/src/aiconfigurator_core/sdk/operations/base.py, which lists every
+# copy that must stay in sync (this standalone tool cannot import aic-core).
 _KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl"}
 
 

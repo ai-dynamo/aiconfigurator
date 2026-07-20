@@ -234,6 +234,7 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
 # at module load time. Re-exported here for any external callers that may
 # still import it via ``aiconfigurator_core.sdk.perf_database._read_filtered_rows``.
 from aiconfigurator_core.sdk.operations.base import (  # noqa: F401
+    _KNOWN_BACKEND_DIRS,
     _read_filtered_rows,
     _read_perf_rows,
     _resolve_perf_data_path,
@@ -341,7 +342,9 @@ def _database_version_dir_is_declared(version_path: str) -> bool:
     )
 
 
-KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
+# Alias of the canonical set in operations/base.py (which lists every
+# standalone copy that must stay in sync).
+KNOWN_BACKEND_DIRS = _KNOWN_BACKEND_DIRS
 _LEGACY_LAYOUT_WARNED: set[str] = set()
 
 

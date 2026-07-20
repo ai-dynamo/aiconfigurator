@@ -73,9 +73,11 @@ _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
 
 # Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
 # other first-level directory under a system dir as a family dir containing
-# <backend>/<version> subtrees. Keep this set textually identical to the SDK
-# loader's KNOWN_BACKEND_DIRS minus _SKIP_BACKEND_DIRS
-# (aic-core/src/aiconfigurator_core/sdk/perf_database.py).
+# <backend>/<version> subtrees. Keep this set textually identical to the
+# CANONICAL _KNOWN_BACKEND_DIRS in
+# aic-core/src/aiconfigurator_core/sdk/operations/base.py minus
+# _SKIP_BACKEND_DIRS (a deliberate 3-entry variant: consumer backends only,
+# no comm pseudo-backends; base.py lists every copy that must stay in sync).
 _LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 
