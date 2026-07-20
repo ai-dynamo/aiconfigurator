@@ -26,6 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
+from aiconfigurator.sdk.errors import ExperimentOutcome, is_gpu_retriable
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -100,6 +101,9 @@ class CLIResult:
     raw_results: dict[str, dict[str, pd.DataFrame | None]] = field(default_factory=dict)
     """Raw pareto_df results from TaskRunner, keyed by experiment name."""
 
+    outcomes: dict[str, ExperimentOutcome] = field(default_factory=dict)
+    """Per-experiment success/failure verdicts from _execute_tasks."""
+
     def __repr__(self) -> str:
         return (
             f"CLIResult(chosen_exp={self.chosen_exp!r}, "
@@ -117,7 +121,7 @@ def _execute_and_wrap_result(
     target_concurrency: float | None = None,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
-    chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_tasks_internal(
+    chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies, outcomes = _execute_tasks_internal(
         tasks,
         mode,
         top_n=top_n,
@@ -134,6 +138,7 @@ def _execute_and_wrap_result(
         best_latencies=best_latencies,
         tasks=tasks,
         raw_results={},
+        outcomes=outcomes,
     )
 
 
@@ -268,6 +273,8 @@ def cli_default(
     )
 
     result = _execute_and_wrap_result(tasks, mode="default", top_n=top_n, strict_sla=strict_sla)
+    if not result.best_configs:
+        raise SystemExit(1)
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -311,7 +318,7 @@ _MAX_GPUS_PER_WORKER = 64
 
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
-    """Widen the search space for recommend mode: enable PP and scale GPU candidates."""
+    """Scale GPU candidates for recommend mode."""
     import dataclasses
 
     num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
@@ -320,14 +327,11 @@ def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
     for name, task in base_tasks.items():
         overrides = {
             "total_gpus": total_gpus,
-            "agg_pp_candidates": [1, 2, 4],
             "agg_num_gpu_candidates": num_gpu_candidates,
         }
         if task.serving_mode == "disagg":
             overrides.update(
-                prefill_pp_candidates=[1, 2, 4],
                 prefill_num_gpu_candidates=num_gpu_candidates,
-                decode_pp_candidates=[1, 2, 4],
                 decode_num_gpu_candidates=num_gpu_candidates,
             )
         rebuilt[name] = dataclasses.replace(task, **overrides)
@@ -480,30 +484,29 @@ def cli_recommend(
     result = None
     for attempt, gpu_budget in enumerate(budgets):
         tasks = _build_recommend_tasks(base_tasks, gpu_budget)
-        try:
-            result = _execute_and_wrap_result(
-                tasks,
-                mode="default",
-                top_n=top_n,
-                strict_sla=strict_sla,
-                target_request_rate=target_request_rate,
-                target_concurrency=target_concurrency,
-            )
-            break
-        except SystemExit as exc:
-            if exc.code != 1 or attempt == len(budgets) - 1:
-                raise
-            logger.info(
-                "Recommend: no valid config at %d GPUs/worker; escalating to %d.",
-                gpu_budget,
-                budgets[attempt + 1],
-            )
-
-    if result is None:
-        raise ValueError(
-            f"System {system} has {gpus_per_node} GPUs/node which exceeds "
-            f"the maximum per-worker search limit ({_MAX_GPUS_PER_WORKER})."
+        result = _execute_and_wrap_result(
+            tasks,
+            mode="default",
+            top_n=top_n,
+            strict_sla=strict_sla,
+            target_request_rate=target_request_rate,
+            target_concurrency=target_concurrency,
         )
+        retriable = [
+            name
+            for name, outcome in result.outcomes.items()
+            if outcome.error is not None and is_gpu_retriable(outcome.error)
+        ]
+        if not retriable or attempt == len(budgets) - 1:
+            break
+        logger.info(
+            "Recommend: %s may fit at larger budget; escalating to %d.",
+            ", ".join(retriable),
+            budgets[attempt + 1],
+        )
+
+    if not result.best_configs:
+        raise SystemExit(1)
 
     # Re-select chosen_exp by fewest total GPUs (not highest throughput).
     min_gpus = {}
@@ -645,6 +648,8 @@ def cli_exp(
         raise ValueError("No valid experiments found in configuration.")
 
     result = _execute_and_wrap_result(tasks, mode="exp", top_n=top_n)
+    if not result.best_configs:
+        raise SystemExit(1)
 
     if save_dir:
         # Create a mock args object for save_results compatibility

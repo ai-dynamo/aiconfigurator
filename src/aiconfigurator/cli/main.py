@@ -25,6 +25,7 @@ from aiconfigurator.generator.api import (
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.errors import (
+    ExperimentOutcome,
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
     is_expected_cli_error,
@@ -1721,7 +1722,14 @@ def _execute_tasks(
     max_total_gpus: int | None = None,
     strict_sla: bool = False,
     inclusive_tpot: bool = False,
-) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
+) -> tuple[
+    str,
+    dict[str, pd.DataFrame],
+    dict[str, pd.DataFrame],
+    dict[str, float],
+    dict[str, dict[str, float]],
+    dict[str, ExperimentOutcome],
+]:
     """
     Execute task configs and return the chosen experiment, best configs, results, best
     throughputs, and estimated latencies.
@@ -1751,9 +1759,11 @@ def _execute_tasks(
               extracted from the rank-1 config.
     """
     results: dict[str, dict[str, pd.DataFrame]] = {}
-    failure_messages: list[str] = []
+    outcomes: dict[str, ExperimentOutcome] = {}
     start_time = time.time()
-    # TODO, can run in parallel
+    # TODO: outcomes are per-experiment and immutable — this loop can be
+    # parallelised with ThreadPoolExecutor once the perf-database cache
+    # (databases_cache / functools.cache in perf_database.py) is thread-safe.
     for exp_name, task in tasks.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
@@ -1762,6 +1772,7 @@ def _execute_tasks(
             task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
+                outcomes[exp_name] = ExperimentOutcome(exp_name)
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
                 db_mode = getattr(task, "database_mode", None)
@@ -1782,22 +1793,18 @@ def _execute_tasks(
                     f"(3) no perf data in the database for this configuration.{hybrid_hint}"
                 )
                 logger.warning(msg)
-                failure_messages.append(msg)
+                outcomes[exp_name] = ExperimentOutcome(exp_name)
         except NoFeasibleConfigError as exc:
             msg = f"Experiment {exp_name} found no SLA-feasible configuration: {exc}"
             logger.warning(msg)
-            failure_messages.append(msg)
+            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
         except Exception as exc:
             if is_expected_cli_error(exc):
-                # Expected failure (no feasible config / OOM / KV-cache capacity,
-                # a per-op perf-data miss, or an unsupported quant/compatibility
-                # config): report cleanly. Keep the traceback at DEBUG for
-                # diagnosis via --log-level DEBUG.
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
                 logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
                 logger.exception("Error running experiment %s", exp_name)
-            failure_messages.append(f"Experiment {exp_name} failed: {exc}")
+            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
 
     if len(results) < 1:
         first_config = next(iter(tasks.values()), None)
@@ -1810,9 +1817,10 @@ def _execute_tasks(
             )
         else:
             logger.error("No successful experiment runs to compare.")
-        for msg in failure_messages:
-            logger.error("  -> %s", msg)
-        raise SystemExit(1)
+        for outcome in outcomes.values():
+            if outcome.error is not None:
+                logger.error("  -> Experiment %s failed: %s", outcome.experiment, outcome.error)
+        return "none", {}, {}, {}, {}, outcomes
 
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
@@ -1860,7 +1868,7 @@ def _execute_tasks(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies, outcomes
 
 
 def _run_generate_mode(args):
@@ -2647,12 +2655,14 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _ = _execute_tasks(
+    _, best_configs, pareto_fronts, _, _, _ = _execute_tasks(
         tasks,
         args.mode,
         top_n=args.top_n,
         **execute_kwargs,
     )
+    if not best_configs:
+        raise SystemExit(1)
 
     if args.save_dir:
         save_results(

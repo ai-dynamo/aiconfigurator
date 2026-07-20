@@ -114,7 +114,7 @@ aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
-- We have five modes: `default`, `recommend`, `exp`, `generate`, and `support`.
+- We have six modes: `default`, `estimate`, `recommend`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - Use `recommend` to find the minimum GPU count and optimal deployment configuration needed to meet a performance target. This mode is designed as a procurement sizing tool — specify a throughput target (`--target-request-rate` or `--target-concurrency`) along with SLA constraints, and the system calculates the minimum GPUs required. The output is unconstrained.
 - **Experimental:** Spica thorough mode is an early preview. Its CLI, config schema, search behavior, and generated artifacts may change in future releases, and sweeps can take substantially longer than the legacy estimator.

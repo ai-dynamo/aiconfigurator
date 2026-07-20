@@ -6,7 +6,6 @@ import gradio as gr
 from aiconfigurator.webapp.components.base import (
     create_model_misc_config,
     create_model_path_config,
-    create_model_quant_config,
     create_runtime_config,
     create_system_config,
 )
@@ -32,7 +31,6 @@ def create_recommender_tab(app_config):
         runtime_config_components = create_runtime_config(app_config, with_sla=True, with_request_latency=True)
         model_misc_config_components = create_model_misc_config(app_config)
         model_system_components = create_system_config(app_config)
-        model_quant_components = create_model_quant_config(app_config)
 
         with gr.Row():
             target_request_rate = gr.Number(
@@ -62,7 +60,6 @@ def create_recommender_tab(app_config):
         "model_path_components": model_path_components,
         "runtime_config_components": runtime_config_components,
         "model_system_components": model_system_components,
-        "model_quant_components": model_quant_components,
         "model_misc_config_components": model_misc_config_components,
         "target_request_rate": target_request_rate,
         "target_concurrency": target_concurrency,

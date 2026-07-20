@@ -189,6 +189,7 @@ class TestCLIExpUnit:
             {"exp_agg_simplified": pd.DataFrame()},
             {"exp_agg_simplified": 100.0},
             {"exp_agg_simplified": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}},
+            {},
         )
 
         # Simplified version based on example.yaml exp_agg_simplified
@@ -372,7 +373,7 @@ class TestCLIRecommendUnit:
             return {}
 
         def fake_execute(tasks, mode, **kwargs):
-            return ("agg", {}, {}, {}, {})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -396,7 +397,7 @@ class TestCLIRecommendUnit:
 
         def fake_execute(tasks, mode, **kwargs):
             execute_kwargs.update(kwargs)
-            return ("agg", {}, {}, {}, {})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -420,7 +421,7 @@ class TestCLIRecommendUnit:
 
         def fake_execute(tasks, mode, **kwargs):
             execute_kwargs.update(kwargs)
-            return ("agg", {}, {}, {}, {})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -444,7 +445,7 @@ class TestCLIRecommendUnit:
 
         def fake_execute(tasks, mode, **kwargs):
             execute_kwargs.update(kwargs)
-            return ("agg", {}, {}, {}, {})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -468,7 +469,7 @@ class TestCLIRecommendUnit:
             return {}
 
         def fake_execute(tasks, mode, **kwargs):
-            return ("agg", {}, {}, {}, {})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -484,42 +485,9 @@ class TestCLIRecommendUnit:
         assert captured_kwargs["enable_wideep"] is True
         assert captured_kwargs["moe_backend"] == "deepep_moe"
 
-    def test_recommend_includes_pp_candidates(self, monkeypatch):
-        import aiconfigurator.cli.api as api
-
-        execute_tasks = {}
-
-        def fake_build_default_tasks(**kwargs):
-            from dataclasses import dataclass, field
-
-            @dataclass
-            class FakeTask:
-                total_gpus: int = 8
-                serving_mode: str = "agg"
-                agg_pp_candidates: list = field(default_factory=lambda: [1])
-                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
-
-            return {"agg": FakeTask()}
-
-        def fake_execute(tasks, mode, **kwargs):
-            execute_tasks.update(tasks)
-            return ("agg", {}, {}, {}, {})
-
-        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
-        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
-
-        api.cli_recommend(
-            model_path="Qwen/Qwen3-32B",
-            system="h200_sxm",
-            target_request_rate=10.0,
-        )
-
-        task = execute_tasks["agg"]
-        assert 2 in task.agg_pp_candidates
-        assert 4 in task.agg_pp_candidates
-
     def test_escalates_on_oom(self, monkeypatch):
         import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
 
         call_count = 0
 
@@ -530,6 +498,8 @@ class TestCLIRecommendUnit:
             class FakeTask:
                 total_gpus: int = 8
                 serving_mode: str = "agg"
+                enable_wideep: bool = False
+                moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
 
@@ -539,8 +509,9 @@ class TestCLIRecommendUnit:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                raise SystemExit(1)
-            return ("agg", {}, {}, {}, {})
+                oom = InsufficientMemoryError("model does not fit")
+                return ("none", {}, {}, {}, {}, {"agg": ExperimentOutcome("agg", error=oom)})
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {"agg": ExperimentOutcome("agg")})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -555,6 +526,7 @@ class TestCLIRecommendUnit:
 
     def test_escalation_ceiling(self, monkeypatch):
         import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
 
         def fake_build_default_tasks(**kwargs):
             from dataclasses import dataclass, field
@@ -563,13 +535,16 @@ class TestCLIRecommendUnit:
             class FakeTask:
                 total_gpus: int = 8
                 serving_mode: str = "agg"
+                enable_wideep: bool = False
+                moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
 
             return {"agg": FakeTask()}
 
         def fake_execute(tasks, mode, **kwargs):
-            raise SystemExit(1)
+            oom = InsufficientMemoryError("model does not fit")
+            return ("none", {}, {}, {}, {}, {"agg": ExperimentOutcome("agg", error=oom)})
 
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
@@ -580,3 +555,105 @@ class TestCLIRecommendUnit:
                 system="h200_sxm",
                 target_request_rate=10.0,
             )
+
+    def test_no_escalation_on_non_retriable_failure(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.errors import ExperimentOutcome, NoFeasibleConfigError
+
+        call_count = 0
+
+        def fake_build_default_tasks(**kwargs):
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class FakeTask:
+                total_gpus: int = 8
+                serving_mode: str = "agg"
+                enable_wideep: bool = False
+                moe_backend: str | None = None
+                agg_pp_candidates: list = field(default_factory=lambda: [1])
+                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+
+            return {"agg": FakeTask()}
+
+        def fake_execute(tasks, mode, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            sla_fail = NoFeasibleConfigError("SLA impossible")
+            return ("none", {}, {}, {}, {}, {"agg": ExperimentOutcome("agg", error=sla_fail)})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        with pytest.raises(SystemExit):
+            api.cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+                target_request_rate=10.0,
+            )
+
+        assert call_count == 1, "Should not escalate for non-retriable failures"
+
+    def test_partial_failure_triggers_escalation(self, monkeypatch):
+        """agg succeeds at first budget, disagg OOMs → retry at larger budget."""
+        import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
+
+        call_count = 0
+
+        def fake_build_default_tasks(**kwargs):
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class FakeTask:
+                total_gpus: int = 8
+                serving_mode: str = "agg"
+                enable_wideep: bool = False
+                moe_backend: str | None = None
+                agg_pp_candidates: list = field(default_factory=lambda: [1])
+                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                prefill_pp_candidates: list = field(default_factory=lambda: [1])
+                prefill_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                decode_pp_candidates: list = field(default_factory=lambda: [1])
+                decode_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+
+            return {"agg": FakeTask(), "disagg": FakeTask(serving_mode="disagg")}
+
+        def fake_execute(tasks, mode, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                oom = InsufficientMemoryError("disagg does not fit")
+                return (
+                    "agg",
+                    {"agg": pd.DataFrame({"x": [1]})},
+                    {},
+                    {},
+                    {},
+                    {
+                        "agg": ExperimentOutcome("agg"),
+                        "disagg": ExperimentOutcome("disagg", error=oom),
+                    },
+                )
+            return (
+                "agg",
+                {"agg": pd.DataFrame({"x": [1]}), "disagg": pd.DataFrame({"x": [1]})},
+                {},
+                {},
+                {},
+                {
+                    "agg": ExperimentOutcome("agg"),
+                    "disagg": ExperimentOutcome("disagg"),
+                },
+            )
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+        )
+
+        assert call_count == 2, "Should escalate when disagg OOMs but agg succeeds"
