@@ -137,11 +137,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     common_parser.add_argument(
         "--deployment-target",
         type=str,
-        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize"],
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"],
         default="dynamo-j2",
-        help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
+        help="Deployment target platform. Options: dynamo-j2 (default, typed Dynamo manifests), "
         "dynamo-python (Dynamo Python config modifiers), llm-d-helm (llm-d Helm values), "
-        "llm-d-kustomize (llm-d Kustomize overlays).",
+        "llm-d-kustomize (llm-d Kustomize overlays), fpm (reusable resource Pod + run.sh).",
     )
     common_parser.add_argument(
         "--engine-step-backend",
@@ -2304,6 +2304,25 @@ def _validate_default_mode_inputs(args) -> None:
         )
 
 
+def _validate_fpm_sweep_tasks(args, tasks: dict[str, Task]) -> None:
+    """Reject task shapes that can only fail after an expensive FPM sweep."""
+    if getattr(args, "deployment_target", "dynamo-j2") != "fpm":
+        return
+
+    unsupported: list[str] = []
+    for name, task in tasks.items():
+        serving_mode = getattr(task, "serving_mode", None)
+        backend = getattr(task, "primary_backend_name", None)
+        if serving_mode != "agg" or backend != common.BackendName.vllm.value:
+            unsupported.append(f"{name} ({serving_mode or 'unknown'}/{backend or 'unknown'})")
+
+    if unsupported:
+        raise SystemExit(
+            "--deployment-target fpm supports only vLLM aggregated tasks; "
+            "unsupported task(s): " + ", ".join(unsupported)
+        )
+
+
 def main(args):
     setup_logging(
         level=_resolve_cli_log_level(args),
@@ -2348,6 +2367,8 @@ def main(args):
     if args.mode == "default":
         _validate_default_mode_inputs(args)
         if getattr(args, "thorough_sweep", False) or getattr(args, "thorough_config", None):
+            if getattr(args, "deployment_target", "dynamo-j2") == "fpm":
+                raise SystemExit("--deployment-target fpm does not support Spica thorough sweeps")
             run_spica_thorough_default(args)
             return
 
@@ -2414,6 +2435,8 @@ def main(args):
             raise SystemExit(1)
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
+
+    _validate_fpm_sweep_tasks(args, tasks)
 
     execute_kwargs: dict = {}
     if getattr(args, "strict_sla", False):
