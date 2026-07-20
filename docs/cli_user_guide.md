@@ -131,7 +131,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--moe-quant-mode`: MoE quantization mode (auto-inferred if omitted)
 - `--comm-quant-mode`: Communication quantization mode (auto-inferred; default `half`)
 - `--prefix`: Prefix cache length (subset of ISL already cached per request). Default: `0`
-- `--nextn`: Number of MTP/speculative draft tokens. Default: `0`. Unlike `cli default`, `estimate` does **not** auto-enable MTP for DeepSeek/Qwen3.5 — pass `--nextn 1` explicitly
+- `--nextn`: Number of MTP/speculative draft tokens. Default: `0`; pass `--nextn 1` explicitly to enable MTP
 - `--nextn-accept-rates`: Comma-separated acceptance rates for the MTP draft tokens (only the first `--nextn` are used). Default: `0.85,0.3,0,0,0`
 - `--stride`: (static modes only) OSL-sweep stride used by `run_static`; ignored for `agg`/`disagg`. Default: `32`
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory for KV cache. Default: `0.9`. Used to estimate max concurrent sequences and warn when batch size exceeds KV cache capacity
@@ -852,9 +852,11 @@ Hybrid mode is a quick solution to support new models without modeling the opera
 These flags enable MTP (Multi-Token Prediction) speculative decoding in the
 configuration search:
 
-- `--nextn N` — Number of draft tokens. When > 0, the sweep includes
-  speculative decoding configurations. Requires the model to support MTP.
-  Default: 0 (disabled).
+- `--nextn N|auto` — Number of draft tokens. MTP is disabled when this flag is
+  omitted or set to `0`. Pass a positive value to enable MTP with that many
+  draft tokens, or pass `auto` to use `num_nextn_predict_layers` from the model
+  config and then the model-family fallback if the field is absent. Requires
+  the model to support MTP.
 - `--nextn-accept-rates RATES` — Comma-separated list of 5 floats representing
   the acceptance probability of each draft token position. Only the first
   `--nextn` values are used. Default: `0.85,0.3,0,0,0`.

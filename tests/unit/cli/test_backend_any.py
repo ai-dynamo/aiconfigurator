@@ -110,19 +110,46 @@ class TestBackendAny:
             assert task_config.nextn == 3
             assert task_config.nextn_accept_rates == [0.9, 0.5, 0.2, 0.1, 0.0]
 
-    def test_build_default_tasks_nextn_default_zero(self):
-        """Test that nextn defaults to 0 (MTP disabled) when not specified."""
+    def test_build_default_tasks_omitted_nextn_disables_mtp(self):
+        """Omitted nextn should preserve the public default of disabled MTP."""
         tasks = build_default_tasks(
-            model_path="Qwen/Qwen3-32B",
+            model_path="nvidia/GLM-5.2-NVFP4",
             total_gpus=8,
-            system="h200_sxm",
-            backend="trtllm",
+            system="gb200",
+            backend="vllm",
+            backend_version="0.11.0",
+            database_mode="SOL",
         )
 
         assert len(tasks) == 2
 
-        # Verify nextn defaults to 0
         for task_config in tasks.values():
             assert task_config.nextn == 0
-            # Default accept rates should still be present
-            assert task_config.nextn_accept_rates is not None
+
+    def test_build_default_tasks_none_uses_model_default_and_preserves_accept_rates(self):
+        """Explicit None opts into model inference without dropping custom rates."""
+        accept_rates = [0.9, 0.4, 0.1, 0.0, 0.0]
+        tasks = build_default_tasks(
+            model_path="nvidia/GLM-5.2-NVFP4",
+            total_gpus=8,
+            system="gb200",
+            backend="vllm",
+            backend_version="0.11.0",
+            database_mode="SOL",
+            nextn=None,
+            nextn_accept_rates=accept_rates,
+        )
+
+        for task_config in tasks.values():
+            assert task_config.nextn == 1
+            assert task_config.nextn_accept_rates == accept_rates
+
+    def test_build_default_tasks_rejects_negative_nextn(self):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-32B",
+                total_gpus=8,
+                system="h200_sxm",
+                backend="trtllm",
+                nextn=-1,
+            )

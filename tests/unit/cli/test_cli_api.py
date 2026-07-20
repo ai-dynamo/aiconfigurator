@@ -10,10 +10,49 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli import CLIResult, cli_exp, cli_generate
+from aiconfigurator.cli import CLIResult, cli_default, cli_exp, cli_generate
 from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
+
+
+class TestCLIDefaultUnit:
+    """Unit tests for the public default-mode API boundary."""
+
+    @pytest.mark.parametrize(
+        ("api_kwargs", "expected_nextn", "expected_accept_rates"),
+        [
+            ({}, 0, None),
+            ({"nextn": 0, "nextn_accept_rates": [0.9, 0.4]}, 0, [0.9, 0.4]),
+            ({"nextn": None, "nextn_accept_rates": [0.8, 0.2]}, None, [0.8, 0.2]),
+        ],
+    )
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    @patch("aiconfigurator.cli.api.build_default_tasks")
+    def test_nextn_contract_is_forwarded(
+        self,
+        mock_build_default_tasks,
+        mock_execute_and_wrap,
+        api_kwargs,
+        expected_nextn,
+        expected_accept_rates,
+    ):
+        tasks = {"agg": MagicMock()}
+        expected_result = MagicMock()
+        mock_build_default_tasks.return_value = tasks
+        mock_execute_and_wrap.return_value = expected_result
+
+        result = cli_default(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            **api_kwargs,
+        )
+
+        assert result is expected_result
+        build_kwargs = mock_build_default_tasks.call_args.kwargs
+        assert build_kwargs["nextn"] == expected_nextn
+        assert build_kwargs["nextn_accept_rates"] == expected_accept_rates
 
 
 class TestCLIEstimateUnit:

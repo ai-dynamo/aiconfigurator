@@ -661,12 +661,11 @@ class Task:
         # ``None`` distinguishes "field absent" from an explicit 0 (e.g. Kimi-K2.5).
         hf_nextn = cfg.get("num_nextn_predict_layers")
         if self.nextn is not None:
-            # User-supplied value wins. Warn when it diverges from the checkpoint --
-            # nextn can stack extra MTP layers beyond what the checkpoint ships, so
-            # an override is a deliberate choice worth surfacing.
+            # User-supplied value wins. Warn when it diverges from the checkpoint;
+            # this can explicitly disable MTP or select a different draft depth.
             if hf_nextn is not None and self.nextn != hf_nextn:
                 logger.warning(
-                    "nextn=%d overrides the checkpoint's num_nextn_predict_layers=%d (stacking additional MTP layers).",
+                    "nextn=%d overrides the checkpoint's num_nextn_predict_layers=%d.",
                     self.nextn,
                     hf_nextn,
                 )

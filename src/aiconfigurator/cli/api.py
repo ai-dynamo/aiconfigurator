@@ -149,6 +149,8 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    nextn: int | None = 0,
+    nextn_accept_rates: list[float] | None = None,
     strict_sla: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -182,6 +184,9 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        nextn: Number of MTP draft tokens. ``0`` disables MTP (the default);
+            explicitly pass ``None`` to use the model-config/family default.
+        nextn_accept_rates: Acceptance rates for MTP draft tokens.
         strict_sla: When True, ``pareto_df`` is filtered to only
             SLA-compliant data points (TPOT or request-latency) *before*
             the Pareto frontier is computed.  TTFT is already enforced at
@@ -255,6 +260,8 @@ def cli_default(
         tpot=tpot,
         request_latency=request_latency,
         prefix=prefix,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
         engine_step_backend=engine_step_backend,
@@ -730,10 +737,8 @@ def cli_estimate(
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) Number of MTP/speculative draft tokens. Applied to
             agg, disagg, and all static modes. Default 0 (disabled).
-            **Note:** unlike :func:`cli_default`, this entrypoint does **not**
-            auto-set ``nextn=1`` for DeepSeek/Qwen3.5 models — pass
-            ``nextn=1`` explicitly when you want MTP to mirror the default-mode
-            behavior.
+            This entrypoint does not infer MTP from the model config; pass
+            ``nextn=1`` explicitly when you want MTP.
         nextn_accept_rates: (common) Acceptance rates for the MTP draft tokens
             (only the first ``nextn`` entries are used).
             Default ``[0.85, 0.3, 0, 0, 0]``.

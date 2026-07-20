@@ -186,6 +186,29 @@ def _validate_model_path(model_path: str) -> str:
         ) from e
 
 
+def _validate_nextn(nextn: int | None) -> None:
+    """Validate the public default-mode MTP draft depth."""
+    if nextn is None:
+        return
+    if isinstance(nextn, bool) or not isinstance(nextn, int) or nextn < 0:
+        raise ValueError(f"nextn must be 'auto' or a non-negative integer, got {nextn}")
+
+
+def _parse_nextn(value: str) -> int | None:
+    """Parse ``--nextn`` while keeping model inference explicit."""
+    if value.strip().lower() == "auto":
+        return None
+    try:
+        nextn = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"nextn must be 'auto' or a non-negative integer, got {value!r}") from exc
+    try:
+        _validate_nextn(nextn)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return nextn
+
+
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model-path",
@@ -312,11 +335,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
         help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. "
-        "When set > 0, enables speculative decoding in the configuration search. "
-        "Requires the model to support MTP. Default: 0 (disabled).",
+        "Omit the flag or set it to 0 to disable MTP; values > 0 enable it with that many draft tokens. "
+        "Set it to 'auto' to infer the value from the model config or AIC's model-family default. "
+        "Requires the model to support MTP.",
     )
     parser.add_argument(
         "--nextn-accept-rates",
@@ -820,8 +844,7 @@ def _add_estimate_mode_arguments(parser):
         default=0,
         help="(common) Number of MTP/speculative draft tokens. Default: 0 (disabled). "
         "Applied to agg, disagg, and all static modes. "
-        "Note: unlike `cli default`, `cli estimate` does NOT auto-set nextn=1 for "
-        "DeepSeek/Qwen3.5 — pass --nextn 1 explicitly when you want MTP.",
+        "This mode does not infer MTP from the model config; pass --nextn 1 explicitly when you want MTP.",
     )
     parser.add_argument(
         "--nextn-accept-rates",
@@ -1136,7 +1159,7 @@ def build_default_tasks(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int = 0,
+    nextn: int | None = 0,
     nextn_accept_rates: list[float] | None = None,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
@@ -1162,7 +1185,8 @@ def build_default_tasks(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: Number of draft tokens for MTP speculative decoding.
+        nextn: Number of draft tokens for MTP speculative decoding. ``0`` disables
+            MTP (the default); ``None`` uses the model-config/family default.
         nextn_accept_rates: Acceptance rates for MTP draft tokens.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
@@ -1174,7 +1198,9 @@ def build_default_tasks(
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
-    nextn_accept_rates = nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0]
+    _validate_nextn(nextn)
+    if nextn_accept_rates is None:
+        nextn_accept_rates = [0.85, 0.3, 0.0, 0.0, 0.0]
     decode_system = decode_system or system
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -1288,8 +1314,9 @@ def build_default_tasks(
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
     }
-    if nextn and nextn > 0:
+    if nextn is not None:
         global_kwargs["nextn"] = nextn
+    if nextn_accept_rates is not None:
         global_kwargs["nextn_accept_rates"] = nextn_accept_rates
 
     if image_height or image_width or (num_images and num_images != 1):

@@ -346,11 +346,59 @@ class TestCLIArgumentParsing:
         assert sorted(action.choices) == sorted(expected_choices)
 
     def test_nextn_default_value(self, cli_parser):
-        """Test that --nextn defaults to 0."""
+        """Omitting --nextn keeps the backward-compatible disabled default."""
         args = cli_parser.parse_args(
             ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
         )
         assert args.nextn == 0
+
+    def test_nextn_can_explicitly_disable_mtp(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "0",
+            ]
+        )
+        assert args.nextn == 0
+
+    def test_nextn_auto_uses_model_default(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+            ]
+        )
+        assert args.nextn is None
+
+    def test_nextn_rejects_negative_values(self, cli_parser):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--nextn",
+                    "-1",
+                ]
+            )
 
     def test_nextn_accept_rates_default_value(self, cli_parser):
         """Test that --nextn-accept-rates defaults to '0.85,0.3,0,0,0'."""
