@@ -49,7 +49,7 @@ def create_agg_pareto_tab(app_config):
             interactive=False,
             visible=True,
         )
-        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False)
+        debugging_box = gr.Textbox(label="Debugging", lines=5, required=False, elem_classes=["debug-output"])
 
         download_btn = gr.Button("Download")
         output_file = gr.File(label="When you click the download button, the downloaded form will be displayed here.")
