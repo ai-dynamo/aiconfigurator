@@ -212,7 +212,7 @@ tables:
   so the attempted-set attestation is collection-time only.
 - "Missing provenance" = a parquet table present with no matching `tables`
   entry. CI fails closed on it (§8); the loader's strict mode refuses it (§7).
-- **Legacy tier (amended during AIC-1502):** data collected before V3 carries a
+- **Legacy tier** (a later amendment): data collected before V3 carries a
   backfilled sidecar with `provenance: legacy` — `runtime: {framework,
   version}` only, per-table `status` (complete unless it had `INCOMPLETE.txt`),
   no hashes. The tier makes the §8 sidecar-coverage gate and the §12.3 support
@@ -389,7 +389,7 @@ unchanged:
   - {framework: sglang, family: moe, tables: [...], systems: [...]}
 ```
 
-Contract notes (locked during AIC-1502): `unchanged` entries carry exactly
+Contract notes (locked during implementation): `unchanged` entries carry exactly
 `{framework, family, tables, systems}` — no vacuous `reasons`/`action`. The
 `case_plan` reason is computed from the family's case-INPUT files (base-ops
 and model-case YAML plus the case-generation modules) hashed at each revision
