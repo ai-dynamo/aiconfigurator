@@ -343,6 +343,25 @@ class Task:
     # used by the Planner, where Pareto selection happens elsewhere.
     pareto_sweep: bool = True
     request_latency: float | None = None
+    # Optional inter-token-latency SLA target (streaming smoothness).
+    itl: float | None = None
+    # SLA percentile semantics (see sdk/queueing): which quantile of the
+    # steady-state distribution each target constrains. Supported:
+    # 0.5 / 0.75 / 0.9 / 0.95 / 0.99 / 0.999. PRESENCE-ACTIVATED — setting
+    # any of these (or an `itl` target) switches the whole filter family to
+    # percentile semantics, the same rule the CLI applies; unset metrics
+    # then use the evaluation-time defaults (p50 for ttft/tpot/
+    # request_latency, p99 for itl). All None (and no itl) = the legacy
+    # scalar filters, byte-compatible, zero added cost.
+    ttft_percentile: float | None = None
+    tpot_percentile: float | None = None
+    itl_percentile: float | None = None
+    request_latency_percentile: float | None = None
+    # --sla-refine: a precision upgrade only — it never changes the
+    # elimination semantics. With percentile constraints it resolves
+    # bracket-straddling candidates with the quantitative evaluator; in all
+    # cases it upgrades the reported top rows to quantitative-tier numbers.
+    sla_refine: bool = False
     total_gpus: int | None = None
     database_mode: str | None = None
     # Fine-grained HYBRID/EMPIRICAL transfer control: which empirical transfer kinds are
@@ -1054,6 +1073,22 @@ class Task:
     # Builders consumed by sweep.py
     # =====================================================================
 
+    @property
+    def sla_percentile(self) -> bool:
+        """Percentile filter semantics are PRESENCE-ACTIVATED: setting any
+        percentile field or an `itl` target switches the filter family to
+        percentile semantics — one rule for both the CLI and exp YAML."""
+        return any(
+            v is not None
+            for v in (
+                self.ttft_percentile,
+                self.tpot_percentile,
+                self.itl_percentile,
+                self.request_latency_percentile,
+                self.itl,
+            )
+        )
+
     def build_runtime_config(self, batch_size: int | None = None) -> config.RuntimeConfig:
         rt = config.RuntimeConfig(
             isl=self.isl,
@@ -1065,6 +1100,14 @@ class Task:
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,
+            itl=self.itl,
+            # unset percentiles fall back to the evaluation-time defaults
+            ttft_percentile=self.ttft_percentile if self.ttft_percentile is not None else 0.5,
+            tpot_percentile=self.tpot_percentile if self.tpot_percentile is not None else 0.5,
+            itl_percentile=self.itl_percentile if self.itl_percentile is not None else 0.99,
+            request_latency_percentile=(
+                self.request_latency_percentile if self.request_latency_percentile is not None else 0.5
+            ),
             engine_step_backend=self.engine_step_backend,
         )
         if batch_size is not None:
@@ -1416,6 +1459,8 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "sla_percentile": self.sla_percentile,
+            "sla_refine": self.sla_refine,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:

@@ -288,6 +288,67 @@ def _add_default_mode_arguments(parser):
         "Pass --strict-sla to only keep configs that meet the given tpot constraint.**",
     )
     parser.add_argument(
+        "--itl",
+        type=float,
+        default=None,
+        help="Optional inter-token-latency SLA target in ms (streaming smoothness; "
+        "constrains the ITL distribution tail, see --itl-percentile).",
+    )
+    percentile_values = {"p50": 0.5, "p75": 0.75, "p90": 0.9, "p95": 0.95, "p99": 0.99, "p999": 0.999}
+
+    def _percentile(value: str) -> float:
+        try:
+            return percentile_values[value.lower()]
+        except KeyError:
+            raise argparse.ArgumentTypeError(
+                f"invalid percentile {value!r}; choose from {', '.join(percentile_values)}"
+            ) from None
+
+    parser.add_argument(
+        "--ttft-percentile",
+        type=_percentile,
+        default=None,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Which percentile of the steady-state TTFT distribution --ttft constrains. "
+        "Default: p50 (typical request under sustained load).",
+    )
+    parser.add_argument(
+        "--tpot-percentile",
+        type=_percentile,
+        default=None,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the TPOT distribution that --tpot constrains. Default: p50. "
+        "NOTE: takes effect only with --sla-refine (no screening-tier TPOT distribution); "
+        "without it the legacy mean screen applies.",
+    )
+    parser.add_argument(
+        "--itl-percentile",
+        type=_percentile,
+        default=None,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the ITL distribution that --itl constrains. Default: p99 "
+        "(the tail is the point of a smoothness SLA).",
+    )
+    parser.add_argument(
+        "--request-latency-percentile",
+        type=_percentile,
+        default=None,
+        metavar="{p50,p75,p90,p95,p99,p999}",
+        help="Percentile of the end-to-end latency distribution that --request-latency "
+        "constrains. Default: p50. NOTE: takes effect only with --sla-refine "
+        "(no screening-tier e2e distribution).",
+    )
+    parser.add_argument(
+        "--sla-refine",
+        action="store_true",
+        default=False,
+        help="Precision upgrade only — never changes the elimination semantics "
+        "(those are set by --*-percentile / --itl; default is the legacy avg filter). "
+        "With percentile constraints, resolves SLA-boundary candidates with the "
+        "quantitative queueing evaluator; in all cases upgrades reported top-N rows "
+        "to quantitative-tier numbers. Costs extra time near the SLA boundary.",
+    )
+    parser.add_argument(
         "--strict-sla",
         action="store_true",
         default=False,
@@ -1164,6 +1225,12 @@ def build_default_tasks(
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
+    itl: float | None = None,
+    ttft_percentile: float | None = None,
+    tpot_percentile: float | None = None,
+    itl_percentile: float | None = None,
+    request_latency_percentile: float | None = None,
+    sla_refine: bool = False,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accept_rates: list[float] | None = None,
@@ -1310,6 +1377,12 @@ def build_default_tasks(
         "ttft": ttft,
         "tpot": tpot,
         "request_latency": request_latency,
+        "itl": itl,
+        "ttft_percentile": ttft_percentile,
+        "tpot_percentile": tpot_percentile,
+        "itl_percentile": itl_percentile,
+        "request_latency_percentile": request_latency_percentile,
+        "sla_refine": sla_refine,
         "total_gpus": total_gpus,
         "database_mode": database_mode,
         "transfer_policy": transfer_policy,
@@ -1650,6 +1723,25 @@ def _execute_tasks(
             max_total_gpus=max_total_gpus,
             strict_sla=strict_sla,
         )
+        # report-boundary tier upgrade (only when the evaluator was opted
+        # in): the handful of rows a human reads get quantitative-tier
+        # queueing numbers; nothing is dropped here
+        if getattr(task, "sla_refine", False):
+            from aiconfigurator.sdk.queueing.refine import refine_report_rows
+
+            try:
+                report_runtime_config = task.build_runtime_config()
+            except Exception:
+                report_runtime_config = None
+            best_config_df = refine_report_rows(
+                best_config_df,
+                runtime_config=report_runtime_config,
+                # task-level resolution not recoverable from row metadata
+                nextn=getattr(task, "nextn", None),
+                nextn_accept_rates=getattr(task, "nextn_accept_rates", None),
+                prefill_latency_correction=getattr(task, "prefill_latency_correction", 1.0),
+                decode_latency_correction=getattr(task, "decode_latency_correction", 1.0),
+            )
         best_configs[name] = best_config_df
         best_throughputs[name] = best_throughput
         best_latencies[name] = latencies
@@ -2390,6 +2482,14 @@ def main(args):
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
+            itl=args.itl,
+            # percentile semantics are presence-activated (Task.sla_percentile
+            # derives from these) — pass through unmodified
+            ttft_percentile=args.ttft_percentile,
+            tpot_percentile=args.tpot_percentile,
+            itl_percentile=args.itl_percentile,
+            request_latency_percentile=args.request_latency_percentile,
+            sla_refine=args.sla_refine,
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],

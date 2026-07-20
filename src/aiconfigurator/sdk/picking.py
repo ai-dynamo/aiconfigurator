@@ -158,6 +158,34 @@ def _build_disagg_summary_dict(
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
+        # Queueing (pass-calendar) columns for disagg composition:
+        # - TTFT side follows the prefill stage. The prefill worker runs a
+        #   static prefill batch, so within one batch there is no admission
+        #   staircase (all requests share the batch) — steady == ttft. The
+        #   transient (burst) case is bounded by queueing behind (p)bs-deep
+        #   batches; without the worker's chunk budget here we report the
+        #   static value; with --sla-refine the report boundary upgrades
+        #   these rows to the tandem-recursion quantitative tier
+        #   (sdk.queueing.evaluate_disagg).
+        # - ITL side follows the decode stage: decode workers have NO
+        #   prefill interference, so the ITL distribution is structurally a
+        #   single mass at tpot (the measurable signature of disagg vs agg,
+        #   where itl_p99 spikes to the mix-pass duration).
+        "ttft_steady_mean": ttft,
+        "ttft_steady_p50": ttft,
+        "ttft_steady_p90": ttft,
+        "ttft_steady_p99": ttft,
+        "ttft_transient_mean": ttft,
+        "ttft_transient_max": ttft,
+        "itl_mean": tpot,
+        "itl_p50": tpot,
+        "itl_p99": tpot,
+        "ttft_steady_p75": ttft,
+        "ttft_steady_p95": ttft,
+        "ttft_steady_p999": ttft,
+        "ttft_steady_p99_lo": ttft,
+        "ttft_steady_p99_hi": ttft,
+        "queueing_tier": "composed",
     }
 
 

@@ -49,6 +49,8 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
+from aiconfigurator.sdk.queueing import closed_form as queueing_closed_form
+from aiconfigurator.sdk.queueing import refine
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -200,6 +202,24 @@ def _rate_match_dict(
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
+        # Queueing (pass-calendar) columns — mirrors
+        # picking._build_disagg_summary_dict (see rationale there); guarded
+        # by the rate-match parity test.
+        "ttft_steady_mean": ttft,
+        "ttft_steady_p50": ttft,
+        "ttft_steady_p90": ttft,
+        "ttft_steady_p99": ttft,
+        "ttft_transient_mean": ttft,
+        "ttft_transient_max": ttft,
+        "itl_mean": tpot,
+        "itl_p50": tpot,
+        "itl_p99": tpot,
+        "ttft_steady_p75": ttft,
+        "ttft_steady_p95": ttft,
+        "ttft_steady_p999": ttft,
+        "ttft_steady_p99_lo": ttft,
+        "ttft_steady_p99_hi": ttft,
+        "queueing_tier": "composed",
     }
 
 
@@ -262,6 +282,8 @@ def _sweep_one_parallel_agg(
     max_batch_size: int,
     ctx_stride: int,
     enable_chunked_prefill: bool,
+    sla_percentile: bool = False,
+    sla_refine: bool = False,
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
     predictor: Any = None,
@@ -274,10 +296,14 @@ def _sweep_one_parallel_agg(
     a full recomputation per tpot, ~80x slowdown for an 80-element tpot
     sweep.
 
-    Returns ``(rows_df, saw_model_fit, saw_memory_fit)``.  Logic faithfully
-    reproduces the body of the legacy
-    ``backend.find_best_agg_result_under_constraints``; parity is enforced by
-    the integration test.
+    Returns ``(rows_df, saw_model_fit, saw_memory_fit)``.  The evaluation
+    grid and TPOT screen reproduce the legacy
+    ``backend.find_best_agg_result_under_constraints``; TTFT feasibility
+    deliberately diverges from legacy: it is resolved by the percentile SLA
+    funnel (wide-keep on the cohort bracket, then quantitative-tier
+    refinement — see sdk/queueing/refine.py). The legacy path
+    (pareto_analysis / InferenceSession.find_best_*) retains legacy
+    semantics.
     """
     isl = runtime_config.isl
     osl = runtime_config.osl
@@ -340,7 +366,34 @@ def _sweep_one_parallel_agg(
             if model_oom or kv_cache_oom:
                 break  # ctx_tokens monotonic → larger will also OOM
             result_dict = summary.get_result_dict()
-            if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
+            # TTFT screen, three modes:
+            # - legacy (default): the legacy scalar filter, byte-compatible;
+            # - percentile: the closed form's stored quantile for the
+            #   requested percentile (still O(1), no evaluator);
+            # - funnel: wide-keep on the cohort bracket lower bound —
+            #   screening bias can never falsely reject; straddlers are
+            #   resolved by the quantitative tier below.
+            # TPOT keeps the mean-based screen in all modes; an optional
+            # --itl target is screened via its stored tail quantile.
+            keep = bool(result_dict) and result_dict["tpot"] <= tpot_target
+            if keep:
+                if sla_refine and sla_percentile:
+                    ttft_screen = result_dict.get("ttft_steady_p99_lo", result_dict["ttft"])
+                elif sla_percentile:
+                    _q_val = queueing_closed_form.screening_quantile(
+                        result_dict, "ttft", getattr(runtime_config, "ttft_percentile", 0.5)
+                    )
+                    ttft_screen = _q_val if _q_val is not None else result_dict["ttft"]
+                else:
+                    ttft_screen = result_dict["ttft"]
+                keep = ttft_screen <= ttft_target
+            itl_target = getattr(runtime_config, "itl", None)
+            if keep and sla_percentile and itl_target is not None:
+                itl_screen = queueing_closed_form.screening_quantile(
+                    result_dict, "itl", getattr(runtime_config, "itl_percentile", 0.99)
+                )
+                keep = itl_screen is None or itl_screen <= itl_target
+            if keep:
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
 
@@ -349,6 +402,40 @@ def _sweep_one_parallel_agg(
 
     df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
     df["_per_ops_source"] = results_per_ops_source
+
+    # SLA funnel stage 2 (opt-in): resolve percentile feasibility on the
+    # wide-kept set with the quantitative tier (limit-cycle evaluator).
+    # Constraint percentiles come from runtime_config (defaults: p50 for
+    # ttft/tpot/request_latency, p99 for itl).
+    if not (sla_refine and sla_percentile):
+        # elimination semantics are set by the percentile args, never by
+        # --sla-refine alone (refine-only mode upgrades reported numbers at
+        # the report boundary instead)
+        df = df.sort_values(by="seq/s", ascending=False).round(3)
+        if top_k > 0:
+            df = df.head(top_k)
+        return df, saw_model_fit, saw_memory_fit
+
+    constraints: dict = {"ttft": (ttft_target, getattr(runtime_config, "ttft_percentile", 0.5))}
+    if tpot_target is not None:
+        constraints["tpot"] = (tpot_target, getattr(runtime_config, "tpot_percentile", 0.5))
+    itl_target = getattr(runtime_config, "itl", None)
+    if itl_target is not None:
+        constraints["itl"] = (itl_target, getattr(runtime_config, "itl_percentile", 0.99))
+    e2e_target = getattr(runtime_config, "request_latency", None)
+    if e2e_target is not None:
+        constraints["e2e"] = (e2e_target, getattr(runtime_config, "request_latency_percentile", 0.5))
+    df = refine.apply_sla_refine(
+        df,
+        model=model,
+        database=database,
+        backend=backend,
+        constraints=constraints,
+        enable_chunked_prefill=enable_chunked_prefill,
+        top_k=top_k,
+        runtime_config=runtime_config,
+    )
+
     df = df.sort_values(by="seq/s", ascending=False).round(3)
     if top_k > 0:
         df = df.head(top_k)
@@ -367,6 +454,8 @@ def sweep_agg(
     max_batch_size: int = 512,
     ctx_stride: int = 512,
     enable_chunked_prefill: bool = False,
+    sla_percentile: bool = False,
+    sla_refine: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     predictor: Any = None,
@@ -483,6 +572,8 @@ def sweep_agg(
                     max_batch_size=max_batch_size,
                     ctx_stride=ctx_stride,
                     enable_chunked_prefill=enable_chunked_prefill,
+                    sla_percentile=sla_percentile,
+                    sla_refine=sla_refine,
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
                     predictor=predictor,

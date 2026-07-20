@@ -672,6 +672,24 @@ ColumnsStatic = [
     "version",
     "system",
     "power_w",  # NEW: E2E weighted average power in watts
+] + [
+    # queueing (pass-calendar) metrics — degenerate in static mode:
+    # ttft_steady_* == ttft, itl_* == tpot (no queueing, no interference)
+    "ttft_steady_mean",
+    "ttft_steady_p50",
+    "ttft_steady_p75",
+    "ttft_steady_p90",
+    "ttft_steady_p95",
+    "ttft_steady_p99",
+    "ttft_steady_p999",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
+    "ttft_transient_mean",
+    "ttft_transient_max",
+    "itl_mean",
+    "itl_p50",
+    "itl_p99",
+    "queueing_tier",
 ]
 
 """
@@ -720,6 +738,27 @@ ColumnsAgg = [
     "version",
     "system",
     "power_w",  # NEW: E2E weighted average power in watts
+] + [
+    # queueing (pass-calendar) metrics, derived at the run_agg operating
+    # point (sdk.queueing.closed_form.operating_point_columns). ttft_steady_*
+    # is the steady-state distribution (SLA semantics), ttft_transient_* the
+    # initial-burst admission staircase; the legacy `ttft` column (blended
+    # heuristic) is unchanged for backward compatibility.
+    "ttft_steady_mean",
+    "ttft_steady_p50",
+    "ttft_steady_p75",
+    "ttft_steady_p90",
+    "ttft_steady_p95",
+    "ttft_steady_p99",
+    "ttft_steady_p999",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
+    "ttft_transient_mean",
+    "ttft_transient_max",
+    "itl_mean",
+    "itl_p50",
+    "itl_p99",
+    "queueing_tier",
 ]
 
 """
@@ -787,6 +826,29 @@ ColumnsDisagg = [
     "(e)parallel",
     "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
+] + [
+    # queueing (pass-calendar) metrics — disagg composition: ttft_steady_*
+    # follows the prefill stage (static batch semantics on the prefill
+    # worker), itl_* follows the decode stage (single mass: no prefill
+    # interference on decode workers — the structural selling point of
+    # disagg). With --sla-refine, the report boundary upgrades these rows
+    # to the tandem-recursion quantitative tier (sdk.queueing.evaluate_disagg:
+    # prefill queueing, KV handoff with fabric contention, phase-mixed).
+    "ttft_steady_mean",
+    "ttft_steady_p50",
+    "ttft_steady_p75",
+    "ttft_steady_p90",
+    "ttft_steady_p95",
+    "ttft_steady_p99",
+    "ttft_steady_p999",
+    "ttft_steady_p99_lo",
+    "ttft_steady_p99_hi",
+    "ttft_transient_mean",
+    "ttft_transient_max",
+    "itl_mean",
+    "itl_p50",
+    "itl_p99",
+    "queueing_tier",
 ]
 
 """

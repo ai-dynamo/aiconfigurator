@@ -15,6 +15,7 @@ from aiconfigurator_core.sdk.config import RuntimeConfig
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
+from aiconfigurator_core.sdk.queueing import closed_form as queueing_closed_form
 from aiconfigurator_core.sdk.rust_engine_step import (
     estimate_decode_step_latency_with_rust,
     estimate_mixed_step_latency_with_rust,
@@ -745,6 +746,10 @@ class BaseBackend:
                 e2e_power_avg,  # NEW: E2E weighted average power in watts
             ]
         ]
+        # static batching: queueing columns degenerate onto the legacy
+        # scalars (no continuous-batching interference, no admission queue)
+        static_queueing = queueing_closed_form.static_degenerate_columns(ttft, tpot)
+        data[0].extend(static_queueing[col] for col in queueing_closed_form.QUEUEING_COLUMNS)
 
         summary_df = pd.DataFrame(data, columns=common.ColumnsStatic).round(3)
 
@@ -1374,6 +1379,24 @@ class BaseBackend:
             "system": database.system,
             "power_w": agg_power_avg_w,
         }
+        # Queueing (pass-calendar) columns: pure arithmetic on quantities
+        # already computed at this operating point — no extra DB queries.
+        result_dict.update(
+            queueing_closed_form.operating_point_columns(
+                isl=isl,
+                osl=osl,
+                batch_size=b,
+                ctx_tokens=ctx_tokens,
+                mix_step_ms=mix_step_latency_ms,
+                genonly_step_ms=genonly_step_latency_ms,
+                prefill_step_ms=_prefill_step_ms,
+                num_mix_steps=num_mix_steps,
+                num_genonly_steps=num_genonly_steps,
+                prefix=prefix,
+                encoder_ms=encoder_latency_ms,
+                dispatch_overhead_ms=self._prefill_dispatch_overhead_ms(model),
+            )
+        )
         result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
         summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
         summary.set_memory_and_check_oom(
