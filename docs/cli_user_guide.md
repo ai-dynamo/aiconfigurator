@@ -350,12 +350,8 @@ This mode is triggered by
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
 or
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
-or
-aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --thorough-sweep
-or
-aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 ```
-`model_path`, `total_gpus`, `system` are three required arguments to define the problem, except when `--thorough-config` provides a native Spica `SmartSearchConfig` YAML.
+`model_path`, `total_gpus`, `system` are three required arguments to define the problem.
 If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
 
 #### Additional arguments
@@ -366,8 +362,6 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--backend-version`: Backend database version. Default: latest.
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
-- `--thorough-sweep`: Use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. Without `--thorough-config`, CLI inputs are converted to a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
-- `--thorough-config`: Path to a native Spica `SmartSearchConfig` YAML file. The file defines the search space, workload, goal, and sweep controls. Its goal owns ranking and SLA semantics; CLI SLA defaults are not inherited. For replay-backed sweeps, put `workload.trace_path` and `workload.trace_format` in this file.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
 - `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
@@ -400,89 +394,9 @@ is selected. This is useful for finding the best backend without running separat
 
 The command will create two experiments for the given problem, one is `agg` and another one is `disagg`. Compare them to find the better one and estimates the perf gain.
 
-#### Spica Thorough Sweep
+#### Spica migration
 
-> [!WARNING]
-> Spica thorough mode is experimental. Its CLI, config schema, search behavior, and generated artifacts may change in future releases. Thorough sweeps also take substantially longer than the legacy estimator.
-
-Pass `--thorough-sweep` to run Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto estimator. Spica is more thorough because it evaluates complete deployment candidates through Dynamo's end-to-end simulator and, with a native `--thorough-config`, can jointly explore deployment topology and parallelism, engine batching limits, router policy, multi-tier KV-cache offload, and planner scaling. This broader search captures interactions among Dynamo components, but replaying candidates takes substantially longer than the legacy estimator's narrower performance sweep.
-
-Spica removes backend/topology pairs that Dynamo replay cannot evaluate before starting a
-study. Currently, TensorRT-LLM remains available for aggregate deployments but is excluded
-from disaggregated branches because Dynamo replay does not support that combination.
-
-Without `--thorough-config`, the CLI converts the normal default inputs into a legacy-compatible Spica config: synthetic workload from `--isl` / `--osl`, closed-loop concurrency derived from GPU budget, the CLI `--ttft` / `--tpot` goodput SLA, round-robin routing, and planner scaling disabled:
-
-```bash
-aiconfigurator cli default \
-  --model-path Qwen/Qwen3-32B-FP8 \
-  --total-gpus 32 \
-  --system h200_sxm \
-  --backend trtllm \
-  --isl 4000 \
-  --osl 1000 \
-  --ttft 2000 \
-  --tpot 30 \
-  --thorough-sweep
-```
-
-Pass `--thorough-config` when you want to provide Spica's native `SmartSearchConfig` directly:
-
-```bash
-aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
-```
-
-The Spica config file maps directly to Spica's schema:
-
-```yaml
-search_space:
-  deployment_mode: [disagg, agg]
-  model_name: Qwen/Qwen3-32B-FP8
-  hardware_sku: h200_sxm
-  gpu_budget: 32
-  backend: [trtllm]
-workload:
-  isl: 4000
-  osl: 1000
-  concurrency: 4096
-  num_request_ratio: 2
-goal:
-  target: goodput_per_gpu
-  sla: {ttft_ms: 2000, itl_ms: 30}
-sweep:
-  max_rounds: 40
-  parallel_evals: 16
-```
-
-For replay-backed sweeps, put the trace information in the Spica config and pass it with `--thorough-config`. This keeps the CLI independent of any single trace schema while Spica can add more `trace_format` values over time. Today Spica supports Mooncake JSONL traces with `trace_format: mooncake`:
-
-```yaml
-search_space:
-  deployment_mode: [disagg, agg]
-  model_name: Qwen/Qwen3-32B-FP8
-  hardware_sku: h200_sxm
-  gpu_budget: 32
-  backend: [trtllm]
-workload:
-  trace_path: /data/replay/traffic.jsonl
-  trace_format: mooncake
-goal:
-  target: goodput_per_gpu
-  sla: {ttft_ms: 2000, itl_ms: 30}
-sweep:
-  max_rounds: 40
-  parallel_evals: 16
-```
-
-```bash
-aiconfigurator cli default --thorough-config spica_mooncake_trace.yaml
-```
-
-For Mooncake, each JSONL row describes one request with fields such as `timestamp`, `input_length`, `output_length`, and `hash_ids`; see [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl) for a concrete example.
-
-In trace mode, traffic shape and request lengths come from the trace, so the workload must not also set synthetic `isl` / `osl` fields. For synthetic workloads, `num_request_ratio` controls the generated request count relative to load (`round(num_request_ratio * concurrency)` for closed-loop concurrency). A Pareto config may instead search `kv_load_ratio: [0, 1]`; Spica derives a concrete concurrency from each candidate's KV capacity, and the CLI preserves that exact replay cap in its CSV and top-N output. The printed summary and top-N selection use the native goal: scalar targets retain their physical units and direction, while Pareto goals use the configured objective axes. Physical throughput remains a separate deployment metric rather than an alias for `Candidate.score`. If `--save-dir` is set, the CLI writes `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, an objective diagnostic plot when two distinct axes are available, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
-
-Generated Spica artifacts preserve the replay's resolved backend version, context length, router weights, planner objective/SLA and GPU limits, and KVBM transfer controls. Candidates using router, planner, or KVBM features currently require `--deployment-target dynamo-j2`; `dynamo-python` and llm-d targets fail closed because their deployment manifests cannot yet encode the full evaluated contract. KV-router admission-control pins are rejected until Dynamo replay can score them. KVBM activation is supported for vLLM and TensorRT-LLM, not SGLang.
+The experimental Spica smart sweeper has moved to the [Dynamo Profiler](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica). The AIC `--thorough-sweep` and `--thorough-config` flags have been removed; run Spica through `python -m dynamo.profiler.spica`.
 
 #### Systems Paths
 
@@ -612,46 +526,7 @@ Each replica has a system of 4 prefill workers and 1 decode workers. Each prefil
 `bs` is required to be set in framework as it limits the largest batch_size of the worker which is crucial to control the TPOT of the deployment.  
 `concurrency` = `concurrency * replicas` Use it to benchmark your deployment on total GPUs. If you only want to benchmark 1 replica, divide it by `replicas`
 
-As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. For Spica thorough mode, the CLI creates a similar run directory with per-rank `topN` folders, including the Spica ranking, generator bridge config, Pareto artifacts, and generated Dynamo deployment artifacts:
-
-```text
-results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
-├── agg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── agg_config.yaml
-│       ├── bench_run.sh
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── disagg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── bench_run.sh
-│       ├── decode_config.yaml
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── prefill_config.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── pareto.csv
-├── pareto_frontier.png
-├── spica_candidates.csv
-└── spica_candidates.yaml
-```
-
-Spica candidate knobs that map to Dynamo runtime fields, including batch/context limits, router policy, planner target and budgets, KVBM transfer controls, prefix caching, attention-DP, and NextN, are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. Active router/planner/KVBM candidates require `--deployment-target dynamo-j2` until the alternate deployment targets can encode the same contract.
-
-For the legacy estimator, here's a structure of the output folder,
+As this is still a little bit challenging to get the right configs for your deployment, we can further specify `--save-dir DIR` to output all the results here as well as **generate the configs for frameworks automatically**. Here is the output folder structure:
 ```text
 results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 ├── agg
