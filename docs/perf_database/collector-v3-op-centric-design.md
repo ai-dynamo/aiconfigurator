@@ -462,17 +462,24 @@ data. V3 makes that cycle computed and mostly declarative:
    `data/<system>/<family>/<backend>/<new_version>/` dirs with provenance), or
    declare reuse (`reuse.yaml` ← previous quarter's version) backed by
    kernel-identity evidence from the #1345 facts plus a spot benchmark per SM
-   generation. Precedence is decided at plan time, not runtime: the DEFAULT
-   move is recollect, and there is no runtime fallback between the two — the
-   quarter's data PR ships one or the other per family, and the evidence gate
-   checks whichever was chosen. Declaring reuse is the exception, permitted
-   only when the kernel-identity facts show the family's kernels did not
-   change across the pin bump and the per-generation spot benchmark confirms
-   it. (On pure data quality, fresh collection is never worse — declared
-   reuse exists because unchanged kernels mean statistically identical rows,
-   so recollecting them buys nothing at fleet-wide GPU cost. The quarter's
-   GPU bill stays proportional to what the framework actually changed, not
-   to the size of the support matrix.)
+   generation. How to choose, per changed family:
+
+   1. **Default: recollect.** Fresh collection is always valid and needs no
+      extra justification.
+   2. **Reuse is allowed only if BOTH hold:** the kernel-identity facts
+      (#1345) show the family's kernels are the same before and after the
+      pin bump, AND a spot benchmark on one system per SM generation
+      confirms it (median latency delta within the policy threshold).
+   3. **If either check fails, recollect.** This is a plan-time decision:
+      the data PR ships one move or the other, the evidence gate verifies
+      whichever was shipped, and the loader never switches between them at
+      query time.
+
+   Why reuse exists at all: when kernels are unchanged, recollection
+   produces statistically identical rows — reuse buys the same answer
+   without the fleet-wide GPU cost, so the quarter's bill stays
+   proportional to what the framework actually changed, not to the size
+   of the support matrix.
 3. **Per-family progress; partial upgrades are first-class.** Each
    *(framework, family)* is an independently ownable task. A family that
    breaks on the new baseline keeps an explicit `families:` override on the
