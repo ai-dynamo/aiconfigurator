@@ -31,6 +31,7 @@ when routing through Rust).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -336,6 +337,50 @@ def fpm_decode_config(sol_fn: Callable[[float, float], float]) -> OpInterpConfig
     )
 
 
+def _oplevel_sol_fn(sol_ops: list, phase: str, database) -> Callable[..., float]:
+    """Whole-model roofline = the op-level model queried in DatabaseMode.SOL.
+
+    Every op\'s analytic max(compute, mem) already encodes the real physics
+    (MoE activated experts, DSA index_topk saturation, per-op quantization),
+    so the FPM sol inherits it instead of hand-rolling an approximation. SOL
+    queries read only the system spec — no perf data files are touched."""
+    from aiconfigurator_core.sdk.perf_database import get_database_view
+
+    view = get_database_view(
+        database.system,
+        database.backend,
+        database.version,
+        systems_paths=[database.systems_root],
+        database_mode="SOL",
+        allow_missing_data=True,
+    )
+    if view is None:
+        raise PerfDataNotAvailableError(
+            f"cannot build a SOL database view for {database.system}/{database.backend}/{database.version}"
+        )
+
+    @functools.lru_cache(maxsize=8192)
+    def _sol(*coords) -> float:
+        total = 0.0
+        if phase == "prefill":
+            batch, total_prefill, total_kv = coords
+            s = max(total_prefill / batch, 1.0)
+            prefix = total_kv / batch
+            for op in sol_ops:
+                x = batch if "logits_gemm" in op._name else total_prefill
+                total += float(
+                    op.query(view, x=x, batch_size=batch, beam_width=1, s=s, prefix=prefix)
+                )
+        else:
+            batch, total_kv = coords
+            s = max(total_kv / batch, 1.0)
+            for op in sol_ops:
+                total += float(op.query(view, x=batch, batch_size=batch, beam_width=1, s=s))
+        return total
+
+    return _sol
+
+
 def build_fpm_sol_fns(model) -> tuple[Callable, Callable, float]:
     """Crude per-rank rooflines for perf_interp's ratio-only uses.
 
@@ -382,11 +427,20 @@ class FPMForwardOp(Operation):
         phase: str,
         model_config,
         model_path: str,
-        sol_fn: Callable[..., float],
-        weight_bytes: float,
+        sol_fn: Callable[..., float] | None = None,
+        weight_bytes: float = 0.0,
+        sol_ops: list | None = None,
     ) -> None:
+        """``sol_fn`` injects an explicit roofline (tests/experiments).
+        ``sol_ops`` — the model's ORIGINAL op-level list for this phase —
+        derives the roofline from the op-level model itself queried in
+        DatabaseMode.SOL: per-op analytic max(compute, mem) with the real
+        physics (MoE activation, DSA index_topk saturation, per-op quant).
+        Exactly one of the two must be provided."""
         if phase not in _PHASES:
             raise ValueError(f"unknown FPM phase: {phase!r}")
+        if (sol_fn is None) == (sol_ops is None):
+            raise ValueError("provide exactly one of sol_fn or sol_ops")
         super().__init__(f"fpm_forward_{phase}", 1.0)
         self._phase = phase
         self._model_path = str(model_path)
@@ -404,10 +458,24 @@ class FPMForwardOp(Operation):
             _norm_identity(model_config.moe_ep_size if model_config.moe_ep_size is not None else 1),
             _norm_identity(model_config.cp_size),
         )
-        if self._phase == "prefill":
-            self._interp_config = fpm_prefill_config(sol_fn)
-        else:
-            self._interp_config = fpm_decode_config(sol_fn)
+        self._sol_ops = list(sol_ops) if sol_ops is not None else None
+        self._interp_configs: dict[tuple, OpInterpConfig] = {}
+        if sol_fn is not None:
+            key = ("static",)
+            self._interp_configs[key] = (
+                fpm_prefill_config(sol_fn) if self._phase == "prefill" else fpm_decode_config(sol_fn)
+            )
+
+    def _interp_config(self, database: PerfDatabase) -> OpInterpConfig:
+        if ("static",) in self._interp_configs:
+            return self._interp_configs[("static",)]
+        key = (database.systems_root, database.system, database.backend, database.version)
+        config = self._interp_configs.get(key)
+        if config is None:
+            sol = _oplevel_sol_fn(self._sol_ops, self._phase, database)
+            config = fpm_prefill_config(sol) if self._phase == "prefill" else fpm_decode_config(sol)
+            self._interp_configs[key] = config
+        return config
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -489,14 +557,15 @@ class FPMForwardOp(Operation):
         wrapper.raise_if_not_loaded()
         return self._select_cell(wrapper["cells"])
 
-    def _resolve(self, cell: dict, coords: tuple) -> PerformanceResult:
+    def _resolve(self, cell: dict, coords: tuple, database: PerfDatabase) -> PerformanceResult:
+        interp_config = self._interp_config(database)
         table = cell["tables"][self._phase]
         domain = cell["domains"].get(self._phase)
         if not table or domain is None:
             raise PerfDataNotAvailableError(
                 f"FPM cell {cell['cell_ids']} has no {self._phase} rows (model_path={cell['model_path']!r})."
             )
-        for axis_index, (axis_name, value) in enumerate(zip(self._interp_config.axes, coords, strict=True)):
+        for axis_index, (axis_name, value) in enumerate(zip(interp_config.axes, coords, strict=True)):
             low, high = domain[axis_index]
             if not low <= value <= high:
                 raise PerfDataNotAvailableError(
@@ -505,7 +574,7 @@ class FPMForwardOp(Operation):
                     "FPM never extrapolates; collect a wider sweep or use forward_model='op_level'."
                 )
 
-        result = perf_interp.query(self._interp_config, table, *coords)
+        result = perf_interp.query(interp_config, table, *coords)
         latency = perf_interp.get_value(result, "latency")
         if not math.isfinite(latency) or latency <= 0:
             raise PerfDataNotAvailableError(
@@ -534,7 +603,7 @@ class FPMForwardOp(Operation):
             # One new token per request; ``s`` is the per-request KV length at
             # this decode step, so the iteration reads batch*s KV tokens.
             coords = (batch_size, batch_size * s)
-        return self._resolve(cell, coords)
+        return self._resolve(cell, coords, database)
 
     def query_pass_baseline(self, database: PerfDatabase, *, batch_size: int) -> PerformanceResult:
         """Decode-pass baseline at the smallest collectable KV for this batch.
@@ -559,7 +628,7 @@ class FPMForwardOp(Operation):
                 f"FPM cell {cell['cell_ids']} has no decode rows (model_path={cell['model_path']!r})."
             )
         kv_floor = max(batch_size, domain[1][0])
-        return self._resolve(cell, (batch_size, kv_floor))
+        return self._resolve(cell, (batch_size, kv_floor), database)
 
     def get_weights(self, **kwargs) -> float:
         """Per-rank weight bytes of the whole model (captured from the original

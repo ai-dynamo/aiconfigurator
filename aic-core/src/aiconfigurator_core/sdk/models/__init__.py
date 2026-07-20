@@ -60,21 +60,24 @@ def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
     """Centralized fpm rewrite: each phase list becomes exactly one whole-model
     op. No model class rewrites its own lists; metadata, parallelism, and the
     public model type are unchanged."""
-    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp, build_fpm_sol_fns
+    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
 
     if model.encoder_ops:
         raise NotImplementedError(
             f"forward_model='fpm' does not support encoder/multimodal models "
             f"(model_family={model.model_family!r} has encoder ops). Use forward_model='op_level'."
         )
-    # Derive the whole-model rooflines and weight bytes from the ORIGINAL
-    # op-level lists before replacing them.
-    prefill_sol, decode_sol, weight_bytes = build_fpm_sol_fns(model)
+    # The ORIGINAL op-level lists stay alive inside the FPM ops as the
+    # whole-model roofline (queried in DatabaseMode.SOL at interpolation
+    # time) and as the weight-bytes inventory for memory estimation.
+    context_ops = list(model.context_ops)
+    generation_ops = list(model.generation_ops)
+    weight_bytes = float(sum(op.get_weights() for op in context_ops))
     model.context_ops = [
-        FPMForwardOp("prefill", model.config, model.model_path, sol_fn=prefill_sol, weight_bytes=weight_bytes)
+        FPMForwardOp("prefill", model.config, model.model_path, sol_ops=context_ops, weight_bytes=weight_bytes)
     ]
     model.generation_ops = [
-        FPMForwardOp("decode", model.config, model.model_path, sol_fn=decode_sol, weight_bytes=weight_bytes)
+        FPMForwardOp("decode", model.config, model.model_path, sol_ops=generation_ops, weight_bytes=weight_bytes)
     ]
     model.forward_model = "fpm"
     return model
