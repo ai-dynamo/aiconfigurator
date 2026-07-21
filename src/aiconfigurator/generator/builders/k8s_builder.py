@@ -148,9 +148,9 @@ def _frontend_main_container(
     dyn: dict[str, Any],
     svc_cfg: dict[str, Any],
 ) -> MainContainer:
-    # Keep the historical enable_router-only DGD shape unchanged; Spica/Dynamo
-    # feature mappings set router_mode/router_config when a frontend command is
-    # required to pass richer CLI flags.
+    # Keep the historical enable_router-only DGD shape unchanged; externally
+    # evaluated candidates set router_mode/router_config when a frontend command
+    # is required to pass richer CLI flags.
     frontend_dyn = dyn if dyn.get("router_mode") or dyn.get("router_config") else {}
     frontend_args = frontend_cli_args_from_dyn_config(frontend_dyn, svc_cfg)
     if frontend_args:

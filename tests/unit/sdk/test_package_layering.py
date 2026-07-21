@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 SDK_ROOT = Path(__file__).parents[3] / "aic-core" / "src" / "aiconfigurator_core" / "sdk"
-UPPER_MODULES = {"aiconfigurator", "spica"}
+UPPER_MODULES = {"aiconfigurator"}
 
 
 def _is_cli_child(name: str) -> bool:
@@ -116,7 +116,6 @@ def test_sdk_modules_do_not_import_upper_layer() -> None:
         (Path("memory.py"), "from aiconfigurator import webapp\n"),
         (Path("memory.py"), "from aiconfigurator import main\n"),
         (Path("subpkg/module.py"), "from aiconfigurator.generator import api\n"),
-        (Path("memory.py"), "import spica\n"),
     ],
 )
 def test_upper_import_offenders_flags_upper_packages(path: Path, source: str) -> None:

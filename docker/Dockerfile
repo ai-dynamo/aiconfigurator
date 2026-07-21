@@ -133,7 +133,6 @@ RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
-COPY docs/spica/examples/ /workspace/docs/spica/examples/
 COPY src/ /workspace/src/
 COPY aic-core/ /workspace/aic-core/
 COPY tools/ /workspace/tools/
