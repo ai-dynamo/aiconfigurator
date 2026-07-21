@@ -23,6 +23,13 @@ description: >
 
 model_case_values:
   attention:
+    # trtllm_attn_backend: TRT-LLM 1.3.0rc20 serving forces
+    # attn_backend=FLASHINFER for Gemma4 on every SM
+    # (Gemma4ForConditionalGeneration.get_model_defaults,
+    # models/modeling_gemma4.py:942-952) because per-layer head_dim 256/512
+    # hybrid VSWA is unsupported by the TRTLLM backend (SM120 MMHA asserts on
+    # head size 512, attentionOp.cpp:2822). The override is model-wide, so
+    # both the SWA and global profiles carry it.
     - id: gemma4_swa_attention
       model_path: google/gemma-4-26B-A4B
       num_attention_heads: 16
@@ -32,6 +39,7 @@ model_case_values:
       sglang_runtime_window_size: 1023
       sglang_scaling: 1.0
       sglang_backends: {90: triton, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
+      trtllm_attn_backend: FLASHINFER
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: gemma4_global_attention
       model_path: google/gemma-4-26B-A4B
@@ -41,6 +49,7 @@ model_case_values:
       window_size: 0
       sglang_scaling: 1.0
       sglang_backends: {90: triton, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
+      trtllm_attn_backend: FLASHINFER
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: google/gemma-4-26B-A4B
