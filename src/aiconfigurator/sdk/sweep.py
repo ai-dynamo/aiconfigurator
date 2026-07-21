@@ -559,7 +559,7 @@ def _get_disagg_worker_candidates(
     ``DisaggInferenceSession.get_worker_candidates``.
     """
     backend = get_backend(backend_name)
-    summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+    result_rows: list[pd.DataFrame] = []
     exceptions: list[Exception] = []
     all_configs_oom = True
 
@@ -602,11 +602,7 @@ def _get_disagg_worker_candidates(
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
-                    summary_df = pd.concat(
-                        [summary_df, summary.get_summary_df()],
-                        axis=0,
-                        ignore_index=True,
-                    )
+                    result_rows.append(summary.get_summary_df())
                 else:
                     break
         except Exception as e:
@@ -623,7 +619,7 @@ def _get_disagg_worker_candidates(
             exceptions.append(e)
             continue
 
-    if summary_df.empty:
+    if not result_rows:
         if exceptions:
             raise RuntimeError(
                 f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
@@ -636,7 +632,7 @@ def _get_disagg_worker_candidates(
         raise NoFeasibleConfigError(
             f"sweep_disagg/{role}: no parallel configuration met TTFT/TPOT or request-latency constraints."
         )
-    return summary_df
+    return pd.concat(result_rows, axis=0, ignore_index=True)
 
 
 def _find_best_disagg_under_constraint(
