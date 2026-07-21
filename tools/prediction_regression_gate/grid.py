@@ -41,8 +41,9 @@ def _dir_is_incomplete(path: str) -> bool:
     ValueError naming the file, matching that canonical loader's fail-loudly
     behavior (unlike operations/base.py's deliberately lenient hot-path
     duplicate of this same predicate). See the CONTRACT NOTE on
-    _version_dir_is_partial in aic-core/src/aiconfigurator_core/sdk/operations
-    /base.py for the intentional resolver-lenient/admission-strict split and
+    _version_dir_is_partial in
+    aic-core/src/aiconfigurator_core/sdk/operations/base.py
+    for the intentional resolver-lenient/admission-strict split and
     the full list of copies."""
     meta_path = os.path.join(path, "collection_meta.yaml")
     if os.path.isfile(meta_path):
