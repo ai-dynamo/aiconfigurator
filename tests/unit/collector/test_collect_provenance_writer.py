@@ -183,6 +183,59 @@ def test_status_partial_when_module_collection_failure_recorded(tmp_path):
     assert doc["tables"]["gemm_perf"]["status"] == provenance.STATUS_PARTIAL
 
 
+def test_finalize_raises_when_no_op_has_checkpoint_evidence(tmp_path):
+    """A parquet table whose ops ALL lack checkpoint files must fail loudly:
+    writing status: complete with a case_plan_hash over an empty case set would
+    be a fabricated attestation (collector doctrine: run it or raise)."""
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+
+    checkpoint_dir = tmp_path / "checkpoint"  # deliberately no checkpoint written
+
+    with pytest.raises(RuntimeError) as excinfo:
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    message = str(excinfo.value)
+    assert "gemm_perf" in message
+    assert FULL_NAME in message
+    assert str(checkpoint_dir.resolve() / BACKEND) in message
+    # No sidecar may be written for the unattestable table.
+    assert not (output_root / "collection_meta.yaml").exists()
+
+
+def test_finalize_raises_when_all_checkpoints_are_unreadable(tmp_path):
+    """Corrupt checkpoint JSON for every op of a table is the same zero-evidence
+    condition as missing checkpoints and must raise, not degrade to complete."""
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    corrupt_path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
+    corrupt_path.parent.mkdir(parents=True, exist_ok=True)
+    corrupt_path.write_text("{not valid json")
+
+    with pytest.raises(RuntimeError, match="gemm_perf"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert not (output_root / "collection_meta.yaml").exists()
+
+
 def test_existing_sidecar_merge_preserves_prior_tables(tmp_path):
     output_root = tmp_path / "out"
     output_root.mkdir(parents=True)

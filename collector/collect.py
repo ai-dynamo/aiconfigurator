@@ -1444,6 +1444,22 @@ def _write_collector_provenance(
             case_ids.update(failed)
             unresolved_failed += len(failed)
 
+        if not case_ids:
+            # ResumeCheckpoint only writes a checkpoint file after >=1 case is
+            # marked done/failed (flush is dirty-gated), so empty case_ids
+            # means this table has ZERO checkpoint evidence: every op's
+            # checkpoint is missing or unreadable (or was hand-emptied).
+            # Finalized parquet with zero attempted cases is unattestable —
+            # fail closed instead of writing a fabricated 'complete' sidecar
+            # whose case_plan_hash covers an empty case set.
+            raise RuntimeError(
+                f"collection_meta: table '{table}' has finalized parquet ({parquet_path}) but no "
+                f"readable checkpoint evidence for any of its ops ({', '.join(full_names)}) under "
+                f"{checkpoint_root}. Zero attempted cases cannot explain produced parquet; writing "
+                "a sidecar here would attest provenance that was never observed. Verify the "
+                "checkpoint dir matches the one this collection ran with."
+            )
+
         tables[table] = {
             "collector_ref": collector_ref,
             "collector_hash": provenance.collector_hash(module, _REPO_ROOT, closures),
