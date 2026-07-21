@@ -30,7 +30,7 @@ Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 
 from __future__ import annotations
 
-import copy
+import dataclasses
 import functools
 import logging
 from typing import Any
@@ -311,13 +311,11 @@ def _sweep_one_parallel_agg(
                     continue
                 capped_b.append(gen_tokens)
 
-            # Deep-copy the full runtime_config (mirrors the disagg path below) so
-            # every field is preserved per batch point. Explicit field-by-field
-            # construction silently dropped multimodal fields (image_height/width,
-            # num_images_per_request, num_image_tokens), zeroing the image encoder
-            # workload in agg while disagg stayed correct (NVBug 6401839).
-            point_rt = copy.deepcopy(runtime_config)
-            point_rt.batch_size = b
+            # dataclasses.replace shallow-copies all fields (including multimodal
+            # fields like image_height/width that field-by-field construction
+            # silently dropped -- NVBug 6401839) and overrides only the named
+            # ones. Safe because the sweep never mutates list-valued fields.
+            point_rt = dataclasses.replace(runtime_config, batch_size=b)
 
             backend_kwargs: dict[str, Any] = {}
             if max_seq_len is not None:
@@ -432,13 +430,15 @@ def sweep_agg(
             cp_size,
         )
         try:
-            point_model_config = copy.deepcopy(model_config)
-            point_model_config.tp_size = tp_size
-            point_model_config.pp_size = pp_size
-            point_model_config.moe_tp_size = moe_tp_size
-            point_model_config.moe_ep_size = moe_ep_size
-            point_model_config.attention_dp_size = dp_size
-            point_model_config.cp_size = cp_size
+            point_model_config = dataclasses.replace(
+                model_config,
+                tp_size=tp_size,
+                pp_size=pp_size,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                attention_dp_size=dp_size,
+                cp_size=cp_size,
+            )
 
             # Build backend + model ONCE per parallel choice so the backend's
             # internal _agg_cache survives across the tpot sweep below.
@@ -463,16 +463,11 @@ def sweep_agg(
                     )
                     continue
                 for ttft_c, tpot_c in pairs:
-                    rt = copy.deepcopy(runtime_config)
-                    rt.ttft = ttft_c
-                    rt.tpot = tpot_c
-                    runtime_configs_to_evaluate.append(rt)
+                    runtime_configs_to_evaluate.append(dataclasses.replace(runtime_config, ttft=ttft_c, tpot=tpot_c))
             else:
                 tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
                 for tpot_v in tpot_list:
-                    rt = copy.deepcopy(runtime_config)
-                    rt.tpot = tpot_v
-                    runtime_configs_to_evaluate.append(rt)
+                    runtime_configs_to_evaluate.append(dataclasses.replace(runtime_config, tpot=tpot_v))
 
             if not runtime_configs_to_evaluate:
                 continue
@@ -581,19 +576,20 @@ def _get_disagg_worker_candidates(
             cp_size,
         )
         try:
-            point_mc = copy.deepcopy(model_config)
-            point_mc.tp_size = tp_size
-            point_mc.pp_size = pp_size
-            point_mc.moe_tp_size = moe_tp_size
-            point_mc.moe_ep_size = moe_ep_size
-            point_mc.attention_dp_size = dp_size
-            point_mc.cp_size = cp_size
+            point_mc = dataclasses.replace(
+                model_config,
+                tp_size=tp_size,
+                pp_size=pp_size,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                attention_dp_size=dp_size,
+                cp_size=cp_size,
+            )
 
             model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
 
             for b in b_list:
-                point_rt = copy.deepcopy(runtime_config)
-                point_rt.batch_size = b
+                point_rt = dataclasses.replace(runtime_config, batch_size=b)
                 summary = predict_disagg_worker(
                     model=model,
                     backend=backend,
