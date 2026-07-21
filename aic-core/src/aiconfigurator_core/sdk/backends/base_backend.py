@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import dataclasses
 import inspect
 import logging
 from collections import defaultdict
@@ -180,9 +181,7 @@ class BaseBackend:
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
-        candidate = copy.deepcopy(runtime_config)
-        candidate.batch_size = batch_size
-        return candidate
+        return dataclasses.replace(runtime_config, batch_size=batch_size)
 
     def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
