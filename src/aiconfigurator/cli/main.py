@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
@@ -1722,6 +1723,7 @@ def _execute_tasks(
     max_total_gpus: int | None = None,
     strict_sla: bool = False,
     inclusive_tpot: bool = False,
+    parallel_experiments: bool = False,
 ) -> tuple[
     str,
     dict[str, pd.DataFrame],
@@ -1761,50 +1763,61 @@ def _execute_tasks(
     results: dict[str, dict[str, pd.DataFrame]] = {}
     outcomes: dict[str, ExperimentOutcome] = {}
     start_time = time.time()
-    # TODO: outcomes are per-experiment and immutable — this loop can be
-    # parallelised with ThreadPoolExecutor once the perf-database cache
-    # (databases_cache / functools.cache in perf_database.py) is thread-safe.
-    for exp_name, task in tasks.items():
+
+    def _run_one(exp_name: str, task) -> tuple[str, dict | None, ExperimentOutcome]:
+        """Run a single experiment and return (name, result_or_None, outcome)."""
         try:
             logger.info("Starting experiment: %s", exp_name)
             logger.debug("Task config: \n%s", task.to_yaml())
             pareto_df = task.run()
-            task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
-                results[exp_name] = task_result
-                outcomes[exp_name] = ExperimentOutcome(exp_name)
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
-            else:
-                db_mode = getattr(task, "database_mode", None)
-                hybrid_hint = (
-                    " For frontier/new models without silicon data, try --database-mode HYBRID."
-                    if db_mode == common.DatabaseMode.SILICON.name
-                    else ""
-                )
-                gpu_hint = (
-                    "(2) the model does not fit — try a quantized model; "
-                    if mode == "recommend"
-                    else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
-                )
-                msg = (
-                    f"Experiment {exp_name} returned no results. Possible causes: "
-                    "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
-                    f"{gpu_hint}"
-                    f"(3) no perf data in the database for this configuration.{hybrid_hint}"
-                )
-                logger.warning(msg)
-                outcomes[exp_name] = ExperimentOutcome(exp_name)
+                return exp_name, {"pareto_df": pareto_df}, ExperimentOutcome(exp_name)
+            db_mode = getattr(task, "database_mode", None)
+            hybrid_hint = (
+                " For frontier/new models without silicon data, try --database-mode HYBRID."
+                if db_mode == common.DatabaseMode.SILICON.name
+                else ""
+            )
+            gpu_hint = (
+                "(2) the model does not fit — try a quantized model; "
+                if mode == "recommend"
+                else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
+            )
+            msg = (
+                f"Experiment {exp_name} returned no results. Possible causes: "
+                "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
+                f"{gpu_hint}"
+                f"(3) no perf data in the database for this configuration.{hybrid_hint}"
+            )
+            logger.warning(msg)
+            return exp_name, None, ExperimentOutcome(exp_name)
         except NoFeasibleConfigError as exc:
             msg = f"Experiment {exp_name} found no SLA-feasible configuration: {exc}"
             logger.warning(msg)
-            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
+            return exp_name, None, ExperimentOutcome(exp_name, error=exc)
         except Exception as exc:
             if is_expected_cli_error(exc):
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
                 logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
                 logger.exception("Error running experiment %s", exp_name)
-            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
+            return exp_name, None, ExperimentOutcome(exp_name, error=exc)
+
+    if parallel_experiments and len(tasks) >= 2:
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = {pool.submit(_run_one, n, t): n for n, t in tasks.items()}
+            for future in as_completed(futures):
+                exp_name, task_result, outcome = future.result()
+                outcomes[exp_name] = outcome
+                if task_result is not None:
+                    results[exp_name] = task_result
+    else:
+        for exp_name, task in tasks.items():
+            exp_name, task_result, outcome = _run_one(exp_name, task)
+            outcomes[exp_name] = outcome
+            if task_result is not None:
+                results[exp_name] = task_result
 
     if len(results) < 1:
         first_config = next(iter(tasks.values()), None)
