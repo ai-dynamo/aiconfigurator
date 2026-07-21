@@ -745,7 +745,7 @@ class BaseBackend:
             ]
         ]
 
-        summary_df = pd.DataFrame(data, columns=common.ColumnsStatic).round(3)
+        summary.set_deferred_row(data, common.ColumnsStatic)
 
         summary.set_encoder_latency_dict(encoder_latency_dict)
         summary.set_context_latency_dict(context_latency_dict)
@@ -773,8 +773,6 @@ class BaseBackend:
 
         if encoder_memory:
             summary.set_encoder_memory(encoder_memory)
-
-        summary.set_summary_df(summary_df)
 
         return summary
 
