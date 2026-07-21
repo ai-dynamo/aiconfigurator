@@ -1373,7 +1373,6 @@ class BaseBackend:
             "system": database.system,
             "power_w": agg_power_avg_w,
         }
-        result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
         summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
         summary.set_memory_and_check_oom(
             memory,
@@ -1384,7 +1383,6 @@ class BaseBackend:
         summary.set_encoder_energy_wms_dict(encoder_energy_wms_dict)
         summary.set_encoder_power_avg(encoder_energy_wms / encoder_latency_ms if encoder_latency_ms > 0 else 0.0)
         summary.set_encoder_source_dict(encoder_source_dict)
-        summary.set_summary_df(result)
         summary.set_result_dict(result_dict)
         if encoder_memory:
             summary.set_encoder_memory(encoder_memory)
