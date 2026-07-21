@@ -5,6 +5,7 @@ import logging
 
 import pandas as pd
 
+from aiconfigurator_core.sdk.common import ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -441,9 +442,15 @@ class InferenceSummary:
         self._summary_df = summary_df
 
     def get_summary_df(self) -> pd.DataFrame:
+        """Get summary dataframe, building it lazily from the result dict.
+
+        run_agg sets result_dict but defers DataFrame construction so the
+        sweep hot path (which only reads result_dict) avoids the overhead.
+        Callers that need the DataFrame (disagg concat, CLI display, save)
+        trigger construction here on first access.
         """
-        Get summary dataframe.
-        """
+        if self._summary_df is None and self._result_dict is not None:
+            self._summary_df = pd.DataFrame([self._result_dict], columns=ColumnsAgg).round(3)
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
