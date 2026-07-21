@@ -80,8 +80,9 @@ class InferenceSummary:
         self._generation_power_avg = 0.0
         self._e2e_power_avg = 0.0
 
-        # summary dataframe
+        # summary dataframe (built lazily from _deferred_row when available)
         self._summary_df = None
+        self._deferred_row: tuple[list, list] | None = None  # (data, columns)
 
         # cached result dict for efficient batch operations
         self._result_dict = None
@@ -441,16 +442,23 @@ class InferenceSummary:
         """
         self._summary_df = summary_df
 
-    def get_summary_df(self) -> pd.DataFrame:
-        """Get summary dataframe, building it lazily from the result dict.
+    def set_deferred_row(self, data: list, columns: list) -> None:
+        """Store raw row data for lazy DataFrame construction."""
+        self._deferred_row = (data, columns)
 
-        run_agg sets result_dict but defers DataFrame construction so the
-        sweep hot path (which only reads result_dict) avoids the overhead.
-        Callers that need the DataFrame (disagg concat, CLI display, save)
-        trigger construction here on first access.
+    def get_summary_df(self) -> pd.DataFrame:
+        """Get summary dataframe, building it lazily on first access.
+
+        run_agg and run_static defer DataFrame construction so the sweep
+        hot path avoids the overhead. Callers that need the DataFrame
+        (disagg concat, CLI display, save) trigger construction here.
         """
-        if self._summary_df is None and self._result_dict is not None:
-            self._summary_df = pd.DataFrame([self._result_dict], columns=ColumnsAgg).round(3)
+        if self._summary_df is None:
+            if self._result_dict is not None:
+                self._summary_df = pd.DataFrame([self._result_dict], columns=ColumnsAgg).round(3)
+            elif self._deferred_row is not None:
+                data, columns = self._deferred_row
+                self._summary_df = pd.DataFrame(data, columns=columns).round(3)
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
