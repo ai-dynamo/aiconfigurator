@@ -586,7 +586,15 @@ def get_wideep_moe_compute_all_test_cases():
     - Only for DeepSeek-V3 model with power_law distribution
     """
     moe_list = []
-    if get_sm_version() > 86 and get_sm_version() < 100:
+    if 90 <= get_sm_version() < 100:
+        # Hopper only, mirroring the moe_trtllm fp8_block axis floor
+        # (base_ops/moe.yaml min_sm: 90): TRT-LLM's fp8_block grouped-GEMM
+        # is DeepGEMM-JIT-backed even under the CUTLASS runner
+        # (CutlassFp8BlockScaleGemmRunner::moeGemm -> grouped_gemm_dispatch
+        # -> deep_gemm::jit::Compiler), and the compiler accepts exactly
+        # SM90 ("DeepGEMM only supports Hopper (SM90) architectures",
+        # deep_gemm/compiler.cuh:330@1.3.0rc20). Hardware-observed on L40S
+        # 2026-07-21: SM89 gate100 failed 100/100 with that signature.
         moe_list += ["fp8_block"]
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]  # SM100+ uses nvfp4
