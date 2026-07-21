@@ -22,6 +22,8 @@ For a ViT with depth D and projector_dims with P (in, out) pairs::
     encoder_act           ElementWise
     encoder_ffn2_gemm     GEMM  (low_precision_input=True)
     encoder_ar_2          CustomAllReduce
+    encoder_rope_apply    ElementWise  (only if partial_rotary_factor > 0;
+                                        replaces the attention-internal RoPE term)
 
   _projector_ops  →  2*P ops + 1 AR  (or 0 ops if projector_dims is empty):
     encoder_projector_fc{i}_gemm  GEMM
@@ -50,7 +52,8 @@ from aiconfigurator_core.sdk import common
 
 
 def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
-    """Build the 10 ViT transformer block ops (each repeated enc_cfg.depth times).
+    """Build the 10 ViT transformer block ops (each repeated enc_cfg.depth times),
+    plus the optional encoder_rope_apply elementwise op.
 
     Raises ValueError if num_heads or intermediate_size is not divisible by tp_size.
     """
@@ -70,7 +73,7 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
     vit_gemm_mode = common.GEMMQuantMode.bfloat16
     vit_fmha_mode = common.FMHAQuantMode.bfloat16
 
-    return [
+    result = [
         ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
         ops.GEMM(
             "encoder_qkv_gemm",
@@ -85,7 +88,7 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
             n_vit // tp_size,
             head_size_vit,
             fmha_quant_mode=vit_fmha_mode,
-            partial_rotary_factor=enc_cfg.partial_rotary_factor,
+            partial_rotary_factor=0.0,
         ),
         ops.GEMM(
             "encoder_proj_gemm",
@@ -121,6 +124,13 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
         ),
         ops.CustomAllReduce("encoder_ar_2", depth, h_vit, tp_size),
     ]
+
+    if enc_cfg.partial_rotary_factor > 0:
+        # the attention op's internal RoPE term is disabled in exchange (partial_rotary_factor=0.0).
+        rope_dim = 6 * (n_vit // tp_size) * head_size_vit
+        result.append(ops.ElementWise("encoder_rope_apply", depth, rope_dim, rope_dim, 0.8))
+
+    return result
 
 
 def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
