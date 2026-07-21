@@ -29,6 +29,11 @@ def _payload_files(names: set[str]) -> set[str]:
     return {name for name in names if ".dist-info/" not in name and not name.endswith("/")}
 
 
+def _spica_entries(names: set[str]) -> list[str]:
+    """Return every stale Spica archive member, regardless of type or suffix."""
+    return sorted(name for name in names if name.startswith("spica/"))
+
+
 def _one_wheel(dist_dir: Path, pattern: str) -> Path:
     matches = sorted(dist_dir.glob(pattern))
     if len(matches) != 1:
@@ -86,7 +91,9 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     if misplaced:
         raise RuntimeError(f"{wheel.name}: upper wheel must not own core payload: {misplaced}")
 
-    removed = sorted(name for name in payload if name.startswith("spica/"))
+    # Scan every archive member, not only recognized source payload suffixes: a
+    # stale Spica binary, data file, or directory entry must also fail the boundary.
+    removed = _spica_entries(names)
     if removed:
         raise RuntimeError(f"{wheel.name}: removed Spica payload is still present: {removed}")
 
