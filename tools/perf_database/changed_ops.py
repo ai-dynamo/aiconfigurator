@@ -66,8 +66,8 @@ Known gaps
 Exit codes
 ----------
 0   success — report emitted to `--out` or stdout.
-3   `--base` predates Collector V3 provenance metadata (missing
-    `collector/provenance.py`, `collector/hash_closures.yaml`, or
+3   `--base` (or `--head`) predates Collector V3 provenance metadata
+    (missing `collector/provenance.py`, `collector/hash_closures.yaml`, or
     `collector/op_backend_catalog.yaml` at that revision): the
     changed-operation manifest cannot be computed against it. The CI
     workflow maps this exit code to a neutral skip, not a failure.
@@ -105,9 +105,9 @@ MODEL_CASES_DIR = "collector/cases/models"
 
 # collector/provenance.py, collector/hash_closures.yaml, and
 # collector/op_backend_catalog.yaml together are the Collector V3 provenance
-# baseline. If `--base` predates all three being introduced together, there
-# is nothing for this tool to diff against (see module docstring "Exit
-# codes").
+# baseline. If `--base` or `--head` predates all three being introduced
+# together, there is nothing for this tool to diff against (see module
+# docstring "Exit codes").
 V3_BASELINE_PATHS = (PROVENANCE_PATH, HASH_CLOSURES_PATH, CATALOG_PATH)
 
 # case_plan's shared file set (design §8 T6 amendment): case_generator.py and
@@ -543,32 +543,34 @@ def _diff_framework(
 
 
 class PreCollectorV3BaselineError(RuntimeError):
-    """`--base` predates Collector V3 provenance metadata (see module
-    docstring "Exit codes") — there is nothing for this tool to diff against.
+    """`--base` (or `--head`) predates Collector V3 provenance metadata (see
+    module docstring "Exit codes") — there is nothing for this tool to diff.
     """
 
 
 PRE_V3_BASELINE_MESSAGE = (
-    "base revision predates Collector V3 provenance metadata; changed-operation manifest cannot be computed against it"
+    "{role} revision predates Collector V3 provenance metadata; "
+    "changed-operation manifest cannot be computed against it"
 )
 
 
-def _check_v3_baseline(repo_root: Path, rev: str) -> None:
+def _check_v3_baseline(repo_root: Path, rev: str, *, role: str = "base") -> None:
     if any(not _git_file_exists(repo_root, rev, path) for path in V3_BASELINE_PATHS):
-        raise PreCollectorV3BaselineError(PRE_V3_BASELINE_MESSAGE)
+        raise PreCollectorV3BaselineError(PRE_V3_BASELINE_MESSAGE.format(role=role))
 
 
 def compute_changed_ops(repo_root: Path, base_rev: str, head_rev: str) -> tuple[list[FamilyDiff], list[FamilyDiff]]:
     """Pure function of (repo, base, head): returns (changed, unchanged), both
     sorted deterministically by (framework, family).
 
-    Raises `PreCollectorV3BaselineError` if `base_rev` predates Collector V3
-    provenance metadata (see module docstring "Exit codes") — the CLI (`main`)
-    maps this to exit code 3.
+    Raises `PreCollectorV3BaselineError` if `base_rev` or `head_rev` predates
+    Collector V3 provenance metadata (see module docstring "Exit codes") — the
+    CLI (`main`) maps this to exit code 3.
     """
     base_sha = _resolve_rev(repo_root, base_rev)
     head_sha = _resolve_rev(repo_root, head_rev)
     _check_v3_baseline(repo_root, base_sha)
+    _check_v3_baseline(repo_root, head_sha, role="head")
 
     base_ctx = _load_revision_context(repo_root, base_sha)
     head_ctx = _load_revision_context(repo_root, head_sha)

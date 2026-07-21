@@ -93,6 +93,19 @@ def _version_dir_is_partial(version_dir: str) -> bool:
     ._version_dir_state, the source of truth for this semantic — perf_database
     imports this module at load time, so importing it back here would be
     circular. Keep in sync with that function's partial-detection rule.
+
+    CONTRACT NOTE — the lenient/strict split is intentional design, not drift:
+    this RESOLVER-side copy deliberately swallows read/parse errors and
+    returns False, because its only job is cheap candidate skipping on the
+    path-resolution hot path. Strictness is owned by the ADMISSION layer:
+    perf_database's _version_dir_state (via _load_collection_meta_yaml) raises
+    ValueError naming the file on a malformed sidecar, so bad metadata still
+    surfaces loudly when the database is loaded. The copies of this predicate
+    and their strictness (mirroring the _KNOWN_BACKEND_DIRS copy list above):
+      aic-core/src/aiconfigurator_core/sdk/perf_database.py
+                                       (_version_dir_state — strict, canonical)
+      tools/prediction_regression_gate/grid.py  (_dir_is_incomplete — strict)
+      tools/sanity_check/create_charts.py       (_dir_is_incomplete — strict)
     """
     meta_path = os.path.join(version_dir, "collection_meta.yaml")
     if os.path.isfile(meta_path):

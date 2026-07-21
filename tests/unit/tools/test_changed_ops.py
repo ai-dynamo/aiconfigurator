@@ -645,6 +645,21 @@ class TestPreV3Baseline:
         err = capsys.readouterr().err
         assert "predates Collector V3 provenance metadata" in err
 
+    def test_main_exits_with_dedicated_code_when_head_predates_v3(self, mod, repo, monkeypatch, capsys):
+        """A pre-V3 --head must map to the same documented exit code 3 (naming
+        head), not escape as a raw CalledProcessError from `git show`."""
+        _write_tree(repo, _default_files())
+        base_sha = _commit_all(repo, "base (v3)")
+        for rel in _default_files():
+            if rel not in _pre_v3_files(omit="collector/provenance.py"):
+                (repo / rel).unlink()
+        head_sha = _commit_all(repo, "pre-v3 head")
+        monkeypatch.setattr(mod, "REPO_ROOT", repo)
+        rc = mod.main(["--base", base_sha, "--head", head_sha])
+        assert rc == mod.EXIT_PRE_V3_BASELINE == 3
+        err = capsys.readouterr().err
+        assert "head revision predates Collector V3 provenance metadata" in err
+
     def test_both_revisions_having_v3_metadata_is_unaffected(self, mod, repo):
         base_sha, head_sha = _base_and_head(
             repo, head_overrides={"collector/sglang/collect_gemm.py": "# collect_gemm v2 (changed)\n"}
