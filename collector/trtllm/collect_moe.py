@@ -473,19 +473,26 @@ def run_moe_torch(
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < get_sm_version() < 100:
-            # Hopper: use triton backend for best performance
+        if 90 <= get_sm_version() < 100:
+            # Hopper only: serving's AUTO resolution returns TRITON exactly
+            # for 90<=sm<100 (resolve_moe_backend, model_config.py:334-335
+            # @1.3.0rc20). SM89/Ada is NOT in this bucket: TritonFusedMoE's
+            # own guard rejects non-SM9x with EP>1 (fused_moe_triton.py:1495
+            # -1497), and with EP=1 it would run a backend serving never
+            # selects there (hardware-observed on L40S 2026-07-21: EP=16
+            # raises NotImplementedError, EP=1 runs off-serving-truth).
             model_config.moe_backend = "triton"
         elif 100 <= get_sm_version() < 120:
             # Datacenter Blackwell: production uses TRTLLMGenFusedMoE
             # (Bf16MxE2m1BlockScaleMoeRunner)
             model_config.moe_backend = "trtllm"
         else:
-            # SM120 and below-Hopper: serving's AUTO resolution routes GptOss
-            # to CUTLASS (resolve_moe_backend, model_config.py:329-335
-            # @1.3.0rc20: TRTLLM only for 100<=sm<120; TRTLLMGenFusedMoE
-            # itself rejects SM120+). Hardware-observed on RTX PRO 6000
-            # 2026-07-19: the trtllm pin fails "does not support SM120".
+            # SM120, SM89/Ada and anything else: serving's AUTO resolution
+            # routes GptOss to CUTLASS (resolve_moe_backend,
+            # model_config.py:329-337@1.3.0rc20: TRTLLM only for
+            # 100<=sm<120, TRITON only for 90<=sm<100, CUTLASS fallback).
+            # Hardware-observed on RTX PRO 6000 2026-07-19: the trtllm pin
+            # fails "does not support SM120".
             model_config.moe_backend = "cutlass"
     else:
         # Select backend based on platform and quant mode.
