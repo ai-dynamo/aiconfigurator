@@ -26,6 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
+from aiconfigurator.sdk.config_builders import validate_nextn as _validate_nextn
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -149,6 +150,8 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
+    nextn: int = 0,
+    nextn_accepted: float | None = None,
     strict_sla: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -182,6 +185,9 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
+        nextn: MTP draft length. Default 0 (disabled); never auto-enabled.
+        nextn_accepted: Average accepted draft tokens per decode step
+            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
         strict_sla: When True, ``pareto_df`` is filtered to only
             SLA-compliant data points (TPOT or request-latency) *before*
             the Pareto frontier is computed.  TTFT is already enforced at
@@ -236,6 +242,9 @@ def cli_default(
         >>> print(result.chosen_exp)  # e.g., 'agg_trtllm' or 'disagg_vllm'
         >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
     """
+    # Fail fast on inconsistent MTP inputs (same early check as the CLI path).
+    _validate_nextn(nextn, nextn_accepted)
+
     # Reuse build_default_tasks from main.py
     tasks = build_default_tasks(
         model_path=model_path,
@@ -255,6 +264,8 @@ def cli_default(
         tpot=tpot,
         request_latency=request_latency,
         prefix=prefix,
+        nextn=nextn,
+        nextn_accepted=nextn_accepted,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
         engine_step_backend=engine_step_backend,
