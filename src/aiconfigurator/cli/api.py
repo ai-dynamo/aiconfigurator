@@ -126,6 +126,7 @@ def _execute_and_wrap_result(
     strict_sla: bool = False,
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
+    parallel_experiments: bool = False,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
     chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies, outcomes = _execute_tasks_internal(
@@ -135,6 +136,7 @@ def _execute_and_wrap_result(
         strict_sla=strict_sla,
         target_request_rate=target_request_rate,
         target_concurrency=target_concurrency,
+        parallel_experiments=parallel_experiments,
     )
 
     return CLIResult(
@@ -514,6 +516,7 @@ def recommend(
             strict_sla=strict_sla,
             target_request_rate=target_request_rate,
             target_concurrency=target_concurrency,
+            parallel_experiments=True,
         )
         retriable = [
             name
