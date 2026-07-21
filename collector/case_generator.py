@@ -235,8 +235,8 @@ def get_attention_head_configs(
 
     if phase not in {"context", "generation"}:
         raise ValueError(f"Unknown attention phase: {phase}")
-    if backend not in {None, "sglang"}:
-        raise ValueError("backend is only accepted for the SGLang-specific attention collector")
+    if backend not in {None, "sglang", "trtllm"}:
+        raise ValueError("backend is only accepted for the SGLang and TRT-LLM attention collectors")
     if backend == "sglang" and sm_version is None:
         raise ValueError("SGLang attention collection requires an explicit SM version")
 
@@ -279,6 +279,8 @@ def get_attention_head_configs(
                 kernel_source=kernel_source,
                 architecture=str(profile["architecture"]) if profile.get("architecture") else None,
             )
+        elif backend == "trtllm":
+            config = dataclasses.replace(config, kernel_source=kernel_source)
         # Source is recorded by the collector for provenance. The SDK keeps
         # its historical query key and does not consume this distinction.
         population_key = (num_heads, num_kv_heads, head_dim, window_size, kernel_source)
@@ -356,6 +358,24 @@ def get_attention_head_configs(
             if kernel_source is None:
                 raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
             kernel_source = str(kernel_source)
+        elif backend == "trtllm":
+            # Mirrors TRT-LLM 1.3.0rc20 serving backend selection: dense
+            # attention runs TorchLlmArgs.attn_backend, default "TRTLLM"
+            # (llmapi/llm_args.py:4544-4546), unless the model class overrides
+            # it via get_model_defaults — a model-level, SM-independent
+            # override, hence a plain string key rather than sglang_backends'
+            # SM map. Example: Gemma4 forces "FLASHINFER" on every SM for its
+            # per-layer head_dim 256/512 hybrid attention
+            # (models/modeling_gemma4.py:942-952).
+            raw_backend = profile.get("trtllm_attn_backend")
+            kernel_source = "TRTLLM" if raw_backend is None else str(raw_backend).upper()
+            if kernel_source not in {"TRTLLM", "FLASHINFER"}:
+                raise ValueError(
+                    f"Unsupported trtllm_attn_backend {raw_backend!r}: the TRT-LLM dense-attention "
+                    "collector mirrors get_attention_backend dispatch "
+                    "(attention_backend/utils.py:27-53@1.3.0rc20), which serves dense models with "
+                    "TRTLLM or FLASHINFER only"
+                )
 
         head_dims = _profile_int_values(
             profile,
