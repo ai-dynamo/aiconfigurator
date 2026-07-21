@@ -82,6 +82,12 @@ def _skip_trtllm_sm89_rc15_long_context_gqa(
     num_key_value_heads: int,
     head_dim: int,
 ) -> bool:
+    # FIXME(kernel-limit): the SM89 long-context GQA IMA family REPRODUCES on
+    # 1.3.0rc20 (L40S gate100 2026-07-21: cudaErrorIllegalAddress at
+    # h=96/kv=8/hd=256/131072 tokens and h=48/kv=4/hd=256/131072 tokens, both
+    # inside this predicate's region). Kept version-scoped to rc15 by owner
+    # decision (SM89 handoff): rc20 cases fail classified instead of being
+    # skipped; re-verify against framework source on the next version bump.
     if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
         return False
 
