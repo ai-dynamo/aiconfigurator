@@ -302,7 +302,10 @@ class KVCacheEstimator:
         # spec-decode aware (e.g. for any draft-module weights). This does NOT scale
         # the capacity activation by (nextn+1); that multiplier is suppressed below
         # (see mtp_activation_scaling). Mirrors the agg/disagg/static estimate paths.
-        apply_nextn(model_config, nextn, nextn_accepted)
+        # Memory is cost-side only: nextn_accepted (the acceptance benefit) never
+        # enters capacity math, so feed apply_nextn a neutral 0.0 when the caller
+        # did not supply one instead of forcing a benefit-side parameter here.
+        apply_nextn(model_config, nextn, nextn_accepted if nextn_accepted is not None else 0.0)
         model = get_model(model_path, model_config, backend)
         backend_obj = get_backend(backend)
         database = perf_database.get_database(system, backend, backend_version, systems_paths=systems_path)
@@ -913,9 +916,11 @@ def estimate_kv_cache(
     fraction = float(memory_fraction_value)
     is_of_free = memory_fraction_kind == "of_free"
 
-    # Validate MTP inputs up front: a user-input error must surface as-is, not
+    # Validate MTP inputs up front: an out-of-range value must surface as-is, not
     # be swallowed by the naive fallback below (which ignores MTP entirely).
-    validate_nextn(nextn, nextn_accepted)
+    # Unlike the latency paths, nextn_accepted is OPTIONAL here: capacity math
+    # never consumes the acceptance benefit, so only range-check it when given.
+    validate_nextn(nextn, nextn_accepted if nextn_accepted is not None else 0.0)
 
     try:
         native = KVCacheEstimator.from_request(
