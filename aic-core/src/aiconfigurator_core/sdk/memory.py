@@ -477,15 +477,33 @@ class NaiveKVCacheEstimator:
     and the token-capacity inverse from that geometry.
     """
 
-    def __init__(self, geometry: dict, *, dtype_bytes: int, tp_size: int, pp_size: int):
+    def __init__(
+        self,
+        geometry: dict,
+        *,
+        dtype_bytes: int,
+        tp_size: int,
+        pp_size: int,
+        moe_ep_size: int = 1,
+        moe_tp_size: int = 1,
+    ):
         self.geometry = geometry
         self.dtype_bytes = int(dtype_bytes)
         self.tp_size = int(tp_size)
         self.pp_size = int(pp_size)
+        self.moe_ep_size = max(int(moe_ep_size), 1)
+        self.moe_tp_size = max(int(moe_tp_size), 1)
 
     @classmethod
     def from_model_path(
-        cls, model_path: str, *, tp_size: int, pp_size: int, allow_hf_config_download: bool
+        cls,
+        model_path: str,
+        *,
+        tp_size: int,
+        pp_size: int,
+        allow_hf_config_download: bool,
+        moe_ep_size: int = 1,
+        moe_tp_size: int = 1,
     ) -> NaiveKVCacheEstimator:
         """Build from an HF ``config.json`` (local dir / pre-cached / optional download).
 
@@ -509,6 +527,8 @@ class NaiveKVCacheEstimator:
             dtype_bytes=cls._dtype_bytes(hf_config),
             tp_size=tp_size,
             pp_size=pp_size,
+            moe_ep_size=moe_ep_size,
+            moe_tp_size=moe_tp_size,
         )
 
     # ----------------------------- config -> geometry ----------------------------- #
@@ -699,15 +719,21 @@ class NaiveKVCacheEstimator:
         attn_params_per_layer = 4 * hidden * hidden
 
         n_experts = int(geom.get("num_experts") or 0)
+        pp = max(self.pp_size, 1)
+        tp = max(self.tp_size, 1)
         if n_experts > 0:
             moe_inter = int(geom.get("moe_inter") or inter)
-            ffn_params_per_layer = n_experts * 3 * hidden * moe_inter
+            # Expert FFN is sharded by moe_tp * moe_ep, not by the attention TP.
+            moe_divisor = self.moe_tp_size * self.moe_ep_size
+            expert_params = n_experts * 3 * hidden * moe_inter // moe_divisor
+            non_expert_params = embed_params + layers * attn_params_per_layer
+            non_expert_bytes = non_expert_params * self.dtype_bytes // (tp * pp)
+            expert_bytes = layers * expert_params * self.dtype_bytes // pp
+            return non_expert_bytes + expert_bytes
         else:
             ffn_params_per_layer = 3 * hidden * inter
-
-        total_params = embed_params + layers * (attn_params_per_layer + ffn_params_per_layer)
-        divisor = max(self.tp_size, 1) * max(self.pp_size, 1)
-        return (total_params * self.dtype_bytes) // max(divisor, 1)
+            total_params = embed_params + layers * (attn_params_per_layer + ffn_params_per_layer)
+            return (total_params * self.dtype_bytes) // (tp * pp)
 
     # --------------------------- byte budget -> tokens ---------------------------- #
 
@@ -948,6 +974,8 @@ def estimate_kv_cache(
             tp_size=int(tp_size),
             pp_size=int(pp_size),
             allow_hf_config_download=allow_hf_config_download,
+            moe_ep_size=int(moe_ep_size or 1),
+            moe_tp_size=int(moe_tp_size or 1),
         ).estimate(
             capacity=gpu_memory_capacity_bytes_override,
             naive_kv_reservation=float(naive_kv_reservation),
