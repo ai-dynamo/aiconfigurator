@@ -30,6 +30,12 @@ For a ViT with depth D and projector_dims with P (in, out) pairs::
     encoder_projector_fc{i}_act   ElementWise  (omitted for final layer)
     encoder_projector_ar          CustomAllReduce
 
+  Encoder DP (enable_encoder_dp, default; vLLM mm_encoder_tp_mode="data" /
+  SGLang --mm-enable-dp-encoder) builds all of the above with tp=1 — full
+  replica per rank, images ceil-sharded across the tp_size ranks at query
+  time in BaseBackend._run_encoder_phase — and appends for tp_size > 1:
+    encoder_dp_all_gather         NCCL all_gather of post-merge embeddings
+
 TP parallelism for projector layers
 ------------------------------------
 The ViT transformer ends with a CustomAllReduce so every projector layer
@@ -179,7 +185,7 @@ def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
     return result
 
 
-def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
+def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int, enable_encoder_dp: bool = True) -> list:
     """Build the complete list of encoder ops for a ViT-based vision encoder.
 
     Combines ViT transformer ops (10 ops x depth repetitions) with projector ops
@@ -187,10 +193,29 @@ def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list
 
     Args:
         enc_cfg: VisionEncoderConfig populated with ViT and projector parameters.
-        tp_size: Tensor-parallel degree.  Must evenly divide num_heads and
-                 intermediate_size when tp_size > 1.
+        tp_size: Worker tensor-parallel degree — the DP degree under encoder DP,
+                 else the ViT weight-sharding degree (must evenly divide
+                 num_heads and intermediate_size when tp_size > 1).
+        enable_encoder_dp: Encoder data parallelism over the TP group (default
+                 True) — see module docstring.
 
     Returns:
         Flat list of operation objects ready to assign to model.encoder_ops.
     """
-    return _vit_transformer_ops(enc_cfg, tp_size) + _projector_ops(enc_cfg, tp_size)
+    if not enable_encoder_dp:
+        return _vit_transformer_ops(enc_cfg, tp_size) + _projector_ops(enc_cfg, tp_size)
+
+    # DP: full-replica ops (tp=1); the per-layer AllReduces degenerate to no-ops.
+    result = _vit_transformer_ops(enc_cfg, 1) + _projector_ops(enc_cfg, 1)
+    if tp_size > 1:
+        result.append(
+            ops.NCCL(
+                "encoder_dp_all_gather",
+                1,
+                "all_gather",
+                num_elements_per_token=enc_cfg.out_hidden_size * enc_cfg.projector_n_instances * tp_size,
+                num_gpus=tp_size,
+                comm_quant_mode=common.CommQuantMode.half,
+            )
+        )
+    return result

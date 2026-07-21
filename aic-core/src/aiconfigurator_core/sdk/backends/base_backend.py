@@ -274,16 +274,23 @@ class BaseBackend:
             return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
 
         n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
-        n_img_pre = pre_merge_per_image * num_images  # pre-merge: processed by ViT transformer
+
+        # Encoder DP: whole images are sharded across the tp_size ranks and the
+        # busiest rank (ceil share) gates the phase.
+        encoder_dp_size = model.config.tp_size if model.config.enable_encoder_dp else 1
+        images_local = -(-batch_size * num_images // encoder_dp_size)
 
         for op in model.encoder_ops:
-            use_post = "encoder_projector" in op._name
+            # Projector ops and the DP exit AllGather run on post-merge tokens.
+            use_post = "encoder_projector" in op._name or "all_gather" in op._name
             # ViT attention uses cu_seqlens: each image is an independent
             # varlen sequence of pre_merge_per_image patches.
             use_varlen = "encoder_attention" in op._name
-            n_img = n_img_post if use_post else n_img_pre
-            eff_batch = batch_size * num_images if use_varlen else batch_size
-            eff_s = pre_merge_per_image if use_varlen else n_img
+            if use_varlen:
+                eff_batch, eff_s = images_local, pre_merge_per_image
+            else:
+                eff_batch = images_local
+                eff_s = tokens_per_image if use_post else pre_merge_per_image
             x = eff_batch * eff_s
             result = op.query(
                 database,
@@ -1100,14 +1107,21 @@ class BaseBackend:
 
     # ============== AGG INFERENCE (shared) =============================
 
-    def _get_encoder_component_memory(self, model: BaseModel, num_tokens: int) -> dict[str, float]:
-        """Encoder memory component colocated with the prefill/agg worker."""
+    def _get_encoder_component_memory(self, model: BaseModel, num_tokens: int, embed_tokens: int) -> dict[str, float]:
+        """Encoder memory component colocated with the prefill/agg worker.
+
+        num_tokens: pre-merge patches run through the ViT on this rank.
+        embed_tokens: post-merge tokens of the projected-embeddings buffer
+        every rank holds at the encoder exit (the full batch in both modes).
+        """
         weights = sum(op.get_weights() for op in model.encoder_ops)
         enc_cfg = getattr(model, "encoder_config", None)
         activations = 0.0
         if isinstance(enc_cfg, common.VisionEncoderConfig) and num_tokens > 0:
             # ~3x hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
             activations = 2 * num_tokens * enc_cfg.hidden_size * 3
+            # Projected embeddings (all projector instances concatenated along hidden)
+            activations += 2 * embed_tokens * enc_cfg.out_hidden_size * enc_cfg.projector_n_instances
             activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
         one_gib = 1 << 30
         return {
@@ -1130,11 +1144,17 @@ class BaseBackend:
             return {}
         if runtime_config.num_images_per_request <= 0:
             return {}
-        _, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        tokens_per_image, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
         if pre_merge_per_image <= 0:
             return {}
-        num_tokens = batch_size * runtime_config.num_images_per_request * pre_merge_per_image
-        return self._get_encoder_component_memory(model, num_tokens)
+        # ViT activations follow the busiest rank's image share; the embeddings
+        # buffer covers the full batch on every rank.
+        total_images = batch_size * runtime_config.num_images_per_request
+        encoder_dp_size = model.config.tp_size if model.config.enable_encoder_dp else 1
+        images_local = -(-total_images // encoder_dp_size)
+        num_tokens = images_local * pre_merge_per_image
+        embed_tokens = total_images * tokens_per_image
+        return self._get_encoder_component_memory(model, num_tokens, embed_tokens)
 
     def run_agg(
         self, model: BaseModel, database: PerfDatabase, runtime_config: RuntimeConfig, **kwargs
