@@ -860,7 +860,7 @@ def _rate_match_agg_epd(
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
-    The agg counterpart of ``_match_workers_epd`` + ``_overlay_encoder_stage``:
+    The agg counterpart of the disagg encoder rate matching + ``_overlay_encoder_stage``:
     for each (agg row, encode-worker choice) whose encode latency still fits
     the TTFT budget, pick the cell of ``a`` agg workers + ``e`` encode workers
     (``e`` = smallest count that does not bottleneck the agg throughput, the
@@ -928,7 +928,6 @@ def _find_best_disagg_under_constraint(
     match_workers: Any,
     autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
     encoder_records: list[dict] | None = None,
-    match_workers_epd: Any = None,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
@@ -936,14 +935,15 @@ def _find_best_disagg_under_constraint(
     DisaggInferenceSession.find_best_disagg_result_under_constraints.
 
     ``match_workers`` is supplied by the caller (``sweep_disagg``) so its
-    ``lru_cache`` is shared across all (ttft, tpot) pairs -- its result is
+    cache is shared across all (ttft, tpot) pairs -- its result is
     independent of the target, so a per-pair cache would recompute identical
     matches.
 
     When ``encoder_records`` is given (EPD), each encode-worker choice spends
-    its batch latency out of the TTFT budget before the prefill filter, and
-    ``match_workers_epd`` sizes the encode pool into the rate matching; the
-    per-decode-parallel best is picked across encode choices as well.
+    its batch latency out of the TTFT budget before the prefill filter and
+    joins the worker rate matching as the third pool (``match_workers``
+    encoder arguments); the per-decode-parallel best is picked across encode
+    choices as well.
     """
 
     p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
@@ -1005,27 +1005,16 @@ def _find_best_disagg_under_constraint(
                         continue
                     p_throughput = float(p_worker["seq/s"])
                     p_gpus = p_worker["num_total_gpus"]
-                    if enc is None:
-                        p_num, d_num = match_workers(
-                            prefill_throughput=p_throughput,
-                            prefill_gpus=p_gpus,
-                            decode_throughput=d_throughput,
-                            decode_gpus=d_gpus,
-                            prefill_deg=prefill_degradation,
-                            decode_deg=decode_degradation,
-                        )
-                        e_num = 0
-                    else:
-                        p_num, d_num, e_num = match_workers_epd(
-                            prefill_throughput=p_throughput,
-                            prefill_gpus=p_gpus,
-                            decode_throughput=d_throughput,
-                            decode_gpus=d_gpus,
-                            encoder_throughput=float(enc["seq/s"]),
-                            encoder_gpus=enc["num_total_gpus"],
-                            prefill_deg=prefill_degradation,
-                            decode_deg=decode_degradation,
-                        )
+                    p_num, d_num, e_num = match_workers(
+                        prefill_throughput=p_throughput,
+                        prefill_gpus=p_gpus,
+                        decode_throughput=d_throughput,
+                        decode_gpus=d_gpus,
+                        prefill_deg=prefill_degradation,
+                        decode_deg=decode_degradation,
+                        encoder_throughput=float(enc["seq/s"]) if enc else 0.0,
+                        encoder_gpus=enc["num_total_gpus"] if enc else 0,
+                    )
                     if p_num == -1 or d_num == -1:
                         continue
                     disagg_dict = _rate_match_dict(
@@ -1260,10 +1249,12 @@ def sweep_disagg(
 
     # Worker-count rate matching depends only on per-worker throughput/GPUs and the
     # (constant) worker-count lists + GPU budget -- NOT on the (ttft, tpot) target.
-    # Define it once here so the lru_cache is shared across every constraint pair.
+    # Define it once here so the cache is shared across every constraint pair.
     # Nesting it inside _find_best_disagg_under_constraint rebuilt the cache per pair
     # and recomputed identical matches (the dominant cost of the disagg sweep).
-    @functools.lru_cache(maxsize=8192)
+    # Unbounded cache: the key space is the (p, d[, e]) candidate cross-product,
+    # which can exceed a default lru size but stays small in memory.
+    @functools.cache
     def _match_workers(
         prefill_throughput: float,
         prefill_gpus: int,
@@ -1271,44 +1262,18 @@ def sweep_disagg(
         decode_gpus: int,
         prefill_deg: float,
         decode_deg: float,
-    ) -> tuple[int, int]:
-        prefill_opt, decode_opt = -1, -1
-        throughput_per_gpu_max = 0.0
-        for d_num in d_num_workers:
-            for p_num in p_num_workers:
-                num_gpu = prefill_gpus * p_num + decode_gpus * d_num
-                if num_gpu_set and num_gpu not in num_gpu_set:
-                    continue
-                if max_prefill_gpus is not None and max_decode_gpus is not None:
-                    if prefill_gpus * p_num > max_prefill_gpus:
-                        continue
-                    if decode_gpus * d_num > max_decode_gpus:
-                        continue
-                p_corrected = prefill_throughput * p_num * prefill_deg
-                d_corrected = decode_throughput * d_num * decode_deg
-                tpg = min(p_corrected, d_corrected) / num_gpu
-                if tpg > throughput_per_gpu_max:
-                    throughput_per_gpu_max = tpg
-                    prefill_opt, decode_opt = p_num, d_num
-        return prefill_opt, decode_opt
-
-    # EPD variant: for each (p_num, d_num), size the encode pool to the
-    # smallest worker count that does not bottleneck the rate-matched P/D
-    # throughput -- so seq/s stays min(p, d) while the encode GPUs count
-    # toward the per-GPU objective and the replica GPU budget.  Unbounded
-    # cache: the key space is the (p, d, e) candidate cross-product, which
-    # exceeds the default lru size but stays small in memory.
-    @functools.cache
-    def _match_workers_epd(
-        prefill_throughput: float,
-        prefill_gpus: int,
-        decode_throughput: float,
-        decode_gpus: int,
-        encoder_throughput: float,
-        encoder_gpus: int,
-        prefill_deg: float,
-        decode_deg: float,
+        encoder_throughput: float = 0.0,
+        encoder_gpus: int = 0,
     ) -> tuple[int, int, int]:
+        """Pick (p_num, d_num, e_num) maximizing throughput per GPU.
+
+        The encode pool is the optional third rate-matched pool (EPD): for
+        each (p_num, d_num) it is sized to the smallest worker count that
+        does not bottleneck the rate-matched P/D throughput, so seq/s stays
+        min(p, d) while the encode GPUs count toward the per-GPU objective
+        and the replica GPU budget.  ``encoder_throughput = 0`` (plain PD)
+        drops the encoder terms entirely and returns ``e_num = 0``.
+        """
         prefill_opt, decode_opt, encoder_opt = -1, -1, -1
         throughput_per_gpu_max = 0.0
         encoder_capacity = encoder_throughput * _RATE_MATCH_ENCODER_DEGRADATION
@@ -1317,7 +1282,7 @@ def sweep_disagg(
                 p_corrected = prefill_throughput * p_num * prefill_deg
                 d_corrected = decode_throughput * d_num * decode_deg
                 required = min(p_corrected, d_corrected)
-                e_num = max(1, math.ceil(required / encoder_capacity))
+                e_num = max(1, math.ceil(required / encoder_capacity)) if encoder_capacity > 0 else 0
                 num_gpu = prefill_gpus * p_num + decode_gpus * d_num + encoder_gpus * e_num
                 if num_gpu_set and num_gpu not in num_gpu_set:
                     continue
@@ -1352,7 +1317,6 @@ def sweep_disagg(
             match_workers=_match_workers,
             autoscale_ttft_correction_factor=ttft_corr,
             encoder_records=encoder_candidates,
-            match_workers_epd=_match_workers_epd,
         )
         if partial is not None:
             disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)
