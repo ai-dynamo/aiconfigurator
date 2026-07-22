@@ -169,11 +169,14 @@ def run_attention_torch(
     is_flashinfer = attn_backend_name == "FLASHINFER"
     if is_flashinfer and use_fp8_context_fmha:
         # Mirror of the sglang collector's compute-dtype labeling rule:
-        # TRT-LLM 1.3.0rc20 FlashInferAttention has no FP8 FMHA compute path —
-        # BF16 Q reads the FP8 KV cache through descales
-        # (attention_backend/flashinfer.py fa2 wrappers), and quant_algo=FP8 /
-        # out_scale is a TRTLLM-backend contract. An fp8-labeled flashinfer
-        # row would record BF16 compute under an fp8 label. Fail closed.
+        # TRT-LLM 1.3.0rc20 FlashInferAttention has no FP8 FMHA compute path,
+        # including under the serving-pinned trtllm-gen sub-backend set below.
+        # trtllm-gen's only fp8 handling is the fp8 KV cache: it casts Q to the
+        # KV dtype to reuse the QkvE4m3OBfloat16 cubins but the FMHA output is
+        # still BF16 (attention_backend/flashinfer.py:1789-1791@1.3.0rc20). The
+        # collector's fp8-context-FMHA case (quant_algo=FP8 + out_scale) is a
+        # TRTLLM-backend contract flashinfer does not consume, so an fp8-labeled
+        # flashinfer row would record BF16 compute under an fp8 label. Fail closed.
         raise ValueError("TRT-LLM 1.3.0rc20 FlashInferAttention has no FP8 FMHA compute path")
 
     # if XQA JIT is enabled, the context phase will also trigger XQA prepare which causes the error
@@ -250,6 +253,21 @@ def run_attention_torch(
             f"create_attention resolved {type(attn).__name__} for backend {attn_backend_name} "
             f"(expected {expected_attn_cls}); refusing the silent fallback"
         )
+
+    if is_flashinfer:
+        # create_attention only selects the backend CLASS; it does not thread
+        # the flashinfer *sub-backend*, so FlashInferAttention defaults it to
+        # "fa2" (attention_backend/flashinfer.py:1372@1.3.0rc20). Serving does
+        # not run fa2 for any FLASHINFER-routed model: the sole such model,
+        # Gemma4, pins ``self.attn.flashinfer_backend = "trtllm-gen"`` for ALL
+        # layers (models/modeling_gemma4.py:263-270@1.3.0rc20) because trtllm-gen
+        # carries the pre-compiled cubins for both the head_dim-256 SWA and
+        # head_dim-512 global geometries. Without this pin the collector would
+        # benchmark fa2 — a kernel serving never invokes — yielding silently
+        # wrong rows (e.g. hd256 SWA "passing" on fa2 while serving's trtllm-gen
+        # rejects the architecture). Mirror serving's pin exactly; the attribute
+        # flows into every metadata.plan() call (flashinfer.py:1848,1874).
+        attn.flashinfer_backend = "trtllm-gen"
 
     total_num_tokens = (input_len + output_len) * batch_size
 
