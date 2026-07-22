@@ -48,6 +48,7 @@ from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
 )
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.models.vit_ops import EncoderOnlyModel, build_encoder_ops
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
@@ -463,7 +464,6 @@ def sweep_agg(
         # encoder, ``encoder_database``); it defaults to the agg side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
-            model_config=model_config,
             tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
             b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
             runtime_config=runtime_config,
@@ -711,7 +711,6 @@ def _get_disagg_worker_candidates(
 def _get_encoder_worker_candidates(
     *,
     model_path: str,
-    model_config: config.ModelConfig,
     tp_list: list[int],
     b_list: list[int],
     runtime_config: config.RuntimeConfig,
@@ -723,34 +722,36 @@ def _get_encoder_worker_candidates(
 
     An encode (E) worker runs only the vision encoder (ViT + projector) with
     its own tensor parallelism, mirroring an encoder-only instance that loads
-    no LLM weights (e.g. SGLang ``--encoder-only``).  A worker encodes one
-    batch of ``b`` requests (each with ``num_images_per_request`` images) in
-    ``encoder_latency`` ms, so its throughput is ``b / encoder_latency``.
-    Per tp, batch points that do not improve throughput over a smaller batch
-    are dominated (same rate at worse latency) and dropped.
+    no LLM weights (e.g. SGLang ``--encoder-only``).  The worker model is
+    built directly from the encoder config: constructing the full LLM here
+    would waste work and, worse, let LLM-side parallelism rules (KV-head
+    divisibility, MoE width identities) reject a tp the ViT itself supports.
+    A worker encodes one batch of ``b`` requests (each with
+    ``num_images_per_request`` images) in ``encoder_latency`` ms, so its
+    throughput is ``b / encoder_latency``.  Per tp, batch points that do not
+    improve throughput over a smaller batch are dominated (same rate at
+    worse latency) and dropped.
 
     Returns row dicts with keys
     ``encoder_latency / seq/s / num_total_gpus / tp / bs / memory``.
     """
     backend = get_backend(backend_name)
+    enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+    if not isinstance(enc_cfg, common.VisionEncoderConfig):
+        # Config error, not a typing mistake: "no VisionEncoderConfig" means
+        # the model is not a VL model, so EPD cannot apply to it.
+        raise ValueError(  # noqa: TRY004
+            f"EPD (encoder disaggregation) requested but model {model_path!r} has no vision encoder."
+        )
     rows: list[dict] = []
     for etp in tp_list:
-        point_mc = copy.deepcopy(model_config)
-        point_mc.tp_size = etp
-        point_mc.pp_size = 1
-        point_mc.attention_dp_size = 1
-        point_mc.cp_size = 1
-        point_mc.moe_tp_size = etp
-        point_mc.moe_ep_size = 1
-        point_mc.language_only = False  # the encode worker itself hosts the ViT
         try:
-            model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
+            encoder_ops = build_encoder_ops(enc_cfg, etp)
         except ValueError as e:
-            # e.g. ViT heads / FFN not divisible by this tp.
-            logger.debug("sweep_disagg/encoder: tp=%s rejected: %s", etp, e)
+            # ViT-side constraint: heads / FFN width not divisible by this tp.
+            logger.debug("EPD encoder: tp=%s rejected: %s", etp, e)
             continue
-        if not getattr(model, "encoder_ops", None):
-            raise ValueError(f"EPD (encoder disaggregation) requested but model {model_path!r} has no vision encoder.")
+        model = EncoderOnlyModel(encoder_ops=encoder_ops, encoder_config=enc_cfg)
         best_seq_s = 0.0
         for b in b_list:
             latency, power_w, memory = backend.run_encoder_static(
@@ -777,7 +778,7 @@ def _get_encoder_worker_candidates(
                 }
             )
     if not rows:
-        raise NoFeasibleConfigError("sweep_disagg/encoder: no encode-worker candidate for any encoder tp.")
+        raise NoFeasibleConfigError("EPD encoder: no encode-worker candidate for any encoder tp.")
     return rows
 
 
@@ -1166,7 +1167,6 @@ def sweep_disagg(
         # encoder, ``encoder_database``); it defaults to the prefill side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
-            model_config=prefill_model_config,
             tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
             b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
             runtime_config=runtime_config,
