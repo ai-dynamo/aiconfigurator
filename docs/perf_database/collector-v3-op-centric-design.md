@@ -427,7 +427,12 @@ generations the change actually touches (an unmapped system fails closed).
 Deterministic: CI and the healer get identical answers from identical
 manifests. Exception WAIVERS (`evidence_exceptions.yaml`, approver + expiry)
 are applied by the evidence-gate CI check, not the resolver — expiry needs a clock,
-which would break the resolver's purity. *(Shipped in PR 4.)*
+which would break the resolver's purity. *(Policy and resolver shipped in PR 4;
+the enforcing CI gate — the required check that validates submitted evidence
+and waivers against these requirements and blocks under-evidenced data PRs —
+is a separate tracked deliverable. Until it lands, the audit workflow uploads
+the changed-op manifest as an informational artifact and enforcement is by
+human review against the resolver's output.)*
 
 | Change | Required evidence |
 |---|---|
