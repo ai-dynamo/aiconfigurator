@@ -152,6 +152,19 @@ def resolve_op_runtime(
     raise KeyError(f"{framework_key} registry has no op {op!r}")
 
 
+def _runtime_identity(runtime: CollectorRuntime) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Executor identity: version plus the pinned images. Two runtimes with the
+    same package version but different images are different containers. `family`
+    stays out — it is routing metadata, not an executor property."""
+    return runtime.version, tuple(sorted(runtime.images.items()))
+
+
+def _describe_runtime(runtime: CollectorRuntime) -> str:
+    """Version plus images, for errors where the version alone cannot distinguish."""
+    images = ", ".join(f"{variant}={image}" for variant, image in sorted(runtime.images.items()))
+    return f"{runtime.version} [{images}]"
+
+
 def require_collector_runtime(
     framework: str,
     installed_version: str,
@@ -186,27 +199,40 @@ def require_collector_runtime(
             missing = ops - {e.op for e in entries}
             if missing:
                 raise KeyError(f"{key} registry has no op(s): {sorted(missing)}")
-        by_version: dict[str, CollectorRuntime] = {}
-        op_versions: dict[str, str] = {}
+        by_identity: dict[tuple[str, tuple[tuple[str, str], ...]], CollectorRuntime] = {}
+        op_runtimes: dict[str, CollectorRuntime] = {}
         for entry in entries:
             runtime = _resolve_from(manifest, family_map, key, entry)
-            by_version.setdefault(runtime.version, runtime)
-            op_versions[entry.op] = runtime.version
-        if len(by_version) > 1:
-            split = ", ".join(f"{op}→{ver}" for op, ver in sorted(op_versions.items()))
+            by_identity.setdefault(_runtime_identity(runtime), runtime)
+            op_runtimes[entry.op] = runtime
+        if len(by_identity) > 1:
+            if len({version for version, _ in by_identity}) > 1:
+                split = ", ".join(f"{op}→{rt.version}" for op, rt in sorted(op_runtimes.items()))
+                raise RuntimeError(
+                    f"{framework} ops resolve to multiple runtime versions ({split}); "
+                    "run each version group in its own container"
+                )
+            split = ", ".join(f"{op}→{_describe_runtime(rt)}" for op, rt in sorted(op_runtimes.items()))
             raise RuntimeError(
-                f"{framework} ops resolve to multiple runtime versions ({split}); "
-                "run each version group in its own container"
+                f"{framework} ops resolve to the same runtime version but different images ({split}); "
+                "run each image group in its own container"
             )
-        if not by_version:
+        if not by_identity:
             raise KeyError(f"{key} registry has no ops to resolve")
-        resolved[key] = next(iter(by_version.values()))
+        resolved[key] = next(iter(by_identity.values()))
 
     wideep_key = f"wideep_{normalized}"
-    if len({r.version for r in resolved.values()}) > 1:
+    if len({_runtime_identity(r) for r in resolved.values()}) > 1:
+        stock, wideep = resolved[normalized], resolved[wideep_key]
+        if stock.version != wideep.version:
+            raise RuntimeError(
+                f"Stock {framework} and WideEP ops require different runtime versions "
+                f"({stock.version} != {wideep.version}); "
+                "run them in separate containers"
+            )
         raise RuntimeError(
-            f"Stock {framework} and WideEP ops require different runtime versions "
-            f"({resolved[normalized].version} != {resolved[wideep_key].version}); "
+            f"Stock {framework} and WideEP ops require different images for the same runtime version "
+            f"({_describe_runtime(stock)} != {_describe_runtime(wideep)}); "
             "run them in separate containers"
         )
     runtime = resolved.get(wideep_key) or resolved[normalized]

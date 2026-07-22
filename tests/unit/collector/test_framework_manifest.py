@@ -258,3 +258,104 @@ families:
         catalog_path=tmp_path / "op_backend_catalog.yaml",
     )
     assert (runtime.family, runtime.version) == ("gemm", "0.5.15")
+
+
+def test_family_override_same_version_different_image_is_rejected(tmp_path):
+    digest_a = "@sha256:" + "a" * 64
+    digest_b = "@sha256:" + "b" * 64
+    (tmp_path / "framework_manifest.yaml").write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest_a}"
+    families:
+      gemm:
+        version: "0.5.14"
+        images:
+          default: "lmsysorg/sglang:v0.5.14-gemm{digest_b}"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "op_backend_catalog.yaml").write_text(
+        """
+schema_version: 1
+families:
+  - family: gemm
+    op_files: [gemm_perf]
+  - family: attention
+    op_files: [context_attention_perf, generation_attention_perf]
+""",
+        encoding="utf-8",
+    )
+    # Runtime identity is (version, images), not version alone: the same package
+    # version pinned to two different images is still two containers, so a mixed
+    # request must fail closed with the op->runtime split instead of letting
+    # registry order pick one image silently.
+    with pytest.raises(RuntimeError) as excinfo:
+        require_collector_runtime(
+            "sglang",
+            "0.5.14",
+            requested_ops={"gemm", "attention_context"},
+            wideep_ops=set(),
+            path=tmp_path / "framework_manifest.yaml",
+            catalog_path=tmp_path / "op_backend_catalog.yaml",
+        )
+    message = str(excinfo.value)
+    assert "same runtime version but different images" in message
+    assert f"gemm→0.5.14 [default=lmsysorg/sglang:v0.5.14-gemm{digest_b}]" in message
+    assert f"attention_context→0.5.14 [default=lmsysorg/sglang:v0.5.14{digest_a}]" in message
+    # Each image group alone is still a valid single-container request.
+    runtime = require_collector_runtime(
+        "sglang",
+        "0.5.14",
+        requested_ops={"gemm"},
+        wideep_ops=set(),
+        path=tmp_path / "framework_manifest.yaml",
+        catalog_path=tmp_path / "op_backend_catalog.yaml",
+    )
+    assert (runtime.family, runtime.version) == ("gemm", "0.5.14")
+    assert runtime.image() == f"lmsysorg/sglang:v0.5.14-gemm{digest_b}"
+
+
+def test_stock_and_wideep_same_version_different_image_is_rejected(tmp_path):
+    digest_a = "@sha256:" + "a" * 64
+    digest_b = "@sha256:" + "b" * 64
+    (tmp_path / "framework_manifest.yaml").write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest_a}"
+  wideep_sglang:
+    base_framework: sglang
+    collector_dir: "collector/wideep/sglang"
+    data_backend: "sglang"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14-wideep{digest_b}"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        require_collector_runtime(
+            "sglang",
+            "0.5.14",
+            requested_ops={"gemm", "wideep_moe"},
+            wideep_ops={"wideep_moe"},
+            path=tmp_path / "framework_manifest.yaml",
+        )
+    message = str(excinfo.value)
+    assert "different images for the same runtime version" in message
+    assert f"lmsysorg/sglang:v0.5.14{digest_a}" in message
+    assert f"lmsysorg/sglang:v0.5.14-wideep{digest_b}" in message
+    assert "separate containers" in message
