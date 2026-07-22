@@ -275,6 +275,10 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
     elif kv_cache_algo is not None:
         raise ValueError(f"Unsupported kv cache algorithm: {kv_cache_algo}")
 
+    # DSV4 sparse attention requires FP8 KV cache across all backends.
+    if architecture == "DeepseekV4ForCausalLM":
+        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
+
     # FMHA quant mode
     if quant_algo is not None and (quant_algo in ("fp8", "fp8_block", "nvfp4") or kv_cache_algo in ("fp8",)):
         overrides["fmha_quant_mode"] = common.FMHAQuantMode.fp8
@@ -354,9 +358,18 @@ def _apply_model_quant_defaults(
         )
 
 
-# Native (FP4 routed-expert) DeepSeek-V4 checkpoints. The sgl-project *-FP8
-# requant artifacts are deliberately absent: their MoE runs fp8_block.
-_DSV4_NATIVE_MODEL_PATHS = ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash")
+def _is_dsv4_fp4_expert_model(model_path: str) -> bool:
+    """True for DeepSeek-V4 checkpoints with native FP4 routed experts.
+
+    Checks ``expert_dtype == "fp4"`` in the HF config rather than hardcoded
+    paths, so third-party requant artifacts (e.g. RedHatAI NVFP4-FP8) are
+    recognized. FP8-only requants (sgl-project) have no ``expert_dtype`` and
+    return False.
+    """
+    info = _get_model_info(model_path)
+    if info.get("architecture") != "DeepseekV4ForCausalLM":
+        return False
+    return str(info.get("raw_config", {}).get("expert_dtype") or "").lower() == "fp4"
 
 
 def resolve_dsv4_moe_arch_mode(
@@ -365,21 +378,21 @@ def resolve_dsv4_moe_arch_mode(
     backend_name: str | None,
     moe_backend: str | None = None,
 ) -> common.MoEQuantMode | None:
-    """Arch-specific MoE quant mode for native DeepSeek-V4 checkpoints on sglang.
+    """Arch-specific MoE quant mode for FP4-expert DeepSeek-V4 checkpoints on sglang.
 
-    SGLang serves the native V4 checkpoints through arch-specific MoE kernels,
+    SGLang serves FP4-expert V4 checkpoints through arch-specific MoE kernels,
     and the perf DB files those rows under dedicated quant modes (loader
     routing in ``operations/moe.py``): Blackwell -> ``w4a8_mxfp4_mxfp8_trtllm``
     (kernel_source ``sglang_mxfp4_flashinfer_trtllm_moe``), Hopper ->
     ``w4a16_mxfp4_cutlass`` (``sglang_flashinfer_cutlass_moe``). Returns the
     remapped mode, or None when the rule does not apply (non-sglang backends,
-    megamoe, requant artifacts, other systems). Mirrors ``task_v2``'s HF-base
-    resolution (legacy V1 dsv4pro-moe-arch); an explicit user mode must win,
-    so callers only apply this when moe_quant_mode was not explicitly set.
+    megamoe, FP8-only requant artifacts, other systems). An explicit user mode
+    must win, so callers only apply this when moe_quant_mode was not explicitly
+    set.
     """
     if backend_name != "sglang" or moe_backend == "megamoe":
         return None
-    if model_path not in _DSV4_NATIVE_MODEL_PATHS:
+    if not _is_dsv4_fp4_expert_model(model_path):
         return None
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system, is_hopper_system
 

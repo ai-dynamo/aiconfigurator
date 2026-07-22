@@ -1305,6 +1305,13 @@ class Task:
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
                 return
+            # Modes that normalize to a different table name for perf queries
+            # (nvfp4_wo -> bfloat16, w4a16_mxfp4_cutlass -> w4a16_mxfp4) are
+            # accepted when the target table mode is supported.
+            validation_aliases = {"nvfp4_wo": "bfloat16", "w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            alias = validation_aliases.get(name)
+            if alias and alias in modes:
+                return
             if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
                 return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
