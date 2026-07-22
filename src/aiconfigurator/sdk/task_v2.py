@@ -1000,22 +1000,24 @@ class Task:
         # data-driven fp8->bf16 fallback so those roles are not downgraded.
         for role in roles:
             backend_name = self._role_attr(role, "backend_name")
-            # DeepSeek-V3 only: the WideEP MLA ops and perf tables are specific to
-            # its shape, and models/deepseek.py likewise routes only this
-            # architecture to WideEPDeepSeekModel.
             is_deepseek_mla = self._architecture == "DeepseekV3ForCausalLM"
-            # WideEP routes DeepSeek attention through the wideep_*_mla tables,
-            # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
-            # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
-            # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
-            # must query with those same labels, so resolve fmha->fp8_block (context
-            # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
             is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
             if is_wideep and is_deepseek_mla:
                 if role != "decode" and not fmha_explicit.get(role, False):
                     self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
                 if not kv_explicit.get(role, False):
                     self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
+
+        # NVFP4 software fallback: on non-Blackwell systems, remap nvfp4 to
+        # nvfp4_wo (FP4 weight memory, BF16 compute speed) so the perf model
+        # queries BF16 data instead of native FP4 data.
+        for role in roles:
+            system = self._role_attr(role, "system_name")
+            if not is_blackwell_system(system):
+                if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.nvfp4:
+                    self._set_role_attr(role, "gemm_quant_mode", common.GEMMQuantMode.nvfp4_wo)
+                if self._role_attr(role, "moe_quant_mode") == common.MoEQuantMode.nvfp4:
+                    self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.nvfp4_wo)
 
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16

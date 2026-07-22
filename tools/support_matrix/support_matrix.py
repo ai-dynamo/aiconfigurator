@@ -357,9 +357,10 @@ def _enum_name(value: object | None) -> str | None:
 
 
 def _format_datatype_list(datatypes: tuple[str, ...]) -> str:
-    if len(datatypes) == 1:
-        return datatypes[0]
-    return ", ".join(datatypes[:-1]) + f" or {datatypes[-1]}"
+    display = tuple(dt.replace("FP4_SWDEQUANT", "FP4") for dt in datatypes)
+    if len(display) == 1:
+        return display[0]
+    return ", ".join(display[:-1]) + f" or {display[-1]}"
 
 
 def _gpu_label(system: str, system_spec: dict) -> str:
@@ -379,6 +380,11 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
             return True
         return "fp8_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 89)
     if datatype == "FP4":
+        return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
+    if datatype == "FP4_SWDEQUANT":
+        # nvfp4 software dequant (Marlin FP4 / casting) on SM >= 80
+        if sm_version is not None and sm_version >= 80:
+            return True
         return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
     return True
 
@@ -404,7 +410,9 @@ def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
     expert_dtype = str(raw_config.get("expert_dtype") or "").lower()
 
     required: set[str] = set()
-    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo == "nvfp4" or expert_dtype == "fp4":
+    if quant_mode_names & _NATIVE_FP4_QUANT_MODE_NAMES or raw_quant_algo == "nvfp4":
+        required.add("FP4_SWDEQUANT")
+    if expert_dtype == "fp4":
         required.add("FP4")
     if quant_mode_names & _FP8_QUANT_MODE_NAMES or raw_quant_algo in {"fp8", "fp8_block"}:
         required.add("FP8")
@@ -412,8 +420,9 @@ def _required_datatypes_for_model(model: str, backend: str) -> tuple[str, ...]:
         required.add("FP8")
 
     # Keep FP4 first so FP4 model failures on older GPUs read as FP4 incompatibility
-    # even when the model also uses FP8 scales or KV cache.
-    return tuple(datatype for datatype in ("FP4", "FP8") if datatype in required)
+    # even when the model also uses FP8 scales or KV cache. FP4_SWDEQUANT (nvfp4
+    # software fallback) is displayed as "FP4" in the incompatibility message.
+    return tuple(datatype for datatype in ("FP4", "FP4_SWDEQUANT", "FP8") if datatype in required)
 
 
 def get_hardware_incompatibility(

@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
 _GEMM_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
     (2, 1): 0.70,  # w16a16 / bfloat16               [data 0.55-0.79]
     (1, 1): 0.55,  # w8a16 / int8_wo                 [inferred]
+    (0.5625, 1): 0.45,  # w4a16+scales / nvfp4_wo (software dequant to bf16) [inferred ≈ int4_wo]
     (0.5, 1): 0.45,  # w4a16 / int4_wo (fused-dequant weight-only runs below
     #                  the bf16 compute roofline it shares; Marlin-class) [inferred]
     (1, 2): 0.45,  # w8a8 / fp8(_block/_ootb), sq    [data 0.28-0.55]

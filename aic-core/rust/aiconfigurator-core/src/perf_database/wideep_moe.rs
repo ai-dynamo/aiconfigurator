@@ -132,9 +132,10 @@ impl WideEpMoeTable {
         kernel_source: &str,
         sol: &dyn Fn(f64) -> f64,
     ) -> Result<f64, AicError> {
+        let lookup_quant = normalize_wideep_moe_quant(quant);
         let by_tokens = self.resolve_slice(
             kernel_source,
-            quant.name(),
+            lookup_quant.name(),
             distribution,
             topk,
             num_experts,
@@ -166,9 +167,10 @@ impl WideEpMoeTable {
         moe_tp_size: u32,
         moe_ep_size: u32,
     ) -> Result<Vec<(u32, f64)>, AicError> {
+        let lookup_quant = normalize_wideep_moe_quant(quant);
         let by_tokens = self.resolve_slice(
             kernel_source,
-            quant.name(),
+            lookup_quant.name(),
             distribution,
             topk,
             num_experts,
@@ -272,6 +274,16 @@ impl WideEpMoeTable {
             .compute
             .get_or_init(|| load_compute_parquet(&self.wideep_moe_sources));
         cell.as_ref().map_err(clone_err)
+    }
+}
+
+/// Normalize WideEP MoE quant for perf table lookup: fp8_block reuses fp8
+/// alltoall tables; nvfp4_wo runs the BF16 compute kernel.
+fn normalize_wideep_moe_quant(quant: MoeQuantMode) -> MoeQuantMode {
+    match quant {
+        MoeQuantMode::Fp8Block => MoeQuantMode::Fp8,
+        MoeQuantMode::Nvfp4Wo => MoeQuantMode::Bfloat16,
+        _ => quant,
     }
 }
 
