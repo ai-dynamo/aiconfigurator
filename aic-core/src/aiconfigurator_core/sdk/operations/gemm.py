@@ -298,6 +298,8 @@ class GEMM(Operation):
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
+        if quant_mode == common.GEMMQuantMode.nvfp4_wo:
+            return common.GEMMQuantMode.bfloat16
         return quant_mode
 
     # ------------------------------------------------------------------

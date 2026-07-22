@@ -255,6 +255,7 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
             return summary
 
     monkeypatch.setattr("aiconfigurator.sdk.inference_session.AFDInferenceSession", FakeSession)
+    monkeypatch.setattr("aiconfigurator.cli.api.resolve_nvfp4_for_system", lambda *a, **k: None)
 
     api._run_afd_estimate(
         model_path="test-model",

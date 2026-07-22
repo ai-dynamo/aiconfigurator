@@ -784,6 +784,16 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
+        # NVFP4 software fallback: on non-Blackwell systems, remap nvfp4 to
+        # nvfp4_wo (FP4 weight memory, BF16 compute speed) so the perf model
+        # queries BF16 data instead of native FP4 data.
+        for role in roles:
+            system = self._role_attr(role, "system_name")
+            if not is_blackwell_system(system):
+                if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.nvfp4:
+                    self._set_role_attr(role, "gemm_quant_mode", common.GEMMQuantMode.nvfp4_wo)
+                if self._role_attr(role, "moe_quant_mode") == common.MoEQuantMode.nvfp4:
+                    self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.nvfp4_wo)
 
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16

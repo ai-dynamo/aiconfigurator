@@ -425,6 +425,46 @@ def resolve_dsv4_moe_arch(
         model_config.moe_quant_mode = mode
 
 
+def resolve_nvfp4_for_system(
+    model_config: config.ModelConfig,
+    system_name: str | None,
+    model_path: str | None = None,
+) -> None:
+    """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
+
+    On Blackwell, nvfp4 runs with native FP4 tensor cores (compute=4x).
+    On Hopper and earlier, the framework dequantizes FP4 weights to BF16
+    before compute, so latency should be modeled at BF16 speed (compute=1x)
+    while weight memory stays FP4-sized.
+
+    When quant modes are still None (CLI estimate path before get_model
+    infers them), infers from the HF config via ``model_path`` so the
+    remap can fire before model construction.
+    """
+    from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+    if is_blackwell_system(system_name):
+        return
+
+    gemm_q = model_config.gemm_quant_mode
+    moe_q = model_config.moe_quant_mode
+    if (gemm_q is None or moe_q is None) and model_path:
+        info = _get_model_info(model_path)
+        inferred = _infer_quant_modes_from_raw_config(
+            info.get("raw_config", {}),
+            info.get("architecture", ""),
+        )
+        if gemm_q is None:
+            gemm_q = inferred.get("gemm_quant_mode")
+        if moe_q is None:
+            moe_q = inferred.get("moe_quant_mode")
+
+    if gemm_q == common.GEMMQuantMode.nvfp4:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo
+    if moe_q == common.MoEQuantMode.nvfp4:
+        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4_wo
+
+
 def resolve_context_fmha_by_data(
     model_config: config.ModelConfig,
     model_path: str,

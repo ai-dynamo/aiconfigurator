@@ -366,6 +366,11 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
             return True
         return "fp8_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 89)
     if datatype == "FP4":
+        # Native FP4 on Blackwell (SM >= 100); software dequant (Marlin FP4 /
+        # casting) on Hopper and Ampere (SM >= 80). Non-NVIDIA systems (b60)
+        # fall through to the fp4_tc_flops / sm_version gate.
+        if sm_version is not None and sm_version >= 80:
+            return True
         return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
     return True
 

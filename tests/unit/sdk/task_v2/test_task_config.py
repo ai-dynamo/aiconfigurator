@@ -980,6 +980,57 @@ def test_sglang_agg_default_moe_ep_search():
     assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+    """NVFP4 models on non-Blackwell systems should have quant modes remapped to nvfp4_wo
+    (FP4 weight memory, BF16 compute speed) for correct perf predictions."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_preserved_on_blackwell():
+    """NVFP4 models on Blackwell should keep native nvfp4 quant modes."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_nvfp4_hopper_explicit_gemm_preserves_supplied_mode():
+    """Explicit gemm_quant_mode is preserved; omitted moe_quant_mode is remapped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_hopper_explicit_moe_preserves_supplied_mode():
+    """Explicit moe_quant_mode is preserved; omitted gemm_quant_mode is remapped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.bfloat16
+
+
 def test_run_validates_by_default():
     """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
     has no wideep_context_mla data for fp8/bf16 -> validate raises."""

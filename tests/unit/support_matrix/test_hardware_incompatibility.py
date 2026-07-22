@@ -59,7 +59,31 @@ def test_fp8_model_is_allowed_for_b60_software_fallback_without_native_fp8_flops
     assert incompatibility is None
 
 
-def test_fp4_model_is_hardware_incompatible_without_fp4_support():
+def test_fp4_model_is_hardware_incompatible_below_sm80():
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="v100",
+        backend="trtllm",
+        system_spec=_system_spec(sm_version=70, fp8=False),
+    )
+
+    assert incompatibility is not None
+    assert "FP4" in incompatibility.missing_datatypes
+    assert "does not support" in incompatibility.reason
+
+
+def test_fp4_model_is_allowed_on_ampere_via_software_fallback():
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="a100_sxm",
+        backend="trtllm",
+        system_spec=_system_spec(sm_version=80, fp8=True),
+    )
+
+    assert incompatibility is None
+
+
+def test_fp4_model_is_allowed_on_hopper_via_software_fallback():
     incompatibility = get_hardware_incompatibility(
         model="nvidia/Qwen3-235B-A22B-NVFP4",
         system="h100_sxm",
@@ -67,9 +91,7 @@ def test_fp4_model_is_hardware_incompatible_without_fp4_support():
         system_spec=_system_spec(sm_version=90, fp8=True),
     )
 
-    assert incompatibility is not None
-    assert incompatibility.missing_datatypes == ("FP4",)
-    assert "does not support FP4" in incompatibility.reason
+    assert incompatibility is None
 
 
 def test_sglang_dsa_model_is_hardware_incompatible_below_sm90():
