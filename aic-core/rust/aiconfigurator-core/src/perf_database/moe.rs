@@ -165,7 +165,8 @@ impl MoeTable {
     ) -> Result<f64, AicError> {
         let loaded = self.load()?;
         let grids = &loaded.default;
-        let quant_name = quant.name();
+        let lookup_quant = normalize_moe_quant(quant);
+        let quant_name = lookup_quant.name();
 
         let shape = MoeShapeKey {
             topk,
@@ -380,6 +381,16 @@ impl MoeTable {
     fn load(&self) -> Result<&LoadedMoeGrids, AicError> {
         let cell = self.moe.get_or_init(|| load_moe_parquet(&self.moe_sources));
         cell.as_ref().map_err(clone_err)
+    }
+}
+
+/// Normalize MoE quant mode for perf table lookup: nvfp4_wo runs the BF16
+/// compute kernel, so bfloat16 perf data is exact.
+fn normalize_moe_quant(quant: MoeQuantMode) -> MoeQuantMode {
+    if quant == MoeQuantMode::Nvfp4Wo {
+        MoeQuantMode::Bfloat16
+    } else {
+        quant
     }
 }
 
