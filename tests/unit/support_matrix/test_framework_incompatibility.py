@@ -77,6 +77,51 @@ def test_dsv4_vllm_019_missing_mhc_data_is_framework_incompatible(monkeypatch):
     assert "DeepSeek-V4 mHC module data not loaded" in errors["disagg"]
 
 
+@pytest.mark.parametrize("system", ["b200_sxm", "b300_sxm", "gb200", "gb300"])
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "Unsupported moe quant mode 'w4a8_mxfp4_mxfp8'",
+        "DeepSeek-V4 mHC module data not loaded",
+    ],
+)
+def test_dsv4_vllm_024_native_blackwell_gap_is_fail(monkeypatch, system, error_message):
+    def fake_run_mode(**_kwargs):
+        raise ValueError(error_message)
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        system=system,
+        backend="vllm",
+        version="0.24.0",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+    assert error_message in errors["agg"]
+
+
+def test_dsv4_vllm_024_non_native_system_gap_remains_framework_incompatible(monkeypatch):
+    def fake_run_mode(**_kwargs):
+        raise ValueError("Unsupported moe quant mode 'w4a8_mxfp4_mxfp8'")
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, _errors = SupportMatrix.run_single_test(
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        system="h200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        system_spec=_b200_system_spec(),
+    )
+
+    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
+
+
 def test_non_dsv4_vllm_019_error_remains_fail(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError("Unsupported moe quant mode 'w4a8_mxfp4_mxfp8'")

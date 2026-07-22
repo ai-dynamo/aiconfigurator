@@ -239,7 +239,7 @@ common_case_values:
       # w4a16_mxfp4 identity — and on SM120 to DeepGemmFP4 (fp8-block
       # activation, fused_moe/experts/deep_gemm_moe.py:423-428) or Marlin,
       # so the MXFP8-activation label exists only on SM100/103.
-      max_sm_exclusive: 120
+      max_sm_exclusive: 110
       requires_runtime_feature: mxfp4
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
