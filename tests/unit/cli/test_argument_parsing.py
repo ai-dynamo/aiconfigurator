@@ -262,6 +262,44 @@ class TestCLIArgumentParsing:
         assert isinstance(param_value, expected_type)
         assert param_value == expected_type(value)
 
+    def test_nextn_accepts_auto(self, cli_parser):
+        """--nextn auto is a literal pass-through; resolution against the
+        checkpoint happens later, once the model config is loaded."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+        assert args.nextn == "auto"
+
+    @pytest.mark.parametrize("bad_value", ["-1", "1.5", "always", ""])
+    def test_nextn_rejects_non_auto_junk(self, cli_parser, bad_value):
+        """--nextn takes a non-negative integer or the literal 'auto'."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--nextn",
+                    bad_value,
+                ]
+            )
+
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
         args = cli_parser.parse_args(

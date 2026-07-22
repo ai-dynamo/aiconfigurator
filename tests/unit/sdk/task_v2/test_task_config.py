@@ -617,6 +617,49 @@ def test_nextn_never_auto_enabled(caplog):
     assert any("ships MTP" in r.message for r in caplog.records)
 
 
+def test_nextn_auto_resolves_depth_from_checkpoint():
+    """nextn='auto' takes the draft DEPTH from num_nextn_predict_layers; the
+    acceptance value is still required -- it is never inferred."""
+    import pytest as _pytest
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+        nextn_accepted=0.7,
+    )
+    assert t.nextn == 1  # checkpoint declares num_nextn_predict_layers=1
+    assert t.nextn_accepted == 0.7
+
+    # No MTP layers in the checkpoint -> auto resolves to disabled, no
+    # acceptance value needed.
+    t2 = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+    )
+    assert t2.nextn == 0
+
+    # auto resolving to a positive depth still demands nextn_accepted, and the
+    # error says what the depth resolved to.
+    with _pytest.raises(ValueError, match=r"auto.*resolved to nextn=1.*nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn="auto",
+        )
+
+    # auto cannot resolve without a checkpoint to read.
+    with _pytest.raises(ValueError, match="requires a model path"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn="auto")
+
+
 def test_nextn_requires_nextn_accepted():
     """nextn > 0 without nextn_accepted is a hard error -- no built-in acceptance assumption."""
     import pytest as _pytest

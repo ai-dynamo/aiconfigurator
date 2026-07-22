@@ -74,6 +74,29 @@ def validate_nextn(nextn: int | None, nextn_accepted: float | None) -> int:
     return normalized
 
 
+def resolve_nextn_auto(model_path: str) -> int:
+    """Resolve ``nextn='auto'`` to the checkpoint's MTP draft depth.
+
+    Reads ``num_nextn_predict_layers`` from the model config (the multimodal
+    text sub-config when applicable); absent or 0 means the checkpoint ships no
+    MTP layers and MTP stays disabled. The checkpoint is the single source of
+    truth -- there is no model-family fallback, and ``nextn_accepted`` is never
+    inferred (acceptance is a workload measurement, not a checkpoint fact).
+    """
+    # Local import: utils pulls in the perf-database layer, which config
+    # builders must not depend on at import time.
+    from aiconfigurator_core.sdk.common import MULTIMODAL_TEXT_CONFIG_KEY
+    from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+    if not model_path:
+        raise ValueError("nextn='auto' requires a model path to resolve num_nextn_predict_layers.")
+    info = get_model_config_from_model_path(model_path)
+    raw = info.get("raw_config", {})
+    text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(info["architecture"])
+    cfg = raw[text_key] if text_key and text_key in raw else raw
+    return int(cfg.get("num_nextn_predict_layers") or 0)
+
+
 def apply_nextn(
     model_config: ModelConfig,
     nextn: int | None,

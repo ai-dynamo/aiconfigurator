@@ -358,7 +358,10 @@ class Task:
     # draft length (compute cost), nextn_accepted the average accepted draft tokens
     # per step (generation benefit, 0 <= nextn_accepted <= nextn). nextn_accepted is
     # required when nextn > 0 -- there is no built-in acceptance assumption.
-    nextn: int = 0
+    # nextn="auto" resolves the draft depth from the checkpoint's
+    # num_nextn_predict_layers (absent/0 -> disabled); the acceptance value is
+    # still never inferred.
+    nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
     attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
@@ -556,9 +559,14 @@ class Task:
         # Validate the MTP pair BEFORE model-identity resolution: the latter is
         # skipped when no primary model path is set, and the check must not
         # depend on it (non-negative integer nextn; finite acceptance in range).
-        validate_nextn(self.nextn, self.nextn_accepted)
+        # nextn="auto" is the one exception: its depth comes from the checkpoint,
+        # so it is resolved and validated in _resolve_model_identity.
+        if self.nextn != "auto":
+            validate_nextn(self.nextn, self.nextn_accepted)
         self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
+        if self.nextn == "auto":
+            raise ValueError("nextn='auto' requires a model path to resolve num_nextn_predict_layers.")
         self._resolve_backend_version()
         self._normalize_wideep_moe_backend()
         self._resolve_quant_modes()
@@ -659,9 +667,31 @@ class Task:
 
         text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(self._architecture)
         cfg = self._raw_config[text_key] if text_key and text_key in self._raw_config else self._raw_config
-        # MTP is never auto-enabled: nextn defaults to 0 and must be set
+        # MTP is never enabled implicitly: nextn defaults to 0 and must be set
         # explicitly. Surface a hint when the checkpoint ships MTP layers.
         hf_nextn = cfg.get("num_nextn_predict_layers")
+        if self.nextn == "auto":
+            # "auto" trusts the checkpoint for the draft DEPTH only; the
+            # acceptance value is a workload measurement and is never inferred.
+            resolved = int(hf_nextn or 0)
+            if resolved > 0:
+                try:
+                    validate_nextn(resolved, self.nextn_accepted)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"nextn='auto' resolved to nextn={resolved} from the checkpoint's "
+                        f"num_nextn_predict_layers: {exc}"
+                    ) from exc
+                logger.info(
+                    "nextn='auto': modeling MTP with nextn=%d from the checkpoint's num_nextn_predict_layers.",
+                    resolved,
+                )
+            else:
+                logger.info(
+                    "nextn='auto': checkpoint ships no MTP layers (num_nextn_predict_layers absent or 0); "
+                    "modeling WITHOUT speculative decoding."
+                )
+            self.nextn = resolved
         if self.nextn > 0:
             # Range/required-ness already validated in __post_init__ (validate_nextn).
             if hf_nextn is not None and self.nextn != hf_nextn:
@@ -674,7 +704,8 @@ class Task:
         elif hf_nextn:
             logger.info(
                 "Checkpoint ships MTP (num_nextn_predict_layers=%d) but nextn is not set; "
-                "modeling WITHOUT speculative decoding. Pass nextn/nextn_accepted to model it.",
+                "modeling WITHOUT speculative decoding. Pass nextn (or nextn='auto') and "
+                "nextn_accepted to model it.",
                 hf_nextn,
             )
 

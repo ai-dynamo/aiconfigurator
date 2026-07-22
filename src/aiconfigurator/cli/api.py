@@ -26,6 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
+from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
 from aiconfigurator.sdk.config_builders import validate_nextn as _validate_nextn
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
 from aiconfigurator.sdk.task_v2 import Task
@@ -150,7 +151,7 @@ def cli_default(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int = 0,
+    nextn: int | str = 0,
     nextn_accepted: float | None = None,
     strict_sla: bool = False,
     free_gpu_memory_fraction: float | None = None,
@@ -185,9 +186,12 @@ def cli_default(
         request_latency: Optional end-to-end request latency target (ms).
             Enables request-latency optimization mode.
         prefix: Prefix cache length. Default is 0.
-        nextn: MTP draft length. Default 0 (disabled); never auto-enabled.
+        nextn: MTP draft length, or ``"auto"`` to use the checkpoint's
+            ``num_nextn_predict_layers`` (absent/0 keeps MTP disabled).
+            Default 0 (disabled); never enabled implicitly.
         nextn_accepted: Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         strict_sla: When True, ``pareto_df`` is filtered to only
             SLA-compliant data points (TPOT or request-latency) *before*
             the Pareto frontier is computed.  TTFT is already enforced at
@@ -243,6 +247,9 @@ def cli_default(
         >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
     """
     # Fail fast on inconsistent MTP inputs (same early check as the CLI path).
+    # nextn="auto" resolves the draft depth from the checkpoint first.
+    if nextn == "auto":
+        nextn = _resolve_nextn_auto(model_path)
     _validate_nextn(nextn, nextn_accepted)
 
     # Reuse build_default_tasks from main.py
@@ -654,7 +661,7 @@ def cli_estimate(
     engine_step_backend: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
-    nextn: int = 0,
+    nextn: int | str = 0,
     nextn_accepted: float | None = None,
     stride: int = 32,
     # AFD-specific parameters (ignored when mode != 'afd')
@@ -739,10 +746,12 @@ def cli_estimate(
         engine_step_backend: Experimental static latency backend ("python" or "rust").
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
-        nextn: (common) MTP draft length. Applied to agg, disagg, and all
-            static modes. Default 0 (disabled); MTP is never auto-enabled.
+        nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's
+            ``num_nextn_predict_layers``. Applied to agg, disagg, and all
+            static modes. Default 0 (disabled); MTP is never enabled implicitly.
         nextn_accepted: (common) Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         stride: (static-only) Stride used by ``run_static`` to accelerate the
             OSL sweep. Ignored by agg / disagg. Default 32.
         n_a_nodes: (afd-only) Number of A-Worker (attention) nodes. Required
@@ -797,6 +806,12 @@ def cli_estimate(
         get_systems_paths,
         set_systems_paths,
     )
+
+    # Resolve nextn="auto" against the checkpoint before mode dispatch so every
+    # estimate path (agg/disagg/static/afd) sees a plain int.
+    if nextn == "auto":
+        nextn = _resolve_nextn_auto(model_path)
+    _validate_nextn(nextn, nextn_accepted)
 
     active_systems_paths = None
     if systems_paths is not None:

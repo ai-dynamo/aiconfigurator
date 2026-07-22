@@ -131,8 +131,8 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--moe-quant-mode`: MoE quantization mode (auto-inferred if omitted)
 - `--comm-quant-mode`: Communication quantization mode (auto-inferred; default `half`)
 - `--prefix`: Prefix cache length (subset of ISL already cached per request). Default: `0`
-- `--nextn`: MTP draft length. Default: `0`; MTP is never auto-enabled — pass `--nextn` explicitly to model it
-- `--nextn-accepted`: Average accepted draft tokens per decode step (`0 <= nextn_accepted <= nextn`). Required when `--nextn > 0`; use a measured value from your deployment
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers` (absent/0 keeps MTP disabled). Default: `0`; MTP is never enabled implicitly — pass `--nextn` explicitly to model it
+- `--nextn-accepted`: Average accepted draft tokens per decode step (`0 <= nextn_accepted <= nextn`). Required when the draft depth is > 0 (including via `--nextn auto`); use a measured value from your deployment
 - `--stride`: (static modes only) OSL-sweep stride used by `run_static`; ignored for `agg`/`disagg`. Default: `32`
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory for KV cache. Default: `0.9`. Used to estimate max concurrent sequences and warn when batch size exceeds KV cache capacity
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls KV blocks pre-allocated per sequence; set to match your deployment for an accurate KV-capacity warning
@@ -850,22 +850,32 @@ Hybrid mode is a quick solution to support new models without modeling the opera
 #### Speculative Decoding (`--nextn`, `--nextn-accepted`)
 
 These flags enable MTP (Multi-Token Prediction) speculative decoding in the
-configuration search. MTP is **never auto-enabled**, even for models that ship
-MTP layers (the CLI logs a hint when the checkpoint declares them):
+configuration search. MTP is **never enabled implicitly** — omitting `--nextn`
+keeps it off even for models that ship MTP layers (the CLI logs a hint when
+the checkpoint declares them):
 
 - `--nextn N` — MTP draft length (compute cost side: extra MTP-layer forward
   plus the wider verify batch; no fixed upper bound). Default: 0 (disabled).
+- `--nextn auto` — take the draft depth from the checkpoint's
+  `num_nextn_predict_layers` (absent or 0 keeps MTP disabled). Only the depth
+  comes from the checkpoint — the acceptance value below is still required,
+  because it is a property of your workload, not of the model.
 - `--nextn-accepted A` — Average accepted draft tokens per decode step
   (`0 <= nextn_accepted <= nextn`); each step yields `1 + nextn_accepted` output tokens.
-  Required when `--nextn > 0` — there is no built-in acceptance assumption.
-  Use a measured value from your deployment (e.g. the engine's reported
-  average acceptance length minus 1).
+  Required whenever the draft depth is > 0 (explicit or via `auto`) — there is
+  no built-in acceptance assumption. Use a measured value from your deployment
+  (e.g. the engine's reported average acceptance length minus 1).
 
 Example:
 ```bash
 aiconfigurator cli default \
   --model Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm \
   --nextn 2 --nextn-accepted 1.2
+
+# Depth from the checkpoint, acceptance from your measurements:
+aiconfigurator cli default \
+  --model deepseek-ai/DeepSeek-V3 --total-gpus 8 --system h200_sxm \
+  --nextn auto --nextn-accepted 0.7
 ```
 
 
@@ -950,7 +960,9 @@ disagg_full:
   ttft: 1000.0                    # target TTFT in ms (default 1000.0)
   tpot: 40.0                      # target TPOT in ms (default 40.0)
 
-  # Speculative decoding: never auto-enabled; nextn_accepted is required when nextn > 0
+  # Speculative decoding: never enabled implicitly; nextn_accepted is required
+  # when the draft depth is > 0. nextn: auto takes the depth from the
+  # checkpoint's num_nextn_predict_layers (the acceptance value is still yours).
   nextn: 1
   nextn_accepted: 0.85
 

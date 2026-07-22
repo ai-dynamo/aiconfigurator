@@ -23,7 +23,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.config_builders import validate_nextn
+from aiconfigurator.sdk.config_builders import resolve_nextn_auto, validate_nextn
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
@@ -152,6 +152,54 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     add_generator_override_arguments(common_parser)
     return common_parser
+
+
+def _parse_nextn(value: str) -> int | str:
+    """argparse type for --nextn: a non-negative integer draft length, or 'auto'
+    to use the checkpoint's num_nextn_predict_layers."""
+    if value.strip().lower() == "auto":
+        return "auto"
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--nextn must be a non-negative integer or 'auto', got {value!r}") from None
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"--nextn must be >= 0 or 'auto', got {parsed}")
+    return parsed
+
+
+def _resolve_and_validate_nextn(args) -> None:
+    """Fail fast on inconsistent MTP input; resolve --nextn auto to the checkpoint depth.
+
+    Mutates ``args.nextn`` in place so everything downstream sees a plain int.
+    """
+    if args.nextn == "auto":
+        try:
+            resolved = resolve_nextn_auto(args.model_path)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if resolved > 0:
+            logger.info(
+                "--nextn auto: modeling MTP with nextn=%d from the checkpoint's num_nextn_predict_layers.",
+                resolved,
+            )
+        else:
+            logger.info(
+                "--nextn auto: checkpoint ships no MTP layers (num_nextn_predict_layers absent or 0); "
+                "MTP stays disabled."
+            )
+        try:
+            validate_nextn(resolved, args.nextn_accepted)
+        except ValueError as exc:
+            raise SystemExit(
+                f"--nextn auto resolved to nextn={resolved} from the checkpoint's num_nextn_predict_layers: {exc}"
+            ) from exc
+        args.nextn = resolved
+        return
+    try:
+        validate_nextn(args.nextn, args.nextn_accepted)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _validate_model_path(model_path: str) -> str:
@@ -313,11 +361,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
-        help="MTP (Multi-Token Prediction) draft length. When set > 0, enables speculative "
-        "decoding in the configuration search (requires --nextn-accepted). Default: 0 (disabled); "
-        "MTP is never auto-enabled, even for models that ship MTP layers.",
+        help="MTP (Multi-Token Prediction) draft length, or 'auto' to use the checkpoint's "
+        "num_nextn_predict_layers (absent/0 keeps MTP disabled). When the depth is > 0, enables "
+        "speculative decoding in the configuration search and requires --nextn-accepted. "
+        "Default: 0 (disabled); MTP is never enabled implicitly when the flag is omitted.",
     )
     parser.add_argument(
         "--nextn-accepted",
@@ -817,11 +866,12 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
-        help="(common) MTP draft length (compute cost side). Default: 0 (disabled); "
-        "MTP is never auto-enabled. Applied to agg, disagg, and all static modes. "
-        "Requires --nextn-accepted when > 0.",
+        help="(common) MTP draft length (compute cost side), or 'auto' to use the checkpoint's "
+        "num_nextn_predict_layers. Default: 0 (disabled); MTP is never enabled implicitly. "
+        "Applied to agg, disagg, and all static modes. Requires --nextn-accepted when the "
+        "depth is > 0.",
     )
     parser.add_argument(
         "--nextn-accepted",
@@ -1137,7 +1187,7 @@ def build_default_tasks(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int = 0,
+    nextn: int | str = 0,
     nextn_accepted: float | None = None,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
@@ -1163,9 +1213,12 @@ def build_default_tasks(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: MTP draft length. Default 0 (disabled); never auto-enabled.
+        nextn: MTP draft length, or ``"auto"`` to use the checkpoint's
+            ``num_nextn_predict_layers`` (absent/0 keeps MTP disabled).
+            Default 0 (disabled); never enabled implicitly.
         nextn_accepted: Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when ``nextn > 0``.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
@@ -1289,7 +1342,7 @@ def build_default_tasks(
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
     }
-    if nextn and nextn > 0:
+    if nextn == "auto" or (isinstance(nextn, int) and nextn > 0):
         global_kwargs["nextn"] = nextn
         global_kwargs["nextn_accepted"] = nextn_accepted
 
@@ -1975,10 +2028,7 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    try:
-        validate_nextn(args.nextn, args.nextn_accepted)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+    _resolve_and_validate_nextn(args)
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2311,10 +2361,7 @@ def main(args):
         return
 
     if args.mode == "default":
-        try:
-            validate_nextn(args.nextn, args.nextn_accepted)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
+        _resolve_and_validate_nextn(args)
 
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
