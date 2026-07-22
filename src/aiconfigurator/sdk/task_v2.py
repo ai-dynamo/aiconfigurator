@@ -1091,14 +1091,15 @@ class Task:
 
     def _prefill_effective_isl(self) -> int:
         """Text ISL + per-request vision context tokens (plain ISL for
-        text-only workloads or when the model config cannot be resolved)."""
-        from aiconfigurator.sdk.backends.base_backend import BaseBackend
+        text-only workloads or when the model config cannot be resolved).
 
-        try:
-            enc_cfg = get_model_config_from_model_path(self.primary_model_path).get("extra_params")
-        except Exception:
-            return self.isl
-        return self.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, self.build_runtime_config())
+        Delegates to :func:`sweep.vl_effective_isl` -- the same implementation
+        sweep_disagg divides its token budget by, so the batch intent encoded
+        in ``prefill_max_num_tokens`` round-trips exactly.
+        """
+        from aiconfigurator.sdk.sweep import vl_effective_isl
+
+        return vl_effective_isl(self.primary_model_path, self.build_runtime_config())
 
     def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
         """Build a ModelConfig template for the given role (parallelism unset).

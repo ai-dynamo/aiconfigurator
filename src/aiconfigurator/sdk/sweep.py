@@ -107,6 +107,24 @@ _DEFAULT_AGG_BATCH_SCHEDULE: list[int] = (
 )
 
 
+def vl_effective_isl(model_path: str, runtime_config: config.RuntimeConfig) -> int:
+    """Per-request effective ISL: text ISL plus vision context tokens.
+
+    Single source of truth for the VL token accounting shared by ``Task``
+    (which builds token budgets as ``batch x effective_isl``) and
+    ``sweep_disagg`` (which divides the budget by the same value to recover
+    the batch range) -- deriving it in two places would silently break that
+    round trip.  Falls back to the plain text ISL when the model config
+    cannot be resolved or the model / workload has no vision input.
+    """
+    try:
+        enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+    except Exception:
+        logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
+        return runtime_config.isl
+    return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+
+
 # ---------------------------------------------------------------------------
 # Rate matching (disagg post-processing, inlined for sweep's internal use)
 # ---------------------------------------------------------------------------
@@ -1146,15 +1164,9 @@ def sweep_disagg(
 
     # Vision tokens occupy the prefill context, so the per-request cost that
     # divides the token budget is the effective ISL (mirrors the legacy
-    # DisaggInferenceSession and the agg sweep above).
-    try:
-        _enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-    except Exception:
-        logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-        _enc_cfg = None
-    prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-        _enc_cfg, runtime_config
-    )
+    # DisaggInferenceSession and the agg sweep above).  Task builds the
+    # budget with the same helper, so the caller's batch intent round-trips.
+    prefill_effective_isl = vl_effective_isl(model_path, runtime_config)
     if prefill_max_num_tokens < prefill_effective_isl:
         logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective ISL")
         prefill_max_num_tokens = prefill_effective_isl
