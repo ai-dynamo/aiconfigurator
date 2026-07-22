@@ -124,6 +124,36 @@ def test_gemma4_profiles_route_to_flashinfer(monkeypatch, phase):
     assert {config.head_dim for config in configs} == {256, 512}
 
 
+def test_flashinfer_path_pins_the_trtllm_gen_sub_backend():
+    # create_attention only selects the backend CLASS; serving additionally
+    # pins the flashinfer sub-backend to "trtllm-gen" for every FLASHINFER
+    # layer (Gemma4, models/modeling_gemma4.py:263-270@1.3.0rc20). Without the
+    # pin FlashInferAttention defaults to "fa2" (flashinfer.py:1372), a kernel
+    # serving never runs — so run_attention_torch must set it. AST-only check
+    # keeps this runnable on CUDA-free CI (run_attention_torch cannot be exec'd
+    # without the framework).
+    source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    run_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+    )
+    pins = [
+        node
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and node.targets[0].attr == "flashinfer_backend"
+        and isinstance(node.value, ast.Constant)
+    ]
+    assert [pin.value.value for pin in pins] == ["trtllm-gen"], (
+        "run_attention_torch must pin the flashinfer sub-backend to serving's "
+        "trtllm-gen exactly once"
+    )
+
+
 def _case_functions():
     namespace = {
         "os": __import__("os"),
