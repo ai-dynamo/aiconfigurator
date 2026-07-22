@@ -345,8 +345,8 @@ def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
         "vllm": {
-            "deepseek-ai/DeepSeek-V4-Flash": set(),
-            "deepseek-ai/DeepSeek-V4-Pro": set(),
+            "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+            "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
@@ -519,6 +519,29 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
     assert selected_modes("sglang", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+
+
+def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():
+    from collector.case_generator import get_moe_quantization_modes
+
+    def selected_modes(sm_version):
+        return {
+            mode
+            for mode in get_moe_quantization_modes(
+                "vllm",
+                sm_version=sm_version,
+                runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+            )
+            if moe_model_allows_quantization("vllm", "deepseek-ai/DeepSeek-V4-Flash", mode)
+        }
+
+    # The trtllm-gen MXFP4xMXFP8 kernel exists only on the SM100 capability
+    # family; SM90 serves this artifact as Marlin W4A16 and SM120 routes to
+    # DeepGemmFP4/Marlin, so the label must not be collected there.
+    assert selected_modes(90) == set()
+    assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(103) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(120) == set()
 
 
 def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
@@ -731,7 +754,7 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         "vllm",
         sm_version=100,
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
-    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
     assert get_moe_quantization_modes(
         "vllm",
         sm_version=120,
