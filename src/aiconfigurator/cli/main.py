@@ -322,6 +322,12 @@ def _add_default_mode_arguments(parser):
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
     parser.add_argument(
+        "--disable-encoder-dp",
+        action="store_true",
+        help="Model the vision encoder as TP-sharded instead of the default data-parallel "
+        "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -540,6 +546,12 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
+        "--disable-encoder-dp",
+        action="store_true",
+        help="Model the vision encoder as TP-sharded instead of the default data-parallel "
+        "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
     )
     parser.add_argument(
         "--batch-size",
@@ -1201,6 +1213,7 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1368,6 +1381,8 @@ def build_default_tasks(
         global_kwargs["image_height"] = image_height
         global_kwargs["image_width"] = image_width
         global_kwargs["num_images_per_request"] = num_images
+    if not enable_encoder_dp:
+        global_kwargs["enable_encoder_dp"] = False
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
@@ -2070,6 +2085,7 @@ def _run_estimate_mode(args):
         image_height=args.image_height,
         image_width=args.image_width,
         num_images=args.num_images,
+        enable_encoder_dp=not args.disable_encoder_dp,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
         tp_size=args.tp_size,
@@ -2149,6 +2165,7 @@ def _run_estimate_mode(args):
     print(f"  OSL:              {result.osl}")
     if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
         print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
+        print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
     # mode (agg / disagg / afd / static*), so surface them in the summary box
@@ -2417,6 +2434,7 @@ def main(args):
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            enable_encoder_dp=not args.disable_encoder_dp,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
