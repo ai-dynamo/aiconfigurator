@@ -80,7 +80,7 @@ Each model class has a `create(cls, model_info, model_config, backend_name)` cla
 ### Key Files
 
 - **`base.py`** — `BaseModel` defines the shared constructor (model metadata, quant config, layer counts) and the `get_kvcache_*` helpers. `_MODEL_REGISTRY` and `register_model(*families)` live here.
-- **`helpers.py`** — Pure functions for model discovery (`_get_model_info`, `get_model_family`, `check_is_moe`), quantization defaults (`_apply_model_quant_defaults`), and MTP math (`calc_expectation`).
+- **`helpers.py`** — Pure functions for model discovery (`_get_model_info`, `get_model_family`, `check_is_moe`), quantization defaults (`_apply_model_quant_defaults`), and MTP math (`mtp_scale_factor`).
 - **`__init__.py`** — The `get_model()` entry point, auto-discovery loop, and backward-compatible re-exports.
 
 ### Architecture-to-Family Mapping

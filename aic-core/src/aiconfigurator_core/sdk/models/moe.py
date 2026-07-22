@@ -8,7 +8,7 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import calc_expectation
+from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -62,14 +62,7 @@ class MOEModel(BaseModel):
         super().__init__(*args)
 
         # MTP scale factor: throughput boost / compute overhead
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-            if self._nextn > 0
-            else 1.0
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
 
         # make sure the paralel width is same (cp is an independent attention
         # dimension that also contributes to the width the MoE must match)
@@ -402,14 +395,7 @@ class SGLangEPMOEModel(BaseModel):
         super().__init__(*args)
 
         # MTP scale factor: throughput boost / compute overhead
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-            if self._nextn > 0
-            else 1.0
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
 
         # make sure the parallel width is same (cp is an independent attention
         # dimension that also contributes to the width the MoE must match)

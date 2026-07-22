@@ -262,6 +262,44 @@ class TestCLIArgumentParsing:
         assert isinstance(param_value, expected_type)
         assert param_value == expected_type(value)
 
+    def test_nextn_accepts_auto(self, cli_parser):
+        """--nextn auto is a literal pass-through; resolution against the
+        checkpoint happens later, once the model config is loaded."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+        assert args.nextn == "auto"
+
+    @pytest.mark.parametrize("bad_value", ["-1", "1.5", "always", ""])
+    def test_nextn_rejects_non_auto_junk(self, cli_parser, bad_value):
+        """--nextn takes a non-negative integer or the literal 'auto'."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--nextn",
+                    bad_value,
+                ]
+            )
+
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
         args = cli_parser.parse_args(
@@ -344,51 +382,3 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
-
-    def test_nextn_default_value(self, cli_parser):
-        """Test that --nextn defaults to 0."""
-        args = cli_parser.parse_args(
-            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
-        )
-        assert args.nextn == 0
-
-    def test_nextn_accept_rates_default_value(self, cli_parser):
-        """Test that --nextn-accept-rates defaults to '0.85,0.3,0,0,0'."""
-        args = cli_parser.parse_args(
-            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
-        )
-        assert args.nextn_accept_rates == "0.85,0.3,0,0,0"
-
-    def test_nextn_can_be_set(self, cli_parser):
-        """Test that --nextn can be set to a custom value."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--nextn",
-                "3",
-            ]
-        )
-        assert args.nextn == 3
-
-    def test_nextn_accept_rates_can_be_set(self, cli_parser):
-        """Test that --nextn-accept-rates can be set to custom values."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--nextn-accept-rates",
-                "0.9,0.5,0.2,0.1,0",
-            ]
-        )
-        assert args.nextn_accept_rates == "0.9,0.5,0.2,0.1,0"

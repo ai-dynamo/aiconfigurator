@@ -85,6 +85,8 @@ _ALLOWED_CLI_FLAGS = {
         "--cuda-graph-max-bs",
         "--speculative-algorithm",
         "--speculative-num-steps",
+        "--speculative-eagle-topk",
+        "--speculative-num-draft-tokens",
         "--disable-overlap-schedule",
         "--load-balance-method",
     },

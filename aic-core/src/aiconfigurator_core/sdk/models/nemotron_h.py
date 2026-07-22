@@ -6,7 +6,7 @@ from __future__ import annotations
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import calc_expectation
+from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 
 
 @register_model("NEMOTRONH")
@@ -68,12 +68,7 @@ class NemotronHModel(BaseModel):
         # MTP block. This is bounded by ~1/L of one layer's cost (<1% of TPOT for these
         # deep models), and the dominant, exactly-correct term is the 1/(1+E[accept])
         # speedup. Not worth modeling an explicit attn+moe MTP block for sub-1% gain.
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
 
     def set_hybrid_config(self, hybrid_config: common.NemotronHConfig) -> None:
         """

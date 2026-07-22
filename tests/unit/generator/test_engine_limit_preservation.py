@@ -98,7 +98,7 @@ def test_module_bridge_propagates_preserve_engine_limits(value: bool):
         prefix=0,
         is_moe=False,
         nextn=0,
-        nextn_accept_rates=[],
+        nextn_accepted=None,
         serving_mode="agg",
         total_gpus=1,
         system_name="gb200",

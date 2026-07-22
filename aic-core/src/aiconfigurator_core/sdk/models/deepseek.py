@@ -8,7 +8,7 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import calc_expectation
+from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +112,7 @@ class DeepSeekModel(BaseModel):
         #    non-attn part
         # meanwhile, needs to scale the actual bs of generation by nextn,
         # this is covered in inferencesession
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -605,12 +600,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         self._moe_inter_size = moe_inter_size
 
         # MTP scale factor for generation phase
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
         self._pdl_factor = 0.9
         self._power_law_alpha = 1.01
 
@@ -1077,12 +1067,7 @@ class WideEPDeepSeekModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = (
-            1.0
-            / (1 + calc_expectation(self._nextn, self._nextn_accept_rates))
-            * (self._nextn + self._num_layers)
-            / self._num_layers
-        )
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
 
         h = self._hidden_size
         tp_size = self.config.tp_size

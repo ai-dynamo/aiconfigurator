@@ -66,12 +66,12 @@ def create_readme_tab(app_config):
                     1. For static mode, you specify the batch size. Context and generation phase will use the same batch size.
                     2. For pareto estimation, you need to specify the first token latency to filter out those results that have TTFT larger than the limit.
                 #### ---> Misc config
-                    For models supporting speculative decoding (MTP), you can define misc config about MTP and acceptance rate.
+                    For models supporting speculative decoding (MTP), you can define misc config about MTP.
                     1. nextn
-                        mtp0, mtp1, mtp2, mtp3, mtp4, mtp5.
-                    2. nextn accept rates
-                        The probability of the model accepting the input for a given nextn. It's a list of 5 numbers.
-                        0.85,0,0,0,0 means 1st draft token is accepted with 85% probability. Starting from 2nd draft token, the probability is zero.
+                        MTP draft length (no fixed upper bound). MTP is never auto-enabled; leave at 0 to disable.
+                    2. nextn_accepted
+                        Average number of draft tokens accepted per decode step (0 <= nextn_accepted <= nextn).
+                        Required when nextn > 0 — use a measured value from your deployment.
                 #### ---> System config
                     GPU type, which framework to use, specific version of the framework.
                 #### ---> Quantization config

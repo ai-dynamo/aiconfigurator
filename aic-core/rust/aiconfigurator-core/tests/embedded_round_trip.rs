@@ -109,7 +109,7 @@ fn embedded_build_then_pure_rust_predict() {
         None,    // fmha_quant_mode
         None,    // comm_quant_mode
         0,       // nextn
-        None,    // nextn_accept_rates
+        None,    // nextn_accepted
         None,    // kv_block_size
         None,    // resolve the installed core wheel's bundled systems data
     )

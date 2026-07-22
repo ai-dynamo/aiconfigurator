@@ -34,7 +34,7 @@ class TestUpdateModelRelatedComponents:
 
     def test_gemma4mix_shows_moe_controls(self):
         """`google/gemma-4-26B-A4B` resolves to the GEMMA4MIX family and is MoE,
-        so every MoE-related control (nextn, accept_rates, enable_wideep,
+        so every MoE-related control (nextn, nextn_accepted, enable_wideep,
         moe_quant_mode, moe_tp_size, moe_ep_size, dp_size) must render visible.
         """
         result = EventFn.update_model_related_components("google/gemma-4-26B-A4B")

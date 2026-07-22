@@ -35,7 +35,7 @@ def _task(
         prefix=0,
         is_moe=False,
         nextn=0,
-        nextn_accept_rates=[],
+        nextn_accepted=None,
         serving_mode=serving_mode,
         total_gpus=0,
         system_name=system_name,
