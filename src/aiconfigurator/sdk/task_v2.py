@@ -427,6 +427,9 @@ class Task:
     decode_cp_candidates: list[int] | None = None
 
     # ====== 8. Disagg orchestration ======
+    # Per-replica GPU budget (allowed replica sizes / size ceiling).  Disagg
+    # replicas always obey it; with enable_epd it also budgets the E+agg
+    # cells (an E+agg cell is a replica), with the same defaults.
     num_gpu_per_replica: list[int] | None = None
     max_gpu_per_replica: int | None = None
     max_prefill_workers: int | None = None
@@ -928,6 +931,9 @@ class Task:
             if self.total_gpus < 0:
                 raise ValueError(f"total_gpus of agg must be no smaller than 0, got {self.total_gpus}")
             self.agg_num_gpu_candidates = [n for n in self.agg_num_gpu_candidates if n <= self.total_gpus]
+            # E+agg cells are replicas: clamp their budget like disagg below.
+            if self.enable_epd and self.max_gpu_per_replica is not None:
+                self.max_gpu_per_replica = min(self.total_gpus, self.max_gpu_per_replica)
         else:
             if self.total_gpus < 2:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {self.total_gpus}")
@@ -943,6 +949,14 @@ class Task:
         def _set(name: str, values: list[int]) -> None:
             if getattr(self, name) is None:
                 setattr(self, name, values)
+
+        # E+agg cells are replicas: give them the same per-replica GPU budget
+        # defaults as disagg replicas (same fields, same vocabulary).
+        if self.enable_epd:
+            if self.num_gpu_per_replica is None:
+                self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
+            if self.max_gpu_per_replica is None:
+                self.max_gpu_per_replica = 128
 
         # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
         # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
@@ -1430,6 +1444,24 @@ class Task:
     # sweep.py kwargs builders
     # =====================================================================
 
+    def _replica_num_gpu_list(self) -> list[int] | None:
+        """Allowed per-replica GPU counts for the sweep's rate matching.
+
+        Mirror v1 get_working_list(num_gpu_per_replica, max_gpu_per_replica):
+        an explicit list is filtered by the cap; a None list (WideEP) becomes
+        range(1, cap+1) so the replica size stays bounded (the sweep gates by
+        this list, not a max ceiling).  Used by disagg replicas and, under
+        enable_epd, by the E+agg cells.
+        """
+        if self.num_gpu_per_replica:
+            num_gpu_list = self.num_gpu_per_replica
+            if self.max_gpu_per_replica is not None:
+                num_gpu_list = [n for n in num_gpu_list if n <= self.max_gpu_per_replica]
+            return num_gpu_list
+        if self.max_gpu_per_replica is not None:
+            return list(range(1, self.max_gpu_per_replica + 1))
+        return None
+
     def sweep_agg_kwargs(self, *, database, encoder_database=None) -> dict[str, Any]:
         """Return the exact kwargs needed for sweep.sweep_agg.
 
@@ -1457,6 +1489,9 @@ class Task:
             "encoder_batch_list": self.encoder_batch_candidates,
             "encoder_latency_correction": self.encoder_latency_correction,
             "encoder_database": encoder_database,
+            # Per-cell (per-replica) budget for the E+agg rate matching; a
+            # plain agg row is a single worker and ignores it.
+            "num_gpu_list": self._replica_num_gpu_list() if self.enable_epd else None,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database, encoder_database=None) -> dict[str, Any]:
@@ -1468,17 +1503,6 @@ class Task:
         # Derive worker count ranges from replica constraints (legacy semantics).
         prefill_worker_list = list(range(1, (self.max_prefill_workers or 32) + 1))
         decode_worker_list = list(range(1, (self.max_decode_workers or 32) + 1))
-        # Mirror v1 get_working_list(num_gpu_per_replica, max_gpu_per_replica): an explicit
-        # list is filtered by the cap; a None list (WideEP) becomes range(1, cap+1) so the
-        # replica size stays bounded (v2 sweep gates by this list, not a max ceiling).
-        if self.num_gpu_per_replica:
-            num_gpu_list = self.num_gpu_per_replica
-            if self.max_gpu_per_replica is not None:
-                num_gpu_list = [n for n in num_gpu_list if n <= self.max_gpu_per_replica]
-        elif self.max_gpu_per_replica is not None:
-            num_gpu_list = list(range(1, self.max_gpu_per_replica + 1))
-        else:
-            num_gpu_list = None
         # SGLang non-wideep disaggregated serving requires prefill/decode TP to match
         # (KV transfer layout constraint, ai-dynamo/dynamo#5870). WideEP relaxes it.
         require_same_tp = self.prefill_backend_name == "sglang" and not (
@@ -1509,7 +1533,7 @@ class Task:
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,
             "decode_num_worker_list": decode_worker_list,
-            "num_gpu_list": num_gpu_list,
+            "num_gpu_list": self._replica_num_gpu_list(),
             "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,

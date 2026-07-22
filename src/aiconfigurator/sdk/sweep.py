@@ -417,6 +417,7 @@ def sweep_agg(
     encoder_batch_list: list[int] | None = None,
     encoder_latency_correction: float = 1.0,
     encoder_database: PerfDatabase | None = None,
+    num_gpu_list: list[int] | None = None,
     predictor: Any = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
@@ -438,9 +439,13 @@ def sweep_agg(
     aggregated.  The agg worker becomes language-only (vision tokens stay in
     context, no ViT hosted); each row is then a rate-matched cell of
     ``(a)workers`` agg workers plus ``(e)workers`` encode workers, with the
-    encode batch latency added to TTFT.  Default (``enable_epd=False``) keeps
-    the encoder inline (colocated): its latency is part of the agg worker's
-    TTFT and its weights part of the worker's memory.
+    encode batch latency added to TTFT.  ``num_gpu_list`` is the allowed
+    per-cell (per-replica) GPU counts for those cells, exactly as in
+    ``sweep_disagg``; it is unused outside EPD (a plain agg row is a single
+    worker whose GPU count is already gated by the parallel candidates).
+    Default (``enable_epd=False``) keeps the encoder inline (colocated): its
+    latency is part of the agg worker's TTFT and its weights part of the
+    worker's memory.
 
     Args:
         model_path: HuggingFace model path or local path.
@@ -491,6 +496,9 @@ def sweep_agg(
         )
         model_config = copy.deepcopy(model_config)
         model_config.language_only = True
+    # Per-cell (per-replica) GPU budget for the E+agg rate matching, same
+    # semantics as sweep_disagg's num_gpu_list.
+    epd_num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
 
     for parallel_config in parallel_config_list:
         tp_size, pp_size, dp_size, moe_tp_size, moe_ep_size, cp_size = parallel_config
@@ -573,6 +581,7 @@ def sweep_agg(
                         point_df,
                         encoder_candidates,
                         ttft_target=point_rt.ttft,
+                        num_gpu_set=epd_num_gpu_set,
                     )
                 if len(point_df) == 0:
                     continue
@@ -818,11 +827,14 @@ def _overlay_encoder_stage(
     corrected wholesale, so the disaggregated encode stage must be too),
     while the agg path keeps 1.0 (run_agg adds the inline encoder outside
     its queueing factor).  The ``encoder_latency`` column stays the raw
-    stage latency, like the inline rows.  ``seq/s`` is unchanged: the
-    encode pool is sized to at least the rate-matched throughput; its GPUs
-    only dilute the per-GPU metrics.  ``power_w`` is re-weighted over the
-    three-phase timeline (encode + prefill + decode); the prefill phase
-    reuses the colocated worker's average power as an approximation.
+    stage latency, like the inline rows.  Three-pool rate matching: when
+    the encode pool's degraded capacity is below the row throughput (the
+    matcher may pick an encode-bound cell), ``seq/s`` is capped at that
+    capacity and the rate-derived columns rescale with it; per-request
+    latency columns are unaffected (the batch latency does not depend on
+    the pool size).  ``power_w`` is re-weighted over the three-phase
+    timeline (encode + prefill + decode); the prefill phase reuses the
+    colocated worker's average power as an approximation.
     """
     row = dict(disagg_dict)
     encoder_latency = encoder_worker["encoder_latency"]
@@ -839,6 +851,13 @@ def _overlay_encoder_stage(
     row["encoder_latency"] = encoder_latency
     row["ttft"] = prefill_ttft + encoder_ttft_share
     row["request_latency"] = row["request_latency"] + encoder_ttft_share
+    # Same association order as the matchers ((seq/s x deg) x workers) so
+    # the capped value is bit-identical to the capacity the argmax used.
+    encoder_capacity = encoder_worker["seq/s"] * _RATE_MATCH_ENCODER_DEGRADATION * encoder_num_worker
+    if 0 < encoder_capacity < row["seq/s"]:
+        row["tokens/s"] = row["tokens/s"] * (encoder_capacity / row["seq/s"])
+        row["seq/s"] = encoder_capacity
+        row["request_rate"] = encoder_capacity
     num_total_gpus = row["num_total_gpus"] + encoder_worker["num_total_gpus"] * encoder_num_worker
     row["seq/s/gpu"] = row["seq/s"] / num_total_gpus
     row["tokens/s/gpu"] = row["tokens/s"] / num_total_gpus
@@ -857,16 +876,23 @@ def _rate_match_agg_epd(
     encoder_records: list[dict],
     *,
     ttft_target: float,
+    num_gpu_set: set[int] | None = None,
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
     The agg counterpart of the disagg encoder rate matching + ``_overlay_encoder_stage``:
     for each (agg row, encode-worker choice) whose encode latency still fits
-    the TTFT budget, pick the cell of ``a`` agg workers + ``e`` encode workers
-    (``e`` = smallest count that does not bottleneck the agg throughput, the
-    EPD disagg convention) maximizing throughput-per-GPU; ties keep the
-    smaller cell.  The returned rows are per-cell — ``(a)workers`` agg workers
-    — so the downstream replicas logic scales whole cells.
+    the TTFT budget, sweep cells of ``a`` agg workers + ``e`` encode workers
+    -- ``e`` up to the first count that no longer binds (larger pools are
+    dominated), smaller counts making the encode pool the rate-matched
+    bottleneck (cell throughput = min of the two pools, applied by the
+    overlay).  ``num_gpu_set`` is the per-replica GPU budget, exactly as in
+    the disagg matching: cells whose total GPU count is not allowed are
+    skipped *before* the argmax, so a feasible small cell is never shadowed
+    by an infeasible better-amortized large one.  Among feasible cells the
+    throughput-per-GPU argmax wins; ties keep the smaller cell.  The
+    returned rows are per-cell — ``(a)workers`` agg workers — so the
+    downstream replicas logic scales whole cells.
     """
     rows: list[dict] = []
     for r in agg_df.to_dict("records"):
@@ -880,11 +906,17 @@ def _rate_match_agg_epd(
             encoder_capacity = float(enc["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
             best: tuple[tuple[float, int], int, int] | None = None
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
-                e_num = max(1, math.ceil(rate_one * a_num / encoder_capacity))
-                num_gpu = gpus_one * a_num + enc["num_total_gpus"] * e_num
-                key = (rate_one * a_num / num_gpu, -num_gpu)
-                if best is None or key > best[0]:
-                    best = (key, a_num, e_num)
+                agg_rate = rate_one * a_num
+                for e_num in range(1, max(1, math.ceil(agg_rate / encoder_capacity)) + 1):
+                    num_gpu = gpus_one * a_num + enc["num_total_gpus"] * e_num
+                    if num_gpu_set and num_gpu not in num_gpu_set:
+                        continue
+                    cell_rate = min(agg_rate, encoder_capacity * e_num)
+                    key = (cell_rate / num_gpu, -num_gpu)
+                    if best is None or key > best[0]:
+                        best = (key, a_num, e_num)
+            if best is None:
+                continue
             _, a_num, e_num = best
             cell = dict(r)
             cell["(a)workers"] = a_num
@@ -893,9 +925,11 @@ def _rate_match_agg_epd(
             cell["request_rate"] = cell["seq/s"]
             cell["concurrency"] = r["concurrency"] * a_num
             cell["num_total_gpus"] = gpus_one * a_num
-            # per-GPU metrics are recomputed by the overlay with the encode
-            # pool GPUs included; the agg worker covers both the prefill and
-            # decode phases of the power timeline.
+            # cell rate columns are the uncapped agg-side capacity; the
+            # overlay applies the min() with the encode pool and recomputes
+            # the per-GPU metrics with the encode GPUs included.  The agg
+            # worker covers both the prefill and decode phases of the power
+            # timeline.
             rows.append(
                 _overlay_encoder_stage(
                     cell,
@@ -1267,34 +1301,45 @@ def sweep_disagg(
     ) -> tuple[int, int, int]:
         """Pick (p_num, d_num, e_num) maximizing throughput per GPU.
 
-        The encode pool is the optional third rate-matched pool (EPD): for
-        each (p_num, d_num) it is sized to the smallest worker count that
-        does not bottleneck the rate-matched P/D throughput, so seq/s stays
-        min(p, d) while the encode GPUs count toward the per-GPU objective
-        and the replica GPU budget.  ``encoder_throughput = 0`` (plain PD)
-        drops the encoder terms entirely and returns ``e_num = 0``.
+        The encode pool is the optional third rate-matched pool (EPD),
+        fully symmetric with P and D: its size is swept like theirs and the
+        achieved throughput is the min of the three degraded pool
+        capacities -- the encode pool may itself be the bottleneck, running
+        at its degradation headroom exactly like a binding P or D pool.
+        ``encoder_throughput = 0`` (plain PD) drops the encoder terms
+        entirely and returns ``e_num = 0``.
         """
         prefill_opt, decode_opt, encoder_opt = -1, -1, -1
         throughput_per_gpu_max = 0.0
         encoder_capacity = encoder_throughput * _RATE_MATCH_ENCODER_DEGRADATION
         for d_num in d_num_workers:
             for p_num in p_num_workers:
-                p_corrected = prefill_throughput * p_num * prefill_deg
-                d_corrected = decode_throughput * d_num * decode_deg
-                required = min(p_corrected, d_corrected)
-                e_num = max(1, math.ceil(required / encoder_capacity)) if encoder_capacity > 0 else 0
-                num_gpu = prefill_gpus * p_num + decode_gpus * d_num + encoder_gpus * e_num
-                if num_gpu_set and num_gpu not in num_gpu_set:
-                    continue
                 if max_prefill_gpus is not None and max_decode_gpus is not None:
                     if prefill_gpus * p_num > max_prefill_gpus:
                         continue
                     if decode_gpus * d_num > max_decode_gpus:
                         continue
-                tpg = required / num_gpu
-                if tpg > throughput_per_gpu_max:
-                    throughput_per_gpu_max = tpg
-                    prefill_opt, decode_opt, encoder_opt = p_num, d_num, e_num
+                p_corrected = prefill_throughput * p_num * prefill_deg
+                d_corrected = decode_throughput * d_num * decode_deg
+                pd_required = min(p_corrected, d_corrected)
+                if encoder_capacity > 0:
+                    # Sweep the encode pool up to the first size that no
+                    # longer binds; larger pools are dominated (same
+                    # throughput, more GPUs).  Smaller sizes trade capped
+                    # throughput for GPUs -- and under a per-replica GPU
+                    # budget they are sometimes the only feasible cells.
+                    e_num_candidates = range(1, max(1, math.ceil(pd_required / encoder_capacity)) + 1)
+                else:
+                    e_num_candidates = (0,)
+                for e_num in e_num_candidates:
+                    required = pd_required if e_num == 0 else min(pd_required, encoder_capacity * e_num)
+                    num_gpu = prefill_gpus * p_num + decode_gpus * d_num + encoder_gpus * e_num
+                    if num_gpu_set and num_gpu not in num_gpu_set:
+                        continue
+                    tpg = required / num_gpu
+                    if tpg > throughput_per_gpu_max:
+                        throughput_per_gpu_max = tpg
+                        prefill_opt, decode_opt, encoder_opt = p_num, d_num, e_num
         return prefill_opt, decode_opt, encoder_opt
 
     disagg_df = pd.DataFrame(columns=common.ColumnsDisagg)
