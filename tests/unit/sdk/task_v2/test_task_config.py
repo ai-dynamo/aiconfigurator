@@ -42,7 +42,7 @@ def test_agg_with_model_resolves_identity_and_backend():
     assert t.nextn is not None
     assert t.backend_version is not None  # resolved to latest
     # Search space defaults populated
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
 
 
@@ -967,8 +967,8 @@ def test_sglang_agg_default_moe_ep_search():
     EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
     masked by always passing explicit candidates, caught by default-path parity."""
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
@@ -977,7 +977,7 @@ def test_sglang_agg_default_moe_ep_search():
         moe_backend="deepep_moe",
     )
     assert t2.agg_moe_tp_candidates == [1]
-    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
 def test_run_validates_by_default():
@@ -1790,7 +1790,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
     # Backend version resolved automatically
     assert d["backend_version"] is not None
     # Search candidates populated
-    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8, 16]
 
 
 def test_to_dict_excludes_internal_fields():
