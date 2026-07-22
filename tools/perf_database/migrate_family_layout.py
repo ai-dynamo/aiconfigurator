@@ -61,6 +61,13 @@ SHARED_LAYER_REUSE = "SHARED_LAYER_REUSE.txt"
 INCOMPLETE = "INCOMPLETE.txt"
 MARKER_NAMES = frozenset({SHARED_LAYER_REUSE, INCOMPLETE})
 
+# Structured per-version sidecars (provenance + declared reuse) that live beside
+# the perf tables in FAMILY-layout version dirs only: verify_tree must not treat
+# them as perf tables ("table not in catalog") and they never count toward the
+# per-table manifest. A legacy-layout version dir never legitimately contains
+# them, so scan_legacy_tree keeps failing closed on any occurrence there.
+STRUCTURED_SIDECAR_NAMES = frozenset({"collection_meta.yaml", "reuse.yaml"})
+
 DEFAULT_CATALOG = Path(__file__).resolve().parents[2] / "collector" / "op_backend_catalog.yaml"
 
 
@@ -388,7 +395,7 @@ def verify_tree(
             for backend_dir in sorted(p for p in family_dir.iterdir() if p.is_dir()):
                 for version_dir in sorted(p for p in backend_dir.iterdir() if p.is_dir()):
                     for f in sorted(p for p in version_dir.iterdir() if p.is_file()):
-                        if f.name in MARKER_NAMES:
+                        if f.name in MARKER_NAMES or f.name in STRUCTURED_SIDECAR_NAMES:
                             continue
                         if f.stem not in family_map:
                             errors.append(f"table not in catalog: {f.relative_to(data_root)}")

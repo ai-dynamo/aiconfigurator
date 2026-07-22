@@ -360,6 +360,17 @@ class TestVerify:
         assert errors
         assert any("wrong family" in e for e in errors)
 
+    def test_verify_skips_structured_sidecars_in_family_version_dirs(self, mod, family_map, family_set, tree):
+        """collection_meta.yaml / reuse.yaml land beside the parquet in family-layout
+        version dirs (next stacked PR); verify must not treat them as perf tables
+        ("table not in catalog") and they must not contribute to the table counts —
+        only the parquet does, so a manifest of exactly {parquet: 1} passes."""
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/gemm_perf.parquet")
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/collection_meta.yaml", b"schema_version: 1\n")
+        _touch(tree, "h200_sxm/gemm/trtllm/1.3.0rc15/reuse.yaml", b"reuse: {}\n")
+        assert mod.verify_tree(tree, family_map, family_set) == []
+        assert mod.verify_tree(tree, family_map, family_set, manifest={"gemm_perf.parquet": 1}) == []
+
 
 # --- Manifest: --manifest write (plan/execute) + count check (--verify) ------------
 
