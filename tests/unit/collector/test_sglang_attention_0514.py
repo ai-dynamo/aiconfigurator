@@ -401,7 +401,10 @@ def test_bf16_prefill_on_fp8_kv_fails_closed_on_internally_quantizing_backends()
 @pytest.mark.parametrize(
     "relative_path",
     [
-        "collector/trtllm/collect_attn.py",
+        # collector/trtllm/collect_attn.py adopted the per-model backend axis
+        # (trtllm_attn_backend) and now passes backend="trtllm"; its
+        # population contract is covered by
+        # test_trtllm_attention_backend.py.
         "collector/vllm/collect_attn.py",
         "collector/vllm/collect_attn_xpu.py",
     ],

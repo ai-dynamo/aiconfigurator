@@ -15,8 +15,16 @@ model_specific_base_ops:
   moonshotai/Kimi-K2.5:
     vllm:
       - encoder_attention
+    # TRT-LLM 1.3.0rc20 natively serves the full K2.5 VLM including the
+    # MoonViT3d tower (modeling_kimi_k25.py: 27-layer encoder,
+    # vt_hidden_size=1152 / vt_num_attention_heads=16 -> head_dim 72,
+    # matching the encoder_attention profile below).
+    trtllm:
+      - encoder_attention
   nvidia/Kimi-K2.5-NVFP4:
     vllm:
+      - encoder_attention
+    trtllm:
       - encoder_attention
 description: >
   Kimi-K2.5 hybrid MLA/MoE model-centric collection plan.
