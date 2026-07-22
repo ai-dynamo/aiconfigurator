@@ -133,6 +133,8 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
 
     if enc_cfg.partial_rotary_factor > 0:
         # the attention op's internal RoPE term is disabled in exchange (partial_rotary_factor=0.0).
+        # partial_rotary_factor gates the op but does not shrink it: the eager kernel
+        # duplicates the half-dim cos/sin table to full head_dim and rotates all of Q/K.
         rope_dim = 6 * (n_vit // tp_size) * head_size_vit
         result.append(ops.ElementWise("encoder_rope_apply", depth, rope_dim, rope_dim, 0.8))
 

@@ -187,6 +187,9 @@ def cli_default(
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
         osl: Output sequence length. Default is 1000.
+        enable_encoder_dp: Model the vision encoder data-parallel (default True;
+            vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
+            False models the legacy TP-sharded encoder.
         ttft: Time to first token target in ms. Default is 2000.
         tpot: Time per output token target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
