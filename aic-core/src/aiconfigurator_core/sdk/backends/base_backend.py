@@ -421,6 +421,12 @@ class BaseBackend:
     ) -> tuple[float, float, dict[str, float]]:
         """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
 
+        ``model`` may be any object carrying ``encoder_ops``,
+        ``encoder_config`` and the ``config`` parallelism fields
+        (``tp_size`` / ``enable_encoder_dp``), e.g.
+        ``models.vit_ops.EncoderOnlyModel`` -- the encoder phase reads
+        nothing else from it.
+
         Runs just the vision-encoder phase for one batch of ``batch_size``
         requests (each carrying ``runtime_config.num_images_per_request``
         images) and returns ``(latency_ms, power_w, memory_dict)``.
