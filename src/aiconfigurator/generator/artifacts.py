@@ -16,6 +16,7 @@ class ArtifactWriter:
     output_dir: str
     prefer_disagg: bool
     has_agg_role: bool
+    preserve_run_sh: bool = False
 
     def write(self, artifacts: dict[str, str]) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
@@ -40,7 +41,7 @@ class ArtifactWriter:
             mapped = self._map_engine_name(artifact_name)
             return os.path.join(self.output_dir, mapped)
         if artifact_name == "run.sh":
-            mapped = "run_x.sh"
+            mapped = "run.sh" if self.preserve_run_sh else "run_x.sh"
         else:
             mapped = artifact_name
         return os.path.join(self.output_dir, mapped)

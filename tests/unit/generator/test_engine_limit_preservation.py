@@ -54,7 +54,7 @@ def _params(*, preserve: bool, rule: str | None = None) -> dict:
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize("rule", [None, "benchmark"])
-def test_spica_preserves_evaluated_engine_limits(backend: str, rule: str | None):
+def test_externally_evaluated_engine_limits_are_preserved(backend: str, rule: str | None):
     params = _params(preserve=True, rule=rule)
 
     result = apply_rule_plugins(copy.deepcopy(params), backend)
@@ -72,7 +72,7 @@ def test_spica_preserves_evaluated_engine_limits(backend: str, rule: str | None)
             assert actual[key] == expected[key]
 
 
-def test_default_vllm_rules_still_resize_non_spica_requests():
+def test_default_vllm_rules_still_resize_unpinned_requests():
     result = apply_rule_plugins(_params(preserve=False), "vllm")
 
     assert result["params"]["prefill"]["max_num_tokens"] == 1628
