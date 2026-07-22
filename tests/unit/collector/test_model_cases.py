@@ -524,13 +524,13 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
 def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():
     from collector.case_generator import get_moe_quantization_modes
 
-    def selected_modes(sm_version):
+    def selected_modes(sm_version, *, mxfp4=True):
         return {
             mode
             for mode in get_moe_quantization_modes(
                 "vllm",
                 sm_version=sm_version,
-                runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+                runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": mxfp4},
             )
             if moe_model_allows_quantization("vllm", "deepseek-ai/DeepSeek-V4-Flash", mode)
         }
@@ -542,6 +542,8 @@ def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():
     assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
     assert selected_modes(103) == {"w4a8_mxfp4_mxfp8"}
     assert selected_modes(120) == set()
+    # The mxfp4 runtime-feature gate must hold even inside the SM interval.
+    assert selected_modes(100, mxfp4=False) == set()
 
 
 def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
