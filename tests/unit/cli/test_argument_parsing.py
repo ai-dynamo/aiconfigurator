@@ -17,8 +17,8 @@ pytestmark = pytest.mark.unit
 class TestCLIArgumentParsing:
     """Test CLI argument parsing and validation."""
 
-    def test_default_mode_core_args_are_conditionally_required(self, cli_parser):
-        """Default core args are validated after parsing so --thorough-config can stand alone."""
+    def test_default_mode_core_args_are_required(self, cli_parser):
+        """Default mode requires the model, GPU budget, and system."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
         assert len(subparsers) == 1
 
@@ -28,9 +28,9 @@ class TestCLIArgumentParsing:
         required_actions = [action for action in default_parser._actions if getattr(action, "required", False)]
         required_args = [action.dest for action in required_actions]
 
-        assert "model_path" not in required_args
-        assert "total_gpus" not in required_args
-        assert "system" not in required_args
+        assert "model_path" in required_args
+        assert "total_gpus" in required_args
+        assert "system" in required_args
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""
@@ -117,69 +117,37 @@ class TestCLIArgumentParsing:
         assert args.ttft == 2000.0
         assert args.tpot == 30.0
         assert args.request_latency is None
-        assert args.thorough_sweep is False
-        assert args.thorough_config is None
         assert args.inclusive_tpot is False
         assert args.prefix == 0
         assert args.engine_step_backend is None
 
-    def test_default_trace_path_is_not_public_cli(self, cli_parser):
-        """Trace replay should be configured through --thorough-config, not a single-format CLI shortcut."""
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--thorough-sweep", None),
+            ("--thorough-config", "/tmp/spica.yaml"),
+            ("--trace-path", "/tmp/traffic.jsonl"),
+            ("--trace-sweep-rounds", "5"),
+            ("--trace-parallel-evals", "5"),
+        ],
+    )
+    def test_removed_spica_flags_are_rejected(self, cli_parser, flag, value):
+        """The AIC CLI no longer exposes Spica or its trace-sweep controls."""
+        argv = [
+            "default",
+            "--model-path",
+            "Qwen/Qwen3-32B",
+            "--total-gpus",
+            "8",
+            "--system",
+            "h200_sxm",
+            flag,
+        ]
+        if value is not None:
+            argv.append(value)
+
         with pytest.raises(SystemExit):
-            cli_parser.parse_args(
-                [
-                    "default",
-                    "--model-path",
-                    "Qwen/Qwen3-32B",
-                    "--total-gpus",
-                    "8",
-                    "--system",
-                    "h200_sxm",
-                    "--trace-path",
-                    "/tmp/traffic.jsonl",
-                ]
-            )
-
-    def test_default_thorough_sweep_parses(self, cli_parser):
-        """--thorough-sweep selects Spica while still using regular default inputs."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--thorough-sweep",
-            ]
-        )
-
-        assert args.thorough_sweep is True
-        assert args.thorough_config is None
-
-    def test_default_thorough_config_parses_without_legacy_required_args(self, cli_parser):
-        """A native Spica config owns model/system/GPU inputs."""
-        args = cli_parser.parse_args(["default", "--thorough-config", "/tmp/spica.yaml"])
-
-        assert args.thorough_config == "/tmp/spica.yaml"
-        assert args.model_path is None
-        assert args.total_gpus is None
-        assert args.system is None
-
-    @pytest.mark.parametrize("flag", ["--trace-sweep-rounds", "--trace-parallel-evals"])
-    def test_default_trace_tuning_flags_are_not_public_cli(self, cli_parser, flag):
-        """Trace sweep tuning is intentionally configured by Spica config or internal env defaults."""
-        with pytest.raises(SystemExit):
-            cli_parser.parse_args(
-                [
-                    "default",
-                    "--thorough-config",
-                    "/tmp/spica.yaml",
-                    flag,
-                    "5",
-                ]
-            )
+            cli_parser.parse_args(argv)
 
     def test_inclusive_tpot_default_false_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
         """--inclusive-tpot defaults to False in exp mode."""
@@ -294,6 +262,44 @@ class TestCLIArgumentParsing:
         assert isinstance(param_value, expected_type)
         assert param_value == expected_type(value)
 
+    def test_nextn_accepts_auto(self, cli_parser):
+        """--nextn auto is a literal pass-through; resolution against the
+        checkpoint happens later, once the model config is loaded."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+        assert args.nextn == "auto"
+
+    @pytest.mark.parametrize("bad_value", ["-1", "1.5", "always", ""])
+    def test_nextn_rejects_non_auto_junk(self, cli_parser, bad_value):
+        """--nextn takes a non-negative integer or the literal 'auto'."""
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "8",
+                    "--system",
+                    "h200_sxm",
+                    "--nextn",
+                    bad_value,
+                ]
+            )
+
     def test_decode_system_defaults_to_system(self, cli_parser):
         """Decode system defaults to system when omitted and can be overridden."""
         args = cli_parser.parse_args(
@@ -376,51 +382,3 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
-
-    def test_nextn_default_value(self, cli_parser):
-        """Test that --nextn defaults to 0."""
-        args = cli_parser.parse_args(
-            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
-        )
-        assert args.nextn == 0
-
-    def test_nextn_accept_rates_default_value(self, cli_parser):
-        """Test that --nextn-accept-rates defaults to '0.85,0.3,0,0,0'."""
-        args = cli_parser.parse_args(
-            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "8", "--system", "h200_sxm"]
-        )
-        assert args.nextn_accept_rates == "0.85,0.3,0,0,0"
-
-    def test_nextn_can_be_set(self, cli_parser):
-        """Test that --nextn can be set to a custom value."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--nextn",
-                "3",
-            ]
-        )
-        assert args.nextn == 3
-
-    def test_nextn_accept_rates_can_be_set(self, cli_parser):
-        """Test that --nextn-accept-rates can be set to custom values."""
-        args = cli_parser.parse_args(
-            [
-                "default",
-                "--model-path",
-                "Qwen/Qwen3-32B",
-                "--total-gpus",
-                "8",
-                "--system",
-                "h200_sxm",
-                "--nextn-accept-rates",
-                "0.9,0.5,0.2,0.1,0",
-            ]
-        )
-        assert args.nextn_accept_rates == "0.9,0.5,0.2,0.1,0"

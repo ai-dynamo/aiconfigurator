@@ -252,7 +252,7 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
         "kv_cache_dtype": None,
         "kv_block_size": None,
         "nextn": None,
-        "nextn_accept_rates": None,
+        "nextn_accepted": None,
         "extra": {},
     }
     model = RustForwardPassPerfModel.from_native(config, {"min_observations": 2})
@@ -316,7 +316,7 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
         "kv_cache_dtype": None,
         "kv_block_size": None,
         "nextn": None,
-        "nextn_accept_rates": None,
+        "nextn_accepted": None,
         "extra": {},
     }
     model = RustForwardPassPerfModel.best_available(config, {"min_observations": 2})

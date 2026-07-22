@@ -12,6 +12,8 @@ RUN mkdir /opt/aiconfigurator && \
     uv venv --python 3.12 ${VIRTUAL_ENV} && \
     chmod a+rx /root && \
     chmod -R a+rX /root/.local
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV MPLCONFIGDIR=/tmp/matplotlib
 
@@ -131,7 +133,6 @@ RUN AIC_WHL=$(ls /wheelhouse/aiconfigurator-*.whl) && \
 
 COPY pytest.ini /workspace/
 COPY tests/ /workspace/tests/
-COPY docs/spica/examples/ /workspace/docs/spica/examples/
 COPY src/ /workspace/src/
 COPY aic-core/ /workspace/aic-core/
 COPY tools/ /workspace/tools/

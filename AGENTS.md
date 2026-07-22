@@ -44,11 +44,13 @@ Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environ
 - **Unit tests:** `pytest -m unit` (868+ tests; no external deps or LFS data needed)
 - **Build tests (PR subset):** `pytest -m "unit or build"` (requires LFS data for the `build`-marked tests)
 - **CLI:** `aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm` (works without LFS data)
-### Known Cloud Agent environment caveats
+### Known environment caveats
 
 1. **LFS data:** `github-cloud.githubusercontent.com` may be blocked by network egress restrictions. If `git lfs pull` fails, unit tests and CLI `generate`/`support` modes still work. The `default` mode and `build`-marked tests will fail.
 2. **TTY tests:** 4 tests in `tests/unit/cli/test_plain_output.py` may fail because the agent runs in a non-TTY environment.
 3. **Rust tests:** `tests/unit/sdk/test_rust_engine_step.py` requires `cargo` with network access to `crates.io`. It will fail if that domain is blocked.
+4. **macOS pytest-timeout crash dialogs:** The `timeout = 120` setting in `pytest.ini` uses SIGALRM by default, which triggers "Python unexpectedly quit" crash reporter popups on macOS. Pass `-p no:timeout` to disable it locally: `.venv/bin/pytest -m unit -p no:timeout`
+5. **torch-dependent tests:** `tests/unit/sdk/database/test_moe_dispatch.py` requires `torch` (not installed in the default dev venv). Ignore it with `--ignore=tests/unit/sdk/database/test_moe_dispatch.py`.
 
 ## CODEOWNERS
 

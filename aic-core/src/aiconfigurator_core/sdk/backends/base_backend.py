@@ -1572,7 +1572,7 @@ class BaseBackend:
 
         # MoE block-scale dispatch workspace (only for families that pay this cost).
         # 128 = block scale; 4 = float bytes.
-        if family in self.MOE_WORKSPACE_FAMILIES:
+        if family in self.MOE_WORKSPACE_FAMILIES and model._num_experts:
             moe_h = self._moe_workspace_width(model, family, h)
             activations += (
                 num_tokens

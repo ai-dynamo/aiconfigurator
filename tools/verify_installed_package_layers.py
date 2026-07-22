@@ -13,9 +13,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
-# Running this file directly prepends ``tools/`` to sys.path. That directory
-# contains helper scripts under ``tools/spica/``, which must not be mistaken for
-# the separately packaged top-level ``spica`` namespace during isolation checks.
+# Running this file directly prepends ``tools/`` to sys.path. Remove that path
+# so installed-package checks cannot accidentally resolve repository helpers.
 _TOOLS_DIR = Path(__file__).resolve().parent
 sys.path[:] = [entry for entry in sys.path if Path(entry or ".").resolve() != _TOOLS_DIR]
 
@@ -111,12 +110,12 @@ def _verify_upper(*, import_runtime: bool) -> str:
             "aiconfigurator/sdk/memory.py",
             "aiconfigurator/sdk/task_v2.py",
             "aiconfigurator/webapp/main.py",
-            "spica/config.py",
         ),
     )
     if import_runtime:
-        for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api", "spica.config"):
+        for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api"):
             importlib.import_module(module)
+    _forbid_module("spica")
     return aic_version
 
 

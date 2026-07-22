@@ -43,7 +43,7 @@ class GPTModel(BaseModel):
 
     def __init__(self, *args) -> None:
         super().__init__(*args)
-        assert self._nextn == 0, "Only DS V3 supports mtp"
+        assert self._nextn == 0, f"{type(self).__name__} does not support MTP speculative decoding (nextn must be 0)"
 
         h = self._hidden_size
         tp_size = self.config.tp_size

@@ -146,7 +146,7 @@ class TestMOEParallelismResolution:
                 moe_tp_size=1,
                 moe_ep_size=8,
                 nextn=nextn,
-                nextn_accept_rates=[0.85, 0.7, 0.5, 0.3, 0.2],
+                nextn_accepted=0.85,
             )
             return get_model("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", mc, backend_name="trtllm")
 
@@ -449,7 +449,7 @@ class TestHFModelSupport:
             moe_tp_size=1,
             moe_ep_size=1,
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = get_model(hf_id, model_config, backend_name="trtllm")
         assert model.model_family == "DEEPSEEKV4"
@@ -473,7 +473,7 @@ class TestHFModelSupport:
             moe_ep_size=8,
             attention_dp_size=1,
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         seq_len = 4096
@@ -508,7 +508,7 @@ class TestHFModelSupport:
             moe_ep_size=4,
             attention_dp_size=1,
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         local_inter_size = model._moe_inter_size // model_config.tp_size
@@ -539,7 +539,7 @@ class TestHFModelSupport:
             moe_backend="megamoe",
             workload_distribution="uniform",
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
 
@@ -563,7 +563,7 @@ class TestHFModelSupport:
             attention_dp_size=8,
             moe_backend="deepep_moe",
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
 
@@ -826,7 +826,7 @@ class TestGetKvcacheMaxTokens:
             moe_ep_size=8,
             attention_dp_size=1,
             nextn=1,
-            nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
+            nextn_accepted=0.85,
         )
         model = models.get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         window = model.extra_params.sliding_window

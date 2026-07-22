@@ -54,7 +54,7 @@ let engine = build_aic_engine(
     None,    // fmha_quant_mode
     None,    // comm_quant_mode
     0,       // nextn (MTP depth; 0 disables)
-    None,    // nextn_accept_rates
+    None,    // nextn_accepted
     None,    // kv_block_size
     None,    // systems_path (None uses the bundled data root)
 )?;
@@ -67,7 +67,7 @@ let decode = engine.decode_latency_ms(/* bs */ 1, /* isl */ 1024, /* osl */ 2)?;
 The `EngineConfig` identity carried by the spec groups its fields into cohesive
 sub-structs — `ParallelMapping` (`tp_size`, `pp_size`, `attention_dp_size`,
 `moe_tp_size`, `moe_ep_size`, `cp_size`), `QuantizationConfig`, and an optional
-`SpeculativeConfig` (`nextn`, `nextn_accept_rates`) — all `#[serde(flatten)]`-ed
+`SpeculativeConfig` (`nextn`, `nextn_accepted`) — all `#[serde(flatten)]`-ed
 so the wire JSON stays the flat object Python emits.
 
 ## Supported vs. not supported

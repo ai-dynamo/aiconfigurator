@@ -70,12 +70,14 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         or model_config.get("topk_group") is not None
         or model_config.get("topk_method") == "noaux_tc"
     )
-    # DeepSeek V4 (model_type "deepseek_ref") declares topk_method=noaux_tc
-    # but routes UNGROUPED in vLLM 0.24: its FusedMoE gets no expert grouping
-    # — only the noaux_tc e_score_correction_bias with sqrtsoftplus scoring
-    # and float32 router logits (models/deepseek_v4/nvidia/model.py:652-669,
-    # 557-561 @0.24.0). The bias/scoring fields below already carry that.
-    ungrouped_noaux_tc = model_type == "deepseek_ref"
+    # DeepSeek V4 declares topk_method=noaux_tc but routes UNGROUPED in vLLM
+    # 0.24: its FusedMoE gets no expert grouping — only the noaux_tc
+    # e_score_correction_bias with sqrtsoftplus scoring and float32 router
+    # logits (models/deepseek_v4/nvidia/model.py:652-669, 557-561 @0.24.0).
+    # The bias/scoring fields below already carry that. Both V4 model_types
+    # share that model code: "deepseek_ref" (the sgl-project FP8 requants)
+    # and "deepseek_v4" (the native expert_dtype=fp4 checkpoints).
+    ungrouped_noaux_tc = model_type in ("deepseek_ref", "deepseek_v4")
     if declares_grouped_routing and not use_grouped_topk and not ungrouped_noaux_tc:
         raise ValueError(
             f"vLLM MoE model {model_name!r} (model_type={model_type!r}) declares grouped/noaux_tc "
@@ -372,6 +374,28 @@ def run_moe_torch(
         )
     elif moe_type == "w4a16_mxfp4":
         quant_config = Mxfp4Config()
+    elif moe_type == "w4a8_mxfp4_mxfp8":
+        # Native DeepSeek-V4 (expert_dtype=fp4) serving path: vLLM overrides
+        # the checkpoint's fp8 quant_method to DeepseekV4FP8Config
+        # (models/deepseek_v4/quant_config.py:120-132 @0.24.0), which returns
+        # Mxfp4MoEMethod for the routed experts (quant_config.py:142-152);
+        # backend selection then runs select_deepseek_v4_mxfp4_moe_backend
+        # exactly as in serving. Constructor args mirror the checkpoints'
+        # quantization_config (fp8-serialized, dynamic, 128x128 blocks).
+        from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+
+        expert_dtype = _load_model_moe_config(model_name).get("expert_dtype")
+        if expert_dtype != "fp4":
+            raise ValueError(
+                f"vLLM MoE case {model_name!r} requests w4a8_mxfp4_mxfp8 but its packaged "
+                f"config declares expert_dtype={expert_dtype!r}; only the native fp4-expert "
+                "DeepSeek-V4 checkpoints run this path"
+            )
+        quant_config = DeepseekV4FP8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[128, 128],
+        )
     elif moe_type == "nvfp4":
         nvfp4_args = {
             "num_bits": 4,
@@ -430,6 +454,15 @@ def run_moe_torch(
         model="collector_dummy",
         quantization_config=None,
     )
+    if moe_type == "w4a8_mxfp4_mxfp8":
+        # DeepseekV4FP8Config resolves expert_dtype lazily from the current
+        # vllm_config's hf_config (models/deepseek_v4/quant_config.py:57-78
+        # @0.24.0); mirror the native checkpoint field so the RoutedExperts
+        # dispatch resolves to the MXFP4 expert path deterministically.
+        vllm_config.model_config.hf_config = SimpleNamespace(
+            model_type="deepseek_v4",
+            expert_dtype="fp4",
+        )
     vllm_config.scheduler_config.max_num_batched_tokens = max(num_tokens_lists)
     vllm_config.parallel_config.enable_expert_parallel = moe_ep_size > 1
 

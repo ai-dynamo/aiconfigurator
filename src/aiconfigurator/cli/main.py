@@ -14,7 +14,6 @@ import yaml
 from aiconfigurator import __version__
 from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.cli.spica.cli_adapter import run_spica_thorough_default
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
@@ -24,6 +23,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.config_builders import resolve_nextn_auto, validate_nextn
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
@@ -137,11 +137,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     common_parser.add_argument(
         "--deployment-target",
         type=str,
-        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize"],
+        choices=["dynamo-j2", "dynamo-python", "llm-d-helm", "llm-d-kustomize", "fpm"],
         default="dynamo-j2",
-        help="Deployment target platform. Options: dynamo-j2 (default, Jinja2 templates), "
+        help="Deployment target platform. Options: dynamo-j2 (default, typed Dynamo manifests), "
         "dynamo-python (Dynamo Python config modifiers), llm-d-helm (llm-d Helm values), "
-        "llm-d-kustomize (llm-d Kustomize overlays).",
+        "llm-d-kustomize (llm-d Kustomize overlays), fpm (reusable resource Pod + run.sh).",
     )
     common_parser.add_argument(
         "--engine-step-backend",
@@ -152,6 +152,54 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     add_generator_override_arguments(common_parser)
     return common_parser
+
+
+def _parse_nextn(value: str) -> int | str:
+    """argparse type for --nextn: a non-negative integer draft length, or 'auto'
+    to use the checkpoint's num_nextn_predict_layers."""
+    if value.strip().lower() == "auto":
+        return "auto"
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--nextn must be a non-negative integer or 'auto', got {value!r}") from None
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"--nextn must be >= 0 or 'auto', got {parsed}")
+    return parsed
+
+
+def _resolve_and_validate_nextn(args) -> None:
+    """Fail fast on inconsistent MTP input; resolve --nextn auto to the checkpoint depth.
+
+    Mutates ``args.nextn`` in place so everything downstream sees a plain int.
+    """
+    if args.nextn == "auto":
+        try:
+            resolved = resolve_nextn_auto(args.model_path)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        if resolved > 0:
+            logger.info(
+                "--nextn auto: modeling MTP with nextn=%d from the checkpoint's num_nextn_predict_layers.",
+                resolved,
+            )
+        else:
+            logger.info(
+                "--nextn auto: checkpoint ships no MTP layers (num_nextn_predict_layers absent or 0); "
+                "MTP stays disabled."
+            )
+        try:
+            validate_nextn(resolved, args.nextn_accepted)
+        except ValueError as exc:
+            raise SystemExit(
+                f"--nextn auto resolved to nextn={resolved} from the checkpoint's num_nextn_predict_layers: {exc}"
+            ) from exc
+        args.nextn = resolved
+        return
+    try:
+        validate_nextn(args.nextn, args.nextn_accepted)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _validate_model_path(model_path: str) -> str:
@@ -193,15 +241,15 @@ def _add_default_mode_arguments(parser):
         "--model",
         dest="model_path",
         type=_validate_model_path,
-        default=None,
+        required=True,
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
-    parser.add_argument("--total-gpus", type=int, default=None, help="Total GPUs for deployment.")
+    parser.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for deployment.")
     parser.add_argument(
         "--system",
         type=str,
-        default=None,
+        required=True,
         help=(
             "System name (GPU type). Example: "
             "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
@@ -302,24 +350,6 @@ def _add_default_mode_arguments(parser):
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
     parser.add_argument(
-        "--thorough-sweep",
-        action="store_true",
-        default=False,
-        help=(
-            "Experimental: use Spica's replay-backed thorough sweeper instead of the legacy AIC Pareto sweep. "
-            "Without --thorough-config, CLI inputs are converted to a Spica SmartSearchConfig."
-        ),
-    )
-    parser.add_argument(
-        "--thorough-config",
-        type=str,
-        default=None,
-        help=(
-            "Experimental: path to a native Spica SmartSearchConfig YAML file. Implies --thorough-sweep and "
-            "lets the file define the Spica search space, workload, goal, and sweep controls."
-        ),
-    )
-    parser.add_argument(
         "--inclusive-tpot",
         action="store_true",
         default=False,
@@ -331,20 +361,21 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
-        help="Number of draft tokens for MTP (Multi-Token Prediction) speculative decoding. "
-        "When set > 0, enables speculative decoding in the configuration search. "
-        "Requires the model to support MTP. Default: 0 (disabled).",
+        help="MTP (Multi-Token Prediction) draft length, or 'auto' to use the checkpoint's "
+        "num_nextn_predict_layers (absent/0 keeps MTP disabled). When the depth is > 0, enables "
+        "speculative decoding in the configuration search and requires --nextn-accepted. "
+        "Default: 0 (disabled); MTP is never enabled implicitly when the flag is omitted.",
     )
     parser.add_argument(
-        "--nextn-accept-rates",
-        type=str,
-        default="0.85,0.3,0,0,0",
-        help="Comma-separated acceptance rates for MTP draft tokens (5 values). "
-        "Each value is the acceptance probability of the i-th draft token; only the first "
-        "--nextn values are used. Example: '0.85,0.3,0,0,0' means the 1st draft token has "
-        "85%% acceptance, 2nd has 30%%, rest unused. Default: '0.85,0.3,0,0,0'.",
+        "--nextn-accepted",
+        type=float,
+        default=None,
+        help="Average accepted draft tokens per decode step (0 <= nextn_accepted <= nextn). "
+        "Required when --nextn > 0; there is no built-in acceptance assumption — "
+        "use a measured value from your deployment (e.g. the engine's reported "
+        "average acceptance length minus 1).",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -835,19 +866,20 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
-        help="(common) Number of MTP/speculative draft tokens. Default: 0 (disabled). "
-        "Applied to agg, disagg, and all static modes. "
-        "Note: unlike `cli default`, `cli estimate` does NOT auto-set nextn=1 for "
-        "DeepSeek/Qwen3.5 — pass --nextn 1 explicitly when you want MTP.",
+        help="(common) MTP draft length (compute cost side), or 'auto' to use the checkpoint's "
+        "num_nextn_predict_layers. Default: 0 (disabled); MTP is never enabled implicitly. "
+        "Applied to agg, disagg, and all static modes. Requires --nextn-accepted when the "
+        "depth is > 0.",
     )
     parser.add_argument(
-        "--nextn-accept-rates",
-        type=str,
-        default="0.85,0.3,0,0,0",
-        help="(common) Comma-separated acceptance rates for the MTP draft tokens "
-        "(only the first --nextn are used). Default: '0.85,0.3,0,0,0'.",
+        "--nextn-accepted",
+        type=float,
+        default=None,
+        help="(common) Average accepted draft tokens per decode step "
+        "(0 <= nextn_accepted <= nextn). Required when --nextn > 0; there is no "
+        "built-in acceptance assumption — use a measured value from your deployment.",
     )
     parser.add_argument(
         "--stride",
@@ -930,16 +962,6 @@ aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
     --perf-db-version 1.2.0rc5 \\
     --config-template-version 1.2.0rc6 \\
     --save-dir results
-# Install the Spica thorough sweeper with pip install 'aiconfigurator[spica]'
-# Run a Spica thorough sweep from normal default CLI inputs
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 \\
-    --backend trtllm \\
-    --total-gpus 32 --system h200_sxm \\
-    --isl 4000 --osl 1000 \\
-    --thorough-sweep
-
-# Run a Spica thorough sweep from a native SmartSearchConfig YAML
-aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 """
 
 
@@ -1165,8 +1187,8 @@ def build_default_tasks(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn: int | str = 0,
+    nextn_accepted: float | None = None,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -1191,8 +1213,12 @@ def build_default_tasks(
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: Number of draft tokens for MTP speculative decoding.
-        nextn_accept_rates: Acceptance rates for MTP draft tokens.
+        nextn: MTP draft length, or ``"auto"`` to use the checkpoint's
+            ``num_nextn_predict_layers`` (absent/0 keeps MTP disabled).
+            Default 0 (disabled); never enabled implicitly.
+        nextn_accepted: Average accepted draft tokens per decode step
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
@@ -1203,7 +1229,6 @@ def build_default_tasks(
         (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
         Otherwise returns 2 configs ('agg' and 'disagg').
     """
-    nextn_accept_rates = nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0]
     decode_system = decode_system or system
     # Expand "auto" backend to all available backends
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -1317,9 +1342,9 @@ def build_default_tasks(
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
     }
-    if nextn and nextn > 0:
+    if nextn == "auto" or (isinstance(nextn, int) and nextn > 0):
         global_kwargs["nextn"] = nextn
-        global_kwargs["nextn_accept_rates"] = nextn_accept_rates
+        global_kwargs["nextn_accepted"] = nextn_accepted
 
     if image_height or image_width or (num_images and num_images != 1):
         global_kwargs["image_height"] = image_height
@@ -2003,15 +2028,7 @@ def _run_estimate_mode(args):
         args.batch_size,
     )
 
-    # Parse nextn accept rates (string form on CLI -> list of floats for API).
-    nextn_accept_rates = None
-    if args.nextn_accept_rates:
-        try:
-            nextn_accept_rates = [float(x) for x in args.nextn_accept_rates.split(",") if x.strip() != ""]
-        except ValueError as exc:
-            raise SystemExit(
-                f"Invalid --nextn-accept-rates {args.nextn_accept_rates!r}; expected comma-separated floats."
-            ) from exc
+    _resolve_and_validate_nextn(args)
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2052,7 +2069,7 @@ def _run_estimate_mode(args):
         engine_step_backend=args.engine_step_backend,
         prefix=args.prefix,
         nextn=args.nextn,
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=args.nextn_accepted,
         stride=args.stride,
     )
 
@@ -2121,7 +2138,7 @@ def _run_estimate_mode(args):
     if args.prefix:
         print(f"  Prefix:           {args.prefix}")
     if args.nextn:
-        print(f"  MTP nextn:        {args.nextn} (accept_rates={args.nextn_accept_rates})")
+        print(f"  MTP nextn:        {args.nextn} (nextn_accepted={args.nextn_accepted})")
 
     if result.mode == "disagg":
         raw = result.raw
@@ -2283,24 +2300,22 @@ def _resolve_cli_log_level(args) -> int:
     return logging.INFO
 
 
-def _validate_default_mode_inputs(args) -> None:
-    """Validate default-mode args that are conditional on the selected sweeper."""
-    if args.mode != "default":
-        return
-    if getattr(args, "thorough_config", None):
+def _validate_fpm_sweep_tasks(args, tasks: dict[str, Task]) -> None:
+    """Reject task shapes that can only fail after an expensive FPM sweep."""
+    if getattr(args, "deployment_target", "dynamo-j2") != "fpm":
         return
 
-    required = {
-        "model_path": "--model-path/--model",
-        "total_gpus": "--total-gpus",
-        "system": "--system",
-    }
-    missing = [flag for attr, flag in required.items() if getattr(args, attr, None) is None]
-    if missing:
+    unsupported: list[str] = []
+    for name, task in tasks.items():
+        serving_mode = getattr(task, "serving_mode", None)
+        backend = getattr(task, "primary_backend_name", None)
+        if serving_mode != "agg" or backend != common.BackendName.vllm.value:
+            unsupported.append(f"{name} ({serving_mode or 'unknown'}/{backend or 'unknown'})")
+
+    if unsupported:
         raise SystemExit(
-            "default mode requires "
-            + ", ".join(missing)
-            + " unless --thorough-config provides a native Spica SmartSearchConfig."
+            "--deployment-target fpm supports only vLLM aggregated tasks; "
+            "unsupported task(s): " + ", ".join(unsupported)
         )
 
 
@@ -2346,10 +2361,7 @@ def main(args):
         return
 
     if args.mode == "default":
-        _validate_default_mode_inputs(args)
-        if getattr(args, "thorough_sweep", False) or getattr(args, "thorough_config", None):
-            run_spica_thorough_default(args)
-            return
+        _resolve_and_validate_nextn(args)
 
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
@@ -2392,7 +2404,7 @@ def main(args):
             request_latency=args.request_latency,
             prefix=args.prefix,
             nextn=args.nextn,
-            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            nextn_accepted=args.nextn_accepted,
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
@@ -2414,6 +2426,8 @@ def main(args):
             raise SystemExit(1)
     else:
         raise SystemExit(f"Unsupported mode: {args.mode}")
+
+    _validate_fpm_sweep_tasks(args, tasks)
 
     execute_kwargs: dict = {}
     if getattr(args, "strict_sla", False):

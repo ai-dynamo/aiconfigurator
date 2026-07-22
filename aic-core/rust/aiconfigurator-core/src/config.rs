@@ -131,21 +131,20 @@ pub struct QuantizationConfig {
 /// Multi-Token Prediction speculative-decoding parameters. Wrapped in
 /// `Option<>` on [`EngineConfig`] so models without MTP don't carry the
 /// noise, and `#[serde(flatten)]`-ed so the flat wire keys (`nextn`,
-/// `nextn_accept_rates`) parse unchanged.
+/// `nextn_accepted`) parse unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SpeculativeConfig {
-    /// Multi-Token Prediction speculative decoding depth (Python's
-    /// `task_config.nextn`). `None`/0 disables MTP scaling. Python sets this
-    /// to 1 for DeepSeek-family + Qwen3.5 models (`sdk/task.py:448-449`);
-    /// other families leave it at 0/None.
+    /// Multi-Token Prediction speculative decoding depth / draft length
+    /// (Python's `task_config.nextn`). `None`/0 disables MTP scaling. MTP is
+    /// never auto-enabled; the user opts in explicitly.
     #[serde(default)]
     pub nextn: Option<u32>,
 
-    /// Per-step accept-rate prior used by MTP scaling. Mirrors Python's
-    /// `task_config.nextn_accept_rates` (default `[0.85, 0.3, 0.0, 0.0,
-    /// 0.0]`). Ignored when `nextn` is `None` or 0.
+    /// Average accepted draft tokens per decode step used by MTP scaling
+    /// (Python's `task_config.nextn_accepted`, `0 <= nextn_accepted <= nextn`). Ignored
+    /// when `nextn` is `None` or 0.
     #[serde(default)]
-    pub nextn_accept_rates: Option<Vec<f64>>,
+    pub nextn_accepted: Option<f64>,
 }
 
 /// Backend performance database family.
@@ -224,7 +223,7 @@ mod engine_config_wire_tests {
             "kv_cache_dtype": "bfloat16",
             "kv_block_size": null,
             "nextn": null,
-            "nextn_accept_rates": null,
+            "nextn_accepted": null,
             "extra": {}
         }"#;
 

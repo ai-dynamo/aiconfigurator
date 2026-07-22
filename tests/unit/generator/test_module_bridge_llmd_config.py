@@ -26,7 +26,7 @@ def _task() -> SimpleNamespace:
         prefix=0,
         is_moe=False,
         nextn=0,
-        nextn_accept_rates=[],
+        nextn_accepted=None,
         serving_mode="disagg",
         total_gpus=0,
         system_name="h200_sxm",

@@ -51,15 +51,15 @@ models:
             pass_config:
               fuse_allreduce_rms: true
       # Provenance: opt-sglang-deepseek-v4-production-defaults (status: validated)
+      # Speculative decoding is driven solely by ModelConfig.nextn (the sglang
+      # rule emits the full NEXTN triple); an unconditional EAGLE default here
+      # deployed spec decoding that AIC never modeled and, combined with the
+      # rule's steps, could form an invalid triple.
       - match: {backend: sglang}
         roles: ["*"]
         backend_args:
           trust-remote-code: true
           disable-flashinfer-autotune: true
-          speculative-algorithm: EAGLE
-          speculative-num-steps: 3
-          speculative-eagle-topk: 1
-          speculative-num-draft-tokens: 4
     precision_variants:
       fp8:
         weight_dtype: fp8

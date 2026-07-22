@@ -1,6 +1,6 @@
 # Dynamo Deployment with Aiconfigurator Guide
 
-> **Note:** This guide covers Dynamo platform deployments (`--deployment-target dynamo-j2` or `dynamo-python`). For llm-d platform deployments, see the [llm-d deployment examples in the README](../README.md#deploying-to-llm-d-platform).
+> **Note:** This guide covers Dynamo platform deployments (`--deployment-target dynamo-j2` or `dynamo-python`). For llm-d platform deployments, see the [llm-d deployment examples in the README](../README.md#deploying-to-llm-d-platform). The separate FPM V1 resource-workload workflow is summarized in [Section 6](#6-fpm-v1-resource-workload-workflow).
 
 This guide walks through   
 - installing aiconfigurator
@@ -485,3 +485,31 @@ Use `--generator-set K8sConfig.<field>=value` (or place the same keys inside `--
 
 
 ---
+
+## 6. FPM V1 Resource Workload Workflow
+
+`--deployment-target fpm` is a separate target for a vLLM single aggregated-worker deployment with exactly one worker replica. It emits a Pod for a single-node topology and a `LeaderWorkerSet` when the resolved worker spans multiple nodes. Router/planner configurations and invalid FPM topologies fail closed. It does not change the output of `dynamo-j2`, `dynamo-python`, or llm-d targets.
+
+FPM V1 emits exactly two artifacts:
+
+```text
+artifacts/
+├── k8s_deploy.yaml   # keepalive Pod or LeaderWorkerSet
+└── run.sh            # rank-aware environment exports and complete vLLM command
+```
+
+The workload requests the generated image, per-node GPU limit, preserved custom resources, volumes, and mounts, but contains no engine arguments or engine/FPM environment variables. Add tokenized launch arguments through `Workers.agg.extra_cli_args: list[str]` and concrete `{name, value}` environment entries through `K8sConfig.extra_env`; the generator places both in `run.sh`. `--benchmark-mode` is required and accepts `agg`, `prefill`, or `decode`; it selects the runtime collection phase without changing the required single aggregated-worker topology. `K8sConfig.fpm_shared_memory_size`, `K8sConfig.fpm_resource_labels`, and `K8sConfig.worker_extra_pod_spec.mainContainer.resources` configure generated shared memory, workload/Pod labels, and non-GPU resource requests or limits. `valueFrom`, `envFrom`, and Secret-derived environment values are not supported in V1.
+
+For a single-node Pod, an agent can create the resource once and execute a generated script in it:
+
+```bash
+kubectl apply -f artifacts/k8s_deploy.yaml
+kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
+kubectl exec -i <pod> -- bash -s < artifacts/run.sh
+```
+
+For a multinode LWS, the collector stages the complete runtime bundle on every Pod and starts the same script concurrently across them. `run.sh` requires `LWS_WORKER_INDEX` and `LWS_LEADER_ADDRESS` from the LWS controller and appends the required model- or data-parallel coordination arguments. A multinode `--dump-config-to` path must contain `{node_rank}`; this substitution applies only to that option. For DP, each node waits for its local result files. Under the current schema-v1 contract it requires `status: complete`, `valid: true`, complete zero-skipped coverage, matching mode/point phase, and nested samples for the expected DP rank before stopping its engine; the earlier schema-v2 `status: passed` plus `config.dp_rank` form remains accepted for Phase 1 compatibility. Strict validation, result collection/aggregation/evidence, exit coordination, and cleanup remain collector responsibilities.
+
+Each collection still starts a new engine and reloads the model. `run.sh` stops result-producing engines after their local completion gate; the collector coordinates headless followers and final cleanup. The script refuses to overwrite any expected benchmark output, so use unique paths for every run. By default `/results` is backed by Pod-local `emptyDir`, and those results disappear when the Pod is deleted; a matching user-provided volume and mount are preserved. Persistent engines and reuse of a GPU-resident model are outside the V1 scope. A target cluster needs the LeaderWorkerSet API and controller for multinode artifacts. See the [CLI User Guide](cli_user_guide.md#fpm-v1-resource-workload-and-run-script) for the full input example.
+
+The current vLLM template matrix tops out at `0.20.1`; reference `0.24.0`-only flags may be passed through, but their runtime compatibility is not yet validated by the generator.

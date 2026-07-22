@@ -324,7 +324,7 @@ pub fn build_aic_engine(
     fmha_quant_mode: Option<&str>,
     comm_quant_mode: Option<&str>,
     nextn: u32,
-    nextn_accept_rates: Option<Vec<f64>>,
+    nextn_accepted: Option<f64>,
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<AicEngine, AicError> {
@@ -344,7 +344,7 @@ pub fn build_aic_engine(
         fmha_quant_mode,
         comm_quant_mode,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         kv_block_size,
         systems_path,
     )?;
@@ -373,7 +373,7 @@ fn compile_engine_from_flat(
     fmha_quant_mode: Option<&str>,
     comm_quant_mode: Option<&str>,
     nextn: u32,
-    nextn_accept_rates: Option<Vec<f64>>,
+    nextn_accepted: Option<f64>,
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<Engine, AicError> {
@@ -400,7 +400,7 @@ fn compile_engine_from_flat(
         kwargs.set_item("fmha_quant_mode", fmha_quant_mode)?;
         kwargs.set_item("comm_quant_mode", comm_quant_mode)?;
         kwargs.set_item("nextn", nextn)?;
-        kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
+        kwargs.set_item("nextn_accepted", nextn_accepted)?;
         kwargs.set_item("kv_block_size", kv_block_size)?;
         kwargs.set_item("systems_path", systems_root_str)?;
         engine_mod
@@ -442,10 +442,10 @@ pub(crate) fn compile_engine_to_engine(
         .as_ref()
         .and_then(|s| s.nextn)
         .unwrap_or(0);
-    let nextn_accept_rates = config
+    let nextn_accepted = config
         .speculative
         .as_ref()
-        .and_then(|s| s.nextn_accept_rates.clone());
+        .and_then(|s| s.nextn_accepted);
 
     compile_engine_from_flat(
         &config.model_name,
@@ -463,7 +463,7 @@ pub(crate) fn compile_engine_to_engine(
         fmha_quant_name(config.quantization.activation_dtype.as_ref()),
         None, // comm quant is not carried on EngineConfig; let Python default it.
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         config.kv_block_size,
         systems_path,
     )
