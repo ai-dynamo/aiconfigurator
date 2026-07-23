@@ -414,6 +414,19 @@ def _render_run_script(
     lines.extend(
         [
             "",
+            "# FlashInfer downloads missing cubins at first use; its default cache",
+            "# lives inside site-packages, which is read-only in the deployed image",
+            "# and crashes every engine worker with EACCES. Default the cache to the",
+            "# writable model-cache volume so pods reuse previously fetched cubins.",
+            'if [[ -z "${FLASHINFER_CUBIN_DIR:-}" && -n "${HF_HOME:-}" ]]; then',
+            '  export FLASHINFER_CUBIN_DIR="${HF_HOME}/flashinfer-cubins"',
+            "fi",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
             f"node_count={topology['node_count']}",
             f"data_parallel_size={topology['data_parallel_size']}",
             f"local_data_parallel_size={topology['local_data_parallel_size']}",
@@ -650,7 +663,7 @@ def _render_run_script(
             "  barrier_port=29511",
             "  if (( node_rank == 0 )); then",
             '    barrier_timeout="${FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS:-180}"',
-            "    python3 - \"$((node_count - 1))\" \"$barrier_port\" \"$barrier_timeout\" <<'PY'",
+            '    python3 - "$((node_count - 1))" "$barrier_port" "$barrier_timeout" <<\'PY\'',
             "import socket",
             "import sys",
             "import time",
@@ -681,8 +694,8 @@ def _render_run_script(
             "    )",
             "PY",
             "  else",
-            "    barrier_timeout=\"${FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS:-120}\"",
-            "    python3 - \"$master_addr\" \"$barrier_port\" \"$node_rank\" \"$barrier_timeout\" <<'PY'",
+            '    barrier_timeout="${FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS:-120}"',
+            '    python3 - "$master_addr" "$barrier_port" "$node_rank" "$barrier_timeout" <<\'PY\'',
             "import socket",
             "import sys",
             "import time",
