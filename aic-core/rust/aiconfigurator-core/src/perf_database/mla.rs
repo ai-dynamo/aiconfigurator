@@ -847,7 +847,8 @@ mod tests {
 
     #[test]
     fn op_level_context_mla_absent_on_vllm_b200() {
-        // vLLM b200 ships module-level MLA only; op-level context_mla_perf.txt
+        // vLLM b200 ships module-level MLA only; op-level
+        // context_mla_perf.parquet
         // is not present. Expect a clear IO error from the lazy loader.
         let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let err = table
@@ -861,7 +862,8 @@ mod tests {
 
     #[test]
     fn module_level_context_mla_exact_hit() {
-        // First row of b200_sxm/vllm/0.19.0/mla_context_module_perf.txt:
+        // First row of
+        // b200_sxm/mla/vllm/0.19.0/mla_context_module_perf.parquet:
         // mla=bfloat16 kv=bfloat16 gemm=bfloat16 n=128 b=1 isl=1 step=0 latency=0.1351
         let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let latency = table

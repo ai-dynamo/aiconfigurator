@@ -727,7 +727,8 @@ mod tests {
 
     #[test]
     fn context_attention_exact_hit() {
-        // First row of b200_sxm/vllm/0.19.0/context_attention_perf.txt:
+        // First row of
+        // b200_sxm/attention/vllm/0.19.0/context_attention_perf.parquet:
         // batch=8 isl=16384 n=64 n_kv=1 head_dim=128 attn=bfloat16 kv=fp8 step=0 latency=19.82
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table

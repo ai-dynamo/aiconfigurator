@@ -8,7 +8,7 @@ Op classes migrated from ``_legacy.py``:
 - ``MoE`` (ISSUE-12) — Mixture-of-Experts compute op. Owns:
     * ``_moe_data`` — regular MoE table
     * ``_moe_low_latency_data`` — TRT-LLM low-latency NVFP4 kernel table
-      (loaded from the same CSV as the regular MoE table; ``load_moe_data``
+      (loaded from the same perf table as the regular MoE data; ``load_moe_data``
       is the only loader that returns a tuple of two tables)
     * ``_wideep_context_moe_data`` — SGLang WideEP context MoE table
     * ``_wideep_generation_moe_data`` — SGLang WideEP generation MoE table
@@ -2383,7 +2383,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
 
 # ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
 
 
@@ -2516,7 +2516,7 @@ def load_moe_data(moe_file):
 
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
-    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
+    Load the SGLang WideEP context MoE data from wideep_context_moe_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2546,7 +2546,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         logger.debug("Legacy database format detected (wideep_context_moe) - power will default to 0.0")
 
     for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        # Parse the perf-table row schema with num_tokens instead of batch_size and input_len
         quant_mode = row["moe_dtype"]
         num_tokens = int(row["num_tokens"])
         hidden_size = int(row["hidden_size"])
@@ -2584,7 +2584,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
 
 def load_wideep_generation_moe_data(wideep_generation_moe_file):
     """
-    Load the SGLang wideep generation MoE data from wideep_generation_moe_perf.txt
+    Load the SGLang WideEP generation MoE data from wideep_generation_moe_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2614,7 +2614,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         logger.debug("Legacy database format detected (wideep_generation_moe) - power will default to 0.0")
 
     for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        # Parse the perf-table row schema with num_tokens instead of batch_size and input_len
         quant_mode = row["moe_dtype"]
         num_tokens = int(row["num_tokens"])
         hidden_size = int(row["hidden_size"])
@@ -2652,7 +2652,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
 
 def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
     """
-    Load the SGLang wideep deepep LL operation data from wideep_deepep_ll_perf.txt
+    Load the SGLang WideEP DeepEP LL data from wideep_deepep_ll_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2706,7 +2706,7 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
 
 def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
     """
-    Load the SGLang wideep deepep normal operation data from wideep_deepep_normal_perf.txt
+    Load the SGLang WideEP DeepEP normal data from wideep_deepep_normal_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2764,7 +2764,7 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
 
 def load_wideep_moe_compute_data(wideep_moe_compute_file):
     """
-    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
+    Load the TensorRT-LLM WideEP MoE compute data from wideep_moe_perf.parquet.
     This data represents pure computation time (excluding All2All communication).
 
     Returns:
@@ -2850,7 +2850,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
 
 def load_trtllm_alltoall_data(trtllm_alltoall_file):
     """
-    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
+    Load TensorRT-LLM AlltoAll data from trtllm_alltoall_perf.parquet.
     Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
 
     Returns:

@@ -94,8 +94,14 @@ python /new_workspace/test_internode.py  --test-ll-compatibility
 ```
 
 # Post-process log files
-Save the processed deepep data under path path/to/aiconfigurator/src/aiconfigurator/systems/data/xxx/sglang/<sglang_version>/.
-Replace xxx with the GPU type (e.g., A100). Point --log-dir to that directory.
+Keep raw DeepEP logs in a staging directory outside the packaged perf-data
+tree. Replace `xxx` with the GPU type (for example, A100) and point `--log-dir`
+to that directory.
 ```bash
-python aiconfigurator/collector/wideep/sglang/deepep/extract_data.py --log-dir path/to/aiconfigurator/src/aiconfigurator/systems/data/xxx/sglang/<sglang_version>/
+python collector/wideep/sglang/deepep/extract_data.py \
+  --log-dir path/to/deepep-logs/xxx/sglang/<sglang_version>/
 ```
+
+After validation and parquet finalization, publish
+`wideep_deepep_{normal,ll}_perf.parquet` under
+`aic-core/src/aiconfigurator_core/systems/data/<system>/comm/sglang/<sglang_version>/`.

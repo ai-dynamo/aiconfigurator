@@ -31,18 +31,19 @@ use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct CommunicationTable {
-    /// Directory containing `custom_allreduce_perf.parquet`. Resolved as
-    /// `<systems_root>/<data_dir>/<backend>/<version>/`.
+    /// Legacy-shaped logical root used to resolve
+    /// `comm/<backend>/<version>/custom_allreduce_perf.parquet`.
     data_root: PathBuf,
-    /// Directory containing `nccl_perf.parquet`. Resolved as
-    /// `<systems_root>/<data_dir>/nccl/<misc.nccl_version>/` to mirror
-    /// Python's system-wide NCCL data layout. `None` when the system YAML
-    /// has no `misc.nccl_version` declared.
+    /// Directory containing `nccl_perf.parquet`. Preferentially resolved as
+    /// `<systems_root>/<data_dir>/comm/nccl/<misc.nccl_version>/`, with the
+    /// legacy non-family path retained during the dual-read transition.
+    /// `None` when the system YAML has no `misc.nccl_version` declared.
     nccl_root: Option<PathBuf>,
-    /// Directory containing `oneccl_perf.parquet`. Resolved as
-    /// `<systems_root>/<data_dir>/oneccl/<misc.oneccl_version>/`. `None`
-    /// when the system YAML has no `misc.oneccl_version` declared (most
-    /// systems — OneCCL is the XPU fallback path).
+    /// Directory containing `oneccl_perf.parquet`. Preferentially resolved as
+    /// `<systems_root>/<data_dir>/comm/oneccl/<misc.oneccl_version>/`, with
+    /// the legacy non-family path retained during the dual-read transition.
+    /// `None` when the system YAML has no `misc.oneccl_version` declared
+    /// (most systems — OneCCL is the XPU fallback path).
     oneccl_root: Option<PathBuf>,
     /// Ordered, priority-sorted sources for `custom_allreduce_perf.parquet`
     /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
@@ -65,7 +66,8 @@ struct NcclGrids {
 }
 
 impl CommunicationTable {
-    /// `data_root` holds the backend/version dir for custom-allreduce.
+    /// `data_root` is the legacy-shaped logical backend/version root used by
+    /// the family-aware custom-allreduce resolver.
     /// `nccl_root` / `oneccl_root` point at the system-wide NCCL/OneCCL
     /// directories resolved from `SystemSpec.misc.{nccl,oneccl}_version`;
     /// callers without a system-spec-aware path may pass `None`, in which

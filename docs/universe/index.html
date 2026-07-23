@@ -500,7 +500,7 @@ const NODES = [
 
   // ---- L7 Measured operation rows ----
   {id:'op_data_points', l:7, repo:'aic', flag:'q', label:'Op Data Points', sub:'*_perf.parquet · shape + quant + kernel source → latency (+ power)',
-   det:{file:['aic-core/src/aiconfigurator_core/systems/data/<gpu>/<framework>/<framework-version>/','collector/registry_types.py','aic-core/src/aiconfigurator_core/sdk/common.py'],
+   det:{file:['aic-core/src/aiconfigurator_core/systems/data/<gpu>/<family>/<framework>/<framework-version>/','collector/registry_types.py','aic-core/src/aiconfigurator_core/sdk/common.py'],
      desc:'Measured operation rows for GEMM, attention, MoE, MLA/DSA, communication/NCCL, state-space, and module-level kernels. Common provenance includes GPU/device, framework, framework version, operation, and <code>kernel_source</code>; op-specific columns hold shape, parallelism, and quantization inputs, with latency and optional power as outputs. Collectors stage CSV and publish curated Parquet files.',
      sym:['<code>gemm_perf.parquet</code>','<code>context_attention_perf.parquet</code> · <code>generation_attention_perf.parquet</code>','<code>moe_perf.parquet</code> · <code>generation_mla_perf.parquet</code>','<code>nccl_perf.parquet</code> · <code>custom_allreduce_perf.parquet</code>'],
      q:'<b>Fidelity check.</b> Before trusting an op model, audit whether rows have a named, reproducible <code>kernel_source</code> or rely on a low-fidelity/shared fallback. The same data-point layer carries <code>used_cuda_graph</code>, framework/version, device, and operation provenance.'}},

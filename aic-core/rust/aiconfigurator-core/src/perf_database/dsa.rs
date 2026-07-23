@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn dsa_context_module_exact_hit() {
-        // First row of dsa_context_module_perf.txt:
+        // First row of dsa_context_module_perf.parquet:
         // arch=DeepseekV32ForCausalLM mla=bfloat16 kv=bfloat16 gemm=bfloat16
         // n=128 b=1 isl=1 step=0 latency=1.0972. Exact 4-axis hit — the
         // engine returns the measured leaf verbatim.

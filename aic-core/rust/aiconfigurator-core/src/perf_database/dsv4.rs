@@ -3,11 +3,11 @@
 
 //! DeepSeek-V4 attention module perf tables.
 //!
-//! Four primary module CSVs distinguished by `(attn_kind, mode)`:
-//! - `dsv4_csa_context_module_perf.txt` — CSA (compressed-sparse) context
-//! - `dsv4_hca_context_module_perf.txt` — HCA (hybrid-causal) context
-//! - `dsv4_csa_generation_module_perf.txt`
-//! - `dsv4_hca_generation_module_perf.txt`
+//! Four primary module parquets distinguished by `(attn_kind, mode)`:
+//! - `dsv4_csa_context_module_perf.parquet` — CSA (compressed-sparse) context
+//! - `dsv4_hca_context_module_perf.parquet` — HCA (hybrid-causal) context
+//! - `dsv4_csa_generation_module_perf.parquet`
+//! - `dsv4_hca_generation_module_perf.parquet`
 //!
 //! Each file loads from an ordered, shared-layer-aware source list (see
 //! [`PerfSource`]).
@@ -1236,9 +1236,6 @@ mod tests {
     #[test]
     fn dsv4_query_matches_python_v2_engine() {
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
-            return; // git-lfs data not materialized
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         let q_ctx = |kind, b, isl, prefix| {
@@ -1295,9 +1292,6 @@ mod tests {
     #[test]
     fn dsv4_pro_head_resolution_and_ragged_generation() {
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_generation_module_perf.parquet").exists() {
-            return; // git-lfs data not materialized
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         let q_gen = |kind, b, s| {
@@ -1350,10 +1344,6 @@ mod tests {
         // from `KvCacheQuantMode::Fp8.name()` = "fp8". Without load-side
         // normalization the lookup misses (Rust-only error vs Python success).
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
-            // Data files are git-lfs tracked; skip if not materialized.
-            return;
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         // (head=64, isl=512, batch=8, step=0) are measured grid points in the

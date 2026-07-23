@@ -11,6 +11,8 @@ single framework backend registry.
 - `collect_all_reduce.py`: local custom allreduce benchmark wrapper.
 - `slurm/`: multi-node Slurm communication collectors and post-processing.
 
-Perf output names stay unchanged (`nccl_perf.txt`, `oneccl_perf.txt`,
-`custom_allreduce_perf.txt`, and `trtllm_alltoall_perf.txt`) so existing perf
-database organization does not change with this source layout split.
+The standalone scripts keep their staging output names (`nccl_perf.txt`,
+`oneccl_perf.txt`, `custom_allreduce_perf.txt`, and
+`trtllm_alltoall_perf.txt`). Collector finalization converts accepted output
+to parquet under
+`aic-core/src/aiconfigurator_core/systems/data/<system>/comm/<backend>/<version>/`.

@@ -266,8 +266,8 @@ bash collector/sglang/dsv4_megamoe/run_slurm_full_collection.sh
 `TEST_ONLY=1` stages the repo and runs `sbatch --test-only` for every rendered
 job.  If a submitted Slurm run fails while `WAIT=1`, the runner writes
 `cancel_jobs.sh` and cancels the submitted jobs unless `KEEP_JOBS=1`.
-Set `COPY_VALIDATED=1` to copy the merged perf file into
-`src/aiconfigurator/systems/data/${SYSTEM_NAME,,}/sglang/${TARGET_SGLANG_VERSION}`;
+Set `COPY_VALIDATED=1` to finalize the merged staging file as parquet under
+`aic-core/src/aiconfigurator_core/systems/data/${SYSTEM_NAME,,}/moe/sglang/${TARGET_SGLANG_VERSION}`;
 set `ALLOW_VERSION_MISMATCH=0` when that copy should require exact collected
 SGLang version matching.
 

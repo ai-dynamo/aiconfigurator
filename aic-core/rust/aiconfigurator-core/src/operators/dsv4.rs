@@ -602,12 +602,6 @@ mod tests {
         let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        let data_dir = systems_root.join("data/b200_sxm/sglang/0.5.10");
-        if !data_dir.join("dsv4_csa_context_module_perf.parquet").exists()
-            || !data_dir.join("dsv4_paged_mqa_logits_module_perf.parquet").exists()
-        {
-            return; // git-lfs data not materialized
-        }
         let db = PerfDatabase::load(&systems_root, "b200_sxm", "sglang", "0.5.10")
             .expect("b200_sxm/sglang/0.5.10 must load");
         let op = dsv4_cp_op(AttnKind::Csa, 8, None);
@@ -638,10 +632,7 @@ mod tests {
     fn mqa_chunked_matches_python_on_gb200_data() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/gb200/sglang/0.5.10");
-        if !root.join("dsv4_paged_mqa_logits_module_perf.parquet").exists() {
-            return; // git-lfs data not materialized
-        }
+            .join("src/aiconfigurator_core/systems/data/gb200/sparse_attention/sglang/0.5.10");
         let table = Dsv4Table::new(root);
         let mut lookup =
             |chunk_isl: u32, past: u32| table.query_paged_mqa_logits(1, chunk_isl, past, 1, 64);

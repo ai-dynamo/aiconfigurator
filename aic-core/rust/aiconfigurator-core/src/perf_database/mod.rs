@@ -3,9 +3,9 @@
 
 //! Modular perf database with one table owner per op family.
 //!
-//! Each per-family submodule (`gemm`, etc.) owns its CSV loaders, query API,
+//! Each per-family submodule (`gemm`, etc.) owns its parquet loaders, query API,
 //! and runtime cache. Loading is lazy: `PerfDatabase::load` only resolves
-//! paths and parses the system YAML; each table's CSV is read on first
+//! paths and parses the system YAML; each table's parquet data is read on first
 //! query via `OnceLock`. Submodules cover the full op-family set: gemm,
 //! attention, mla, dsa, dsv4, mhc, moe, communication, state-space, and
 //! the WideEP/DeepEP all-to-all variants.
@@ -173,12 +173,13 @@ pub use wideep::WideEpTable;
 pub use wideep_mla::WideEpMlaTable;
 pub use wideep_moe::WideEpMoeTable;
 
-/// Modular performance database for a specific
-/// `<system>/<backend>/<version>` tuple.
+/// Modular performance database for a logical
+/// `<system>/<backend>/<version>` selection.
 ///
 /// `load` does the cheap work: resolves the data directory from the system
-/// YAML and constructs empty per-family tables. The first query on each
-/// family triggers the CSV read.
+/// YAML and constructs empty per-family tables. Physical table files live
+/// under `<system>/<family>/<backend>/<version>`; the first query on each
+/// family triggers the parquet read.
 pub struct PerfDatabase {
     pub system: String,
     pub backend: String,
@@ -321,14 +322,13 @@ mod tests {
         assert_eq!(db.system, "b200_sxm");
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
-        let gemm_sources = resolve_op_sources(
-            &PerfDbSources::default(),
-            "gemm_perf.parquet",
-            &db.data_root,
-        );
+        let gemm_sources =
+            resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &db.data_root);
+        assert_eq!(gemm_sources.len(), 1);
         assert!(
             gemm_sources[0].0.is_file(),
-            "resolved GEMM source must exist"
+            "resolved GEMM parquet must exist: {}",
+            gemm_sources[0].0.display()
         );
     }
 

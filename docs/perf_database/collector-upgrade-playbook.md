@@ -227,7 +227,8 @@ For data delivery:
 2. finalize staging files to parquet only after checkpoint failures are
    resolved or explicitly accepted by the delivery contract;
 3. place data under
-   `src/aiconfigurator/systems/data/<system>/<backend>/<version>/`;
+   `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`,
+   where `<family>` comes from `collector/op_backend_catalog.yaml`;
 4. regenerate kernel-source metadata when sources change;
 5. run parquet diff/review tools and loader tests;
 6. test representative Python and Rust consumer queries using the exact
