@@ -114,9 +114,7 @@ def test_gemma4_profiles_route_to_flashinfer(monkeypatch, phase):
         else get_attention_generation_shape_sweeps("trtllm")
     )
     configs = [
-        config
-        for sweep in sweeps
-        for config in get_attention_head_configs(sweep, phase=phase, backend="trtllm")
+        config for sweep in sweeps for config in get_attention_head_configs(sweep, phase=phase, backend="trtllm")
     ]
 
     assert configs, "Gemma4 attention profiles must populate"
@@ -135,9 +133,7 @@ def test_flashinfer_path_pins_the_trtllm_gen_sub_backend():
     source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
     run_fn = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
     )
     pins = [
         node
@@ -149,9 +145,27 @@ def test_flashinfer_path_pins_the_trtllm_gen_sub_backend():
         and isinstance(node.value, ast.Constant)
     ]
     assert [pin.value.value for pin in pins] == ["trtllm-gen"], (
-        "run_attention_torch must pin the flashinfer sub-backend to serving's "
-        "trtllm-gen exactly once"
+        "run_attention_torch must pin the flashinfer sub-backend to serving's trtllm-gen exactly once"
     )
+
+
+def test_dense_attention_uses_full_kv_cache_for_every_backend():
+    source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    run_fn = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+    )
+    assignments = [
+        node
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "kv_cache_type" for target in node.targets)
+    ]
+
+    assert len(assignments) == 1
+    value = assignments[0].value
+    assert isinstance(value, ast.Attribute)
+    assert value.attr == "SELF"
 
 
 def _case_functions():

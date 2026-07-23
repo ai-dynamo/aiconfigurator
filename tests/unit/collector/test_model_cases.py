@@ -844,6 +844,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         apply_model_filter=False,
     )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    trtllm_specs = get_mla_module_model_specs(backend="trtllm")
     vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -949,20 +950,23 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
         ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
+    assert trtllm_specs == vllm_specs
 
 
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 
-    for model_path, attention_type, architecture in (
-        ("nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+    for backend, model_path, attention_type, architecture in (
+        ("trtllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("trtllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+        ("vllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        specs = get_mla_module_model_specs(attention_type=attention_type, backend="vllm")
+        specs = get_mla_module_model_specs(attention_type=attention_type, backend=backend)
         assert [(spec.model_path, spec.architecture) for spec in specs] == [(model_path, architecture)]
 
 
@@ -1216,7 +1220,7 @@ def test_full_mode_ops_are_a_union_of_model_plan_ops():
             assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
 
 
-def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
+def test_mla_module_metadata_canonicalizes_consumer_keyed_backends():
     from collector.case_generator import get_mla_module_model_specs
 
     original_artifacts = {
@@ -1231,13 +1235,40 @@ def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
             for spec in get_mla_module_model_specs(
                 attention_type="mla",
                 backend=backend,
-                apply_model_filter=backend == "vllm",
+                apply_model_filter=backend in {"trtllm", "vllm"},
             )
         }
 
     assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
     assert paths("sglang") == original_artifacts
-    assert paths("trtllm") == original_artifacts
+    assert paths("trtllm") == {"deepseek-ai/DeepSeek-V3"}
+
+
+def test_trtllm_mla_module_getter_requests_backend_canonicalization():
+    from types import SimpleNamespace
+
+    source_path = REPO_ROOT / "collector/trtllm/collect_mla_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_module_test_cases"
+    )
+    calls = []
+
+    def get_model_specs(**kwargs):
+        calls.append(kwargs)
+        return [SimpleNamespace(model_path="deepseek-ai/DeepSeek-V3")]
+
+    namespace = {
+        "get_context_test_cases": lambda _attention_type: [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16"]],
+        "get_generation_test_cases": lambda _attention_type: [],
+        "get_mla_module_model_specs": get_model_specs,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    cases = namespace["_build_module_test_cases"]("mla", "context")
+
+    assert calls == [{"attention_type": "mla", "backend": "trtllm"}]
+    assert cases == [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16", "deepseek-ai/DeepSeek-V3", "mla"]]
 
 
 def test_support_matrix_models_have_model_case_aliases():

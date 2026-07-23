@@ -776,9 +776,10 @@ def get_mla_module_model_specs(
             )
         )
 
-    if backend == "vllm" and apply_model_filter and model_path_filter is None:
-        # vLLM 0.24 builds every module with the case's explicit precision and
-        # head count, so checkpoint aliases no longer change the invocation.
+    if backend in {"trtllm", "vllm"} and apply_model_filter and model_path_filter is None:
+        # TRT-LLM and vLLM build every module with the case's explicit
+        # precision and head count, so checkpoint aliases no longer change the
+        # consumer-visible identity.
         # MLA has one architecture-less consumer table (the perf rows carry no
         # lora/rope geometry key, so distinct-geometry models could not be
         # represented anyway); DSA is keyed by architecture. Stable first-wins
@@ -799,7 +800,7 @@ def get_mla_module_model_specs(
             canonical = canonical_specs[key]
             print(
                 f"mla_module: collapsed {len(dropped_paths)} declared spec(s) into canonical "
-                f"{canonical.model_path!r} for {key[0]} (architecture-less consumer table): "
+                f"{canonical.model_path!r} for {key[0]} (consumer identity {key!r}): "
                 f"{', '.join(dropped_paths)}"
             )
 
