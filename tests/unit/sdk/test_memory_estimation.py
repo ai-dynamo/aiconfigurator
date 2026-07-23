@@ -226,9 +226,9 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
 
 
 def test_breakdown_accepts_nextn_without_accepted(monkeypatch):
-    # Regression (Spica sweep): capacity math never consumes the acceptance
-    # benefit, so KV estimation with nextn > 0 must not require nextn_accepted
-    # -- a neutral 0.0 is applied to the ModelConfig instead.
+    # Capacity math never consumes the acceptance benefit, so external KV
+    # estimation callers with nextn > 0 must not require nextn_accepted -- a
+    # neutral 0.0 is applied to the ModelConfig instead.
     captured = {}
 
     def _fake_get_model(model_path, model_config, backend):
@@ -628,8 +628,8 @@ def test_estimate_kv_cache_propagates_when_fallback_disabled(monkeypatch):
 
 
 def test_estimate_kv_cache_nextn_accepted_is_optional_but_range_checked(monkeypatch):
-    # nextn without nextn_accepted must reach the breakdown (Spica's KV path
-    # never has an acceptance value); an out-of-range value still fails fast.
+    # nextn without nextn_accepted must reach the breakdown for external
+    # capacity callers; an out-of-range value still fails fast.
     reached = {"n": 0}
 
     def _spy(*args, **kwargs):

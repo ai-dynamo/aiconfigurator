@@ -396,7 +396,10 @@ The command will create two experiments for the given problem, one is `agg` and 
 
 #### Spica migration
 
-The experimental Spica smart sweeper has moved to the [Dynamo Profiler](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica). The AIC `--thorough-sweep` and `--thorough-config` flags have been removed; run Spica through `python -m dynamo.profiler.spica`.
+The experimental Spica smart sweeper has moved to Dynamo's standalone
+[AI Simulate distribution](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/aisimulate/spica).
+The AIC `--thorough-sweep` and `--thorough-config` flags have been removed. Install
+`aisimulate` from the Dynamo repository and run Spica through `python -m spica`.
 
 #### Systems Paths
 
