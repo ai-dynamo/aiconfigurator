@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 from collections import defaultdict
 
 import aiconfigurator
@@ -51,6 +52,8 @@ def main(args):
     """
     Main function for the WebApp.
     """
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
     try:
         import gradio as gr
     except ModuleNotFoundError as e:
@@ -97,9 +100,7 @@ def main(args):
     if not perf_database.get_supported_databases():
         raise SystemExit(perf_database.build_no_databases_message())
 
-    with gr.Blocks(
-        title="AIConfigurator for Disaggregated Serving Deployment",
-        css="""
+    _css = """
         .config-column {
             border-right: 5px solid #e0e0e0;
             padding-right: 20px;
@@ -122,7 +123,14 @@ def main(args):
             scrollbar-width: none !important;
             -ms-overflow-style: none !important;
         }
-    """,
+        /* Monospace font for debugging output textboxes */
+        .debug-output textarea {
+            font-family: monospace !important;
+        }
+    """
+
+    with gr.Blocks(
+        title="AIConfigurator for Disaggregated Serving Deployment",
     ) as demo:
         pareto_results_state = gr.State(defaultdict())
 
@@ -188,7 +196,7 @@ def main(args):
         if app_config["enable_profiling"]:
             EventHandler.setup_profiling_events(profiling_components)
 
-        demo.launch(server_name=args.server_name, server_port=args.server_port)
+        demo.launch(server_name=args.server_name, server_port=args.server_port, css=_css)
 
 
 if __name__ == "__main__":

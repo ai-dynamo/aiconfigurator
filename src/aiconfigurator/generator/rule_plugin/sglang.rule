@@ -31,3 +31,10 @@ when (ModelConfig.prefix or 0) > 0:
 when (ModelConfig.nextn or 0) > 0:
     speculative_decoding_type = "NEXTN"
     num_nextn_predict_layers = ModelConfig.nextn
+    # Guard: SGLang's (num-steps, eagle-topk, num-draft-tokens) triple must be
+    # emitted in full or not at all -- auto-derivation only runs when num-steps
+    # is None, and a partial triple crashes server startup (TypeError/assert in
+    # speculative_hook). Chain MTP: topk=1, draft = nextn+1 (verify width),
+    # matching the SDK's (nextn+1) decode-batch model.
+    speculative_eagle_topk = 1
+    speculative_num_draft_tokens = ModelConfig.nextn + 1

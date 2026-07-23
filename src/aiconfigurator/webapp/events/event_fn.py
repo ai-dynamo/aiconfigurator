@@ -177,7 +177,7 @@ class EventFn:
         moe_quant_mode,
         comm_quant_mode,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         enable_wideep,
         enable_eplb,
         mode,
@@ -199,7 +199,6 @@ class EventFn:
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
-                nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     tp_size=tp_size,
                     pp_size=pp_size,
@@ -212,7 +211,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -292,7 +291,7 @@ class EventFn:
         moe_quant_mode,
         comm_quant_mode,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         enable_wideep,
         enable_eplb,
     ):
@@ -308,7 +307,6 @@ class EventFn:
                 database = get_database(system_name, backend_name, version)
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
-                nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     tp_size=tp_size,
                     pp_size=pp_size,
@@ -321,7 +319,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -405,7 +403,7 @@ class EventFn:
         moe_quant_mode,
         comm_quant_mode,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         enable_wideep,
         enable_eplb,
     ):
@@ -422,7 +420,6 @@ class EventFn:
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
-                nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 model_config = config.ModelConfig(
                     gemm_quant_mode=common.GEMMQuantMode[gemm_quant_mode],
                     kvcache_quant_mode=common.KVCacheQuantMode[kvcache_quant_mode],
@@ -430,7 +427,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -540,7 +537,7 @@ class EventFn:
         ttft,
         request_latency,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         enable_wideep,
         enable_eplb,
         prefill_system_name,
@@ -602,7 +599,6 @@ class EventFn:
                 assert decode_database is not None
                 prefill_database.set_default_database_mode(common.DatabaseMode[prefill_database_mode])
                 decode_database.set_default_database_mode(common.DatabaseMode[decode_database_mode])
-                nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
                     pp_size=prefill_pp_size,
@@ -615,7 +611,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
@@ -633,7 +629,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
@@ -803,7 +799,7 @@ class EventFn:
         ttft,
         tpot,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         enable_wideep,
         enable_eplb,
         prefill_system_name,
@@ -899,7 +895,6 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
-                nextn_accept_rates = [float(x) for x in nextn_accept_rates.split(",")]
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
                     pp_size=prefill_pp_size,
@@ -912,7 +907,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
@@ -930,7 +925,7 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accept_rates=nextn_accept_rates,
+                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
@@ -1336,12 +1331,12 @@ class EventFn:
 
     @staticmethod
     def update_model_related_components(model_path):
-        # nextn, accept_rate, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size, wideep
+        # Output order: nextn, nextn_accepted, enable_wideep, moe_quant_mode, moe_tp_size, moe_ep_size, dp_size
         model_family = models.get_model_family(model_path)
         if check_is_moe(model_path):
             return (
                 gr.update(value=0, visible=True),
-                gr.update(visible=True),
+                gr.update(value=None, visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
                 gr.update(visible=True),
@@ -1352,7 +1347,7 @@ class EventFn:
             # LLAMA supports MTP (Multi-Token Prediction) speculative decoding
             return (
                 gr.update(value=0, visible=True),
-                gr.update(visible=True),
+                gr.update(value=None, visible=True),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
@@ -1363,7 +1358,7 @@ class EventFn:
             # GPT, NEMOTRONNAS, NEMOTRONH do not support nextn/MTP
             return (
                 gr.update(value=0, visible=False),
-                gr.update(visible=False),
+                gr.update(value=None, visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=False),

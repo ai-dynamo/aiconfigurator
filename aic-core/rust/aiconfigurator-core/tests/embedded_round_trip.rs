@@ -122,7 +122,7 @@ fn embedded_builder_and_compatibility_adapter_match() {
         None,    // fmha_quant_mode
         None,    // comm_quant_mode
         0,       // nextn
-        None,    // nextn_accept_rates
+        None,    // nextn_accepted
         None,    // kv_block_size
         None,    // resolve the installed core wheel's bundled systems data
     )

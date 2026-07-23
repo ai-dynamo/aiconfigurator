@@ -160,7 +160,7 @@ def task_config_to_generator_config(
         "prefix": prefix_tokens,
         "is_moe": task_config.is_moe,
         "nextn": task_config.nextn,
-        "nextn_accept_rates": task_config.nextn_accept_rates if task_config.nextn else None,
+        "nextn_accepted": task_config.nextn_accepted if task_config.nextn else None,
     }
     model_cfg = {k: v for k, v in model_cfg.items() if v is not None}
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))

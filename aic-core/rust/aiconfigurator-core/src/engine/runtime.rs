@@ -603,7 +603,9 @@ mod tests {
             },
             speculative: nextn.map(|n| crate::SpeculativeConfig {
                 nextn: Some(n),
-                nextn_accept_rates: None,
+                // Batch-scaling-only fixture; 0.0 keeps the enabled-MTP
+                // contract (nextn > 0 requires an acceptance value) satisfied.
+                nextn_accepted: Some(0.0),
             }),
             perf_db_sources: Default::default(),
             extra: BTreeMap::new(),

@@ -82,15 +82,6 @@ service = [
     "orjson>=3.10.16",
     "uvicorn>=0.34.2"
 ]
-spica = [
-    "google-vizier[jax]==0.1.21; python_version < '3.13'",
-    "jax==0.4.38; python_version < '3.13'",
-    "jaxlib==0.4.38; python_version < '3.13'",
-    "flax==0.10.0; python_version < '3.13'",
-    "optax==0.2.4; python_version < '3.13'",
-    "chex==0.1.87; python_version < '3.13'",
-    "tensorflow-probability[jax]==0.25.0; python_version < '3.13'",
-]
 
 [project.urls]
 GitHub = "https://github.com/ai-dynamo/aiconfigurator"
@@ -102,7 +93,6 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 aiconfigurator = "aiconfigurator.main:main"
-spica = "spica.__main__:main"
 
 [tool.setuptools]
 include-package-data = false
@@ -114,7 +104,7 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.sdk*", "aiconfigurator.webapp*", "spica*"]
+include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.sdk*", "aiconfigurator.webapp*"]
 exclude = ["aiconfigurator_core*"]
 
 [tool.uv.sources]
@@ -173,13 +163,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["aiconfigurator", "aiconfigurator_core", "spica", "utils", "helper"]
+known-first-party = ["aiconfigurator", "aiconfigurator_core", "utils", "helper"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]
-# Keep Spica's public exception names and its API-grouped export list stable.
-"src/spica/__init__.py" = ["RUF022"]
-"src/spica/config.py" = ["TRY004"]
-"src/spica/kv_estimate.py" = ["N818"]
-"src/spica/kv_load.py" = ["N818"]
-"src/spica/model_hw.py" = ["N818"]

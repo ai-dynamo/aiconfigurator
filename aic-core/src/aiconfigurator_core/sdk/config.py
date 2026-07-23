@@ -30,8 +30,11 @@ class ModelConfig:
     cp_style: str = "none"
     workload_distribution: str = "power_law"
     # quantization options
-    nextn: int = 0  # at most mtp5
-    nextn_accept_rates: list = None
+    # MTP speculative decoding: nextn = draft length (compute cost side),
+    # nextn_accepted = average accepted draft tokens per step (generation benefit
+    # side, 0 <= nextn_accepted <= nextn). nextn_accepted is required when nextn > 0.
+    nextn: int = 0
+    nextn_accepted: float = None
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20

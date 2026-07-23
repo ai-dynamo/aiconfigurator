@@ -311,7 +311,7 @@ struct EngineBuildRequest {
     fmha_quant_mode: Option<String>,
     comm_quant_mode: Option<String>,
     nextn: u32,
-    nextn_accept_rates: Option<Vec<f64>>,
+    nextn_accepted: Option<f64>,
     kv_block_size: Option<u32>,
     systems_path: Option<String>,
 }
@@ -352,7 +352,7 @@ impl AicEngineBuilder {
                 fmha_quant_mode: None,
                 comm_quant_mode: None,
                 nextn: 0,
-                nextn_accept_rates: None,
+                nextn_accepted: None,
                 kv_block_size: None,
                 systems_path: None,
             },
@@ -421,9 +421,9 @@ impl AicEngineBuilder {
     }
 
     /// Configure speculative decoding.
-    pub fn speculative_decoding(mut self, nextn: u32, accept_rates: Option<Vec<f64>>) -> Self {
+    pub fn speculative_decoding(mut self, nextn: u32, nextn_accepted: Option<f64>) -> Self {
         self.request.nextn = nextn;
-        self.request.nextn_accept_rates = accept_rates;
+        self.request.nextn_accepted = nextn_accepted;
         self
     }
 
@@ -470,7 +470,7 @@ mod builder_tests {
             .pp_size(2)
             .attention_dp_size(4)
             .moe_parallelism(Some(1), Some(8))
-            .speculative_decoding(2, Some(vec![0.8, 0.3]))
+            .speculative_decoding(2, Some(0.8))
             .kv_block_size(16)
             .systems_path("/tmp/systems");
         assert_eq!(builder.request.backend, "sglang");
@@ -481,7 +481,7 @@ mod builder_tests {
             (builder.request.moe_tp_size, builder.request.moe_ep_size),
             (Some(1), Some(8))
         );
-        assert_eq!(builder.request.nextn_accept_rates, Some(vec![0.8, 0.3]));
+        assert_eq!(builder.request.nextn_accepted, Some(0.8));
         assert_eq!(builder.request.kv_block_size, Some(16));
         assert_eq!(
             builder.request.systems_path.as_deref(),
@@ -533,7 +533,7 @@ pub fn build_aic_engine(
     fmha_quant_mode: Option<&str>,
     comm_quant_mode: Option<&str>,
     nextn: u32,
-    nextn_accept_rates: Option<Vec<f64>>,
+    nextn_accepted: Option<f64>,
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<AicEngine, AicError> {
@@ -553,7 +553,7 @@ pub fn build_aic_engine(
         fmha_quant_mode: fmha_quant_mode.map(str::to_owned),
         comm_quant_mode: comm_quant_mode.map(str::to_owned),
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         kv_block_size,
         systems_path: systems_path.map(str::to_owned),
     })
@@ -595,7 +595,7 @@ fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, Ai
         kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
         kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
         kwargs.set_item("nextn", request.nextn)?;
-        kwargs.set_item("nextn_accept_rates", request.nextn_accept_rates.clone())?;
+        kwargs.set_item("nextn_accepted", request.nextn_accepted)?;
         kwargs.set_item("kv_block_size", request.kv_block_size)?;
         kwargs.set_item("systems_path", systems_root_str)?;
         engine_mod
@@ -640,10 +640,7 @@ pub(crate) fn compile_engine_to_engine(
         .as_ref()
         .and_then(|s| s.nextn)
         .unwrap_or(0);
-    let nextn_accept_rates = config
-        .speculative
-        .as_ref()
-        .and_then(|s| s.nextn_accept_rates.clone());
+    let nextn_accepted = config.speculative.as_ref().and_then(|s| s.nextn_accepted);
 
     compile_engine_from_request(EngineBuildRequest {
         model_path: config.model_name.clone(),
@@ -665,7 +662,7 @@ pub(crate) fn compile_engine_to_engine(
         // Comm quant is not carried on EngineConfig; let Python default it.
         comm_quant_mode: None,
         nextn,
-        nextn_accept_rates,
+        nextn_accepted,
         kv_block_size: config.kv_block_size,
         systems_path: systems_path.map(str::to_owned),
     })

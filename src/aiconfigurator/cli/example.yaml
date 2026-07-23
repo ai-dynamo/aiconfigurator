@@ -61,9 +61,10 @@ agg_full:
   enable_eplb: false
   moe_backend: null
 
-  # Speculative decoding (auto-inferred from HF config if omitted)
+  # Speculative decoding: never auto-enabled. nextn = draft length,
+  # nextn_accepted = average accepted draft tokens per step (required when nextn > 0).
   nextn: 1
-  nextn_accept_rates: [0.85, 0, 0, 0, 0]
+  nextn_accepted: 0.85
 
   # Quantization override.
   # Default behavior: each mode is inferred from the model's HF config
@@ -112,9 +113,10 @@ disagg_full:
   tpot: 40.0
   total_gpus: 32
 
-  # Speculative decoding (shared; auto-inferred from HF config if omitted)
+  # Speculative decoding (shared): never auto-enabled. nextn = draft length,
+  # nextn_accepted = average accepted draft tokens per step (required when nextn > 0).
   nextn: 1
-  nextn_accept_rates: [0.85, 0, 0, 0, 0]
+  nextn_accepted: 0.85
 
   # MoE communication backend (shared; e.g. "deepep_moe" for SGLang WideEP).
   moe_backend: null

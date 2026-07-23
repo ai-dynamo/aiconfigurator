@@ -124,7 +124,7 @@ class BaseModel:
         )
 
         self._nextn = model_config.nextn
-        self._nextn_accept_rates = model_config.nextn_accept_rates
+        self._nextn_accepted = model_config.nextn_accepted
 
     @property
     def activation_hidden_size(self) -> int:
