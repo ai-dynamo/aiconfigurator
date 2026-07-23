@@ -14,9 +14,7 @@
 //!   releases the GIL around the Rust compute via [`Python::allow_threads`],
 //!   so the Rust compute runs without holding the GIL.
 //! * **Rust → Python → Rust (embedded path).** [`AicEngineBuilder`] is the
-//!   preferred Rust entry point. The flat [`build_aic_engine`] function remains
-//!   as a source-compatibility adapter for callers such as the Dynamo Mocker.
-//!   Both cross into Python once to run
+//!   Rust entry point. It crosses into Python once to run
 //!   `aiconfigurator_core.sdk.engine.compile_engine`, then build an [`Engine`]
 //!   from the returned bincode bytes. After that the `predict_*` hot path is
 //!   pure Rust with no GIL.
@@ -24,7 +22,8 @@
 //! Two error conversions live inline here (NOT in `common/error.rs`, which must
 //! stay free of the pyo3 dependency):
 //! * `AicError → PyErr` (`aic_to_py`) for the `#[pymethods]` boundary.
-//! * `PyErr → AicError` (inline in [`build_aic_engine`]) for the embedded path.
+//! * `PyErr → AicError` (inline in [`compile_engine_from_request`]) for the
+//!   embedded path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -113,7 +112,7 @@ pub struct AicEngine {
 
 impl AicEngine {
     /// Internal constructor shared by [`AicEngine::from_spec`] and
-    /// [`build_aic_engine`].
+    /// [`AicEngineBuilder::build`].
     fn new(engine: Engine) -> Self {
         AicEngine {
             inner: Arc::new(engine),
@@ -278,8 +277,9 @@ impl AicEngine {
 /// op-transfer). Python's `compile_engine` builds the `EngineSpec` as a JSON
 /// string (externally-tagged `Op` variants + `EngineConfig`) — JSON is the
 /// debuggable wire and the only format Python can produce — and calls this to
-/// get the bincode bytes that `AicEngine.from_spec` / `build_aic_engine`
-/// consume. `serde_json` round-trips `EngineConfig`'s `#[serde(flatten)]`
+/// get the bincode bytes that `AicEngine.from_spec` /
+/// [`AicEngineBuilder::build`] consume. `serde_json` round-trips
+/// `EngineConfig`'s `#[serde(flatten)]`
 /// cleanly (only bincode rejected it; that is exactly why `to_bincode`
 /// re-encodes `engine` as JSON inside the bincode payload).
 #[pyfunction]
@@ -291,9 +291,10 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
 
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
-/// The builder and the flat compatibility function both normalize into this
-/// representation before the one-time Python compile. Keeping this type private
-/// lets the public builder evolve without creating a second public config API.
+/// The public builder and the crate-internal `EngineConfig` path both normalize
+/// into this representation before the one-time Python compile. Keeping this
+/// type private lets the public builder evolve without creating a second public
+/// config API.
 #[derive(Clone, Debug)]
 struct EngineBuildRequest {
     model_path: String,
@@ -320,9 +321,7 @@ struct EngineBuildRequest {
 ///
 /// Only the model, system, and backend are required. Parallelism defaults to
 /// one, speculative decoding defaults to disabled, and all other options defer
-/// to Python's `compile_engine` defaults. New callers should use this builder.
-/// [`build_aic_engine`] remains available as a source-compatibility adapter for
-/// existing callers through 0.10 and is planned for removal in version 0.11.0.
+/// to Python's `compile_engine` defaults.
 #[derive(Clone, Debug)]
 pub struct AicEngineBuilder {
     request: EngineBuildRequest,
@@ -441,7 +440,7 @@ impl AicEngineBuilder {
 
     /// Compile the Python engine specification once and return a Rust handle.
     pub fn build(self) -> Result<AicEngine, AicError> {
-        build_aic_engine_impl(self.request)
+        build_engine_from_request(self.request)
     }
 }
 
@@ -490,77 +489,8 @@ mod builder_tests {
     }
 }
 
-/// Compatibility Rust → Python → Rust embedded build entry point.
-///
-/// A plain `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers (e.g. the Dynamo
-/// Mocker) call it with flat scalars. It crosses into Python exactly once to
-/// run `aiconfigurator_core.sdk.engine.compile_engine`, which walks the model's
-/// op lists and returns bincoded [`crate::engine::spec::EngineSpec`] bytes. It
-/// then builds the [`Engine`] from those bytes (via
-/// [`Engine::from_spec_bytes`], which does `from_bincode` +
-/// `PerfDatabase::load` + `Engine::build`). The call shape is
-/// `with_gil → import → call_method1("compile_engine", ...) →
-/// extract::<Vec<u8>>() → build`.
-///
-/// The flat arg list matches the `compile_engine` signature. `systems_path` is
-/// the Rust-side perf-DB root (it is also forwarded to `compile_engine` so the
-/// two stay aligned).
-///
-/// The full Rust → Python → Rust round-trip is validated end-to-end by
-/// `tests/embedded_round_trip.rs`.
-///
-/// # Compatibility
-///
-/// This flat function remains source-compatible through the 0.10 release for
-/// existing consumers. New code should use [`AicEngineBuilder`]. The flat
-/// function is planned for removal in version 0.11.0.
-// `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
-// `tests/embedded_round_trip.rs`).
-#[allow(clippy::too_many_arguments)]
-pub fn build_aic_engine(
-    model_path: &str,
-    system: &str,
-    backend: &str,
-    backend_version: Option<&str>,
-    tp_size: u32,
-    pp_size: u32,
-    attention_dp_size: u32,
-    moe_tp_size: Option<u32>,
-    moe_ep_size: Option<u32>,
-    gemm_quant_mode: Option<&str>,
-    moe_quant_mode: Option<&str>,
-    kvcache_quant_mode: Option<&str>,
-    fmha_quant_mode: Option<&str>,
-    comm_quant_mode: Option<&str>,
-    nextn: u32,
-    nextn_accepted: Option<f64>,
-    kv_block_size: Option<u32>,
-    systems_path: Option<&str>,
-) -> Result<AicEngine, AicError> {
-    build_aic_engine_impl(EngineBuildRequest {
-        model_path: model_path.to_owned(),
-        system: system.to_owned(),
-        backend: backend.to_owned(),
-        backend_version: backend_version.map(str::to_owned),
-        tp_size,
-        pp_size,
-        attention_dp_size,
-        moe_tp_size,
-        moe_ep_size,
-        gemm_quant_mode: gemm_quant_mode.map(str::to_owned),
-        moe_quant_mode: moe_quant_mode.map(str::to_owned),
-        kvcache_quant_mode: kvcache_quant_mode.map(str::to_owned),
-        fmha_quant_mode: fmha_quant_mode.map(str::to_owned),
-        comm_quant_mode: comm_quant_mode.map(str::to_owned),
-        nextn,
-        nextn_accepted,
-        kv_block_size,
-        systems_path: systems_path.map(str::to_owned),
-    })
-}
-
 /// Construct the public handle from the one canonical build request.
-fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
+fn build_engine_from_request(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
     let engine = compile_engine_from_request(request)?;
     Ok(AicEngine::new(engine))
 }
@@ -569,8 +499,8 @@ fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicEr
 /// `compile_engine` from one normalized request, then build an [`Engine`] from
 /// the returned bincode bytes (`from_bincode` + `PerfDatabase::load` +
 /// `Engine::build`).
-/// The builder, compatibility wrapper, and [`compile_engine_to_engine`] all use
-/// this function, so Python argument names and defaults cannot drift.
+/// The public builder and [`compile_engine_to_engine`] both use this function,
+/// so Python argument names and defaults cannot drift.
 fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, AicError> {
     let systems_root = resolve_systems_root(request.systems_path.as_deref())
         .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
@@ -859,9 +789,6 @@ impl PyForwardPassPerfModel {
 /// names from this inner module. This is distinct from `[lib] name` in
 /// `Cargo.toml`, which stays `aiconfigurator_core` and drives the ctypes dylib
 /// filename.
-///
-/// Note `build_aic_engine` is intentionally NOT added here: it is a Rust-only
-/// entry point for embedded callers, not part of the Python surface.
 #[pymodule]
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;

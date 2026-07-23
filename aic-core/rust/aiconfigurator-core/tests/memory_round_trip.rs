@@ -18,7 +18,7 @@
 //! `tolerance_adjusted`). This test restores that coverage: a typo in a forwarded
 //! kwarg name or a parsed dict key fails here instead of first surfacing in the
 //! deferred downstream Mocker PR. It mirrors `embedded_round_trip.rs`, the sibling
-//! `build_aic_engine` round-trip.
+//! `AicEngineBuilder` round-trip.
 //!
 //! ## Run requirements
 //!

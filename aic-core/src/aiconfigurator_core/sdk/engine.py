@@ -20,8 +20,8 @@ The wire is shaped in two hops:
 2. The Rust ``engine_spec_bincode_from_json`` ``#[pyfunction]`` decodes that
    JSON into an ``EngineSpec`` and re-encodes it as bincode bytes (Python can't
    bincode; serde_json round-trips ``EngineConfig``'s flattened layout where
-   bincode can't). Those bytes are what ``AicEngine.from_spec`` /
-   ``build_aic_engine`` consume.
+   bincode can't). Those bytes are what ``AicEngine.from_spec`` and the Rust
+   ``AicEngineBuilder`` consume.
 
 ``EngineHandle`` wraps the compiled bytes plus an ``AicEngine`` and exposes the
 per-call surface (``run_static`` / ``predict_*_latency`` / ``mixed_step_latency``
@@ -736,7 +736,7 @@ def compile_engine(
 ) -> bytes:
     """Compile a model into bincoded ``EngineSpec`` bytes.
 
-    Signature matches the kwargs ``build_aic_engine`` (Rust) passes. Reuses
+    Signature matches the kwargs the Rust ``AicEngineBuilder`` passes. Reuses
     ``cli/api._build_model_config`` + ``sdk/models.get_model`` (quant inferred
     inside ``get_model``) to build the model, then walks ``encoder_ops`` (vision
     decomposed), ``context_ops`` and ``generation_ops`` into OpSpecs and returns

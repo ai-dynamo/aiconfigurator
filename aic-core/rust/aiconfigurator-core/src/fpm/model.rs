@@ -126,7 +126,7 @@ impl ForwardPassPerfModel {
     /// Description: create a strict native AIC forward-pass model.
     ///
     /// Compiles `config` into an [`Engine`] by crossing into Python once
-    /// (mirroring [`crate::build_aic_engine`]): `compile_engine` walks the model
+    /// (mirroring [`crate::AicEngineBuilder`]): `compile_engine` walks the model
     /// and returns bincoded spec bytes, then [`Engine::from_spec_bytes`] loads
     /// the matching perf database. This constructor fails if `config` cannot be
     /// compiled. Use `best_available` when unsupported native configs should
@@ -447,9 +447,9 @@ impl ForwardPassPerfModel {
 
 /// Build a compiled [`Engine`] from an [`EngineConfig`] by crossing into Python
 /// once to run `aiconfigurator.sdk.engine.compile_engine`, then loading the
-/// matching perf database via [`Engine::from_spec_bytes`]. Mirrors
-/// [`crate::build_aic_engine`] but takes an `EngineConfig` (mapping its
-/// modular fields onto the flat `compile_engine` kwargs).
+/// matching perf database via [`Engine::from_spec_bytes`]. This is the internal
+/// `EngineConfig` counterpart to [`crate::AicEngineBuilder`] and maps its
+/// modular fields onto the flat `compile_engine` kwargs.
 ///
 /// `systems_root` overrides the bundled `systems/` dir for BOTH the
 /// `compile_engine` call (`systems_path` kwarg) and the Rust-side perf-DB load.

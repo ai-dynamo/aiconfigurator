@@ -12,9 +12,9 @@
 //! stride quadrature and the `(nextn + 1)` decode-batch multiplier around it.
 //!
 //! The `Engine` is pure-Rust internals; its PyO3 bindings (`run_static`,
-//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`,
-//! `build_aic_engine`) live in [`crate::py`]. The agg sweep is orchestrated in
-//! Python — there is no Rust `run_agg`.
+//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`) and the
+//! embedded [`crate::AicEngineBuilder`] live in [`crate::py`]. The agg sweep is
+//! orchestrated in Python — there is no Rust `run_agg`.
 
 use std::sync::Arc;
 
@@ -129,7 +129,7 @@ impl Engine {
     /// Build an `Engine` from a spec and a pre-loaded database.
     ///
     /// Extracts the op lists and the `nextn` scalar from `spec.engine`. The
-    /// caller (`build_aic_engine` / `from_spec_bytes`) is responsible for
+    /// caller (`AicEngineBuilder` / `from_spec_bytes`) is responsible for
     /// having loaded the matching `PerfDatabase` from `spec.engine`'s identity.
     pub fn build(spec: EngineSpec, db: Arc<PerfDatabase>) -> Result<Engine, AicError> {
         let nextn = spec

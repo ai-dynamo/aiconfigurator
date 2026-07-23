@@ -3,7 +3,7 @@
 
 """compile_engine must apply MTP to the model it builds.
 
-``compile_engine`` (the flat-kwargs entry the Rust ``build_aic_engine`` path
+``compile_engine`` (the flat-kwargs entry the Rust ``AicEngineBuilder`` path
 calls) previously forwarded ``nextn``/``nextn_accepted`` only into the spec
 JSON; the model itself was built with ``nextn=0``, so the walked op lists
 carried no ``1/(1+nextn_accepted)*(L+nextn)/L`` generation scale and compiled
