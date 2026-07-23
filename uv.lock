@@ -19,7 +19,7 @@ resolution-markers = [
 
 [[package]]
 name = "aiconfigurator"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiconfigurator-core" },
@@ -106,7 +106,7 @@ provides-extras = ["dev", "webapp", "service"]
 
 [[package]]
 name = "aiconfigurator-core"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "aic-core" }
 dependencies = [
     { name = "numpy" },
