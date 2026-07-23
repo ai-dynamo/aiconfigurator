@@ -394,6 +394,11 @@ class TestForwardModelRewrite:
         with pytest.raises(NotImplementedError, match="encoder"):
             models.get_model("Qwen/Qwen3-VL-2B-Instruct", cfg, "vllm")
 
+    def test_mtp_rejected(self):
+        cfg = _model_config(forward_model="fpm", nextn=1, nextn_accepted=0.8)
+        with pytest.raises(NotImplementedError, match="MTP"):
+            models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
+
 
 # ---------------------------------------------------------------------------
 # Static + mixed-step integration through a real PerfDatabase/backend

@@ -67,6 +67,14 @@ def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
             f"forward_model='fpm' does not support encoder/multimodal models "
             f"(model_family={model.model_family!r} has encoder ops). Use forward_model='op_level'."
         )
+    if getattr(model, "_nextn", 0):
+        # The collected whole-model curves carry neither the MTP-head cost nor
+        # the acceptance amortization that op_level encodes in
+        # mtp_scale_factor, so fpm would silently price MTP as plain decode.
+        raise NotImplementedError(
+            f"forward_model='fpm' does not support MTP speculative decoding (nextn={model._nextn}). "
+            "Use forward_model='op_level'."
+        )
     # The ORIGINAL op-level lists stay alive inside the FPM ops as the
     # whole-model roofline (queried in DatabaseMode.SOL at interpolation
     # time) and as the weight-bytes inventory for memory estimation.
