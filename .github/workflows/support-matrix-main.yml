@@ -13,7 +13,7 @@ jobs:
   update-support-matrix:
     name: Update Support Matrix
     runs-on: prod-aiconfigurator-default-amd64-v1
-    timeout-minutes: 480 # 8 hours
+    timeout-minutes: 1200 # 20 hours — full grid outgrew the 8h budget (dailies timing out since 2026-07-14)
     permissions:
       contents: write
       pull-requests: write
