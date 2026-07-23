@@ -288,16 +288,10 @@ def run_attention_torch(
     )
 
     # Serving allocates dense-attention KV cache as CacheType.SELF
-    # (pyexecutor/_util.py:1539@1.3.0rc20; SELFKONLY is the MLA path,
-    # _util.py:1636). The flashinfer path views the pool as
-    # [pages, 2, heads, page, dim] and needs the real K+V layout; the
-    # historical SELFKONLY on the TRTLLM branch is left untouched to keep its
-    # rows comparable with previously collected data.
-    kv_cache_type = (
-        tensorrt_llm.bindings.internal.batch_manager.CacheType.SELF
-        if is_flashinfer
-        else tensorrt_llm.bindings.internal.batch_manager.CacheType.SELFKONLY
-    )
+    # (pyexecutor/_util.py:1539@1.3.0rc20); SELFKONLY is reserved for MLA
+    # (_util.py:1636). Regular GQA/MHA has separate K and V tensors, so both
+    # TRTLLM and FlashInfer paths must benchmark the full serving layout.
+    kv_cache_type = tensorrt_llm.bindings.internal.batch_manager.CacheType.SELF
     kv_cache_manager = KVCacheManager(
         kv_cache_config=kv_cache_config,
         kv_cache_type=kv_cache_type,

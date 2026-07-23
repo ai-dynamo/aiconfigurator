@@ -297,7 +297,7 @@ def _build_module_test_cases(attn_type: str, mode: str):
      model_path, attn_type]
     """
     base_cases = get_context_test_cases(attn_type) if mode == "context" else get_generation_test_cases(attn_type)
-    model_specs = get_mla_module_model_specs(attention_type=attn_type)
+    model_specs = get_mla_module_model_specs(attention_type=attn_type, backend="trtllm")
     cases = []
     for model_spec in model_specs:
         for base_case in base_cases:
