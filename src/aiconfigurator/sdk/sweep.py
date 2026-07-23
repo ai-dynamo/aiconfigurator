@@ -49,6 +49,7 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,7 @@ def _sweep_one_parallel_agg(
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> tuple[pd.DataFrame, bool, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
@@ -330,6 +332,7 @@ def _sweep_one_parallel_agg(
                 runtime_config=point_rt,
                 ctx_tokens=ctx_tokens,
                 predictor=predictor,
+                speculative_profile=speculative_profile,
                 **backend_kwargs,
             )
 
@@ -370,6 +373,7 @@ def sweep_agg(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -486,6 +490,7 @@ def sweep_agg(
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
                     predictor=predictor,
+                    speculative_profile=speculative_profile,
                 )
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
@@ -550,6 +555,7 @@ def _get_disagg_worker_candidates(
     backend_name: str,
     latency_correction: float,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> pd.DataFrame:
     """Enumerate (parallel, batch_size) worker candidates for a disagg role.
 
@@ -596,6 +602,7 @@ def _get_disagg_worker_candidates(
                     role=role,  # type: ignore[arg-type]
                     latency_correction=latency_correction,
                     predictor=predictor,
+                    speculative_profile=speculative_profile,
                 )
                 if not summary.check_oom():
                     all_configs_oom = False
@@ -765,6 +772,7 @@ def sweep_disagg(
     rate_matching_decode_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
@@ -839,6 +847,7 @@ def sweep_disagg(
         backend_name=prefill_backend_name,
         latency_correction=prefill_latency_correction,
         predictor=predictor,
+        speculative_profile=speculative_profile,
     )
     decode_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
@@ -851,6 +860,7 @@ def sweep_disagg(
         backend_name=decode_backend_name,
         latency_correction=decode_latency_correction,
         predictor=predictor,
+        speculative_profile=speculative_profile,
     )
 
     if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:

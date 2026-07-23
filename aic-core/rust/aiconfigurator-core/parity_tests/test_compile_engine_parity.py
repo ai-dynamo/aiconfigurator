@@ -174,7 +174,6 @@ class TestOpTransferRoundTrip:
             kv_block_size=None,
             systems_path=None,
             nextn=0,
-            nextn_accepted=None,
             database=database,
         )
         spec = json.loads(spec_json)

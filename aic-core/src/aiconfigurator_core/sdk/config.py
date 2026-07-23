@@ -30,11 +30,9 @@ class ModelConfig:
     cp_style: str = "none"
     workload_distribution: str = "power_law"
     # quantization options
-    # MTP speculative decoding: nextn = draft length (compute cost side),
-    # nextn_accepted = average accepted draft tokens per step (generation benefit
-    # side, 0 <= nextn_accepted <= nextn). nextn_accepted is required when nextn > 0.
+    # MTP speculative decoding: draft length (compute/verification cost only).
+    # Accepted-token progress belongs to the upper prediction/simulation layer.
     nextn: int = 0
-    nextn_accepted: float = None
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20

@@ -33,6 +33,7 @@ import logging
 from typing import ClassVar
 
 from aiconfigurator_core.sdk import config
+from aiconfigurator_core.sdk.config_builders import normalize_nextn
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,8 @@ class BaseModel:
             f"num_heads {self._num_heads} should be divisible by tp_size {model_config.tp_size} "
         )
 
-        self._nextn = model_config.nextn
-        self._nextn_accepted = model_config.nextn_accepted
+        self._nextn = normalize_nextn(model_config.nextn)
+        model_config.nextn = self._nextn
 
     @property
     def activation_hidden_size(self) -> int:

@@ -21,7 +21,7 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // only distinguishable by this version — `EngineSpec::from_bincode` reads and
 // checks it before decoding the op lists. Bump whenever an `OpSpec` field
 // changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 3;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -130,8 +130,8 @@ pub struct QuantizationConfig {
 
 /// Multi-Token Prediction speculative-decoding parameters. Wrapped in
 /// `Option<>` on [`EngineConfig`] so models without MTP don't carry the
-/// noise, and `#[serde(flatten)]`-ed so the flat wire keys (`nextn`,
-/// `nextn_accepted`) parse unchanged.
+/// noise, and `#[serde(flatten)]`-ed so the flat wire key (`nextn`) parses
+/// unchanged. Accepted-token progress is modeled above `aic-core`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SpeculativeConfig {
     /// Multi-Token Prediction speculative decoding depth / draft length
@@ -139,12 +139,6 @@ pub struct SpeculativeConfig {
     /// never auto-enabled; the user opts in explicitly.
     #[serde(default)]
     pub nextn: Option<u32>,
-
-    /// Average accepted draft tokens per decode step used by MTP scaling
-    /// (Python's `task_config.nextn_accepted`, `0 <= nextn_accepted <= nextn`). Ignored
-    /// when `nextn` is `None` or 0.
-    #[serde(default)]
-    pub nextn_accepted: Option<f64>,
 }
 
 /// Backend performance database family.
@@ -223,7 +217,6 @@ mod engine_config_wire_tests {
             "kv_cache_dtype": "bfloat16",
             "kv_block_size": null,
             "nextn": null,
-            "nextn_accepted": null,
             "extra": {}
         }"#;
 

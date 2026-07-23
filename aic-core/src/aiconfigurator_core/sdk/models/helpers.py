@@ -528,18 +528,13 @@ def check_is_moe(model_path: str, model_info: dict | None = None) -> bool:
     return False
 
 
-def mtp_scale_factor(nextn: int, nextn_accepted: float | None, num_layers: int) -> float:
-    """Per-output-token generation scale for MTP speculative decoding.
+def mtp_scale_factor(nextn: int, num_layers: int) -> float:
+    """Per-iteration compute scale for MTP speculative decoding.
 
-    ``nextn`` is the draft length (cost side: the model runs ``num_layers + nextn``
-    layers' worth of compute per decode step). ``nextn_accepted`` is the average number
-    of draft tokens actually accepted per step (benefit side: each step yields
-    ``1 + nextn_accepted`` output tokens). Returns 1.0 when MTP is disabled.
+    A decode iteration evaluates ``num_layers + nextn`` layers' worth of work.
+    Accepted-token progress is deliberately excluded: it is a workload-level
+    assumption applied by the upper prediction layer.
     """
     if nextn <= 0:
         return 1.0
-    if nextn_accepted is None:
-        raise ValueError("nextn_accepted (average accepted draft tokens per step) is required when nextn > 0")
-    if not 0 <= nextn_accepted <= nextn:
-        raise ValueError(f"nextn_accepted ({nextn_accepted}) must be within [0, nextn={nextn}]")
-    return (nextn + num_layers) / num_layers / (1 + nextn_accepted)
+    return (nextn + num_layers) / num_layers

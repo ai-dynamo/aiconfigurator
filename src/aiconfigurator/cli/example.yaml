@@ -61,8 +61,8 @@ agg_full:
   enable_eplb: false
   moe_backend: null
 
-  # Speculative decoding: never auto-enabled. nextn = draft length,
-  # nextn_accepted = average accepted draft tokens per step (required when nextn > 0).
+  # Speculative decoding: never auto-enabled. nextn = draft length;
+  # nextn_accepted = average accepted draft tokens per step and is required when nextn > 0.
   nextn: 1
   nextn_accepted: 0.85
 
@@ -113,8 +113,8 @@ disagg_full:
   tpot: 40.0
   total_gpus: 32
 
-  # Speculative decoding (shared): never auto-enabled. nextn = draft length,
-  # nextn_accepted = average accepted draft tokens per step (required when nextn > 0).
+  # Speculative decoding (shared): never auto-enabled. nextn = draft length;
+  # nextn_accepted = average accepted draft tokens per step and is required when nextn > 0.
   nextn: 1
   nextn_accepted: 0.85
 

@@ -112,7 +112,7 @@ class DeepSeekModel(BaseModel):
         #    non-attn part
         # meanwhile, needs to scale the actual bs of generation by nextn,
         # this is covered in inferencesession
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -600,7 +600,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         self._moe_inter_size = moe_inter_size
 
         # MTP scale factor for generation phase
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._pdl_factor = 0.9
         self._power_law_alpha = 1.01
 
@@ -1067,7 +1067,7 @@ class WideEPDeepSeekModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         h = self._hidden_size
         tp_size = self.config.tp_size

@@ -21,7 +21,7 @@ pub fn configured_builder() -> AicEngineBuilder {
         .kvcache_quant_mode("bfloat16")
         .fmha_quant_mode("bfloat16")
         .comm_quant_mode("bfloat16")
-        .speculative_decoding(0, None)
+        .speculative_decoding(0)
         .kv_block_size(16)
         .systems_path("/tmp/systems")
 }
@@ -53,7 +53,6 @@ pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
         Some("bfloat16"),
         Some("bfloat16"),
         0,
-        None,
         Some(16),
         Some("/tmp/systems"),
     )
@@ -80,7 +79,7 @@ mod tests {
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
         assert_eq!(ENGINE_CONFIG_SCHEMA_VERSION, 1);
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 2);
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 3);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

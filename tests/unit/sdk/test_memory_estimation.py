@@ -182,7 +182,7 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
 
     def _fake_get_model(model_path, model_config, backend):
         captured["nextn"] = model_config.nextn
-        captured["nextn_accepted"] = model_config.nextn_accepted
+        captured["has_nextn_accepted"] = hasattr(model_config, "nextn_accepted")
 
         class _StubModel:
             def get_kvcache_bytes_per_sequence(self, seq_len):
@@ -217,23 +217,20 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
         max_num_tokens=8192,
         max_batch_size=256,
         nextn=2,
-        nextn_accepted=1.1,
         systems_path="/tmp/aic-core-systems",
     )
     assert captured["nextn"] == 2
-    assert captured["nextn_accepted"] == 1.1
+    assert captured["has_nextn_accepted"] is False
     assert captured["systems_paths"] == "/tmp/aic-core-systems"
 
 
-def test_breakdown_accepts_nextn_without_accepted(monkeypatch):
-    # Capacity math never consumes the acceptance benefit, so external KV
-    # estimation callers with nextn > 0 must not require nextn_accepted -- a
-    # neutral 0.0 is applied to the ModelConfig instead.
+def test_breakdown_accepts_nextn_without_acceptance_field(monkeypatch):
+    # Capacity math consumes only the core-owned draft depth.
     captured = {}
 
     def _fake_get_model(model_path, model_config, backend):
         captured["nextn"] = model_config.nextn
-        captured["nextn_accepted"] = model_config.nextn_accepted
+        captured["has_nextn_accepted"] = hasattr(model_config, "nextn_accepted")
 
         class _StubModel:
             def get_kvcache_bytes_per_sequence(self, seq_len):
@@ -265,7 +262,7 @@ def test_breakdown_accepts_nextn_without_accepted(monkeypatch):
         nextn=2,
     )
     assert captured["nextn"] == 2
-    assert captured["nextn_accepted"] == 0.0
+    assert captured["has_nextn_accepted"] is False
 
 
 def test_native_capacity_override_wins():
@@ -627,13 +624,13 @@ def test_estimate_kv_cache_propagates_when_fallback_disabled(monkeypatch):
         )
 
 
-def test_estimate_kv_cache_nextn_accepted_is_optional_but_range_checked(monkeypatch):
-    # nextn without nextn_accepted must reach the breakdown for external
-    # capacity callers; an out-of-range value still fails fast.
+def test_estimate_kv_cache_nextn_reaches_breakdown(monkeypatch):
+    # Acceptance is not part of the aic-core memory API.
     reached = {"n": 0}
 
     def _spy(*args, **kwargs):
         reached["n"] += 1
+        reached["nextn"] = kwargs.get("nextn")
         raise RuntimeError("stop here")
 
     monkeypatch.setattr(memory.KVCacheEstimator, "from_request", classmethod(_spy))
@@ -651,21 +648,7 @@ def test_estimate_kv_cache_nextn_accepted_is_optional_but_range_checked(monkeypa
             allow_naive_fallback=False,
         )
     assert reached["n"] == 1
-
-    with pytest.raises(ValueError, match="nextn_accepted"):
-        memory.estimate_kv_cache(
-            "Qwen/Qwen3-32B",
-            "h200_sxm",
-            "trtllm",
-            max_num_tokens=8192,
-            max_batch_size=256,
-            memory_fraction_kind="of_free",
-            memory_fraction_value=0.9,
-            nextn=2,
-            nextn_accepted=3.5,
-            allow_naive_fallback=False,
-        )
-    assert reached["n"] == 1
+    assert reached["nextn"] == 2
 
 
 def test_estimate_kv_cache_rejects_bad_fraction_before_breakdown(monkeypatch):

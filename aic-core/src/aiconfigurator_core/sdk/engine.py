@@ -89,7 +89,7 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # refactor added serialized `OpSpec` fields); the Rust consumer gates on this
 # version before decoding the positional op lists. Keep in lockstep with the
 # Rust `ENGINE_SPEC_SCHEMA_VERSION`.
-ENGINE_SPEC_SCHEMA_VERSION = 2
+ENGINE_SPEC_SCHEMA_VERSION = 3
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 
@@ -648,7 +648,6 @@ def _engine_config_dict(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accepted: float | None,
     database: Any = None,
 ) -> dict:
     """Build the ``EngineConfig`` JSON (matches the Rust modularised struct).
@@ -664,10 +663,7 @@ def _engine_config_dict(
     effective_nextn = int(model_nextn) if model_nextn is not None else int(nextn)
     speculative = None
     if effective_nextn:
-        speculative = {
-            "nextn": effective_nextn,
-            "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
-        }
+        speculative = {"nextn": effective_nextn}
     # The Rust ``EngineConfig`` flattens ``parallel`` / ``quantization`` /
     # ``speculative`` via ``#[serde(flatten)]``, so their fields live at the
     # TOP LEVEL of this dict (NOT nested under sub-keys).
@@ -697,12 +693,11 @@ def _engine_config_dict(
         "perf_db_sources": _compute_perf_db_sources(database),
         "extra": {},
     }
-    # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accepted at
-    # the top level when MTP is active. When inactive, omit both keys so the
+    # SpeculativeConfig (flattened, Option<>): emit nextn at the top level
+    # when MTP is active. When inactive, omit it so the
     # flattened Option deserializes to None.
     if speculative is not None:
         engine["nextn"] = speculative["nextn"]
-        engine["nextn_accepted"] = speculative["nextn_accepted"]
     return engine
 
 
@@ -732,7 +727,6 @@ def compile_engine(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accepted: float | None = None,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
 ) -> bytes:
@@ -761,9 +755,8 @@ def compile_engine(
         comm_quant_mode=comm_quant_mode,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
-    # 1/(1+nextn_accepted)*(L+nextn)/L generation scale; the spec's top-level
-    # nextn only drives the Rust (nextn+1) decode-batch multiplier.
-    apply_nextn(model_config, nextn, nextn_accepted)
+    # (L+nextn)/L compute scale; accepted-token progress is applied above core.
+    apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
     # The database is only needed to pre-bake the WideEP MoE kernel selection
@@ -779,8 +772,7 @@ def compile_engine(
         backend_version=backend_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
-        nextn=nextn,
-        nextn_accepted=nextn_accepted,
+        nextn=model_config.nextn,
         database=database,
     )
 
@@ -797,7 +789,6 @@ def build_engine_spec_json(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accepted: float | None,
     database: Any = None,
 ) -> str:
     """Walk a built model's op lists into an ``EngineSpec`` JSON string.
@@ -836,7 +827,6 @@ def build_engine_spec_json(
             kv_block_size=kv_block_size,
             systems_path=systems_path,
             nextn=nextn,
-            nextn_accepted=nextn_accepted,
             database=database,
         ),
         "context_ops": context_ops,

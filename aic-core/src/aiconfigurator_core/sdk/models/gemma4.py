@@ -89,7 +89,7 @@ class Gemma4MixModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._gemma4_config: common.Gemma4MixConfig | None = None
         self._power_law_alpha = 1.01
 
