@@ -367,10 +367,10 @@ mod tests {
         systems_root().join("data/b200_sxm/sglang/0.5.10")
     }
 
-    /// `<systems_root>/data/b200_sxm/nccl/2.27.3/` — the system-spec-aware
-    /// NCCL root for b200_sxm, mirroring Python's path layout.
+    /// `<systems_root>/data/b200_sxm/comm/nccl/2.27.3/` — the family-first
+    /// system-spec-aware NCCL root for b200_sxm.
     fn b200_nccl_root() -> Option<PathBuf> {
-        Some(systems_root().join("data/b200_sxm/nccl/2.27.3"))
+        Some(systems_root().join("data/b200_sxm/comm/nccl/2.27.3"))
     }
 
     #[test]
@@ -418,7 +418,7 @@ mod tests {
     fn nccl_loads_from_system_wide_path() {
         // With the system-spec-aware path (b200_sxm declares
         // `nccl_version: '2.27.3'`), NCCL data resolves to
-        // `<systems_root>/data/b200_sxm/nccl/2.27.3/nccl_perf.parquet`
+        // `<systems_root>/data/b200_sxm/comm/nccl/2.27.3/nccl_perf.parquet`
         // and the table loads successfully — NOT
         // `<vllm/0.19.0>/nccl_perf.parquet` which never existed.
         let table = CommunicationTable::new(b200_vllm_data_root(), b200_nccl_root(), None);

@@ -321,8 +321,15 @@ mod tests {
         assert_eq!(db.system, "b200_sxm");
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
-        assert!(db.data_root.is_dir(), "data_root must exist");
-        assert!(db.data_root.join("gemm_perf.parquet").is_file());
+        let gemm_sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "gemm_perf.parquet",
+            &db.data_root,
+        );
+        assert!(
+            gemm_sources[0].0.is_file(),
+            "resolved GEMM source must exist"
+        );
     }
 
     #[test]

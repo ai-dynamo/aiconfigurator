@@ -72,8 +72,13 @@ replacement for `best_available(...)`.
 ```python
 from aiconfigurator_core.sdk import RustForwardPassPerfModel
 
+# Engine-config and per-rank FPM dictionary setup is omitted here.
 model = RustForwardPassPerfModel.best_available(config)
 diagnostics = model.diagnostics()
+print(diagnostics["source"])
+if diagnostics["last_warning"] is not None:
+    print(diagnostics["last_warning"])
+
 estimate_ms = model.estimate_forward_pass_time_ms(metrics_by_rank)
 ```
 
