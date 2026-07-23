@@ -488,6 +488,11 @@ DefaultHFModels = {
     "zai-org/GLM-5",
     "zai-org/GLM-5-FP8",
     "nvidia/GLM-5-NVFP4",
+    "zai-org/GLM-5.1",
+    "zai-org/GLM-5.1-FP8",
+    "nvidia/GLM-5.1-NVFP4",
+    "zai-org/GLM-5.2",
+    "zai-org/GLM-5.2-FP8",
     "nvidia/GLM-5.2-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
