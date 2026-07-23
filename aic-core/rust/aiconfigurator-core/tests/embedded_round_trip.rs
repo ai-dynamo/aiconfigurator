@@ -3,40 +3,41 @@
 
 //! End-to-end embedded round-trip.
 //!
-//! Drives the full Rust → Python → Rust embedded build path: calls
-//! [`aiconfigurator_core::build_aic_engine`] for a real fixture model, which
-//! crosses into Python once to run `aiconfigurator.sdk.engine.compile_engine`,
-//! gets bincoded `EngineSpec` bytes back, loads the matching perf database, and
-//! returns an [`aiconfigurator_core::AicEngine`]. It then asserts the
-//! **pure-Rust hot path** produces finite, positive latencies.
+//! Drives the full Rust → Python → Rust embedded build path through both the
+//! preferred [`aiconfigurator_core::AicEngineBuilder`] and the flat
+//! [`aiconfigurator_core::build_aic_engine`] compatibility adapter. Each
+//! crosses into Python once to run
+//! `aiconfigurator_core.sdk.engine.compile_engine`, gets bincoded `EngineSpec`
+//! bytes back, loads the matching perf database, and returns an
+//! [`aiconfigurator_core::AicEngine`]. The test asserts both paths agree and
+//! that the **pure-Rust hot path** produces finite, positive latencies.
 //!
 //! ## Why this proves the Mocker hot path is PyO3-free
 //!
-//! After `build_aic_engine` returns, the test calls the **inherent** Rust
-//! methods `AicEngine::prefill_latency_ms` / `decode_latency_ms` — these take
-//! NO PyO3 `py` token (unlike the `#[pymethods]` forms). They compile and run
-//! without acquiring the GIL; any re-entry into Python would require a `py`
-//! token, which these signatures cannot produce. The call succeeding is the
+//! After construction, the test calls the **inherent** Rust methods
+//! `AicEngine::prefill_latency_ms` / `decode_latency_ms` — these take NO PyO3
+//! `py` token (unlike the `#[pymethods]` forms). They compile and run without
+//! acquiring the GIL; any re-entry into Python would require a `py` token,
+//! which these signatures cannot produce. The call succeeding is the
 //! observable proof that the per-point predict path is pure Rust over the
 //! compiled `Engine`, not a Python re-entry.
 //!
 //! ## Run requirements
 //!
-//! `build_aic_engine` embeds a Python interpreter (PyO3 `auto-initialize`) and
-//! imports `aiconfigurator.sdk.engine`, which itself imports the maturin-built
-//! `aiconfigurator_core` extension. So the test needs BOTH:
-//!   * `aiconfigurator_core` installed into the interpreter
-//!     (`uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml --release`)
-//!   * `aiconfigurator` importable, i.e. `PYTHONPATH=src`.
+//! Engine construction embeds a Python interpreter (PyO3 `auto-initialize`)
+//! and imports `aiconfigurator_core.sdk.engine`, which itself imports the
+//! maturin-built `aiconfigurator_core` extension. The test therefore needs
+//! `aiconfigurator_core` installed into the interpreter
+//! (`uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml --release`).
 //!
 //! The embedded interpreter (the framework libpython the test binary links) is
-//! NOT the uv venv, so it does not see the venv's editable `aiconfigurator`
-//! install or the maturin-built `aiconfigurator_core` automatically. Point it
-//! at both via **absolute** `PYTHONPATH` entries (relative paths do not resolve
-//! under cargo's test cwd):
+//! NOT the uv venv, so it does not see the venv's installed core package or the
+//! maturin-built `aiconfigurator_core` automatically. Point it at the core
+//! source and venv site-packages via **absolute** `PYTHONPATH` entries
+//! (relative paths do not resolve under cargo's test cwd):
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages" \
 //!   cargo test -p aiconfigurator-core --test embedded_round_trip -- --nocapture
 //! ```
 //! (run after `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml
@@ -53,17 +54,17 @@
 
 #![cfg(feature = "embed-python")]
 
-use aiconfigurator_core::build_aic_engine;
+use aiconfigurator_core::{build_aic_engine, AicEngineBuilder, BackendKind};
 use pyo3::prelude::*;
 
 const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
 /// Soft-skip guard: true only when the embedded interpreter can import the
-/// `aiconfigurator.sdk.engine` module (which transitively imports the
+/// `aiconfigurator_core.sdk.engine` module (which transitively imports the
 /// maturin-built `aiconfigurator_core`). Returns false otherwise so the test
 /// passes without running the assertions on a bare `cargo test`.
 fn python_engine_importable() -> bool {
-    Python::with_gil(|py| match py.import("aiconfigurator.sdk.engine") {
+    Python::with_gil(|py| match py.import("aiconfigurator_core.sdk.engine") {
         Ok(_) => true,
         Err(e) => {
             let exe: String = py
@@ -78,25 +79,34 @@ fn python_engine_importable() -> bool {
 }
 
 #[test]
-fn embedded_build_then_pure_rust_predict() {
+fn embedded_builder_and_compatibility_adapter_match() {
     let required = std::env::var_os("AIC_REQUIRE_EMBEDDED_ROUND_TRIP").is_some();
     if !python_engine_importable() {
         assert!(
             !required,
             "embedded_round_trip: AIC_REQUIRE_EMBEDDED_ROUND_TRIP is set but \
-             `aiconfigurator.sdk.engine` is not importable — run after \
+             `aiconfigurator_core.sdk.engine` is not importable — run after \
              `maturin develop` with PYTHONPATH including aic-core/src, the venv \
-             site-packages, and src."
+             site-packages."
         );
         eprintln!(
-            "embedded_round_trip: SKIP — `aiconfigurator.sdk.engine` not importable. \
+            "embedded_round_trip: SKIP — `aiconfigurator_core.sdk.engine` not importable. \
              Set AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 + PYTHONPATH to enforce."
         );
         return;
     }
 
-    // Rust -> Python (compile_engine) -> Rust (Engine build + perf-DB load).
-    let engine = build_aic_engine(
+    // Preferred Rust -> Python (compile_engine) -> Rust path.
+    let engine = AicEngineBuilder::new(TEST_MODEL, "b200_sxm", BackendKind::Vllm)
+        .backend_version("0.19.0")
+        .tp_size(8)
+        .moe_parallelism(Some(1), Some(8))
+        .build()
+        .expect("AicEngineBuilder must succeed end-to-end");
+
+    // Flat compatibility adapter must remain behaviorally identical during the
+    // announced migration window.
+    let compatibility_engine = build_aic_engine(
         TEST_MODEL,
         "b200_sxm",
         "vllm",
@@ -116,7 +126,7 @@ fn embedded_build_then_pure_rust_predict() {
         None,    // kv_block_size
         None,    // resolve the installed core wheel's bundled systems data
     )
-    .expect("build_aic_engine must succeed end-to-end");
+    .expect("build_aic_engine compatibility adapter must succeed end-to-end");
 
     // Pure-Rust hot path: these inherent methods take NO `py` token, so this
     // compute happens with the GIL never acquired. Finite, positive latencies
@@ -128,6 +138,10 @@ fn embedded_build_then_pure_rust_predict() {
         prefill.is_finite() && prefill > 0.0,
         "prefill latency must be finite and > 0, got {prefill}"
     );
+    let compatibility_prefill = compatibility_engine
+        .prefill_latency_ms(1, 1024, 0)
+        .expect("compatibility prefill predict must succeed");
+    assert_eq!(prefill, compatibility_prefill);
 
     let decode = engine
         .decode_latency_ms(1, 1024, 2)
@@ -136,4 +150,8 @@ fn embedded_build_then_pure_rust_predict() {
         decode.is_finite() && decode > 0.0,
         "decode latency must be finite and > 0, got {decode}"
     );
+    let compatibility_decode = compatibility_engine
+        .decode_latency_ms(1, 1024, 2)
+        .expect("compatibility decode predict must succeed");
+    assert_eq!(decode, compatibility_decode);
 }

@@ -52,47 +52,22 @@ Python modules carry their own annotations.
 
 ## Stable Rust facade
 
-New embedded consumers should prefer `AicEngineBuilder`:
+New embedded consumers should construct engines with `AicEngineBuilder`. The
+flat `build_aic_engine(...)` function is a source-compatibility adapter for
+existing callers: it remains supported through the 0.10 release and is planned
+to be marked deprecated in version 0.11.0. Both paths normalize into the same
+private build request and enter Python once to compile an engine specification.
+Calls on the returned `AicEngine` are pure Rust and do not re-enter Python.
 
-Standalone binaries that call `AicEngineBuilder::build()` must enable the
-crate's `embed-python` feature, which enables PyO3's `auto-initialize` support:
-
-```toml
-[dependencies]
-aiconfigurator-core = { version = "0.10.0", features = ["embed-python"] }
-```
-
-Applications that embed Python in an existing host may initialize the Python
-interpreter themselves instead. The matching `aiconfigurator-core` wheel must
-also be importable by that interpreter.
-
-```rust,no_run
-use aiconfigurator_core::{AicEngineBuilder, AicError, BackendKind};
-
-fn build() -> Result<(), AicError> {
-    let engine = AicEngineBuilder::new(
-        "Qwen/Qwen3-32B",
-        "h200_sxm",
-        BackendKind::Vllm,
-    )
-    .tp_size(2)
-    .kv_block_size(16)
-    .build()?;
-    let latency_ms = engine.prefill_latency_ms(1, 1024, 0)?;
-    assert!(latency_ms > 0.0);
-    Ok(())
-}
-```
-
-`build_aic_engine` remains supported for existing callers that use the flat
-argument list. Both construction paths enter Python once to compile an engine
-specification. Calls on the returned `AicEngine` are pure Rust and do not
-re-enter Python.
+Standalone binaries must enable the crate's `embed-python` feature; applications
+hosted by an initialized Python interpreter do not. In either case, the matching
+`aiconfigurator-core` wheel must be importable. See the
+[crate README](rust/aiconfigurator-core/README.md) for setup and usage examples.
 
 The supported root-level Rust surface is grouped as follows:
 
-- compiled engine: `AicEngineBuilder`, `AicEngine`, `build_aic_engine`,
-  `AicError`;
+- compiled engine: `AicEngineBuilder` (preferred), `build_aic_engine`
+  (0.10 compatibility adapter), `AicEngine`, `AicError`;
 - forward-pass estimation: `ForwardPassPerfModel`,
   `ForwardPassPerfOptions`, diagnostics/readiness/source types, and the
   `ForwardPassMetrics` telemetry types;

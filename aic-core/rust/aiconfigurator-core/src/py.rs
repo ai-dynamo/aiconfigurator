@@ -13,12 +13,13 @@
 //!   Rust `run_agg`. Each method
 //!   releases the GIL around the Rust compute via [`Python::allow_threads`],
 //!   so the Rust compute runs without holding the GIL.
-//! * **Rust → Python → Rust (embedded path).** [`build_aic_engine`] is a plain
-//!   `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers such as the Dynamo
-//!   Mocker call it with flat scalars, it crosses into Python once to run
-//!   `aiconfigurator.sdk.engine.compile_engine`, then builds an [`Engine`] from
-//!   the returned bincode bytes. After that the `predict_*` hot path is pure
-//!   Rust with no GIL.
+//! * **Rust → Python → Rust (embedded path).** [`AicEngineBuilder`] is the
+//!   preferred Rust entry point. The flat [`build_aic_engine`] function remains
+//!   as a source-compatibility adapter for callers such as the Dynamo Mocker.
+//!   Both cross into Python once to run
+//!   `aiconfigurator_core.sdk.engine.compile_engine`, then build an [`Engine`]
+//!   from the returned bincode bytes. After that the `predict_*` hot path is
+//!   pure Rust with no GIL.
 //!
 //! Two error conversions live inline here (NOT in `common/error.rs`, which must
 //! stay free of the pyo3 dependency):
@@ -288,17 +289,16 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     spec.to_bincode().map_err(aic_to_py)
 }
 
-/// Ergonomic builder for the Rust -> Python -> Rust compiled-engine entry point.
+/// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
-/// Only the model, system, and backend are required. Parallelism defaults to
-/// one, speculative decoding defaults to disabled, and all other options defer
-/// to Python's `compile_engine` defaults. [`build_aic_engine`] remains available
-/// for source compatibility with existing callers.
+/// The builder and the flat compatibility function both normalize into this
+/// representation before the one-time Python compile. Keeping this type private
+/// lets the public builder evolve without creating a second public config API.
 #[derive(Clone, Debug)]
-pub struct AicEngineBuilder {
+struct EngineBuildRequest {
     model_path: String,
     system: String,
-    backend: BackendKind,
+    backend: String,
     backend_version: Option<String>,
     tp_size: u32,
     pp_size: u32,
@@ -316,6 +316,18 @@ pub struct AicEngineBuilder {
     systems_path: Option<String>,
 }
 
+/// Ergonomic builder for the Rust -> Python -> Rust compiled-engine entry point.
+///
+/// Only the model, system, and backend are required. Parallelism defaults to
+/// one, speculative decoding defaults to disabled, and all other options defer
+/// to Python's `compile_engine` defaults. New callers should use this builder.
+/// [`build_aic_engine`] remains available as a source-compatibility adapter for
+/// existing callers and is planned to be deprecated in version 0.11.0.
+#[derive(Clone, Debug)]
+pub struct AicEngineBuilder {
+    request: EngineBuildRequest,
+}
+
 impl AicEngineBuilder {
     /// Start an engine build for a model, target system, and backend.
     pub fn new(
@@ -324,129 +336,112 @@ impl AicEngineBuilder {
         backend: BackendKind,
     ) -> Self {
         Self {
-            model_path: model_path.into(),
-            system: system.into(),
-            backend,
-            backend_version: None,
-            tp_size: 1,
-            pp_size: 1,
-            attention_dp_size: 1,
-            moe_tp_size: None,
-            moe_ep_size: None,
-            gemm_quant_mode: None,
-            moe_quant_mode: None,
-            kvcache_quant_mode: None,
-            fmha_quant_mode: None,
-            comm_quant_mode: None,
-            nextn: 0,
-            nextn_accept_rates: None,
-            kv_block_size: None,
-            systems_path: None,
+            request: EngineBuildRequest {
+                model_path: model_path.into(),
+                system: system.into(),
+                backend: backend.as_str().to_owned(),
+                backend_version: None,
+                tp_size: 1,
+                pp_size: 1,
+                attention_dp_size: 1,
+                moe_tp_size: None,
+                moe_ep_size: None,
+                gemm_quant_mode: None,
+                moe_quant_mode: None,
+                kvcache_quant_mode: None,
+                fmha_quant_mode: None,
+                comm_quant_mode: None,
+                nextn: 0,
+                nextn_accept_rates: None,
+                kv_block_size: None,
+                systems_path: None,
+            },
         }
     }
 
     /// Select a specific backend version.
     pub fn backend_version(mut self, value: impl Into<String>) -> Self {
-        self.backend_version = Some(value.into());
+        self.request.backend_version = Some(value.into());
         self
     }
 
     /// Set tensor parallelism.
     pub fn tp_size(mut self, value: u32) -> Self {
-        self.tp_size = value;
+        self.request.tp_size = value;
         self
     }
 
     /// Set pipeline parallelism.
     pub fn pp_size(mut self, value: u32) -> Self {
-        self.pp_size = value;
+        self.request.pp_size = value;
         self
     }
 
     /// Set attention data parallelism.
     pub fn attention_dp_size(mut self, value: u32) -> Self {
-        self.attention_dp_size = value;
+        self.request.attention_dp_size = value;
         self
     }
 
     /// Set optional MoE tensor and expert parallelism.
     pub fn moe_parallelism(mut self, tp_size: Option<u32>, ep_size: Option<u32>) -> Self {
-        self.moe_tp_size = tp_size;
-        self.moe_ep_size = ep_size;
+        self.request.moe_tp_size = tp_size;
+        self.request.moe_ep_size = ep_size;
         self
     }
 
     /// Override the GEMM quantization mode.
     pub fn gemm_quant_mode(mut self, value: impl Into<String>) -> Self {
-        self.gemm_quant_mode = Some(value.into());
+        self.request.gemm_quant_mode = Some(value.into());
         self
     }
 
     /// Override the MoE quantization mode.
     pub fn moe_quant_mode(mut self, value: impl Into<String>) -> Self {
-        self.moe_quant_mode = Some(value.into());
+        self.request.moe_quant_mode = Some(value.into());
         self
     }
 
     /// Override the KV-cache quantization mode.
     pub fn kvcache_quant_mode(mut self, value: impl Into<String>) -> Self {
-        self.kvcache_quant_mode = Some(value.into());
+        self.request.kvcache_quant_mode = Some(value.into());
         self
     }
 
     /// Override the FMHA quantization mode.
     pub fn fmha_quant_mode(mut self, value: impl Into<String>) -> Self {
-        self.fmha_quant_mode = Some(value.into());
+        self.request.fmha_quant_mode = Some(value.into());
         self
     }
 
     /// Override the communication quantization mode.
     pub fn comm_quant_mode(mut self, value: impl Into<String>) -> Self {
-        self.comm_quant_mode = Some(value.into());
+        self.request.comm_quant_mode = Some(value.into());
         self
     }
 
     /// Configure speculative decoding.
     pub fn speculative_decoding(mut self, nextn: u32, accept_rates: Option<Vec<f64>>) -> Self {
-        self.nextn = nextn;
-        self.nextn_accept_rates = accept_rates;
+        self.request.nextn = nextn;
+        self.request.nextn_accept_rates = accept_rates;
         self
     }
 
     /// Override the KV-cache block size.
     pub fn kv_block_size(mut self, value: u32) -> Self {
-        self.kv_block_size = Some(value);
+        self.request.kv_block_size = Some(value);
         self
     }
 
     /// Override the bundled systems-data root.
     pub fn systems_path(mut self, value: impl Into<String>) -> Self {
-        self.systems_path = Some(value.into());
+        self.request.systems_path = Some(value.into());
         self
     }
 
     /// Compile the Python engine specification once and return a Rust handle.
     pub fn build(self) -> Result<AicEngine, AicError> {
-        build_aic_engine(
-            &self.model_path,
-            &self.system,
-            self.backend.as_str(),
-            self.backend_version.as_deref(),
-            self.tp_size,
-            self.pp_size,
-            self.attention_dp_size,
-            self.moe_tp_size,
-            self.moe_ep_size,
-            self.gemm_quant_mode.as_deref(),
-            self.moe_quant_mode.as_deref(),
-            self.kvcache_quant_mode.as_deref(),
-            self.fmha_quant_mode.as_deref(),
-            self.comm_quant_mode.as_deref(),
-            self.nextn,
-            self.nextn_accept_rates,
-            self.kv_block_size,
-            self.systems_path.as_deref(),
-        )
+        build_aic_engine_impl(self.request)
     }
 }
 
@@ -457,14 +452,14 @@ mod builder_tests {
     #[test]
     fn builder_defaults_match_compile_engine_defaults() {
         let builder = AicEngineBuilder::new("model", "system", BackendKind::Vllm);
-        assert_eq!(builder.tp_size, 1);
-        assert_eq!(builder.pp_size, 1);
-        assert_eq!(builder.attention_dp_size, 1);
-        assert_eq!(builder.nextn, 0);
-        assert!(builder.backend_version.is_none());
-        assert!(builder.moe_tp_size.is_none());
-        assert!(builder.moe_ep_size.is_none());
-        assert!(builder.kv_block_size.is_none());
+        assert_eq!(builder.request.tp_size, 1);
+        assert_eq!(builder.request.pp_size, 1);
+        assert_eq!(builder.request.attention_dp_size, 1);
+        assert_eq!(builder.request.nextn, 0);
+        assert!(builder.request.backend_version.is_none());
+        assert!(builder.request.moe_tp_size.is_none());
+        assert!(builder.request.moe_ep_size.is_none());
+        assert!(builder.request.kv_block_size.is_none());
     }
 
     #[test]
@@ -478,28 +473,32 @@ mod builder_tests {
             .speculative_decoding(2, Some(vec![0.8, 0.3]))
             .kv_block_size(16)
             .systems_path("/tmp/systems");
-        assert_eq!(builder.backend, BackendKind::Sglang);
-        assert_eq!(builder.backend_version.as_deref(), Some("0.5.9"));
-        assert_eq!((builder.tp_size, builder.pp_size), (8, 2));
-        assert_eq!(builder.attention_dp_size, 4);
+        assert_eq!(builder.request.backend, "sglang");
+        assert_eq!(builder.request.backend_version.as_deref(), Some("0.5.9"));
+        assert_eq!((builder.request.tp_size, builder.request.pp_size), (8, 2));
+        assert_eq!(builder.request.attention_dp_size, 4);
         assert_eq!(
-            (builder.moe_tp_size, builder.moe_ep_size),
+            (builder.request.moe_tp_size, builder.request.moe_ep_size),
             (Some(1), Some(8))
         );
-        assert_eq!(builder.nextn_accept_rates, Some(vec![0.8, 0.3]));
-        assert_eq!(builder.kv_block_size, Some(16));
-        assert_eq!(builder.systems_path.as_deref(), Some("/tmp/systems"));
+        assert_eq!(builder.request.nextn_accept_rates, Some(vec![0.8, 0.3]));
+        assert_eq!(builder.request.kv_block_size, Some(16));
+        assert_eq!(
+            builder.request.systems_path.as_deref(),
+            Some("/tmp/systems")
+        );
     }
 }
 
-/// Rust → Python → Rust embedded build entry point.
+/// Compatibility Rust → Python → Rust embedded build entry point.
 ///
 /// A plain `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers (e.g. the Dynamo
 /// Mocker) call it with flat scalars. It crosses into Python exactly once to
-/// run `aiconfigurator.sdk.engine.compile_engine`, which walks the model's
-/// op lists and returns bincoded [`EngineSpec`] bytes; it then builds the
-/// [`Engine`] from those bytes (via [`Engine::from_spec_bytes`], which does
-/// `from_bincode` + `PerfDatabase::load` + `Engine::build`). The call shape is
+/// run `aiconfigurator_core.sdk.engine.compile_engine`, which walks the model's
+/// op lists and returns bincoded [`crate::engine::spec::EngineSpec`] bytes. It
+/// then builds the [`Engine`] from those bytes (via
+/// [`Engine::from_spec_bytes`], which does `from_bincode` +
+/// `PerfDatabase::load` + `Engine::build`). The call shape is
 /// `with_gil → import → call_method1("compile_engine", ...) →
 /// extract::<Vec<u8>>() → build`.
 ///
@@ -509,6 +508,12 @@ mod builder_tests {
 ///
 /// The full Rust → Python → Rust round-trip is validated end-to-end by
 /// `tests/embedded_round_trip.rs`.
+///
+/// # Compatibility
+///
+/// This flat function remains source-compatible through the 0.10 release for
+/// existing consumers. New code should use [`AicEngineBuilder`]. The flat
+/// function is planned to be marked deprecated in version 0.11.0.
 // `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
 // `tests/embedded_round_trip.rs`).
 #[allow(clippy::too_many_arguments)]
@@ -532,56 +537,42 @@ pub fn build_aic_engine(
     kv_block_size: Option<u32>,
     systems_path: Option<&str>,
 ) -> Result<AicEngine, AicError> {
-    let engine = compile_engine_from_flat(
-        model_path,
-        system,
-        backend,
-        backend_version,
+    build_aic_engine_impl(EngineBuildRequest {
+        model_path: model_path.to_owned(),
+        system: system.to_owned(),
+        backend: backend.to_owned(),
+        backend_version: backend_version.map(str::to_owned),
         tp_size,
         pp_size,
         attention_dp_size,
         moe_tp_size,
         moe_ep_size,
-        gemm_quant_mode,
-        moe_quant_mode,
-        kvcache_quant_mode,
-        fmha_quant_mode,
-        comm_quant_mode,
+        gemm_quant_mode: gemm_quant_mode.map(str::to_owned),
+        moe_quant_mode: moe_quant_mode.map(str::to_owned),
+        kvcache_quant_mode: kvcache_quant_mode.map(str::to_owned),
+        fmha_quant_mode: fmha_quant_mode.map(str::to_owned),
+        comm_quant_mode: comm_quant_mode.map(str::to_owned),
         nextn,
         nextn_accept_rates,
         kv_block_size,
-        systems_path,
-    )?;
+        systems_path: systems_path.map(str::to_owned),
+    })
+}
+
+/// Construct the public handle from the one canonical build request.
+fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
+    let engine = compile_engine_from_request(request)?;
     Ok(AicEngine::new(engine))
 }
 
 /// Shared `Rust → Python → Rust` compile body: cross into Python once to run
-/// `compile_engine` over flat kwargs, then build an [`Engine`] from the returned
-/// bincode bytes (`from_bincode` + `PerfDatabase::load` + `Engine::build`).
-/// `build_aic_engine` and [`compile_engine_to_engine`] share this so there is
-/// exactly one Python-compile shape.
-#[allow(clippy::too_many_arguments)]
-fn compile_engine_from_flat(
-    model_path: &str,
-    system: &str,
-    backend: &str,
-    backend_version: Option<&str>,
-    tp_size: u32,
-    pp_size: u32,
-    attention_dp_size: u32,
-    moe_tp_size: Option<u32>,
-    moe_ep_size: Option<u32>,
-    gemm_quant_mode: Option<&str>,
-    moe_quant_mode: Option<&str>,
-    kvcache_quant_mode: Option<&str>,
-    fmha_quant_mode: Option<&str>,
-    comm_quant_mode: Option<&str>,
-    nextn: u32,
-    nextn_accept_rates: Option<Vec<f64>>,
-    kv_block_size: Option<u32>,
-    systems_path: Option<&str>,
-) -> Result<Engine, AicError> {
-    let systems_root = resolve_systems_root(systems_path)
+/// `compile_engine` from one normalized request, then build an [`Engine`] from
+/// the returned bincode bytes (`from_bincode` + `PerfDatabase::load` +
+/// `Engine::build`).
+/// The builder, compatibility wrapper, and [`compile_engine_to_engine`] all use
+/// this function, so Python argument names and defaults cannot drift.
+fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, AicError> {
+    let systems_root = resolve_systems_root(request.systems_path.as_deref())
         .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
     let systems_root_str = systems_root.to_str().ok_or_else(|| {
         AicError::DataRoot(format!(
@@ -592,25 +583,29 @@ fn compile_engine_from_flat(
     let spec_bytes: Vec<u8> = Python::with_gil(|py| -> PyResult<Vec<u8>> {
         let engine_mod = py.import("aiconfigurator_core.sdk.engine")?;
         let kwargs = pyo3::types::PyDict::new(py);
-        kwargs.set_item("backend_version", backend_version)?;
-        kwargs.set_item("tp_size", tp_size)?;
-        kwargs.set_item("pp_size", pp_size)?;
-        kwargs.set_item("attention_dp_size", attention_dp_size)?;
-        kwargs.set_item("moe_tp_size", moe_tp_size)?;
-        kwargs.set_item("moe_ep_size", moe_ep_size)?;
-        kwargs.set_item("gemm_quant_mode", gemm_quant_mode)?;
-        kwargs.set_item("moe_quant_mode", moe_quant_mode)?;
-        kwargs.set_item("kvcache_quant_mode", kvcache_quant_mode)?;
-        kwargs.set_item("fmha_quant_mode", fmha_quant_mode)?;
-        kwargs.set_item("comm_quant_mode", comm_quant_mode)?;
-        kwargs.set_item("nextn", nextn)?;
-        kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
-        kwargs.set_item("kv_block_size", kv_block_size)?;
+        kwargs.set_item("backend_version", request.backend_version.as_deref())?;
+        kwargs.set_item("tp_size", request.tp_size)?;
+        kwargs.set_item("pp_size", request.pp_size)?;
+        kwargs.set_item("attention_dp_size", request.attention_dp_size)?;
+        kwargs.set_item("moe_tp_size", request.moe_tp_size)?;
+        kwargs.set_item("moe_ep_size", request.moe_ep_size)?;
+        kwargs.set_item("gemm_quant_mode", request.gemm_quant_mode.as_deref())?;
+        kwargs.set_item("moe_quant_mode", request.moe_quant_mode.as_deref())?;
+        kwargs.set_item("kvcache_quant_mode", request.kvcache_quant_mode.as_deref())?;
+        kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
+        kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
+        kwargs.set_item("nextn", request.nextn)?;
+        kwargs.set_item("nextn_accept_rates", request.nextn_accept_rates.clone())?;
+        kwargs.set_item("kv_block_size", request.kv_block_size)?;
         kwargs.set_item("systems_path", systems_root_str)?;
         engine_mod
             .call_method(
                 "compile_engine",
-                (model_path, system, backend),
+                (
+                    request.model_path.as_str(),
+                    request.system.as_str(),
+                    request.backend.as_str(),
+                ),
                 Some(&kwargs),
             )?
             .extract::<Vec<u8>>()
@@ -627,8 +622,7 @@ fn compile_engine_from_flat(
 
 /// Build a compiled [`Engine`] from a modular [`EngineConfig`] (the
 /// `fpm::ForwardPassPerfModel::from_native` entry point). Maps the
-/// config's nested fields onto the flat `compile_engine` kwargs and reuses the
-/// shared [`compile_engine_from_flat`] body.
+/// config's nested fields onto the shared [`EngineBuildRequest`].
 ///
 /// Quantization: each `DataType` is mapped to the matching backend quant-mode
 /// enum NAME per target field (see [`gemm_quant_name`] etc.). DataTypes with no
@@ -651,26 +645,30 @@ pub(crate) fn compile_engine_to_engine(
         .as_ref()
         .and_then(|s| s.nextn_accept_rates.clone());
 
-    compile_engine_from_flat(
-        &config.model_name,
-        &config.system_name,
-        config.backend.as_str(),
-        config.backend_version.as_deref(),
-        config.parallel.tp_size,
-        config.parallel.pp_size,
-        config.parallel.attention_dp_size.unwrap_or(1),
-        config.parallel.moe_tp_size,
-        config.parallel.moe_ep_size,
-        gemm_quant_name(config.quantization.weight_dtype.as_ref()),
-        moe_quant_name(config.quantization.moe_dtype.as_ref()),
-        kvcache_quant_name(config.quantization.kv_cache_dtype.as_ref()),
-        fmha_quant_name(config.quantization.activation_dtype.as_ref()),
-        None, // comm quant is not carried on EngineConfig; let Python default it.
+    compile_engine_from_request(EngineBuildRequest {
+        model_path: config.model_name.clone(),
+        system: config.system_name.clone(),
+        backend: config.backend.as_str().to_owned(),
+        backend_version: config.backend_version.clone(),
+        tp_size: config.parallel.tp_size,
+        pp_size: config.parallel.pp_size,
+        attention_dp_size: config.parallel.attention_dp_size.unwrap_or(1),
+        moe_tp_size: config.parallel.moe_tp_size,
+        moe_ep_size: config.parallel.moe_ep_size,
+        gemm_quant_mode: gemm_quant_name(config.quantization.weight_dtype.as_ref())
+            .map(str::to_owned),
+        moe_quant_mode: moe_quant_name(config.quantization.moe_dtype.as_ref()).map(str::to_owned),
+        kvcache_quant_mode: kvcache_quant_name(config.quantization.kv_cache_dtype.as_ref())
+            .map(str::to_owned),
+        fmha_quant_mode: fmha_quant_name(config.quantization.activation_dtype.as_ref())
+            .map(str::to_owned),
+        // Comm quant is not carried on EngineConfig; let Python default it.
+        comm_quant_mode: None,
         nextn,
         nextn_accept_rates,
-        config.kv_block_size,
-        systems_path,
-    )
+        kv_block_size: config.kv_block_size,
+        systems_path: systems_path.map(str::to_owned),
+    })
 }
 
 /// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
