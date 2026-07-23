@@ -950,13 +950,10 @@ class Task:
             if getattr(self, name) is None:
                 setattr(self, name, values)
 
-        # E+agg cells are replicas: give them the same per-replica GPU budget
-        # defaults as disagg replicas (same fields, same vocabulary).
+        # E+agg cells are replicas: resolve the same per-replica GPU budget
+        # defaults as disagg replicas (same fields, same code).
         if self.enable_epd:
-            if self.num_gpu_per_replica is None:
-                self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
-            if self.max_gpu_per_replica is None:
-                self.max_gpu_per_replica = 128
+            self._resolve_replica_budget()
 
         # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
         # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
@@ -1037,14 +1034,19 @@ class Task:
             if self.max_gpu_per_replica is None:
                 self.max_gpu_per_replica = 512
         else:
-            if self.num_gpu_per_replica is None:
-                self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
-            if self.max_gpu_per_replica is None:
-                self.max_gpu_per_replica = 128
+            self._resolve_replica_budget()
         if self.max_prefill_workers is None:
             self.max_prefill_workers = 32
         if self.max_decode_workers is None:
             self.max_decode_workers = 32
+
+    def _resolve_replica_budget(self) -> None:
+        """Default per-replica GPU budget, shared by disagg replicas and
+        (under enable_epd) E+agg cells — an E+agg cell is a replica."""
+        if self.num_gpu_per_replica is None:
+            self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
+        if self.max_gpu_per_replica is None:
+            self.max_gpu_per_replica = 128
 
     def _fill_role_search(self, role: str, src: dict[str, list[int]]) -> None:
         map_to_attr = {
@@ -1213,8 +1215,13 @@ class Task:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         # EPD is switched on explicitly and only by enable_epd (both serving
         # modes); every other encoder_* field is a pure search-space /
-        # placement knob and must not act as an implicit switch.
-        encoder_knobs_set = self.encoder_tp_candidates or self.encoder_batch_candidates or self.encoder_system_name
+        # placement / calibration knob and must not act as an implicit switch.
+        encoder_knobs_set = (
+            self.encoder_tp_candidates
+            or self.encoder_batch_candidates
+            or self.encoder_system_name
+            or self.encoder_latency_correction != 1.0
+        )
         if encoder_knobs_set and not self.enable_epd:
             raise ValueError("encoder_* settings require enable_epd=True.")
         if self.serving_mode == "agg":

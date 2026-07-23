@@ -487,8 +487,8 @@ def sweep_agg(
         # encoder, ``encoder_database``); it defaults to the agg side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
-            tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
-            b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
+            tp_list=encoder_tp_list,
+            b_list=encoder_batch_list,
             runtime_config=runtime_config,
             database=encoder_database or database,
             backend_name=backend_name,
@@ -563,7 +563,10 @@ def sweep_agg(
                     backend=backend,
                     database=database,
                     runtime_config=point_rt,
-                    top_k=top_k,
+                    # EPD defers the top_k cut to the encoder pairing: cutting
+                    # the language-only rows here would let high-throughput
+                    # rows without encode headroom shadow the pairable ones.
+                    top_k=0 if encoder_candidates is not None else top_k,
                     max_batch_size=max_batch_size,
                     ctx_stride=ctx_stride,
                     enable_chunked_prefill=enable_chunked_prefill,
@@ -582,6 +585,7 @@ def sweep_agg(
                         encoder_candidates,
                         ttft_target=point_rt.ttft,
                         num_gpu_set=epd_num_gpu_set,
+                        top_k=top_k,
                     )
                 if len(point_df) == 0:
                     continue
@@ -738,8 +742,8 @@ def _get_disagg_worker_candidates(
 def _get_encoder_worker_candidates(
     *,
     model_path: str,
-    tp_list: list[int],
-    b_list: list[int],
+    tp_list: list[int] | None,
+    b_list: list[int] | None,
     runtime_config: config.RuntimeConfig,
     database: PerfDatabase,
     backend_name: str,
@@ -753,6 +757,8 @@ def _get_encoder_worker_candidates(
     built directly from the encoder config: constructing the full LLM here
     would waste work and, worse, let LLM-side parallelism rules (KV-head
     divisibility, MoE width identities) reject a tp the ViT itself supports.
+    ``tp_list`` / ``b_list`` fall back to :data:`_DEFAULT_ENCODER_TP_LIST` /
+    :data:`_DEFAULT_ENCODER_BATCH_SCHEDULE` when None.
     A worker encodes one batch of ``b`` requests (each with
     ``num_images_per_request`` images) in ``encoder_latency`` ms, so its
     throughput is ``b / encoder_latency``.  Per tp, batch points that do not
@@ -770,8 +776,15 @@ def _get_encoder_worker_candidates(
         raise ValueError(  # noqa: TRY004
             f"EPD (encoder disaggregation) requested but model {model_path!r} has no vision encoder."
         )
+    if BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config) <= 0:
+        raise ValueError(
+            "EPD (encoder disaggregation) requested but the workload has no image input; "
+            "set image_height/image_width (or num_image_tokens) and num_images_per_request."
+        )
     rows: list[dict] = []
-    for etp in tp_list:
+    # The dominance filter below relies on ascending batch order.
+    b_schedule = sorted(set(b_list or _DEFAULT_ENCODER_BATCH_SCHEDULE))
+    for etp in sorted(set(tp_list or _DEFAULT_ENCODER_TP_LIST)):
         try:
             encoder_ops = build_encoder_ops(enc_cfg, etp)
         except ValueError as e:
@@ -780,15 +793,10 @@ def _get_encoder_worker_candidates(
             continue
         model = EncoderOnlyModel(encoder_ops=encoder_ops, encoder_config=enc_cfg)
         best_seq_s = 0.0
-        for b in b_list:
+        for b in b_schedule:
             latency, power_w, memory = backend.run_encoder_static(
                 model, database, runtime_config, b, latency_correction_scale=latency_correction
             )
-            if latency <= 0.0:
-                raise ValueError(
-                    "EPD (encoder disaggregation) requested but the workload has no image input; "
-                    "set image_height/image_width (or num_image_tokens) and num_images_per_request."
-                )
             seq_s = b * 1000.0 / latency
             if seq_s <= best_seq_s:
                 continue
@@ -877,12 +885,19 @@ def _rate_match_agg_epd(
     *,
     ttft_target: float,
     num_gpu_set: set[int] | None = None,
+    top_k: int = 0,
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
     The agg counterpart of the disagg encoder rate matching + ``_overlay_encoder_stage``:
-    for each (agg row, encode-worker choice) whose encode latency still fits
-    the TTFT budget, sweep cells of ``a`` agg workers + ``e`` encode workers
+    for each encode-worker choice, pair the agg rows whose encode latency
+    still fits the TTFT budget -- best throughput first, up to ``top_k``
+    rows per choice (0 = uncapped), mirroring the per-choice
+    ``_prefill_records`` re-filter in the disagg path.  The caller hands
+    over the full SLA-feasible row set: a top_k cut on the language-only
+    rows *before* this pairing would let high-throughput rows without
+    encode headroom shadow the (possibly only) pairable rows.  For each
+    pairing, sweep cells of ``a`` agg workers + ``e`` encode workers
     -- ``e`` up to the first count that no longer binds (larger pools are
     dominated), smaller counts making the encode pool the rate-matched
     bottleneck (cell throughput = min of the two pools, applied by the
@@ -894,16 +909,18 @@ def _rate_match_agg_epd(
     returned rows are per-cell — ``(a)workers`` agg workers — so the
     downstream replicas logic scales whole cells.
     """
+    records = agg_df.sort_values(by="seq/s", ascending=False).to_dict("records")
     rows: list[dict] = []
-    for r in agg_df.to_dict("records"):
-        rate_one = float(r["seq/s"])
-        gpus_one = int(r["num_total_gpus"])
-        if rate_one <= 0:
-            continue
-        for enc in encoder_records:
+    for enc in encoder_records:
+        encoder_capacity = float(enc["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
+        paired = 0
+        for r in records:
             if enc["encoder_latency"] + r["ttft"] >= ttft_target:
                 continue
-            encoder_capacity = float(enc["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
+            rate_one = float(r["seq/s"])
+            gpus_one = int(r["num_total_gpus"])
+            if rate_one <= 0:
+                continue
             best: tuple[tuple[float, int], int, int] | None = None
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
                 agg_rate = rate_one * a_num
@@ -939,6 +956,9 @@ def _rate_match_agg_epd(
                     decode_power=r.get("power_w", 0.0),
                 )
             )
+            paired += 1
+            if top_k and paired >= top_k:
+                break
     if not rows:
         return pd.DataFrame(columns=list(agg_df.columns))
     return pd.DataFrame(rows)
@@ -1202,8 +1222,8 @@ def sweep_disagg(
         # encoder, ``encoder_database``); it defaults to the prefill side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
-            tp_list=encoder_tp_list or _DEFAULT_ENCODER_TP_LIST,
-            b_list=encoder_batch_list or _DEFAULT_ENCODER_BATCH_SCHEDULE,
+            tp_list=encoder_tp_list,
+            b_list=encoder_batch_list,
             runtime_config=runtime_config,
             database=encoder_database or prefill_database,
             backend_name=prefill_backend_name,

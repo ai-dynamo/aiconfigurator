@@ -345,7 +345,7 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
     assert epd_row["num_total_gpus"] == 42
     assert epd_row["seq/s"] == pytest.approx(60.0)
     assert epd_row["tokens/s/gpu"] == pytest.approx(6000.0 / 42, abs=1e-3)
-    assert (epd_row["(e)tp"], epd_row["(e)bs"], epd_row["(e)parallel"]) == (2, 4, "tp2")
+    assert (epd_row["(e)tp"], epd_row["(e)bs"]) == (2, 4)
     # request latency = corrected prefill ttft + tpot*(osl-1) + corrected encode stage.
     assert epd_row["request_latency"] == pytest.approx(108.0 + 8.0 * 99 + 90.0)
 
@@ -415,9 +415,7 @@ def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
 
     monkeypatch.setattr(sweep, "get_model", _fake_get_model)
     monkeypatch.setattr(sweep, "get_backend", lambda name: MagicMock())
-    monkeypatch.setattr(
-        sweep, "_sweep_one_parallel_agg", lambda **_kwargs: (pd.DataFrame([agg_row]), True, True)
-    )
+    monkeypatch.setattr(sweep, "_sweep_one_parallel_agg", lambda **_kwargs: (pd.DataFrame([agg_row]), True, True))
     monkeypatch.setattr(
         sweep,
         "_get_encoder_worker_candidates",
@@ -456,7 +454,209 @@ def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
     assert row["seq/s"] == pytest.approx(70.0)
     assert row["tokens/s/gpu"] == pytest.approx(7000.0 / 30, abs=1e-3)
     assert row["concurrency"] == 32 * 7
-    assert (row["(e)tp"], row["(e)bs"], row["(e)parallel"]) == (2, 4, "tp2")
+    assert (row["(e)tp"], row["(e)bs"]) == (2, 4)
+
+
+def test_sweep_disagg_epd_encoder_can_bottleneck_under_replica_budget(monkeypatch):
+    """Three-pool rate matching under a per-replica GPU budget.
+
+    p/d workers of 10 seq/s x 1 GPU each; encode worker 10 seq/s x 1 GPU
+    (degraded capacity 9).  Sizing the encode pool to never bottleneck needs
+    2 encode workers, but that cell (1p+1d+2e = 4 GPUs) is outside
+    num_gpu_list=[3]; the only feasible cell is 1p1d1e with the encode pool
+    as the rate-matched bottleneck: seq/s = 9 (min of the three pools), not
+    the P/D-matched 10.  A ceil-only sizing would emit nothing here.
+    """
+    import pandas as pd
+
+    def _row(**overrides) -> dict:
+        base = {
+            "model": "m",
+            "isl": 1000,
+            "osl": 100,
+            "prefix": 0,
+            "concurrency": 1,
+            "request_rate": 0.0,
+            "bs": 1,
+            "global_bs": 1,
+            "ttft": 60.0,
+            "tpot": 0.0,
+            "seq/s": 10.0,
+            "seq/s/gpu": 10.0,
+            "tokens/s": 10.0,
+            "tokens/s/gpu": 10.0,
+            "tokens/s/user": 0.0,
+            "request_latency": 60.0,
+            "encoder_latency": 0.0,
+            "encoder_memory": 0.0,
+            "num_total_gpus": 1,
+            "tp": 1,
+            "pp": 1,
+            "dp": 1,
+            "moe_tp": 1,
+            "moe_ep": 1,
+            "cp": 1,
+            "parallel": "tp1pp1dp1",
+            "gemm": "fp8",
+            "kvcache": "fp8",
+            "fmha": "fp8",
+            "moe": "fp8",
+            "comm": "half",
+            "memory": 30.0,
+            "power_w": 500.0,
+        }
+        base.update(overrides)
+        return base
+
+    prefill_df = pd.DataFrame([_row()])
+    decode_df = pd.DataFrame([_row(bs=32, global_bs=32, concurrency=32, ttft=0.0, tpot=8.0)])
+
+    monkeypatch.setattr(
+        sweep,
+        "_get_disagg_worker_candidates",
+        lambda *, role, **_kwargs: (decode_df if role == "decode" else prefill_df).copy(),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 10.0, "num_total_gpus": 1, "tp": 1, "bs": 4, "memory": 1.0}
+        ],
+    )
+
+    row = sweep_disagg(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
+        prefill_database=MagicMock(),
+        prefill_backend_name="sglang",
+        prefill_model_config=config.ModelConfig(),
+        prefill_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        prefill_latency_correction=1.0,
+        decode_database=MagicMock(),
+        decode_backend_name="sglang",
+        decode_model_config=config.ModelConfig(),
+        decode_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        decode_latency_correction=1.0,
+        prefill_num_worker_list=[1, 2],
+        decode_num_worker_list=[1, 2],
+        num_gpu_list=[3],
+        rate_matching_prefill_degradation=1.0,
+        rate_matching_decode_degradation=1.0,
+        enable_epd=True,
+        encoder_tp_list=[1],
+    ).iloc[0]
+
+    assert (row["(p)workers"], row["(d)workers"], row["(e)workers"]) == (1, 1, 1)
+    assert row["num_total_gpus"] == 3
+    # Encode pool binds: 10 * 1 * 0.9 = 9 < min(p, d) = 10.
+    assert row["seq/s"] == pytest.approx(9.0)
+    assert row["tokens/s/gpu"] == pytest.approx(900.0 / 3, abs=1e-3)
+
+
+def test_sweep_agg_epd_respects_replica_budget(monkeypatch):
+    """E+agg cell selection under num_gpu_list, with an encode-bound cell.
+
+    agg worker 10 seq/s x 4 GPUs; encode worker 8 seq/s x 2 GPUs (degraded
+    capacity 7.2).  Unbudgeted, the argmax grows the cell to amortize the
+    encode ceil; num_gpu_list=[6] leaves exactly one feasible cell — 1 agg +
+    1 encode — which is encode-bound: seq/s = 7.2.
+    """
+    import pandas as pd
+
+    # Only the keys the (agg x encode) matcher and the encoder overlay read.
+    agg_row = {
+        "osl": 100,
+        "concurrency": 32,
+        "ttft": 100.0,
+        "tpot": 8.0,
+        "request_latency": 892.0,
+        "seq/s": 10.0,
+        "tokens/s": 1000.0,
+        "num_total_gpus": 4,
+    }
+
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "get_backend", lambda name: MagicMock())
+    monkeypatch.setattr(sweep, "_sweep_one_parallel_agg", lambda **_kwargs: (pd.DataFrame([agg_row]), True, True))
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 8.0, "num_total_gpus": 2, "tp": 2, "bs": 4, "memory": 1.5}
+        ],
+    )
+
+    row = sweep.sweep_agg(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
+        database=MagicMock(),
+        backend_name="sglang",
+        model_config=config.ModelConfig(),
+        parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+        enable_epd=True,
+        encoder_tp_list=[2],
+        num_gpu_list=[6],
+    ).iloc[0]
+
+    assert (row["(a)workers"], row["(e)workers"]) == (1, 1)
+    assert row["num_total_gpus"] == 6
+    # Encode pool binds: 8 * 1 * 0.9 = 7.2 < 10.
+    assert row["seq/s"] == pytest.approx(7.2)
+
+
+def test_sweep_agg_epd_top_k_defers_to_encoder_pairing(monkeypatch):
+    """The top_k cut must happen per encode pairing, not on the language-only
+    rows: with top_k=1 the higher-throughput row (no encode headroom,
+    50 + 180 >= 200) would otherwise shadow the only pairable row."""
+    import pandas as pd
+
+    # Only the keys the (agg x encode) matcher and the encoder overlay read.
+    def _row(ttft: float, seq_s: float) -> dict:
+        return {
+            "osl": 100,
+            "concurrency": 32,
+            "ttft": ttft,
+            "tpot": 8.0,
+            "request_latency": ttft + 8.0 * 99,
+            "seq/s": seq_s,
+            "tokens/s": seq_s * 100,
+            "num_total_gpus": 4,
+        }
+
+    captured: dict = {}
+
+    def _fake_sweep_one(**kwargs):
+        captured["top_k"] = kwargs["top_k"]
+        return pd.DataFrame([_row(ttft=180.0, seq_s=50.0), _row(ttft=60.0, seq_s=10.0)]), True, True
+
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "get_backend", lambda name: MagicMock())
+    monkeypatch.setattr(sweep, "_sweep_one_parallel_agg", _fake_sweep_one)
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 8.0, "num_total_gpus": 2, "tp": 2, "bs": 4, "memory": 1.5}
+        ],
+    )
+
+    df = sweep.sweep_agg(
+        model_path="m",
+        runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
+        database=MagicMock(),
+        backend_name="sglang",
+        model_config=config.ModelConfig(),
+        parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+        top_k=1,
+        enable_epd=True,
+        encoder_tp_list=[2],
+    )
+
+    # The language-only rows reach the pairing uncut ...
+    assert captured["top_k"] == 0
+    # ... and the pairable row (ttft 60 + encode 50) wins the per-choice slot.
+    assert len(df) == 1
+    assert df.iloc[0]["ttft"] == pytest.approx(110.0)
 
 
 def test_sweep_disagg_rejects_empty_num_worker_lists():
