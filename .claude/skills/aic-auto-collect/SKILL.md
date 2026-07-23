@@ -420,7 +420,12 @@ root = Path(
     "<system>/<family>/<backend>/<version>"
 )
 failed = False
-for path in sorted(root.glob("*_perf.parquet")):
+paths = sorted(root.glob("*_perf.parquet"))
+if not paths:
+    print(root, "ERROR no_perf_files")
+    failed = True
+
+for path in paths:
     table = pq.read_table(path)
     if table.num_rows == 0:
         print(path.name, "rows", 0, "ERROR empty_file")
