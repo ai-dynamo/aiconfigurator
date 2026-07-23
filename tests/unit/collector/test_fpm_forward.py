@@ -1000,7 +1000,8 @@ def test_fmha_resolves_per_kv_dtype_against_joint_evidence(monkeypatch):
     fp8 label the database cannot serve jointly."""
 
     class Estimate:
-        breakdown = {"non_kv_bytes": 50, "gpu_memory_capacity_bytes": 100}
+        def __init__(self):
+            self.breakdown = {"non_kv_bytes": 50, "gpu_memory_capacity_bytes": 100}
 
     monkeypatch.setattr(
         "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
