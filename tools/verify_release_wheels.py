@@ -12,7 +12,21 @@ from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
 
-PAYLOAD_SUFFIXES = {".css", ".csv", ".j2", ".js", ".json", ".md", ".parquet", ".py", ".rule", ".txt", ".yaml"}
+PAYLOAD_SUFFIXES = {
+    ".css",
+    ".csv",
+    ".j2",
+    ".js",
+    ".json",
+    ".md",
+    ".parquet",
+    ".py",
+    ".pyi",
+    ".rule",
+    ".txt",
+    ".typed",
+    ".yaml",
+}
 
 
 def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
@@ -123,7 +137,9 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     payload = _payload_files(names)
     required = {
         "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/_aiconfigurator_core.pyi",
         "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
+        "aiconfigurator_core/py.typed",
         "aiconfigurator_core/sdk/__init__.py",
         "aiconfigurator_core/sdk/common.py",
         "aiconfigurator_core/sdk/engine.py",

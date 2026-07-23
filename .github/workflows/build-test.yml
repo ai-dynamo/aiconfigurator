@@ -30,6 +30,44 @@ jobs:
           cargo-deny --version || cargo install cargo-deny@0.19.0
           cargo-deny --all-features check --show-stats licenses bans
 
+  core-public-api-contract:
+    name: aic-core public API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          lfs: true
+          fetch-depth: 0
+      - name: Git LFS Pull
+        run: git lfs pull
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+      - name: Test crate without Python embedding
+        run: cargo test --workspace --no-default-features
+      - name: Install the local wheel and upper compatibility package
+        run: |
+          python -m pip install uv
+          uv sync --extra dev
+      - name: Test Python package contracts
+        run: |
+          uv run pytest -q \
+            tests/cross_package/test_core_public_api.py \
+            tests/cross_package/test_core_version_contract.py \
+            tests/cross_package/test_import_contract.py
+      - name: Test crate with Python embedding
+        env:
+          AIC_REQUIRE_EMBEDDED_ROUND_TRIP: '1'
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.12/site-packages:${{ github.workspace }}/src
+        run: cargo test --workspace --all-features
+
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
