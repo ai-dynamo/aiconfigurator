@@ -422,6 +422,10 @@ root = Path(
 failed = False
 for path in sorted(root.glob("*_perf.parquet")):
     table = pq.read_table(path)
+    if table.num_rows == 0:
+        print(path.name, "rows", 0, "ERROR empty_file")
+        failed = True
+        continue
     if "latency" not in table.column_names:
         print(path.name, "rows", table.num_rows, "ERROR missing_required_column=latency")
         failed = True
