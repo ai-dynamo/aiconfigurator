@@ -21,7 +21,7 @@ fallback, and diagnostics.
 KV-cache capacity estimation is not exported here: it is computed in Python
 (``aiconfigurator_core.sdk.memory``), and the Rust
 ``aiconfigurator_core::memory::estimate_kv_cache`` is a Rust-only forwarder for
-embedded callers (e.g. the Dynamo Mocker), like ``build_aic_engine``.
+embedded callers (e.g. the Dynamo Mocker).
 """
 
 from ._aiconfigurator_core import (

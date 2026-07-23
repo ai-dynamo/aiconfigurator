@@ -20,8 +20,8 @@ The wire is shaped in two hops:
 2. The Rust ``engine_spec_bincode_from_json`` ``#[pyfunction]`` decodes that
    JSON into an ``EngineSpec`` and re-encodes it as bincode bytes (Python can't
    bincode; serde_json round-trips ``EngineConfig``'s flattened layout where
-   bincode can't). Those bytes are what ``AicEngine.from_spec`` /
-   ``build_aic_engine`` consume.
+   bincode can't). Those bytes are what ``AicEngine.from_spec`` and the Rust
+   ``AicEngineBuilder`` consume.
 
 ``EngineHandle`` wraps the compiled bytes plus an ``AicEngine`` and exposes the
 per-call surface (``run_static`` / ``predict_*_latency`` / ``mixed_step_latency``
@@ -38,7 +38,7 @@ import os
 from typing import Any
 
 import aiconfigurator_core
-from aiconfigurator_core.sdk.config_builders import build_model_config
+from aiconfigurator_core.sdk.config_builders import apply_nextn, build_model_config
 from aiconfigurator_core.sdk.models import get_model
 from aiconfigurator_core.sdk.operations import (
     GEMM,
@@ -646,7 +646,7 @@ def _engine_config_dict(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accept_rates: list[float] | None,
+    nextn_accepted: float | None,
     database: Any = None,
 ) -> dict:
     """Build the ``EngineConfig`` JSON (matches the Rust modularised struct).
@@ -664,7 +664,7 @@ def _engine_config_dict(
     if effective_nextn:
         speculative = {
             "nextn": effective_nextn,
-            "nextn_accept_rates": ([float(r) for r in nextn_accept_rates] if nextn_accept_rates is not None else None),
+            "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
         }
     # The Rust ``EngineConfig`` flattens ``parallel`` / ``quantization`` /
     # ``speculative`` via ``#[serde(flatten)]``, so their fields live at the
@@ -695,12 +695,12 @@ def _engine_config_dict(
         "perf_db_sources": _compute_perf_db_sources(database),
         "extra": {},
     }
-    # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accept_rates at
+    # SpeculativeConfig (flattened, Option<>): emit nextn/nextn_accepted at
     # the top level when MTP is active. When inactive, omit both keys so the
     # flattened Option deserializes to None.
     if speculative is not None:
         engine["nextn"] = speculative["nextn"]
-        engine["nextn_accept_rates"] = speculative["nextn_accept_rates"]
+        engine["nextn_accepted"] = speculative["nextn_accepted"]
     return engine
 
 
@@ -730,13 +730,13 @@ def compile_engine(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn_accepted: float | None = None,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
 ) -> bytes:
     """Compile a model into bincoded ``EngineSpec`` bytes.
 
-    Signature matches the kwargs ``build_aic_engine`` (Rust) passes. Reuses
+    Signature matches the kwargs the Rust ``AicEngineBuilder`` passes. Reuses
     ``cli/api._build_model_config`` + ``sdk/models.get_model`` (quant inferred
     inside ``get_model``) to build the model, then walks ``encoder_ops`` (vision
     decomposed), ``context_ops`` and ``generation_ops`` into OpSpecs and returns
@@ -758,6 +758,10 @@ def compile_engine(
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
     )
+    # Apply MTP BEFORE get_model so the walked op lists carry the
+    # 1/(1+nextn_accepted)*(L+nextn)/L generation scale; the spec's top-level
+    # nextn only drives the Rust (nextn+1) decode-batch multiplier.
+    apply_nextn(model_config, nextn, nextn_accepted)
     model = get_model(model_path, model_config, backend)
 
     # The database is only needed to pre-bake the WideEP MoE kernel selection
@@ -774,7 +778,7 @@ def compile_engine(
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=nextn,
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=nextn_accepted,
         database=database,
     )
 
@@ -791,7 +795,7 @@ def build_engine_spec_json(
     kv_block_size: int | None,
     systems_path: str | None,
     nextn: int,
-    nextn_accept_rates: list[float] | None,
+    nextn_accepted: float | None,
     database: Any = None,
 ) -> str:
     """Walk a built model's op lists into an ``EngineSpec`` JSON string.
@@ -830,7 +834,7 @@ def build_engine_spec_json(
             kv_block_size=kv_block_size,
             systems_path=systems_path,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             database=database,
         ),
         "context_ops": context_ops,

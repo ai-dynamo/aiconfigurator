@@ -93,14 +93,14 @@ class TestBackendAny:
                 assert task_config.decode_system_name == "h200_sxm"
 
     def test_build_default_tasks_with_nextn(self):
-        """Test that nextn and nextn_accept_rates are passed to TaskConfig when specified."""
+        """Test that nextn and nextn_accepted are passed to TaskConfig when specified."""
         tasks = build_default_tasks(
             model_path="Qwen/Qwen3-32B",
             total_gpus=8,
             system="h200_sxm",
             backend="trtllm",
             nextn=3,
-            nextn_accept_rates=[0.9, 0.5, 0.2, 0.1, 0.0],
+            nextn_accepted=1.5,
         )
 
         assert len(tasks) == 2
@@ -108,7 +108,7 @@ class TestBackendAny:
         # Verify nextn is set in config
         for task_config in tasks.values():
             assert task_config.nextn == 3
-            assert task_config.nextn_accept_rates == [0.9, 0.5, 0.2, 0.1, 0.0]
+            assert task_config.nextn_accepted == 1.5
 
     def test_build_default_tasks_nextn_default_zero(self):
         """Test that nextn defaults to 0 (MTP disabled) when not specified."""
@@ -121,8 +121,7 @@ class TestBackendAny:
 
         assert len(tasks) == 2
 
-        # Verify nextn defaults to 0
+        # Verify nextn defaults to 0 (and no acceptance assumption exists)
         for task_config in tasks.values():
             assert task_config.nextn == 0
-            # Default accept rates should still be present
-            assert task_config.nextn_accept_rates is not None
+            assert task_config.nextn_accepted is None

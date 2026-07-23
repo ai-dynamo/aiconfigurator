@@ -3,14 +3,12 @@
 
 //! End-to-end embedded round-trip.
 //!
-//! Drives the full Rust → Python → Rust embedded build path through both the
-//! preferred [`aiconfigurator_core::AicEngineBuilder`] and the flat
-//! [`aiconfigurator_core::build_aic_engine`] compatibility adapter. Each
-//! crosses into Python once to run
+//! Drives the full Rust → Python → Rust embedded build path through
+//! [`aiconfigurator_core::AicEngineBuilder`]. It crosses into Python once to run
 //! `aiconfigurator_core.sdk.engine.compile_engine`, gets bincoded `EngineSpec`
 //! bytes back, loads the matching perf database, and returns an
-//! [`aiconfigurator_core::AicEngine`]. The test asserts both paths agree and
-//! that the **pure-Rust hot path** produces finite, positive latencies.
+//! [`aiconfigurator_core::AicEngine`]. The test asserts that the **pure-Rust hot
+//! path** produces finite, positive latencies.
 //!
 //! ## Why this proves the Mocker hot path is PyO3-free
 //!
@@ -54,8 +52,6 @@
 
 #![cfg(feature = "embed-python")]
 
-#[allow(deprecated)]
-use aiconfigurator_core::build_aic_engine;
 use aiconfigurator_core::{AicEngineBuilder, BackendKind};
 use pyo3::prelude::*;
 
@@ -81,7 +77,7 @@ fn python_engine_importable() -> bool {
 }
 
 #[test]
-fn embedded_builder_and_compatibility_adapter_match() {
+fn embedded_builder_round_trip() {
     let required = std::env::var_os("AIC_REQUIRE_EMBEDDED_ROUND_TRIP").is_some();
     if !python_engine_importable() {
         assert!(
@@ -98,38 +94,13 @@ fn embedded_builder_and_compatibility_adapter_match() {
         return;
     }
 
-    // Preferred Rust -> Python (compile_engine) -> Rust path.
+    // Rust -> Python (compile_engine) -> Rust path.
     let engine = AicEngineBuilder::new(TEST_MODEL, "b200_sxm", BackendKind::Vllm)
         .backend_version("0.19.0")
         .tp_size(8)
         .moe_parallelism(Some(1), Some(8))
         .build()
         .expect("AicEngineBuilder must succeed end-to-end");
-
-    // Flat compatibility adapter must remain behaviorally identical during the
-    // announced migration window.
-    #[allow(deprecated)]
-    let compatibility_engine = build_aic_engine(
-        TEST_MODEL,
-        "b200_sxm",
-        "vllm",
-        Some("0.19.0"),
-        8,       // tp_size
-        1,       // pp_size
-        1,       // attention_dp_size
-        Some(1), // moe_tp_size
-        Some(8), // moe_ep_size
-        None,    // gemm_quant_mode (inferred by compile_engine)
-        None,    // moe_quant_mode
-        None,    // kvcache_quant_mode
-        None,    // fmha_quant_mode
-        None,    // comm_quant_mode
-        0,       // nextn
-        None,    // nextn_accept_rates
-        None,    // kv_block_size
-        None,    // resolve the installed core wheel's bundled systems data
-    )
-    .expect("build_aic_engine compatibility adapter must succeed end-to-end");
 
     // Pure-Rust hot path: these inherent methods take NO `py` token, so this
     // compute happens with the GIL never acquired. Finite, positive latencies
@@ -141,11 +112,6 @@ fn embedded_builder_and_compatibility_adapter_match() {
         prefill.is_finite() && prefill > 0.0,
         "prefill latency must be finite and > 0, got {prefill}"
     );
-    let compatibility_prefill = compatibility_engine
-        .prefill_latency_ms(1, 1024, 0)
-        .expect("compatibility prefill predict must succeed");
-    assert_eq!(prefill, compatibility_prefill);
-
     let decode = engine
         .decode_latency_ms(1, 1024, 2)
         .expect("decode predict must succeed");
@@ -153,8 +119,4 @@ fn embedded_builder_and_compatibility_adapter_match() {
         decode.is_finite() && decode > 0.0,
         "decode latency must be finite and > 0, got {decode}"
     );
-    let compatibility_decode = compatibility_engine
-        .decode_latency_ms(1, 1024, 2)
-        .expect("compatibility decode predict must succeed");
-    assert_eq!(decode, compatibility_decode);
 }

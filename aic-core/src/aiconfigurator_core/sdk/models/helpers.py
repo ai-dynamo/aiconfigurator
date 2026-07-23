@@ -515,17 +515,18 @@ def check_is_moe(model_path: str, model_info: dict | None = None) -> bool:
     return False
 
 
-def calc_expectation(nextn: int, nextn_accept_rates: list[float]) -> float:
-    """
-    Calculate expectation for mtp
-    """
-    prob = 1.0
-    if nextn == 0:
-        return 0.0
+def mtp_scale_factor(nextn: int, nextn_accepted: float | None, num_layers: int) -> float:
+    """Per-output-token generation scale for MTP speculative decoding.
 
-    for i in range(nextn):
-        prob *= nextn_accept_rates[i]
-    if nextn > 1:
-        return prob + calc_expectation(nextn - 1, nextn_accept_rates)
-    else:
-        return prob
+    ``nextn`` is the draft length (cost side: the model runs ``num_layers + nextn``
+    layers' worth of compute per decode step). ``nextn_accepted`` is the average number
+    of draft tokens actually accepted per step (benefit side: each step yields
+    ``1 + nextn_accepted`` output tokens). Returns 1.0 when MTP is disabled.
+    """
+    if nextn <= 0:
+        return 1.0
+    if nextn_accepted is None:
+        raise ValueError("nextn_accepted (average accepted draft tokens per step) is required when nextn > 0")
+    if not 0 <= nextn_accepted <= nextn:
+        raise ValueError(f"nextn_accepted ({nextn_accepted}) must be within [0, nextn={nextn}]")
+    return (nextn + num_layers) / num_layers / (1 + nextn_accepted)

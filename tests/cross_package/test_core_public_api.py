@@ -69,7 +69,7 @@ def test_stable_function_signatures() -> None:
         "gemm_quant_mode: 'str | None' = None, moe_quant_mode: 'str | None' = None, "
         "kvcache_quant_mode: 'str | None' = None, fmha_quant_mode: 'str | None' = None, "
         "comm_quant_mode: 'str | None' = None, nextn: 'int' = 0, "
-        "nextn_accept_rates: 'list[float] | None' = None, kv_block_size: 'int | None' = None, "
+        "nextn_accepted: 'float | None' = None, kv_block_size: 'int | None' = None, "
         "systems_path: 'str | None' = None) -> 'bytes'"
     )
     assert "scheduler_block_size" in inspect.signature(estimate_num_gpu_blocks).parameters

@@ -5,14 +5,14 @@
 //!
 //! [`estimate_kv_cache`] is a top-level crate function (NOT a method on
 //! `AicEngine`): estimation runs once at startup, uses overlapping but not
-//! identical inputs to `build_aic_engine`, and is a separate concern from
+//! identical inputs to `AicEngineBuilder`, and is a separate concern from
 //! latency prediction. The Dynamo Mocker is the primary external consumer; it
 //! calls this once and derives `num_gpu_blocks_per_rank` from
 //! `total_kv_size_tokens`.
 //!
 //! ## Rust is a pure forwarder; the estimate is computed in Python
 //!
-//! This mirrors how `build_aic_engine` forwards to the Python `compile_engine`:
+//! This mirrors how `AicEngineBuilder` forwards to Python's `compile_engine`:
 //! ALL of the work -- fraction + tolerance validation, HF-config parsing, the
 //! AIC backend memory model, the OfFree/OfTotal budget math, the naive heuristic
 //! fallback, AND the tolerance margin -- lives in
@@ -232,8 +232,8 @@ pub fn estimate_kv_cache(
 
 /// Cross into Python once to compute the complete estimate.
 ///
-/// Mirrors the `build_aic_engine` → `compile_engine` forwarder shape: `with_gil
-/// → import aiconfigurator.sdk.memory → call estimate_kv_cache(...) → extract
+/// Mirrors the `AicEngineBuilder` → `compile_engine` crossing: `with_gil →
+/// import aiconfigurator.sdk.memory → call estimate_kv_cache(...) → extract
 /// the returned dict`. `tolerance_fraction` is forwarded; the Python fn applies
 /// the tolerance and returns `tolerance_adjusted` in the dict.
 fn fetch_python_estimate(
@@ -250,10 +250,10 @@ fn fetch_python_estimate(
         .as_ref()
         .and_then(|s| s.nextn)
         .unwrap_or(0);
-    let nextn_accept_rates = engine
+    let nextn_accepted = engine
         .speculative
         .as_ref()
-        .and_then(|s| s.nextn_accept_rates.clone());
+        .and_then(|s| s.nextn_accepted);
     let (fraction_kind, fraction_value) = req.kv_cache_memory_fraction.to_wire();
 
     Python::with_gil(|py| -> PyResult<KvCacheEstimate> {
@@ -286,7 +286,7 @@ fn fetch_python_estimate(
         // overhead comes from `system_spec` (`nccl_mem` / `other_mem`), not the
         // comm quant mode, so it does not affect the non-KV breakdown.
         kwargs.set_item("nextn", nextn)?;
-        kwargs.set_item("nextn_accept_rates", nextn_accept_rates)?;
+        kwargs.set_item("nextn_accepted", nextn_accepted)?;
         kwargs.set_item(
             "systems_path",
             engine.systems_path.as_deref().and_then(|p| p.to_str()),

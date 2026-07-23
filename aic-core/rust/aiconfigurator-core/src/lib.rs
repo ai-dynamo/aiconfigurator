@@ -7,9 +7,8 @@
 //! `compile_engine` walks the model once and emits an [`engine::spec::EngineSpec`]
 //! (op lists + [`EngineConfig`] identity); the Rust [`engine::Engine`] executes
 //! it without re-entering Python. [`AicEngineBuilder`] is the preferred Rust →
-//! Python → Rust embedded build entry point; the deprecated
-//! [`build_aic_engine`] remains a flat source-compatibility adapter for callers
-//! that have not migrated yet. [`AicEngine`] is the PyO3 hot-path pyclass.
+//! Python → Rust embedded build entry point. [`AicEngine`] is the PyO3 hot-path
+//! pyclass.
 
 use std::path::PathBuf;
 
@@ -52,11 +51,9 @@ pub use memory::{
     MemoryBreakdown,
 };
 // PyO3 bindings. `AicEngine` is the Python -> Rust hot-path pyclass;
-// `AicEngineBuilder` is the preferred Rust -> Python -> Rust entry point;
-// deprecated `build_aic_engine` is retained as a flat compatibility adapter.
-// They must be `pub`-re-exported here because the `py` module itself is private.
-#[allow(deprecated)]
-pub use py::{build_aic_engine, AicEngine, AicEngineBuilder};
+// `AicEngineBuilder` is the Rust -> Python -> Rust entry point. They must be
+// `pub`-re-exported here because the `py` module itself is private.
+pub use py::{AicEngine, AicEngineBuilder};
 // Public wire/identity config types live in `config`. Re-exported at the crate
 // root so existing `crate::EngineConfig` / `crate::BackendKind` / ... paths
 // resolve unchanged across the crate and for external consumers.

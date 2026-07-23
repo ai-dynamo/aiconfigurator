@@ -5,7 +5,7 @@
 //!
 //! Proves that `aiconfigurator-core` links libpython and can start a Python
 //! interpreter via PyO3's `auto-initialize`. This is the linkage that
-//! `build_aic_engine` relies on. It does NOT import the
+//! `AicEngineBuilder::build` relies on. It does NOT import the
 //! `aiconfigurator_core` extension itself (that `.so` is not on `sys.path`
 //! during `cargo test`); it only exercises the embedded interpreter.
 

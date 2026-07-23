@@ -231,14 +231,19 @@ def create_model_misc_config(app_config):
     """create model misc config components"""
     with gr.Accordion("Misc config"):
         with gr.Row():
-            nextn = gr.Dropdown(choices=[0, 1, 2, 3, 4, 5], value=0, label="nextn", interactive=True)
-            nextn_accept_rates = gr.Textbox(value="0.85,0.3,0.0,0.0,0.0", label="nextn accept rates", interactive=True)
+            nextn = gr.Number(value=0, precision=0, minimum=0, label="nextn (MTP draft length)", interactive=True)
+            nextn_accepted = gr.Number(
+                value=None,
+                minimum=0,
+                label="nextn_accepted (avg accepted draft tokens/step, required when nextn > 0)",
+                interactive=True,
+            )
             enable_wideep = gr.Checkbox(label="enable wideep", value=False, interactive=True)
             enable_eplb = gr.Checkbox(label="enable eplb", value=False, interactive=False)
 
     return {
         "nextn": nextn,
-        "nextn_accept_rates": nextn_accept_rates,
+        "nextn_accepted": nextn_accepted,
         "enable_wideep": enable_wideep,
         "enable_eplb": enable_eplb,
     }

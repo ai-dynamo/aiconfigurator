@@ -22,12 +22,10 @@ interprets it — closer to a compiled query plan than a compiled executable. Th
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python.
 
-- `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
-  entry point for callers in other crates. The flat `build_aic_engine(...)`
-  function is deprecated as of version 0.11.0 but remains available as a
-  source-compatibility adapter while existing consumers migrate. Both normalize
-  into one private build request and embed a Python interpreter only for the
-  one-time compile step.
+- `AicEngineBuilder` is the Rust → Python (`compile_engine`) → Rust entry point
+  for callers in other crates. It normalizes configuration into one private
+  build request and embeds a Python interpreter only for the one-time compile
+  step.
 - The returned `AicEngine` exposes GIL-free inherent methods
   (`prefill_latency_ms`, `decode_latency_ms`) for the pure-Rust hot path, plus
   `#[pymethods]` wrappers and an FPM-aggregate `estimate_forward_pass_time_ms`
@@ -71,7 +69,7 @@ let decode = engine.decode_latency_ms(/* bs */ 1, /* isl */ 1024, /* osl */ 2)?;
 The `EngineConfig` identity carried by the spec groups its fields into cohesive
 sub-structs — `ParallelMapping` (`tp_size`, `pp_size`, `attention_dp_size`,
 `moe_tp_size`, `moe_ep_size`, `cp_size`), `QuantizationConfig`, and an optional
-`SpeculativeConfig` (`nextn`, `nextn_accept_rates`) — all `#[serde(flatten)]`-ed
+`SpeculativeConfig` (`nextn`, `nextn_accepted`) — all `#[serde(flatten)]`-ed
 so the wire JSON stays the flat object Python emits.
 
 ## Supported vs. not supported
