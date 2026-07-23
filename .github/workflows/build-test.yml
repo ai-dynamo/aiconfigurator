@@ -95,7 +95,9 @@ jobs:
           echo "Running pytest paths: ${test_paths[*]}"
 
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
-          docker run --name aic aiconfigurator:test \
+          # Fail-closed loader provenance checks (Collector V3 design §7.4); the
+          # committed data tree is fully sidecar-covered post-PR3, so this must stay green.
+          docker run --name aic -e AIC_STRICT_PROVENANCE=1 aiconfigurator:test \
             pytest \
             "${test_paths[@]}" \
             -m "unit or build" \

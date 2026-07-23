@@ -369,22 +369,33 @@ def test_cross_backend_inheritance(env: Path) -> None:
 
 
 def test_fallback_emits_warning(env: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """Loading `tier=shared_fallback` rows in HYBRID mode emits a single WARNING per
-    sibling source so the user knows latency predictions for those shapes are
-    framework-implicit (kernel_source=default).
+    """Loading `tier=shared_fallback` rows via CROSS-BACKEND fill (design §6.4)
+    in HYBRID mode emits a single WARNING per sibling source so the user knows
+    latency predictions for those shapes are framework-implicit
+    (kernel_source=default).
+
+    Post-AIC-1503 the warning is specific to the `cross_backend` channel: a
+    same-backend older version (design §6.2 `fallback` / §6.3 `declared_reuse`)
+    is still the active backend's OWN measurement, not a framework-implicit
+    substitute, so it never emits this warning (see
+    ``test_reuse_ordering.py`` for that channel's coverage). This test's
+    sibling is therefore a *different* backend (vllm), not an older version of
+    the active one.
     """
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
     active_csv.write_text(_GEMM_HEADER)
 
-    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "default", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm"])])
+    _write_gemm_csv(_backend_csv(env, backend="vllm", version="0.5"), [("vllm", "default", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm", "vllm"])])
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database"):
         db = _build_db(env)  # HYBRID mode
-    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
-    fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
-    assert len(fallback_warnings) == 1
+        # The lazy GEMM.load_data (triggered by _gemm_lookup) emits the
+        # warning, so it must run while capture is active.
+        assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+        fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
+        assert len(fallback_warnings) == 1
 
 
 def test_same_framework_outranks_other_framework(env: Path) -> None:

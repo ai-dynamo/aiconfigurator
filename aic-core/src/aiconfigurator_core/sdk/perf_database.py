@@ -650,6 +650,219 @@ def _shared_layer_enabled(database_mode: str | None) -> bool:
     return database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Strict provenance mode (Collector V3 design §5/§7.4, AIC-1503 PR4 task 2).
+#
+# Fail-closed load-time validation, scoped to the dirs a ``get_database()``
+# request actually touches: the REQUESTED (system, backend, version)'s own
+# family dirs (primary), plus any donor dir their own ``reuse.yaml`` declares
+# (channel 2, design §6.3). Nearest-earlier/cross-backend fallback siblings
+# are NOT walked here -- their count is unbounded per request, and auditing
+# them is the CI audit's job (design §8), not this per-request hook's.
+#
+# Off by default; CI turns it on (env var, see build-test.yml). When on, a
+# violation raises instead of the warn-and-continue this module otherwise
+# uses for questionable-but-recoverable data.
+# ─────────────────────────────────────────────────────────────────────────
+
+_STRICT_PROVENANCE_WARNED: set[tuple[str, str]] = set()
+
+# (sorted primary paths, backend) pairs that already passed
+# ``_check_strict_provenance_for_request`` with ``strict=True`` this process.
+# ``get_database()`` consults it on strict cache HITS: ``databases_cache`` can
+# hold worker-imported instances that were never request-validated (see
+# ``_store_loaded_database``), so a strict hit must validate before returning —
+# this memo keeps repeated strict hits cheap. Cleared wherever
+# ``databases_cache`` entries are invalidated (``unload_database``).
+_STRICT_VALIDATED_REQUESTS: set[tuple[tuple[str, ...], str]] = set()
+
+
+def _strict_provenance_enabled(strict_provenance: bool | None) -> bool:
+    """Resolve the effective strict-provenance flag. An explicit bool wins;
+    ``None`` falls back to the ``AIC_STRICT_PROVENANCE`` env var (truthy:
+    ``"1"`` or ``"true"``, case-insensitive)."""
+    if strict_provenance is not None:
+        return bool(strict_provenance)
+    return os.environ.get("AIC_STRICT_PROVENANCE", "").strip().lower() in ("1", "true")
+
+
+def _warn_strict_provenance_once(kind: str, key: str, message: str) -> None:
+    """One-time-per-(kind, key) warning, mirroring this module's other
+    warn-once helpers (e.g. ``_warn_legacy_marker_once``)."""
+    dedupe_key = (kind, key)
+    if dedupe_key in _STRICT_PROVENANCE_WARNED:
+        return
+    _STRICT_PROVENANCE_WARNED.add(dedupe_key)
+    logger.warning(message)
+
+
+def _version_dir_data_filenames(version_path: str) -> list[str]:
+    """Real perf-data filenames physically present in a version dir (excludes
+    dotfiles and the structured/legacy provenance marker files themselves).
+
+    A nonexistent dir is a legitimate "no files" answer; any other ``OSError``
+    (e.g. permission denied) propagates so ``_check_strict_provenance_coverage``
+    can fail closed instead of silently treating an unreadable dir as empty."""
+    try:
+        entries = os.listdir(version_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    names = []
+    for entry in entries:
+        if entry.startswith(".") or entry in _DATABASE_VERSION_METADATA_FILES:
+            continue
+        if os.path.isfile(os.path.join(version_path, entry)):
+            names.append(entry)
+    return names
+
+
+def _check_strict_provenance_coverage(version_path: str, *, strict: bool, only_table: str | None = None) -> None:
+    """Design §5/§7.4 sidecar-coverage check for one version dir.
+
+    ``only_table`` narrows the check to a single declared-reuse table
+    (channel 2 admits one table at a time, design §6.3); ``None`` checks
+    every real data file physically present (used for primary version
+    dirs). A missing ``collection_meta.yaml`` sidecar, or one that does not
+    list the table(s) in question, raises ``ValueError`` naming the dir and
+    table(s) when ``strict`` is True; otherwise it logs a warning once per
+    (dir, condition) and returns. A malformed sidecar surfaces the existing
+    ``ValueError`` from ``_load_collection_meta_yaml`` in strict mode;
+    non-strict warns instead. A ``provenance: legacy`` sidecar is graced --
+    warns once per dir, never raises -- in BOTH modes (one-release grace,
+    design §5): the AIC-1502 backfill covers the whole tree, but the tier is
+    honest about not having per-table hashes, so a coverage gap there is
+    treated as a data-quality note, not a hard failure.
+    """
+    if only_table is not None:
+        stems = {only_table}
+    else:
+        try:
+            data_filenames = _version_dir_data_filenames(version_path)
+        except OSError as e:
+            message = (
+                f"{version_path}: cannot inspect perf-data files ({e}); strict provenance "
+                "cannot verify sidecar coverage (Collector V3 design §5/§7.4)"
+            )
+            if strict:
+                raise ValueError(message) from e
+            _warn_strict_provenance_once("unreadable-version-dir", version_path, message)
+            return
+        if not data_filenames:
+            return
+        stems = {os.path.splitext(name)[0] for name in data_filenames}
+
+    meta_path = os.path.join(version_path, COLLECTION_META_MARKER)
+    if not os.path.isfile(meta_path):
+        message = (
+            f"{version_path}: holds table(s) {sorted(stems)} with no collection_meta.yaml "
+            "sidecar (Collector V3 design §5/§7.4)"
+        )
+        if strict:
+            raise ValueError(message)
+        _warn_strict_provenance_once("missing-sidecar", version_path, message)
+        return
+
+    try:
+        meta = _load_collection_meta_yaml(meta_path)
+    except ValueError as e:
+        if strict:
+            raise
+        _warn_strict_provenance_once("malformed-sidecar", meta_path, str(e))
+        return
+
+    tables = meta.get("tables") if isinstance(meta, dict) else None
+    covered = tables if isinstance(tables, dict) else {}
+    uncovered = sorted(stems - set(covered))
+    if not uncovered:
+        return
+
+    if isinstance(meta, dict) and meta.get("provenance") == "legacy":
+        _warn_strict_provenance_once(
+            "legacy-uncovered",
+            meta_path,
+            f"{meta_path}: provenance: legacy sidecar does not list table(s) {uncovered}; "
+            "graced for one release (Collector V3 design §5)",
+        )
+        return
+
+    message = (
+        f"{meta_path}: table(s) {uncovered} not covered by collection_meta.yaml 'tables' entries "
+        "(Collector V3 design §5/§7.4)"
+    )
+    if strict:
+        raise ValueError(message)
+    _warn_strict_provenance_once("uncovered-table", meta_path, message)
+
+
+def _is_family_layout_version_dir(version_path: str, data_dir: str) -> bool:
+    """True when ``version_path`` is ``<data_dir>/<family>/<backend>/<version>``
+    (3 path components under ``data_dir``), false for the legacy
+    ``<data_dir>/<backend>/<version>`` layout (2 components) or an
+    otherwise-unresolved path. ``collection_meta.yaml``/``reuse.yaml`` are a
+    family-layout-paired concept (design §7 item 1: "family tree first,
+    legacy layout as deprecated fallback for one transition window") -- a
+    legacy-shaped dir predates the V3 metadata regime entirely, so strict
+    provenance does not apply to it, mirroring how ``_op_file_family_from_path``
+    already treats legacy-shaped paths as structurally outside the comm-family
+    exclusion (Task 1's FIX-2).
+    """
+    try:
+        rel = os.path.relpath(version_path, data_dir)
+    except ValueError:
+        return False
+    parts = rel.split(os.sep)
+    return len(parts) == 3 and parts[0] not in KNOWN_BACKEND_DIRS
+
+
+def _check_strict_provenance_for_request(paths: list[str], backend: str, data_dir_abs: str, *, strict: bool) -> None:
+    """Run ``_check_strict_provenance_coverage`` over every dir one
+    ``get_database()`` request touches: each primary ``path`` (a family dir
+    holding the requested (backend, version)), plus every donor dir that
+    path's own ``reuse.yaml`` declares (design §6.3). A malformed
+    ``reuse.yaml`` surfaces its existing ``ValueError`` in strict mode;
+    non-strict warns instead (same contract as the sidecar-coverage check).
+    Legacy-layout primary dirs (see ``_is_family_layout_version_dir``) are
+    skipped entirely -- out of the V3 metadata regime's scope.
+    """
+    for version_path in paths:
+        if not _is_family_layout_version_dir(version_path, data_dir_abs):
+            continue
+        _check_strict_provenance_coverage(version_path, strict=strict)
+        reuse_path = os.path.join(version_path, REUSE_YAML_MARKER)
+        if not os.path.isfile(reuse_path):
+            continue
+        try:
+            declared_entries = _parse_reuse_yaml(reuse_path)["entries"]
+        except ValueError as e:
+            if strict:
+                raise
+            _warn_strict_provenance_once("malformed-reuse", reuse_path, str(e))
+            continue
+        for entry in declared_entries:
+            donor_path = resolve_op_data_path(data_dir_abs, backend, entry["from_version"], f"{entry['table']}.parquet")
+            if not os.path.isfile(donor_path):
+                continue  # not admitted -- mirrors _build_op_sources' own existence check
+            _check_strict_provenance_coverage(os.path.dirname(donor_path), strict=strict, only_table=entry["table"])
+
+
+def _version_dir_partial_for_request(version_path: str, data_dir: str, *, strict: bool) -> bool:
+    """``get_database()``'s request-scoped wrapper around
+    ``_version_dir_state``'s ``partial`` flag: a malformed sidecar under it
+    raises in strict mode (same ``ValueError``), and in non-strict mode is
+    logged and treated as "not partial" rather than aborting the whole
+    lookup. ``_version_dir_state``'s OTHER call sites (discovery/listing,
+    e.g. ``_declared_versions``) are out of this per-request hook's scope and
+    keep their pre-existing unconditional raise.
+    """
+    try:
+        return bool(_version_dir_state(version_path, data_dir=data_dir)["partial"])
+    except ValueError as e:
+        if strict:
+            raise
+        _warn_strict_provenance_once("malformed-sidecar", version_path, str(e))
+        return False
+
+
 def get_database(
     system: str,
     backend: str,
@@ -658,6 +871,7 @@ def get_database(
     allow_missing_data: bool = False,
     database_mode: str | None = None,
     shared_layer: bool | None = None,
+    strict_provenance: bool | None = None,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -682,6 +896,13 @@ def get_database(
             active backend/version's own rows even under SILICON; ``True``
             forces sibling inheritance on. Overridden templates are cached
             separately from derived ones.
+        strict_provenance: fail-closed provenance mode (Collector V3 design
+            §5/§7.4). ``None`` (default) resolves from the ``AIC_STRICT_PROVENANCE``
+            env var. When on, a missing/malformed/uncovering ``collection_meta.yaml``
+            or ``reuse.yaml`` sidecar under the requested (system, backend, version)
+            or its declared donors raises instead of the module's usual
+            warn-and-continue; `provenance: legacy` sidecars are always graced
+            (warn, never raise).
 
     Returns:
         PerfDatabase for the given system, backend, version.
@@ -698,14 +919,18 @@ def get_database(
     shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
     # Only pass the override kwarg when explicitly set: PerfDatabase derives the
     # same flag from database_mode otherwise, and tests monkeypatch PerfDatabase
-    # with fakes that predate the kwarg.
+    # with fakes that predate the kwarg. Same rule for strict_provenance below --
+    # when unset, PerfDatabase resolves the identical env-derived default itself.
     extra_database_kwargs = {} if shared_layer is None else {"shared_layer": shared_flag}
+    if strict_provenance is not None:
+        extra_database_kwargs["strict_provenance"] = strict_provenance
+    effective_strict = _strict_provenance_enabled(strict_provenance)
     missing_data_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
             continue
-        cache_key = (systems_root, system, shared_flag)
+        cache_key = (systems_root, system, shared_flag, effective_strict)
         try:
             with open(system_yaml_path) as f:
                 system_spec = yaml.load(f, Loader=yaml.SafeLoader)
@@ -716,14 +941,19 @@ def get_database(
 
         data_dir_abs = os.path.join(systems_root, data_dir)
         paths = [p for v, p in _iter_backend_version_dirs(data_dir_abs, backend) if v == version]
-        is_incomplete = bool(paths) and all(_version_dir_state(p, data_dir=data_dir_abs)["partial"] for p in paths)
+        is_incomplete = bool(paths) and all(
+            _version_dir_partial_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
+        )
         if paths and not is_incomplete:
+            request_key = (tuple(sorted(paths)), backend)
             try:
                 database = databases_cache[cache_key][backend][version]
-                return database
             except KeyError:
                 logger.info(f"Loading database for {system=}, {backend=}, {version=}")
                 try:
+                    _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=effective_strict)
+                    if effective_strict:
+                        _STRICT_VALIDATED_REQUESTS.add(request_key)
                     database = PerfDatabase(
                         system,
                         backend,
@@ -735,10 +965,21 @@ def get_database(
                     databases_cache[cache_key][backend][version] = database
                     return database
                 except Exception:
+                    if effective_strict:
+                        raise
                     logger.warning(
                         f"failed to load {system=}, {backend=}, {version=}, continuing searching",
                         exc_info=True,
                     )
+            else:
+                # Cache HIT: the entry may be a worker-imported instance that
+                # was never request-validated (``_store_loaded_database``
+                # inserts under a strict key without validating). Strict mode
+                # must fail closed here too, not just on the miss path above.
+                if effective_strict and request_key not in _STRICT_VALIDATED_REQUESTS:
+                    _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=True)
+                    _STRICT_VALIDATED_REQUESTS.add(request_key)
+                return database
         elif allow_missing_data:
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
@@ -767,6 +1008,8 @@ def get_database(
                 databases_cache[cache_key][backend][version] = database
                 return database
             except Exception:
+                if effective_strict:
+                    raise
                 logger.warning(
                     f"failed to load estimate-only {system=}, {backend=}, {version=}",
                     exc_info=True,
@@ -842,6 +1085,7 @@ def get_database_view(
     database_mode: str | common.DatabaseMode | None = None,
     transfer_policy=None,
     shared_layer: bool | None = None,
+    strict_provenance: bool | None = None,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -854,6 +1098,8 @@ def get_database_view(
     shared SILICON data layer. ``shared_layer`` explicitly overrides the
     mode-derived shared-layer flag (see :func:`get_database`); regression
     harnesses pass ``False`` to pin SILICON queries to per-version data.
+    ``strict_provenance`` is forwarded to :func:`get_database` unchanged (see
+    its docstring); ``None`` resolves from the ``AIC_STRICT_PROVENANCE`` env var.
     """
     mode = _normalize_database_mode(database_mode)
     database_kwargs = {
@@ -863,6 +1109,7 @@ def get_database_view(
         "allow_missing_data": allow_missing_data,
         "database_mode": mode.name,
         "shared_layer": shared_layer,
+        "strict_provenance": strict_provenance,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths
@@ -1013,7 +1260,7 @@ def _store_loaded_database(
     # that identity when importing a database from a worker; putting it in the
     # formula-only slot would make a later EMPIRICAL lookup reuse shared rows.
     shared_flag = database.enable_shared_layer
-    databases_cache[(systems_root, system, shared_flag)][backend][version] = database
+    databases_cache[(systems_root, system, shared_flag, database.strict_provenance)][backend][version] = database
 
 
 def clear_database_runtime_caches(system: str, backend: str, version: str) -> None:
@@ -1026,7 +1273,7 @@ def clear_database_runtime_caches(system: str, backend: str, version: str) -> No
     """
     seen_database_ids: set[int] = set()
     for cache_key, systems_cache in databases_cache.items():
-        _, cached_system, _ = cache_key
+        _, cached_system, _, _ = cache_key
         if cached_system != system:
             continue
 
@@ -1059,7 +1306,7 @@ def unload_database(system: str, backend: str, version: str) -> None:
     pop.
     """
     for cache_key in list(databases_cache.keys()):
-        _, cached_system, _ = cache_key
+        _, cached_system, _, _ = cache_key
         if cached_system != system:
             continue
 
@@ -1081,6 +1328,9 @@ def unload_database(system: str, backend: str, version: str) -> None:
 
     clear_all_op_caches()
     _cached_configured_database_view.cache_clear()
+    # A future get_database() for this triple must re-validate under strict
+    # mode; the memo is coarse (keyed by primary paths), so drop it wholesale.
+    _STRICT_VALIDATED_REQUESTS.clear()
 
 
 def _load_database_ref_in_parent(ref: DatabaseRef) -> PerfDatabase | None:
@@ -1590,6 +1840,115 @@ def _gemm_key_names(database) -> list[str]:
     return sorted(names)
 
 
+# ``comm`` is the one family design §6.5 rule 5 hard-excludes from every reuse
+# channel (NCCL curves are topology-bound; shape-filling across versions is
+# wrong there). Detected structurally off the op's resolved primary path.
+_COMM_FAMILY_DIR = "comm"
+
+
+def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str | None:
+    """Best-effort family-dir name for an op's resolved primary path.
+
+    Structural: the family-first layout is
+    ``<data_dir>/<family>/<backend>/<version>/<file>``, so the family is the
+    path's first component relative to ``system_data_root`` when that
+    component isn't a known backend dir. Returns ``None`` for legacy-layout
+    paths (``<data_dir>/<backend>/<version>/<file>``, 3 components) or
+    otherwise-unresolved paths — comm exclusion then simply does not trigger;
+    detection is deliberately primary-path-only (see ``_build_op_sources``).
+
+    Deliberate exception, not a bug (AIC-1503 PR4 task 1, FIX 2): design
+    §6.5 rule 5's "comm" family is a structural concept that only exists in
+    the family-first layout. A comm op file (custom_allreduce_perf.parquet,
+    trtllm_alltoall_perf.parquet, wideep_deepep_*_perf.parquet, ...) resolved
+    under a legacy-shaped 3-component path has no family component to
+    detect, so this function returns ``None`` for it and `_build_op_sources`
+    does NOT apply the comm hard exclusion — that op keeps the pre-V3
+    sibling-reuse behavior for as long as its tree stays legacy-shaped. This
+    was adjudicated deliberately over the alternative of recognizing these
+    op files by table-name identity: that would smuggle catalog knowledge
+    ("which tables are comm") into a loader that must stay catalog-free. The
+    real committed tree is fully family-first today (zero live exposure);
+    this only matters for the transition window if a legacy-shaped tree is
+    ever loaded again. Pinned by
+    ``test_reuse_ordering.py::test_legacy_layout_comm_op_keeps_pre_v3_siblings``
+    — any future change to this behavior must update that test deliberately.
+    """
+    try:
+        rel = os.path.relpath(primary_path, system_data_root)
+    except ValueError:
+        return None
+    parts = rel.split(os.sep)
+    if len(parts) == 4 and parts[0] not in KNOWN_BACKEND_DIRS:
+        return parts[0]
+    # Legacy-layout (3-component) or otherwise-unresolved path: no family
+    # component exists structurally, so we can't detect "comm" here. This is
+    # the transition-window exception described above, not a bug — legacy
+    # comm op files simply keep pre-V3 sibling-reuse behavior.
+    return None
+
+
+def _requested_version_reuse_entries(
+    system_data_root: str, backend: str, version: str, op_file_basename: str, *, strict: bool
+) -> list[dict[str, str]]:
+    """Declared-reuse entries (design §6.3) for one op file, scoped to the
+    REQUESTED version dir(s) only.
+
+    A (backend, version) pair may resolve to several family dirs (mirrors
+    ``_iter_backend_version_dirs``'s own contract); every ``reuse.yaml`` found
+    at that pair is parsed and only entries whose ``table`` names this op file
+    are kept, in file order.
+
+    A malformed ``reuse.yaml`` raises ``ValueError`` in strict mode (mirrors
+    ``_check_strict_provenance_for_request``'s load-time check). Non-strict
+    mode warns once per path -- the SAME dedupe key as that load-time check,
+    so a tree that already warned at load doesn't warn again here -- and
+    treats that path as declaring zero donors, instead of crashing. Without
+    this, a non-strict ``get_database()`` call would warn-and-continue at
+    load time only to crash on the very same malformed file the first time an
+    op is actually queried (AIC-1503 PR4 task 5, FIX 1).
+    """
+    matched: list[dict[str, str]] = []
+    for candidate_version, version_path in _iter_backend_version_dirs(system_data_root, backend):
+        if candidate_version != version:
+            continue
+        reuse_path = os.path.join(version_path, REUSE_YAML_MARKER)
+        if not os.path.isfile(reuse_path):
+            continue
+        try:
+            entries = _parse_reuse_yaml(reuse_path)["entries"]
+        except ValueError as e:
+            if strict:
+                raise
+            _warn_strict_provenance_once("malformed-reuse", reuse_path, str(e))
+            continue
+        for reuse_entry in entries:
+            if f"{reuse_entry['table']}.parquet" == op_file_basename:
+                matched.append(reuse_entry)
+    return matched
+
+
+_UNPARSEABLE_SIBLING_VERSION_WARNED: set[tuple[str, str, str]] = set()
+
+
+def _warn_unparseable_sibling_version_once(system_data_root: str, backend: str, version: str) -> None:
+    """One-time-per-(tree, backend, version) warning for a sibling version string
+    that fails PEP 440 parsing — it cannot be ordered against the requested
+    version, so it's excluded from implicit nearest-earlier fallback entirely
+    (design §6.2). An explicit ``reuse.yaml`` declaration still works for it."""
+    key = (system_data_root, backend, version)
+    if key in _UNPARSEABLE_SIBLING_VERSION_WARNED:
+        return
+    _UNPARSEABLE_SIBLING_VERSION_WARNED.add(key)
+    logger.warning(
+        "Sibling version %r of backend %s is not PEP 440-parseable; excluded from "
+        "implicit nearest-earlier fallback (Collector V3 design §6.2). Declare an "
+        "explicit reuse.yaml entry if this version's data should be reused.",
+        version,
+        backend,
+    )
+
+
 class PerfDatabase:
     """
     The perf database for a given system, backend and version
@@ -1642,6 +2001,7 @@ class PerfDatabase:
         systems_root: str = "./systems",
         database_mode: str | None = None,
         shared_layer: bool | None = None,
+        strict_provenance: bool | None = None,
     ) -> None:
         """
         Initialize the perf database.
@@ -1658,11 +2018,20 @@ class PerfDatabase:
                 ``False`` loads only the active backend/version's own rows even
                 under SILICON (used by regression harnesses to pin per-version
                 behavior); ``True`` forces sibling inheritance on.
+            strict_provenance: fail-closed provenance mode (Collector V3 design
+                §5/§7.4). ``None`` (default) resolves from the
+                ``AIC_STRICT_PROVENANCE`` env var (truthy: ``"1"``/``"true"``).
+                Stored as ``self.strict_provenance``; the load-time validation
+                itself runs in :func:`get_database` (the loader entry point),
+                not here -- constructing a ``PerfDatabase`` directly (as tests
+                commonly do against synthetic trees) performs no provenance
+                validation of its own.
         """
         self.system = system
         self.backend = backend
         self.version = version
         self.systems_root = systems_root
+        self.strict_provenance: bool = _strict_provenance_enabled(strict_provenance)
         self._shared_layer_mode = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
         # Which empirical transfer kinds are permitted (HYBRID/EMPIRICAL only). All on by
         # default = current behaviour; set_transfer_policy() narrows it for fine-grained
@@ -1677,6 +2046,14 @@ class PerfDatabase:
         # (lazy-load path inside each op class) to discover which sibling
         # backend/version dirs hold rows the active backend can inherit.
         self._op_kernel_source_manifest_entries = _load_op_kernel_source_manifest_entries(systems_root)
+
+        # Per-op-file source diagnostics (design §6.5 guardrail), lazily populated
+        # by ``_build_op_sources`` as each op loads: op_file basename -> list of
+        # {version, path, channel, exists} for every ADMITTED source, in priority
+        # order. Granularity is admitted sources, not per-row/per-shape
+        # attribution — two different tables in the same source file share one
+        # entry even if only one of them actually contributed rows.
+        self.data_provenance: dict[str, list[dict[str, object]]] = {}
 
         # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
         # via ``OpClass.load_data(database)``. No eager warm-up here — each op
@@ -1841,7 +2218,7 @@ class PerfDatabase:
         primary_path: str,
         system_data_root: str,
     ) -> list[tuple[str, Optional[set[str]]]]:
-        """Build the priority-ordered list of source files for one op.
+        """Build the priority-ordered list of source files for one op (design §6).
 
         Returns a list of `(file_path, kernel_source_filter)` tuples to be
         loaded in order. The first source whose file actually contains rows
@@ -1849,32 +2226,150 @@ class PerfDatabase:
         only fill in shapes the earlier ones lacked. Ordering, in priority:
 
           1. Active backend/version (primary). Filter is `None` — load every row.
-          2. Other versions of the *same* framework, newest first. A different
-             version of the same backend is closer to the active measurement
-             than any other framework, so it wins on shape conflicts.
-          3. Other frameworks alphabetically; within each, newest version first.
+          2. Declared donors from the REQUESTED version dir's `reuse.yaml`
+             (design §6.3), in file order. Same backend, any direction — this
+             is the only channel that may borrow a version NEWER than
+             requested. Filter is `None`.
+          3. Same-backend siblings STRICTLY EARLIER than requested (design
+             §6.2), nearest first. Free and always on; no manifest dependency.
+             A version newer than requested is never admitted here — only an
+             explicit declaration (channel 2) can do that. Filter is `None`.
+          4. Cross-backend fill (design §6.4), kernel-identity gated by
+             `op_kernel_source_manifest.yaml`, newest-first per framework.
 
-        Returns just the primary tuple when the shared layer is disabled, when
-        the op file is framework-agnostic (nccl / oneccl), or when no manifest
-        entry whitelists the active backend for this op. The kernel-source
-        filter on sibling sources is essential — `load_*` functions strip
-        `kernel_source` from dict keys, so unfiltered sibling rows would
-        silently clobber active-backend rows on key conflict.
+        Every admitted source is recorded, tagged with its channel
+        (`primary | declared_reuse | fallback | cross_backend`), into
+        `self.data_provenance[op_file_basename]` — see that attribute's
+        docstring for the granularity contract.
+
+        An existing primary whose containing version dir is marked partial
+        (legacy-layout fallback only — the resolver already skips partial
+        family dirs) is refused entirely: no record, no source tuple, only a
+        warning; channels 2-4 still fill.
+
+        Returns just the primary tuple (still recorded) when the shared layer
+        is disabled, when the op file is framework-agnostic (nccl / oneccl),
+        or when the op's primary path resolves under the `comm` family dir
+        (design §6.5 rule 5 — comm is hard-excluded from every reuse channel,
+        declarations included; NCCL curves are topology-bound). The
+        kernel-source filter on cross-backend sources is essential — `load_*`
+        functions strip `kernel_source` from dict keys, so an unfiltered
+        cross-backend row would silently clobber an active-backend row on key
+        conflict. Same-backend sources (primary/declared/fallback) use no
+        filter, same as reading the active backend's own file.
         """
-        sources: list[tuple[str, Optional[set[str]]]] = [(primary_path, None)]
-        if not self.enable_shared_layer:
-            return sources
-        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
-            return sources
-
         op_file_basename = op_filename_enum.value
+        records: list[dict[str, object]] = []
+        primary_version_dir = os.path.dirname(primary_path)
+        if os.path.isfile(primary_path) and _version_dir_partial_for_request(
+            primary_version_dir, system_data_root, strict=self.strict_provenance
+        ):
+            # Only the LEGACY-layout fallback can get here: resolve_op_data_path
+            # already skips partial FAMILY dirs, so a family-layout primary is
+            # never partial (pinned by test_reuse_ordering.py's
+            # test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard).
+            # Partial dirs are excluded from discovery and every reuse channel
+            # (design §5/§6) — refuse the primary too; channels 2-4 below still
+            # fill, and data_provenance keeps listing admitted sources only.
+            logger.warning(
+                "Not admitting primary source %s for %s: version dir %s is marked partial "
+                "(collection_meta.yaml status: partial, or legacy INCOMPLETE.txt); partial "
+                "dirs are excluded from data loading (Collector V3 design §5/§6).",
+                primary_path,
+                op_file_basename,
+                primary_version_dir,
+            )
+        else:
+            records.append({"version": self.version, "path": primary_path, "channel": "primary", "ks_filter": None})
+
+        def _finish() -> list[tuple[str, Optional[set[str]]]]:
+            self.data_provenance[op_file_basename] = [
+                {
+                    "version": record["version"],
+                    "path": record["path"],
+                    "channel": record["channel"],
+                    "exists": os.path.isfile(record["path"]),
+                }
+                for record in records
+            ]
+            return [(record["path"], record["ks_filter"]) for record in records]
+
+        if not self.enable_shared_layer:
+            return _finish()
+        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
+            return _finish()
+        if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
+            return _finish()
+
         backend_lower = self.backend.lower()
 
-        # `framework -> set of kernel_sources` that the active backend may inherit
-        # from sibling dirs of that framework. Both `shared` and `shared_fallback`
-        # rows are admitted whenever the shared layer is enabled (SILICON/HYBRID);
-        # the fallback set is tracked separately only so we can emit a single
-        # warning per fallback source.
+        # Channel 2 (design §6.3): declared donors from the REQUESTED version
+        # dir's reuse.yaml, in file order. Duplicate (table, from_version)
+        # entries in one reuse.yaml would otherwise admit the same source
+        # twice -- table is fixed to op_file_basename for this call, so
+        # `declared_donor_versions` membership alone is the (table,
+        # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
+        # task 5, FIX 2).
+        declared_donor_versions: set[str] = set()
+        for reuse_entry in _requested_version_reuse_entries(
+            system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
+        ):
+            from_version = reuse_entry["from_version"]
+            if from_version in declared_donor_versions:
+                logger.debug(
+                    "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
+                    reuse_entry["table"],
+                    from_version,
+                    system_data_root,
+                )
+                continue
+            donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
+            if not os.path.isfile(donor_path):
+                continue
+            records.append(
+                {
+                    "version": from_version,
+                    "path": donor_path,
+                    "channel": "declared_reuse",
+                    "ks_filter": None,
+                }
+            )
+            declared_donor_versions.add(from_version)
+
+        # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
+        # sibling versions can't be ordered against the requested version, so
+        # they're excluded here (logged once) — an explicit declaration still
+        # works for them. Versions already admitted as declared donors above
+        # are excluded too — the dominant real reuse.yaml pattern points
+        # BACKWARD at an earlier sibling, and without this exclusion that same
+        # physical source would be listed twice (channels declared_reuse AND
+        # fallback), doubling I/O and duplicating data_provenance rows.
+        requested_parsed = parse_support_matrix_version(self.version)
+        if requested_parsed is not None:
+            sibling_versions = {v for v, _ in _iter_backend_version_dirs(system_data_root, backend_lower)}
+            sibling_versions.discard(self.version)
+            sibling_versions -= declared_donor_versions
+            earlier_versions = []
+            for sibling_version in sibling_versions:
+                parsed = parse_support_matrix_version(sibling_version)
+                if parsed is None:
+                    _warn_unparseable_sibling_version_once(system_data_root, backend_lower, sibling_version)
+                    continue
+                if parsed >= requested_parsed:
+                    continue  # Never admit newer-than-requested implicitly.
+                earlier_versions.append((parsed, sibling_version))
+            earlier_versions.sort(key=lambda item: item[0], reverse=True)  # nearest-earlier first
+            for _, sibling_version in earlier_versions:
+                sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
+                if not os.path.isfile(sibling_path):
+                    continue
+                records.append(
+                    {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
+                )
+
+        # Channel 4 aka §6.4 (cross-backend fill, kernel-identity gated). Same
+        # mechanism as before; the active backend is excluded from
+        # `ordered_frameworks` because channels 2-3 above already cover it.
         per_framework_filter: dict[str, set[str]] = defaultdict(set)
         per_framework_fallback: dict[str, set[str]] = defaultdict(set)
         for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
@@ -1892,16 +2387,7 @@ class PerfDatabase:
                     for fw in frameworks_lower:
                         per_framework_fallback[fw].add(ks)
 
-        if not per_framework_filter:
-            return sources
-
-        # Iterate the active framework first (newest sibling versions first), then
-        # other frameworks alphabetically. Putting the active framework first means
-        # cross-version siblings outrank cross-framework on shape conflicts.
-        ordered_frameworks: list[str] = []
-        if backend_lower in per_framework_filter:
-            ordered_frameworks.append(backend_lower)
-        ordered_frameworks.extend(sorted(set(per_framework_filter) - {backend_lower}))
+        ordered_frameworks = sorted(set(per_framework_filter) - {backend_lower})
 
         # Sort key for newest-first ordering. Parseable PEP 440 versions form one
         # group and always rank above unparseable strings — guarantees `1.10.0`
@@ -1919,12 +2405,17 @@ class PerfDatabase:
                 reverse=True,
             )
             for sibling_version in fw_versions:
-                if framework == backend_lower and sibling_version == self.version:
-                    continue  # Active source already added as the primary.
                 sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
                     continue
-                sources.append((sibling_path, ks_filter))
+                records.append(
+                    {
+                        "version": sibling_version,
+                        "path": sibling_path,
+                        "channel": "cross_backend",
+                        "ks_filter": ks_filter,
+                    }
+                )
                 if fallback_only & ks_filter:
                     logger.warning(
                         "Loading low-fidelity fallback rows for %s from %s. Queries "
@@ -1933,7 +2424,7 @@ class PerfDatabase:
                         op_file_basename,
                         sibling_path,
                     )
-        return sources
+        return _finish()
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """

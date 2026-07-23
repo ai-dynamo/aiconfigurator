@@ -331,12 +331,12 @@ The loader's source ordering (§7) in one list:
 
 Guardrails:
 
-- **Provenance surfacing:** the loader reports, per table, which versions
-  supplied rows and via which channel (`primary | declared_reuse | fallback`),
-  so the support-matrix health classifier can tell "natively collected" from "riding
-  on a declaration" without re-deriving anything.
+- **Provenance surfacing:** the loader reports, per table, the admitted
+  sources with channel tags (`primary | declared_reuse | fallback |
+  cross_backend`), so the support-matrix health classifier can tell "natively
+  collected" from "riding on a declaration" without re-deriving anything.
 - **CI audit:** a `reuse.yaml` pointing at data that does not exist, or any
-  fill pattern outside these three channels, fails the PR — that is the
+  fill pattern outside these channels, fails the PR — that is the
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
@@ -347,9 +347,10 @@ In increasing order of semantic weight:
 
 1. **Dual-layout discovery** — family tree first, legacy layout as deprecated
    fallback for one transition window.
-2. **Effective-source provenance** — per table, expose which versions supplied
-   rows and via which path (`primary | declared_reuse | fallback`), consumed by
-   support-matrix health and diagnostics.
+2. **Effective-source provenance** — `PerfDatabase.data_provenance`: per table,
+   the admitted sources with channel tags (`primary | declared_reuse | fallback |
+   cross_backend`), consumed by support-matrix health. Granularity is
+   admitted sources, not per-row attribution. *(Shipped in PR 4.)*
 3. **Reuse rules** — implement §6 ordering. `get_database(system, backend,
    version)` keeps `version` as the *requested* framework version; per-op
    resolution happens inside.
@@ -417,10 +418,21 @@ The CI audit is the primary gate; loader strict mode is the backstop.
 
 ## 9. Evidence policy
 
-Policy-as-code: `collector/evidence_policy.yaml` plus a pure-function resolver
-`tools/perf_database/evidence_check.py --manifest changed_ops.yaml` → required
-evidence list. Deterministic: CI and the healer get identical answers from
-identical manifests.
+Policy-as-code: `collector/evidence_policy.yaml` (thresholds; an authored
+`system_generations` map covering the whole fleet — SM103 Ultra folded into
+blackwell as a policy decision — and one evidence representative per
+generation) plus the pure-function resolver `tools/perf_database/evidence_check.py
+--manifest changed_ops.yaml` → required evidence, filtered to the SM
+generations the change actually touches (an unmapped system fails closed).
+Deterministic: CI and the healer get identical answers from identical
+manifests. Exception WAIVERS (`evidence_exceptions.yaml`, approver + expiry)
+are applied by the evidence-gate CI check, not the resolver — expiry needs a clock,
+which would break the resolver's purity. *(Policy and resolver shipped in PR 4;
+the enforcing CI gate — the required check that validates submitted evidence
+and waivers against these requirements and blocks under-evidenced data PRs —
+is a separate tracked deliverable. Until it lands, the audit workflow uploads
+the changed-op manifest as an informational artifact and enforcement is by
+human review against the resolver's output.)*
 
 | Change | Required evidence |
 |---|---|
