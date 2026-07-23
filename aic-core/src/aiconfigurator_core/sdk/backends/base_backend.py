@@ -1127,9 +1127,7 @@ class BaseBackend:
                 # _run_generation_phase scaled the batch by (nextn + 1); the
                 # baseline must be sampled at the same effective batch.
                 pass_baseline_ms = float(
-                    model.generation_ops[0].query_pass_baseline(
-                        database, batch_size=gen_tokens * (model._nextn + 1)
-                    )
+                    model.generation_ops[0].query_pass_baseline(database, batch_size=gen_tokens * (model._nextn + 1))
                 )
             energy_dict = summary.get_generation_energy_wms_dict()
             source_dict = summary.get_generation_source_dict()

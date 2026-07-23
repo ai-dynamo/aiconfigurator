@@ -34,11 +34,11 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
-import logging
 import math
 import os
+from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations.base import Operation
@@ -48,8 +48,6 @@ from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
-
-logger = logging.getLogger(__name__)
 
 FPM_FORWARD_SCHEMA_NAME = "aic_fpm_forward_perf"
 FPM_FORWARD_SCHEMA_VERSION = 5
@@ -132,7 +130,7 @@ def _validate_sidecar(metadata_path: str, parquet_path: str) -> dict:
     with open(metadata_path, encoding="utf-8") as handle:
         metadata = json.load(handle)
     if not isinstance(metadata, dict):
-        raise ValueError(f"FPM metadata sidecar must be a JSON object: {metadata_path}")
+        raise TypeError(f"FPM metadata sidecar must be a JSON object: {metadata_path}")
     if metadata.get("schema_name") != FPM_FORWARD_SCHEMA_NAME:
         raise ValueError(
             f"unsupported FPM schema_name={metadata.get('schema_name')!r} "
@@ -368,9 +366,7 @@ def _oplevel_sol_fn(sol_ops: list, phase: str, database) -> Callable[..., float]
             prefix = total_kv / batch
             for op in sol_ops:
                 x = batch if "logits_gemm" in op._name else total_prefill
-                total += float(
-                    op.query(view, x=x, batch_size=batch, beam_width=1, s=s, prefix=prefix)
-                )
+                total += float(op.query(view, x=x, batch_size=batch, beam_width=1, s=s, prefix=prefix))
         else:
             batch, total_kv = coords
             s = max(total_kv / batch, 1.0)
@@ -379,42 +375,6 @@ def _oplevel_sol_fn(sol_ops: list, phase: str, database) -> Callable[..., float]
         return total
 
     return _sol
-
-
-def build_fpm_sol_fns(model) -> tuple[Callable, Callable, float]:
-    """Crude per-rank rooflines for perf_interp's ratio-only uses.
-
-    perf_interp consumes SOL exclusively in ratios (one-sided bracket
-    recovery, cross-site util transfer), so only the scaling trend along each
-    axis matters — absolute units and constant factors cancel. V1 therefore
-    models the leading physics only:
-
-      prefill (compute-bound): dense FLOPs ~ total_prefill_tokens, plus
-          attention pair work ~ total_prefill * (total_prefill + total_kv) / B
-      decode (memory-bound):   weight bytes + KV bytes read ~ total_kv
-
-    Returns ``(prefill_sol, decode_sol, weight_bytes)`` where ``weight_bytes``
-    is the per-rank op-level weights sum (reused by FPMForwardOp.get_weights
-    so memory estimation keeps working after the op-list rewrite).
-    """
-    cfg = model.config
-    weight_bytes = float(sum(op.get_weights() for op in model.context_ops))
-    mem_bytes_per_weight = float(getattr(cfg.gemm_quant_mode.value, "memory", 2.0)) if cfg.gemm_quant_mode else 2.0
-    flops_per_token = max(2.0 * weight_bytes / max(mem_bytes_per_weight, 1e-9), 1.0)
-    layers_per_rank = model._num_layers / max(cfg.pp_size, 1)
-    heads_per_rank = max(model._num_heads // max(cfg.tp_size, 1), 1)
-    attn_flops_per_pair = 4.0 * layers_per_rank * heads_per_rank * model._head_size
-    kv_bytes_per_token = max(float(model.get_kvcache_bytes_per_sequence(1)), 1.0)
-
-    def prefill_sol(batch: float, total_prefill: float, total_kv: float) -> float:
-        return flops_per_token * total_prefill + attn_flops_per_pair * total_prefill * (
-            total_prefill + total_kv
-        ) / max(batch, 1.0)
-
-    def decode_sol(batch: float, total_kv: float) -> float:
-        return weight_bytes + kv_bytes_per_token * total_kv
-
-    return prefill_sol, decode_sol, weight_bytes
 
 
 class FPMForwardOp(Operation):

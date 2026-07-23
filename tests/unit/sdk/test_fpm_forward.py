@@ -117,13 +117,15 @@ def _write_pair(data_dir: str, rows: list[dict], *, sidecar_overrides: dict | No
     os.makedirs(data_dir, exist_ok=True)
     parquet_path = os.path.join(data_dir, "fpm_forward_perf.parquet")
     pq.write_table(pa.Table.from_pylist(rows), parquet_path)
+    with open(parquet_path, "rb") as handle:
+        parquet_sha = hashlib.sha256(handle.read()).hexdigest()
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
         "schema_version": 5,
         "coordinate_system": "iteration_totals_balanced_v1",
         "measurement_policy": "dynamo_native_single_sample_v1",
         "row_count": len(rows),
-        "parquet_sha256": hashlib.sha256(open(parquet_path, "rb").read()).hexdigest(),
+        "parquet_sha256": parquet_sha,
         "system": SYSTEM,
         "backend": BACKEND,
         "backend_version": VERSION,
@@ -151,7 +153,9 @@ def fake_db(tmp_path):
         root = tmp_path / "systems"
         data_dir = root / "data" / BACKEND / VERSION
         if write:
-            _write_pair(str(data_dir), rows if rows is not None else _default_rows(), sidecar_overrides=sidecar_overrides)
+            _write_pair(
+                str(data_dir), rows if rows is not None else _default_rows(), sidecar_overrides=sidecar_overrides
+            )
         else:
             os.makedirs(data_dir, exist_ok=True)
         return _FakeDatabase(str(root))
@@ -173,9 +177,9 @@ def _model_config(**overrides) -> sdk_config.ModelConfig:
 
 def _make_op(phase: str, model_config=None, model_path: str = MODEL_PATH) -> FPMForwardOp:
     if phase == "prefill":
-        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))  # noqa: E731
+        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))
     else:
-        sol = lambda b, tk: 1e9 + 100.0 * tk  # noqa: E731
+        sol = lambda b, tk: 1e9 + 100.0 * tk
     return FPMForwardOp(phase, model_config or _model_config(), model_path, sol_fn=sol, weight_bytes=1e9)
 
 
