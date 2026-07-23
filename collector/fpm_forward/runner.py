@@ -1045,11 +1045,7 @@ def _recover_completed_attempt(
         return None
 
     recovered = dict(entry)
-    original_error = {
-        key: recovered.pop(key)
-        for key in ("error_type", "error")
-        if key in recovered
-    }
+    original_error = {key: recovered.pop(key) for key in ("error_type", "error") if key in recovered}
     recovered.update(
         {
             "status": "passed",

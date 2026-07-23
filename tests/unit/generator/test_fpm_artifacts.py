@@ -1050,7 +1050,7 @@ def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_scr
     # while the leader is still alive stays a real failure.
     assert '"${engine_command[@]}" --headless &' in script
     assert 'wait "$headless_pid"' in script
-    assert '/dev/tcp/${master_addr}/2379' in script
+    assert "/dev/tcp/${master_addr}/2379" in script
     assert "Headless engine exited after leader teardown; reporting success" in script
 
 

@@ -393,9 +393,7 @@ def test_stage_rejects_masked_truncated_copy(tmp_path):
 def test_collect_rejects_masked_partial_copy(tmp_path):
     # exercise the raw-copy path: these fixtures model uncompressed transfers
     runner = _runner(tmp_path)
-    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(
-        RuntimeError("remote_exit=127")
-    )
+    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(RuntimeError("remote_exit=127"))
     payloads = {
         "benchmark.json": b'{"status":"complete"}\n',
         "benchmark_dp1.json": b'{"status":"complete"}\n',
@@ -450,9 +448,7 @@ def test_collect_retries_one_file_without_recopying_verified_files(tmp_path):
 def test_collect_accepts_exact_remote_manifest(tmp_path):
     # exercise the raw-copy path: these fixtures model uncompressed transfers
     runner = _runner(tmp_path)
-    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(
-        RuntimeError("remote_exit=127")
-    )
+    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(RuntimeError("remote_exit=127"))
     payloads = {"benchmark.json": b'{"status":"complete"}\n', "engine.stderr.log": b"done\n"}
     runner._remote_result_manifest = lambda pod: {
         name: {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
@@ -734,9 +730,7 @@ def test_resume_retry_recovers_complete_salvaged_attempt_without_rerun(monkeypat
         plan_sha256=plan.sha256,
         attempt_id="attempt-1",
     )
-    (raw / "benchmark.json").write_text(
-        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
-    )
+    (raw / "benchmark.json").write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
 
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()
@@ -802,9 +796,7 @@ def test_plain_resume_recovers_interrupted_attempt_without_rerun(monkeypatch, tm
         plan_sha256=plan.sha256,
         attempt_id="attempt-1",
     )
-    (raw / "benchmark.json").write_text(
-        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
-    )
+    (raw / "benchmark.json").write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
 
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()
@@ -814,9 +806,7 @@ def test_plain_resume_recovers_interrupted_attempt_without_rerun(monkeypatch, tm
             {
                 "schema": fpm_runner.CHECKPOINT_SCHEMA,
                 "plan_sha256": plan.sha256,
-                "cells": {
-                    cell.cell_id: {"status": "interrupted", "attempt_id": "attempt-1"}
-                },
+                "cells": {cell.cell_id: {"status": "interrupted", "attempt_id": "attempt-1"}},
             }
         )
     )
@@ -855,9 +845,7 @@ def test_recovery_rejects_entries_with_cleanup_error(tmp_path):
         plan_sha256=plan.sha256,
         attempt_id="attempt-1",
     )
-    (raw / "benchmark.json").write_text(
-        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
-    )
+    (raw / "benchmark.json").write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
     entry = {
         "status": "failed",
         "attempt_id": "attempt-1",
