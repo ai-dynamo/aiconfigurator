@@ -91,7 +91,11 @@ Loader obligations (mirroring the writer's semantics):
   TaskV2 field + `build_model_config` (`src/aiconfigurator/sdk/task_v2.py:354, 1074`),
   v1-compat passthrough (`task_v1_compat.py:83`), CLI flag `--forward-model`
   (`src/aiconfigurator/cli/main.py`, `cli/api.py`), webapp bridges, `pareto_analysis.py`.
-  Generator is **not** touched in V1 (module boundary).
+  Generator is **not** touched in V1 (module boundary). This is not an exemption from
+  generator validation: `forward_model` is a modeling-mode switch that never flows into
+  generator output — the bridge (`generator/module_bridge.py`) reads named Task
+  attributes and result columns only, none of which change, so generated deployment
+  configs are byte-identical with the flag set or omitted.
 - While M2 (Rust) is not landed, `forward_model=fpm` forces the Python engine step:
   `should_use_rust_engine_step` (`rust_engine_step.py:224`) returns False for FPM models.
 
@@ -203,7 +207,9 @@ Required tests (unit tests under `tests/unit/sdk/`, mirroring existing layout):
   schema, non-finite latency all fail;
 - exact-match rows for P=0 prefill, P>0 prefill, decode; interpolation golden fixtures;
 - out-of-domain and missing-cell queries fail explicitly;
-- mixed = pure prefill + pure decode (both languages);
+- mixed = pure prefill plus the decode work's marginal cost (decode(B, KV) minus the
+  KV-floor pass baseline, so shared per-pass costs are paid once); a generation-only
+  step keeps the full decode latency;
 - DP: dp>1 queries use local axes and reproduce collected values exactly;
 - old `EngineSpec` versions fail with the version error;
 - producer-consumer test (I1 analogue): a synthetic parquet+sidecar pair written **from the
@@ -241,17 +247,20 @@ qualification remain.
 
 ## 5. Open decisions (need owner sign-off before implementation)
 
-- **D1 — model identity matching.** Rows key on the HF `model_path` string; `ModelConfig`
-  carries no path. Proposal: select by all other identity columns; if exactly one
-  `model_path` remains, use it; if several, require an explicit path from the consumer
-  (TaskV2 flows have it). Alternative: add a `model_path` field to ModelConfig.
-- **D2 — interpolation config.** Start from `perf_interp` Grid over
-  `(batch_size, total_prefill_tokens, total_kv_read_tokens)` with log-scaled token axes;
-  freeze after fixture evaluation on the first real GLM-5.2 cell. Fallback: exact-match only.
-- **D3 — energy.** Zero-energy convention (recommended, matches Rust engine-step precedent)
-  vs hard error on energy queries in FPM mode (original plan §M1).
-- **D4 — schema bump timing.** Bump `ENGINE_SPEC_SCHEMA_VERSION` in M2 only (recommended)
-  vs pre-emptively in M0.
+- **D1 — model identity matching. RESOLVED (shipped).** Exact `model_path` match wins;
+  otherwise the identity columns must select a unique collected path, and any ambiguity
+  (several paths, or several backend policies for one path) raises
+  `PerfDataNotAvailableError` (see `FPMForwardOp._select_cell`).
+- **D2 — interpolation config. RESOLVED (shipped).** Not Grid: the runtime grid emits
+  per-batch token curves that are not axis-aligned, so the shipped config is
+  `ScatteredSites` (prefill sites = `(batch, kv)` owning the new-token curve; decode
+  sites = `batch` owning the KV curve) with `own_curve_coverage_fallback=True` and
+  `max_site_distance=2.0`, validated by the LOO/holdout harness on GLM-5.2 cells.
+- **D3 — energy. RESOLVED (shipped).** Zero-energy convention, matching the Rust
+  engine-step precedent.
+- **D4 — schema bump timing.** Still open: bump `ENGINE_SPEC_SCHEMA_VERSION` in M2 only
+  (recommended) vs pre-emptively in M0. Moot until the Rust engine-step port (M2)
+  lands — V1 forces the Python phases.
 
 ## 6. Non-goals (unchanged from the original plan unless noted)
 
