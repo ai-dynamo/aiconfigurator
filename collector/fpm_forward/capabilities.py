@@ -294,7 +294,18 @@ def resolve_model_capability(
             fmha_resolution_by_kv[kv_name] = "checkpoint_native"
         elif "bfloat16" in joint_modes:
             fmha_by_kv[kv_name] = "bfloat16"
-            fmha_resolution_by_kv[kv_name] = f"aic_data_fallback_from_{inferred_fmha}"
+            if inferred_fmha == "fp8" and kv_name != "fp8":
+                # The fp8 FMHA path exists only with an fp8 KV cache — the SDK
+                # checkpoint inference pairs them for the same reason — so
+                # under a non-fp8 kv slice the engine itself dispatches the
+                # bfloat16 attention path. This label follows that kv-coupled
+                # dispatch; it is not a data-availability substitution.
+                fmha_resolution_by_kv[kv_name] = f"kv_dtype_dispatch_from_{inferred_fmha}"
+            else:
+                # The checkpoint-native mode has no data under its own kv
+                # slice: AIC transfers utilization from the bfloat16 slice
+                # (e.g. DSV4 module tables carry only bfloat16 rows).
+                fmha_resolution_by_kv[kv_name] = f"aic_data_fallback_from_{inferred_fmha}"
         else:
             raise ValueError(
                 f"AIC database has no joint fmha evidence for ({inferred_fmha!r} fmha, "

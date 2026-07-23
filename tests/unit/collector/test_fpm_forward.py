@@ -1017,12 +1017,14 @@ def test_fmha_resolves_per_kv_dtype_against_joint_evidence(monkeypatch):
 
     assert plan.dtype_profile.fmha_by_kv_dtype == {"bfloat16": "bfloat16", "fp8": "fp8"}
     assert plan.dtype_profile.fmha_resolution_by_kv_dtype == {
-        "bfloat16": "aic_data_fallback_from_fp8",
+        # fp8 FMHA exists only with an fp8 KV cache, so the bf16-kv cells run
+        # (and are labeled with) the engine's kv-coupled bfloat16 dispatch.
+        "bfloat16": "kv_dtype_dispatch_from_fp8",
         "fp8": "checkpoint_native",
     }
     labels = {(cell.kv_cache_dtype, cell.fmha_quant_mode, cell.fmha_resolution) for cell in plan.cells}
     assert labels == {
-        ("bfloat16", "bfloat16", "aic_data_fallback_from_fp8"),
+        ("bfloat16", "bfloat16", "kv_dtype_dispatch_from_fp8"),
         ("fp8", "fp8", "checkpoint_native"),
     }
 
