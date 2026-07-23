@@ -113,6 +113,18 @@ class SpeculativeDecodingProfile:
         else:
             ratio = progress
 
+        if role == "agg" and {"backend", "concurrency", "request_latency", "seq/s"}.issubset(frame.columns):
+            # vLLM caps aggregate output throughput with Little's Law in
+            # aic-core. Reapply the equivalent request-rate cap after TPOT is
+            # projected because TTFT remains fixed and therefore prevents the
+            # end-to-end rate from scaling by ``progress`` in every case.
+            vllm_rows = frame["backend"].astype(str).str.lower() == "vllm"
+            projected_seq_cap = frame["concurrency"] * 1000.0 / frame["request_latency"].replace(0, float("nan"))
+            capped_ratio = projected_seq_cap / frame["seq/s"].replace(0, float("nan"))
+            capped_ratio = capped_ratio.clip(lower=0.0, upper=progress).fillna(progress)
+            ratio = frame["seq/s"] * 0.0 + progress
+            ratio.loc[vllm_rows] = capped_ratio.loc[vllm_rows]
+
         for column in ("request_rate", "seq/s", "seq/s/gpu", "tokens/s", "tokens/s/gpu"):
             if column in frame:
                 frame[column] = frame[column] * ratio

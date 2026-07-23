@@ -18,6 +18,8 @@ from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.models.helpers import _get_model_info, _infer_quant_modes_from_raw_config
 from aiconfigurator.sdk.perf_database import get_database, get_supported_databases
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
+from aiconfigurator.sdk.sweep import sweep_agg, sweep_disagg
 from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 
@@ -196,6 +198,7 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
+                speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
@@ -211,7 +214,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -232,6 +234,10 @@ class EventFn:
                 backend = get_backend(backend_name)
                 session = InferenceSession(model, database, backend)
                 summary = session.run_static(runtime_config=runtime_config, mode=mode, stride=stride)
+                projection_role = (
+                    "prefill" if mode == "static_ctx" else ("decode" if mode == "static_gen" else "static")
+                )
+                summary = speculative_profile.project_summary(summary, role=projection_role)
             except Exception:
                 traceback_log = traceback.format_exc()
                 is_error = True
@@ -304,6 +310,7 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
+                speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
                 database = get_database(system_name, backend_name, version)
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
@@ -319,7 +326,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -353,13 +359,18 @@ class EventFn:
 
                 results_df = None
 
-                backend = get_backend(backend_name)
-                model = get_model(model_path, model_config, backend_name)
-                session = InferenceSession(model, database, backend)
-                summary = session.find_best_agg_result_under_constraints(
-                    runtime_config=runtime_config, top_k=10, max_batch_size=512, ctx_stride=512
+                results_df = sweep_agg(
+                    model_path=model_path,
+                    runtime_config=runtime_config,
+                    database=database,
+                    backend_name=backend_name,
+                    model_config=model_config,
+                    parallel_config_list=parallel_config_list,
+                    top_k=10,
+                    max_batch_size=512,
+                    ctx_stride=512,
+                    speculative_profile=speculative_profile,
                 )
-                results_df = summary.get_summary_df()
 
                 if results_df is None or results_df.size == 0:
                     logger.error(
@@ -417,6 +428,7 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
+                speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
                 database = copy.deepcopy(get_database(system_name, backend_name, version))
                 assert database is not None
                 database.set_default_database_mode(common.DatabaseMode[database_mode])
@@ -427,7 +439,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and backend_name == "sglang") else None,
@@ -467,13 +478,14 @@ class EventFn:
                         "Please double check your parallel configs."
                     )
 
-                results_df = pareto_analysis.agg_pareto(
+                results_df = sweep_agg(
                     model_path=model_path,
                     runtime_config=runtime_config,
                     database=database,
                     backend_name=backend_name,
                     model_config=model_config,
                     parallel_config_list=parallel_config_list,
+                    speculative_profile=speculative_profile,
                 )
 
                 # Use request_latency as x-axis if request_latency mode is active
@@ -591,6 +603,7 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
+                speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
                 prefill_database = copy.deepcopy(
                     get_database(prefill_system_name, prefill_backend_name, prefill_version)
                 )
@@ -611,7 +624,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
@@ -629,7 +641,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
@@ -703,6 +714,12 @@ class EventFn:
                     decode_num_worker_list = [decode_num_worker]
 
                 num_gpu_list = [int(x) for x in num_gpu_list.split(",")] if len(num_gpu_list) > 0 else None
+                if max_num_gpu > 0:
+                    num_gpu_list = (
+                        [num_gpu for num_gpu in num_gpu_list if num_gpu <= max_num_gpu]
+                        if num_gpu_list is not None
+                        else list(range(1, max_num_gpu + 1))
+                    )
                 # logger.info(f"target num_gpu_list in the disagg system: {num_gpu_list}")
 
                 # For SGLang non-wideep disaggregated serving
@@ -715,7 +732,7 @@ class EventFn:
                         "sizes will be filtered out. "
                     )
 
-                results_df = pareto_analysis.disagg_pareto(
+                results_df = sweep_disagg(
                     model_path=model_path,
                     runtime_config=runtime_config,
                     prefill_database=prefill_database,
@@ -723,18 +740,18 @@ class EventFn:
                     prefill_model_config=prefill_model_config,
                     prefill_parallel_config_list=prefill_parallel_config_list,
                     prefill_num_worker_list=prefill_num_worker_list,
-                    prefill_latency_correction_scale=prefill_latency_correction_scale,
+                    prefill_latency_correction=prefill_latency_correction_scale,
                     decode_database=decode_database,
                     decode_backend_name=decode_backend_name,
                     decode_model_config=decode_model_config,
                     decode_parallel_config_list=decode_parallel_config_list,
                     decode_num_worker_list=decode_num_worker_list,
-                    decode_latency_correction_scale=decode_latency_correction_scale,
+                    decode_latency_correction=decode_latency_correction_scale,
                     num_gpu_list=num_gpu_list,
-                    max_num_gpu=max_num_gpu if max_num_gpu > 0 else None,
                     prefill_max_num_tokens=prefill_max_batch_size * isl,
                     decode_max_num_tokens=decode_max_batch_size,
                     require_same_tp=require_same_tp,
+                    speculative_profile=speculative_profile,
                 )
 
                 # Use request_latency as x-axis if request_latency mode is active
@@ -895,6 +912,7 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
+                speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
                 prefill_model_config = config.ModelConfig(
                     tp_size=prefill_tp_size,
                     pp_size=prefill_pp_size,
@@ -907,7 +925,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[prefill_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[prefill_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and prefill_backend_name == "sglang") else None,
@@ -925,7 +942,6 @@ class EventFn:
                     moe_quant_mode=common.MoEQuantMode[decode_moe_quant_mode],
                     comm_quant_mode=common.CommQuantMode[decode_comm_quant_mode],
                     nextn=nextn,
-                    nextn_accepted=nextn_accepted,
                     enable_wideep=enable_wideep,
                     enable_eplb=enable_eplb if enable_wideep else False,
                     moe_backend="deepep_moe" if (enable_wideep and decode_backend_name == "sglang") else None,
@@ -995,6 +1011,7 @@ class EventFn:
                         runtime_config=config.RuntimeConfig(batch_size=b, isl=isl, osl=osl),
                         stride=decode_stride,
                     )
+                    decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
                     decode_results_df = pd.concat(
                         [decode_results_df, decode_summary.get_summary_df()], ignore_index=True
                     )

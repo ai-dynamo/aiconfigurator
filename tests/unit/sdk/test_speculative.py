@@ -81,6 +81,31 @@ def test_expected_progress_projects_service_metrics_not_core_breakdown():
     assert original.get_result_dict()["tpot"] == 10.0
 
 
+def test_aggregate_projection_reapplies_vllm_little_law_cap():
+    original = _summary()
+    frame = original.get_summary_df().copy()
+    frame["backend"] = "vllm"
+    frame["concurrency"] = 1
+    frame["request_rate"] = 10.0
+    frame["seq/s"] = 10.0
+    frame["seq/s/gpu"] = 2.5
+    frame["tokens/s"] = 80.0
+    frame["tokens/s/gpu"] = 20.0
+    original.set_summary_df(frame)
+    original.set_result_dict(frame.iloc[0].to_dict())
+
+    projected = SpeculativeDecodingProfile(1.0).project_summary(original, role="agg")
+    row = projected.get_result_dict()
+
+    # Projected request latency is 60 ms, so one concurrent request caps the
+    # request rate at 1000 / 60 rather than the naive 10 * 2 = 20 seq/s.
+    assert row["request_latency"] == 60.0
+    assert row["seq/s"] == pytest.approx(16.667)
+    assert row["request_rate"] == pytest.approx(16.667)
+    assert row["tokens/s"] == pytest.approx(133.333)
+    assert row["tokens/s/gpu"] == pytest.approx(33.333)
+
+
 def test_prefill_metrics_are_not_projected():
     summary = _summary()
     assert SpeculativeDecodingProfile(1.0).project_summary(summary, role="prefill") is summary
