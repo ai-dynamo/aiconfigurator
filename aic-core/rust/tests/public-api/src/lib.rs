@@ -33,9 +33,9 @@ pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
     builder.build()
 }
 
-/// Keep the flat compatibility adapter source-compatible until its announced
-/// deprecation. The function is compiled but not called because it embeds
-/// Python and needs installed model/system data.
+/// Keep the flat compatibility adapter source-compatible through 0.10. The
+/// function is compiled but not called because it embeds Python and needs
+/// installed model/system data.
 pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
     build_aic_engine(
         "Qwen/Qwen3-32B",

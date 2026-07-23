@@ -55,9 +55,9 @@ Python modules carry their own annotations.
 New embedded consumers should construct engines with `AicEngineBuilder`. The
 flat `build_aic_engine(...)` function is a source-compatibility adapter for
 existing callers: it remains supported through the 0.10 release and is planned
-to be marked deprecated in version 0.11.0. Both paths normalize into the same
-private build request and enter Python once to compile an engine specification.
-Calls on the returned `AicEngine` are pure Rust and do not re-enter Python.
+for removal in version 0.11.0. Both paths normalize into the same private build
+request and enter Python once to compile an engine specification. Calls on the
+returned `AicEngine` are pure Rust and do not re-enter Python.
 
 Standalone binaries must enable the crate's `embed-python` feature; applications
 hosted by an initialized Python interpreter do not. In either case, the matching

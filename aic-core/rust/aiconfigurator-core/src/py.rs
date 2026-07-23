@@ -322,7 +322,7 @@ struct EngineBuildRequest {
 /// one, speculative decoding defaults to disabled, and all other options defer
 /// to Python's `compile_engine` defaults. New callers should use this builder.
 /// [`build_aic_engine`] remains available as a source-compatibility adapter for
-/// existing callers and is planned to be deprecated in version 0.11.0.
+/// existing callers through 0.10 and is planned for removal in version 0.11.0.
 #[derive(Clone, Debug)]
 pub struct AicEngineBuilder {
     request: EngineBuildRequest,
@@ -513,7 +513,7 @@ mod builder_tests {
 ///
 /// This flat function remains source-compatible through the 0.10 release for
 /// existing consumers. New code should use [`AicEngineBuilder`]. The flat
-/// function is planned to be marked deprecated in version 0.11.0.
+/// function is planned for removal in version 0.11.0.
 // `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
 // `tests/embedded_round_trip.rs`).
 #[allow(clippy::too_many_arguments)]
