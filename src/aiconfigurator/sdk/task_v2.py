@@ -427,6 +427,9 @@ class Task:
     decode_cp_candidates: list[int] | None = None
 
     # ====== 8. Disagg orchestration ======
+    # Per-replica GPU budget (allowed replica sizes / size ceiling).  Disagg
+    # replicas always obey it; with enable_epd it also budgets the E+agg
+    # cells (an E+agg cell is a replica), with the same defaults.
     num_gpu_per_replica: list[int] | None = None
     max_gpu_per_replica: int | None = None
     max_prefill_workers: int | None = None
@@ -445,6 +448,24 @@ class Task:
     # Used by both ``_find_best_disagg_under_constraint`` and
     # ``picking.pick_autoscale``; default 1.8 locked by parity test.
     autoscale_ttft_correction_factor: float = 1.8
+
+    # ====== 8.6 EPD: encoder disaggregation (VL models) ======
+    # enable_epd runs the vision encoder on dedicated encode workers, swept
+    # over tp x batch.  serving_mode='disagg' gives E+P+D; serving_mode='agg'
+    # gives E+agg (encoder disaggregated, prefill+decode aggregated).  The
+    # P/agg workers become language-only (vision tokens stay in context, no
+    # ViT hosted); TTFT adds the encode batch latency; the encode pool joins
+    # the worker rate matching.  Default (False) keeps the encoder inline
+    # (colocated) in both serving modes.
+    enable_epd: bool = False
+    encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
+    encoder_batch_candidates: list[int] | None = None  # None -> default schedule
+    encoder_latency_correction: float = 1.0
+    # Encode workers may run on a different system (GPU type) than the
+    # P/agg side (hetero encoder, mirroring prefill_/decode_system_name);
+    # backend and version follow the prefill/agg side.  None inherits the
+    # P/agg system too.
+    encoder_system_name: str | None = None
 
     # ====== 8.5 Predictor strategy ======
     # Optional Predictor that decides how each single config point is
@@ -942,6 +963,9 @@ class Task:
             if self.total_gpus < 0:
                 raise ValueError(f"total_gpus of agg must be no smaller than 0, got {self.total_gpus}")
             self.agg_num_gpu_candidates = [n for n in self.agg_num_gpu_candidates if n <= self.total_gpus]
+            # E+agg cells are replicas: clamp their budget like disagg below.
+            if self.enable_epd and self.max_gpu_per_replica is not None:
+                self.max_gpu_per_replica = min(self.total_gpus, self.max_gpu_per_replica)
         else:
             if self.total_gpus < 2:
                 raise ValueError(f"total_gpus must be greater than 2 for disagg, got {self.total_gpus}")
@@ -957,6 +981,11 @@ class Task:
         def _set(name: str, values: list[int]) -> None:
             if getattr(self, name) is None:
                 setattr(self, name, values)
+
+        # E+agg cells are replicas: resolve the same per-replica GPU budget
+        # defaults as disagg replicas (same fields, same code).
+        if self.enable_epd:
+            self._resolve_replica_budget()
 
         # CP auto-sweep for validated families (sglang); [1] otherwise. agg runs
         # prefill in-worker, so cp applies; decode-cp=1 is enforced in iter_parallel.
@@ -1037,14 +1066,19 @@ class Task:
             if self.max_gpu_per_replica is None:
                 self.max_gpu_per_replica = 512
         else:
-            if self.num_gpu_per_replica is None:
-                self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
-            if self.max_gpu_per_replica is None:
-                self.max_gpu_per_replica = 128
+            self._resolve_replica_budget()
         if self.max_prefill_workers is None:
             self.max_prefill_workers = 32
         if self.max_decode_workers is None:
             self.max_decode_workers = 32
+
+    def _resolve_replica_budget(self) -> None:
+        """Default per-replica GPU budget, shared by disagg replicas and
+        (under enable_epd) E+agg cells — an E+agg cell is a replica."""
+        if self.num_gpu_per_replica is None:
+            self.num_gpu_per_replica = [1, 2, 4, 8] + list(range(16, 129, 8))
+        if self.max_gpu_per_replica is None:
+            self.max_gpu_per_replica = 128
 
     def _fill_role_search(self, role: str, src: dict[str, list[int]]) -> None:
         map_to_attr = {
@@ -1102,6 +1136,18 @@ class Task:
         if batch_size is not None:
             rt.batch_size = batch_size
         return rt
+
+    def _prefill_effective_isl(self) -> int:
+        """Text ISL + per-request vision context tokens (plain ISL for
+        text-only workloads or when the model config cannot be resolved).
+
+        Delegates to :func:`sweep.vl_effective_isl` -- the same implementation
+        sweep_disagg divides its token budget by, so the batch intent encoded
+        in ``prefill_max_num_tokens`` round-trips exactly.
+        """
+        from aiconfigurator.sdk.sweep import vl_effective_isl
+
+        return vl_effective_isl(self.primary_model_path, self.build_runtime_config())
 
     def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
         """Build a ModelConfig template for the given role (parallelism unset).
@@ -1199,6 +1245,17 @@ class Task:
             raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
+        # EPD is switched on explicitly and only by enable_epd (both serving
+        # modes); every other encoder_* field is a pure search-space /
+        # placement / calibration knob and must not act as an implicit switch.
+        encoder_knobs_set = (
+            self.encoder_tp_candidates
+            or self.encoder_batch_candidates
+            or self.encoder_system_name
+            or self.encoder_latency_correction != 1.0
+        )
+        if encoder_knobs_set and not self.enable_epd:
+            raise ValueError("encoder_* settings require enable_epd=True.")
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":
@@ -1426,7 +1483,25 @@ class Task:
     # sweep.py kwargs builders
     # =====================================================================
 
-    def sweep_agg_kwargs(self, *, database) -> dict[str, Any]:
+    def _replica_num_gpu_list(self) -> list[int] | None:
+        """Allowed per-replica GPU counts for the sweep's rate matching.
+
+        Mirror v1 get_working_list(num_gpu_per_replica, max_gpu_per_replica):
+        an explicit list is filtered by the cap; a None list (WideEP) becomes
+        range(1, cap+1) so the replica size stays bounded (the sweep gates by
+        this list, not a max ceiling).  Used by disagg replicas and, under
+        enable_epd, by the E+agg cells.
+        """
+        if self.num_gpu_per_replica:
+            num_gpu_list = self.num_gpu_per_replica
+            if self.max_gpu_per_replica is not None:
+                num_gpu_list = [n for n in num_gpu_list if n <= self.max_gpu_per_replica]
+            return num_gpu_list
+        if self.max_gpu_per_replica is not None:
+            return list(range(1, self.max_gpu_per_replica + 1))
+        return None
+
+    def sweep_agg_kwargs(self, *, database, encoder_database=None) -> dict[str, Any]:
         """Return the exact kwargs needed for sweep.sweep_agg.
 
         Caller is responsible for loading the perf database (so it can be
@@ -1448,9 +1523,17 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "enable_epd": self.enable_epd,
+            "encoder_tp_list": self.encoder_tp_candidates,
+            "encoder_batch_list": self.encoder_batch_candidates,
+            "encoder_latency_correction": self.encoder_latency_correction,
+            "encoder_database": encoder_database,
+            # Per-cell (per-replica) budget for the E+agg rate matching; a
+            # plain agg row is a single worker and ignores it.
+            "num_gpu_list": self._replica_num_gpu_list() if self.enable_epd else None,
         }
 
-    def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
+    def sweep_disagg_kwargs(self, *, prefill_database, decode_database, encoder_database=None) -> dict[str, Any]:
         """Return the exact kwargs needed for sweep.sweep_disagg."""
         if self.serving_mode != "disagg":
             raise ValueError(f"sweep_disagg_kwargs requires serving_mode='disagg', got {self.serving_mode!r}")
@@ -1459,17 +1542,6 @@ class Task:
         # Derive worker count ranges from replica constraints (legacy semantics).
         prefill_worker_list = list(range(1, (self.max_prefill_workers or 32) + 1))
         decode_worker_list = list(range(1, (self.max_decode_workers or 32) + 1))
-        # Mirror v1 get_working_list(num_gpu_per_replica, max_gpu_per_replica): an explicit
-        # list is filtered by the cap; a None list (WideEP) becomes range(1, cap+1) so the
-        # replica size stays bounded (v2 sweep gates by this list, not a max ceiling).
-        if self.num_gpu_per_replica:
-            num_gpu_list = self.num_gpu_per_replica
-            if self.max_gpu_per_replica is not None:
-                num_gpu_list = [n for n in num_gpu_list if n <= self.max_gpu_per_replica]
-        elif self.max_gpu_per_replica is not None:
-            num_gpu_list = list(range(1, self.max_gpu_per_replica + 1))
-        else:
-            num_gpu_list = None
         # SGLang non-wideep disaggregated serving requires prefill/decode TP to match
         # (KV transfer layout constraint, ai-dynamo/dynamo#5870). WideEP relaxes it.
         require_same_tp = self.prefill_backend_name == "sglang" and not (
@@ -1491,15 +1563,25 @@ class Task:
             "decode_model_config": self.build_model_config(role="decode"),
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
-            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
+            # Token budget for prefill_max_batch_size requests: VL requests
+            # spend effective-ISL tokens (text + vision) of the engine's
+            # max_num_tokens each, so the budget is derived from it too --
+            # sweep_disagg divides by the same effective ISL, preserving the
+            # user's batch intent for VL and text alike.
+            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self._prefill_effective_isl(),
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,
             "decode_num_worker_list": decode_worker_list,
-            "num_gpu_list": num_gpu_list,
+            "num_gpu_list": self._replica_num_gpu_list(),
             "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
             "require_same_tp": require_same_tp,
+            "enable_epd": self.enable_epd,
+            "encoder_tp_list": self.encoder_tp_candidates,
+            "encoder_batch_list": self.encoder_batch_candidates,
+            "encoder_latency_correction": self.encoder_latency_correction,
+            "encoder_database": encoder_database,
         }
 
     # =====================================================================
@@ -1555,8 +1637,9 @@ class Task:
             if autoscale:
                 raise ValueError("autoscale is only supported in disagg mode")
             database = self._load_database(self.system_name, self.backend_name, self.backend_version)
+            encoder_database = self._load_encoder_database(self.backend_name, self.backend_version)
             return sweep_agg(
-                **self.sweep_agg_kwargs(database=database),
+                **self.sweep_agg_kwargs(database=database, encoder_database=encoder_database),
                 predictor=self.predictor,
             )
         if self.serving_mode == "disagg":
@@ -1566,12 +1649,26 @@ class Task:
             decode_database = self._load_database(
                 self.decode_system_name, self.decode_backend_name, self.decode_backend_version
             )
+            encoder_database = self._load_encoder_database(self.prefill_backend_name, self.prefill_backend_version)
             return sweep_disagg(
-                **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
+                **self.sweep_disagg_kwargs(
+                    prefill_database=prefill_database,
+                    decode_database=decode_database,
+                    encoder_database=encoder_database,
+                ),
                 autoscale=autoscale,
                 predictor=self.predictor,
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+
+    def _load_encoder_database(self, default_backend: str, default_version: str | None):
+        """Load the encode-pool perf DB when EPD places it on its own system
+        (GPU type); backend/version follow the P/agg side.  None when EPD is
+        off or no encoder system is set -- the sweep then reuses the
+        P/agg-side database."""
+        if not (self.enable_epd and self.encoder_system_name):
+            return None
+        return self._load_database(self.encoder_system_name, default_backend, default_version)
 
     # =====================================================================
     # Single-point evaluation (subsumes cli_estimate)

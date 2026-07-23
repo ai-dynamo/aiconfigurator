@@ -48,7 +48,10 @@ class Qwen3VLModel(LLAMAModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
+        # EPD language-only workers keep encoder_config (vision tokens still
+        # extend the LLM context) but never host the ViT ops.
+        if not self.config.language_only:
+            self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
 
 
 @register_model("QWEN3VL_MOE")
@@ -87,4 +90,5 @@ class Qwen3VLMoEModel(MOEModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
+        if not self.config.language_only:
+            self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))

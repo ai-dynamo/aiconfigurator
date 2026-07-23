@@ -147,6 +147,9 @@ def cli_default(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -202,6 +205,12 @@ def cli_default(
             Used to filter batch sizes that would exceed KV cache capacity.
         max_seq_len: TRT-LLM ``--max_seq_len`` setting. Controls how many KV blocks are
             pre-allocated per sequence. Defaults to ``isl + osl`` when ``None``.
+        enable_epd: VL models -- serve the vision encoder from a dedicated
+            encode-worker pool (agg becomes E+agg, disagg becomes E+P+D).
+            Requires an image workload (image_height/image_width).
+        encoder_tp: EPD encode-worker TP sizes to sweep (default [1, 2, 4, 8]).
+        encoder_system: System (GPU type) for the encode workers; defaults to
+            the prefill/agg side's system.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -267,6 +276,9 @@ def cli_default(
         image_height=image_height,
         image_width=image_width,
         num_images=num_images,
+        enable_epd=enable_epd,
+        encoder_tp=encoder_tp,
+        encoder_system=encoder_system,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
