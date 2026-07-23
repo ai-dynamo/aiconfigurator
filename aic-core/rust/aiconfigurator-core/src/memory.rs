@@ -5,14 +5,14 @@
 //!
 //! [`estimate_kv_cache`] is a top-level crate function (NOT a method on
 //! `AicEngine`): estimation runs once at startup, uses overlapping but not
-//! identical inputs to `build_aic_engine`, and is a separate concern from
+//! identical inputs to `AicEngineBuilder`, and is a separate concern from
 //! latency prediction. The Dynamo Mocker is the primary external consumer; it
 //! calls this once and derives `num_gpu_blocks_per_rank` from
 //! `total_kv_size_tokens`.
 //!
 //! ## Rust is a pure forwarder; the estimate is computed in Python
 //!
-//! This mirrors how `build_aic_engine` forwards to the Python `compile_engine`:
+//! This mirrors how `AicEngineBuilder` forwards to Python's `compile_engine`:
 //! ALL of the work -- fraction + tolerance validation, HF-config parsing, the
 //! AIC backend memory model, the OfFree/OfTotal budget math, the naive heuristic
 //! fallback, AND the tolerance margin -- lives in
@@ -232,8 +232,8 @@ pub fn estimate_kv_cache(
 
 /// Cross into Python once to compute the complete estimate.
 ///
-/// Mirrors the `build_aic_engine` → `compile_engine` forwarder shape: `with_gil
-/// → import aiconfigurator.sdk.memory → call estimate_kv_cache(...) → extract
+/// Mirrors the `AicEngineBuilder` → `compile_engine` crossing: `with_gil →
+/// import aiconfigurator.sdk.memory → call estimate_kv_cache(...) → extract
 /// the returned dict`. `tolerance_fraction` is forwarded; the Python fn applies
 /// the tolerance and returns `tolerance_adjusted` in the dict.
 fn fetch_python_estimate(
