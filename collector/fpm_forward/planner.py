@@ -26,13 +26,21 @@ def _canonical_hash(payload: object) -> str:
 
 def _git_revision() -> str:
     root = Path(__file__).resolve().parents[2]
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        detail = getattr(error, "stderr", "") or str(error)
+        raise ValueError(
+            "FPM plan identity requires the collector source revision, but 'git rev-parse HEAD' "
+            f"failed under {root}: {detail.strip()}. Run the collector from a git checkout"
+        ) from error
     return completed.stdout.strip()
 
 
@@ -164,6 +172,7 @@ class FPMCell:
     moe_quant_mode: str | None = None
     fmha_quant_mode: str | None = None
     comm_quant_mode: str | None = None
+    fmha_resolution: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -180,6 +189,7 @@ class FPMCell:
                 "fmha_quant_mode": self.fmha_quant_mode,
                 "comm_quant_mode": self.comm_quant_mode,
                 "kvcache_quant_mode": self.kv_cache_dtype,
+                "fmha_resolution": self.fmha_resolution,
             },
             "backend_policy": self.backend_policy.to_dict(),
         }
@@ -355,8 +365,9 @@ def build_collection_plan(
             parallel_strategy=topology_strategy(topology, is_moe=capability.is_moe),
             gemm_quant_mode=capability.dtype.gemm_quant_mode,
             moe_quant_mode=capability.dtype.moe_quant_mode,
-            fmha_quant_mode=capability.dtype.fmha_quant_mode,
+            fmha_quant_mode=capability.dtype.fmha_by_kv_dtype[kv_cache_dtype],
             comm_quant_mode=capability.dtype.comm_quant_mode,
+            fmha_resolution=capability.dtype.fmha_resolution_by_kv_dtype[kv_cache_dtype],
         )
         for phase in ("prefill", "decode")
         for topology in topologies

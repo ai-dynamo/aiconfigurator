@@ -89,7 +89,7 @@ def _estimate_dtype(
             gemm_quant_mode=capability.dtype.gemm_quant_mode,
             moe_quant_mode=capability.dtype.moe_quant_mode,
             kvcache_quant_mode=kv_cache_dtype,
-            fmha_quant_mode=capability.dtype.fmha_quant_mode,
+            fmha_quant_mode=capability.dtype.fmha_by_kv_dtype[kv_cache_dtype],
             comm_quant_mode=capability.dtype.comm_quant_mode,
         ).breakdown
         non_kv = math.ceil(float(breakdown["non_kv_bytes"]))
