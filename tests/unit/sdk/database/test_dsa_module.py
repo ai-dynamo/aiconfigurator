@@ -948,3 +948,68 @@ class TestGenerationDSAModule:
 
         assert float(result) == pytest.approx(11.0 * sol_query / sol_boundary)
         assert result.source == "empirical"
+
+
+class TestLoadGlm5SparseFamilyAnchor:
+    """_load_glm5_sparse resolves the sparse version DIR via a representative
+    filename. The three sparse tables (mqa / topk / dsa_attn) are collected as
+    independent ops, so the anchor must be whichever sibling exists first — a
+    family dir holding only topk/dsa_attn (no mqa) must still be found instead
+    of silently falling back to the legacy dir."""
+
+    @staticmethod
+    def _write_sparse_parquet(path, latency: float) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.table(
+            {
+                "batch_size": pa.array([1], pa.int64()),
+                "isl": pa.array([4096], pa.int64()),
+                "step": pa.array([0], pa.int64()),
+                "latency": pa.array([latency], pa.float64()),
+                "num_heads": pa.array([64], pa.int64()),
+            }
+        )
+        pq.write_table(table, path)
+
+    @staticmethod
+    def _fake_database(tmp_path):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            systems_root=str(tmp_path),
+            system="h200_sxm",
+            backend="sglang",
+            version="0.5.14",
+            enable_shared_layer=False,
+            system_spec={"data_dir": "data/h200_sxm"},
+        )
+
+    def test_family_dir_without_mqa_still_resolves_siblings(self, tmp_path):
+        from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+
+        vdir = tmp_path / "data" / "h200_sxm" / "sparse_attention" / "sglang" / "0.5.14"
+        self._write_sparse_parquet(vdir / "glm5_topk_module_perf.parquet", 12.5)
+
+        ContextDSAModule._glm5_sparse_cache.clear()
+        try:
+            tables = ContextDSAModule._load_glm5_sparse(self._fake_database(tmp_path), GLM5_ARCHITECTURE, 64)
+        finally:
+            ContextDSAModule._glm5_sparse_cache.clear()
+
+        assert tables["_2d"]["topk_last"] == {1: {(4096, 0): 12.5}}
+
+    def test_mqa_anchor_still_preferred_when_present(self, tmp_path):
+        from aiconfigurator.sdk.operations.dsa import ContextDSAModule
+
+        vdir = tmp_path / "data" / "h200_sxm" / "sparse_attention" / "sglang" / "0.5.14"
+        self._write_sparse_parquet(vdir / "glm5_mqa_logits_module_perf.parquet", 3.0)
+        self._write_sparse_parquet(vdir / "glm5_topk_module_perf.parquet", 12.5)
+
+        ContextDSAModule._glm5_sparse_cache.clear()
+        try:
+            tables = ContextDSAModule._load_glm5_sparse(self._fake_database(tmp_path), GLM5_ARCHITECTURE, 64)
+        finally:
+            ContextDSAModule._glm5_sparse_cache.clear()
+
+        assert tables["_2d"]["mqa"] == {1: {(4096, 0): 3.0}}
+        assert tables["_2d"]["topk_last"] == {1: {(4096, 0): 12.5}}

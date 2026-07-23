@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -117,8 +117,9 @@ class Mamba2Kernel(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.mamba2.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mamba2.value
+            )
             sources = database._build_op_sources(PerfDataFilename.mamba2, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_mamba2_data(sources), PerfDataFilename.mamba2, primary_path)
             cls._record_load()
@@ -339,8 +340,9 @@ class GDNKernel(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.gdn.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.gdn.value
+            )
             sources = database._build_op_sources(PerfDataFilename.gdn, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_gdn_data(sources), PerfDataFilename.gdn, primary_path)
             cls._record_load()

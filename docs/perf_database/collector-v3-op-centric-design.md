@@ -212,6 +212,13 @@ tables:
   so the attempted-set attestation is collection-time only.
 - "Missing provenance" = a parquet table present with no matching `tables`
   entry. CI fails closed on it (§8); the loader's strict mode refuses it (§7).
+- **Legacy tier** (a later amendment): data collected before V3 carries a
+  backfilled sidecar with `provenance: legacy` — `runtime: {framework,
+  version}` only, per-table `status` (complete unless it had `INCOMPLETE.txt`),
+  no hashes. The tier makes the §8 sidecar-coverage gate and the §12.3 support
+  bar total over the whole tree while staying honest about unknown identity.
+  Strict mode (PR 4) treats `legacy` as warn-not-fail for one release. New
+  collections always write full provenance; the legacy tier only shrinks.
 - Transient run artifacts (`collection_summary_*.json`, `errors_*.json`) remain
   uncommitted but are retained as CI artifacts on data PRs (§9).
 
@@ -379,8 +386,17 @@ changed:
     systems: [h200_sxm, b200_sxm, gb200]   # systems holding data at the old pin
     action: recollect
 unchanged:
-  - {framework: sglang, family: moe, ...}
+  - {framework: sglang, family: moe, tables: [...], systems: [...]}
 ```
+
+Contract notes (locked during implementation): `unchanged` entries carry exactly
+`{framework, family, tables, systems}` — no vacuous `reasons`/`action`. The
+`case_plan` reason is computed from the family's case-INPUT files (base-ops
+and model-case YAML plus the case-generation modules) hashed at each revision
+— GPU-free and deterministic at any rev — while `collection_meta.yaml`'s
+`case_plan_hash` remains the collection-time attestation of the expanded case
+set. A base revision predating V3 metadata exits with code 3 ("cannot compute
+against a pre-V3 baseline"); CI maps it to a neutral skip.
 
 This file is the single input consumed by the evidence resolver (§9), the CI
 gate, and the support-matrix healer — same manifest in, same

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -95,8 +95,9 @@ class CustomAllReduce(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.custom_allreduce.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.custom_allreduce.value
+            )
             sources = database._build_op_sources(PerfDataFilename.custom_allreduce, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_custom_allreduce_data(sources), PerfDataFilename.custom_allreduce, primary_path
@@ -323,11 +324,13 @@ class NCCL(Operation):
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
-            # NCCL data lives under ``systems_data_root/nccl/<nccl_version>/``,
-            # NOT under ``backend/version/``. Per ``_build_op_sources`` early-
-            # exit, NCCL ops never inherit shared-layer sibling rows.
-            nccl_data_dir = os.path.join(system_data_root, "nccl", database.system_spec["misc"]["nccl_version"])
-            nccl_primary = os.path.join(nccl_data_dir, PerfDataFilename.nccl.value)
+            # NCCL data lives under ``systems_data_root/nccl/<nccl_version>/``
+            # (legacy) or ``systems_data_root/<family>/nccl/<nccl_version>/``
+            # (family-first), NOT under ``backend/version/``. Per
+            # ``_build_op_sources`` early-exit, NCCL ops never inherit
+            # shared-layer sibling rows.
+            nccl_version = database.system_spec["misc"]["nccl_version"]
+            nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
             nccl_sources = database._build_op_sources(PerfDataFilename.nccl, nccl_primary, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_nccl_data(nccl_sources), PerfDataFilename.nccl, nccl_primary)
 
@@ -335,8 +338,9 @@ class NCCL(Operation):
             # declares an ``oneccl_version`` under ``misc``.
             oneccl_version = database.system_spec.get("misc", {}).get("oneccl_version")
             if oneccl_version:
-                oneccl_data_dir = os.path.join(system_data_root, "oneccl", oneccl_version)
-                oneccl_primary = os.path.join(oneccl_data_dir, PerfDataFilename.oneccl.value)
+                oneccl_primary = resolve_op_data_path(
+                    system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value
+                )
                 oneccl_sources = database._build_op_sources(PerfDataFilename.oneccl, oneccl_primary, system_data_root)
                 cls._oneccl_data_cache[key] = LoadedOpData(
                     load_nccl_data(oneccl_sources), PerfDataFilename.oneccl, oneccl_primary

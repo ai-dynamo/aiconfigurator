@@ -315,28 +315,14 @@ class TestDatabaseCache:
 
         monkeypatch.setattr(PerfDatabase, "__init__", counting_init)
 
-        # Mock file operations
-        system_spec = {
-            "data_dir": "data",
-            "misc": {"nccl_version": "v1"},
-            "gpu": {
-                "bfloat16_tc_flops": 1000.0,
-                "mem_bw": 100.0,
-                "mem_bw_empirical_scaling_factor": 0.8,
-                "mem_empirical_constant_latency": 0.001,
-            },
-            "node": {
-                "inter_node_bw": 100.0,
-                "intra_node_bw": 200.0,
-                "num_gpus_per_node": 8,
-                "p2p_latency": 0.000001,
-            },
-        }
-        monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
-        monkeypatch.setattr("os.path.exists", lambda path: True)
-        monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
-        (tmp_path / "sys1.yaml").write_text("dummy")
-        (tmp_path / "sys2.yaml").write_text("dummy")
+        # Real synthetic tree: <system>.yaml pointing at data/<system>, with a
+        # legacy-layout backend/version dir holding a stub perf file so the
+        # declaration check (os.listdir/os.path.isdir) finds real directories.
+        for system in ("sys1", "sys2"):
+            (tmp_path / f"{system}.yaml").write_text(f"data_dir: data/{system}\n", encoding="utf-8")
+            version_dir = tmp_path / "data" / system / "backend1" / "v1"
+            version_dir.mkdir(parents=True)
+            (version_dir / "gemm_perf.parquet").write_bytes(b"PAR1stub")
 
         # First call should create new instance
         db1 = get_database("sys1", "backend1", "v1", systems_paths=str(tmp_path))

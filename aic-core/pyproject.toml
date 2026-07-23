@@ -38,5 +38,6 @@ include = [
     "src/aiconfigurator_core/systems/**/*.json",
     "src/aiconfigurator_core/systems/**/*.txt",
     "src/aiconfigurator_core/systems/**/*.parquet",
+    "src/aiconfigurator_core/systems/data/**/*.yaml",
     "src/aiconfigurator_core/model_configs/*.json",
 ]

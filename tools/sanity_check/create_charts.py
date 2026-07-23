@@ -9,18 +9,24 @@ This script is designed to run in GitHub Actions to visualize new performance da
 
 import argparse
 import functools
+import logging
 import math
 import os
 import subprocess
 import sys
 import textwrap
 from collections import defaultdict
+from pathlib import Path
+
+import yaml
 
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, get_database
 
 # Disable interactive backend
 os.environ["MPLBACKEND"] = "agg"
 import matplotlib.pyplot as plt
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SYSTEMS_PREFIX = "aic-core/src/aiconfigurator_core/systems/"
@@ -49,24 +55,114 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 )
 
 
-def _data_dir(system: str, backend: str, backend_version: str) -> str:
-    return os.path.join(
-        REPO_ROOT,
-        "aic-core",
-        "src",
-        "aiconfigurator_core",
-        "systems",
-        "data",
-        system,
-        backend,
-        backend_version,
-    )
+# Legacy top-level backend dirs (family-first layout treats any other first-level
+# directory under <system>/ as a family dir containing <backend>/<version>
+# subtrees). Keep textually identical to the CANONICAL _KNOWN_BACKEND_DIRS in
+# aic-core/src/aiconfigurator_core/sdk/operations/base.py, which lists every
+# copy that must stay in sync (this standalone tool cannot import aic-core).
+_KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl"}
 
 
-def _perf_files_present(data_dir: str) -> set[str]:
-    if not os.path.isdir(data_dir):
-        return set()
-    return {entry for entry in os.listdir(data_dir) if entry.endswith("_perf.parquet")}
+def _dir_is_incomplete(path: str) -> bool:
+    """Yaml-first partial-dir check (collection_meta.yaml status:partial), with
+    INCOMPLETE.txt as the legacy fallback. Duplicated (not imported) from
+    aiconfigurator_core.sdk.perf_database._version_dir_state, the source of
+    truth for this semantic — kept local so this tool doesn't take an aic-core
+    dependency for one predicate. Malformed collection_meta.yaml raises
+    ValueError naming the file, matching that canonical loader's fail-loudly
+    behavior (unlike operations/base.py's deliberately lenient hot-path
+    duplicate of this same predicate). See the CONTRACT NOTE on
+    _version_dir_is_partial in
+    aic-core/src/aiconfigurator_core/sdk/operations/base.py
+    for the intentional resolver-lenient/admission-strict split and
+    the full list of copies."""
+    meta_path = os.path.join(path, "collection_meta.yaml")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"{meta_path}: failed to parse collection_meta.yaml: {e}") from e
+        tables = meta.get("tables") if isinstance(meta, dict) else None
+        return isinstance(tables, dict) and any(
+            isinstance(t, dict) and t.get("status") == "partial" for t in tables.values()
+        )
+    return os.path.isfile(os.path.join(path, "INCOMPLETE.txt"))
+
+
+def _systems_data_root() -> str:
+    return os.path.join(REPO_ROOT, "aic-core", "src", "aiconfigurator_core", "systems", "data")
+
+
+def _legacy_data_dir(system: str, backend: str, backend_version: str) -> str:
+    return os.path.join(_systems_data_root(), system, backend, backend_version)
+
+
+def _perf_file_paths(perf_root: str, system: str, backend: str, backend_version: str) -> dict[str, Path]:
+    """Map each *_perf.parquet (and *_perf.txt) basename for this
+    (system, backend, backend_version) to its full path, aggregated across the
+    legacy (<backend>/<version>) dir AND every family-first
+    (<family>/<backend>/<version>) dir holding the same (backend, version).
+
+    This deliberately does not pick a single winning directory: one
+    (backend, version) can legitimately split its perf files across multiple
+    family dirs (e.g. gemm files under <system>/gemm/<backend>/<version>/ and
+    attention files under <system>/attention/<backend>/<version>/), and callers
+    need the union of all of them.
+
+    On a basename collision across directories, the legacy dir's copy wins (for
+    determinism during the migration window) and a warning is logged.
+    """
+    system_dir = Path(perf_root) / system
+    legacy_dir = system_dir / backend / backend_version
+
+    try:
+        entries = sorted(os.listdir(system_dir))
+    except OSError:
+        entries = []
+
+    family_dirs = []
+    for entry in entries:
+        if entry in _KNOWN_BACKEND_DIRS:
+            continue
+        candidate = system_dir / entry / backend / backend_version
+        if candidate.is_dir():
+            family_dirs.append(candidate)
+
+    def _is_perf_file(name: str) -> bool:
+        return name.endswith("_perf.parquet") or name.endswith("_perf.txt")
+
+    paths: dict[str, Path] = {}
+    for data_dir in family_dirs:
+        for name in sorted(os.listdir(data_dir)):
+            if not _is_perf_file(name):
+                continue
+            full_path = data_dir / name
+            if name in paths:
+                logger.warning(
+                    "Duplicate perf file %r found in multiple family dirs (keeping %s, ignoring %s)",
+                    name,
+                    paths[name],
+                    full_path,
+                )
+                continue
+            paths[name] = full_path
+
+    if legacy_dir.is_dir():
+        for name in sorted(os.listdir(legacy_dir)):
+            if not _is_perf_file(name):
+                continue
+            full_path = legacy_dir / name
+            if name in paths:
+                logger.warning(
+                    "Perf file %r present in both legacy dir and a family dir (keeping legacy copy %s, ignoring %s)",
+                    name,
+                    full_path,
+                    paths[name],
+                )
+            paths[name] = full_path
+
+    return paths
 
 
 def _short_error(exc: Exception) -> str:
@@ -219,12 +315,8 @@ def run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple
 
 def should_run_cli_smoke_test(system: str, backend: str, backend_version: str) -> tuple[bool, str]:
     """Return whether the default Qwen CLI smoke test has enough data to be meaningful."""
-    data_dir = _data_dir(system, backend, backend_version)
-    missing_files = [
-        perf_file
-        for perf_file in CLI_SMOKE_REQUIRED_PERF_FILES
-        if not os.path.exists(os.path.join(data_dir, perf_file))
-    ]
+    perf_file_paths = _perf_file_paths(_systems_data_root(), system, backend, backend_version)
+    missing_files = [perf_file for perf_file in CLI_SMOKE_REQUIRED_PERF_FILES if perf_file not in perf_file_paths]
     if missing_files:
         return (
             False,
@@ -302,8 +394,7 @@ def create_charts(
     output_md_file: str,
 ):
     new_nccl_perf_collected = False  # FIXME
-    data_dir = _data_dir(system, backend, backend_version)
-    all_perf_files = _perf_files_present(data_dir)
+    all_perf_files = set(_perf_file_paths(_systems_data_root(), system, backend, backend_version))
 
     # TODO: for simplicity & maintainability, maybe better to ignore perf_files and
     # just call all chart functions in validate_database?
@@ -509,8 +600,34 @@ def main():
             if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
                 continue
 
-            data_dir = _data_dir(system, backend, backend_version)
-            if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
+            # A 5-part changed path is legacy-shaped, so its partial marker
+            # (collection_meta.yaml status, INCOMPLETE.txt fallback) lives in
+            # the exact legacy dir — a best-guess resolution across layouts
+            # could pick an unrelated family dir here.
+            data_dir = _legacy_data_dir(system, backend, backend_version)
+            if _dir_is_incomplete(data_dir):
+                continue
+            system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
+
+        # data/<system>/<family>/<backend>/<backend_version>/*.parquet (family-first layout)
+        elif len(parts) == 6 and parts[0] == "data":
+            system = parts[1]
+            family = parts[2]
+            backend = parts[3]
+            backend_version = parts[4]
+
+            # data/<system>/<family>/nccl/<nccl_version>/nccl_perf.parquet
+            # data/<system>/<family>/oneccl/<oneccl_version>/oneccl_perf.parquet
+            if backend in ("nccl", "oneccl"):
+                # Ignore for now
+                continue
+
+            perf_file = parts[5]
+            if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
+                continue
+
+            data_dir = os.path.join(_systems_data_root(), system, family, backend, backend_version)
+            if _dir_is_incomplete(data_dir):
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 

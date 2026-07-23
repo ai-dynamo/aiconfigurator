@@ -30,6 +30,7 @@ from aiconfigurator.sdk.errors import (
     is_expected_cli_error,
 )
 from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
@@ -1034,7 +1035,9 @@ def configure_parser(parser):
     _add_support_mode_arguments(support_parser)
 
 
-def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
+def _get_system_data_root(system_name: str) -> str | None:
+    """Resolve a system's perf-data root (the dir holding either
+    <family>/<backend>/<version> or legacy <backend>/<version> subtrees)."""
     for systems_root in perf_database.get_systems_paths():
         system_yaml = os.path.join(systems_root, f"{system_name}.yaml")
         if not os.path.isfile(system_yaml):
@@ -1044,8 +1047,17 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
         data_dir = system_spec.get("data_dir")
         if not data_dir:
             return None
-        return os.path.join(systems_root, data_dir, backend_name, backend_version)
+        return os.path.join(systems_root, data_dir)
     return None
+
+
+def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str, op_filename: str) -> str | None:
+    """Resolve one perf-data file's on-disk path for (system, backend, version),
+    across both the family-first and legacy tree layouts (see resolve_op_data_path)."""
+    system_data_root = _get_system_data_root(system_name)
+    if system_data_root is None:
+        return None
+    return resolve_op_data_path(system_data_root, backend_name, backend_version, op_filename)
 
 
 _SGLANG_DEEPEP_REQUIRED_FILES = (
@@ -1083,19 +1095,15 @@ def _sglang_deepep_perf_data_skip_reason(
             missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
             continue
 
-        data_path = _get_backend_data_path(system_to_check, common.BackendName.sglang.value, resolved_version)
-        if data_path is None:
-            missing_paths.extend(
-                f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
-                for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+        for filename in _SGLANG_DEEPEP_REQUIRED_FILES:
+            resolved_path = _get_backend_data_path(
+                system_to_check, common.BackendName.sglang.value, resolved_version, filename
             )
-            continue
-
-        missing_paths.extend(
-            os.path.join(data_path, filename)
-            for filename in _SGLANG_DEEPEP_REQUIRED_FILES
-            if not os.path.isfile(os.path.join(data_path, filename))
-        )
+            if resolved_path is None or not os.path.isfile(resolved_path):
+                missing_paths.append(
+                    resolved_path
+                    or f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
+                )
 
     if missing_versions:
         return "no database version available for " + ", ".join(missing_versions)
@@ -1143,16 +1151,24 @@ def _ensure_backend_version_available(
         backend_name,
         backend_version,
     )
-    data_path = _get_backend_data_path(system_name, backend_name, backend_version)
-    if data_path:
-        logger.error("Searched: %s", data_path)
+    system_data_root = _get_system_data_root(system_name)
+    if system_data_root:
+        logger.error(
+            "Searched: %s (backend=%s, version=%s; both family-first <family>/<backend>/<version> "
+            "and legacy <backend>/<version> layouts)",
+            system_data_root,
+            backend_name,
+            backend_version,
+        )
     logger.error("Configured systems paths: %s", systems_paths_display)
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
             "Fix: switch --backend-version to one of the available versions, "
             "remove --backend-version to use latest, "
-            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            "or add a declared version directory with %s (legacy: %s) when this version "
+            "intentionally reuses shared-layer data.",
+            perf_database.REUSE_YAML_MARKER,
             perf_database.SHARED_LAYER_REUSE_MARKER,
         )
     else:

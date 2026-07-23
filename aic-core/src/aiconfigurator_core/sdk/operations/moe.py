@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -206,12 +206,13 @@ class MoE(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
             # Regular MoE table — ``load_moe_data`` returns ``(default, low_latency)``
             # because rows tagged ``kernel_source="moe_torch_flow_min_latency"``
             # are routed into a separate accumulator.
-            moe_primary = os.path.join(data_dir, PerfDataFilename.moe.value)
+            moe_primary = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.moe.value
+            )
             moe_sources = database._build_op_sources(PerfDataFilename.moe, moe_primary, system_data_root)
             moe_result = load_moe_data(moe_sources)
             if isinstance(moe_result, tuple):
@@ -223,7 +224,9 @@ class MoE(Operation):
 
             # WideEP MoE tables — SGLang-only.
             if database.backend == "sglang":
-                ctx_primary = os.path.join(data_dir, PerfDataFilename.wideep_context_moe.value)
+                ctx_primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_moe.value
+                )
                 ctx_sources = database._build_op_sources(
                     PerfDataFilename.wideep_context_moe, ctx_primary, system_data_root
                 )
@@ -233,7 +236,12 @@ class MoE(Operation):
                     ctx_primary,
                 )
 
-                gen_primary = os.path.join(data_dir, PerfDataFilename.wideep_generation_moe.value)
+                gen_primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.wideep_generation_moe.value,
+                )
                 gen_sources = database._build_op_sources(
                     PerfDataFilename.wideep_generation_moe, gen_primary, system_data_root
                 )
@@ -929,9 +937,13 @@ class MoEDispatch(Operation):
         if key not in cls._normal_data_cache:
             if database.backend == "sglang":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
 
-                normal_primary = os.path.join(data_dir, PerfDataFilename.wideep_deepep_normal.value)
+                normal_primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.wideep_deepep_normal.value,
+                )
                 normal_sources = database._build_op_sources(
                     PerfDataFilename.wideep_deepep_normal, normal_primary, system_data_root
                 )
@@ -941,7 +953,9 @@ class MoEDispatch(Operation):
                     normal_primary,
                 )
 
-                ll_primary = os.path.join(data_dir, PerfDataFilename.wideep_deepep_ll.value)
+                ll_primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_deepep_ll.value
+                )
                 ll_sources = database._build_op_sources(PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root)
                 cls._ll_data_cache[key] = LoadedOpData(
                     load_wideep_deepep_ll_data(ll_sources),
@@ -1492,8 +1506,9 @@ class TrtLLMWideEPMoE(Operation):
         if key not in cls._data_cache:
             if database.backend == "trtllm":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary = os.path.join(data_dir, PerfDataFilename.wideep_moe_compute.value)
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_moe_compute.value
+                )
                 sources = database._build_op_sources(PerfDataFilename.wideep_moe_compute, primary, system_data_root)
                 cls._data_cache[key] = LoadedOpData(
                     load_wideep_moe_compute_data(sources),
@@ -1935,8 +1950,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
         if key not in cls._data_cache:
             if database.backend == "trtllm":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary = os.path.join(data_dir, PerfDataFilename.trtllm_alltoall.value)
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.trtllm_alltoall.value
+                )
                 sources = database._build_op_sources(PerfDataFilename.trtllm_alltoall, primary, system_data_root)
                 cls._data_cache[key] = LoadedOpData(
                     load_trtllm_alltoall_data(sources),

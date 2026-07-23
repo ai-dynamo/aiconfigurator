@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Collector Data Audit
+
+# Fail-closed CI enforcement for the Collector V3 design
+# (docs/perf_database/collector-v3-op-centric-design.md §8): every PR
+# touching the perf data tree, the collector, or the perf-database tools runs
+# tools/perf_database/audit_collector_data.py, which fails the job on any
+# provenance/reuse/placement/identity violation.
+#
+# The changed-operation manifest (tools/perf_database/changed_ops.py) also
+# runs and is uploaded as an artifact -- informational per §8. Gating merges
+# on the evidence it implies is AIC-1214/PR 4 scope, not this workflow.
+
+on:
+  pull_request:
+    paths:
+      - "aic-core/src/aiconfigurator_core/systems/data/**"
+      - "collector/**"
+      - "tools/perf_database/**"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: Audit collector data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # github.base_ref is only set for pull_request events; workflow_dispatch
+      # (manual runs, e.g. against main) falls back to the default branch.
+      BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || github.event.repository.default_branch }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          # No `lfs: true`: the audit and changed-ops steps only ever read
+          # parquet filenames/stems and the YAML sidecars beside them, never
+          # parquet content, so LFS smudging is unneeded weight -- and would
+          # fail checkout for fork PRs that can't authenticate to LFS.
+          persist-credentials: false
+
+      - name: Fetch base ref
+        # fetch-depth: 0 above fetches full history of the checked-out ref
+        # only; the base branch's own remote-tracking ref (origin/<base>) is
+        # not guaranteed to exist yet in PR context (same gap
+        # perf-parquet-diff.yml works around), so changed_ops.py's
+        # `origin/${BASE_REF}` needs it fetched explicitly.
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install AIC and test dependencies
+        run: |
+          python -m pip install uv
+          uv sync --extra dev
+
+      - name: Audit collector data (fail-closed)
+        run: uv run python tools/perf_database/audit_collector_data.py
+
+      - name: Compute changed-operation manifest (informational, §8)
+        id: changed_ops
+        run: |
+          set +e
+          uv run python tools/perf_database/changed_ops.py --base "origin/${BASE_REF}" --out changed-ops.yaml
+          rc=$?
+          set -e
+          if [ "${rc}" -eq 3 ]; then
+            echo "::notice::changed_ops: base revision predates Collector V3 provenance metadata; manifest skipped (neutral, not a failure)"
+            echo "produced=false" >> "${GITHUB_OUTPUT}"
+          elif [ "${rc}" -ne 0 ]; then
+            exit "${rc}"
+          else
+            echo "produced=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Upload changed-operation manifest artifact
+        if: steps.changed_ops.outputs.produced == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: changed-ops
+          path: changed-ops.yaml
+          retention-days: 30

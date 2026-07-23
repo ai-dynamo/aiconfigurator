@@ -28,7 +28,17 @@ logger = logging.getLogger(__name__)
 _SYSTEMS_PATHS: list[str] = [os.fspath(pkg_resources.files("aiconfigurator_core") / "systems")]
 _MISSING_SILICON_DATA_EXCEPTIONS = (PerfDataNotAvailableError, InterpolationDataNotAvailableError)
 SHARED_LAYER_REUSE_MARKER = "SHARED_LAYER_REUSE.txt"
-_DATABASE_VERSION_METADATA_FILES = {SHARED_LAYER_REUSE_MARKER, "INCOMPLETE.txt"}
+INCOMPLETE_MARKER = "INCOMPLETE.txt"
+# Structured provenance markers (Collector V3 design §5/§6.3), yaml-first with the
+# two legacy .txt markers above kept as a one-transition-window fallback.
+REUSE_YAML_MARKER = "reuse.yaml"
+COLLECTION_META_MARKER = "collection_meta.yaml"
+_DATABASE_VERSION_METADATA_FILES = {
+    SHARED_LAYER_REUSE_MARKER,
+    INCOMPLETE_MARKER,
+    REUSE_YAML_MARKER,
+    COLLECTION_META_MARKER,
+}
 
 
 def _normalize_systems_paths(raw_paths: str | Iterable[str] | None) -> list[str]:
@@ -234,9 +244,11 @@ def _load_op_kernel_source_manifest_entries(systems_root: str) -> dict[str, tupl
 # at module load time. Re-exported here for any external callers that may
 # still import it via ``aiconfigurator_core.sdk.perf_database._read_filtered_rows``.
 from aiconfigurator_core.sdk.operations.base import (  # noqa: F401
+    _KNOWN_BACKEND_DIRS,
     _read_filtered_rows,
     _read_perf_rows,
     _resolve_perf_data_path,
+    resolve_op_data_path,
 )
 
 
@@ -272,15 +284,7 @@ def get_supported_databases(
                     continue
 
                 for backend in common.BackendName:
-                    backend_path = os.path.join(data_dir, backend.value)
-                    if not os.path.isdir(backend_path):
-                        continue
-
-                    versions = [
-                        v
-                        for v in os.listdir(backend_path)
-                        if not v.startswith(".") and _database_version_dir_is_declared(os.path.join(backend_path, v))
-                    ]
+                    versions = _declared_versions(data_dir, backend.value)
                     if versions:
                         supported_sets[system][backend.value].update(versions)
             except Exception as e:
@@ -300,6 +304,7 @@ def _iter_database_version_paths(
     version: str,
     systems_paths: str | list[str] | None = None,
 ):
+    """Yield (version_path, data_dir) pairs for a (system, backend, version)."""
     if systems_paths is None:
         systems_paths = get_systems_paths()
     elif isinstance(systems_paths, str):
@@ -316,9 +321,9 @@ def _iter_database_version_paths(
             logger.warning("Could not process system config %s: %s", os.path.basename(system_yaml_path), e)
             continue
         data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
-        version_path = os.path.join(data_dir, backend, version)
-        if os.path.isdir(version_path):
-            yield version_path
+        for v, version_path in _iter_backend_version_dirs(data_dir, backend):
+            if v == version:
+                yield version_path, data_dir
 
 
 def _database_version_dir_has_perf_files(version_path: str) -> bool:
@@ -334,18 +339,187 @@ def _database_version_dir_has_perf_files(version_path: str) -> bool:
     return False
 
 
-def _database_version_dir_has_shared_layer_marker(version_path: str) -> bool:
-    return os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+_REUSE_ENTRY_REQUIRED_KEYS = ("table", "from_version", "reason", "approved_by")
+_LEGACY_MARKER_WARNED: set[tuple[str, str]] = set()
 
 
-def _database_version_dir_is_declared(version_path: str) -> bool:
+def _warn_legacy_marker_once(scope: str, marker_name: str, replacement: str) -> None:
+    """One-time-per-(scope, marker) deprecation warning, mirroring _LEGACY_LAYOUT_WARNED."""
+    key = (scope, marker_name)
+    if key in _LEGACY_MARKER_WARNED:
+        return
+    _LEGACY_MARKER_WARNED.add(key)
+    logger.warning(
+        "Legacy marker file %s honored under %s; migrate to %s (Collector V3 design §5/§6.3)",
+        marker_name,
+        scope,
+        replacement,
+    )
+
+
+def _parse_reuse_yaml(path: str) -> dict:
+    """Parse+validate a ``reuse.yaml`` sidecar (design §6.3): top-level ``reuse:``
+    list of {table, from_version, reason, approved_by}. Raises ValueError on any
+    structural or type mismatch (fail loudly on malformed authored data).
+
+    A present-but-empty ``reuse: []`` is a valid "nothing declared" document.
+    A MISSING (or misspelled, e.g. ``reuses:``) top-level ``reuse`` key is a
+    schema error, not silently treated as empty — it almost always means the
+    author typo'd the key and the file's declarations are being dropped.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except Exception as e:
+        raise ValueError(f"{path}: failed to parse reuse.yaml: {e}") from e
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a YAML mapping at the top level, got {type(raw).__name__}")  # noqa: TRY004
+    if "reuse" not in raw:
+        raise ValueError(f"{path}: missing required top-level 'reuse' key")
+    entries = raw["reuse"]
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: 'reuse' must be a list, got {type(entries).__name__}")  # noqa: TRY004
+
+    validated: list[dict[str, str]] = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: reuse[{i}] must be a mapping, got {type(entry).__name__}")  # noqa: TRY004
+        missing = [key for key in _REUSE_ENTRY_REQUIRED_KEYS if key not in entry]
+        if missing:
+            raise ValueError(f"{path}: reuse[{i}] missing required key(s): {', '.join(missing)}")
+        for key in _REUSE_ENTRY_REQUIRED_KEYS:
+            if not isinstance(entry[key], str) or not entry[key].strip():
+                raise ValueError(f"{path}: reuse[{i}].{key} must be a non-empty string")
+        validated.append({key: entry[key] for key in _REUSE_ENTRY_REQUIRED_KEYS})
+    return {"entries": validated}
+
+
+def _load_collection_meta_yaml(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except Exception as e:
+        raise ValueError(f"{path}: failed to parse collection_meta.yaml: {e}") from e
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a YAML mapping at the top level, got {type(raw).__name__}")  # noqa: TRY004
+    return raw
+
+
+def _collection_meta_has_partial_table(meta: dict) -> bool:
+    tables = meta.get("tables")
+    if not isinstance(tables, dict):
+        return False
+    return any(isinstance(table, dict) and table.get("status") == "partial" for table in tables.values())
+
+
+def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dict[str, object]:
+    """Consolidated per-version-dir marker state, yaml-first with legacy .txt fallback.
+
+    - ``declared_reuse``: parsed ``reuse.yaml`` contents (design §6.3) when it has
+      >=1 entry; the legacy marker-only sentinel when only ``SHARED_LAYER_REUSE.txt``
+      is present; ``None`` when neither declares reuse.
+    - ``partial``: True when ``collection_meta.yaml`` has any table with
+      ``status: partial`` (whole-dir discovery parity with today; per-table nuance
+      is PR 4 scope), or (fallback) ``INCOMPLETE.txt`` is present.
+    - ``has_perf``: whether the dir holds real perf output files.
+
+    ``data_dir`` scopes the one-time-per-tree legacy-marker deprecation warning
+    (mirrors ``_LEGACY_LAYOUT_WARNED``); callers that have it in scope should pass
+    it so honoring many legacy marker dirs under one tree warns once, not per dir.
+    """
+    warn_scope = data_dir if data_dir is not None else version_path
+
+    declared_reuse: dict | None = None
+    reuse_yaml_path = os.path.join(version_path, REUSE_YAML_MARKER)
+    legacy_reuse_path = os.path.join(version_path, SHARED_LAYER_REUSE_MARKER)
+    if os.path.isfile(reuse_yaml_path):
+        parsed = _parse_reuse_yaml(reuse_yaml_path)
+        declared_reuse = parsed if parsed["entries"] else None
+    elif os.path.isfile(legacy_reuse_path):
+        _warn_legacy_marker_once(warn_scope, SHARED_LAYER_REUSE_MARKER, REUSE_YAML_MARKER)
+        declared_reuse = {"entries": [], "legacy": True}
+
+    partial = False
+    meta_yaml_path = os.path.join(version_path, COLLECTION_META_MARKER)
+    legacy_incomplete_path = os.path.join(version_path, INCOMPLETE_MARKER)
+    if os.path.isfile(meta_yaml_path):
+        partial = _collection_meta_has_partial_table(_load_collection_meta_yaml(meta_yaml_path))
+    elif os.path.isfile(legacy_incomplete_path):
+        _warn_legacy_marker_once(warn_scope, INCOMPLETE_MARKER, COLLECTION_META_MARKER)
+        partial = True
+
+    return {
+        "declared_reuse": declared_reuse,
+        "partial": partial,
+        "has_perf": _database_version_dir_has_perf_files(version_path),
+    }
+
+
+def _database_version_dir_is_declared(version_path: str, *, data_dir: str | None = None) -> bool:
     if not os.path.isdir(version_path):
         return False
-    if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+    state = _version_dir_state(version_path, data_dir=data_dir)
+    if state["partial"]:
         return False
-    return _database_version_dir_has_perf_files(version_path) or _database_version_dir_has_shared_layer_marker(
-        version_path
-    )
+    return bool(state["has_perf"]) or state["declared_reuse"] is not None
+
+
+# Alias of the canonical set in operations/base.py (which lists every
+# standalone copy that must stay in sync).
+KNOWN_BACKEND_DIRS = _KNOWN_BACKEND_DIRS
+_LEGACY_LAYOUT_WARNED: set[str] = set()
+
+
+def _iter_backend_version_dirs(data_dir: str, backend: str):
+    """Yield (version, version_path) for a backend across BOTH tree layouts.
+
+    Family layout: <data_dir>/<family>/<backend>/<version> — any first-level
+    directory whose name is not a known backend dir is a family dir. Legacy
+    layout: <data_dir>/<backend>/<version> (deprecated; warns once per tree).
+    A (backend, version) may yield several paths — one per family dir holding
+    it — and callers aggregate.
+    """
+    try:
+        entries = os.listdir(data_dir)
+    except Exception:
+        return
+    for entry in entries:
+        entry_path = os.path.join(data_dir, entry)
+        if entry.startswith(".") or not os.path.isdir(entry_path):
+            continue
+        if entry == backend:  # legacy layout
+            if data_dir not in _LEGACY_LAYOUT_WARNED:
+                _LEGACY_LAYOUT_WARNED.add(data_dir)
+                logger.warning(
+                    "Legacy perf-data layout (<backend>/<version>) found under %s; "
+                    "migrate to <family>/<backend>/<version> (Collector V3 design §3)",
+                    data_dir,
+                )
+            yield from _iter_version_subdirs(entry_path)
+        elif entry not in KNOWN_BACKEND_DIRS:  # family dir
+            backend_path = os.path.join(entry_path, backend)
+            if os.path.isdir(backend_path):
+                yield from _iter_version_subdirs(backend_path)
+
+
+def _iter_version_subdirs(backend_path: str):
+    try:
+        versions = os.listdir(backend_path)
+    except Exception:
+        return
+    for version in versions:
+        version_path = os.path.join(backend_path, version)
+        if not version.startswith((".", "_")) and os.path.isdir(version_path):
+            yield version, version_path
+
+
+def _declared_versions(data_dir: str, backend: str) -> set[str]:
+    """Versions declared for a backend: >=1 path passes the per-dir check."""
+    declared: set[str] = set()
+    for version, version_path in _iter_backend_version_dirs(data_dir, backend):
+        if version not in declared and _database_version_dir_is_declared(version_path, data_dir=data_dir):
+            declared.add(version)
+    return declared
 
 
 def is_shared_layer_marker_only_version(
@@ -356,12 +530,13 @@ def is_shared_layer_marker_only_version(
 ) -> bool:
     """True when a declared version has only the shared-layer marker and no measured files."""
     saw_marker = False
-    for version_path in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
-        if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+    for version_path, data_dir in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
+        state = _version_dir_state(version_path, data_dir=data_dir)
+        if state["partial"]:
             continue
-        if _database_version_dir_has_perf_files(version_path):
+        if state["has_perf"]:
             return False
-        saw_marker = saw_marker or os.path.isfile(os.path.join(version_path, SHARED_LAYER_REUSE_MARKER))
+        saw_marker = saw_marker or state["declared_reuse"] is not None
     return saw_marker
 
 
@@ -539,9 +714,10 @@ def get_database(
             logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
             continue
 
-        data_path = os.path.join(systems_root, data_dir, backend, version)
-        is_incomplete = os.path.isfile(os.path.join(data_path, "INCOMPLETE.txt"))
-        if os.path.exists(data_path) and not is_incomplete:
+        data_dir_abs = os.path.join(systems_root, data_dir)
+        paths = [p for v, p in _iter_backend_version_dirs(data_dir_abs, backend) if v == version]
+        is_incomplete = bool(paths) and all(_version_dir_state(p, data_dir=data_dir_abs)["partial"] for p in paths)
+        if paths and not is_incomplete:
             try:
                 database = databases_cache[cache_key][backend][version]
                 return database
@@ -568,9 +744,14 @@ def get_database(
                 missing_data_candidate = (systems_root, cache_key)
         else:
             if is_incomplete:
-                logger.warning(f"data path {data_path} is marked incomplete, continuing searching")
+                logger.warning(
+                    f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
+                    "continuing searching"
+                )
             else:
-                logger.warning(f"data path {data_path} not found, continuing searching")
+                logger.warning(
+                    f"no data found for {system=}, {backend=}, {version=} in either layout, continuing searching"
+                )
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate
@@ -736,15 +917,13 @@ def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: 
 
     for backend in common.BackendName:
         backend_name = backend.value
-        backend_path = os.path.join(data_dir, backend_name)
-        if not os.path.isdir(backend_path):
-            continue
+        version_paths: dict[str, list[str]] = defaultdict(list)
+        for version, version_path in _iter_backend_version_dirs(data_dir, backend_name):
+            version_paths[version].append(version_path)
 
-        for version in sorted(os.listdir(backend_path)):
-            version_path = os.path.join(backend_path, version)
-            if version.startswith(".") or not os.path.isdir(version_path):
-                continue
-            if os.path.isfile(os.path.join(version_path, "INCOMPLETE.txt")):
+        for version in sorted(version_paths):
+            paths = version_paths[version]
+            if all(_version_dir_state(p, data_dir=data_dir)["partial"] for p in paths):
                 continue
             yield system, backend_name, version, systems_root
 
@@ -1732,20 +1911,17 @@ class PerfDatabase:
             return (1, parsed) if parsed is not None else (0, version)
 
         for framework in ordered_frameworks:
-            fw_dir = os.path.join(system_data_root, framework)
-            if not os.path.isdir(fw_dir):
-                continue
             ks_filter = per_framework_filter[framework]
             fallback_only = per_framework_fallback.get(framework, set())
             fw_versions = sorted(
-                (v for v in os.listdir(fw_dir) if not v.startswith("_")),
+                {v for v, _ in _iter_backend_version_dirs(system_data_root, framework)},
                 key=_newest_first,
                 reverse=True,
             )
             for sibling_version in fw_versions:
                 if framework == backend_lower and sibling_version == self.version:
                     continue  # Active source already added as the primary.
-                sibling_path = _resolve_perf_data_path(os.path.join(fw_dir, sibling_version, op_file_basename))
+                sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
                     continue
                 sources.append((sibling_path, ks_filter))

@@ -60,9 +60,9 @@ def load_my_op_data(my_op_file):
 ```
 
 Imports needed at module top: `defaultdict` from `collections`,
-`_read_filtered_rows` from `aiconfigurator_core.sdk.operations.base`,
-`logger` from `logging.getLogger(__name__)`, and `common` for
-quant-mode enums.
+`_read_filtered_rows` and `resolve_op_data_path` from
+`aiconfigurator_core.sdk.operations.base`, `logger` from
+`logging.getLogger(__name__)`, and `common` for quant-mode enums.
 
 `_read_filtered_rows` accepts either a path string OR an iterable of
 `(path, kernel_source_filter)` tuples (used by the shared-layer load
@@ -119,8 +119,9 @@ class MyOp(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.my_op.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.my_op.value
+            )
             sources = database._build_op_sources(PerfDataFilename.my_op, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_my_op_data(sources), PerfDataFilename.my_op, primary_path
@@ -133,7 +134,7 @@ class MyOp(Operation):
             database._my_op_data = cls._data_cache[key]
 ```
 
-Three things to notice:
+Four things to notice:
 
 - The CSV loader is referenced directly (module-local name). Don't
   import it from `perf_database.py`; that path would capture
@@ -144,6 +145,11 @@ Three things to notice:
 - The instance-attribute bind is gated on `database.__dict__`, not
   `hasattr(...)`. Tests that pre-set `db._my_op_data = ...` rely on
   this gate.
+- Per-op paths must always be resolved through `resolve_op_data_path`,
+  never a bare `os.path.join(system_data_root, database.backend,
+  database.version, ...)` — the family-first layout may place this
+  op's table under a sibling family dir instead of a flat
+  `<backend>/<version>` dir.
 
 ### 5. Add the lookup logic
 

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -275,8 +275,9 @@ class ContextAttention(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.context_attention.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.context_attention.value
+            )
             sources = database._build_op_sources(PerfDataFilename.context_attention, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
@@ -618,8 +619,9 @@ class GenerationAttention(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.generation_attention.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.generation_attention.value
+            )
             sources = database._build_op_sources(PerfDataFilename.generation_attention, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_generation_attention_data(sources), PerfDataFilename.generation_attention, primary_path
@@ -974,8 +976,9 @@ class EncoderAttention(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.encoder_attention.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.encoder_attention.value
+            )
             sources = database._build_op_sources(PerfDataFilename.encoder_attention, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
