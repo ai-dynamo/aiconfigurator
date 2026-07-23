@@ -24,10 +24,10 @@ the hot path never re-walks the model or re-enters Python.
 
 - `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
   entry point for callers in other crates. The flat `build_aic_engine(...)`
-  function remains source-compatible through the 0.10 release for existing
-  consumers and is planned to be marked deprecated in version 0.11.0. Both
-  normalize into one private build request and embed a Python interpreter only
-  for the one-time compile step.
+  function is deprecated as of version 0.11.0 but remains available as a
+  source-compatibility adapter while existing consumers migrate. Both normalize
+  into one private build request and embed a Python interpreter only for the
+  one-time compile step.
 - The returned `AicEngine` exposes GIL-free inherent methods
   (`prefill_latency_ms`, `decode_latency_ms`) for the pure-Rust hot path, plus
   `#[pymethods]` wrappers and an FPM-aggregate `estimate_forward_pass_time_ms`

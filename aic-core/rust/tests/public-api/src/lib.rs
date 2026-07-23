@@ -3,8 +3,10 @@
 
 //! Compile-time contract tests from an external crate's point of view.
 
+#[allow(deprecated)]
+use aiconfigurator_core::build_aic_engine;
 use aiconfigurator_core::{
-    build_aic_engine, AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
+    AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
     ForwardPassPerfOptions, KvCacheEstimateRequest,
 };
 
@@ -36,6 +38,7 @@ pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
 /// Keep the flat compatibility adapter source-compatible until its announced
 /// deprecation. The function is compiled but not called because it embeds
 /// Python and needs installed model/system data.
+#[allow(deprecated)]
 pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
     build_aic_engine(
         "Qwen/Qwen3-32B",

@@ -54,7 +54,9 @@
 
 #![cfg(feature = "embed-python")]
 
-use aiconfigurator_core::{build_aic_engine, AicEngineBuilder, BackendKind};
+#[allow(deprecated)]
+use aiconfigurator_core::build_aic_engine;
+use aiconfigurator_core::{AicEngineBuilder, BackendKind};
 use pyo3::prelude::*;
 
 const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
@@ -106,6 +108,7 @@ fn embedded_builder_and_compatibility_adapter_match() {
 
     // Flat compatibility adapter must remain behaviorally identical during the
     // announced migration window.
+    #[allow(deprecated)]
     let compatibility_engine = build_aic_engine(
         TEST_MODEL,
         "b200_sxm",

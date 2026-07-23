@@ -53,11 +53,11 @@ Python modules carry their own annotations.
 ## Stable Rust facade
 
 New embedded consumers should construct engines with `AicEngineBuilder`. The
-flat `build_aic_engine(...)` function is a source-compatibility adapter for
-existing callers: it remains supported through the 0.10 release and is planned
-to be marked deprecated in version 0.11.0. Both paths normalize into the same
-private build request and enter Python once to compile an engine specification.
-Calls on the returned `AicEngine` are pure Rust and do not re-enter Python.
+flat `build_aic_engine(...)` function is deprecated as of version 0.11.0 but
+remains available as a source-compatibility adapter while existing callers
+migrate. Both paths normalize into the same private build request and enter
+Python once to compile an engine specification. Calls on the returned
+`AicEngine` are pure Rust and do not re-enter Python.
 
 Standalone binaries must enable the crate's `embed-python` feature; applications
 hosted by an initialized Python interpreter do not. In either case, the matching
@@ -67,7 +67,7 @@ hosted by an initialized Python interpreter do not. In either case, the matching
 The supported root-level Rust surface is grouped as follows:
 
 - compiled engine: `AicEngineBuilder` (preferred), `build_aic_engine`
-  (0.10 compatibility adapter), `AicEngine`, `AicError`;
+  (deprecated compatibility adapter), `AicEngine`, `AicError`;
 - forward-pass estimation: `ForwardPassPerfModel`,
   `ForwardPassPerfOptions`, diagnostics/readiness/source types, and the
   `ForwardPassMetrics` telemetry types;
