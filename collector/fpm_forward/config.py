@@ -12,6 +12,9 @@ FPM_FORWARD_OP = "fpm_forward"
 FPM_WARMUP_ITERATIONS = 5
 FPM_MEASUREMENT_REPEATS = 1
 FPM_MAX_PREFILL_ISL = 8192
+# Default preserves the extended-capture collection policy. Use
+# --fpm-max-prefill-cudagraph-size (e.g. 512) to align the collected machine
+# with a deployment that runs vLLM's stock capture defaults.
 FPM_MAX_PREFILL_CUDAGRAPH_SIZE = 2048
 VLLM_AUTO_FIT_MAX_MODEL_LEN = -1
 
@@ -64,15 +67,16 @@ def _powers_of_two_up_to(limit: int) -> tuple[int, ...]:
     return tuple(values)
 
 
-def _prefill_cudagraph_capture_sizes(max_isl: int) -> tuple[int, ...]:
+def _prefill_cudagraph_capture_sizes(max_isl: int, max_capture_size_limit: int) -> tuple[int, ...]:
     """Build the formal prefill capture axis for the FPM Scheduler sweep.
 
     Sizes through 512 mirror vLLM 0.24's balanced defaults. The 32-token
     stride above 512 is an explicit FPM collection policy that extends capture
-    coverage to 2048 without inheriting an unbounded runtime default.
+    coverage to the configured limit (default 2048) without inheriting an
+    unbounded runtime default.
     """
 
-    max_capture_size = min(max_isl, FPM_MAX_PREFILL_CUDAGRAPH_SIZE)
+    max_capture_size = min(max_isl, max_capture_size_limit)
     sizes = [value for value in (1, 2, 4) if value <= max_capture_size]
     sizes.extend(range(8, min(max_capture_size + 1, 256), 8))
     if max_capture_size >= 256:
@@ -123,13 +127,21 @@ class PrefillSamplingProfile:
     max_kv_read_token_samples: int
 
     @classmethod
-    def build(cls, *, max_isl: int, max_batch_size: int | None) -> PrefillSamplingProfile:
+    def build(
+        cls,
+        *,
+        max_isl: int,
+        max_batch_size: int | None,
+        max_cudagraph_capture_size: int = FPM_MAX_PREFILL_CUDAGRAPH_SIZE,
+    ) -> PrefillSamplingProfile:
         if max_isl < 2:
             raise ValueError("FPM max prefill ISL must be at least 2")
         if max_batch_size is not None and max_batch_size < 1:
             raise ValueError("FPM max prefill batch size must be positive")
+        if max_cudagraph_capture_size < 1:
+            raise ValueError("FPM max prefill CUDA-graph capture size must be positive")
 
-        capture_sizes = _prefill_cudagraph_capture_sizes(max_isl)
+        capture_sizes = _prefill_cudagraph_capture_sizes(max_isl, max_cudagraph_capture_size)
         new_token_points = _dynamo_cudagraph_axis_points(capture_sizes, max_isl)
         batch_upper_bound = min(max_isl, max_batch_size or max_isl)
         # PR11509's KV axis contains zero, a batch-aligned minimum, powers of
@@ -191,12 +203,14 @@ class FPMCollectionOptions:
     vllm_max_model_len: int = VLLM_AUTO_FIT_MAX_MODEL_LEN
     max_prefill_isl: int = FPM_MAX_PREFILL_ISL
     max_prefill_batch_size: int | None = None
+    max_prefill_cudagraph_size: int = FPM_MAX_PREFILL_CUDAGRAPH_SIZE
 
     @property
     def prefill_sampling(self) -> PrefillSamplingProfile:
         return PrefillSamplingProfile.build(
             max_isl=self.max_prefill_isl,
             max_batch_size=self.max_prefill_batch_size,
+            max_cudagraph_capture_size=self.max_prefill_cudagraph_size,
         )
 
     @classmethod
@@ -258,6 +272,9 @@ class FPMCollectionOptions:
             ),
             max_prefill_isl=getattr(args, "fpm_max_prefill_isl", None) or FPM_MAX_PREFILL_ISL,
             max_prefill_batch_size=getattr(args, "fpm_max_prefill_batch_size", None),
+            max_prefill_cudagraph_size=(
+                getattr(args, "fpm_max_prefill_cudagraph_size", None) or FPM_MAX_PREFILL_CUDAGRAPH_SIZE
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -375,6 +392,17 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Optional prefill max_num_seqs override; defaults to the Dynamo/vLLM runtime value.",
     )
     group.add_argument(
+        "--fpm-max-prefill-cudagraph-size",
+        dest="fpm_max_prefill_cudagraph_size",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Largest prefill CUDA-graph capture size in the collected axis; set 512 to "
+            "mirror vLLM's stock capture defaults "
+            f"(default: {FPM_MAX_PREFILL_CUDAGRAPH_SIZE})."
+        ),
+    )
+    group.add_argument(
         "--fpm-artifact-root",
         default=None,
         help="Out-of-place root for generated artifacts, raw results, logs, and checkpoints.",
@@ -466,6 +494,7 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_warmup_iterations",
         "fpm_max_prefill_isl",
         "fpm_max_prefill_batch_size",
+        "fpm_max_prefill_cudagraph_size",
         "fpm_artifact_root",
         "fpm_database_root",
     ):
