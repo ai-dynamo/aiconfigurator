@@ -962,10 +962,13 @@ def test_load_mla_bmm_data_basic(tmp_path):
 
 def test_load_wideep_moe_compute_data(tmp_path):
     """
-    Test loading wideep MoE compute data with the format from:
+    Test loading WideEP MoE compute data with the format from the production source:
     aic-core/src/aiconfigurator_core/systems/data/gb200/moe/trtllm/1.3.0rc10/wideep_moe_perf.parquet
 
-    CSV columns:
+    The fixture below is a temporary CSV-formatted ``wideep_moe_perf.txt`` file
+    used to test the backward-compatible parser.
+
+    Table columns:
         framework,version,device,op_name,kernel_source,moe_dtype,moe_kernel,num_tokens,
         dp_num_tokens,rank0_num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,
         moe_tp_size,moe_ep_size,distribution,simulation_mode,latency

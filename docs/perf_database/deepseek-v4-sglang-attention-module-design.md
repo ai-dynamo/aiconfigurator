@@ -43,7 +43,8 @@ real serving workload. The correction is applied in AIC after the module lookup.
 
 ## Data Files
 
-The SGLang registry stages four module-level DeepSeek-V4 attention CSVs:
+The SGLang registry stages four module-level DeepSeek-V4 attention
+CSV-formatted `*_perf.txt` files:
 
 ```text
 dsv4_csa_context_module_perf.txt

@@ -394,7 +394,9 @@ The canonical destination family comes from
   `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`.
 - It is not empty and has the expected parquet schema.
 - Rows contain the expected framework, version, and device name.
-- Latency values are finite and plausible. They should usually be positive; allow zero only for documented modeled-overhead files such as compute-scale where the collector intentionally clamps negative overhead to zero.
+- Latency values are finite and plausible. They should usually be positive;
+  allow zero only for `computescale_perf.parquet`, where the collector
+  intentionally clamps negative modeled overhead to zero.
 - Power values, when collected, are positive and below/near the configured power limit.
 - There are no unexplained duplicate rows for identical keys.
 - Coverage is comparable to the nearest existing system/backend/version.
@@ -411,19 +413,35 @@ from pathlib import Path
 import math
 import pyarrow.parquet as pq
 
+ZERO_LATENCY_FILES = {"computescale_perf.parquet"}
+
 root = Path(
     "aic-core/src/aiconfigurator_core/systems/data/"
     "<system>/<family>/<backend>/<version>"
 )
+failed = False
 for path in sorted(root.glob("*_perf.parquet")):
     table = pq.read_table(path)
-    latencies = table.column("latency").to_pylist() if "latency" in table.column_names else []
+    if "latency" not in table.column_names:
+        print(path.name, "rows", table.num_rows, "ERROR missing_required_column=latency")
+        failed = True
+        continue
+
+    allow_zero = path.name in ZERO_LATENCY_FILES
+    latencies = table.column("latency").to_pylist()
     bad = [
         value
         for value in latencies
-        if value is None or not math.isfinite(float(value)) or float(value) <= 0
+        if value is None
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        or (float(value) == 0 and not allow_zero)
     ]
     print(path.name, "rows", table.num_rows, "bad_latency", len(bad))
+    failed |= bool(bad)
+
+if failed:
+    raise SystemExit(1)
 PY
 ```
 

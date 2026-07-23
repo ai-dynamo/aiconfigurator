@@ -64,7 +64,7 @@ class CustomAllReduce(Operation):
     """
     Custom AllReduce operation with power tracking.
 
-    Owns ``_data_cache`` for the custom_allreduce CSV table.
+    Owns ``_data_cache`` for the packaged custom_allreduce Parquet perf table.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -86,7 +86,7 @@ class CustomAllReduce(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads custom_allreduce CSV, binds
+        """Idempotent. Loads the packaged custom_allreduce Parquet perf table and binds
         ``database._custom_allreduce_data``."""
         import os
 
@@ -196,7 +196,7 @@ class CustomAllReduce(Operation):
             # synthesizes empty dicts for missing (quant_mode, tp_size, strategy)
             # combinations. Validate explicitly so upstream callers see a structured
             # PerfDataNotAvailableError instead of an opaque empty-table miss when
-            # the CSV has no rows for this bucket.
+            # the perf table has no rows for this bucket.
             effective_tp = min(tp_size, database.system_spec["node"]["num_gpus_per_node"])
             by_tp = data_wrapper.get(quant_mode, {})
             strategy_dict = by_tp.get(effective_tp, {})
@@ -276,7 +276,7 @@ class NCCL(Operation):
     """
     NCCL collective communication operation with power tracking.
 
-    Owns ``_data_cache`` for the NCCL CSV table plus ``_oneccl_data_cache``
+    Owns ``_data_cache`` for the packaged NCCL Parquet perf table plus ``_oneccl_data_cache``
     for the optional oneCCL fallback (loaded together because
     ``query_nccl`` picks between them at query time when NCCL data is
     empty on XPU systems).
@@ -314,7 +314,7 @@ class NCCL(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads NCCL CSV + the optional oneCCL fallback,
+        """Idempotent. Loads the packaged NCCL Parquet perf table plus the optional oneCCL fallback,
         binds ``database._nccl_data`` and ``database._oneccl_data``."""
         import os
 
@@ -531,7 +531,7 @@ class P2P(Operation):
     P2P (point-to-point) communication operation with power tracking.
 
     Purely analytical — no silicon table. The base ``Operation.load_data``
-    no-op default handles the missing CSV; ``_query_p2p_table`` is factored
+    no-op default handles the missing perf table; ``_query_p2p_table`` is factored
     out only for parity with the other migrated ops.
     """
 
@@ -606,7 +606,7 @@ class P2P(Operation):
 
 
 # ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
 
 

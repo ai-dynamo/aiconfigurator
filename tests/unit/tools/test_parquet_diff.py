@@ -319,10 +319,7 @@ def test_report_includes_row_level_counts(parquet_diff_module):
     assert "- Row-level changes: +1 / -1 / ~1" in report
     assert "- Full per-file diff artifacts: 1 file under `parquet-diff-details/diffs/`" in report
     assert "### Other Parquet Changes" not in report
-    assert (
-        "| M | aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet |"
-        not in report
-    )
+    assert "| M | aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet |" not in report
     assert "Full per-file unified diffs: `parquet-diff-details/diffs/` (1 file)" in report
     assert "Exact row-level CSVs: `parquet-diff-details/` (listed in `summary.csv`)" in report
     assert "**added rows** - full CSV: `parquet-diff-details/gemm.added.csv`" in report
