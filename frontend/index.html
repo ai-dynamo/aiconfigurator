@@ -249,8 +249,8 @@
     .filter-grid {
       display: grid;
       padding: 20px 22px;
-      grid-template-columns: repeat(6, minmax(132px, 1fr)) auto;
-      gap: 15px;
+      grid-template-columns: repeat(7, minmax(118px, 1fr)) auto;
+      gap: 12px;
       align-items: end;
     }
 
@@ -441,7 +441,11 @@
     }
 
     .metric-value.small {
-      font-size: 18px;
+      overflow: visible;
+      font-size: 16px;
+      line-height: 1.25;
+      text-overflow: clip;
+      white-space: normal;
     }
 
     .metric-note {
@@ -643,6 +647,38 @@
       stroke-linejoin: round;
       stroke-width: 2.25;
       vector-effect: non-scaling-stroke;
+    }
+
+    .coverage-boundary {
+      stroke: #7d8781;
+      stroke-width: 1.25;
+      stroke-dasharray: 4 5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .boundary-label-background {
+      fill: rgba(255, 255, 255, 0.96);
+      stroke: #d8ddd9;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .boundary-title,
+    .boundary-detail {
+      fill: #4f5953;
+      font-family: inherit;
+      font-size: 9px;
+      font-weight: 780;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    .boundary-detail {
+      fill: #69736d;
+      font-size: 9px;
+      font-weight: 620;
+      letter-spacing: 0;
+      text-transform: none;
     }
 
     .series-point {
@@ -972,24 +1008,37 @@
         </div>
 
         <div class="field">
-          <label for="workload-filter">Workload</label>
+          <label for="parallelism-filter">Parallelization mapping</label>
           <div class="select-wrap">
-            <select id="workload-filter" name="workload">
-              <option value="all">All workloads</option>
-              <option value="Prefill">Prefill</option>
-              <option value="Decode">Decode</option>
-              <option value="Mixed">Mixed</option>
+            <select id="parallelism-filter" name="parallelism">
+              <option value="all">All mappings</option>
+              <option value="TP8">TP8</option>
+              <option value="TP4 · PP2">TP4 · PP2</option>
+              <option value="DP2 · TP4">DP2 · TP4</option>
             </select>
           </div>
         </div>
 
         <div class="field">
-          <label for="window-filter">Run window</label>
+          <label for="mtp-filter">MTP</label>
           <div class="select-wrap">
-            <select id="window-filter" name="window">
-              <option value="8">Last 8 revisions</option>
-              <option value="6">Last 6 revisions</option>
-              <option value="4">Last 4 revisions</option>
+            <select id="mtp-filter" name="mtp">
+              <option value="all">All MTP settings</option>
+              <option value="Disabled">Disabled</option>
+              <option value="MTP-1">MTP-1</option>
+              <option value="MTP-3">MTP-3</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="engine-type-filter">Engine type</label>
+          <div class="select-wrap">
+            <select id="engine-type-filter" name="engineType">
+              <option value="all">All engine types</option>
+              <option value="Prefill">Prefill</option>
+              <option value="Decode">Decode</option>
+              <option value="Aggregated">Aggregated</option>
             </select>
           </div>
         </div>
@@ -1070,42 +1119,74 @@
 
       const datasets = [
         {
-          id: "prod-traffic-v1",
-          name: "Production traffic · v1",
-          description: "Chronological FPM replay sampled from production traffic.",
-          baseline: 0
+          id: "self-benchmark",
+          name: "Self-benchmark",
+          description: "Controlled engine shapes collected by the AIC self-benchmark workflow.",
+          baseline: 0,
+          changeAfterIndex: 3,
+          coverageStep: 4.8,
+          changeDetail: "TP8 + MTP shapes added"
         },
         {
-          id: "self-benchmark-v2",
-          name: "Self-benchmark grid · v2",
-          description: "Controlled prefill/decode shapes collected during self-benchmark.",
-          baseline: 2.8
+          id: "mooncake-trace",
+          name: "Mooncake trace",
+          description: "FPM replay derived from the Mooncake production-style trace.",
+          baseline: 4.4,
+          changeAfterIndex: 3,
+          coverageStep: 6.4,
+          changeDetail: "Trace v2: long context added"
         },
         {
-          id: "stress-replay-v1",
-          name: "Long-context stress replay · v1",
-          description: "High-KV and mixed-workload FPMs emphasizing tail shapes.",
-          baseline: 6.1
+          id: "placeholder-real-accuracy-trace",
+          name: "Place holder real accuracy trace",
+          description: "Reserved dataset for a future real-world accuracy trace.",
+          baseline: 2.3,
+          changeAfterIndex: 3,
+          coverageStep: 5.5,
+          changeDetail: "Engine coverage expands to B200"
         }
       ];
 
       const methods = [
-        { id: "aic-native", name: "AIC Native", color: "#2b6de8", baseline: 13.2, slope: -0.55 },
-        { id: "aic-regression", name: "AIC Regression", color: "#8e4ec6", baseline: 18.7, slope: -0.88 },
-        { id: "prefill-q-plus-r", name: "Q + R", color: "#e0792d", baseline: 22.8, slope: -0.69 },
         {
-          id: "physical-attention",
-          name: "Physical Attention",
-          color: "#008f7a",
-          baseline: 17.1,
-          slope: -0.47
+          id: "aic-native",
+          name: "AIC native",
+          color: "#2b6de8",
+          baseline: 19.2,
+          slope: -0.25,
+          changeSensitivity: 1
         },
         {
-          id: "piecewise-physical",
-          name: "Piecewise Physical",
+          id: "aic-native-bootstrap",
+          name: "AIC native + self-benchmarking data bootstrap",
+          color: "#8e4ec6",
+          baseline: 16.1,
+          slope: -0.35,
+          changeSensitivity: 0.88
+        },
+        {
+          id: "aic-native-bootstrap-online",
+          name: "AIC native + self-benchmarking data bootstrap + online-finetune",
+          color: "#008f7a",
+          baseline: 13.1,
+          slope: -0.55,
+          changeSensitivity: 0.68
+        },
+        {
+          id: "regression-self-benchmark",
+          name: "Regression (build with self-benchmarking)",
+          color: "#e0792d",
+          baseline: 18,
+          slope: -0.45,
+          changeSensitivity: 1.08
+        },
+        {
+          id: "regression-online",
+          name: "Regression + online-finetune",
           color: "#cf3f66",
-          baseline: 15.4,
-          slope: -0.72
+          baseline: 14.8,
+          slope: -0.65,
+          changeSensitivity: 0.78
         }
       ];
 
@@ -1114,7 +1195,9 @@
         gpu: ["H100 SXM", "B200 SXM"],
         backend: ["vLLM", "SGLang"],
         precision: ["FP8", "BF16"],
-        workload: ["Prefill", "Decode", "Mixed"]
+        parallelism: ["TP8", "TP4 · PP2", "DP2 · TP4"],
+        mtp: ["Disabled", "MTP-1", "MTP-3"],
+        engineType: ["Prefill", "Decode", "Aggregated"]
       };
 
       const dimensionEffect = {
@@ -1122,7 +1205,9 @@
         gpu: { "H100 SXM": 1.1, "B200 SXM": -0.4 },
         backend: { "vLLM": -0.2, "SGLang": 1.0 },
         precision: { FP8: 1.2, BF16: -0.1 },
-        workload: { Prefill: -1.0, Decode: 0.8, Mixed: 3.1 }
+        parallelism: { TP8: 1.5, "TP4 · PP2": 0.4, "DP2 · TP4": 2.1 },
+        mtp: { Disabled: -0.2, "MTP-1": 0.9, "MTP-3": 2.5 },
+        engineType: { Prefill: -1.0, Decode: 0.8, Aggregated: 2.2 }
       };
 
       const filterLabels = {
@@ -1130,7 +1215,9 @@
         gpu: "Accelerator",
         backend: "Backend",
         precision: "Precision",
-        workload: "Workload"
+        parallelism: "Parallelization",
+        mtp: "MTP",
+        engineType: "Engine type"
       };
 
       const filterForm = document.getElementById("filters");
@@ -1163,52 +1250,56 @@
               dimensions.gpu.forEach((gpu) => {
                 dimensions.backend.forEach((backend) => {
                   dimensions.precision.forEach((precision) => {
-                    dimensions.workload.forEach((workload) => {
-                      for (let replicate = 0; replicate < 2; replicate += 1) {
-                        const runId = [
-                          dataset.id,
-                          date.value,
-                          model,
-                          gpu,
-                          backend,
-                          precision,
-                          workload,
-                          replicate
-                        ].join(":");
-                        methods.forEach((method) => {
-                          const noise = deterministicNoise(runId, method.id) * 3.8 - 1.9;
-                          const regressionBoost =
-                            method.id === "aic-regression" && dateIndex >= 4 ? -1.15 : 0;
-                          const stressInteraction =
-                            dataset.id === "stress-replay-v1" && method.id === "physical-attention"
-                              ? -1.45
-                              : 0;
-                          const rawMape =
-                            method.baseline +
-                            dataset.baseline +
-                            dateIndex * method.slope +
-                            dimensionEffect.model[model] +
-                            dimensionEffect.gpu[gpu] +
-                            dimensionEffect.backend[backend] +
-                            dimensionEffect.precision[precision] +
-                            dimensionEffect.workload[workload] +
-                            regressionBoost +
-                            stressInteraction +
-                            noise;
-                          output.push({
-                            dataset: dataset.id,
-                            date: date.value,
-                            method: method.id,
+                    dimensions.parallelism.forEach((parallelism) => {
+                      dimensions.mtp.forEach((mtp) => {
+                        dimensions.engineType.forEach((engineType) => {
+                          const runId = [
+                            dataset.id,
+                            date.value,
                             model,
                             gpu,
                             backend,
                             precision,
-                            workload,
-                            runId,
-                            mape: Math.max(2.5, rawMape)
+                            parallelism,
+                            mtp,
+                            engineType
+                          ].join(":");
+                          methods.forEach((method) => {
+                            const noise = deterministicNoise(runId, method.id) * 3.8 - 1.9;
+                            const coveragePenalty =
+                              dateIndex > dataset.changeAfterIndex
+                                ? dataset.coverageStep * method.changeSensitivity
+                                : 0;
+                            const rawMape =
+                              method.baseline +
+                              dataset.baseline +
+                              dateIndex * method.slope +
+                              dimensionEffect.model[model] +
+                              dimensionEffect.gpu[gpu] +
+                              dimensionEffect.backend[backend] +
+                              dimensionEffect.precision[precision] +
+                              dimensionEffect.parallelism[parallelism] +
+                              dimensionEffect.mtp[mtp] +
+                              dimensionEffect.engineType[engineType] +
+                              coveragePenalty +
+                              noise;
+                            output.push({
+                              dataset: dataset.id,
+                              date: date.value,
+                              method: method.id,
+                              model,
+                              gpu,
+                              backend,
+                              precision,
+                              parallelism,
+                              mtp,
+                              engineType,
+                              runId,
+                              mape: Math.max(2.5, rawMape)
+                            });
                           });
                         });
-                      }
+                      });
                     });
                   });
                 });
@@ -1224,15 +1315,12 @@
       }
 
       function selectedDates() {
-        const windowSize = Number(activeFilters.window);
-        return dates.slice(-windowSize);
+        return dates;
       }
 
       function filteredRecords() {
-        const allowedDates = new Set(selectedDates().map((date) => date.value));
         return records.filter((record) => {
-          if (!allowedDates.has(record.date)) return false;
-          return ["model", "gpu", "backend", "precision", "workload"].every(
+          return ["model", "gpu", "backend", "precision", "parallelism", "mtp", "engineType"].every(
             (dimension) =>
               activeFilters[dimension] === "all" ||
               record[dimension] === activeFilters[dimension]
@@ -1391,15 +1479,24 @@
         card.className = "chart-card";
         const activeDates = selectedDates();
         const visible = methods.filter((method) => visibleMethods.has(method.id));
-        const firstValues = visible
-          .map((method) => averageFor(groups, dataset.id, activeDates[0].value, method.id))
+        const preChangeValues = visible
+          .map((method) =>
+            averageFor(groups, dataset.id, activeDates[dataset.changeAfterIndex].value, method.id)
+          )
+          .filter((value) => value !== null);
+        const postChangeValues = visible
+          .map((method) =>
+            averageFor(groups, dataset.id, activeDates[dataset.changeAfterIndex + 1].value, method.id)
+          )
           .filter((value) => value !== null);
         const latestValues = visible
           .map((method) => averageFor(groups, dataset.id, activeDates.at(-1).value, method.id))
           .filter((value) => value !== null);
-        const firstMean = mean(firstValues);
+        const preChangeMean = mean(preChangeValues);
+        const postChangeMean = mean(postChangeValues);
         const latestMean = mean(latestValues);
-        const delta = firstMean === null || latestMean === null ? null : latestMean - firstMean;
+        const delta =
+          preChangeMean === null || postChangeMean === null ? null : postChangeMean - preChangeMean;
         const datasetRunCount = new Set(
           rows.filter((record) => record.dataset === dataset.id).map((record) => record.runId)
         ).size;
@@ -1417,7 +1514,7 @@
                 <span class="dataset-stat-value">${latestMean === null ? "—" : `${latestMean.toFixed(1)}%`}</span>
               </div>
               <div>
-                <span class="dataset-stat-label">Window change</span>
+                <span class="dataset-stat-label">Post-change shift</span>
                 <span class="dataset-stat-value ${delta !== null && delta <= 0 ? "trend-good" : "trend-bad"}">
                   ${delta === null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`}
                 </span>
@@ -1426,7 +1523,7 @@
           </div>
           <div class="chart-wrap"></div>
           <div class="chart-footnote">
-            <span>${datasetRunCount.toLocaleString()} matching runs · averages include all selected configurations</span>
+            <span>${datasetRunCount.toLocaleString()} matching runs · line break marks non-comparable coverage</span>
             <span>X-axis: evaluation date / AIC main TOT</span>
           </div>
         `;
@@ -1455,7 +1552,9 @@
         svg.setAttribute("role", "img");
         svg.setAttribute(
           "aria-label",
-          `${dataset.name} average MAPE line chart for ${visible.map((method) => method.name).join(", ")}`
+          `${dataset.name} average MAPE line chart for ${visible.map((method) => method.name).join(", ")}. ` +
+            `A coverage boundary between ${activeDates[dataset.changeAfterIndex].label} and ` +
+            `${activeDates[dataset.changeAfterIndex + 1].label} means points across it are not directly comparable.`
         );
 
         const x = (index) =>
@@ -1503,23 +1602,42 @@
           );
         });
 
+        const boundaryX =
+          (x(dataset.changeAfterIndex) + x(dataset.changeAfterIndex + 1)) / 2;
+        svg.insertAdjacentHTML(
+          "beforeend",
+          `<line
+            class="coverage-boundary"
+            x1="${boundaryX}"
+            x2="${boundaryX}"
+            y1="${margin.top}"
+            y2="${height - margin.bottom}"
+          ></line>`
+        );
+
         visible.forEach((method) => {
           const points = activeDates.map((date, index) => ({
             date,
             value: averageFor(groups, dataset.id, date.value, method.id),
             x: x(index)
           }));
-          const path = points
-            .filter((point) => point.value !== null)
-            .map(
-              (point, index) =>
-                `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${y(point.value).toFixed(2)}`
-            )
-            .join(" ");
-          svg.insertAdjacentHTML(
-            "beforeend",
-            `<path class="series-line" d="${path}" stroke="${method.color}"></path>`
-          );
+          const segments = [
+            points.slice(0, dataset.changeAfterIndex + 1),
+            points.slice(dataset.changeAfterIndex + 1)
+          ];
+          segments.forEach((segment) => {
+            const path = segment
+              .filter((point) => point.value !== null)
+              .map(
+                (point, index) =>
+                  `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${y(point.value).toFixed(2)}`
+              )
+              .join(" ");
+            svg.insertAdjacentHTML(
+              "beforeend",
+              `<path class="series-line" d="${path}" stroke="${method.color}"></path>`
+            );
+          });
 
           points.forEach((point) => {
             if (point.value === null) return;
@@ -1543,6 +1661,33 @@
             svg.appendChild(circle);
           });
         });
+
+        const boundaryLabelWidth = compact ? 148 : 214;
+        const boundaryLabelHeight = 38;
+        const boundaryLabelX = Math.min(
+          boundaryX + 8,
+          width - margin.right - boundaryLabelWidth
+        );
+        const boundaryLabelY = margin.top + 8;
+        svg.insertAdjacentHTML(
+          "beforeend",
+          `
+            <rect
+              class="boundary-label-background"
+              x="${boundaryLabelX}"
+              y="${boundaryLabelY}"
+              width="${boundaryLabelWidth}"
+              height="${boundaryLabelHeight}"
+              rx="6"
+            ></rect>
+            <text class="boundary-title" x="${boundaryLabelX + 9}" y="${boundaryLabelY + 14}">
+              Coverage boundary
+            </text>
+            <text class="boundary-detail" x="${boundaryLabelX + 9}" y="${boundaryLabelY + 29}">
+              ${escapeHtml(dataset.changeDetail)}
+            </text>
+          `
+        );
 
         return svg;
       }
