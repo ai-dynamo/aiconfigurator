@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  computescale_perf:
+    status: complete
+  scale_matrix_perf:
+    status: complete

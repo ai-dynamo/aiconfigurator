@@ -33,6 +33,8 @@ import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
+import yaml
+
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -83,13 +85,50 @@ def _resolve_perf_data_path(perf_file: str) -> str:
 _KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
 
 
+def _version_dir_is_partial(version_dir: str) -> bool:
+    """Yaml-first partial-dir check: collection_meta.yaml status:partial, with
+    INCOMPLETE.txt as the legacy fallback.
+
+    Duplicated (not imported) from aiconfigurator_core.sdk.perf_database
+    ._version_dir_state, the source of truth for this semantic — perf_database
+    imports this module at load time, so importing it back here would be
+    circular. Keep in sync with that function's partial-detection rule.
+
+    CONTRACT NOTE — the lenient/strict split is intentional design, not drift:
+    this RESOLVER-side copy deliberately swallows read/parse errors and
+    returns False, because its only job is cheap candidate skipping on the
+    path-resolution hot path. Strictness is owned by the ADMISSION layer:
+    perf_database's _version_dir_state (via _load_collection_meta_yaml) raises
+    ValueError naming the file on a malformed sidecar, so bad metadata still
+    surfaces loudly when the database is loaded. The copies of this predicate
+    and their strictness (mirroring the _KNOWN_BACKEND_DIRS copy list above):
+      aic-core/src/aiconfigurator_core/sdk/perf_database.py
+                                       (_version_dir_state — strict, canonical)
+      tools/prediction_regression_gate/grid.py  (_dir_is_incomplete — strict)
+      tools/sanity_check/create_charts.py       (_dir_is_incomplete — strict)
+    """
+    meta_path = os.path.join(version_dir, "collection_meta.yaml")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = yaml.safe_load(f)
+        except Exception:
+            return False
+        tables = meta.get("tables") if isinstance(meta, dict) else None
+        if not isinstance(tables, dict):
+            return False
+        return any(isinstance(t, dict) and t.get("status") == "partial" for t in tables.values())
+    return os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt"))
+
+
 def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_filename: str) -> str:
     """Resolve one op table under the family-first layout, legacy fallback.
 
     Family dirs are discovered structurally (any first-level dir that is not
-    a known backend dir); dirs carrying INCOMPLETE.txt are skipped. Candidates
-    run through the .parquet->.txt fallback. When nothing exists, returns the
-    legacy-shaped path so callers keep their missing-file semantics.
+    a known backend dir); dirs marked partial (yaml-first, txt fallback — see
+    ``_version_dir_is_partial``) are skipped. Candidates run through the
+    .parquet->.txt fallback. When nothing exists, returns the legacy-shaped
+    path so callers keep their missing-file semantics.
     """
     op_filename = str(op_filename)
     try:
@@ -100,7 +139,7 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
         if entry.startswith(".") or entry in _KNOWN_BACKEND_DIRS:
             continue
         version_dir = os.path.join(system_data_root, entry, backend, version)
-        if not os.path.isdir(version_dir) or os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt")):
+        if not os.path.isdir(version_dir) or _version_dir_is_partial(version_dir):
             continue
         candidate = _resolve_perf_data_path(os.path.join(version_dir, op_filename))
         if os.path.exists(candidate):

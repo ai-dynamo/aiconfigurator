@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: sglang
+  version: 0.5.9
+tables:
+  moe_perf:
+    status: partial

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: dsv4_megamoe_module_perf
+  from_version: 0.5.10
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl
+- table: moe_perf
+  from_version: 0.5.14
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl
+- table: wideep_context_moe_perf
+  from_version: 0.5.10
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl
+- table: wideep_generation_moe_perf
+  from_version: 0.5.10
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl

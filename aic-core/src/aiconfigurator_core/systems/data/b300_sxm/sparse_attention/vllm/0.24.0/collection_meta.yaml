@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  dsa_context_module_perf:
+    status: complete
+  dsa_generation_module_perf:
+    status: complete
+  dsv4_csa_context_module_perf:
+    status: complete
+  dsv4_csa_generation_module_perf:
+    status: complete
+  dsv4_hca_attn_module_perf:
+    status: complete
+  dsv4_hca_context_module_perf:
+    status: complete
+  dsv4_hca_generation_module_perf:
+    status: complete
+  dsv4_paged_mqa_logits_module_perf:
+    status: complete

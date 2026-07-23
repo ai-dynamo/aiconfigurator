@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: moe_perf
+  from_version: 0.24.0
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl

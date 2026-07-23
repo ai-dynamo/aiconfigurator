@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: legacy
+runtime:
+  framework: trtllm
+  version: 1.2.0rc5
+tables:
+  dsa_context_module_perf:
+    status: complete
+  dsa_generation_module_perf:
+    status: complete

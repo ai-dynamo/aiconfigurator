@@ -18,6 +18,8 @@ import textwrap
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError, get_database
 
 # Disable interactive backend
@@ -59,6 +61,33 @@ OPTIONAL_CHART_ERROR_SNIPPETS = (
 # aic-core/src/aiconfigurator_core/sdk/operations/base.py, which lists every
 # copy that must stay in sync (this standalone tool cannot import aic-core).
 _KNOWN_BACKEND_DIRS = {"trtllm", "sglang", "vllm", "nccl", "oneccl"}
+
+
+def _dir_is_incomplete(path: str) -> bool:
+    """Yaml-first partial-dir check (collection_meta.yaml status:partial), with
+    INCOMPLETE.txt as the legacy fallback. Duplicated (not imported) from
+    aiconfigurator_core.sdk.perf_database._version_dir_state, the source of
+    truth for this semantic — kept local so this tool doesn't take an aic-core
+    dependency for one predicate. Malformed collection_meta.yaml raises
+    ValueError naming the file, matching that canonical loader's fail-loudly
+    behavior (unlike operations/base.py's deliberately lenient hot-path
+    duplicate of this same predicate). See the CONTRACT NOTE on
+    _version_dir_is_partial in
+    aic-core/src/aiconfigurator_core/sdk/operations/base.py
+    for the intentional resolver-lenient/admission-strict split and
+    the full list of copies."""
+    meta_path = os.path.join(path, "collection_meta.yaml")
+    if os.path.isfile(meta_path):
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"{meta_path}: failed to parse collection_meta.yaml: {e}") from e
+        tables = meta.get("tables") if isinstance(meta, dict) else None
+        return isinstance(tables, dict) and any(
+            isinstance(t, dict) and t.get("status") == "partial" for t in tables.values()
+        )
+    return os.path.isfile(os.path.join(path, "INCOMPLETE.txt"))
 
 
 def _systems_data_root() -> str:
@@ -571,11 +600,12 @@ def main():
             if perf_file == "INCOMPLETE.txt" or not perf_file.endswith("_perf.parquet"):
                 continue
 
-            # A 5-part changed path is legacy-shaped, so its INCOMPLETE.txt
-            # marker lives in the exact legacy dir — a best-guess resolution
-            # across layouts could pick an unrelated family dir here.
+            # A 5-part changed path is legacy-shaped, so its partial marker
+            # (collection_meta.yaml status, INCOMPLETE.txt fallback) lives in
+            # the exact legacy dir — a best-guess resolution across layouts
+            # could pick an unrelated family dir here.
             data_dir = _legacy_data_dir(system, backend, backend_version)
-            if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
+            if _dir_is_incomplete(data_dir):
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 
@@ -597,7 +627,7 @@ def main():
                 continue
 
             data_dir = os.path.join(_systems_data_root(), system, family, backend, backend_version)
-            if os.path.isfile(os.path.join(data_dir, "INCOMPLETE.txt")):
+            if _dir_is_incomplete(data_dir):
                 continue
             system_backend_version_to_changed_files[(system, backend, backend_version)].append(perf_file)
 
