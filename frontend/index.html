@@ -1,0 +1,1614 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    name="description"
+    content="Interactive mock dashboard for exploring average FPM prediction MAPE over AIC main revisions."
+  >
+  <title>AIC Eval · Performance Modeling Trends</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      --ink: #18201c;
+      --muted: #65706a;
+      --subtle: #8a948f;
+      --surface: #ffffff;
+      --canvas: #f3f5f3;
+      --line: #dfe4e0;
+      --line-soft: #edf0ed;
+      --brand: #76b900;
+      --brand-dark: #315900;
+      --brand-soft: #eff9dc;
+      --nav: #151a17;
+      --shadow: 0 14px 38px rgba(28, 40, 33, 0.07);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--canvas);
+      color: var(--ink);
+    }
+
+    button,
+    select {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .app-header {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background:
+        radial-gradient(circle at 78% -40%, rgba(118, 185, 0, 0.24), transparent 32%),
+        var(--nav);
+      color: #fff;
+    }
+
+    .nav {
+      display: flex;
+      max-width: 1560px;
+      min-height: 68px;
+      margin: 0 auto;
+      padding: 0 32px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 34px;
+      border-radius: 9px;
+      background: var(--brand);
+      color: #0e150a;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+      place-items: center;
+    }
+
+    .brand-name {
+      font-size: 15px;
+      font-weight: 760;
+      letter-spacing: 0.01em;
+    }
+
+    .brand-section {
+      color: #9fa8a2;
+      font-size: 13px;
+    }
+
+    .nav-status {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #c9cfcb;
+      font-size: 12px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(118, 185, 0, 0.14);
+    }
+
+    main {
+      max-width: 1560px;
+      margin: 0 auto;
+      padding: 34px 32px 64px;
+    }
+
+    .hero {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 25px;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 9px;
+      color: var(--brand-dark);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 22px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--brand);
+      content: "";
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 3.5vw, 48px);
+      letter-spacing: -0.043em;
+      line-height: 1.05;
+    }
+
+    .hero-copy {
+      max-width: 830px;
+      margin: 11px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .snapshot {
+      display: grid;
+      min-width: 230px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.65);
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+    }
+
+    .snapshot-icon {
+      display: grid;
+      width: 31px;
+      height: 31px;
+      border-radius: 8px;
+      background: var(--brand-soft);
+      color: var(--brand-dark);
+      font-size: 16px;
+      grid-row: 1 / span 2;
+      place-items: center;
+    }
+
+    .snapshot-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .snapshot-value {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 720;
+    }
+
+    .commit {
+      color: var(--brand-dark);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+    }
+
+    .filter-panel {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .filter-heading {
+      display: flex;
+      padding: 19px 22px 17px;
+      border-bottom: 1px solid var(--line-soft);
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .filter-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      font-weight: 780;
+    }
+
+    .filter-icon {
+      display: grid;
+      width: 29px;
+      height: 29px;
+      border-radius: 8px;
+      background: #eef1ef;
+      place-items: center;
+    }
+
+    .filter-caption {
+      color: var(--subtle);
+      font-size: 12px;
+    }
+
+    .filter-grid {
+      display: grid;
+      padding: 20px 22px;
+      grid-template-columns: repeat(6, minmax(132px, 1fr)) auto;
+      gap: 15px;
+      align-items: end;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field label {
+      display: block;
+      margin: 0 0 7px 1px;
+      color: #58615c;
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+    }
+
+    .select-wrap {
+      position: relative;
+    }
+
+    .select-wrap::after {
+      position: absolute;
+      top: 50%;
+      right: 13px;
+      width: 7px;
+      height: 7px;
+      border-right: 1.5px solid #6e7772;
+      border-bottom: 1.5px solid #6e7772;
+      content: "";
+      pointer-events: none;
+      transform: translateY(-70%) rotate(45deg);
+    }
+
+    select {
+      width: 100%;
+      height: 42px;
+      padding: 0 35px 0 12px;
+      border: 1px solid #d7dcd8;
+      border-radius: 9px;
+      outline: none;
+      background: #fff;
+      color: #27302b;
+      font-size: 13px;
+      font-weight: 570;
+      appearance: none;
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    select:hover {
+      border-color: #b9c0bb;
+    }
+
+    select:focus {
+      border-color: #78a62c;
+      box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.13);
+    }
+
+    .filter-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .button {
+      height: 42px;
+      padding: 0 16px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      font-size: 13px;
+      font-weight: 750;
+      transition: transform 120ms ease, background-color 160ms ease, border-color 160ms ease;
+    }
+
+    .button:active {
+      transform: translateY(1px);
+    }
+
+    .button-primary {
+      min-width: 112px;
+      background: var(--brand);
+      color: #17200f;
+    }
+
+    .button-primary:hover {
+      background: #86ca0c;
+    }
+
+    .button-secondary {
+      padding-inline: 13px;
+      border-color: #d7dcd8;
+      background: #fff;
+      color: #5d6661;
+    }
+
+    .button-secondary:hover {
+      border-color: #bbc2bd;
+      background: #f8f9f8;
+    }
+
+    .applied-bar {
+      display: flex;
+      min-height: 48px;
+      padding: 10px 22px;
+      border-top: 1px solid var(--line-soft);
+      background: #fafbfa;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .applied-filters {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .applied-label {
+      margin-right: 2px;
+      color: var(--subtle);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .filter-chip {
+      padding: 5px 9px;
+      border: 1px solid #dce5d2;
+      border-radius: 999px;
+      background: #f5faef;
+      color: #47631d;
+      font-size: 11px;
+      font-weight: 670;
+    }
+
+    .sample-count {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .sample-count strong {
+      color: var(--ink);
+    }
+
+    .overview {
+      display: grid;
+      margin: 20px 0 24px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--surface);
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 18px 21px;
+      border-right: 1px solid var(--line-soft);
+    }
+
+    .metric:last-child {
+      border-right: 0;
+    }
+
+    .metric-label {
+      display: flex;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .metric-value {
+      overflow: hidden;
+      font-size: 23px;
+      font-weight: 790;
+      letter-spacing: -0.025em;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .metric-value.small {
+      font-size: 18px;
+    }
+
+    .metric-note {
+      margin-top: 4px;
+      color: var(--subtle);
+      font-size: 11px;
+    }
+
+    .charts-heading {
+      display: flex;
+      margin: 0 0 14px;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .charts-heading h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.022em;
+    }
+
+    .charts-heading p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .series-picker {
+      display: flex;
+      max-width: 900px;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .series-toggle {
+      display: inline-flex;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid #dce1dd;
+      border-radius: 999px;
+      background: #fff;
+      color: #47504b;
+      font-size: 11px;
+      font-weight: 680;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .series-toggle:hover {
+      border-color: #bfc6c1;
+    }
+
+    .series-toggle.off {
+      color: #929a95;
+      opacity: 0.7;
+    }
+
+    .series-toggle.off .series-swatch {
+      background: #c5cbc7 !important;
+    }
+
+    .series-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .chart-list {
+      display: grid;
+      gap: 16px;
+    }
+
+    .chart-card {
+      position: relative;
+      min-width: 0;
+      padding: 19px 20px 13px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface);
+      box-shadow: 0 9px 28px rgba(34, 44, 38, 0.045);
+    }
+
+    .chart-card-header {
+      display: flex;
+      padding: 0 3px 8px;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .dataset-kicker {
+      margin-bottom: 5px;
+      color: var(--brand-dark);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .chart-card h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: -0.012em;
+    }
+
+    .dataset-description {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .dataset-stat {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: flex-end;
+      gap: 16px;
+    }
+
+    .dataset-stat > div {
+      text-align: right;
+    }
+
+    .dataset-stat-label {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--subtle);
+      font-size: 9px;
+      font-weight: 750;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .dataset-stat-value {
+      font-size: 15px;
+      font-weight: 770;
+    }
+
+    .trend-good {
+      color: #437b00;
+    }
+
+    .trend-bad {
+      color: #b5472f;
+    }
+
+    .chart-wrap {
+      position: relative;
+      width: 100%;
+      min-height: 0;
+    }
+
+    .chart-wrap svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }
+
+    .grid-line {
+      stroke: #e8ece9;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .axis-line {
+      stroke: #cfd5d1;
+      stroke-width: 1;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .axis-label,
+    .axis-title {
+      fill: #77817b;
+      font-family: inherit;
+      font-size: 10px;
+    }
+
+    .axis-title {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .tot-label {
+      fill: #9aa29d;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 8px;
+    }
+
+    .series-line {
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2.25;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .series-point {
+      stroke: #fff;
+      stroke-width: 1.7;
+      vector-effect: non-scaling-stroke;
+      transition: r 110ms ease;
+    }
+
+    .series-point:hover,
+    .series-point:focus {
+      r: 5;
+      outline: none;
+    }
+
+    .hover-guide {
+      stroke: #9da69f;
+      stroke-width: 1;
+      stroke-dasharray: 3 4;
+      opacity: 0;
+      pointer-events: none;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .tooltip {
+      position: fixed;
+      z-index: 20;
+      min-width: 205px;
+      padding: 11px 12px;
+      border: 1px solid #d7dcd8;
+      border-radius: 10px;
+      background: rgba(21, 26, 23, 0.96);
+      box-shadow: 0 12px 30px rgba(18, 24, 20, 0.22);
+      color: #fff;
+      font-size: 11px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(12px, 12px);
+      transition: opacity 80ms ease;
+    }
+
+    .tooltip.visible {
+      opacity: 1;
+    }
+
+    .tooltip-date {
+      margin-bottom: 8px;
+      color: #cbd1cd;
+      font-size: 10px;
+    }
+
+    .tooltip-row {
+      display: flex;
+      margin-top: 5px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .tooltip-series {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .tooltip-value {
+      font-weight: 760;
+    }
+
+    .empty-state {
+      display: grid;
+      min-height: 260px;
+      color: var(--muted);
+      font-size: 13px;
+      place-items: center;
+    }
+
+    .chart-footnote {
+      display: flex;
+      margin: 2px 3px 0;
+      padding-top: 9px;
+      border-top: 1px solid var(--line-soft);
+      color: var(--subtle);
+      font-size: 10px;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .mock-notice {
+      display: flex;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border: 1px solid #dce5d2;
+      border-radius: 11px;
+      background: #f7faF3;
+      color: #66715f;
+      font-size: 11px;
+      line-height: 1.5;
+      align-items: flex-start;
+      gap: 9px;
+    }
+
+    .mock-notice strong {
+      color: #354128;
+    }
+
+    @media (max-width: 1260px) {
+      .filter-grid {
+        grid-template-columns: repeat(3, minmax(150px, 1fr));
+      }
+
+      .filter-actions {
+        grid-column: span 3;
+        justify-content: flex-end;
+      }
+    }
+
+    @media (max-width: 850px) {
+      .nav,
+      main {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .hero {
+        display: block;
+      }
+
+      .snapshot {
+        max-width: 270px;
+        margin-top: 18px;
+      }
+
+      .filter-grid {
+        grid-template-columns: repeat(2, minmax(130px, 1fr));
+      }
+
+      .filter-actions {
+        grid-column: span 2;
+      }
+
+      .overview {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .metric:nth-child(2) {
+        border-right: 0;
+      }
+
+      .metric:nth-child(-n + 2) {
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .charts-heading {
+        display: block;
+      }
+
+      .series-picker {
+        margin-top: 12px;
+        justify-content: flex-start;
+      }
+
+      .chart-card {
+        padding-inline: 12px;
+      }
+
+      .chart-card-header {
+        display: block;
+      }
+
+      .dataset-stat {
+        margin-top: 12px;
+        justify-content: flex-start;
+      }
+
+      .dataset-stat > div {
+        text-align: left;
+      }
+    }
+
+    @media (max-width: 540px) {
+      .brand-section,
+      .nav-status,
+      .filter-caption {
+        display: none;
+      }
+
+      main {
+        padding-top: 24px;
+      }
+
+      .filter-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .filter-actions {
+        grid-column: auto;
+      }
+
+      .filter-actions .button-primary {
+        flex: 1;
+      }
+
+      .applied-bar {
+        display: block;
+      }
+
+      .sample-count {
+        margin-top: 8px;
+      }
+
+      .overview {
+        grid-template-columns: 1fr;
+      }
+
+      .metric {
+        border-right: 0;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .metric:last-child {
+        border-bottom: 0;
+      }
+
+      .chart-footnote {
+        display: block;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="nav" aria-label="Primary">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div>
+          <div class="brand-name">AIC Eval</div>
+          <div class="brand-section">Performance intelligence</div>
+        </div>
+      </div>
+      <div class="nav-status">
+        <span class="status-dot" aria-hidden="true"></span>
+        Mock dataset connected
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <div class="eyebrow">Forward-pass prediction</div>
+        <h1 id="page-title">Performance modeling trends</h1>
+        <p class="hero-copy">
+          Track how each modeling method performs across AIC main revisions.
+          Every point is the mean MAPE for runs matching the filters below.
+        </p>
+      </div>
+      <div class="snapshot" aria-label="Latest snapshot">
+        <div class="snapshot-icon" aria-hidden="true">↗</div>
+        <div class="snapshot-label">Latest AIC main TOT</div>
+        <div class="snapshot-value">Jul 18, 2026 <span class="commit">8f47c2a</span></div>
+      </div>
+    </section>
+
+    <section class="filter-panel" aria-labelledby="filter-title">
+      <div class="filter-heading">
+        <div class="filter-title" id="filter-title">
+          <span class="filter-icon" aria-hidden="true">≡</span>
+          Filter evaluation runs
+        </div>
+        <div class="filter-caption">Filters apply to all three FPM datasets</div>
+      </div>
+
+      <form class="filter-grid" id="filters">
+        <div class="field">
+          <label for="model-filter">Model</label>
+          <div class="select-wrap">
+            <select id="model-filter" name="model">
+              <option value="all">All models</option>
+              <option value="Qwen3-8B">Qwen3-8B</option>
+              <option value="Llama-3.1-70B">Llama 3.1 70B</option>
+              <option value="DeepSeek-R1-32B">DeepSeek R1 32B</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="gpu-filter">Accelerator</label>
+          <div class="select-wrap">
+            <select id="gpu-filter" name="gpu">
+              <option value="all">All accelerators</option>
+              <option value="H100 SXM">H100 SXM</option>
+              <option value="B200 SXM">B200 SXM</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="backend-filter">Backend</label>
+          <div class="select-wrap">
+            <select id="backend-filter" name="backend">
+              <option value="all">All backends</option>
+              <option value="vLLM">vLLM</option>
+              <option value="SGLang">SGLang</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="precision-filter">Precision</label>
+          <div class="select-wrap">
+            <select id="precision-filter" name="precision">
+              <option value="all">All precisions</option>
+              <option value="FP8">FP8</option>
+              <option value="BF16">BF16</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="workload-filter">Workload</label>
+          <div class="select-wrap">
+            <select id="workload-filter" name="workload">
+              <option value="all">All workloads</option>
+              <option value="Prefill">Prefill</option>
+              <option value="Decode">Decode</option>
+              <option value="Mixed">Mixed</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="window-filter">Run window</label>
+          <div class="select-wrap">
+            <select id="window-filter" name="window">
+              <option value="8">Last 8 revisions</option>
+              <option value="6">Last 6 revisions</option>
+              <option value="4">Last 4 revisions</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="filter-actions">
+          <button class="button button-secondary" type="button" id="reset-button">Reset</button>
+          <button class="button button-primary" type="submit">Apply filters</button>
+        </div>
+      </form>
+
+      <div class="applied-bar">
+        <div class="applied-filters" id="applied-filters" aria-live="polite"></div>
+        <div class="sample-count" id="sample-count" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="overview" aria-label="Filtered evaluation summary">
+      <div class="metric">
+        <div class="metric-label">Latest mean MAPE</div>
+        <div class="metric-value" id="latest-mape">—</div>
+        <div class="metric-note">all visible methods &amp; datasets</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Best latest method</div>
+        <div class="metric-value small" id="best-method">—</div>
+        <div class="metric-note" id="best-method-note">—</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Evaluation runs</div>
+        <div class="metric-value" id="run-count">—</div>
+        <div class="metric-note">after filtering</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Compared revisions</div>
+        <div class="metric-value" id="revision-count">—</div>
+        <div class="metric-note">AIC main snapshots</div>
+      </div>
+    </section>
+
+    <section aria-labelledby="chart-section-title">
+      <div class="charts-heading">
+        <div>
+          <h2 id="chart-section-title">Average MAPE by FPM dataset</h2>
+          <p>Lower is better · click a method to show or hide it across all charts</p>
+        </div>
+        <div class="series-picker" id="series-picker" aria-label="Visible performance modeling methods"></div>
+      </div>
+
+      <div class="chart-list" id="chart-list"></div>
+      <div class="mock-notice">
+        <span aria-hidden="true">ⓘ</span>
+        <div>
+          <strong>Interactive POC with synthetic data.</strong>
+          Dataset names, run dates, commit hashes, and MAPE values are placeholders.
+          The aggregation behavior mirrors the intended product: filters select run records,
+          then the chart averages MAPE by dataset, AIC main TOT, and performance modeling method.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const dates = [
+        { value: "2026-05-29", label: "May 29", commit: "1c5ed90" },
+        { value: "2026-06-05", label: "Jun 05", commit: "a40b1d3" },
+        { value: "2026-06-12", label: "Jun 12", commit: "b981e72" },
+        { value: "2026-06-19", label: "Jun 19", commit: "3e2d0b8" },
+        { value: "2026-06-26", label: "Jun 26", commit: "d07f51c" },
+        { value: "2026-07-03", label: "Jul 03", commit: "4b18e96" },
+        { value: "2026-07-10", label: "Jul 10", commit: "68525f6" },
+        { value: "2026-07-18", label: "Jul 18", commit: "8f47c2a" }
+      ];
+
+      const datasets = [
+        {
+          id: "prod-traffic-v1",
+          name: "Production traffic · v1",
+          description: "Chronological FPM replay sampled from production traffic.",
+          baseline: 0
+        },
+        {
+          id: "self-benchmark-v2",
+          name: "Self-benchmark grid · v2",
+          description: "Controlled prefill/decode shapes collected during self-benchmark.",
+          baseline: 2.8
+        },
+        {
+          id: "stress-replay-v1",
+          name: "Long-context stress replay · v1",
+          description: "High-KV and mixed-workload FPMs emphasizing tail shapes.",
+          baseline: 6.1
+        }
+      ];
+
+      const methods = [
+        { id: "aic-native", name: "AIC Native", color: "#2b6de8", baseline: 13.2, slope: -0.55 },
+        { id: "aic-regression", name: "AIC Regression", color: "#8e4ec6", baseline: 18.7, slope: -0.88 },
+        { id: "prefill-q-plus-r", name: "Q + R", color: "#e0792d", baseline: 22.8, slope: -0.69 },
+        {
+          id: "physical-attention",
+          name: "Physical Attention",
+          color: "#008f7a",
+          baseline: 17.1,
+          slope: -0.47
+        },
+        {
+          id: "piecewise-physical",
+          name: "Piecewise Physical",
+          color: "#cf3f66",
+          baseline: 15.4,
+          slope: -0.72
+        }
+      ];
+
+      const dimensions = {
+        model: ["Qwen3-8B", "Llama-3.1-70B", "DeepSeek-R1-32B"],
+        gpu: ["H100 SXM", "B200 SXM"],
+        backend: ["vLLM", "SGLang"],
+        precision: ["FP8", "BF16"],
+        workload: ["Prefill", "Decode", "Mixed"]
+      };
+
+      const dimensionEffect = {
+        model: { "Qwen3-8B": -0.8, "Llama-3.1-70B": 1.4, "DeepSeek-R1-32B": 2.6 },
+        gpu: { "H100 SXM": 1.1, "B200 SXM": -0.4 },
+        backend: { "vLLM": -0.2, "SGLang": 1.0 },
+        precision: { FP8: 1.2, BF16: -0.1 },
+        workload: { Prefill: -1.0, Decode: 0.8, Mixed: 3.1 }
+      };
+
+      const filterLabels = {
+        model: "Model",
+        gpu: "Accelerator",
+        backend: "Backend",
+        precision: "Precision",
+        workload: "Workload"
+      };
+
+      const filterForm = document.getElementById("filters");
+      const resetButton = document.getElementById("reset-button");
+      const appliedFilters = document.getElementById("applied-filters");
+      const sampleCount = document.getElementById("sample-count");
+      const chartList = document.getElementById("chart-list");
+      const seriesPicker = document.getElementById("series-picker");
+      const tooltip = document.getElementById("tooltip");
+
+      let activeFilters = readFilterForm();
+      const visibleMethods = new Set(methods.map((method) => method.id));
+      const records = buildMockRecords();
+
+      function deterministicNoise(...parts) {
+        const input = parts.join("|");
+        let hash = 2166136261;
+        for (let index = 0; index < input.length; index += 1) {
+          hash ^= input.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return ((hash >>> 0) % 1000) / 1000;
+      }
+
+      function buildMockRecords() {
+        const output = [];
+        datasets.forEach((dataset) => {
+          dates.forEach((date, dateIndex) => {
+            dimensions.model.forEach((model) => {
+              dimensions.gpu.forEach((gpu) => {
+                dimensions.backend.forEach((backend) => {
+                  dimensions.precision.forEach((precision) => {
+                    dimensions.workload.forEach((workload) => {
+                      for (let replicate = 0; replicate < 2; replicate += 1) {
+                        const runId = [
+                          dataset.id,
+                          date.value,
+                          model,
+                          gpu,
+                          backend,
+                          precision,
+                          workload,
+                          replicate
+                        ].join(":");
+                        methods.forEach((method) => {
+                          const noise = deterministicNoise(runId, method.id) * 3.8 - 1.9;
+                          const regressionBoost =
+                            method.id === "aic-regression" && dateIndex >= 4 ? -1.15 : 0;
+                          const stressInteraction =
+                            dataset.id === "stress-replay-v1" && method.id === "physical-attention"
+                              ? -1.45
+                              : 0;
+                          const rawMape =
+                            method.baseline +
+                            dataset.baseline +
+                            dateIndex * method.slope +
+                            dimensionEffect.model[model] +
+                            dimensionEffect.gpu[gpu] +
+                            dimensionEffect.backend[backend] +
+                            dimensionEffect.precision[precision] +
+                            dimensionEffect.workload[workload] +
+                            regressionBoost +
+                            stressInteraction +
+                            noise;
+                          output.push({
+                            dataset: dataset.id,
+                            date: date.value,
+                            method: method.id,
+                            model,
+                            gpu,
+                            backend,
+                            precision,
+                            workload,
+                            runId,
+                            mape: Math.max(2.5, rawMape)
+                          });
+                        });
+                      }
+                    });
+                  });
+                });
+              });
+            });
+          });
+        });
+        return output;
+      }
+
+      function readFilterForm() {
+        return Object.fromEntries(new FormData(filterForm).entries());
+      }
+
+      function selectedDates() {
+        const windowSize = Number(activeFilters.window);
+        return dates.slice(-windowSize);
+      }
+
+      function filteredRecords() {
+        const allowedDates = new Set(selectedDates().map((date) => date.value));
+        return records.filter((record) => {
+          if (!allowedDates.has(record.date)) return false;
+          return ["model", "gpu", "backend", "precision", "workload"].every(
+            (dimension) =>
+              activeFilters[dimension] === "all" ||
+              record[dimension] === activeFilters[dimension]
+          );
+        });
+      }
+
+      function aggregate(rows) {
+        const groups = new Map();
+        rows.forEach((record) => {
+          const key = `${record.dataset}|${record.date}|${record.method}`;
+          const current = groups.get(key) || { sum: 0, count: 0 };
+          current.sum += record.mape;
+          current.count += 1;
+          groups.set(key, current);
+        });
+        return groups;
+      }
+
+      function mean(values) {
+        if (!values.length) return null;
+        return values.reduce((sum, value) => sum + value, 0) / values.length;
+      }
+
+      function averageFor(groups, datasetId, dateValue, methodId) {
+        const group = groups.get(`${datasetId}|${dateValue}|${methodId}`);
+        return group ? group.sum / group.count : null;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function renderSeriesPicker() {
+        seriesPicker.innerHTML = methods
+          .map(
+            (method) => `
+              <button
+                type="button"
+                class="series-toggle ${visibleMethods.has(method.id) ? "" : "off"}"
+                data-method="${escapeHtml(method.id)}"
+                aria-pressed="${visibleMethods.has(method.id)}"
+              >
+                <span class="series-swatch" style="background:${method.color}"></span>
+                ${escapeHtml(method.name)}
+              </button>
+            `
+          )
+          .join("");
+
+        seriesPicker.querySelectorAll("[data-method]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const methodId = button.dataset.method;
+            if (visibleMethods.has(methodId) && visibleMethods.size > 1) {
+              visibleMethods.delete(methodId);
+            } else {
+              visibleMethods.add(methodId);
+            }
+            render();
+          });
+        });
+      }
+
+      function renderAppliedFilters(rows) {
+        const chips = Object.entries(filterLabels)
+          .filter(([key]) => activeFilters[key] !== "all")
+          .map(
+            ([key, label]) =>
+              `<span class="filter-chip">${escapeHtml(label)}: ${escapeHtml(activeFilters[key])}</span>`
+          );
+
+        appliedFilters.innerHTML = `
+          <span class="applied-label">Applied</span>
+          ${chips.length ? chips.join("") : '<span class="filter-chip">All configurations</span>'}
+        `;
+
+        const runCount = new Set(rows.map((record) => record.runId)).size;
+        sampleCount.innerHTML = `<strong>${runCount.toLocaleString()}</strong> matching evaluation runs`;
+      }
+
+      function renderOverview(rows, groups) {
+        const visible = methods.filter((method) => visibleMethods.has(method.id));
+        const finalDate = selectedDates().at(-1);
+        const latestValues = [];
+        const latestByMethod = new Map();
+
+        datasets.forEach((dataset) => {
+          visible.forEach((method) => {
+            const value = averageFor(groups, dataset.id, finalDate.value, method.id);
+            if (value !== null) {
+              latestValues.push(value);
+              const values = latestByMethod.get(method.id) || [];
+              values.push(value);
+              latestByMethod.set(method.id, values);
+            }
+          });
+        });
+
+        const latestMape = mean(latestValues);
+        const best = [...latestByMethod.entries()]
+          .map(([methodId, values]) => ({
+            method: methods.find((method) => method.id === methodId),
+            value: mean(values)
+          }))
+          .sort((left, right) => left.value - right.value)[0];
+        const runCount = new Set(rows.map((record) => record.runId)).size;
+
+        document.getElementById("latest-mape").textContent =
+          latestMape === null ? "—" : `${latestMape.toFixed(1)}%`;
+        document.getElementById("best-method").textContent = best ? best.method.name : "—";
+        document.getElementById("best-method-note").textContent = best
+          ? `${best.value.toFixed(1)}% mean MAPE on ${finalDate.label}`
+          : "No matching records";
+        document.getElementById("run-count").textContent = runCount.toLocaleString();
+        document.getElementById("revision-count").textContent = selectedDates().length;
+      }
+
+      function niceYMaximum(groups) {
+        const values = [];
+        datasets.forEach((dataset) => {
+          selectedDates().forEach((date) => {
+            methods
+              .filter((method) => visibleMethods.has(method.id))
+              .forEach((method) => {
+                const value = averageFor(groups, dataset.id, date.value, method.id);
+                if (value !== null) values.push(value);
+              });
+          });
+        });
+        const maximum = values.length ? Math.max(...values) : 30;
+        return Math.max(10, Math.ceil((maximum + 2) / 5) * 5);
+      }
+
+      function renderCharts(rows, groups) {
+        const yMaximum = niceYMaximum(groups);
+        chartList.innerHTML = "";
+        datasets.forEach((dataset) => {
+          const card = buildChartCard(dataset, rows, groups);
+          chartList.appendChild(card);
+          const wrap = card.querySelector(".chart-wrap");
+          if (!wrap.querySelector(".empty-state")) {
+            wrap.appendChild(
+              buildSvgChart(dataset, groups, yMaximum, Math.round(wrap.getBoundingClientRect().width))
+            );
+          }
+        });
+      }
+
+      function buildChartCard(dataset, rows, groups) {
+        const card = document.createElement("article");
+        card.className = "chart-card";
+        const activeDates = selectedDates();
+        const visible = methods.filter((method) => visibleMethods.has(method.id));
+        const firstValues = visible
+          .map((method) => averageFor(groups, dataset.id, activeDates[0].value, method.id))
+          .filter((value) => value !== null);
+        const latestValues = visible
+          .map((method) => averageFor(groups, dataset.id, activeDates.at(-1).value, method.id))
+          .filter((value) => value !== null);
+        const firstMean = mean(firstValues);
+        const latestMean = mean(latestValues);
+        const delta = firstMean === null || latestMean === null ? null : latestMean - firstMean;
+        const datasetRunCount = new Set(
+          rows.filter((record) => record.dataset === dataset.id).map((record) => record.runId)
+        ).size;
+
+        card.innerHTML = `
+          <div class="chart-card-header">
+            <div>
+              <div class="dataset-kicker">FPM dataset</div>
+              <h3>${escapeHtml(dataset.name)}</h3>
+              <p class="dataset-description">${escapeHtml(dataset.description)}</p>
+            </div>
+            <div class="dataset-stat">
+              <div>
+                <span class="dataset-stat-label">Latest mean</span>
+                <span class="dataset-stat-value">${latestMean === null ? "—" : `${latestMean.toFixed(1)}%`}</span>
+              </div>
+              <div>
+                <span class="dataset-stat-label">Window change</span>
+                <span class="dataset-stat-value ${delta !== null && delta <= 0 ? "trend-good" : "trend-bad"}">
+                  ${delta === null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="chart-wrap"></div>
+          <div class="chart-footnote">
+            <span>${datasetRunCount.toLocaleString()} matching runs · averages include all selected configurations</span>
+            <span>X-axis: evaluation date / AIC main TOT</span>
+          </div>
+        `;
+
+        const wrap = card.querySelector(".chart-wrap");
+        if (!datasetRunCount) {
+          wrap.innerHTML = '<div class="empty-state">No runs match the selected filters.</div>';
+        }
+        return card;
+      }
+
+      function buildSvgChart(dataset, groups, yMaximum, availableWidth) {
+        const namespace = "http://www.w3.org/2000/svg";
+        const width = Math.max(340, availableWidth);
+        const compact = width < 600;
+        const height = compact ? 250 : 276;
+        const margin = compact
+          ? { top: 12, right: 10, bottom: 52, left: 42 }
+          : { top: 12, right: 28, bottom: 52, left: 55 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const activeDates = selectedDates();
+        const visible = methods.filter((method) => visibleMethods.has(method.id));
+        const svg = document.createElementNS(namespace, "svg");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute(
+          "aria-label",
+          `${dataset.name} average MAPE line chart for ${visible.map((method) => method.name).join(", ")}`
+        );
+
+        const x = (index) =>
+          activeDates.length === 1
+            ? margin.left + plotWidth / 2
+            : margin.left + (index / (activeDates.length - 1)) * plotWidth;
+        const y = (value) => margin.top + plotHeight - (value / yMaximum) * plotHeight;
+
+        const ySteps = 5;
+        for (let index = 0; index <= ySteps; index += 1) {
+          const value = (yMaximum / ySteps) * index;
+          const yPosition = y(value);
+          svg.insertAdjacentHTML(
+            "beforeend",
+            `
+              <line class="grid-line" x1="${margin.left}" x2="${width - margin.right}" y1="${yPosition}" y2="${yPosition}"></line>
+              <text class="axis-label" x="${margin.left - 10}" y="${yPosition + 3}" text-anchor="end">${value.toFixed(0)}%</text>
+            `
+          );
+        }
+
+        svg.insertAdjacentHTML(
+          "beforeend",
+          `
+            <line class="axis-line" x1="${margin.left}" x2="${margin.left}" y1="${margin.top}" y2="${height - margin.bottom}"></line>
+            <line class="axis-line" x1="${margin.left}" x2="${width - margin.right}" y1="${height - margin.bottom}" y2="${height - margin.bottom}"></line>
+            <text class="axis-title" x="14" y="${margin.top + plotHeight / 2}" text-anchor="middle" transform="rotate(-90 14 ${margin.top + plotHeight / 2})">Mean MAPE</text>
+          `
+        );
+
+        activeDates.forEach((date, index) => {
+          const xPosition = x(index);
+          const showTickLabel =
+            !compact ||
+            activeDates.length <= 4 ||
+            index === activeDates.length - 1 ||
+            (index % 2 === 0 && index < activeDates.length - 2);
+          if (!showTickLabel) return;
+          svg.insertAdjacentHTML(
+            "beforeend",
+            `
+              <text class="axis-label" x="${xPosition}" y="${height - 27}" text-anchor="middle">${date.label}</text>
+              <text class="tot-label" x="${xPosition}" y="${height - 12}" text-anchor="middle">${date.commit}</text>
+            `
+          );
+        });
+
+        visible.forEach((method) => {
+          const points = activeDates.map((date, index) => ({
+            date,
+            value: averageFor(groups, dataset.id, date.value, method.id),
+            x: x(index)
+          }));
+          const path = points
+            .filter((point) => point.value !== null)
+            .map(
+              (point, index) =>
+                `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${y(point.value).toFixed(2)}`
+            )
+            .join(" ");
+          svg.insertAdjacentHTML(
+            "beforeend",
+            `<path class="series-line" d="${path}" stroke="${method.color}"></path>`
+          );
+
+          points.forEach((point) => {
+            if (point.value === null) return;
+            const circle = document.createElementNS(namespace, "circle");
+            circle.setAttribute("class", "series-point");
+            circle.setAttribute("cx", point.x);
+            circle.setAttribute("cy", y(point.value));
+            circle.setAttribute("r", "3.6");
+            circle.setAttribute("fill", method.color);
+            circle.setAttribute("tabindex", "0");
+            circle.setAttribute(
+              "aria-label",
+              `${method.name}, ${point.date.label}, ${point.value.toFixed(2)} percent mean MAPE`
+            );
+            const show = (event) => showTooltip(event, dataset, point.date, method, point.value);
+            circle.addEventListener("mouseenter", show);
+            circle.addEventListener("mousemove", positionTooltip);
+            circle.addEventListener("mouseleave", hideTooltip);
+            circle.addEventListener("focus", show);
+            circle.addEventListener("blur", hideTooltip);
+            svg.appendChild(circle);
+          });
+        });
+
+        return svg;
+      }
+
+      function showTooltip(event, dataset, date, method, value) {
+        tooltip.innerHTML = `
+          <div class="tooltip-date">
+            ${escapeHtml(dataset.name)}<br>
+            ${escapeHtml(date.label)}, 2026 · main@${escapeHtml(date.commit)}
+          </div>
+          <div class="tooltip-row">
+            <span class="tooltip-series">
+              <span class="series-swatch" style="background:${method.color}"></span>
+              ${escapeHtml(method.name)}
+            </span>
+            <span class="tooltip-value">${value.toFixed(2)}%</span>
+          </div>
+        `;
+        tooltip.classList.add("visible");
+        positionTooltip(event);
+      }
+
+      function positionTooltip(event) {
+        const source = event.touches ? event.touches[0] : event;
+        let left = source.clientX;
+        let top = source.clientY;
+        if (!Number.isFinite(left) || !Number.isFinite(top)) {
+          const rect = event.target.getBoundingClientRect();
+          left = rect.left + rect.width / 2;
+          top = rect.top + rect.height / 2;
+        }
+        const tooltipWidth = tooltip.offsetWidth || 220;
+        const tooltipHeight = tooltip.offsetHeight || 100;
+        if (left + tooltipWidth + 26 > window.innerWidth) left -= tooltipWidth + 24;
+        if (top + tooltipHeight + 26 > window.innerHeight) top -= tooltipHeight + 24;
+        tooltip.style.left = `${Math.max(8, left)}px`;
+        tooltip.style.top = `${Math.max(8, top)}px`;
+      }
+
+      function hideTooltip() {
+        tooltip.classList.remove("visible");
+      }
+
+      function render() {
+        const rows = filteredRecords();
+        const groups = aggregate(rows);
+        renderSeriesPicker();
+        renderAppliedFilters(rows);
+        renderOverview(rows, groups);
+        renderCharts(rows, groups);
+      }
+
+      filterForm.addEventListener("submit", (event) => {
+        event.preventDefault();
+        activeFilters = readFilterForm();
+        render();
+      });
+
+      resetButton.addEventListener("click", () => {
+        filterForm.reset();
+        activeFilters = readFilterForm();
+        render();
+      });
+
+      render();
+    })();
+  </script>
+</body>
+</html>
