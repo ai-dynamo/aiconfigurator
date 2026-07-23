@@ -29,7 +29,8 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// String identifier used as a directory key under `systems/data/<system>/<backend>/`.
+    /// String identifier used as a directory key under
+    /// `systems/data/<system>/<family>/<backend>/`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Trtllm => "trtllm",
@@ -265,10 +266,10 @@ impl fmt::Display for ModelFamily {
     }
 }
 
-/// Performance data CSV filenames. Mirrors `common.PerfDataFilename`.
+/// Performance data table filenames. Mirrors `common.PerfDataFilename`.
 ///
-/// Used by `perf_database/` modules to locate per-table CSV files under
-/// `systems/data/<system>/<backend>/<version>/`.
+/// Used by `perf_database/` modules to locate per-table parquet files under
+/// `systems/data/<system>/<family>/<backend>/<version>/`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PerfDataFilename {
     Gemm,
@@ -308,44 +309,44 @@ pub enum PerfDataFilename {
 }
 
 impl PerfDataFilename {
-    /// Stable CSV basename used by the perf DB loaders. Matches Python's
+    /// Stable parquet basename used by the perf DB loaders. Matches Python's
     /// `PerfDataFilename` enum values.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Gemm => "gemm_perf.txt",
-            Self::Nccl => "nccl_perf.txt",
-            Self::Oneccl => "oneccl_perf.txt",
-            Self::GenerationAttention => "generation_attention_perf.txt",
-            Self::ContextAttention => "context_attention_perf.txt",
-            Self::EncoderAttention => "encoder_attention_perf.txt",
-            Self::ContextMla => "context_mla_perf.txt",
-            Self::GenerationMla => "generation_mla_perf.txt",
-            Self::MlaBmm => "mla_bmm_perf.txt",
-            Self::Moe => "moe_perf.txt",
-            Self::CustomAllreduce => "custom_allreduce_perf.txt",
-            Self::WideepContextMla => "wideep_context_mla_perf.txt",
-            Self::WideepGenerationMla => "wideep_generation_mla_perf.txt",
-            Self::WideepContextMoe => "wideep_context_moe_perf.txt",
-            Self::WideepGenerationMoe => "wideep_generation_moe_perf.txt",
-            Self::WideepDeepepNormal => "wideep_deepep_normal_perf.txt",
-            Self::WideepDeepepLl => "wideep_deepep_ll_perf.txt",
-            Self::WideepMoeCompute => "wideep_moe_perf.txt",
-            Self::TrtllmAlltoall => "trtllm_alltoall_perf.txt",
-            Self::ComputeScale => "computescale_perf.txt",
-            Self::ScaleMatrix => "scale_matrix_perf.txt",
-            Self::Mamba2 => "mamba2_perf.txt",
-            Self::Gdn => "gdn_perf.txt",
-            Self::MlaContextModule => "mla_context_module_perf.txt",
-            Self::MlaGenerationModule => "mla_generation_module_perf.txt",
-            Self::DsaContextModule => "dsa_context_module_perf.txt",
-            Self::DsaGenerationModule => "dsa_generation_module_perf.txt",
-            Self::MhcModule => "mhc_module_perf.txt",
-            Self::Dsv4CsaContextModule => "dsv4_csa_context_module_perf.txt",
-            Self::Dsv4HcaContextModule => "dsv4_hca_context_module_perf.txt",
-            Self::Dsv4CsaGenerationModule => "dsv4_csa_generation_module_perf.txt",
-            Self::Dsv4HcaGenerationModule => "dsv4_hca_generation_module_perf.txt",
-            Self::Dsv4PagedMqaLogitsModule => "dsv4_paged_mqa_logits_module_perf.txt",
-            Self::Dsv4HcaAttnModule => "dsv4_hca_attn_module_perf.txt",
+            Self::Gemm => "gemm_perf.parquet",
+            Self::Nccl => "nccl_perf.parquet",
+            Self::Oneccl => "oneccl_perf.parquet",
+            Self::GenerationAttention => "generation_attention_perf.parquet",
+            Self::ContextAttention => "context_attention_perf.parquet",
+            Self::EncoderAttention => "encoder_attention_perf.parquet",
+            Self::ContextMla => "context_mla_perf.parquet",
+            Self::GenerationMla => "generation_mla_perf.parquet",
+            Self::MlaBmm => "mla_bmm_perf.parquet",
+            Self::Moe => "moe_perf.parquet",
+            Self::CustomAllreduce => "custom_allreduce_perf.parquet",
+            Self::WideepContextMla => "wideep_context_mla_perf.parquet",
+            Self::WideepGenerationMla => "wideep_generation_mla_perf.parquet",
+            Self::WideepContextMoe => "wideep_context_moe_perf.parquet",
+            Self::WideepGenerationMoe => "wideep_generation_moe_perf.parquet",
+            Self::WideepDeepepNormal => "wideep_deepep_normal_perf.parquet",
+            Self::WideepDeepepLl => "wideep_deepep_ll_perf.parquet",
+            Self::WideepMoeCompute => "wideep_moe_perf.parquet",
+            Self::TrtllmAlltoall => "trtllm_alltoall_perf.parquet",
+            Self::ComputeScale => "computescale_perf.parquet",
+            Self::ScaleMatrix => "scale_matrix_perf.parquet",
+            Self::Mamba2 => "mamba2_perf.parquet",
+            Self::Gdn => "gdn_perf.parquet",
+            Self::MlaContextModule => "mla_context_module_perf.parquet",
+            Self::MlaGenerationModule => "mla_generation_module_perf.parquet",
+            Self::DsaContextModule => "dsa_context_module_perf.parquet",
+            Self::DsaGenerationModule => "dsa_generation_module_perf.parquet",
+            Self::MhcModule => "mhc_module_perf.parquet",
+            Self::Dsv4CsaContextModule => "dsv4_csa_context_module_perf.parquet",
+            Self::Dsv4HcaContextModule => "dsv4_hca_context_module_perf.parquet",
+            Self::Dsv4CsaGenerationModule => "dsv4_csa_generation_module_perf.parquet",
+            Self::Dsv4HcaGenerationModule => "dsv4_hca_generation_module_perf.parquet",
+            Self::Dsv4PagedMqaLogitsModule => "dsv4_paged_mqa_logits_module_perf.parquet",
+            Self::Dsv4HcaAttnModule => "dsv4_hca_attn_module_perf.parquet",
         }
     }
 }
@@ -413,17 +414,26 @@ mod tests {
     #[test]
     fn perf_data_filenames_match_python_enum() {
         // Sampled across categories from common.PerfDataFilename.
-        assert_eq!(PerfDataFilename::Gemm.as_str(), "gemm_perf.txt");
+        assert_eq!(PerfDataFilename::Gemm.as_str(), "gemm_perf.parquet");
         assert_eq!(
             PerfDataFilename::ContextAttention.as_str(),
-            "context_attention_perf.txt"
+            "context_attention_perf.parquet"
         );
-        assert_eq!(PerfDataFilename::CustomAllreduce.as_str(), "custom_allreduce_perf.txt");
-        assert_eq!(PerfDataFilename::WideepDeepepLl.as_str(), "wideep_deepep_ll_perf.txt");
-        assert_eq!(PerfDataFilename::TrtllmAlltoall.as_str(), "trtllm_alltoall_perf.txt");
+        assert_eq!(
+            PerfDataFilename::CustomAllreduce.as_str(),
+            "custom_allreduce_perf.parquet"
+        );
+        assert_eq!(
+            PerfDataFilename::WideepDeepepLl.as_str(),
+            "wideep_deepep_ll_perf.parquet"
+        );
+        assert_eq!(
+            PerfDataFilename::TrtllmAlltoall.as_str(),
+            "trtllm_alltoall_perf.parquet"
+        );
         assert_eq!(
             PerfDataFilename::Dsv4HcaGenerationModule.as_str(),
-            "dsv4_hca_generation_module_perf.txt"
+            "dsv4_hca_generation_module_perf.parquet"
         );
     }
 }

@@ -43,7 +43,7 @@ real serving workload. The correction is applied in AIC after the module lookup.
 
 ## Data Files
 
-The SGLang registry exposes four module-level DeepSeek-V4 attention ops:
+The SGLang registry stages four module-level DeepSeek-V4 attention CSVs:
 
 ```text
 dsv4_csa_context_module_perf.txt
@@ -52,7 +52,12 @@ dsv4_csa_generation_module_perf.txt
 dsv4_hca_generation_module_perf.txt
 ```
 
-They are registered in:
+`collect.py` finalizes those staging files as parquet. Packaged tables live
+under
+`aic-core/src/aiconfigurator_core/systems/data/<system>/sparse_attention/sglang/<version>/`
+with the corresponding `*.parquet` names.
+
+The ops and their canonical filenames are registered in:
 
 ```text
 collector/sglang/registry.py

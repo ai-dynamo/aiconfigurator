@@ -1715,7 +1715,7 @@ def load_mla_bmm_data(mla_bmm_file):
 
 def load_wideep_context_mla_data(wideep_context_mla_file):
     """
-    Load the SGLang wideep context mla data from wideep_context_mla_perf.txt
+    Load the SGLang WideEP context MLA data from wideep_context_mla_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -1783,7 +1783,7 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
 
 def load_wideep_generation_mla_data(wideep_generation_mla_file):
     """
-    Load the SGLang wideep generation mla data from wideep_generation_mla_perf.txt
+    Load the SGLang WideEP generation MLA data from wideep_generation_mla_perf.parquet
     with power support (backward compatible).
 
     Returns:

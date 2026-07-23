@@ -308,10 +308,15 @@ python3 "${SCRIPT_DIR}/validate_perf.py" validate \
 
 if [[ "${COPY_VALIDATED}" == "1" ]]; then
   target_system="$(printf '%s' "${SYSTEM_NAME}" | tr '[:upper:]' '[:lower:]')"
-  target_dir="${LOCAL_REPO}/src/aiconfigurator/systems/data/${target_system}/sglang/${TARGET_SGLANG_VERSION}"
+  target_dir="${LOCAL_REPO}/aic-core/src/aiconfigurator_core/systems/data/${target_system}/moe/sglang/${TARGET_SGLANG_VERSION}"
+  target_staging="${target_dir}/${PERF_FILE}"
   mkdir -p "${target_dir}"
-  cp "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" "${target_dir}/${PERF_FILE}"
-  echo "COPIED_TO=${target_dir}/${PERF_FILE}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
+  cp "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" "${target_staging}"
+  PYTHONPATH="${LOCAL_REPO}${PYTHONPATH:+:${PYTHONPATH}}" \
+    python3 -c 'import sys; from collector.helper import convert_perf_csv_to_parquet; convert_perf_csv_to_parquet(sys.argv[1])' \
+    "${target_staging}"
+  finalized_file="${target_staging%.txt}.parquet"
+  echo "FINALIZED_TO=${finalized_file}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
 fi
 
 echo "RUNNER_ALL_JOBS_COMPLETE $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${LOCAL_RESULT_DIR}/runner.log"

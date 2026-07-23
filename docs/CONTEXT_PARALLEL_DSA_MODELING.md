@@ -265,11 +265,14 @@ slightly heavy (+) vs MoE-perf light (−), partly cancelling.
 
 ### 9.1 Data
 
-`systems/data/b200_sxm/sglang/0.5.12/`: `dsa_context_module_perf.parquet`
-(isl→16384 after the piecewise-skip fix in `collect_mla_module.py`),
+`aic-core/src/aiconfigurator_core/systems/data/b200_sxm/sparse_attention/sglang/0.5.12/`
+resolves the sparse-attention tables through `reuse.yaml` (currently from
+0.5.14): `dsa_context_module_perf.parquet` (isl→16384 after the
+piecewise-skip fix in `collect_mla_module.py`),
 `glm5_mqa_logits_module_perf.parquet`, `glm5_topk_module_perf.parquet`
 (`score_mode ∈ {flat, top_last}`), `glm5_dsa_attn_module_perf.parquet`,
-`nccl/2.28.9/nccl_perf.parquet`.
+plus
+`aic-core/src/aiconfigurator_core/systems/data/b200_sxm/comm/nccl/2.28.9/nccl_perf.parquet`.
 
 > The `topk_full` / per-card-reference points at `isl=32768, prefix=0` need
 > `chunked_prefill_size ≥ isl`; the standard sweep caps isl at the runtime

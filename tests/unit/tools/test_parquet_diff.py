@@ -84,7 +84,7 @@ def test_row_diff_writes_added_removed_and_modified_artifacts(parquet_diff_modul
     )
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -131,7 +131,7 @@ def test_row_diff_pairs_duplicate_keys_within_key(parquet_diff_module, tmp_path)
     )
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "aic-core/src/aiconfigurator_core/systems/data/h100/sglang/0.5.10/moe_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/moe/sglang/0.5.10/moe_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -148,7 +148,7 @@ def test_measurement_only_columns_use_full_row_delta(parquet_diff_module, tmp_pa
     head = _snapshot(parquet_diff_module, "latency_perf.parquet", [{"latency": 2.0}, {"latency": 3.0}])
 
     row_diff = parquet_diff_module._diff_snapshots(
-        "aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/latency_perf.parquet",
+        "aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/latency_perf.parquet",
         base,
         head,
         detail_dir=tmp_path,
@@ -278,8 +278,8 @@ def test_full_diff_artifacts_include_every_changed_perf_file(parquet_diff_module
 
 def test_report_includes_row_level_counts(parquet_diff_module):
     comparison = parquet_diff_module.Comparison(
-        path="aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
-        base_path="aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet",
+        path="aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet",
+        base_path="aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet",
         status="M",
         base_rows=3,
         head_rows=3,
@@ -311,7 +311,7 @@ def test_report_includes_row_level_counts(parquet_diff_module):
                 status="M",
                 path=comparison.path,
                 old_path=None,
-                diff_file="diffs/aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet.diff",
+                diff_file="diffs/aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet.diff",
             )
         ],
     )
@@ -319,7 +319,10 @@ def test_report_includes_row_level_counts(parquet_diff_module):
     assert "- Row-level changes: +1 / -1 / ~1" in report
     assert "- Full per-file diff artifacts: 1 file under `parquet-diff-details/diffs/`" in report
     assert "### Other Parquet Changes" not in report
-    assert "| M | aic-core/src/aiconfigurator_core/systems/data/h100/vllm/0.19.0/gemm_perf.parquet |" not in report
+    assert (
+        "| M | aic-core/src/aiconfigurator_core/systems/data/h100/gemm/vllm/0.19.0/gemm_perf.parquet |"
+        not in report
+    )
     assert "Full per-file unified diffs: `parquet-diff-details/diffs/` (1 file)" in report
     assert "Exact row-level CSVs: `parquet-diff-details/` (listed in `summary.csv`)" in report
     assert "**added rows** - full CSV: `parquet-diff-details/gemm.added.csv`" in report

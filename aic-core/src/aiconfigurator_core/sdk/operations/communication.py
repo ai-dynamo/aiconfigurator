@@ -3,12 +3,12 @@
 
 """Communication ops: NCCL + CustomAllReduce + P2P (ISSUE-07 / AIC-541).
 
-- ``CustomAllReduce`` owns ``custom_allreduce_perf.txt`` (CSV) — keyed by
+- ``CustomAllReduce`` owns ``custom_allreduce_perf.parquet`` — keyed by
   ``(quant_mode, tp_size, strategy)``. ``PerfDatabase.query_custom_allreduce``
   delegates here. No SOL clamp, no extrapolation in the legacy
   ``_correct_data`` / ``__init__`` path.
 
-- ``NCCL`` owns ``nccl_perf.txt`` AND the optional oneCCL fallback table.
+- ``NCCL`` owns ``nccl_perf.parquet`` AND the optional oneCCL fallback table.
   ``PerfDatabase.query_nccl`` delegates here. The oneCCL fallback is loaded
   alongside NCCL data because ``query_nccl`` picks between them at query
   time (XPU systems load oneCCL when NCCL is empty).
@@ -206,7 +206,7 @@ class CustomAllReduce(Operation):
                     f"No custom_allreduce silicon data for quant_mode={quant_mode.value.name}, "
                     f"tp_size={effective_tp} (requested tp_size={tp_size}). "
                     f"Available tp_sizes for this quant_mode: {sorted(by_tp.keys())}. "
-                    "Consider using HYBRID mode, or supply custom_allreduce_perf.txt rows "
+                    "Consider using HYBRID mode, or supply custom_allreduce_perf.parquet rows "
                     "covering this tp_size."
                 )
             # 1-D size curve on the raw table: RAW lerp in range (allreduce is

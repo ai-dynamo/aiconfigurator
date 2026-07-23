@@ -91,7 +91,9 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     """
     # Patch yaml.load so that PerfDatabase.__init__ sees a valid system_spec.
     dummy_system_spec = {
-        "data_dir": "data",  # PerfDatabase will look under systems_dir/data/<backend>/<version>
+        # PerfDatabase uses a legacy-shaped logical lookup key, then resolves
+        # physical files under data/<family>/<backend>/<version>.
+        "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
             # These two values are used in many "SOL"-mode formulas:

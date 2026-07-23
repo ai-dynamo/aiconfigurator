@@ -27,10 +27,13 @@ use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
 
-/// GEMM-family perf-data owner for one `<system>/<backend>/<version>` slice.
+/// GEMM-family perf-data owner for one logical
+/// `<system>/<backend>/<version>` selection.
 ///
-/// Holds the data directory and three lazy CSV-loaded tables. Construct via
-/// `GemmTable::new`; queries trigger the relevant table's load on first use.
+/// Resolves the physical files under
+/// `<system>/<family>/<backend>/<version>` and lazily loads the three parquet
+/// tables. Construct via `GemmTable::new`; queries trigger the relevant
+/// table's load on first use.
 ///
 /// `system_spec` is kept for SOL clamping at load time, mirroring Python's
 /// `GEMM._correct_sol`. The supporting `compute_scale` / `scale_matrix`
@@ -544,7 +547,7 @@ mod tests {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join(format!(
-                "src/aiconfigurator_core/systems/data/b200_sxm/{backend}/{version}/gemm_perf.parquet"
+                "src/aiconfigurator_core/systems/data/b200_sxm/gemm/{backend}/{version}/gemm_perf.parquet"
             ))
     }
 
@@ -616,7 +619,8 @@ mod tests {
     #[test]
     fn gemm_exact_hit_returns_recorded_latency() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        // First row of b200_sxm/vllm/0.19.0/gemm_perf.txt (bfloat16 32768x65536x16384).
+        // First row of b200_sxm/gemm/vllm/0.19.0/gemm_perf.parquet
+        // (bfloat16 32768x65536x16384).
         let latency = table
             .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
             .expect("query must succeed");

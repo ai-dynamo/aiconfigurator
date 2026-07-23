@@ -584,14 +584,15 @@ def main():
             # Ignore for now
             continue
 
+        # Deprecated legacy transition path:
         # data/<system>/<backend>/<backend_version>/*.parquet
         elif len(parts) == 5 and parts[0] == "data":
             system = parts[1]
             backend = parts[2]
             backend_version = parts[3]
 
-            # data/<system>/nccl/<nccl_version>/nccl_perf.parquet
-            # data/<system>/oneccl/<oneccl_version>/oneccl_perf.parquet
+            # Legacy data/<system>/nccl/<nccl_version>/nccl_perf.parquet
+            # Legacy data/<system>/oneccl/<oneccl_version>/oneccl_perf.parquet
             if backend in ("nccl", "oneccl"):
                 # Ignore for now
                 continue

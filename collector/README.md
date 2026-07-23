@@ -57,7 +57,10 @@ network/collect_comm.sh --all_reduce_backend vllm --device xpu #all_reduce data 
 ```
 Today we only collect intra-node comm. This script will collect custom allreduce data for trtllm within a node.
 It will also collect nccl allreduce, all_gather, all2all, reduce_scatter using nccl.
-The generated files are nccl_perf.txt, oneccl_perf.txt, and custom_allreduce_perf.txt.
+The standalone scripts stage `nccl_perf.txt`, `oneccl_perf.txt`, and
+`custom_allreduce_perf.txt`. Collector finalization converts accepted output
+to parquet under
+`aic-core/src/aiconfigurator_core/systems/data/<system>/comm/<backend>/<version>/`.
 
 # Model-centric cases and healing runs
 

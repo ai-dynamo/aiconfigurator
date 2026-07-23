@@ -3,7 +3,7 @@
 
 //! TensorRT-LLM WideEP MoE *compute* perf table.
 //!
-//! `wideep_moe_perf.txt` (Python `PerfDataFilename.wideep_moe_compute`).
+//! `wideep_moe_perf.parquet` (Python `PerfDataFilename.wideep_moe_compute`).
 //! Pure-compute kernel timing (no All2All) for the WideEP execution
 //! path. The dispatch / combine cost is modeled separately by the
 //! `wideep` (DeepEP / TRT-LLM All2All) table.
@@ -292,7 +292,8 @@ mod tests {
 
     #[test]
     fn wideep_moe_compute_exact_hit() {
-        // First row of b200_sxm/trtllm/1.3.0rc10/wideep_moe_perf.txt:
+        // First row of
+        // b200_sxm/moe/trtllm/1.3.0rc10/wideep_moe_perf.parquet:
         // kernel=wideep_compute_cutlass moe_dtype=nvfp4 num_tokens=1
         // hidden=6144 inter=2048 topk=8 num_experts=256 num_slots=256
         // moe_tp=1 moe_ep=2 distribution=power_law_1.01 latency=0.08600...

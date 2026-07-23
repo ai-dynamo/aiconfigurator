@@ -381,7 +381,11 @@ def check(registry_path: Path, by_op: dict[str, list[dict]], axes_by_op: dict[st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-root", type=Path, default=Path("src/aiconfigurator/systems/data"))
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=Path("aic-core/src/aiconfigurator_core/systems/data"),
+    )
     parser.add_argument("--registry", type=Path, default=Path("collector/op_backend_facts.yaml"))
     parser.add_argument("--backend-map", type=Path, default=Path("collector/kernel_source_backends.yaml"))
     parser.add_argument("--catalog", type=Path, default=Path("collector/op_backend_catalog.yaml"))

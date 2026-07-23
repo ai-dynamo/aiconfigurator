@@ -4,10 +4,10 @@
 """Mamba2 + GDN kernels (ISSUE-09 / AIC-539).
 
 - ``Mamba2Kernel`` represents a single Mamba2 kernel (conv1d or SSM) and
-  owns ``_data_cache`` for ``mamba2_perf.txt``.
+  owns ``_data_cache`` for ``mamba2_perf.parquet``.
   ``PerfDatabase.query_mamba2`` delegates here.
 - ``GDNKernel`` represents a single Gated DeltaNet kernel for Qwen3.5
-  linear-attention layers and owns ``_data_cache`` for ``gdn_perf.txt``.
+  linear-attention layers and owns ``_data_cache`` for ``gdn_perf.parquet``.
   ``PerfDatabase.query_gdn`` delegates here.
 - ``Mamba2`` is the higher-level composite op for NemotronH-style hybrid
   models — calls ``database.query_gemm`` (for in_proj + out_proj) and
@@ -702,7 +702,7 @@ class Mamba2(Operation):
 
 def load_mamba2_data(mamba2_file: str):
     """
-    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.parquet.
 
     CSV columns: framework, version, device, op_name, kernel_source, phase,
     batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
@@ -787,7 +787,7 @@ _GDN_DECODE_RECURRENCE_ALIASES = {
 
 def load_gdn_data(gdn_file: str):
     """
-    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
+    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.parquet.
 
     CSV columns: framework, version, device, op_name, kernel_source, phase,
     batch_size, seq_len, num_tokens, d_model, d_conv, num_k_heads, head_k_dim,

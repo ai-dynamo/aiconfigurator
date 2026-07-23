@@ -155,9 +155,10 @@ Update the draft PR body whenever scope changes or a meaningful checkpoint lands
 
 If the system is new or incomplete:
 
-1. Add `src/aiconfigurator/systems/<system>.yaml`.
-2. Add `<system>` to `SupportedSystems` in `src/aiconfigurator/sdk/common.py`.
-3. Create `src/aiconfigurator/systems/data/<system>/`.
+1. Add `aic-core/src/aiconfigurator_core/systems/<system>.yaml`.
+2. Add `<system>` to `SupportedSystems` in
+   `aic-core/src/aiconfigurator_core/sdk/common.py`.
+3. Create `aic-core/src/aiconfigurator_core/systems/data/<system>/`.
 4. Populate YAML with conservative, documented values:
    - `gpu.mem_bw`
    - `gpu.mem_capacity`
@@ -386,10 +387,12 @@ Therefore ALWAYS verify results by content, never by status:
    large shortfalls mean the run died early — check the tail of the log for
    container/cluster death, not just collector errors.
 
-Accept a perf file only when:
+The canonical destination family comes from
+`collector/op_backend_catalog.yaml`. Accept a perf file only when:
 
-- It exists under `src/aiconfigurator/systems/data/<system>/<backend>/<version>/`.
-- It is not empty and has the expected CSV header.
+- It is finalized as parquet under
+  `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`.
+- It is not empty and has the expected parquet schema.
 - Rows contain the expected framework, version, and device name.
 - Latency values are finite and plausible. They should usually be positive; allow zero only for documented modeled-overhead files such as compute-scale where the collector intentionally clamps negative overhead to zero.
 - Power values, when collected, are positive and below/near the configured power limit.
@@ -401,16 +404,26 @@ Accept a perf file only when:
 Useful checks:
 
 ```bash
-find src/aiconfigurator/systems/data/<system>/<backend>/<version> -maxdepth 1 -type f -name '*_perf.txt' -print
+find aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version> \
+  -maxdepth 1 -type f -name '*_perf.parquet' -print
 python3 - <<'PY'
 from pathlib import Path
-import csv, math
-root = Path("src/aiconfigurator/systems/data/<system>/<backend>/<version>")
-for path in sorted(root.glob("*_perf.txt")):
-    with path.open() as f:
-        rows = list(csv.DictReader(f))
-    bad = [r for r in rows if "latency" in r and (not r["latency"] or not math.isfinite(float(r["latency"])) or float(r["latency"]) <= 0)]
-    print(path.name, "rows", len(rows), "bad_latency", len(bad))
+import math
+import pyarrow.parquet as pq
+
+root = Path(
+    "aic-core/src/aiconfigurator_core/systems/data/"
+    "<system>/<family>/<backend>/<version>"
+)
+for path in sorted(root.glob("*_perf.parquet")):
+    table = pq.read_table(path)
+    latencies = table.column("latency").to_pylist() if "latency" in table.column_names else []
+    bad = [
+        value
+        for value in latencies
+        if value is None or not math.isfinite(float(value)) or float(value) <= 0
+    ]
+    print(path.name, "rows", table.num_rows, "bad_latency", len(bad))
 PY
 ```
 

@@ -3,19 +3,19 @@
 
 //! WideEP / DeepEP / TRT-LLM all-to-all perf tables for distributed MoE.
 //!
-//! Five CSVs span two shape families:
+//! Six parquet tables span two shape families:
 //!
-//! 1. MoE-compute layout (same columns as `moe_perf.txt`):
-//!    - `wideep_context_moe_perf.txt`
-//!    - `wideep_generation_moe_perf.txt`
-//!    - `wideep_moe_perf.txt` (TRT-LLM WideEP MoE compute; extra columns
+//! 1. MoE-compute layout (same columns as `moe_perf.parquet`):
+//!    - `wideep_context_moe_perf.parquet`
+//!    - `wideep_generation_moe_perf.parquet`
+//!    - `wideep_moe_perf.parquet` (TRT-LLM WideEP MoE compute; extra columns
 //!      handled by tolerant deserialization)
-//!    - `trtllm_alltoall_perf.txt` (TRT-LLM alltoall dispatch; subset of
+//!    - `trtllm_alltoall_perf.parquet` (TRT-LLM alltoall dispatch; subset of
 //!      MoE columns)
 //!
 //! 2. DeepEP dispatch layout (separate notify/transmit latencies):
-//!    - `wideep_deepep_normal_perf.txt`
-//!    - `wideep_deepep_ll_perf.txt`
+//!    - `wideep_deepep_normal_perf.parquet`
+//!    - `wideep_deepep_ll_perf.parquet`
 //!
 //! All loaders are lazy. Token curves resolve on the shared perf_interp v2
 //! engine (Grid, RAW lerp in range; beyond the collected range the

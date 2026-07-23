@@ -3,8 +3,9 @@
 
 //! SGLang WideEP MLA perf tables (context + generation).
 //!
-//! Two CSVs with the same column set: `wideep_context_mla_perf.txt` and
-//! `wideep_generation_mla_perf.txt`. Columns: framework, version, device,
+//! Two parquet tables with the same column set:
+//! `wideep_context_mla_perf.parquet` and
+//! `wideep_generation_mla_perf.parquet`. Columns: framework, version, device,
 //! op_name, kernel_source, model, architecture, mla_dtype, kv_cache_dtype,
 //! gemm_type, num_heads, batch_size, isl, tp_size, step, latency.
 //!
@@ -534,7 +535,8 @@ mod tests {
 
     #[test]
     fn wideep_context_mla_exact_hit() {
-        // First DSv3 row in b200_sxm/sglang/0.5.10 wideep_context_mla_perf.txt:
+        // First DSv3 row in
+        // b200_sxm/mla/sglang/0.5.10/wideep_context_mla_perf.parquet:
         // kernel=trtllm_mla mla=fp8_block kv=fp8 num_heads=128 b=1 isl=1 latency=0.5470
         let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
         let latency = table
@@ -555,7 +557,8 @@ mod tests {
 
     #[test]
     fn wideep_generation_mla_exact_hit() {
-        // First DSv3 row in b200_sxm/sglang/0.5.10 wideep_generation_mla_perf.txt:
+        // First DSv3 row in
+        // b200_sxm/mla/sglang/0.5.10/wideep_generation_mla_perf.parquet:
         // kernel=trtllm_mla kv=fp8 num_heads=128 b=1 isl=1 step=0 latency=0.1049
         let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
         let latency = table

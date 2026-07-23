@@ -36,7 +36,10 @@ AIConfigurator is a Python CLI/SDK tool for optimizing LLM inference deployment 
 Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environment lives at `.venv/`. All commands below assume `.venv/bin/` is on PATH or you prefix with `.venv/bin/`.
 
 - **Install/refresh deps:** `python3 -m uv sync --extra dev`
-- **Git LFS:** The performance database files under `aic-core/src/aiconfigurator_core/systems/data/**/*.txt` are tracked with Git LFS. Run `git lfs pull` after cloning. If LFS pull fails (e.g., `github-cloud.githubusercontent.com` is blocked), the CLI `generate` and `support` modes still work. The `default` mode requires real LFS data.
+- **Performance data:** Current op profiles are parquet files under
+  `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`
+  and are checked in directly. Legacy `*.txt` perf files, when present, use
+  Git LFS; run `git lfs pull` only when working with those legacy assets.
 
 ### Lint / Test / Run
 
@@ -46,7 +49,10 @@ Dependencies are managed via `uv` with a `uv.lock` lockfile. The virtual environ
 - **CLI:** `aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm` (works without LFS data)
 ### Known environment caveats
 
-1. **LFS data:** `github-cloud.githubusercontent.com` may be blocked by network egress restrictions. If `git lfs pull` fails, unit tests and CLI `generate`/`support` modes still work. The `default` mode and `build`-marked tests will fail.
+1. **Legacy LFS data:** `github-cloud.githubusercontent.com` may be blocked by
+   network egress restrictions. If `git lfs pull` fails, tests that explicitly
+   exercise legacy text assets may fail; current parquet-backed workflows do
+   not depend on those legacy files.
 2. **TTY tests:** 4 tests in `tests/unit/cli/test_plain_output.py` may fail because the agent runs in a non-TTY environment.
 3. **Rust tests:** `tests/unit/sdk/test_rust_engine_step.py` requires `cargo` with network access to `crates.io`. It will fail if that domain is blocked.
 4. **macOS pytest-timeout crash dialogs:** The `timeout = 120` setting in `pytest.ini` uses SIGALRM by default, which triggers "Python unexpectedly quit" crash reporter popups on macOS. Pass `-p no:timeout` to disable it locally: `.venv/bin/pytest -m unit -p no:timeout`
