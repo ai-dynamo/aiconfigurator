@@ -286,9 +286,7 @@ def resolve_model_capability(
     fmha_by_kv: dict[str, str] = {}
     fmha_resolution_by_kv: dict[str, str] = {}
     for kv_name in resolved_kv:
-        joint_modes = context_fmha_supported_modes(
-            database, context_op, common.KVCacheQuantMode[kv_name]
-        )
+        joint_modes = context_fmha_supported_modes(database, context_op, common.KVCacheQuantMode[kv_name])
         if inferred_fmha in joint_modes:
             fmha_by_kv[kv_name] = inferred_fmha
             fmha_resolution_by_kv[kv_name] = "checkpoint_native"
