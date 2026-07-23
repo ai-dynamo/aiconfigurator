@@ -544,7 +544,7 @@ mod tests {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join(format!(
-                "src/aiconfigurator_core/systems/data/b200_sxm/{backend}/{version}/gemm_perf.parquet"
+                "src/aiconfigurator_core/systems/data/b200_sxm/gemm/{backend}/{version}/gemm_perf.parquet"
             ))
     }
 
