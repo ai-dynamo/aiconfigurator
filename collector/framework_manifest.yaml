@@ -1,39 +1,53 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Collector V3 manifest (schema v2): one `default` runtime per framework plus
+# explicit per-family overrides (design: docs/perf_database/
+# collector-v3-op-centric-design.md §4). Public images are digest-pinned;
+# bare internal image names are exempt. WideEP runtimes are peer framework
+# entries (wideep_<base>) so per-op resolution is uniform.
 
-schema_version: 1
+schema_version: 2
 
 frameworks:
   sglang:
-    version: "0.5.14"
-    images:
-      default: "lmsysorg/sglang:v0.5.14"
-      cu130: "lmsysorg/sglang:v0.5.14-cu130"
     source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
+        cu130: "lmsysorg/sglang:v0.5.14-cu130@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
+    # families: {}   # explicit per-family overrides go here (spec §4)
   trtllm:
-    version: "1.3.0rc10"
-    images:
-      default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
+    default:
+      version: "1.3.0rc10"
+      images:
+        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:fd68e7500952100df58bb3682c4ea69b6e6723dc4d13dfc911a1bdee80ac389a"
   vllm:
-    version: "0.24.0"
-    images:
-      default: "vllm/vllm-openai:v0.24.0"
-      cu129: "vllm/vllm-openai:v0.24.0-cu129"
     source_repo: "https://github.com/vllm-project/vllm.git"
-
-wideep:
-  sglang:
-    version: "0.5.10"
-    images:
-      default: "deepseek-v4-blackwell"
-      grace_blackwell: "deepseek-v4-grace-blackwell"
+    default:
+      version: "0.24.0"
+      images:
+        default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
+        cu129: "vllm/vllm-openai:v0.24.0-cu129@sha256:6b005c78cd17a1f0215f31e95d183833f4dfd6167c4473241b80d1c8843b91e8"
+  wideep_sglang:
+    base_framework: sglang
     collector_dir: "collector/wideep/sglang"
+    data_backend: sglang
+    default:
+      version: "0.5.10"
+      images:
+        default: "deepseek-v4-blackwell"
+        grace_blackwell: "deepseek-v4-grace-blackwell"
     notes: >
       Requires an SGLang image with DeepSeek-V4/DeepEP modules; stock
       lmsysorg/sglang images may not include them.
-  trtllm:
-    version: "1.3.0rc10"
-    images:
-      default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10"
+  wideep_trtllm:
+    base_framework: trtllm
     collector_dir: "collector/wideep/trtllm"
+    data_backend: trtllm
+    default:
+      version: "1.3.0rc10"
+      images:
+        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:fd68e7500952100df58bb3682c4ea69b6e6723dc4d13dfc911a1bdee80ac389a"
