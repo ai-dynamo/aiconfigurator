@@ -767,6 +767,18 @@
       gap: 18px;
     }
 
+    .detail-link {
+      margin-left: auto;
+      color: var(--brand-dark);
+      font-weight: 760;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .detail-link:hover {
+      text-decoration: underline;
+    }
+
     .mock-notice {
       display: flex;
       margin-top: 16px;
@@ -1525,6 +1537,9 @@
           <div class="chart-footnote">
             <span>${datasetRunCount.toLocaleString()} matching runs · line break marks non-comparable coverage</span>
             <span>X-axis: evaluation date / AIC main TOT</span>
+            <a class="detail-link" href="evaluation-detail.html#dataset=${encodeURIComponent(dataset.id)}">
+              View heatmaps ↗
+            </a>
           </div>
         `;
 

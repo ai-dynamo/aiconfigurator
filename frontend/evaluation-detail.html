@@ -1,0 +1,1647 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    name="description"
+    content="Interactive AIC evaluation slice detail with workload distribution and prediction-error heatmaps."
+  >
+  <title>AIC Eval · Evaluation Slice Detail</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      --ink: #18201c;
+      --muted: #65706a;
+      --subtle: #8a948f;
+      --surface: #ffffff;
+      --canvas: #f3f5f3;
+      --line: #dfe4e0;
+      --line-soft: #edf0ed;
+      --brand: #76b900;
+      --brand-dark: #315900;
+      --brand-soft: #eff9dc;
+      --nav: #151a17;
+      --blue: #3068d8;
+      --orange: #e6633e;
+      --shadow: 0 14px 38px rgba(28, 40, 33, 0.07);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--canvas);
+      color: var(--ink);
+    }
+
+    button {
+      font: inherit;
+      cursor: pointer;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .app-header {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background:
+        radial-gradient(circle at 78% -40%, rgba(118, 185, 0, 0.24), transparent 32%),
+        var(--nav);
+      color: #fff;
+    }
+
+    .nav {
+      display: flex;
+      max-width: 1560px;
+      min-height: 68px;
+      margin: 0 auto;
+      padding: 0 32px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: var(--brand);
+      color: #0e150a;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+      place-items: center;
+    }
+
+    .brand-name {
+      font-size: 15px;
+      font-weight: 760;
+      letter-spacing: 0.01em;
+    }
+
+    .brand-section {
+      color: #9fa8a2;
+      font-size: 13px;
+    }
+
+    .nav-status {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #c9cfcb;
+      font-size: 12px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(118, 185, 0, 0.14);
+    }
+
+    main {
+      max-width: 1560px;
+      margin: 0 auto;
+      padding: 28px 32px 64px;
+    }
+
+    .breadcrumb {
+      display: flex;
+      margin-bottom: 22px;
+      color: var(--muted);
+      font-size: 12px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .breadcrumb a {
+      color: var(--brand-dark);
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .breadcrumb a:hover {
+      text-decoration: underline;
+    }
+
+    .breadcrumb-separator {
+      color: #adb4af;
+    }
+
+    .hero {
+      display: flex;
+      margin-bottom: 24px;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 9px;
+      color: var(--brand-dark);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 22px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--brand);
+      content: "";
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font-size: clamp(29px, 3.5vw, 46px);
+      letter-spacing: -0.04em;
+      line-height: 1.08;
+    }
+
+    .hero-copy {
+      max-width: 850px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .mock-badge {
+      display: inline-flex;
+      flex: 0 0 auto;
+      padding: 8px 11px;
+      border: 1px solid #dce5d2;
+      border-radius: 999px;
+      background: #f7faF3;
+      color: #557328;
+      font-size: 11px;
+      font-weight: 750;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .mock-badge::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--brand);
+      content: "";
+    }
+
+    .slice-browser {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .section-heading {
+      display: flex;
+      margin-bottom: 13px;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .section-heading h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: -0.01em;
+    }
+
+    .section-heading p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .slice-options {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .slice-option {
+      position: relative;
+      min-width: 0;
+      padding: 13px 14px 12px;
+      border: 1px solid #dde2de;
+      border-radius: 11px;
+      outline: none;
+      background: #fff;
+      color: var(--ink);
+      text-align: left;
+      transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+    }
+
+    .slice-option:hover {
+      border-color: #b9c2bb;
+      background: #fcfdfc;
+    }
+
+    .slice-option:focus-visible {
+      box-shadow: 0 0 0 3px rgba(118, 185, 0, 0.16);
+    }
+
+    .slice-option.active {
+      border-color: #83b737;
+      background: #f7fbf1;
+      box-shadow: inset 3px 0 0 var(--brand);
+    }
+
+    .slice-option-dataset {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--brand-dark);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .slice-option-config {
+      display: block;
+      overflow: hidden;
+      font-size: 13px;
+      font-weight: 760;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .slice-option-method {
+      display: -webkit-box;
+      margin-top: 4px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+
+    .detail-card {
+      margin-top: 16px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface);
+    }
+
+    .detail-card-header {
+      display: flex;
+      padding: 19px 21px;
+      border-bottom: 1px solid var(--line-soft);
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .detail-card-kicker {
+      margin-bottom: 5px;
+      color: var(--brand-dark);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .detail-card h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.025em;
+    }
+
+    .detail-subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .config-id {
+      flex: 0 0 auto;
+      padding: 6px 9px;
+      border-radius: 7px;
+      background: #f1f3f1;
+      color: #65706a;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+    }
+
+    .config-grid {
+      display: grid;
+      padding: 17px 21px;
+      grid-template-columns: 1.3fr 1fr 1fr 0.7fr 1fr 1.7fr 1.1fr;
+      gap: 0;
+    }
+
+    .config-item {
+      min-width: 0;
+      padding: 4px 16px;
+      border-right: 1px solid var(--line-soft);
+    }
+
+    .config-item:first-child {
+      padding-left: 0;
+    }
+
+    .config-item:last-child {
+      padding-right: 0;
+      border-right: 0;
+    }
+
+    .config-label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--subtle);
+      font-size: 9px;
+      font-weight: 760;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .config-value {
+      display: block;
+      overflow: hidden;
+      font-size: 12px;
+      font-weight: 710;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+    }
+
+    .phase-bar {
+      display: flex;
+      padding: 12px 21px;
+      border-top: 1px solid var(--line-soft);
+      background: #fafbfa;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .phase-copy {
+      min-width: 0;
+    }
+
+    .phase-copy strong {
+      display: block;
+      font-size: 12px;
+    }
+
+    .phase-copy span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .phase-tabs {
+      display: inline-flex;
+      flex: 0 0 auto;
+      padding: 3px;
+      border: 1px solid #dce1dd;
+      border-radius: 9px;
+      background: #fff;
+      gap: 3px;
+    }
+
+    .phase-tab {
+      min-width: 104px;
+      height: 31px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #64706a;
+      font-size: 11px;
+      font-weight: 720;
+    }
+
+    .phase-tab.active {
+      background: #26302b;
+      color: #fff;
+    }
+
+    .phase-count {
+      margin-left: 5px;
+      opacity: 0.72;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metrics {
+      display: grid;
+      margin: 16px 0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      overflow: hidden;
+      background: var(--surface);
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 15px 18px;
+      border-right: 1px solid var(--line-soft);
+    }
+
+    .metric:last-child {
+      border-right: 0;
+    }
+
+    .metric-label {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 760;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      font-size: 21px;
+      font-weight: 790;
+      letter-spacing: -0.025em;
+    }
+
+    .metric-note {
+      margin-top: 3px;
+      color: var(--subtle);
+      font-size: 9px;
+    }
+
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .heatmap-card {
+      min-width: 0;
+      padding: 18px 18px 14px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: var(--surface);
+      box-shadow: 0 9px 28px rgba(34, 44, 38, 0.045);
+    }
+
+    .heatmap-header {
+      display: flex;
+      min-height: 55px;
+      margin-bottom: 8px;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .heatmap-kicker {
+      margin-bottom: 4px;
+      color: var(--brand-dark);
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .heatmap-header h3 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: -0.015em;
+    }
+
+    .heatmap-description {
+      max-width: 520px;
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .metric-toggle {
+      display: inline-flex;
+      flex: 0 0 auto;
+      padding: 2px;
+      border: 1px solid #dde2de;
+      border-radius: 8px;
+      background: #f8f9f8;
+    }
+
+    .metric-toggle button {
+      height: 28px;
+      padding: 0 9px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 720;
+    }
+
+    .metric-toggle button.active {
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(27, 38, 31, 0.1);
+      color: var(--ink);
+    }
+
+    .heatmap-canvas {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    .heatmap-canvas svg {
+      display: block;
+      width: 100%;
+      min-width: 520px;
+      height: auto;
+    }
+
+    .heatmap-axis-label {
+      fill: #748078;
+      font-family: inherit;
+      font-size: 10px;
+    }
+
+    .heatmap-axis-title {
+      fill: #59645e;
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 760;
+    }
+
+    .heatmap-cell {
+      stroke: #fff;
+      stroke-width: 2;
+      transition: opacity 100ms ease, stroke 100ms ease;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .heatmap-cell:hover,
+    .heatmap-cell:focus {
+      stroke: #17201b;
+      stroke-width: 2.5;
+      outline: none;
+      opacity: 0.88;
+    }
+
+    .heatmap-value {
+      fill: #fff;
+      font-family: inherit;
+      font-size: 9px;
+      font-weight: 750;
+      pointer-events: none;
+    }
+
+    .heatmap-value.dark {
+      fill: #26302b;
+    }
+
+    .empty-cell {
+      fill: #f4f6f4;
+      stroke: #e5e9e6;
+    }
+
+    .legend {
+      display: grid;
+      margin: 9px 7px 0 59px;
+      grid-template-columns: auto minmax(90px, 190px) auto;
+      align-items: center;
+      justify-content: end;
+      gap: 8px;
+      color: var(--subtle);
+      font-size: 9px;
+    }
+
+    .legend-bar {
+      height: 7px;
+      border-radius: 999px;
+    }
+
+    .legend-bar.distribution {
+      background: linear-gradient(90deg, #eef7df, #76b900, #315900);
+    }
+
+    .legend-bar.error {
+      background: linear-gradient(90deg, #3068d8, #e9effc 42%, #f7f7f5 50%, #fbe9e4 58%, #e6633e);
+    }
+
+    .insight-bar {
+      display: grid;
+      margin-top: 16px;
+      padding: 13px 15px;
+      border: 1px solid #dce5d2;
+      border-radius: 11px;
+      background: #f7faF3;
+      grid-template-columns: auto 1fr;
+      gap: 9px;
+      color: #66715f;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .insight-bar strong {
+      color: #354128;
+    }
+
+    .reference-note {
+      margin-top: 13px;
+      color: var(--subtle);
+      font-size: 10px;
+      line-height: 1.55;
+    }
+
+    .reference-note a {
+      color: #4b6b19;
+      font-weight: 650;
+    }
+
+    .tooltip {
+      position: fixed;
+      z-index: 20;
+      width: min(280px, calc(100vw - 16px));
+      padding: 11px 12px;
+      border: 1px solid #d7dcd8;
+      border-radius: 10px;
+      background: rgba(21, 26, 23, 0.97);
+      box-shadow: 0 12px 30px rgba(18, 24, 20, 0.22);
+      color: #fff;
+      font-size: 10px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(12px, 12px);
+      transition: opacity 80ms ease;
+    }
+
+    .tooltip.visible {
+      opacity: 1;
+    }
+
+    .tooltip-title {
+      margin-bottom: 7px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 11px;
+      font-weight: 760;
+    }
+
+    .tooltip-row {
+      display: flex;
+      margin-top: 5px;
+      color: #cbd1cd;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .tooltip-row strong {
+      color: #fff;
+      font-weight: 730;
+    }
+
+    @media (max-width: 1120px) {
+      .config-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        row-gap: 14px;
+      }
+
+      .config-item,
+      .config-item:first-child,
+      .config-item:last-child {
+        padding: 0 12px;
+        border-right: 1px solid var(--line-soft);
+      }
+
+      .config-item:nth-child(4n),
+      .config-item:last-child {
+        border-right: 0;
+      }
+
+      .config-item:nth-child(4n + 1) {
+        padding-left: 0;
+      }
+    }
+
+    @media (max-width: 880px) {
+      .nav,
+      main {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .hero {
+        display: block;
+      }
+
+      .mock-badge {
+        margin-top: 16px;
+      }
+
+      .slice-options {
+        grid-template-columns: 1fr;
+      }
+
+      .heatmap-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .metric:nth-child(3) {
+        border-right: 0;
+      }
+
+      .metric:nth-child(-n + 3) {
+        border-bottom: 1px solid var(--line-soft);
+      }
+    }
+
+    @media (max-width: 620px) {
+      .brand-section,
+      .nav-status {
+        display: none;
+      }
+
+      main {
+        padding-top: 22px;
+      }
+
+      .detail-card-header {
+        display: block;
+      }
+
+      .config-id {
+        display: inline-block;
+        margin-top: 12px;
+      }
+
+      .config-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .config-item:nth-child(n),
+      .config-item:first-child,
+      .config-item:last-child {
+        padding: 0 11px;
+        border-right: 1px solid var(--line-soft);
+      }
+
+      .config-item:nth-child(2n) {
+        border-right: 0;
+      }
+
+      .config-item:nth-child(2n + 1) {
+        padding-left: 0;
+      }
+
+      .phase-bar {
+        display: block;
+      }
+
+      .phase-tabs {
+        display: flex;
+        width: 100%;
+        margin-top: 12px;
+      }
+
+      .phase-tab {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .metric:nth-child(n) {
+        border-right: 1px solid var(--line-soft);
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .metric:nth-child(2n) {
+        border-right: 0;
+      }
+
+      .metric:last-child {
+        border-right: 0;
+        border-bottom: 0;
+      }
+
+      .heatmap-card {
+        padding-inline: 12px;
+      }
+
+      .heatmap-canvas svg {
+        min-width: 0;
+      }
+
+      .heatmap-header {
+        display: block;
+      }
+
+      .metric-toggle {
+        margin-top: 10px;
+      }
+
+      .legend {
+        margin-left: 50px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <nav class="nav" aria-label="Primary">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div>
+          <div class="brand-name">AIC Eval</div>
+          <div class="brand-section">Performance intelligence</div>
+        </div>
+      </div>
+      <div class="nav-status">
+        <span class="status-dot" aria-hidden="true"></span>
+        Evaluation slice detail
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="index.html">Performance trends</a>
+      <span class="breadcrumb-separator">/</span>
+      <span>Evaluation slice detail</span>
+    </nav>
+
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <div class="eyebrow">Configuration drill-down</div>
+        <h1 id="page-title">Workload coverage and prediction error</h1>
+        <p class="hero-copy">
+          Inspect one exact model × hardware × backend × MTP × parallelization ×
+          performance-modeling method × dataset combination.
+        </p>
+      </div>
+      <div class="mock-badge">Interactive synthetic data</div>
+    </section>
+
+    <section class="slice-browser" aria-labelledby="slice-browser-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="slice-browser-title">Open an evaluation slice</h2>
+          <p>Each option is one exact configuration and predictor run.</p>
+        </div>
+      </div>
+      <div class="slice-options" id="slice-options"></div>
+    </section>
+
+    <section class="detail-card" aria-labelledby="detail-title">
+      <div class="detail-card-header">
+        <div>
+          <div class="detail-card-kicker" id="detail-kicker">Selected evaluation slice</div>
+          <h2 id="detail-title">—</h2>
+          <p class="detail-subtitle" id="detail-subtitle">—</p>
+        </div>
+        <code class="config-id" id="configuration-id">—</code>
+      </div>
+
+      <div class="config-grid" id="config-grid"></div>
+
+      <div class="phase-bar">
+        <div class="phase-copy">
+          <strong>Forward-pass workload</strong>
+          <span id="phase-note">Switch phase to inspect its shape distribution.</span>
+        </div>
+        <div class="phase-tabs" id="phase-tabs" aria-label="Forward-pass workload phase"></div>
+      </div>
+    </section>
+
+    <section class="metrics" aria-label="Evaluation summary">
+      <div class="metric">
+        <div class="metric-label">Observations</div>
+        <div class="metric-value" id="metric-observations">—</div>
+        <div class="metric-note">eligible FPMs</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Coverage</div>
+        <div class="metric-value" id="metric-coverage">—</div>
+        <div class="metric-note">successful predictions</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">MAPE</div>
+        <div class="metric-value" id="metric-mape">—</div>
+        <div class="metric-note">mean absolute % error</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">MAE</div>
+        <div class="metric-value" id="metric-mae">—</div>
+        <div class="metric-note">milliseconds</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Bias</div>
+        <div class="metric-value" id="metric-bias">—</div>
+        <div class="metric-note">prediction − actual</div>
+      </div>
+    </section>
+
+    <section class="heatmap-grid" aria-label="Evaluation heatmaps">
+      <article class="heatmap-card">
+        <div class="heatmap-header">
+          <div>
+            <div class="heatmap-kicker">Heatmap 1</div>
+            <h3>Dataset distribution</h3>
+            <p class="heatmap-description" id="distribution-description">
+              FPM count in each workload-shape bin.
+            </p>
+          </div>
+        </div>
+        <div class="heatmap-canvas" id="distribution-heatmap"></div>
+        <div class="legend">
+          <span>Fewer</span>
+          <span class="legend-bar distribution"></span>
+          <span>More FPMs</span>
+        </div>
+      </article>
+
+      <article class="heatmap-card">
+        <div class="heatmap-header">
+          <div>
+            <div class="heatmap-kicker">Heatmap 2</div>
+            <h3>Prediction − actual</h3>
+            <p class="heatmap-description">
+              Signed mean error in the same workload-shape bins.
+            </p>
+          </div>
+          <div class="metric-toggle" aria-label="Prediction error metric">
+            <button type="button" class="active" data-error-metric="pct">% error</button>
+            <button type="button" data-error-metric="ms">Δ ms</button>
+          </div>
+        </div>
+        <div class="heatmap-canvas" id="error-heatmap"></div>
+        <div class="legend">
+          <span>Underpredict</span>
+          <span class="legend-bar error"></span>
+          <span>Overpredict</span>
+        </div>
+      </article>
+    </section>
+
+    <div class="insight-bar">
+      <span aria-hidden="true">ⓘ</span>
+      <div id="insight-copy"></div>
+    </div>
+
+    <p class="reference-note">
+      The workload dimensions and distribution behavior follow the evaluation methodology in
+      <a
+        href="https://docs.google.com/document/d/1dCt1XQnn4yQbOWU8JdU1atjIF1yD4ScxlJNeLexyxMA/edit"
+        target="_blank"
+        rel="noreferrer"
+      >Evaluating AIC Forward Pass Prediction</a>:
+      self-benchmarking targets broad, even shape coverage, while Mooncake replay is decode-heavy
+      and concentrated in long-context regions. Values shown here are synthetic.
+    </p>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const slices = [
+        {
+          id: "minimax-mooncake",
+          model: "MiniMax-M2.5",
+          hardware: "4 × H100 SXM",
+          backend: "vLLM 0.24",
+          mtp: "MTP-1",
+          parallelism: "TP4 · PP1",
+          method: "AIC native + self-benchmarking data bootstrap + online-finetune",
+          dataset: "Mooncake trace",
+          datasetId: "mooncake-trace",
+          configurationId: "wc_73f3b133…358e3",
+          profile: "mooncake",
+          defaultPhase: "decode",
+          counts: { prefill: 2, decode: 5000 },
+          coverage: { prefill: 1, decode: 0.998 },
+          errorScale: 0.72,
+          subtitle: "Mooncake replay evaluated with an online-tuned native predictor."
+        },
+        {
+          id: "qwen-self-benchmark",
+          model: "Qwen3-8B",
+          hardware: "1 × H100 SXM",
+          backend: "vLLM 0.24",
+          mtp: "Disabled",
+          parallelism: "TP1 · PP1",
+          method: "Regression (build with self-benchmarking)",
+          dataset: "Self-benchmark",
+          datasetId: "self-benchmark",
+          configurationId: "wc_312823e2…d95c",
+          profile: "self-benchmark",
+          defaultPhase: "prefill",
+          counts: { prefill: 2500, decode: 2500 },
+          coverage: { prefill: 1, decode: 1 },
+          errorScale: 0.9,
+          subtitle: "Held-out self-benchmark grid evaluated with a fitted regression predictor."
+        },
+        {
+          id: "deepseek-real-trace",
+          model: "DeepSeek-R1-32B",
+          hardware: "8 × B200 SXM",
+          backend: "SGLang 0.4",
+          mtp: "MTP-3",
+          parallelism: "DP2 · TP4",
+          method: "AIC native",
+          dataset: "Place holder real accuracy trace",
+          datasetId: "placeholder-real-accuracy-trace",
+          configurationId: "wc_b87931af…771d",
+          profile: "real-trace",
+          defaultPhase: "decode",
+          counts: { prefill: 12000, decode: 18000 },
+          coverage: { prefill: 0.984, decode: 0.991 },
+          errorScale: 1.18,
+          subtitle: "Placeholder production-accuracy slice with organic workload clusters."
+        }
+      ];
+
+      const phases = {
+        prefill: {
+          label: "Prefill",
+          xTitle: "num_prefill_requests",
+          yTitle: "sum_prefill_tokens",
+          xBins: ["1", "2", "4", "8", "16", "32", "64", "128"],
+          yBins: ["128", "256", "512", "1K", "2K", "4K", "8K", "16K"]
+        },
+        decode: {
+          label: "Decode",
+          xTitle: "num_decode_requests",
+          yTitle: "sum_decode_kv_tokens",
+          xBins: ["1", "2", "4", "8", "16", "32", "64", "128"],
+          yBins: ["1K", "2K", "4K", "8K", "16K", "32K", "64K", "128K"]
+        }
+      };
+
+      const sliceOptions = document.getElementById("slice-options");
+      const phaseTabs = document.getElementById("phase-tabs");
+      const configGrid = document.getElementById("config-grid");
+      const distributionHeatmap = document.getElementById("distribution-heatmap");
+      const errorHeatmap = document.getElementById("error-heatmap");
+      const tooltip = document.getElementById("tooltip");
+
+      let selectedSlice = resolveInitialSlice();
+      let selectedPhase = selectedSlice.defaultPhase;
+      let errorMetric = "pct";
+
+      function resolveInitialSlice() {
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        const sliceId = params.get("slice");
+        const datasetId = params.get("dataset");
+        return (
+          slices.find((slice) => slice.id === sliceId) ||
+          slices.find((slice) => slice.datasetId === datasetId) ||
+          slices[0]
+        );
+      }
+
+      function deterministicNoise(...parts) {
+        const input = parts.join("|");
+        let hash = 2166136261;
+        for (let index = 0; index < input.length; index += 1) {
+          hash ^= input.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return ((hash >>> 0) % 1000) / 1000;
+      }
+
+      function clamp(value, minimum, maximum) {
+        return Math.min(maximum, Math.max(minimum, value));
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function buildDistribution(slice, phase) {
+        const target = slice.counts[phase];
+        const weights = Array.from({ length: 8 }, () => Array(8).fill(0));
+
+        for (let row = 0; row < 8; row += 1) {
+          for (let column = 0; column < 8; column += 1) {
+            const noise = 0.72 + deterministicNoise(slice.id, phase, row, column) * 0.62;
+            let weight = 0;
+
+            if (slice.profile === "self-benchmark") {
+              const boundaryBoost =
+                row === 0 || row === 7 || column === 0 || column === 7 ? 1.32 : 1;
+              const cudaGraphBoost = [0, 1, 3, 7].includes(column) ? 1.18 : 1;
+              weight = (0.9 + ((row * 3 + column * 5) % 7) * 0.045) *
+                boundaryBoost * cudaGraphBoost * noise;
+            } else if (slice.profile === "mooncake") {
+              if (phase === "decode") {
+                const batchDistance = Math.abs(column - 2);
+                const contextCenter = row >= 5 ? 1 : Math.max(0.03, 0.22 - (5 - row) * 0.035);
+                weight = Math.exp(-batchDistance * 2.4) * contextCenter * noise;
+              } else {
+                weight = (row === 4 && column === 0) || (row === 6 && column === 1) ? 1 : 0;
+              }
+            } else {
+              const clusterOne =
+                Math.exp(-((row - 5.6) ** 2) / 3.8 - ((column - 2.2) ** 2) / 2.4);
+              const clusterTwo =
+                Math.exp(-((row - 2.1) ** 2) / 2.8 - ((column - 5.1) ** 2) / 3.1);
+              const tail = row > 5 && column > 5 ? 0.24 : 0;
+              weight = (clusterOne + clusterTwo * 0.78 + tail) * noise;
+            }
+
+            weights[row][column] = Math.max(0, weight);
+          }
+        }
+
+        const totalWeight = weights.flat().reduce((sum, value) => sum + value, 0);
+        const counts = Array.from({ length: 8 }, () => Array(8).fill(0));
+        const allocations = [];
+        let allocated = 0;
+        weights.forEach((row, rowIndex) =>
+          row.forEach((weight, columnIndex) => {
+            const exact = totalWeight ? (weight / totalWeight) * target : 0;
+            const base = Math.floor(exact);
+            counts[rowIndex][columnIndex] = base;
+            allocated += base;
+            allocations.push({
+              row: rowIndex,
+              column: columnIndex,
+              remainder: exact - base
+            });
+          })
+        );
+        allocations
+          .sort((left, right) => right.remainder - left.remainder)
+          .slice(0, target - allocated)
+          .forEach(({ row, column }) => {
+            counts[row][column] += 1;
+          });
+        return counts;
+      }
+
+      function buildCellDetails(slice, phase, counts) {
+        return counts.map((row, rowIndex) =>
+          row.map((count, columnIndex) => {
+            if (!count) {
+              return { count: 0, actualMs: null, predictedMs: null, errorPct: null, deltaMs: null };
+            }
+            const baseLatency =
+              phase === "prefill"
+                ? 3.8 + rowIndex * 4.6 + columnIndex * 1.35
+                : 1.7 + rowIndex * 1.55 + columnIndex * 0.72;
+            const structuredError =
+              (rowIndex - 3.3) * 1.15 -
+              (columnIndex - 3.1) * 0.86 +
+              Math.sin((rowIndex + 1) * (columnIndex + 2)) * 1.8;
+            const profileShift =
+              slice.profile === "mooncake" && phase === "decode" && rowIndex >= 5 ? -4.8 : 0;
+            const rawError =
+              (structuredError + profileShift) * slice.errorScale +
+              (deterministicNoise("error", slice.id, phase, rowIndex, columnIndex) - 0.5) * 3.5;
+            const errorPct = clamp(rawError, -24, 24);
+            const actualMs = baseLatency * (0.96 + deterministicNoise("actual", rowIndex, columnIndex) * 0.08);
+            const predictedMs = actualMs * (1 + errorPct / 100);
+            return {
+              count,
+              actualMs,
+              predictedMs,
+              errorPct,
+              deltaMs: predictedMs - actualMs
+            };
+          })
+        );
+      }
+
+      function weightedSummary(details, coverage) {
+        const populated = details.flat().filter((cell) => cell.count > 0);
+        const observations = populated.reduce((sum, cell) => sum + cell.count, 0);
+        const weighted = (selector) =>
+          populated.reduce((sum, cell) => sum + selector(cell) * cell.count, 0) /
+          Math.max(1, observations);
+        return {
+          observations,
+          coverage,
+          mape: weighted((cell) => Math.abs(cell.errorPct)),
+          mae: weighted((cell) => Math.abs(cell.deltaMs)),
+          bias: weighted((cell) => cell.deltaMs)
+        };
+      }
+
+      function distributionColor(value, maximum) {
+        if (!value || !maximum) return "#f4f6f4";
+        const ratio = Math.pow(value / maximum, 0.48);
+        const start = [238, 247, 223];
+        const middle = [118, 185, 0];
+        const end = [49, 89, 0];
+        const from = ratio < 0.56 ? start : middle;
+        const to = ratio < 0.56 ? middle : end;
+        const local = ratio < 0.56 ? ratio / 0.56 : (ratio - 0.56) / 0.44;
+        return `rgb(${from.map((channel, index) =>
+          Math.round(channel + (to[index] - channel) * local)
+        ).join(",")})`;
+      }
+
+      function errorColor(value, maximum) {
+        const ratio = clamp(Math.abs(value) / Math.max(maximum, 0.001), 0, 1);
+        const neutral = [247, 247, 245];
+        const target = value < 0 ? [48, 104, 216] : [230, 99, 62];
+        return `rgb(${neutral.map((channel, index) =>
+          Math.round(channel + (target[index] - channel) * Math.pow(ratio, 0.72))
+        ).join(",")})`;
+      }
+
+      function buildHeatmapSvg(kind, slice, phase, details) {
+        const namespace = "http://www.w3.org/2000/svg";
+        const compact = window.innerWidth < 620;
+        const width = compact ? 520 : 680;
+        const height = 480;
+        const margin = compact
+          ? { top: 15, right: 10, bottom: 76, left: 73 }
+          : { top: 15, right: 16, bottom: 76, left: 91 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const cellWidth = plotWidth / 8;
+        const cellHeight = plotHeight / 8;
+        const phaseSpec = phases[phase];
+        const svg = document.createElementNS(namespace, "svg");
+        svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        svg.setAttribute("role", "img");
+        svg.setAttribute(
+          "aria-label",
+          kind === "distribution"
+            ? `${slice.dataset} ${phaseSpec.label} FPM distribution heatmap`
+            : `${slice.method} ${phaseSpec.label} prediction minus actual heatmap`
+        );
+
+        const maximumCount = Math.max(...details.flat().map((cell) => cell.count));
+        const errorValues = details
+          .flat()
+          .filter((cell) => cell.count)
+          .map((cell) => (errorMetric === "pct" ? cell.errorPct : cell.deltaMs));
+        const maximumError = Math.max(1, ...errorValues.map((value) => Math.abs(value)));
+
+        for (let rowIndex = 0; rowIndex < 8; rowIndex += 1) {
+          for (let columnIndex = 0; columnIndex < 8; columnIndex += 1) {
+            const cell = details[rowIndex][columnIndex];
+            const x = margin.left + columnIndex * cellWidth;
+            const y = margin.top + (7 - rowIndex) * cellHeight;
+            const value = errorMetric === "pct" ? cell.errorPct : cell.deltaMs;
+            const fill =
+              kind === "distribution"
+                ? distributionColor(cell.count, maximumCount)
+                : cell.count
+                  ? errorColor(value, maximumError)
+                  : "#f4f6f4";
+            const rect = document.createElementNS(namespace, "rect");
+            rect.setAttribute("x", x);
+            rect.setAttribute("y", y);
+            rect.setAttribute("width", cellWidth);
+            rect.setAttribute("height", cellHeight);
+            rect.setAttribute("rx", "4");
+            rect.setAttribute(
+              "class",
+              `heatmap-cell ${cell.count ? "" : "empty-cell"}`
+            );
+            rect.setAttribute("fill", fill);
+            rect.setAttribute("tabindex", "0");
+            rect.setAttribute(
+              "aria-label",
+              cell.count
+                ? `${phaseSpec.xTitle} ${phaseSpec.xBins[columnIndex]}, ` +
+                    `${phaseSpec.yTitle} ${phaseSpec.yBins[rowIndex]}, ${cell.count} FPMs`
+                : "No observations"
+            );
+            const show = (event) =>
+              showTooltip(event, slice, phase, rowIndex, columnIndex, cell);
+            rect.addEventListener("mouseenter", show);
+            rect.addEventListener("mousemove", positionTooltip);
+            rect.addEventListener("mouseleave", hideTooltip);
+            rect.addEventListener("focus", show);
+            rect.addEventListener("blur", hideTooltip);
+            svg.appendChild(rect);
+
+            if (cell.count) {
+              const showLabel =
+                kind === "distribution"
+                  ? cell.count >= Math.max(2, maximumCount * 0.1)
+                  : Math.abs(value) >= maximumError * 0.14;
+              if (showLabel) {
+                const text = document.createElementNS(namespace, "text");
+                text.setAttribute("x", x + cellWidth / 2);
+                text.setAttribute("y", y + cellHeight / 2 + 3);
+                text.setAttribute("text-anchor", "middle");
+                const darkText =
+                  kind === "distribution"
+                    ? cell.count < maximumCount * 0.32
+                    : Math.abs(value) < maximumError * 0.48;
+                text.setAttribute("class", `heatmap-value ${darkText ? "dark" : ""}`);
+                text.textContent =
+                  kind === "distribution"
+                    ? formatCompact(cell.count)
+                    : errorMetric === "pct"
+                      ? `${value > 0 ? "+" : ""}${value.toFixed(0)}%`
+                      : `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+                svg.appendChild(text);
+              }
+            }
+          }
+        }
+
+        phaseSpec.xBins.forEach((label, index) => {
+          const x = margin.left + index * cellWidth + cellWidth / 2;
+          svg.insertAdjacentHTML(
+            "beforeend",
+            `<text class="heatmap-axis-label" x="${x}" y="${height - 51}" text-anchor="middle">${label}</text>`
+          );
+        });
+
+        [...phaseSpec.yBins].reverse().forEach((label, displayIndex) => {
+          const y = margin.top + displayIndex * cellHeight + cellHeight / 2 + 3;
+          svg.insertAdjacentHTML(
+            "beforeend",
+            `<text class="heatmap-axis-label" x="${margin.left - 10}" y="${y}" text-anchor="end">${label}</text>`
+          );
+        });
+
+        svg.insertAdjacentHTML(
+          "beforeend",
+          `
+            <text class="heatmap-axis-title" x="${margin.left + plotWidth / 2}" y="${height - 19}" text-anchor="middle">${phaseSpec.xTitle}</text>
+            <text
+              class="heatmap-axis-title"
+              x="20"
+              y="${margin.top + plotHeight / 2}"
+              text-anchor="middle"
+              transform="rotate(-90 20 ${margin.top + plotHeight / 2})"
+            >${phaseSpec.yTitle}</text>
+          `
+        );
+        return svg;
+      }
+
+      function formatCompact(value) {
+        if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
+        return value.toLocaleString();
+      }
+
+      function renderSliceOptions() {
+        sliceOptions.innerHTML = slices
+          .map(
+            (slice) => `
+              <button
+                type="button"
+                class="slice-option ${slice.id === selectedSlice.id ? "active" : ""}"
+                data-slice="${escapeHtml(slice.id)}"
+                aria-pressed="${slice.id === selectedSlice.id}"
+              >
+                <span class="slice-option-dataset">${escapeHtml(slice.dataset)}</span>
+                <span class="slice-option-config">${escapeHtml(slice.model)} · ${escapeHtml(slice.hardware)}</span>
+                <span class="slice-option-method">${escapeHtml(slice.method)}</span>
+              </button>
+            `
+          )
+          .join("");
+
+        sliceOptions.querySelectorAll("[data-slice]").forEach((button) => {
+          button.addEventListener("click", () => {
+            selectedSlice = slices.find((slice) => slice.id === button.dataset.slice);
+            selectedPhase = selectedSlice.defaultPhase;
+            updateHash();
+            render();
+          });
+        });
+      }
+
+      function renderConfiguration() {
+        document.getElementById("detail-title").textContent =
+          `${selectedSlice.model} · ${selectedSlice.dataset}`;
+        document.getElementById("detail-subtitle").textContent = selectedSlice.subtitle;
+        document.getElementById("configuration-id").textContent =
+          selectedSlice.configurationId;
+        const items = [
+          ["Model", selectedSlice.model],
+          ["Hardware", selectedSlice.hardware],
+          ["Backend", selectedSlice.backend],
+          ["MTP", selectedSlice.mtp],
+          ["Parallelization", selectedSlice.parallelism],
+          ["Perf modeling method", selectedSlice.method],
+          ["Dataset", selectedSlice.dataset]
+        ];
+        configGrid.innerHTML = items
+          .map(
+            ([label, value]) => `
+              <div class="config-item">
+                <span class="config-label">${escapeHtml(label)}</span>
+                <span class="config-value" title="${escapeHtml(value)}">${escapeHtml(value)}</span>
+              </div>
+            `
+          )
+          .join("");
+      }
+
+      function renderPhaseTabs() {
+        phaseTabs.innerHTML = Object.entries(phases)
+          .map(
+            ([phase, spec]) => `
+              <button
+                type="button"
+                class="phase-tab ${phase === selectedPhase ? "active" : ""}"
+                data-phase="${phase}"
+                aria-pressed="${phase === selectedPhase}"
+              >
+                ${spec.label}
+                <span class="phase-count">${formatCompact(selectedSlice.counts[phase])}</span>
+              </button>
+            `
+          )
+          .join("");
+        phaseTabs.querySelectorAll("[data-phase]").forEach((button) => {
+          button.addEventListener("click", () => {
+            selectedPhase = button.dataset.phase;
+            updateHash();
+            render();
+          });
+        });
+      }
+
+      function renderHeatmaps() {
+        const counts = buildDistribution(selectedSlice, selectedPhase);
+        const details = buildCellDetails(selectedSlice, selectedPhase, counts);
+        const summary = weightedSummary(
+          details,
+          selectedSlice.coverage[selectedPhase]
+        );
+
+        distributionHeatmap.replaceChildren(
+          buildHeatmapSvg("distribution", selectedSlice, selectedPhase, details)
+        );
+        errorHeatmap.replaceChildren(
+          buildHeatmapSvg("error", selectedSlice, selectedPhase, details)
+        );
+
+        document.getElementById("metric-observations").textContent =
+          summary.observations.toLocaleString();
+        document.getElementById("metric-coverage").textContent =
+          `${(summary.coverage * 100).toFixed(1)}%`;
+        document.getElementById("metric-mape").textContent =
+          `${summary.mape.toFixed(1)}%`;
+        document.getElementById("metric-mae").textContent =
+          `${summary.mae.toFixed(2)} ms`;
+        document.getElementById("metric-bias").textContent =
+          `${summary.bias > 0 ? "+" : ""}${summary.bias.toFixed(2)} ms`;
+
+        const phaseSpec = phases[selectedPhase];
+        const isSparse = summary.observations < 20;
+        document.getElementById("phase-note").textContent = isSparse
+          ? `Only ${summary.observations} ${phaseSpec.label.toLowerCase()} observations are available in this trace.`
+          : `Inspecting ${phaseSpec.label.toLowerCase()} workload shapes on shared axes.`;
+        document.getElementById("distribution-description").textContent =
+          `${phaseSpec.xTitle} × ${phaseSpec.yTitle}; cell intensity is eligible FPM count.`;
+        document.getElementById("insight-copy").innerHTML =
+          insightFor(selectedSlice, selectedPhase, summary);
+      }
+
+      function insightFor(slice, phase, summary) {
+        if (slice.profile === "mooncake" && phase === "decode") {
+          return (
+            `<strong>Mooncake coverage is highly concentrated.</strong> ` +
+            `Most of the ${summary.observations.toLocaleString()} decode FPMs sit near batch size 4 ` +
+            `and long aggregate KV context. The predictor tends to underpredict the highest-context bins.`
+          );
+        }
+        if (slice.profile === "mooncake") {
+          return (
+            `<strong>Prefill coverage is insufficient for comparison.</strong> ` +
+            `This mock mirrors the referenced replay, which produced only two prefill-only FPMs.`
+          );
+        }
+        if (slice.profile === "self-benchmark") {
+          return (
+            `<strong>Self-benchmarking provides broad shape coverage.</strong> ` +
+            `Boundary anchors, low-discrepancy interior points, and CUDA-graph-aware sampling ` +
+            `produce a much more even grid than replay traffic.`
+          );
+        }
+        return (
+          `<strong>Organic traffic forms multiple workload clusters.</strong> ` +
+          `The signed-error heatmap separates well-covered common shapes from sparse tail regions ` +
+          `where the native predictor has larger bias.`
+        );
+      }
+
+      function showTooltip(event, slice, phase, row, column, cell) {
+        const spec = phases[phase];
+        tooltip.innerHTML = cell.count
+          ? `
+              <div class="tooltip-title">${escapeHtml(spec.label)} workload bin</div>
+              <div class="tooltip-row"><span>${escapeHtml(spec.xTitle)}</span><strong>${escapeHtml(spec.xBins[column])}</strong></div>
+              <div class="tooltip-row"><span>${escapeHtml(spec.yTitle)}</span><strong>${escapeHtml(spec.yBins[row])}</strong></div>
+              <div class="tooltip-row"><span>FPM observations</span><strong>${cell.count.toLocaleString()}</strong></div>
+              <div class="tooltip-row"><span>Actual mean</span><strong>${cell.actualMs.toFixed(2)} ms</strong></div>
+              <div class="tooltip-row"><span>Predicted mean</span><strong>${cell.predictedMs.toFixed(2)} ms</strong></div>
+              <div class="tooltip-row"><span>Signed error</span><strong>${cell.errorPct > 0 ? "+" : ""}${cell.errorPct.toFixed(1)}%</strong></div>
+            `
+          : `
+              <div class="tooltip-title">No observations</div>
+              <div class="tooltip-row"><span>${escapeHtml(spec.xTitle)}</span><strong>${escapeHtml(spec.xBins[column])}</strong></div>
+              <div class="tooltip-row"><span>${escapeHtml(spec.yTitle)}</span><strong>${escapeHtml(spec.yBins[row])}</strong></div>
+            `;
+        tooltip.classList.add("visible");
+        positionTooltip(event);
+      }
+
+      function positionTooltip(event) {
+        const source = event.touches ? event.touches[0] : event;
+        let left = source.clientX;
+        let top = source.clientY;
+        if (!Number.isFinite(left) || !Number.isFinite(top)) {
+          const rect = event.target.getBoundingClientRect();
+          left = rect.left + rect.width / 2;
+          top = rect.top + rect.height / 2;
+        }
+        const tooltipWidth = tooltip.offsetWidth || 280;
+        const tooltipHeight = tooltip.offsetHeight || 170;
+        if (left + tooltipWidth + 26 > window.innerWidth) left -= tooltipWidth + 24;
+        if (top + tooltipHeight + 26 > window.innerHeight) top -= tooltipHeight + 24;
+        tooltip.style.left = `${Math.max(8, left)}px`;
+        tooltip.style.top = `${Math.max(8, top)}px`;
+      }
+
+      function hideTooltip() {
+        tooltip.classList.remove("visible");
+      }
+
+      function updateHash() {
+        const params = new URLSearchParams({
+          slice: selectedSlice.id,
+          phase: selectedPhase
+        });
+        window.history.replaceState(null, "", `#${params}`);
+      }
+
+      document.querySelectorAll("[data-error-metric]").forEach((button) => {
+        button.addEventListener("click", () => {
+          errorMetric = button.dataset.errorMetric;
+          document.querySelectorAll("[data-error-metric]").forEach((item) => {
+            item.classList.toggle("active", item === button);
+            item.setAttribute("aria-pressed", item === button);
+          });
+          renderHeatmaps();
+        });
+      });
+
+      function render() {
+        renderSliceOptions();
+        renderConfiguration();
+        renderPhaseTabs();
+        renderHeatmaps();
+      }
+
+      const initialParams = new URLSearchParams(window.location.hash.slice(1));
+      if (initialParams.get("phase") in phases) {
+        selectedPhase = initialParams.get("phase");
+      }
+      render();
+    })();
+  </script>
+</body>
+</html>
