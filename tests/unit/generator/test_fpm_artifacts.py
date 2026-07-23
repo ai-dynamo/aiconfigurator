@@ -1045,7 +1045,13 @@ def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_scr
     assert 'node_rank="${LWS_WORKER_INDEX:?LWS_WORKER_INDEX is required for multinode FPM}"' in script
     assert 'master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"' in script
     assert '--nnodes "$node_count" --node-rank "$node_rank"' in script
-    assert 'exec "${engine_command[@]}" --headless' in script
+    # Headless followers run the engine in the foreground and classify its
+    # exit: leader-driven teardown (etcd endpoint gone) is success, a crash
+    # while the leader is still alive stays a real failure.
+    assert '"${engine_command[@]}" --headless &' in script
+    assert 'wait "$headless_pid"' in script
+    assert '/dev/tcp/${master_addr}/2379' in script
+    assert "Headless engine exited after leader teardown; reporting success" in script
 
 
 def test_fpm_multinode_efa_resource_matches_per_node_gpu_count():
@@ -1156,6 +1162,9 @@ pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
             "FAKE_ARGS_PATH": str(args_path),
             "LWS_WORKER_INDEX": "1",
             "LWS_LEADER_ADDRESS": "leader.example",
+            # These harnesses run a single follower with no leader listening,
+            # so the completion-barrier rendezvous must give up immediately.
+            "FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS": "1",
         }
     )
 
@@ -1237,6 +1246,9 @@ while True:
             "FAKE_ARGS_PATH": str(args_path),
             "LWS_WORKER_INDEX": "1",
             "LWS_LEADER_ADDRESS": "leader.example",
+            # These harnesses run a single follower with no leader listening,
+            # so the completion-barrier rendezvous must give up immediately.
+            "FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS": "1",
         }
     )
 
