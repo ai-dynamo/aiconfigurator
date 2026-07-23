@@ -12,6 +12,7 @@ the model/system/backend/version support matrix for AIConfigurator.
 import csv
 import json
 import logging
+import multiprocessing
 import os
 import shlex
 import traceback
@@ -606,9 +607,13 @@ def _compare_pareto_dfs(
 
 
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
-# Set in the parent before forking; children inherit it via copy-on-write.
+# Set in the parent before forking; children inherit via copy-on-write.
+# We explicitly use a "fork" mp context (see _run_parallel_combinations) so
+# this works on macOS too, where the default start method is "spawn".
 _worker_matrix: "SupportMatrix | None" = None
 _worker_modes_to_test: tuple[str, ...] | None = None
+
+_fork_ctx = multiprocessing.get_context("fork")
 
 
 def _process_combination_worker(
@@ -618,7 +623,7 @@ def _process_combination_worker(
     Run a single combination in a worker process. Uses the process-local SupportMatrix.
     Must be a module-level function for pickling by ProcessPoolExecutor.
     """
-    assert _worker_matrix is not None  # this only works in linux, not in windows/macos
+    assert _worker_matrix is not None
     model, system, backend, version = combo
     status_dict, error_dict, command_dict, provenance_dict = _worker_matrix.run_single_test(
         model=model,
@@ -1019,7 +1024,10 @@ class SupportMatrix:
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(combinations))) as executor:
+        with ProcessPoolExecutor(
+            max_workers=min(max_workers, len(combinations)),
+            mp_context=_fork_ctx,
+        ) as executor:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
                 combo = futures[future]
