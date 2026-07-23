@@ -130,7 +130,11 @@ def _validate_sidecar(metadata_path: str, parquet_path: str) -> dict:
     with open(metadata_path, encoding="utf-8") as handle:
         metadata = json.load(handle)
     if not isinstance(metadata, dict):
-        raise TypeError(f"FPM metadata sidecar must be a JSON object: {metadata_path}")
+        # Retype-exempt: load_fpm_forward_data documents a uniform ValueError
+        # for every structural violation of the parquet/metadata pair.
+        raise ValueError(  # noqa: TRY004
+            f"FPM metadata sidecar must be a JSON object: {metadata_path}"
+        )
     if metadata.get("schema_name") != FPM_FORWARD_SCHEMA_NAME:
         raise ValueError(
             f"unsupported FPM schema_name={metadata.get('schema_name')!r} "

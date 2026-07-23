@@ -342,9 +342,10 @@ class TestFPMForwardLoaderValidation:
         with pytest.raises(ValueError, match="backend_version"):
             self._query(fake_db(rows))
 
-    def test_non_positive_latency(self, fake_db):
+    @pytest.mark.parametrize("bad_latency", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_or_non_positive_latency(self, fake_db, bad_latency):
         rows = _default_rows()
-        rows[0]["latency_ms"] = 0.0
+        rows[0]["latency_ms"] = bad_latency
         with pytest.raises(ValueError, match="latency"):
             self._query(fake_db(rows))
 
