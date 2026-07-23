@@ -331,37 +331,37 @@ const NODES = [
 
   // ---- L1 Sweepers · Orchestration  ·  4 parallel sub-sections: Sweepers · Optimizers · Pareto · Config Generator ----
   // ---- L1 components · Sweeper V2 (Spica) ----
-  {id:'profiler', l:1, repo:'dyn', label:'Sweeper V2 (Spica)', sub:'experimental · dynamo knobs + engine knobs · full deployment · → Dynamo + Engine Knob Space',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/search.py','dynamo: components/src/dynamo/profiler/spica/search_space.py','dynamo: components/src/dynamo/profiler/spica/__main__.py'],
+  {id:'aisimulate', l:1, repo:'dyn', label:'Sweeper V2 (Spica)', sub:'experimental · dynamo knobs + engine knobs · full deployment · → Dynamo + Engine Knob Space',
+   det:{file:['dynamo: aisimulate/spica/search.py','dynamo: aisimulate/spica/search_space.py','dynamo: aisimulate/spica/__main__.py'],
      desc:'The <b>full-deployment</b> sweeper. It sweeps the whole <b>Dynamo Knob Space</b> — router mode &amp; KV-score, planner scaling policy + load predictor, KV-tier, replicas — <b>and</b> the engine knobs of the <b>Engine Knob Space</b>. It uses the <b>Vizier</b> optimizer to propose candidates and evaluates them through AIC’s modeling core; branches by <code>deployment_mode</code> (agg/disagg) and ranks by goal (throughput / e2e_latency / goodput / goodput_per_gpu).',
-     sym:['<code>run_smart_search(SmartSearchConfig) → list[Candidate]</code>','sweeps Dynamo knobs <b>+</b> engine knobs','one YAML: <code>python -m dynamo.profiler.spica --config smart_sweep.yaml</code>'],
+     sym:['<code>run_smart_search(SmartSearchConfig) → list[Candidate]</code>','sweeps Dynamo knobs <b>+</b> engine knobs','one YAML: <code>python -m spica --config smart_sweep.yaml</code>'],
      q:'<b>“Full Dynamo knob sweep instead of just the engine sweep.”</b> (Dynamo&nbsp;#9410). <b>Sweeper V2 (Spica)</b> replaces the AIC sweeper/picker role; <b>AIC stays the lower-level provider</b> (backend support, legal parallelism, perf-model data, memory/capacity). Dynamo injects into AIC — AIC never imports Dynamo.'}},
   // ---- L1 components · Vizier optimizer ----
   {id:'vizier', l:1, repo:'dyn', label:'Vizier', sub:'Bayesian candidate suggester · guides Sweeper V2 (Spica)',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/sampler.py','dynamo: components/src/dynamo/profiler/spica/search.py'],
+   det:{file:['dynamo: aisimulate/spica/sampler.py','dynamo: aisimulate/spica/search.py'],
      desc:'The smart-search optimizer. Each round it suggests candidate knob assignments; the decoded candidates are scored through AIC’s modeling core and the scores guide the next suggestions — far fewer evaluations than a full grid. Drives <b>Sweeper V2 (Spica)</b>; runs one flat study per branch (agg/disagg).',
      sym:['<code>VizierBranchSampler</code>','<code>suggest()</code> · <code>observe()</code> · <code>observe_infeasible()</code>','<code>make_branch_sampler()</code> · GP-bandit default / random-search option']}},
   // ---- L2 Search Space · two explicit groups: Dynamo Knob Space (DYN) + Engine Knob Space (AIC) ----
   // -- Dynamo Knob Space --
   {id:'knob_router', l:2, repo:'dyn', label:'Router', sub:'mode · overlap-score · prefill-load · cache-hit · temperature',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/config.py','dynamo: components/src/dynamo/profiler/spica/search_space.py'],
+   det:{file:['dynamo: aisimulate/spica/config.py','dynamo: aisimulate/spica/search_space.py'],
      desc:'Router knobs of the <b>Dynamo Knob Space</b> — how requests are routed across workers. Searched by <b>Sweeper V2 (Spica)</b>.',
      sym:['<code>router_mode</code>','<code>overlap_score_credit</code>','<code>prefill_load_scale</code>','cache-hit weights','<code>router_temperature</code>']}},
   {id:'knob_planner', l:2, repo:'dyn', label:'Planner', sub:'scaling policy · fpm-sampling · load-sensitivity · load predictor',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/config.py','dynamo: components/src/dynamo/profiler/spica/load_predictor_sweep.py'],
+   det:{file:['dynamo: aisimulate/spica/config.py','dynamo: aisimulate/spica/load_predictor_sweep.py'],
      desc:'Planner knobs of the <b>Dynamo Knob Space</b> — SLA-driven scaling policy plus the load predictor that drives runtime autoscaling.',
      sym:['<code>planner_scaling_policy</code>','<code>fpm_sampling</code>','<code>load_sensitivity</code>','load predictor (separate deterministic grid)']}},
   {id:'knob_kvtier', l:2, repo:'dyn', flag:'future', label:'KV Tier / Offload', sub:'G1 device · G2 host · G3 disk/shared · pinned today → sweepable',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/config.py','dynamo: docs/components/profiler/spica/search-space.md','dynamo: lib/kvbm-engine/'],
+   det:{file:['dynamo: aisimulate/spica/config.py','dynamo: docs/components/aisimulate/spica/search-space.md','dynamo: lib/kvbm-engine/'],
      desc:'Storage-plane knobs of the <b>Dynamo Knob Space</b>: device, host, disk, and shared KV tiers plus their capacity and transfer policy. Spica accepts KVBM tier/offload settings as pinned inputs today; sweeping them is planned. <b>Dynamo KVBM / KV Transfer</b> owns their simulation.',
      sym:['tiers: G1 device · G2 host · G3 disk/shared','offload · onboard · transfer bandwidth','KVBM / NIXL']}},
   {id:'knob_replicas', l:2, repo:'dyn', label:'Replica Topology', sub:'agg replicas · prefill/decode pools · static fleet or Planner scaling',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/parallel_enum.py','dynamo: components/src/dynamo/profiler/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/'],
+   det:{file:['dynamo: aisimulate/spica/parallel_enum.py','dynamo: aisimulate/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/'],
      desc:'The worker-pool shape of each deployment candidate. Aggregated mode has one replica pool; disaggregated mode has separate prefill and decode pools. Spica searches the initial counts, the <b>Mocker Replay Runtime</b> executes that topology, and the <b>Dynamo Planner</b> may change the counts during planner-in-the-loop simulation.',
      sym:['agg: <code>replicas</code>','disagg: <code>prefill_replicas</code> + <code>decode_replicas</code>','static fleet vs Planner scale decisions']}},
   // -- Engine Knob Space --
   {id:'knob_serving', l:2, repo:'aic', label:'Serving Mode', sub:'agg (IFB) vs disagg (prefill/decode split) · both swept → one Pareto',
-   det:{file:['dynamo: components/src/dynamo/profiler/spica/search_space.py','dynamo: components/src/dynamo/profiler/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/agg.rs','dynamo: lib/mocker/src/replay/offline/disagg.rs','src/aiconfigurator/sdk/sweep.py'],
+   det:{file:['dynamo: aisimulate/spica/search_space.py','dynamo: aisimulate/spica/deploy.py','dynamo: lib/mocker/src/replay/offline/agg.rs','dynamo: lib/mocker/src/replay/offline/disagg.rs','src/aiconfigurator/sdk/sweep.py'],
      desc:'The top-level topology branch. Spica builds one search branch per <code>deployment_mode</code>, then creates either one aggregated replica pool or separate prefill/decode pools. <b>Dynamo Mocker Replay</b> executes the request-level behavior through <code>AggRuntime</code> or <code>DisaggRuntime</code>. Separately, the standalone AIC SDK provides analytical <code>sweep_agg()</code>/<code>sweep_disagg()</code>; its disagg path rate-matches worker throughput without simulating queues or handoff. AFD is a separate, orthogonal split.',
      sym:['Spica <code>DeploymentPlan</code>','Mocker <code>AggRuntime</code> · <code>DisaggRuntime</code>','standalone AIC <code>sweep_agg()</code> · <code>sweep_disagg()</code>']}},
   {id:'knob_parallel', l:2, repo:'aic', label:'Parallelism', sub:'{tp · pp · dp · moe_tp · moe_ep} · legal shapes (pruned)',
@@ -567,10 +567,10 @@ const NODES = [
 
 const EDGES = [
   // entry → Sweeper V2 (Spica)
-  ['cli','profiler','planned'],             // planned: CLI V2 → Sweeper V2 (Spica)
-  ['dgdr','profiler','control'],            // planned operator path: DGDR v2 → Sweeper V2 (Spica)
+  ['cli','aisimulate','planned'],             // planned: CLI V2 → Sweeper V2 (Spica)
+  ['dgdr','aisimulate','control'],            // planned operator path: DGDR v2 → Sweeper V2 (Spica)
   // Sweeper V2 (Spica) · Vizier-guided smart loop + AIC evaluation
-  ['profiler','vizier'],['vizier','profiler','feedback'],
+  ['aisimulate','vizier'],['vizier','aisimulate','feedback'],
   // pareto → config generator
   ['pareto','configgen'],                   // frontier → select winning config
   // L2 knob spaces → their direct L3 owners/evaluators
@@ -609,16 +609,16 @@ const EDGES = [
 
 // Group-level links avoid drawing one edge to every member tile.
 const GROUP_EDGES = [
-  ['profiler','space_dyn'],
-  ['profiler','space_sched'],
-  ['profiler','space_engine'],
+  ['aisimulate','space_dyn'],
+  ['aisimulate','space_sched'],
+  ['aisimulate','space_engine'],
   ['aic_wheel','models_op'],
   ['aic_wheel','models_fpm'],
   ['core_crate','models_fpm'],
 ];
 
 const QUESTIONS = [
-  {n:'profiler', t:'Sweeper V2 (Spica) — full Dynamo + engine knob sweep', s:'Vizier-guided · replaces engine-only sweep · #9410'},
+  {n:'aisimulate', t:'Sweeper V2 (Spica) — full Dynamo + engine knob sweep', s:'Vizier-guided · replaces engine-only sweep · #9410'},
   {n:'knob_parallel', t:'Engine Knob Space — the engine-knob slice', s:'serving · parallelism · scheduler · precision · spec · AFD · kernels · #9410'},
   {n:'op_data_points', t:'Fidelity check — high vs low fidelity op data', s:'audit provenance before trusting a sweep'},
 ];
@@ -626,7 +626,7 @@ const QUESTIONS = [
 const NOTE_MAP = [
   ['CLI V2 (planned · default · exp · smart)', 'cli'],
   ['Kubelet interface (planned DGDR v2)', 'dgdr'],
-  ['Sweeper V2 (Spica) · full knob sweep · #9410', 'profiler'],
+  ['Sweeper V2 (Spica) · full knob sweep · #9410', 'aisimulate'],
   ['Full Dynamo knob sweep vs engine sweep', 'knob_router','knob_parallel'],
   ['Vizier optimizer · smart sweep', 'vizier'],
   ['Config Generator · pick → bridge → generate', 'configgen'],
@@ -659,7 +659,7 @@ const TODOS = {
   ],
 
   // L1 · current orchestration components
-  profiler: [
+  aisimulate: [
     'Expose one current Spica runner to both planned entry points — CLI V2 <code>recommend</code> and DGDR v2 — so search behavior cannot diverge.',
     'Stabilize the candidate record: branch, full knob assignment, seed, feasibility outcome, predicted metrics, GPU cost, and rejection reason.',
     'Register future L2 dimensions behind capability checks so unsupported KVBM, precision, speculative, AFD, kernel, and scheduler combinations are pruned before Vizier.',
@@ -878,7 +878,7 @@ const TODOS = {
 /* ============================ LAYOUT ============================ */
 const GUT=170, NW=200, NH=116, LH=176, TOP=88, PADX=34;
 const LAYER_ORDER = {
-  1: ['profiler', 'vizier', 'pareto', 'configgen'],
+  1: ['aisimulate', 'vizier', 'pareto', 'configgen'],
   5: ['pm_ops', 'pm_op_hybrid', 'pm_op_empirical', 'pm_op_sol', 'pm_layerwise', 'pm_fpm', 'pm_fpm_tuned'],
   6: ['op_model', 'op_operations', 'op_perfdb'],
   8: ['collector_plan', 'op_collectors'],
