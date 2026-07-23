@@ -10,7 +10,11 @@ from typing import Any
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models.helpers import _infer_quant_modes_from_raw_config
-from aiconfigurator.sdk.perf_database import get_database, get_latest_database_version
+from aiconfigurator.sdk.perf_database import (
+    context_fmha_supported_modes,
+    get_database,
+    get_latest_database_version,
+)
 from aiconfigurator.sdk.utils import _attach_inferred_quant_fields
 
 from .model_capability import ResolvedModelConfig, load_model_config, resolve_attention_source
@@ -75,11 +79,15 @@ def _attention_ops(source_name: str) -> tuple[str, str]:
 class ResolvedDTypeProfile:
     gemm_quant_mode: str
     moe_quant_mode: str
+    # Scalar fmha fields describe the FIRST resolved kv dtype; the maps carry
+    # the per-kv-slice resolution that cells and rows must use.
     fmha_quant_mode: str
     comm_quant_mode: str
     native_kv_cache_dtype: str
     kv_cache_dtypes: tuple[str, ...]
     fmha_resolution: str
+    fmha_by_kv_dtype: dict[str, str]
+    fmha_resolution_by_kv_dtype: dict[str, str]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -90,6 +98,8 @@ class ResolvedDTypeProfile:
             "native_kv_cache_dtype": self.native_kv_cache_dtype,
             "kv_cache_dtypes": list(self.kv_cache_dtypes),
             "fmha_resolution": self.fmha_resolution,
+            "fmha_by_kv_dtype": dict(self.fmha_by_kv_dtype),
+            "fmha_resolution_by_kv_dtype": dict(self.fmha_resolution_by_kv_dtype),
         }
 
 
@@ -189,6 +199,14 @@ def resolve_model_capability(
         model_family=model_family,
         is_moe=is_moe,
     )
+    # The dense-attention op pair is inherited by every ``include_base: true``
+    # model file, so its presence in selected_ops is not exact evidence by
+    # itself. When the family template deliberately routes attention away from
+    # the dense path (e.g. MiniMax-M3 MSA transfers utilization from DSA), the
+    # family routing wins; a dense exact source is authoritative only for
+    # families that are themselves dense.
+    if exact_source == "dense_attention" and template_source != "dense_attention":
+        exact_source = None
     if has_model_cases and model_family and exact_source is not None:
         support_level = "exact"
         source_name = exact_source
@@ -242,17 +260,6 @@ def resolve_model_capability(
     context_modes = _supported_modes(supported, context_op)
     if not context_modes:
         raise ValueError(f"AIC database has no context-attention dtype evidence for template op {context_op!r}")
-    if inferred_fmha in context_modes:
-        fmha = inferred_fmha
-        fmha_resolution = "checkpoint_native"
-    elif "bfloat16" in context_modes:
-        fmha = "bfloat16"
-        fmha_resolution = f"aic_data_fallback_from_{inferred_fmha}"
-    else:
-        raise ValueError(
-            f"AIC database cannot resolve FMHA dtype {inferred_fmha!r} for {context_op}; "
-            f"supported modes: {sorted(context_modes)}"
-        )
 
     generation_modes = _supported_modes(supported, generation_op)
     if not generation_modes:
@@ -265,6 +272,38 @@ def resolve_model_capability(
             f"AIC database does not support KV-cache dtype(s) {unsupported_kv} for {generation_op}; "
             f"supported modes: {sorted(generation_modes)}"
         )
+
+    # fmha_quant_mode names the AIC data slice a template transfers
+    # utilization from, so it is resolved PER KV DTYPE against joint
+    # (fmha, kv) evidence: the flat supported_quant_mode list unions fmha
+    # keys across kv slices (see perf_database.context_fmha_supported_modes),
+    # so a single flat-checked label could claim a slice that only exists
+    # under a different kv dtype. Some module tables carry only a bfloat16
+    # slice (e.g. DSV4), so a checkpoint-native mode without joint evidence
+    # falls back to the bfloat16 slice — recorded per cell/row via
+    # fmha_resolution so the physical checkpoint mode is never lost — and
+    # a kv dtype with no usable slice at all fails loudly.
+    fmha_by_kv: dict[str, str] = {}
+    fmha_resolution_by_kv: dict[str, str] = {}
+    for kv_name in resolved_kv:
+        joint_modes = context_fmha_supported_modes(
+            database, context_op, common.KVCacheQuantMode[kv_name]
+        )
+        if inferred_fmha in joint_modes:
+            fmha_by_kv[kv_name] = inferred_fmha
+            fmha_resolution_by_kv[kv_name] = "checkpoint_native"
+        elif "bfloat16" in joint_modes:
+            fmha_by_kv[kv_name] = "bfloat16"
+            fmha_resolution_by_kv[kv_name] = f"aic_data_fallback_from_{inferred_fmha}"
+        else:
+            raise ValueError(
+                f"AIC database has no joint fmha evidence for ({inferred_fmha!r} fmha, "
+                f"{kv_name!r} kv) on {context_op!r} and no bfloat16 slice to transfer from; "
+                f"jointly supported fmha modes: {sorted(joint_modes)}"
+            )
+    primary_kv = resolved_kv[0]
+    fmha = fmha_by_kv[primary_kv]
+    fmha_resolution = fmha_resolution_by_kv[primary_kv]
 
     # vLLM folds MoE tensor parallelism into ordinary tensor parallelism, so
     # pure TP is a backend capability rather than an attention-family
@@ -292,5 +331,7 @@ def resolve_model_capability(
             native_kv_cache_dtype=native_kv,
             kv_cache_dtypes=resolved_kv,
             fmha_resolution=fmha_resolution,
+            fmha_by_kv_dtype=fmha_by_kv,
+            fmha_resolution_by_kv_dtype=fmha_resolution_by_kv,
         ),
     )

@@ -119,6 +119,7 @@ def aggregate_cell(
                 "gemm_quant_mode": cell.gemm_quant_mode or cell.weight_quantization,
                 "moe_quant_mode": cell.moe_quant_mode,
                 "fmha_quant_mode": cell.fmha_quant_mode,
+                "fmha_resolution": cell.fmha_resolution,
                 "comm_quant_mode": cell.comm_quant_mode,
                 "kv_cache_dtype": cell.kv_cache_dtype,
                 "parallel_strategy": cell.parallel_strategy,
@@ -178,6 +179,10 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _curated_systems_root() -> Path:
+    return Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "systems" / "data"
+
+
 @contextmanager
 def _publication_lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,9 +221,21 @@ def write_formal_database(
     if len(versions) != 1 or not next(iter(versions)):
         raise ValueError(f"FPM rows must contain one non-empty runtime backend_version, got {sorted(versions)!r}")
     version = next(iter(versions))
+    curated_root = systems_root is None
     if systems_root is None:
-        systems_root = Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "systems" / "data"
+        systems_root = _curated_systems_root()
     destination = systems_root / plan.system / plan.backend / version
+    if curated_root and not destination.is_dir():
+        # The SDK's version discovery treats ANY populated directory under the
+        # curated tree as a declared database version, so materializing a new
+        # directory that holds only FPM files would make
+        # get_latest_database_version return a dataless version and poison
+        # every later default-version resolution for this system.
+        raise ValueError(
+            f"pod-reported backend_version {version!r} has no curated AIC database directory at "
+            f"{destination}; publish against a curated version or pass --fpm-database-root to "
+            "write into an explicit tree"
+        )
     destination.mkdir(parents=True, exist_ok=True)
     parquet_path = destination / "fpm_forward_perf.parquet"
     metadata_path = destination / "fpm_forward_perf.metadata.json"

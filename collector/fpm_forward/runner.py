@@ -962,6 +962,45 @@ def _runtime_timing_summary(raw_root: Path) -> dict[str, int | float]:
     }
 
 
+def _salvage_artifacts(resource: KubernetesCellRunner, cell_id: str) -> None:
+    """Best-effort artifact salvage after a failed or interrupted attempt.
+
+    kubectl-exec disconnects do not stop pod processes, so the runtime may
+    still be writing when the failure handler runs; a file that grows between
+    the manifest snapshot and the copy can never match its size/sha entry and
+    would abort the whole salvage. Wait for two consecutive identical result
+    manifests per pod before collecting, and log every failure — salvage runs
+    inside failure handling and must never raise or fall silent.
+    """
+
+    try:
+        pods = resource.pods()
+    except Exception as error:
+        logger.warning("FPM salvage for %s could not list pods: %s", cell_id, error)
+        return
+    for pod in pods:
+        try:
+            previous = None
+            for _ in range(6):
+                current = resource._remote_result_manifest(pod)
+                if current == previous:
+                    break
+                previous = current
+                time.sleep(3)
+            else:
+                logger.warning(
+                    "FPM salvage for %s: results on %s were still changing after the settle window",
+                    cell_id,
+                    pod,
+                )
+        except Exception as error:
+            logger.warning("FPM salvage for %s could not settle %s: %s", cell_id, pod, error)
+    try:
+        resource.collect(pods, require_benchmark=False)
+    except Exception as error:
+        logger.warning("FPM salvage for %s did not capture a complete artifact set: %s", cell_id, error)
+
+
 # Statuses whose salvaged artifacts may be acknowledged without a rerun. A
 # cell that failed, was interrupted, or lost its host process can leave a
 # complete, attempt-matched artifact set behind; "cleanup_failed" is excluded
@@ -1146,6 +1185,13 @@ def run_collection(
             if not manifest.exists() or not run_script.exists():
                 raise RuntimeError("Generator FPM target did not emit k8s_deploy.yaml and run.sh")
             resource = KubernetesCellRunner(manifest, cell_dir)
+            if previous:
+                # A prior attempt may have left the same-named workload alive
+                # (cleanup timeout, killed collector host). apply() would adopt
+                # those pods and let the stale engine write into this attempt's
+                # freshly wiped /results, so drive a verified ignore-not-found
+                # delete before re-applying.
+                resource.cleanup()
             resource.apply()
             pods = resource.wait_ready(_expected_nodes(manifest))
             resource.stage(
@@ -1180,10 +1226,7 @@ def run_collection(
             }
         except KeyboardInterrupt:
             if resource is not None:
-                try:
-                    resource.collect(resource.pods(), require_benchmark=False)
-                except Exception:
-                    pass
+                _salvage_artifacts(resource, cell.cell_id)
             checkpoint["cells"][cell.cell_id] = {
                 **base_record,
                 "status": "interrupted",
@@ -1192,10 +1235,7 @@ def run_collection(
             raise
         except Exception as error:
             if resource is not None:
-                try:
-                    resource.collect(resource.pods(), require_benchmark=False)
-                except Exception:
-                    pass
+                _salvage_artifacts(resource, cell.cell_id)
             checkpoint["cells"][cell.cell_id] = {
                 **base_record,
                 "status": "failed",

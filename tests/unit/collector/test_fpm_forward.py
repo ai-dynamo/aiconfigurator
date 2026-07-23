@@ -22,6 +22,15 @@ from collector.fpm_forward.types import ParallelTopology
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _pinned_git_revision(monkeypatch):
+    """Keep plan-identity tests hermetic: no git binary or checkout required
+    (CI test containers ship without git), and plan hashes must not depend on
+    the ambient repository HEAD."""
+
+    monkeypatch.setattr("collector.fpm_forward.planner._git_revision", lambda: "test-revision")
+
+
 def _write_provenance(path, *, cell_id: str, plan_sha256: str = "plan-sha", attempt_id: str = "attempt"):
     path.write_text(
         json.dumps(
@@ -960,3 +969,82 @@ def test_formal_database_serializes_concurrent_publishers(tmp_path):
     metadata = json.loads((destination / "fpm_forward_perf.metadata.json").read_text())
     assert table.num_rows == len(rows)
     assert metadata["row_count"] == len(rows)
+
+
+def test_minimax_m3_family_routing_survives_inherited_base_attention_ops():
+    """include_base-inherited dense ops must not count as exact evidence."""
+
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="MiniMaxAI/MiniMax-M3",
+        model_architecture="MiniMaxM3ForCausalLM",
+        system="b200_sxm",
+        selected_ops={"attention_context", "attention_generation"},
+        has_model_cases=True,
+        options=FPMCollectionOptions.from_args(
+            _args(
+                fpm_max_gpus=16,
+                fpm_gpu_counts=[8, 16],
+            )
+        ),
+    )
+
+    assert plan.capability.support_level == "family_template"
+    assert plan.capability.template_id == "aic_family:minimaxm3:moe_msa"
+    assert plan.capability.attention_source == "dsa_module"
+
+
+def test_fmha_resolves_per_kv_dtype_against_joint_evidence(monkeypatch):
+    """fp8 fmha exists only under the fp8 kv slice: bf16-kv cells must carry
+    the bfloat16 transfer slice (recorded via fmha_resolution), never a flat
+    fp8 label the database cannot serve jointly."""
+
+    class Estimate:
+        breakdown = {"non_kv_bytes": 50, "gpu_memory_capacity_bytes": 100}
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        lambda *_args, **_kwargs: Estimate(),
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["bfloat16", "fp8"])),
+    )
+
+    assert plan.dtype_profile.fmha_by_kv_dtype == {"bfloat16": "bfloat16", "fp8": "fp8"}
+    assert plan.dtype_profile.fmha_resolution_by_kv_dtype == {
+        "bfloat16": "aic_data_fallback_from_fp8",
+        "fp8": "checkpoint_native",
+    }
+    labels = {(cell.kv_cache_dtype, cell.fmha_quant_mode, cell.fmha_resolution) for cell in plan.cells}
+    assert labels == {
+        ("bfloat16", "bfloat16", "aic_data_fallback_from_fp8"),
+        ("fp8", "fp8", "checkpoint_native"),
+    }
+
+
+def test_formal_database_refuses_new_version_dirs_in_curated_tree(tmp_path, monkeypatch):
+    """A pod-reported version without a curated directory must not materialize
+    one: the SDK treats any populated version dir as a declared database."""
+
+    from collector.fpm_forward import database as fpm_database
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    curated = tmp_path / "curated"
+    monkeypatch.setattr(fpm_database, "_curated_systems_root", lambda: curated)
+
+    with pytest.raises(ValueError, match="no curated AIC database directory"):
+        write_formal_database(plan, rows, systems_root=None)
+
+    (curated / plan.system / plan.backend / "0.24.0").mkdir(parents=True)
+    parquet, _metadata = write_formal_database(plan, rows, systems_root=None)
+    assert parquet.is_file()
+
+    explicit = tmp_path / "explicit"
+    parquet2, _metadata2 = write_formal_database(plan, rows, systems_root=explicit)
+    assert parquet2.is_file()
