@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -15,6 +17,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -26,10 +29,15 @@ import yaml
 from .native_artifact import COLLECTOR_PROVENANCE_FILENAME, validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
 
+logger = logging.getLogger(__name__)
+
 CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v3"
 DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
 RESULT_COPY_ATTEMPTS = 3
 RESULT_COPY_TIMEOUT_SECONDS = 300
+# kubectl-cp truncation has only been observed on multi-MB files; smaller
+# files skip the in-pod gzip and its extra proxied round-trips entirely.
+RESULT_COMPRESSION_MIN_BYTES = 1024 * 1024
 _FPM_VLLM_RUNTIME_ARGS = (
     "--distributed-executor-backend",
     "mp",
@@ -378,6 +386,43 @@ class KubernetesCellRunner:
         )
         return pod, completed
 
+    def _compress_remote_result(self, pod: str, remote_path: str, remote_gz: str) -> bool:
+        """Best-effort in-pod gzip of a result file before transfer.
+
+        kubectl cp through proxied clusters silently truncates large files
+        (observed repeatedly at 18-148 MB); shipping a ~10x smaller archive
+        shrinks the truncation window and the sha check below still verifies
+        the decompressed bytes against the pod-side manifest. The probe is
+        retried once so a transient proxy hiccup is not mistaken for a missing
+        gzip binary. Returns False when compression is unavailable so the
+        caller falls back to the raw copy path.
+        """
+        last_error: Exception | None = None
+        for _probe_attempt in range(2):
+            try:
+                self._exec_checked(
+                    pod,
+                    ["sh", "-c", f"gzip -cf {shlex.quote(remote_path)} > {shlex.quote(remote_gz)}"],
+                    timeout=RESULT_COPY_TIMEOUT_SECONDS,
+                )
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                last_error = error
+                continue
+            return True
+        logger.warning(
+            "in-pod gzip unavailable for %s on %s (%s); falling back to raw copy",
+            remote_path,
+            pod,
+            last_error,
+        )
+        return False
+
+    def _remove_remote_file(self, pod: str, remote_path: str) -> None:
+        try:
+            self._exec_checked(pod, ["rm", "-f", remote_path], timeout=RESULT_COPY_TIMEOUT_SECONDS)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            logger.warning("failed to remove transfer temp %s on %s: %s", remote_path, pod, error)
+
     def _copy_result_file(
         self,
         pod: str,
@@ -393,40 +438,76 @@ class KubernetesCellRunner:
         if target.is_file() and _file_metadata(target) == expected:
             return
 
+        remote_path = f"/results/{relative.as_posix()}"
+        # The transfer temp must live outside /results: the pod-side result
+        # manifest rglobs /results, so a temp leaked there would enter a later
+        # salvage manifest as a phantom result file and abort the salvage.
+        remote_gz = f"{REMOTE_WORKDIR}/{relative.as_posix().replace('/', '__')}.__xfer.gz"
+        should_compress = int(expected.get("size", 0)) >= RESULT_COMPRESSION_MIN_BYTES
+        compressed = should_compress and self._compress_remote_result(pod, remote_path, remote_gz)
+
         partial = target.with_name(f".{target.name}.part")
+        partial_gz = target.with_name(f".{target.name}.part.gz")
         failures = []
-        for attempt in range(1, RESULT_COPY_ATTEMPTS + 1):
-            partial.unlink(missing_ok=True)
-            try:
-                copied = self._kubectl(
-                    "cp",
-                    f"{self.namespace}/{pod}:/results/{relative.as_posix()}",
-                    str(partial),
-                    check=False,
-                    timeout=RESULT_COPY_TIMEOUT_SECONDS,
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
+        try:
+            for attempt in range(1, RESULT_COPY_ATTEMPTS + 1):
+                partial.unlink(missing_ok=True)
+                partial_gz.unlink(missing_ok=True)
+                source = remote_gz if compressed else remote_path
+                destination = partial_gz if compressed else partial
+                try:
+                    copied = self._kubectl(
+                        "cp",
+                        f"{self.namespace}/{pod}:{source}",
+                        str(destination),
+                        check=False,
+                        timeout=RESULT_COPY_TIMEOUT_SECONDS,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    failures.append(
+                        {
+                            "attempt": attempt,
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                        }
+                    )
+                    continue
+                if compressed and destination.is_file():
+                    try:
+                        with gzip.open(partial_gz, "rb") as src, open(partial, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                    except (OSError, EOFError, zlib.error) as error:
+                        failures.append(
+                            {
+                                "attempt": attempt,
+                                "local_exit": copied.returncode,
+                                "gz_size": partial_gz.stat().st_size,
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            }
+                        )
+                        continue
+                actual = _file_metadata(partial) if partial.is_file() else None
+                if actual == expected:
+                    os.replace(partial, target)
+                    return
                 failures.append(
                     {
                         "attempt": attempt,
-                        "error_type": type(error).__name__,
-                        "error": str(error),
+                        "local_exit": copied.returncode,
+                        "actual": actual,
+                        "gz_size": partial_gz.stat().st_size if partial_gz.is_file() else None,
+                        "output": (copied.stderr or copied.stdout).strip(),
                     }
                 )
-                continue
-            actual = _file_metadata(partial) if partial.is_file() else None
-            if actual == expected:
-                os.replace(partial, target)
-                return
-            failures.append(
-                {
-                    "attempt": attempt,
-                    "local_exit": copied.returncode,
-                    "actual": actual,
-                    "output": (copied.stderr or copied.stdout).strip(),
-                }
-            )
-        partial.unlink(missing_ok=True)
+        finally:
+            partial.unlink(missing_ok=True)
+            partial_gz.unlink(missing_ok=True)
+            if should_compress:
+                # Success or failure alike: `gzip -cf X > Y` pre-creates Y via
+                # shell redirection even when gzip itself fails, so the temp
+                # must be removed on every path.
+                self._remove_remote_file(pod, remote_gz)
         raise RuntimeError(
             f"failed to collect exact result file {remote_name!r} from {pod} "
             f"after {RESULT_COPY_ATTEMPTS} attempts: expected={expected!r}, "
@@ -881,6 +962,70 @@ def _runtime_timing_summary(raw_root: Path) -> dict[str, int | float]:
     }
 
 
+# Statuses whose salvaged artifacts may be acknowledged without a rerun. A
+# cell that failed, was interrupted, or lost its host process can leave a
+# complete, attempt-matched artifact set behind; "cleanup_failed" is excluded
+# because only a rerun re-drives the verified deletion of leaked resources.
+FPM_RECOVERABLE_STATUSES = frozenset({"failed", "interrupted", "running"})
+
+
+def _recover_completed_attempt(
+    plan: FPMCollectionPlan,
+    cell: FPMCell,
+    root: Path,
+    entry: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recover a non-passed checkpoint cell whose salvaged artifacts are complete.
+
+    Recovery only flips identity fields; the passed-entry refresh loop that
+    follows in ``run_collection`` owns the metadata of every passed record.
+    Entries carrying ``cleanup_error`` are never recovered, whatever their
+    status: their Kubernetes teardown was not verified, and only a rerun
+    re-applies and re-deletes the leaked resource.
+    """
+
+    status = entry.get("status")
+    if status not in FPM_RECOVERABLE_STATUSES or "cleanup_error" in entry:
+        return None
+    cell_dir = root / "cells" / cell.cell_id
+    try:
+        attempt_id = _required_attempt_id(entry, cell.cell_id)
+        _runtime_collection_summary(
+            cell,
+            cell_dir / "raw",
+            expected_plan_sha256=plan.sha256,
+            expected_attempt_id=attempt_id,
+        )
+    except (OSError, TypeError, ValueError) as error:
+        logger.info(
+            "FPM cell %s (status=%s) is not recoverable from local artifacts: %s",
+            cell.cell_id,
+            status,
+            error,
+        )
+        return None
+
+    recovered = dict(entry)
+    original_error = {
+        key: recovered.pop(key)
+        for key in ("error_type", "error")
+        if key in recovered
+    }
+    recovered.update(
+        {
+            "status": "passed",
+            "artifact_dir": str(cell_dir),
+            "artifact_recovery": {
+                "recovered_at": _utc_now(),
+                "validation": "native_collection_plan_and_attempt_identity",
+                "original_status": status,
+                **original_error,
+            },
+        }
+    )
+    return recovered
+
+
 def run_collection(
     plan: FPMCollectionPlan,
     *,
@@ -909,6 +1054,29 @@ def run_collection(
     target_cells = plan.cells[: (cell_limit or (1 if smoke else len(plan.cells)))]
 
     checkpoint_changed = False
+    # Recovery costs zero cluster time, so it runs on every resume: it only
+    # acknowledges strictly validated, attempt-matched artifacts that already
+    # exist on disk. Rerunning (--resume-retry-failed) remains the only path
+    # that schedules cluster work.
+    if resume:
+        for cell in target_cells:
+            entry = checkpoint["cells"].get(cell.cell_id)
+            if not isinstance(entry, dict):
+                continue
+            recovered = _recover_completed_attempt(plan, cell, root, entry)
+            if recovered is None:
+                continue
+            checkpoint["cells"][cell.cell_id] = recovered
+            checkpoint_changed = True
+            logger.info(
+                "Recovered completed FPM cell %s from strictly validated artifacts for attempt %s",
+                cell.cell_id,
+                recovered["attempt_id"],
+            )
+        if checkpoint_changed:
+            _atomic_json(checkpoint_path, checkpoint)
+            checkpoint_changed = False
+
     for cell in target_cells:
         entry = checkpoint["cells"].get(cell.cell_id)
         if not isinstance(entry, dict) or entry.get("status") != "passed":

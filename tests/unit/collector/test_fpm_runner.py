@@ -391,12 +391,15 @@ def test_stage_rejects_masked_truncated_copy(tmp_path):
 
 
 def test_collect_rejects_masked_partial_copy(tmp_path):
+    # exercise the raw-copy path: these fixtures model uncompressed transfers
     runner = _runner(tmp_path)
+    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(
+        RuntimeError("remote_exit=127")
+    )
     payloads = {
         "benchmark.json": b'{"status":"complete"}\n',
         "benchmark_dp1.json": b'{"status":"complete"}\n',
     }
-    runner._exec_checked = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
     runner._remote_result_manifest = lambda pod: {
         name: {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
         for name, payload in payloads.items()
@@ -445,9 +448,12 @@ def test_collect_retries_one_file_without_recopying_verified_files(tmp_path):
 
 
 def test_collect_accepts_exact_remote_manifest(tmp_path):
+    # exercise the raw-copy path: these fixtures model uncompressed transfers
     runner = _runner(tmp_path)
+    runner._exec_checked = lambda pod, command, timeout: (_ for _ in ()).throw(
+        RuntimeError("remote_exit=127")
+    )
     payloads = {"benchmark.json": b'{"status":"complete"}\n', "engine.stderr.log": b"done\n"}
-    runner._exec_checked = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr="")
     runner._remote_result_manifest = lambda pod: {
         name: {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
         for name, payload in payloads.items()
@@ -716,6 +722,158 @@ def test_run_collection_stages_no_explicit_scheduler_or_case_manifest(monkeypatc
     assert "prefill_requested_new_token_axis_count" not in checkpoint["cells"][cell.cell_id]
 
 
+def test_resume_retry_recovers_complete_salvaged_attempt_without_rerun(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root = tmp_path / "artifacts"
+    raw = artifact_root / plan.sha256[:16] / "smoke" / "cells" / cell.cell_id / "raw" / "pod-0"
+    raw.mkdir(parents=True)
+    _write_provenance(
+        raw / "collector-provenance.json",
+        cell_id=cell.cell_id,
+        plan_sha256=plan.sha256,
+        attempt_id="attempt-1",
+    )
+    (raw / "benchmark.json").write_text(
+        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
+    )
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "fpm_forward_smoke.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {
+                    cell.cell_id: {
+                        "status": "failed",
+                        "attempt_id": "attempt-1",
+                        "error_type": "RuntimeError",
+                        "error": "result copy was interrupted",
+                    }
+                },
+            }
+        )
+    )
+
+    def reject_rerun(*_args, **_kwargs):
+        raise AssertionError("a complete salvaged attempt must not rerun on the cluster")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", reject_rerun)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=True,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert errors == []
+    checkpoint = json.loads(checkpoint_path.read_text())
+    record = checkpoint["cells"][cell.cell_id]
+    assert record["status"] == "passed"
+    assert record["attempt_id"] == "attempt-1"
+    assert record["measured_point_count"] == 1
+    assert record["artifact_recovery"] == {
+        "error": "result copy was interrupted",
+        "error_type": "RuntimeError",
+        "original_status": "failed",
+        "recovered_at": record["artifact_recovery"]["recovered_at"],
+        "validation": "native_collection_plan_and_attempt_identity",
+    }
+    assert checkpoint["smoke"]["status"] == "passed"
+
+
+def test_plain_resume_recovers_interrupted_attempt_without_rerun(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root = tmp_path / "artifacts"
+    raw = artifact_root / plan.sha256[:16] / "smoke" / "cells" / cell.cell_id / "raw" / "pod-0"
+    raw.mkdir(parents=True)
+    _write_provenance(
+        raw / "collector-provenance.json",
+        cell_id=cell.cell_id,
+        plan_sha256=plan.sha256,
+        attempt_id="attempt-1",
+    )
+    (raw / "benchmark.json").write_text(
+        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
+    )
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "fpm_forward_smoke.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {
+                    cell.cell_id: {"status": "interrupted", "attempt_id": "attempt-1"}
+                },
+            }
+        )
+    )
+
+    def reject_rerun(*_args, **_kwargs):
+        raise AssertionError("a complete interrupted attempt must not rerun on the cluster")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", reject_rerun)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert errors == []
+    record = json.loads(checkpoint_path.read_text())["cells"][cell.cell_id]
+    assert record["status"] == "passed"
+    assert record["artifact_recovery"]["original_status"] == "interrupted"
+
+
+def test_recovery_rejects_entries_with_cleanup_error(tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+    root = tmp_path / "artifacts" / plan.sha256[:16] / "smoke"
+    raw = root / "cells" / cell.cell_id / "raw" / "pod-0"
+    raw.mkdir(parents=True)
+    _write_provenance(
+        raw / "collector-provenance.json",
+        cell_id=cell.cell_id,
+        plan_sha256=plan.sha256,
+        attempt_id="attempt-1",
+    )
+    (raw / "benchmark.json").write_text(
+        json.dumps(_native_payload(phase="prefill", rank=0, dp=1))
+    )
+    entry = {
+        "status": "failed",
+        "attempt_id": "attempt-1",
+        "error_type": "RuntimeError",
+        "error": "result copy was interrupted",
+        "cleanup_error": "kubectl delete timed out",
+    }
+
+    # Identical artifacts, but the unverified teardown quarantines the entry:
+    # only a rerun re-drives the verified deletion of the leaked resource.
+    assert fpm_runner._recover_completed_attempt(plan, cell, root, entry) is None
+    del entry["cleanup_error"]
+    recovered = fpm_runner._recover_completed_attempt(plan, cell, root, entry)
+    assert recovered is not None and recovered["status"] == "passed"
+
+
 def test_cleanup_failure_marks_passed_cell_retryable(monkeypatch, tmp_path):
     cell = _cell()
     plan = _plan(cell)
@@ -849,3 +1007,92 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
     assert "--tensor-parallel-size 4" in script
     assert "--data-parallel-size 1" in script
     assert "--enable-expert-parallel" not in script
+
+
+def _expected_meta(data: bytes) -> dict:
+    import hashlib
+
+    return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+def test_copy_result_file_uses_gzip_transfer(tmp_path):
+    import gzip as _gzip
+
+    runner = _runner(tmp_path)
+    payload = b'{"results": [1, 2, 3]}' * 50000  # >1MiB engages compression
+    exec_calls = []
+    runner._exec_checked = lambda pod, command, timeout: exec_calls.append(command)
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            assert args[1].endswith(".__xfer.gz"), args[1]
+            # The transfer temp must live outside the manifested /results tree.
+            assert f":{REMOTE_WORKDIR}/" in args[1], args[1]
+            Path(args[2]).write_bytes(_gzip.compress(payload))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    runner._kubectl = kubectl
+    runner._copy_result_file("pod-0", "benchmark.json", _expected_meta(payload), tmp_path / "raw")
+
+    assert (tmp_path / "raw" / "benchmark.json").read_bytes() == payload
+    assert any("gzip -cf" in " ".join(c) for c in exec_calls)
+    assert any(c[:2] == ["rm", "-f"] for c in exec_calls), "transfer temp must be removed"
+
+
+def test_copy_result_file_retries_truncated_gzip(tmp_path):
+    import gzip as _gzip
+
+    runner = _runner(tmp_path)
+    payload = b"x" * (2 * 1024 * 1024)
+    blob = _gzip.compress(payload)
+    attempts = iter([blob[: len(blob) // 2], blob])
+    runner._exec_checked = lambda pod, command, timeout: None
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            Path(args[2]).write_bytes(next(attempts))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    runner._kubectl = kubectl
+    runner._copy_result_file("pod-0", "benchmark.json", _expected_meta(payload), tmp_path / "raw")
+    assert (tmp_path / "raw" / "benchmark.json").read_bytes() == payload
+
+
+def test_copy_result_file_falls_back_to_raw_when_gzip_unavailable(tmp_path):
+    runner = _runner(tmp_path)
+    payload = b"raw-path-data" * 100000  # >1MiB so compression is attempted
+    copies = []
+
+    def exec_checked(pod, command, timeout):
+        raise RuntimeError("remote_exit=127")
+
+    runner._exec_checked = exec_checked
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            copies.append(args[1])
+            Path(args[2]).write_bytes(payload)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    runner._kubectl = kubectl
+    runner._copy_result_file("pod-0", "benchmark.json", _expected_meta(payload), tmp_path / "raw")
+    assert copies and copies[0].endswith(":/results/benchmark.json")
+    assert (tmp_path / "raw" / "benchmark.json").read_bytes() == payload
+
+
+def test_copy_result_file_skips_compression_for_small_files(tmp_path):
+    runner = _runner(tmp_path)
+    payload = b"raw-path-data"
+    exec_calls = []
+    runner._exec_checked = lambda pod, command, timeout: exec_calls.append(command)
+
+    def kubectl(*args, **kwargs):
+        if args[0] == "cp":
+            assert args[1].endswith(":/results/benchmark.json"), args[1]
+            Path(args[2]).write_bytes(payload)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    runner._kubectl = kubectl
+    runner._copy_result_file("pod-0", "benchmark.json", _expected_meta(payload), tmp_path / "raw")
+    assert exec_calls == [], "small files must not pay the in-pod gzip round-trips"
+    assert (tmp_path / "raw" / "benchmark.json").read_bytes() == payload
