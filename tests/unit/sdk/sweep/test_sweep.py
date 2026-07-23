@@ -68,6 +68,39 @@ def test_default_agg_batch_schedule_is_monotonic_and_capped():
 
 
 # ---------------------------------------------------------------------------
+# sweep_afd parameter forwarding
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_afd_forwards_max_a_batch_size(monkeypatch):
+    from aiconfigurator.sdk import pareto_analysis
+
+    captured = {}
+    expected = object()
+
+    def fake_afd_pareto(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(pareto_analysis, "afd_pareto", fake_afd_pareto)
+
+    result = sweep.sweep_afd(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=config.RuntimeConfig(isl=128, osl=32),
+        database=object(),
+        backend_name="trtllm",
+        model_config=config.ModelConfig(),
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+        max_a_batch_size=1536,
+    )
+
+    assert result is expected
+    assert captured["max_a_batch_size"] == 1536
+
+
+# ---------------------------------------------------------------------------
 # sweep_agg no-result classification
 # ---------------------------------------------------------------------------
 

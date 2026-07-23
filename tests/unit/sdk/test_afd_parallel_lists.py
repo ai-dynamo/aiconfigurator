@@ -88,6 +88,43 @@ def test_search_config_can_truncate_candidate_overflow():
     assert len(candidates) == 1
 
 
+def test_search_config_rejects_invalid_candidate_limit():
+    with pytest.raises(ValueError, match="max_candidates must be >= 1"):
+        build_afd_parallel_lists(
+            total_gpus=32,
+            gpus_per_node=8,
+            is_moe=False,
+            search_config={"max_candidates": 0},
+        )
+
+
+def test_search_config_rejects_invalid_overflow_policy():
+    with pytest.raises(ValueError, match="candidate_overflow must be 'error' or 'truncate'"):
+        build_afd_parallel_lists(
+            total_gpus=32,
+            gpus_per_node=8,
+            is_moe=False,
+            search_config={"candidate_overflow": "ignore"},
+        )
+
+
+def test_default_limit_covers_128_gpu_dense_search():
+    candidates = build_afd_parallel_lists(total_gpus=128, gpus_per_node=8, is_moe=False)
+
+    assert len(candidates) == 2040
+
+
+def test_default_limit_covers_96_gpu_moe_search():
+    candidates = build_afd_parallel_lists(
+        total_gpus=96,
+        gpus_per_node=8,
+        is_moe=True,
+        num_experts=256,
+    )
+
+    assert len(candidates) > 2000
+
+
 def test_single_node_returns_empty():
     assert build_afd_parallel_lists(total_gpus=8, gpus_per_node=8, is_moe=True, num_experts=64) == []
 

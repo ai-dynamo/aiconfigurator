@@ -187,6 +187,26 @@ def _validate_model_path(model_path: str) -> str:
         ) from e
 
 
+def _parse_afd_max_a_batch_size(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("AFD max A batch size must be an integer >= 32.") from exc
+    if parsed < 32:
+        raise argparse.ArgumentTypeError("AFD max A batch size must be an integer >= 32.")
+    return parsed
+
+
+def _parse_afd_max_candidates(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("AFD max candidates must be a positive integer.") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("AFD max candidates must be a positive integer.")
+    return parsed
+
+
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model-path",
@@ -230,7 +250,28 @@ def _add_default_mode_arguments(parser):
         default="auto",
         help="Serving modes to sweep and compare. 'auto' (default) compares agg and disagg; "
         "'all' compares agg, disagg, and afd; pick a single mode to restrict the search. "
-        "afd requires at least 2 nodes worth of GPUs and is skipped otherwise.",
+        "The current node-granular AFD model requires one full A node and one full F node "
+        "(at least 2 nodes); 'all' skips AFD with a warning when that budget is unavailable.",
+    )
+    parser.add_argument(
+        "--afd-max-a-batch-size",
+        type=_parse_afd_max_a_batch_size,
+        default=1024,
+        help="[expert] Maximum total in-flight batch per A worker during the AFD auto-batch search. "
+        "Candidates are aligned down to a multiple of 8. Default: 1024.",
+    )
+    parser.add_argument(
+        "--afd-max-candidates",
+        type=_parse_afd_max_candidates,
+        default=10_000,
+        help="[expert] Maximum number of AFD topology candidates. Default: 10000.",
+    )
+    parser.add_argument(
+        "--afd-candidate-overflow",
+        choices=["error", "truncate"],
+        default="error",
+        help="[expert] Behavior when the AFD topology search exceeds --afd-max-candidates. "
+        "Default: error; use truncate only as an explicit bounded-search opt-in.",
     )
     parser.add_argument(
         "--perf-db-version",
@@ -1183,6 +1224,9 @@ def build_default_tasks(
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
     serving_mode: str = "auto",
+    afd_max_a_batch_size: int = 1024,
+    afd_max_candidates: int = 10_000,
+    afd_candidate_overflow: str = "error",
 ) -> dict[str, Any]:
     """Build task configs for default mode comparison."""
     nextn_accept_rates = nextn_accept_rates or [0.85, 0.3, 0.0, 0.0, 0.0]
@@ -1276,7 +1320,7 @@ def build_default_tasks(
                 )
 
     def _disagg_backend_available(backend_name: str) -> bool:
-        if decode_system == system or database_mode != common.DatabaseMode.SILICON.name:
+        if decode_system == system or not _database_mode_requires_declared_perf_database(database_mode):
             return True
         supported = perf_database.get_supported_databases()
         decode_versions = supported.get(decode_system, {}).get(backend_name, [])
@@ -1366,7 +1410,8 @@ def build_default_tasks(
             logger.warning("Skipping afd: could not resolve num_gpus_per_node for system %s.", system)
         elif total_gpus < 2 * afd_gpus_per_node:
             logger.warning(
-                "Skipping afd: requires at least 2 nodes (%d GPUs at %d GPUs/node), got total_gpus=%d.",
+                "Skipping afd: the current node-granular topology requires one full A node "
+                "and one full F node (%d GPUs total at %d GPUs/node), got total_gpus=%d.",
                 2 * afd_gpus_per_node,
                 afd_gpus_per_node,
                 total_gpus,
@@ -1405,6 +1450,9 @@ def build_default_tasks(
                     enable_wideep=enable_wideep,
                     enable_chunked_prefill=enable_chunked_prefill,
                     moe_backend=backend_moe,
+                    afd_max_a_batch_size=afd_max_a_batch_size,
+                    afd_max_candidates=afd_max_candidates,
+                    afd_candidate_overflow=afd_candidate_overflow,
                     **global_kwargs,
                 )
             except ValueError as exc:
@@ -1556,38 +1604,9 @@ def build_experiment_tasks(
         try:
             task_config = {**exp_config, "database_mode": database_mode}
             if serving_mode == "afd":
-                if engine_step_backend is not None and "engine_step_backend" not in task_config:
-                    task_config["engine_step_backend"] = engine_step_backend
-                # Build a v2 Task for AFD from YAML config
-                afd_kwargs = {
-                    "serving_mode": "afd",
-                    "model_path": task_config["model_path"],
-                    "system_name": task_config["system_name"],
-                    "backend_name": task_config.get("backend_name", common.BackendName.trtllm.value),
-                    "backend_version": task_config.get("backend_version"),
-                    "isl": task_config.get("isl", 4000),
-                    "osl": task_config.get("osl", 1000),
-                    "image_height": task_config.get("image_height", 0),
-                    "image_width": task_config.get("image_width", 0),
-                    "num_images_per_request": task_config.get(
-                        "num_images_per_request", task_config.get("num_images", 1)
-                    ),
-                    "prefix": task_config.get("prefix", 0),
-                    "ttft": task_config.get("ttft", 1000),
-                    "tpot": task_config.get("tpot", 50),
-                    "request_latency": task_config.get("request_latency"),
-                    "enable_wideep": task_config.get("enable_wideep", False),
-                    "enable_chunked_prefill": task_config.get("enable_chunked_prefill", False),
-                    "moe_backend": task_config.get("moe_backend"),
-                    "total_gpus": task_config.get("total_gpus"),
-                    "database_mode": database_mode,
-                    "free_gpu_memory_fraction": task_config.get("free_gpu_memory_fraction"),
-                    "max_seq_len": task_config.get("max_seq_len"),
-                    "engine_step_backend": task_config.get("engine_step_backend"),
-                }
-                tasks[exp_name] = Task(**{k: v for k, v in afd_kwargs.items() if v is not None})
-            else:
-                tasks[exp_name] = Task.from_yaml(task_config, **overrides)
+                task_config.setdefault("model_path", model_path)
+                task_config.setdefault("system_name", system_name)
+            tasks[exp_name] = Task.from_yaml(task_config, **overrides)
         except Exception as exc:
             if is_expected_cli_error(exc):
                 logger.log(logging.ERROR, "Failed to build Task for experiment '%s': %s", exp_name, exc)
@@ -2459,6 +2478,9 @@ def main(args):
             max_seq_len=args.max_seq_len,
             engine_step_backend=args.engine_step_backend,
             serving_mode=args.serving_mode,
+            afd_max_a_batch_size=getattr(args, "afd_max_a_batch_size", 1024),
+            afd_max_candidates=getattr(args, "afd_max_candidates", 10_000),
+            afd_candidate_overflow=getattr(args, "afd_candidate_overflow", "error"),
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
         )

@@ -141,11 +141,26 @@ class TestCLIIntegration:
             {"afd": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
         )
 
-        args = cli_args_factory(mode="default", extra_args=["--serving-mode", "afd"])
+        args = cli_args_factory(
+            mode="default",
+            extra_args=[
+                "--serving-mode",
+                "afd",
+                "--afd-max-a-batch-size",
+                "1536",
+                "--afd-max-candidates",
+                "500",
+                "--afd-candidate-overflow",
+                "truncate",
+            ],
+        )
         cli_main(args)
 
         mock_build_default.assert_called_once()
         assert mock_build_default.call_args.kwargs["serving_mode"] == "afd"
+        assert mock_build_default.call_args.kwargs["afd_max_a_batch_size"] == 1536
+        assert mock_build_default.call_args.kwargs["afd_max_candidates"] == 500
+        assert mock_build_default.call_args.kwargs["afd_candidate_overflow"] == "truncate"
         mock_execute.assert_called_once()
 
     @patch("aiconfigurator.cli.main.save_results")

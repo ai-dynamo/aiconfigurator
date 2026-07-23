@@ -982,6 +982,7 @@ def sweep_afd(
     comm_overhead_factor: float = 1.0,
     boundary_on_attn: bool = True,
     total_batch_size: int | None = None,
+    max_a_batch_size: int = 1024,
     target_ttft: float | None = None,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -1023,9 +1024,7 @@ def sweep_afd(
     )
 
     if not afd_parallel_config_list:
-        raise NoFeasibleConfigError(
-            "sweep_afd: empty afd_parallel_config_list — no AFD topologies to evaluate."
-        )
+        raise NoFeasibleConfigError("sweep_afd: empty afd_parallel_config_list — no AFD topologies to evaluate.")
 
     result_df = afd_pareto(
         model_path=model_path,
@@ -1040,6 +1039,7 @@ def sweep_afd(
         comm_overhead_factor=comm_overhead_factor,
         boundary_on_attn=boundary_on_attn,
         total_batch_size=total_batch_size,
+        max_a_batch_size=max_a_batch_size,
         target_ttft=target_ttft,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,

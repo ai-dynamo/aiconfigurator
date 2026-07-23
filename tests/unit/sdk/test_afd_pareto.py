@@ -5,6 +5,7 @@
 
 import copy
 import math
+import re
 
 import pandas as pd
 import pytest
@@ -77,10 +78,10 @@ def test_decode_latency_correction_recomputes_rate_fields():
 class TestCombineAfdWithStaticPrefill:
     def test_rate_matched_combination(self):
         row = _afd_decode_row()
-        options = [{"tp": 2, "num_gpus": 2, "ttft": 500.0, "seq_s": 2.0, "memory": 40.0, "power_w": 0.0}]
+        options = [{"tp": 2, "num_gpus": 2, "ttft": 500.0, "seq_s": 1.9, "memory": 40.0, "power_w": 0.0}]
         combined = _combine_afd_row_with_static_prefill(row, options, target_ttft=2000.0)
 
-        effective_per_worker = 2.0 * _AFD_PREFILL_DEGRADATION
+        effective_per_worker = 1.9 * _AFD_PREFILL_DEGRADATION
         effective_decode_seq_s = 8.0 * _AFD_DECODE_DEGRADATION
         expected_workers = max(1, math.ceil(effective_decode_seq_s / effective_per_worker))
         expected_ttft = 500.0 * _AFD_TTFT_CORRECTION_FACTOR
@@ -97,6 +98,43 @@ class TestCombineAfdWithStaticPrefill:
         assert combined["tokens/s"] == pytest.approx(expected_seq_s * 1000)
         assert combined["(p)impl"] == "static_ctx"
         assert combined["(d)impl"] == "afd"
+
+    def test_prefill_bound_combination_can_maximize_tokens_per_gpu(self):
+        row = _afd_decode_row(osl=100, num_total_gpus=8)
+        row["seq/s"] = 100.0
+        options = [{"tp": 8, "num_gpus": 8, "ttft": 10.0, "seq_s": 30.0, "memory": 40.0, "power_w": 0.0}]
+
+        combined = _combine_afd_row_with_static_prefill(
+            row,
+            options,
+            prefill_degradation=1.0,
+            decode_degradation=1.0,
+            ttft_correction_factor=1.0,
+        )
+
+        assert combined is not None
+        assert combined["(p)workers"] == 3
+        assert combined["seq/s"] == 90.0
+        assert combined["num_total_gpus"] == 32
+        assert combined["tokens/s/gpu"] == pytest.approx(281.25)
+
+    def test_prefill_bound_combination_can_fit_tight_gpu_budget(self):
+        row = _afd_decode_row(osl=100, num_total_gpus=8)
+        row["seq/s"] = 100.0
+        options = [{"tp": 8, "num_gpus": 8, "ttft": 10.0, "seq_s": 30.0, "memory": 40.0, "power_w": 0.0}]
+
+        combined = _combine_afd_row_with_static_prefill(
+            row,
+            options,
+            total_gpus=32,
+            prefill_degradation=1.0,
+            decode_degradation=1.0,
+            ttft_correction_factor=1.0,
+        )
+
+        assert combined is not None
+        assert combined["(p)workers"] == 3
+        assert combined["num_total_gpus"] == 32
 
     def test_prefers_ttft_compliant_option(self):
         row = _afd_decode_row()
@@ -278,7 +316,7 @@ class TestEnumerateAfdPrefillOptions:
         assert options[-1]["cp"] == 2
 
     def test_prefill_candidate_overflow_errors(self):
-        with pytest.raises(ValueError, match="afd_config.prefill_search.max_candidates=1"):
+        with pytest.raises(ValueError, match=re.escape("afd_config.prefill_search.max_candidates=1")):
             _enumerate_afd_prefill_options(
                 model_path="Qwen/Qwen3-32B",
                 runtime_config=type("RuntimeConfig", (), {"batch_size": 1})(),

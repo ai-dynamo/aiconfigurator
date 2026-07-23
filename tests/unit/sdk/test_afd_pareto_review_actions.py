@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -31,14 +33,13 @@ class _FakeSummary:
         return pd.DataFrame([{"tokens/s/gpu": 1.0}])
 
 
-
 def _patch_afd_pareto_fixed_batch_dependencies(
     monkeypatch,
     *,
     max_batch_size: int = 1024,
     f_max_batch_size: int | None = None,
     session_oom: bool = False,
-    tpot: float | None = 10.0,
+    tpot: float | Callable[[int], float] | None = 10.0,
 ):
     captured = {"sessions": [], "runtime_configs": [], "max_batch_calls": [], "derive_called": False}
 
@@ -61,7 +62,8 @@ def _patch_afd_pareto_fixed_batch_dependencies(
 
         def get_result_dict(self):
             b_total = self._runtime_config.batch_size
-            row_tpot = float(self._runtime_config.tpot if tpot is None else tpot)
+            configured_tpot = tpot(self._afd_config.a_batch_size) if callable(tpot) else tpot
+            row_tpot = float(self._runtime_config.tpot if configured_tpot is None else configured_tpot)
             return {
                 "model": "Qwen/Qwen3-32B",
                 "phase": "decode",
@@ -124,6 +126,49 @@ def _patch_afd_pareto_fixed_batch_dependencies(
     return captured
 
 
+def test_afd_pareto_warns_once_when_candidate_exceptions_narrow_results(monkeypatch, caplog):
+    _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=64,
+        f_max_batch_size=4096,
+    )
+    successful_derive = pa._derive_a_batch_size
+
+    def fail_for_tp_two(model_path, a_model_config, *args, **kwargs):
+        if a_model_config.tp_size == 2:
+            raise KeyError("operation name changed")
+        return successful_derive(model_path, a_model_config, *args, **kwargs)
+
+    monkeypatch.setattr(pa, "_derive_a_batch_size", fail_for_tp_two)
+    caplog.set_level(logging.WARNING, logger=pa.__name__)
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=128, osl=32, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[
+            (1, 1, 2, 1, 2, "optimistic"),
+            (1, 1, 2, 1, 3, "balanced"),
+            (1, 1, 4, 1, 2, "optimistic"),
+        ],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.name == pa.__name__ and "candidate evaluations failed" in record.getMessage()
+    ]
+    assert len(warning_records) == 1
+    warning = warning_records[0].getMessage()
+    assert "2/3 candidate evaluations failed with exceptions" in warning
+    assert "2x KeyError: 'operation name changed'" in warning
+    assert "search results may be incomplete" in warning
+    assert set(df["(a)tp"]) == {4}
+
+
 @pytest.mark.parametrize(
     ("max_micro_batch_size", "num_microbatches", "align_to", "expected"),
     [
@@ -133,12 +178,8 @@ def _patch_afd_pareto_fixed_batch_dependencies(
         (64, 1, 8, 64),
     ],
 )
-def test_afd_total_batch_capacity_converts_from_microbatch(
-    max_micro_batch_size, num_microbatches, align_to, expected
-):
-    assert (
-        pa._afd_total_batch_capacity(max_micro_batch_size, num_microbatches, align_to=align_to) == expected
-    )
+def test_afd_total_batch_capacity_converts_from_microbatch(max_micro_batch_size, num_microbatches, align_to, expected):
+    assert pa._afd_total_batch_capacity(max_micro_batch_size, num_microbatches, align_to=align_to) == expected
 
 
 def test_afd_pareto_fixed_total_batch_uses_exact_a_batch(monkeypatch):
@@ -165,7 +206,8 @@ def test_afd_pareto_fixed_total_batch_uses_exact_a_batch(monkeypatch):
 def test_afd_pareto_request_latency_enumerates_constraints_and_filters_final_rows(monkeypatch):
     captured = _patch_afd_pareto_fixed_batch_dependencies(monkeypatch, max_batch_size=1024, tpot=None)
     monkeypatch.setattr(
-        pa, "enumerate_ttft_tpot_constraints",
+        pa,
+        "enumerate_ttft_tpot_constraints",
         lambda _osl, _request_latency, _ttft: [(100.0, 5.0), (100.0, 20.0)],
     )
 
@@ -282,12 +324,19 @@ def test_afd_pareto_fixed_total_batch_checks_memory_capacity(monkeypatch):
 
 
 def test_derive_a_batch_size_aligns_converted_total_capacity(monkeypatch):
+    analytical_kwargs = {}
+
     monkeypatch.setattr(pa, "get_model", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
         lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[]),
     )
-    monkeypatch.setattr(pa, "_analytical_max_batch_size", lambda *_args, **_kwargs: 15)
+
+    def fake_analytical_max_batch_size(*_args, **kwargs):
+        analytical_kwargs.update(kwargs)
+        return 15
+
+    monkeypatch.setattr(pa, "_analytical_max_batch_size", fake_analytical_max_batch_size)
 
     backend = SimpleNamespace(name=SimpleNamespace(value="trtllm"))
     batch_size, _, _ = pa._derive_a_batch_size(
@@ -305,6 +354,75 @@ def test_derive_a_batch_size_aligns_converted_total_capacity(monkeypatch):
     )
 
     assert batch_size == 40
+    assert analytical_kwargs["kvcache_multiplier"] == 3
+
+
+def test_derive_a_batch_size_keeps_capacity_above_256(monkeypatch):
+    monkeypatch.setattr(pa, "get_model", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[]),
+    )
+    monkeypatch.setattr(pa, "_analytical_max_batch_size", lambda *_args, **_kwargs: 128)
+
+    backend = SimpleNamespace(name=SimpleNamespace(value="trtllm"))
+    batch_size, _, _ = pa._derive_a_batch_size(
+        "Qwen/Qwen3-32B",
+        ModelConfig(),
+        backend,
+        _FakeDatabase(),
+        num_microbatches=3,
+        boundary_on_attn=False,
+        isl=32768,
+        osl=32,
+        prefix=0,
+        max_seq_len=None,
+        free_gpu_memory_fraction=None,
+    )
+
+    assert batch_size == 384
+
+
+def test_derive_a_batch_size_applies_configured_ceiling(monkeypatch):
+    monkeypatch.setattr(pa, "get_model", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[]),
+    )
+    monkeypatch.setattr(pa, "_analytical_max_batch_size", lambda *_args, **_kwargs: 128)
+
+    backend = SimpleNamespace(name=SimpleNamespace(value="trtllm"))
+    batch_size, _, _ = pa._derive_a_batch_size(
+        "Qwen/Qwen3-32B",
+        ModelConfig(),
+        backend,
+        _FakeDatabase(),
+        num_microbatches=3,
+        boundary_on_attn=False,
+        isl=32768,
+        osl=32,
+        prefix=0,
+        max_seq_len=None,
+        free_gpu_memory_fraction=None,
+        max_a_batch_size=300,
+    )
+
+    assert batch_size == 296
+
+
+@pytest.mark.parametrize("max_a_batch_size", [0, 31, True, 64.0])
+def test_afd_pareto_rejects_invalid_max_a_batch_size(max_a_batch_size):
+    with pytest.raises(ValueError, match="max_a_batch_size must be an integer >= 32"):
+        pa.afd_pareto(
+            model_path="Qwen/Qwen3-32B",
+            runtime_config=RuntimeConfig(isl=128, osl=32),
+            database=_FakeDatabase(),
+            backend_name="trtllm",
+            afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+            gpus_per_node=8,
+            combined_with_pd=False,
+            max_a_batch_size=max_a_batch_size,
+        )
 
 
 def test_afd_pareto_without_fixed_total_batch_keeps_auto_derivation(monkeypatch):
@@ -330,6 +448,134 @@ def test_afd_pareto_without_fixed_total_batch_keeps_auto_derivation(monkeypatch)
     evaluated_batch_sizes = [afd_config.a_batch_size for afd_config in captured["sessions"]]
     assert {1, 2, 4, 64}.issubset(evaluated_batch_sizes)
     assert {1, 2, 4, 64}.issubset(set(df["(a)bs"]))
+
+
+def test_afd_pareto_low_quick_balance_ratio_is_advisory(monkeypatch, caplog):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=64,
+        f_max_batch_size=1024,
+    )
+    monkeypatch.setattr(pa, "_quick_balance_ratio", lambda *_args, **_kwargs: 0.1)
+    caplog.set_level(logging.DEBUG, logger=pa.__name__)
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=128, osl=32),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    assert not df.empty
+    assert captured["sessions"]
+    assert any("advisory only" in record.getMessage() for record in caplog.records)
+
+
+def test_afd_pareto_quick_balance_probe_failure_is_advisory(monkeypatch, caplog):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=64,
+        f_max_batch_size=1024,
+    )
+
+    def fail_quick_probe(*_args, **_kwargs):
+        raise LookupError("missing quick-probe perf point")
+
+    monkeypatch.setattr(pa, "_quick_balance_ratio", fail_quick_probe)
+    caplog.set_level(logging.DEBUG, logger=pa.__name__)
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=128, osl=32),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    assert not df.empty
+    assert captured["sessions"]
+    assert any("quick balance probe failed; advisory only" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("f_max_batch_size", "expected_batch_size"),
+    [(12, 8), (24, 16), (32, 24)],
+)
+def test_afd_pareto_auto_batch_searches_capacities_below_32(
+    monkeypatch,
+    f_max_batch_size,
+    expected_batch_size,
+):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=64,
+        f_max_batch_size=f_max_batch_size,
+    )
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=65536, osl=32, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    evaluated_batch_sizes = [afd_config.a_batch_size for afd_config in captured["sessions"]]
+    assert expected_batch_size in evaluated_batch_sizes
+    assert expected_batch_size in set(df["(a)bs"])
+
+
+def test_afd_pareto_auto_batch_finds_24_when_32_misses_tpot(monkeypatch):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=64,
+        f_max_batch_size=4096,
+        tpot=lambda batch_size: 30.0 if batch_size >= 32 else 10.0,
+    )
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=65536, osl=32, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    evaluated_batch_sizes = [afd_config.a_batch_size for afd_config in captured["sessions"]]
+    assert 32 in evaluated_batch_sizes
+    assert 24 in evaluated_batch_sizes
+    assert max(df["(a)bs"]) == 24
+
+
+def test_afd_pareto_auto_batch_searches_above_256(monkeypatch):
+    captured = _patch_afd_pareto_fixed_batch_dependencies(
+        monkeypatch,
+        max_batch_size=384,
+        f_max_batch_size=4096,
+    )
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=32768, osl=32, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 1, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+    )
+
+    evaluated_batch_sizes = [afd_config.a_batch_size for afd_config in captured["sessions"]]
+    assert 384 in evaluated_batch_sizes
+    assert 384 in set(df["(a)bs"])
 
 
 def test_afd_pareto_combined_with_pd_requires_static_prefill_options(monkeypatch):

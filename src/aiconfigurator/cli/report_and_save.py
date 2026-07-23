@@ -998,6 +998,7 @@ def save_results(
             # 4. Save the generated config for this experiment, sub-directory for each best config
             # Use original (non-display) data so --inclusive-tpot does not affect deployment artifacts.
             artifact_config_df = best_configs.get(exp_name)
+            afd_artifact_warning_emitted = False
             if artifact_config_df is not None:
                 for i, (idx, result_df) in enumerate(artifact_config_df.iterrows()):
                     # For multi-backend mode, get the task for this row's backend
@@ -1011,6 +1012,16 @@ def save_results(
                     else:
                         row_task = exp_task
                         row_backend_version = effective_generated_version
+
+                    if row_task.serving_mode == "afd":
+                        if not afd_artifact_warning_emitted:
+                            logger.warning(
+                                "Skipping deployment artifact generation for AFD experiment '%s': "
+                                "the current generator schema does not represent A/F worker topology.",
+                                exp_name,
+                            )
+                            afd_artifact_warning_emitted = True
+                        continue
 
                     cfg = task_config_to_generator_config(
                         task_config=row_task,
