@@ -369,8 +369,8 @@ mod tests {
         systems_root().join("data/b200_sxm/sglang/0.5.10")
     }
 
-    /// `<systems_root>/data/b200_sxm/comm/nccl/2.27.3/` — the system-spec-aware
-    /// NCCL root for b200_sxm, mirroring Python's path layout.
+    /// `<systems_root>/data/b200_sxm/comm/nccl/2.27.3/` — the family-first
+    /// system-spec-aware NCCL root for b200_sxm.
     fn b200_nccl_root() -> Option<PathBuf> {
         Some(systems_root().join("data/b200_sxm/comm/nccl/2.27.3"))
     }

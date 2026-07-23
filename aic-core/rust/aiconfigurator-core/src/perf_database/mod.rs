@@ -322,13 +322,13 @@ mod tests {
         assert_eq!(db.system, "b200_sxm");
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
-        let sources =
+        let gemm_sources =
             resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &db.data_root);
-        assert_eq!(sources.len(), 1);
+        assert_eq!(gemm_sources.len(), 1);
         assert!(
-            sources[0].0.is_file(),
+            gemm_sources[0].0.is_file(),
             "resolved GEMM parquet must exist: {}",
-            sources[0].0.display()
+            gemm_sources[0].0.display()
         );
     }
 
