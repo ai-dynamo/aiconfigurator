@@ -50,6 +50,33 @@ extension contract:
 The wheel includes `py.typed` and a stub for that native extension. The SDK
 Python modules carry their own annotations.
 
+## Choosing a forward-pass API
+
+For adaptive forward-pass modeling, use
+`RustForwardPassPerfModel.best_available(...)` from Python or
+`ForwardPassPerfModel::best_available(...)` from Rust. This path uses the
+native AIC estimate when the engine configuration is supported, learns online
+correction factors from FPM observations, and falls back to regression for an
+eligible native-unsupported configuration. Check `diagnostics()` to determine
+whether the active source is `aic`, `aic_with_correction`, or
+`fallback_regression`, and to inspect any fallback warning.
+
+Use `from_native(...)` instead when native AIC support is required and an
+unsupported configuration should fail rather than fall back.
+
+`AicEngineBuilder` serves a different purpose: it constructs the strict native
+Rust engine for direct prefill, decode, and mixed-step latency calls. It does
+not provide regression fallback or online correction, so it is not a
+replacement for `best_available(...)`.
+
+```python
+from aiconfigurator_core.sdk import RustForwardPassPerfModel
+
+model = RustForwardPassPerfModel.best_available(config)
+diagnostics = model.diagnostics()
+estimate_ms = model.estimate_forward_pass_time_ms(metrics_by_rank)
+```
+
 ## Stable Rust facade
 
 New embedded consumers should construct engines with `AicEngineBuilder`. The
