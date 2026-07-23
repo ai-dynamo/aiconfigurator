@@ -1235,8 +1235,8 @@ def build_default_tasks(
             ``num_nextn_predict_layers`` (absent/0 keeps MTP disabled).
             Default 0 (disabled); never enabled implicitly.
         nextn_accepted: Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when the resolved draft
-            depth is > 0; never inferred.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.

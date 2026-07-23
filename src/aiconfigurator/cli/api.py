@@ -195,8 +195,8 @@ def cli_default(
             ``num_nextn_predict_layers`` (absent/0 keeps MTP disabled).
             Default 0 (disabled); never enabled implicitly.
         nextn_accepted: Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when the resolved draft
-            depth is > 0; never inferred.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         strict_sla: When True, ``pareto_df`` is filtered to only
             SLA-compliant data points (TPOT or request-latency) *before*
             the Pareto frontier is computed.  TTFT is already enforced at
@@ -755,8 +755,8 @@ def cli_estimate(
             ``num_nextn_predict_layers``. Applied to agg, disagg, and all
             static modes. Default 0 (disabled); MTP is never enabled implicitly.
         nextn_accepted: (common) Average accepted draft tokens per decode step
-            (0 <= nextn_accepted <= nextn). Required when the resolved draft
-            depth is > 0; never inferred.
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0; never inferred.
         stride: (static-only) Stride used by ``run_static`` to accelerate the
             OSL sweep. Ignored by agg / disagg. Default 32.
         n_a_nodes: (afd-only) Number of A-Worker (attention) nodes. Required

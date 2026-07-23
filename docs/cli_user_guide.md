@@ -132,7 +132,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--comm-quant-mode`: Communication quantization mode (auto-inferred; default `half`)
 - `--prefix`: Prefix cache length (subset of ISL already cached per request). Default: `0`
 - `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers` (absent/0 keeps MTP disabled). Default: `0`; MTP is never enabled implicitly — pass `--nextn` explicitly to model it
-- `--nextn-accepted`: Average accepted draft tokens per decode step (`0 <= nextn_accepted <= nextn`). Required when the resolved draft depth is > 0 (including via `--nextn auto`); use a measured value from your deployment
+- `--nextn-accepted`: Average accepted draft tokens per decode step (`0 <= nextn_accepted <= nextn`). Required when the draft depth is > 0 (including via `--nextn auto`); use a measured value from your deployment
 - `--stride`: (static modes only) OSL-sweep stride used by `run_static`; ignored for `agg`/`disagg`. Default: `32`
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory for KV cache. Default: `0.9`. Used to estimate max concurrent sequences and warn when batch size exceeds KV cache capacity
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls KV blocks pre-allocated per sequence; set to match your deployment for an accurate KV-capacity warning
@@ -866,9 +866,9 @@ the checkpoint declares them):
   because it is a property of your workload, not of the model.
 - `--nextn-accepted A` — Average accepted draft tokens per decode step
   (`0 <= nextn_accepted <= nextn`); each step yields `1 + nextn_accepted` output tokens.
-  Required whenever the resolved draft depth is > 0 (explicit or via `auto`) —
-  there is no built-in acceptance assumption. Use a measured value from your
-  deployment (e.g. the engine's reported average acceptance length minus 1).
+  Required whenever the draft depth is > 0 (explicit or via `auto`) — there is
+  no built-in acceptance assumption. Use a measured value from your deployment
+  (e.g. the engine's reported average acceptance length minus 1).
 
 `nextn` is part of the `aic-core` operation and iteration-cost model.
 `nextn_accepted` is a workload assumption applied by the SDK predictor/sweep
@@ -970,7 +970,7 @@ disagg_full:
   tpot: 40.0                      # target TPOT in ms (default 40.0)
 
   # Speculative decoding: never enabled implicitly; nextn_accepted is required
-  # when the resolved draft depth is > 0. nextn: auto takes the depth from the
+  # when the draft depth is > 0. nextn: auto takes the depth from the
   # checkpoint's num_nextn_predict_layers (the acceptance value is still yours).
   nextn: 1
   nextn_accepted: 0.85
