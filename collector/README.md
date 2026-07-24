@@ -113,6 +113,33 @@ capabilities.py                        — generation-time capability/denylist f
 The plan is one equation: cases = dedup(base grid ∪ model shapes), then
 intersected with hardware capability floors and minus the hang denylist.
 
+## Whole-forward FPM campaign
+
+`--ops fpm_forward` is an explicit vLLM whole-forward campaign, not a normal
+backend-registry `OpEntry`. It must be selected alone and requires a resolved
+model, `--gpu`, and `--fpm-max-gpus`. It derives a latency-blind prefill/decode
+design from the model's AIC attention cases, asks Generator for a keepalive
+Pod/LeaderWorkerSet plus `run.sh`, stages its Scheduler adapter, and publishes
+the formal table only after every frozen cell passes. Start with `--plan-only`
+or a one-cell `--smoke --limit 1` run.
+
+Model identity is resolved from a local checkpoint/config, the packaged AIC
+config cache, or Hugging Face. A real model architecture that is not registered
+by AIC uses a config-derived bootstrap template; an unresolved or empty config
+fails before planning. When the checkpoint exists only inside the runtime Pod,
+pass its real local metadata explicitly with
+`--fpm-model-config /path/to/config.json` (a directory containing `config.json`
+is also accepted). The resolved config snapshot and SHA-256 are frozen into the
+collection plan.
+
+Generator and Collector share the Dynamo-native benchmark result schema
+version; generated `run.sh` validates that contract directly and is usable
+without a Collector-side text patch. Formal `fpm_forward_perf.parquet` output
+uses metadata schema v5 and records `collector_attempt_id`, `runtime_run_id`,
+and `runtime_grid_digest` on every row. Republishing the same attempt is
+idempotent, while rows from a different attempt or runtime run are rejected for
+an existing cell even when their benchmark grids do not overlap.
+
 ## Failure philosophy: observe, don't predict
 
 There is no declarative expected-failure layer. A case that cannot run on the
