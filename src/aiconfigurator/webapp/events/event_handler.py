@@ -505,3 +505,60 @@ class EventHandler:
             components["model_path_components"],
             components["model_system_components"],
         )
+
+    @staticmethod
+    def setup_recommender_events(components):
+        components["recommend_btn"].click(
+            fn=EventFn.run_recommender,
+            inputs=[
+                components["model_path_components"]["model_path"],
+                components["model_system_components"]["system"],
+                components["model_system_components"]["backend"],
+                components["model_system_components"]["version"],
+                components["model_system_components"]["database_mode"],
+                components["runtime_config_components"]["isl"],
+                components["runtime_config_components"]["osl"],
+                components["runtime_config_components"]["prefix"],
+                components["runtime_config_components"]["ttft"],
+                components["runtime_config_components"]["tpot"],
+                components["runtime_config_components"]["request_latency"],
+                components["model_quant_components"]["gemm_quant_mode"],
+                components["model_quant_components"]["kvcache_quant_mode"],
+                components["model_quant_components"]["fmha_quant_mode"],
+                components["model_quant_components"]["moe_quant_mode"],
+                components["model_quant_components"]["comm_quant_mode"],
+                components["model_misc_config_components"]["nextn"],
+                components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
+                components["model_misc_config_components"]["enable_eplb"],
+                components["target_request_rate"],
+                components["target_concurrency"],
+            ],
+            outputs=[
+                components["result_df"],
+                components["debugging_box"],
+            ],
+        )
+
+        EventHandler.setup_common_events(
+            components["model_path_components"],
+            components["model_system_components"],
+            components["model_quant_components"],
+            components["model_misc_config_components"],
+        )
+
+        components["model_path_components"]["model_path"].change(
+            fn=EventFn.update_model_capabilities,
+            inputs=[components["model_path_components"]["model_path"]],
+            outputs=[
+                components["model_misc_config_components"]["nextn"],
+                components["model_misc_config_components"]["nextn_accept_rates"],
+                components["model_misc_config_components"]["enable_wideep"],
+            ],
+        )
+
+        components["download_btn"].click(
+            fn=EventFn.generate_csv,
+            inputs=components["result_df"],
+            outputs=components["output_file"],
+        )

@@ -52,6 +52,12 @@ def create_readme_tab(app_config):
                     This tab is used to do comparison between different pareto estimation results.
                 #### Use cases
                     1. comparing agg vs. disagg, to understand whether disagg might help in your case and find the best deployment strategy of your target SLA. Disagg is not always better. You need to specify your SLA.
+
+
+                ### Sizing Recommender tab
+                    Given a model, system, backend, workload, and a throughput target (request rate or concurrency),
+                    find the minimum number of GPUs and optimal deployment configuration (agg vs disagg, TP/PP/DP).
+                    Designed for procurement sizing — the output is unconstrained.
                 """,
             )
 

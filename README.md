@@ -107,11 +107,12 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 
 ```bash
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
+aiconfigurator cli recommend --model Qwen/Qwen3-32B-FP8 --system h200_sxm --target-request-rate 50 --ttft 2000 --tpot 30
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
-- We have four modes: `default`, `exp`, `generate`, and `support`.
+- We have six modes: `default`, `estimate`, `recommend`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - The experimental Spica smart sweeper now lives in Dynamo's standalone
   [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/4871677d0c4419070729fced4963164bdb1b5221/docs/components/aisimulate/spica/README.md).
@@ -119,6 +120,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
   `python -m spica` for Spica searches.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
+- Use `recommend` to find the minimum GPU count and optimal deployment configuration needed to meet a performance target. This mode is designed as a procurement sizing tool -- specify a throughput target (`--target-request-rate` or `--target-concurrency`) along with SLA constraints, and the system calculates the minimum GPUs required. You can also omit `--total-gpus` in default mode with a load target for the same behavior.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
@@ -147,7 +149,7 @@ Refer to [CLI User Guide](docs/cli_user_guide.md)
 You can also use `aiconfigurator` programmatically in Python:
 
 ```python
-from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_recommend, cli_support
 
 # 1. Run default agg vs disagg comparison
 result = cli_default(model_path="Qwen/Qwen3-32B-FP8", total_gpus=32, system="h200_sxm")
@@ -167,11 +169,16 @@ result = cli_exp(config={
     }
 })
 
-# 3. Generate a naive configuration
+# 3. Find minimum GPUs for a performance target (procurement sizing)
+result = cli_recommend(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm", target_request_rate=50.0, ttft=2000, tpot=30)
+for mode, df in result.best_configs.items():
+    print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
+
+# 4. Generate a naive configuration
 result = cli_generate(model_path="Qwen/Qwen3-32B-FP8", total_gpus=8, system="h200_sxm")
 print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 
-# 4. Check support for a model/system combination
+# 5. Check support for a model/system combination
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```

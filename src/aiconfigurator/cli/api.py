@@ -120,10 +120,17 @@ def _execute_and_wrap_result(
     mode: str,
     top_n: int = 5,
     strict_sla: bool = False,
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
     chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies = _execute_tasks_internal(
-        tasks, mode, top_n=top_n, strict_sla=strict_sla
+        tasks,
+        mode,
+        top_n=top_n,
+        strict_sla=strict_sla,
+        target_request_rate=target_request_rate,
+        target_concurrency=target_concurrency,
     )
 
     return CLIResult(
@@ -310,6 +317,237 @@ def cli_default(
         mock_args.generator_set = generator_set
         mock_args.generator_config = generator_config
         mock_args.generator_dynamo_version = generator_dynamo_version
+
+        save_results(
+            args=mock_args,
+            best_configs=result.best_configs,
+            pareto_fronts=result.pareto_fronts,
+            tasks=result.tasks,
+            save_dir=save_dir,
+            generated_backend_version=None,
+        )
+
+    return result
+
+
+_MAX_GPUS_PER_WORKER = 64
+
+
+def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
+    """Widen the search space for recommend mode: enable PP and scale GPU candidates."""
+    import dataclasses
+
+    num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
+
+    rebuilt = {}
+    for name, task in base_tasks.items():
+        overrides = {
+            "total_gpus": total_gpus,
+            "agg_pp_candidates": [1, 2, 4],
+            "agg_num_gpu_candidates": num_gpu_candidates,
+        }
+        if task.serving_mode == "disagg":
+            overrides.update(
+                prefill_pp_candidates=[1, 2, 4],
+                prefill_num_gpu_candidates=num_gpu_candidates,
+                decode_pp_candidates=[1, 2, 4],
+                decode_num_gpu_candidates=num_gpu_candidates,
+            )
+        rebuilt[name] = dataclasses.replace(task, **overrides)
+    return rebuilt
+
+
+def cli_recommend(
+    model_path: str,
+    system: str,
+    *,
+    target_request_rate: float | None = None,
+    target_concurrency: float | None = None,
+    decode_system: str | None = None,
+    backend: str = "trtllm",
+    backend_version: str | None = None,
+    database_mode: str = "SILICON",
+    transfer_policy: str | list | None = None,
+    isl: int = 4000,
+    osl: int = 1000,
+    image_height: int = 0,
+    image_width: int = 0,
+    num_images: int = 1,
+    ttft: float = 2000.0,
+    tpot: float = 30.0,
+    request_latency: float | None = None,
+    prefix: int = 0,
+    nextn: int = 0,
+    nextn_accept_rates: list[float] | None = None,
+    strict_sla: bool = False,
+    enable_chunked_prefill: bool = False,
+    free_gpu_memory_fraction: float | None = None,
+    max_seq_len: int | None = None,
+    enable_wideep: bool = False,
+    moe_backend: str | None = None,
+    top_n: int = 5,
+    save_dir: str | None = None,
+    engine_step_backend: str | None = None,
+) -> CLIResult:
+    """Find the minimum number of GPUs to meet a performance target.
+
+    This is the programmatic equivalent of:
+        aiconfigurator cli recommend --model-path ... --system ... --target-request-rate ...
+
+    Inverts the default mode: instead of 'given GPUs, find best config',
+    this answers 'given performance targets, find minimum GPUs'.  Designed
+    as a procurement sizing tool — the output is unconstrained.
+
+    The function sweeps all valid per-worker parallelism configurations and
+    uses :func:`pick_load_match` to compute the replica count needed to
+    serve the target load under the given SLA constraints.
+
+    Exactly one of ``target_request_rate`` or ``target_concurrency`` must
+    be provided.
+
+    Args:
+        model_path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or local path.
+        system: System name (GPU type), e.g., 'h200_sxm', 'b200_sxm'.
+        target_request_rate: Target system request rate in req/s.
+        target_concurrency: Target number of concurrent requests.
+        decode_system: System name for disagg decode workers. Defaults to ``system``.
+        backend: Backend name ('trtllm', 'sglang', 'vllm', 'auto').
+        backend_version: Backend database version. Default is latest.
+        database_mode: Database mode ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL').
+        transfer_policy: Fine-grained HYBRID/EMPIRICAL transfer control.
+        isl: Input sequence length. Default is 4000.
+        osl: Output sequence length. Default is 1000.
+        image_height: Image height for vision-language models.
+        image_width: Image width for vision-language models.
+        num_images: Number of images per request.
+        ttft: Time to first token SLA target in ms. Default is 2000.
+        tpot: Time per output token SLA target in ms. Default is 30.
+        request_latency: Optional end-to-end request latency target (ms).
+        prefix: Prefix cache length.
+        nextn: Number of draft tokens for MTP speculative decoding.
+        nextn_accept_rates: Acceptance rates for MTP draft tokens.
+        strict_sla: When True, filter to SLA-compliant configs only.
+        enable_chunked_prefill: Enable chunked prefill for finer context sweep.
+        free_gpu_memory_fraction: Fraction of free GPU memory for KV cache.
+        max_seq_len: TRT-LLM max_seq_len setting.
+        enable_wideep: Enable Wide Expert Parallelism for MoE models.
+        moe_backend: Explicit SGLang MoE backend override.
+        top_n: Number of top configurations to return per mode. Default is 5.
+        save_dir: Directory to save results. If None, results are not saved.
+        engine_step_backend: Experimental static latency backend.
+
+    Returns:
+        CLIResult with best configs containing ``total_gpus_needed`` and
+        ``replicas_needed`` columns, ranked by fewest GPUs first.
+
+    Example:
+        >>> result = cli_recommend(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     system="h200_sxm",
+        ...     target_request_rate=50.0,
+        ...     ttft=2000,
+        ...     tpot=30,
+        ... )
+        >>> print(result.best_configs)
+    """
+    from aiconfigurator.sdk.perf_database import load_system_spec
+
+    has_rate = target_request_rate is not None
+    has_conc = target_concurrency is not None
+    if has_rate == has_conc:
+        raise ValueError("Exactly one of target_request_rate or target_concurrency must be provided.")
+
+    spec = load_system_spec(system)
+    gpus_per_node = spec["node"]["num_gpus_per_node"]
+
+    base_tasks = build_default_tasks(
+        model_path=model_path,
+        total_gpus=gpus_per_node,
+        system=system,
+        decode_system=decode_system,
+        backend=backend,
+        backend_version=backend_version,
+        database_mode=database_mode,
+        transfer_policy=transfer_policy,
+        isl=isl,
+        osl=osl,
+        image_height=image_height,
+        image_width=image_width,
+        num_images=num_images,
+        ttft=ttft,
+        tpot=tpot,
+        request_latency=request_latency,
+        prefix=prefix,
+        nextn=nextn,
+        nextn_accept_rates=nextn_accept_rates,
+        enable_chunked_prefill=enable_chunked_prefill,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
+        engine_step_backend=engine_step_backend,
+        enable_wideep=enable_wideep,
+        moe_backend=moe_backend,
+    )
+
+    # Build escalation sequence: gpus_per_node, *2, *4, *8, capped at _MAX_GPUS_PER_WORKER.
+    budgets = [gpus_per_node]
+    budget = gpus_per_node * 2
+    while budget <= _MAX_GPUS_PER_WORKER:
+        budgets.append(budget)
+        budget *= 2
+
+    result = None
+    for attempt, gpu_budget in enumerate(budgets):
+        tasks = _build_recommend_tasks(base_tasks, gpu_budget)
+        try:
+            result = _execute_and_wrap_result(
+                tasks,
+                mode="default",
+                top_n=top_n,
+                strict_sla=strict_sla,
+                target_request_rate=target_request_rate,
+                target_concurrency=target_concurrency,
+            )
+            break
+        except SystemExit as exc:
+            if exc.code != 1 or attempt == len(budgets) - 1:
+                raise
+            logger.info(
+                "Recommend: no valid config at %d GPUs/worker; escalating to %d.",
+                gpu_budget,
+                budgets[attempt + 1],
+            )
+
+    if result is None:
+        raise ValueError(
+            f"System {system} has {gpus_per_node} GPUs/node which exceeds "
+            f"the maximum per-worker search limit ({_MAX_GPUS_PER_WORKER})."
+        )
+
+    if save_dir:
+
+        class _MockArgs:
+            pass
+
+        mock_args = _MockArgs()
+        mock_args.save_dir = save_dir
+        mock_args.mode = "recommend"
+        mock_args.model_path = model_path
+        mock_args.total_gpus = 0
+        mock_args.system = system
+        mock_args.backend = backend
+        mock_args.isl = isl
+        mock_args.osl = osl
+        mock_args.image_height = image_height
+        mock_args.image_width = image_width
+        mock_args.num_images = num_images
+        mock_args.ttft = ttft
+        mock_args.tpot = tpot
+        mock_args.request_latency = request_latency
+        mock_args.top_n = top_n
+        mock_args.generated_config_version = None
+        mock_args.generator_set = None
+        mock_args.generator_config = None
+        mock_args.generator_dynamo_version = None
 
         save_results(
             args=mock_args,
@@ -1857,5 +2095,6 @@ __all__ = [
     "cli_estimate",
     "cli_exp",
     "cli_generate",
+    "cli_recommend",
     "cli_support",
 ]

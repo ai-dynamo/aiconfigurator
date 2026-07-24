@@ -377,3 +377,243 @@ class TestCLISupportEquivalence:
         assert api_result.disagg_supported == cli_disagg_supported, (
             f"Disaggregated support mismatch: API={api_result.disagg_supported}, CLI={cli_disagg_supported}"
         )
+
+
+class TestCLIRecommendUnit:
+    """Unit tests for cli_recommend API."""
+
+    def test_requires_exactly_one_load_target(self):
+        from aiconfigurator.cli.api import cli_recommend
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+            )
+
+        with pytest.raises(ValueError, match="Exactly one of"):
+            cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+                target_request_rate=10.0,
+                target_concurrency=50.0,
+            )
+
+    def test_calls_build_default_tasks_with_gpus_per_node(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        captured_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+        )
+
+        assert captured_kwargs["total_gpus"] == 8
+        assert captured_kwargs["model_path"] == "Qwen/Qwen3-32B"
+
+    def test_forwards_load_match_params(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        execute_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            execute_kwargs.update(kwargs)
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=42.0,
+        )
+
+        assert execute_kwargs["target_request_rate"] == 42.0
+        assert execute_kwargs.get("target_concurrency") is None
+
+    def test_concurrency_mode(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        execute_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            execute_kwargs.update(kwargs)
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_concurrency=200.0,
+        )
+
+        assert execute_kwargs.get("target_request_rate") is None
+        assert execute_kwargs["target_concurrency"] == 200.0
+
+    def test_strict_sla_forwarded(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        execute_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            execute_kwargs.update(kwargs)
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+            strict_sla=True,
+        )
+
+        assert execute_kwargs["strict_sla"] is True
+
+    def test_wideep_and_moe_backend_forwarded(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        captured_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+            enable_wideep=True,
+            moe_backend="deepep_moe",
+        )
+
+        assert captured_kwargs["enable_wideep"] is True
+        assert captured_kwargs["moe_backend"] == "deepep_moe"
+
+    def test_recommend_includes_pp_candidates(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        execute_tasks = {}
+
+        def fake_build_default_tasks(**kwargs):
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class FakeTask:
+                total_gpus: int = 8
+                serving_mode: str = "agg"
+                agg_pp_candidates: list = field(default_factory=lambda: [1])
+                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+
+            return {"agg": FakeTask()}
+
+        def fake_execute(tasks, mode, **kwargs):
+            execute_tasks.update(tasks)
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+        )
+
+        task = execute_tasks["agg"]
+        assert 2 in task.agg_pp_candidates
+        assert 4 in task.agg_pp_candidates
+
+    def test_escalates_on_oom(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        call_count = 0
+
+        def fake_build_default_tasks(**kwargs):
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class FakeTask:
+                total_gpus: int = 8
+                serving_mode: str = "agg"
+                agg_pp_candidates: list = field(default_factory=lambda: [1])
+                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+
+            return {"agg": FakeTask()}
+
+        def fake_execute(tasks, mode, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise SystemExit(1)
+            return ("agg", {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+        )
+
+        assert call_count == 2
+
+    def test_escalation_ceiling(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        def fake_build_default_tasks(**kwargs):
+            from dataclasses import dataclass, field
+
+            @dataclass
+            class FakeTask:
+                total_gpus: int = 8
+                serving_mode: str = "agg"
+                agg_pp_candidates: list = field(default_factory=lambda: [1])
+                agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+
+            return {"agg": FakeTask()}
+
+        def fake_execute(tasks, mode, **kwargs):
+            raise SystemExit(1)
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        with pytest.raises(SystemExit):
+            api.cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+                target_request_rate=10.0,
+            )

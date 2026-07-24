@@ -418,6 +418,167 @@ def _add_default_mode_arguments(parser):
     )
 
 
+def _add_recommend_mode_arguments(parser):
+    parser.add_argument(
+        "--model-path",
+        "--model",
+        dest="model_path",
+        type=_validate_model_path,
+        default=None,
+        help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
+        "local path to directory containing config.json.",
+    )
+    load_group = parser.add_mutually_exclusive_group(required=True)
+    load_group.add_argument(
+        "--target-request-rate",
+        type=float,
+        default=None,
+        help="Target system request rate in req/s. Find minimum GPUs to serve this rate.",
+    )
+    load_group.add_argument(
+        "--target-concurrency",
+        type=float,
+        default=None,
+        help="Target number of concurrent users. Find minimum GPUs to serve this concurrency.",
+    )
+    parser.add_argument(
+        "--system",
+        type=str,
+        default=None,
+        help=(
+            "System name (GPU type). Example: "
+            "h200_sxm,h100_sxm,h100_pcie,b200_sxm,b300_sxm,gb200,a100_sxm,a100_pcie,l40s,l4,a30,gb300."
+        ),
+    )
+    parser.add_argument(
+        "--decode-system",
+        type=str,
+        default=None,
+        help="System name for disagg decode workers. Defaults to --system if omitted.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=[backend.value for backend in common.BackendName] + ["auto"],
+        type=str,
+        default=common.BackendName.trtllm.value,
+        help="Backend name. Use a specific backend (trtllm, vllm, sglang) or 'auto' to sweep "
+        "across all supported backends for the given system and compare results side by side. "
+        "Default: trtllm.",
+    )
+    parser.add_argument(
+        "--perf-db-version",
+        "--backend-version",
+        dest="backend_version",
+        type=str,
+        default=None,
+        help="[expert] Performance-database version used for the simulation/search "
+        "(search fidelity). Default: latest measured version. Alias: --backend-version.",
+    )
+    parser.add_argument(
+        "--database-mode",
+        choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
+        type=str,
+        default=common.DatabaseMode.SILICON.name,
+        help="Database mode for performance estimation. "
+        "SILICON (default): uses silicon-collected data. "
+        "HYBRID (recommended for frontier/new models): extends SILICON with SOL+empirical estimates. "
+        "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
+    )
+    parser.add_argument(
+        "--transfer-policy",
+        type=str,
+        default=None,
+        help="Fine-grained HYBRID/EMPIRICAL transfer control. "
+        "A preset (off|conservative|balanced|aggressive) or comma-separated kinds. "
+        "Default: all kinds enabled. Ignored in SILICON mode.",
+    )
+    parser.add_argument("--isl", type=int, default=4000, help="Input sequence length. Default: 4000.")
+    parser.add_argument("--osl", type=int, default=1000, help="Output sequence length. Default: 1000.")
+    parser.add_argument(
+        "--image-height",
+        type=int,
+        default=0,
+        help="Image height in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--image-width",
+        type=int,
+        default=0,
+        help="Image width in pixels for vision-language models. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
+        "--ttft",
+        type=float,
+        default=2000.0,
+        help="Time to first token SLA target in ms. (Default: 2000)",
+    )
+    parser.add_argument(
+        "--tpot",
+        type=float,
+        default=30.0,
+        help="Time per output token SLA target in ms. (Default: 30)",
+    )
+    parser.add_argument(
+        "--strict-sla",
+        action="store_true",
+        default=False,
+        help="Filter the Pareto frontier and best configs to only SLA-compliant data points.",
+    )
+    parser.add_argument(
+        "--request-latency",
+        type=float,
+        default=None,
+        help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
+    )
+    parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
+    parser.add_argument(
+        "--nextn",
+        type=int,
+        default=0,
+        help="Number of draft tokens for MTP speculative decoding. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--nextn-accept-rates",
+        type=str,
+        default="0.85,0.3,0,0,0",
+        help="Comma-separated acceptance rates for MTP draft tokens (5 values). Default: '0.85,0.3,0,0,0'.",
+    )
+    parser.add_argument(
+        "--enable-chunked-prefill",
+        action="store_true",
+        default=False,
+        help="Enable chunked prefill for finer-grained context token sweep during optimization.",
+    )
+    parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=1.0,
+        help="Fraction of free GPU memory allocated for KV cache (default: 1.0).",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="TRT-LLM --max_seq_len setting (default: isl + osl).",
+    )
+    parser.add_argument(
+        "--enable-wideep",
+        action="store_true",
+        default=False,
+        help="Enable Wide Expert Parallelism (WideEP) for MoE models.",
+    )
+    parser.add_argument(
+        "--moe-backend",
+        type=str,
+        choices=["deepep_moe", "megamoe"],
+        default=None,
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+    )
+
+
 def _add_experiments_mode_arguments(parser):
     parser.add_argument(
         "--yaml-path",
@@ -1036,6 +1197,19 @@ def configure_parser(parser):
     )
     _add_support_mode_arguments(support_parser)
 
+    recommend_parser = subparsers.add_parser(
+        "recommend",
+        parents=[common_cli_parser, common_cli_experiments_parser],
+        help="Find minimum GPUs to meet a performance target.",
+        description=(
+            "Given a model, system, workload (ISL/OSL), SLA targets (TTFT/TPOT), "
+            "and a load target (request rate or concurrency), find the minimum "
+            "number of GPUs needed. Designed as a procurement sizing tool — "
+            "the output is unconstrained."
+        ),
+    )
+    _add_recommend_mode_arguments(recommend_parser)
+
 
 def _get_system_data_root(system_name: str) -> str | None:
     """Resolve a system's perf-data root (the dir holding either
@@ -1641,7 +1815,7 @@ def _execute_tasks(
                 msg = (
                     f"Experiment {exp_name} returned no results. Possible causes: "
                     "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
-                    "(2) the model does not fit on the available GPUs — try increasing --total-gpus; "
+                    "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
                     f"(3) no perf data in the database for this configuration.{hybrid_hint}"
                 )
                 logger.warning(msg)
@@ -2376,6 +2550,53 @@ def main(args):
                 logger.debug("Traceback for estimate mode", exc_info=True)
                 raise SystemExit("Error: " + str(exc)) from exc
             raise
+        return
+
+    if args.mode == "recommend":
+        if not getattr(args, "model_path", None):
+            raise SystemExit("recommend mode requires --model-path")
+        if not getattr(args, "system", None):
+            raise SystemExit("recommend mode requires --system")
+
+        from aiconfigurator.cli.api import cli_recommend
+
+        logger.info(
+            "Recommend mode: finding minimum GPUs for %s on %s (backend=%s)",
+            args.model_path,
+            args.system,
+            args.backend,
+        )
+        cli_recommend(
+            model_path=args.model_path,
+            system=args.system,
+            target_request_rate=args.target_request_rate,
+            target_concurrency=args.target_concurrency,
+            decode_system=args.decode_system,
+            backend=args.backend,
+            backend_version=args.backend_version,
+            database_mode=args.database_mode,
+            transfer_policy=args.transfer_policy,
+            isl=args.isl,
+            osl=args.osl,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            num_images=args.num_images,
+            ttft=args.ttft,
+            tpot=args.tpot,
+            request_latency=args.request_latency,
+            prefix=args.prefix,
+            nextn=args.nextn,
+            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            strict_sla=getattr(args, "strict_sla", False),
+            enable_chunked_prefill=args.enable_chunked_prefill,
+            free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+            max_seq_len=args.max_seq_len,
+            enable_wideep=getattr(args, "enable_wideep", False),
+            moe_backend=getattr(args, "moe_backend", None),
+            top_n=args.top_n,
+            save_dir=args.save_dir,
+            engine_step_backend=args.engine_step_backend,
+        )
         return
 
     if args.mode == "default":
