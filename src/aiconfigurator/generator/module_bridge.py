@@ -93,6 +93,18 @@ def task_config_to_generator_config(
 
     overrides = copy.deepcopy(generator_overrides or {})
 
+    # Encoder parallelism is deployment-relevant only when the task models an
+    # image workload (same gate as the BenchConfig seeding below); text-only
+    # tasks must not grow multimodal engine flags.
+    _num_images = getattr(task_config, "num_images_per_request", None)
+    encoder_dp: bool | None = None
+    if (
+        (getattr(task_config, "image_height", 0) or 0) > 0
+        and (getattr(task_config, "image_width", 0) or 0) > 0
+        and (_num_images is None or _num_images > 0)
+    ):
+        encoder_dp = bool(getattr(task_config, "enable_encoder_dp", True))
+
     def _build_worker_params(prefix: str, extra_overrides: dict | None) -> tuple[dict, int]:
         workers = _safe_int(_series_val(result_df, f"{prefix}workers", 1), 1)
         tp = _safe_int(_series_val(result_df, f"{prefix}tp", 1), 1)
@@ -126,6 +138,8 @@ def task_config_to_generator_config(
             worker_payload["memory"] = memory
         if quant.get("kvcache_quant_mode"):
             worker_payload["kv_cache_dtype"] = quant["kvcache_quant_mode"]
+        if encoder_dp is not None:
+            worker_payload["enable_encoder_dp"] = encoder_dp
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)

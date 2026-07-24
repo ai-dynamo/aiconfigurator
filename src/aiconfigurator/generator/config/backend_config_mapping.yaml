@@ -41,6 +41,15 @@ parameters:
   sglang: null
   trtllm: null
 
+# Vision encoder parallelism (VL models).
+# Guard: SGLang's --mm-enable-dp-encoder only exists >= 0.5.10.
+- param_key: enable_encoder_dp
+  vllm:
+    key: mm-encoder-tp-mode
+    value: '"data" if enable_encoder_dp else "weights"'
+  sglang: mm-enable-dp-encoder
+  trtllm: null
+
 # KV Cache
 - param_key: kv_cache_dtype
   # Guard: vLLM doesn't accept "bfloat16" as a literal kv-cache-dtype -> map to "auto".

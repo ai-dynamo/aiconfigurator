@@ -17,7 +17,13 @@ import pandas as pd
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 
 
-def _task(*, image_height: int, image_width: int, num_images_per_request: int) -> SimpleNamespace:
+def _task(
+    *,
+    image_height: int,
+    image_width: int,
+    num_images_per_request: int,
+    enable_encoder_dp: bool = True,
+) -> SimpleNamespace:
     return SimpleNamespace(
         primary_backend_name="vllm",
         primary_system_name="h200_sxm",
@@ -37,6 +43,7 @@ def _task(*, image_height: int, image_width: int, num_images_per_request: int) -
         image_height=image_height,
         image_width=image_width,
         num_images_per_request=num_images_per_request,
+        enable_encoder_dp=enable_encoder_dp,
     )
 
 
@@ -88,3 +95,24 @@ def test_explicit_zero_image_count_disables_encoder_even_with_dimensions():
     result = task_config_to_generator_config(task, row, num_gpus_per_node=4)
 
     assert result["BenchConfig"]["image_batch_size"] == 0
+
+
+def test_encoder_dp_choice_reaches_worker_params():
+    # A non-default value proves the bridge forwards the Task's choice (the
+    # deployed engine flag must match what the estimator modeled).
+    task = _task(image_height=1024, image_width=1024, num_images_per_request=1, enable_encoder_dp=False)
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    result = task_config_to_generator_config(task, row, num_gpus_per_node=4)
+
+    assert result["params"]["agg"]["enable_encoder_dp"] is False
+
+
+def test_text_only_workload_omits_encoder_dp():
+    # No image workload -> no multimodal engine flags in the deployment.
+    task = _task(image_height=0, image_width=0, num_images_per_request=1)
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    result = task_config_to_generator_config(task, row, num_gpus_per_node=4)
+
+    assert "enable_encoder_dp" not in result["params"]["agg"]
