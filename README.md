@@ -76,22 +76,22 @@ python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
 ### Build and Install from Source
 
 ```bash
-# 1. Install Git LFS
-apt-get install git-lfs  # (Linux)
-brew install git-lfs   # (macOS)
-
-# 2. Clone the repo
+# 1. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
-git lfs pull
 
-# 3. Create and activate a virtual environment
+# 2. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install the standalone core, then the upper package
+# 3. Install the standalone core, then the upper package
 pip3 install ./aic-core
 pip3 install .
 ```
+
+Current performance profiles are checked-in Parquet files, so normal builds
+and usage do not require Git LFS. Install Git LFS and run `git lfs pull` only
+when working with retained legacy `*.txt` perf assets or their compatibility
+tests.
 
 ### Build with Docker
 

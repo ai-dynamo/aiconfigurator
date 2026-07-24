@@ -29,7 +29,8 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// String identifier used as a directory key under `systems/data/<system>/<backend>/`.
+    /// String identifier used as a directory key under
+    /// `systems/data/<system>/<family>/<backend>/`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Trtllm => "trtllm",

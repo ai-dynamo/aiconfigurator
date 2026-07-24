@@ -9,25 +9,19 @@ This guide will help you get started with developing `aiconfigurator`. We welcom
 
 ## Initial Setup
 
-### 1. Install Git LFS
-
-Git LFS is required to handle large database files in the repository.
-
-```bash
-apt-get install git-lfs
-```
-
-### 2. Clone the Repository
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/ai-dynamo/aiconfigurator
 cd aiconfigurator
-
-# Pull LFS files
-git lfs pull
 ```
 
-### 3. Set Up Python Virtual Environment
+Current performance profiles are checked-in Parquet files. Git LFS is only
+needed when developing against retained legacy `*.txt` perf assets or running
+their compatibility tests; for that work, install Git LFS and run
+`git lfs pull`.
+
+### 2. Set Up Python Virtual Environment
 
 ```bash
 # Create virtual environment
@@ -37,7 +31,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 4. Install Development Dependencies
+### 3. Install Development Dependencies
 
 ```bash
 # Install the standalone core and upper package in editable mode

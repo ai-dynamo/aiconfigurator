@@ -50,8 +50,8 @@ FAKE_CLOSURES = {
 
 
 def test_load_closures_fails_closed_on_missing_registry_module(tmp_path):
-    # Only ever true if at least one real registry module exists, which it does.
-    real_module = sorted(provenance.enumerate_registry_modules())[0]
+    # Only ever true if at least one real provenance module exists, which it does.
+    real_module = sorted(provenance.enumerate_provenance_modules())[0]
     incomplete = tmp_path / "hash_closures.yaml"
     # Deliberately omit every real registry module.
     incomplete.write_text("some.other.module: []\n", encoding="utf-8")
@@ -75,19 +75,18 @@ def test_load_closures_rejects_non_list_extras(tmp_path):
 
 
 def test_hash_closures_yaml_covers_every_registry_module():
-    # The fail-closed CI gate (design §5, mirrors test_manifest_resolution's
-    # test_real_manifest_resolves_every_registry_op): every module across all
-    # five registries has a hash_closures.yaml entry.
+    # The fail-closed CI gate: every registered or explicitly standalone
+    # provenance producer has a hash_closures.yaml entry.
     closures = provenance.load_closures(HASH_CLOSURES_PATH)
-    missing = provenance.enumerate_registry_modules() - closures.keys()
+    missing = provenance.enumerate_provenance_modules() - closures.keys()
     assert missing == set()
 
 
 def test_hash_closures_yaml_has_no_stale_entries():
-    # Entries for modules no registry references anymore would be silently
-    # wrong (blast-radius honesty cuts both ways) — keep the file exact.
+    # Entries for modules no registry or standalone declaration references
+    # anymore would be silently wrong — keep the file exact.
     closures = provenance.load_closures(HASH_CLOSURES_PATH)
-    stale = closures.keys() - provenance.enumerate_registry_modules()
+    stale = closures.keys() - provenance.enumerate_provenance_modules()
     assert stale == set()
 
 

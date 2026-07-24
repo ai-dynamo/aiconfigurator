@@ -14,9 +14,9 @@ provides the building blocks:
   at run time (GPU needed to produce it — never recomputed in CI).
 - ``write_collection_meta``: renders the design-§5 YAML deterministically.
 
-``load_closures`` fails closed: every module referenced by any of the five
-collector registries (``collector.framework_manifest._REGISTRY_MODULES``)
-MUST have a ``hash_closures.yaml`` entry, or loading raises ``KeyError``.
+``load_closures`` fails closed: every registered module and every explicitly
+declared standalone collector module MUST have a ``hash_closures.yaml`` entry,
+or loading raises ``KeyError``.
 """
 
 from __future__ import annotations
@@ -42,6 +42,15 @@ SHARED_CORE: tuple[str, ...] = (
 # file (the shared model-shapes group), sorted, at hash time.
 MODEL_CASES_GROUP = "__model_cases__"
 _MODEL_CASES_DIR = "collector/cases/models"
+
+# Standalone distributed collectors do not fit collect.py's single-host
+# OpEntry executor/checkpoint contract, but their published tables still need
+# authored collector_hash closures.
+STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
+    {
+        "collector.sglang.collect_dsv4_megamoe",
+    }
+)
 
 STATUS_COMPLETE = "complete"
 STATUS_PARTIAL = "partial"
@@ -70,11 +79,16 @@ def enumerate_registry_modules() -> set[str]:
     return modules
 
 
+def enumerate_provenance_modules() -> set[str]:
+    """Return every registered or explicitly standalone provenance producer."""
+    return enumerate_registry_modules() | set(STANDALONE_COLLECTOR_MODULES)
+
+
 def load_closures(path: str | Path) -> dict[str, list[str]]:
     """Load ``hash_closures.yaml`` and fail closed on incomplete coverage.
 
-    Every module returned by :func:`enumerate_registry_modules` MUST appear as
-    a key; a module missing its closure entry is a KeyError, not a silent
+    Every module returned by :func:`enumerate_provenance_modules` MUST appear
+    as a key; a module missing its closure entry is a KeyError, not a silent
     empty closure (fail-closed — see collector/hash_closures.yaml header).
     """
     closures_path = Path(path)
@@ -92,11 +106,11 @@ def load_closures(path: str | Path) -> dict[str, list[str]]:
             raise ValueError(f"{closures_path}: {module} closure must be a list of strings")
         closures[module] = list(extras)
 
-    missing = enumerate_registry_modules() - closures.keys()
+    missing = enumerate_provenance_modules() - closures.keys()
     if missing:
         raise KeyError(
-            f"{closures_path}: missing hash_closures.yaml entries for registry module(s) "
-            f"{sorted(missing)} (fail-closed — every registry module must declare its "
+            f"{closures_path}: missing hash_closures.yaml entries for provenance module(s) "
+            f"{sorted(missing)} (fail-closed — every provenance producer must declare its "
             "collector_hash closure)"
         )
     return closures

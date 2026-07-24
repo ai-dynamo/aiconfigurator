@@ -160,8 +160,8 @@ jobs:
           lfs: true
           fetch-depth: 0
       - name: Git LFS Pull
-        # The parity suite reads the collected perf parquet tables under
-        # aic-core/src/aiconfigurator_core/systems/data (stored via Git LFS).
+        # Current perf parquet tables are checked in directly; materialize any
+        # legacy LFS assets retained for compatibility coverage.
         run: git lfs pull
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
