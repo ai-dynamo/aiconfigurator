@@ -149,6 +149,36 @@ def test_flashinfer_path_pins_the_trtllm_gen_sub_backend():
     )
 
 
+def test_flashinfer_path_fails_closed_on_non_blackwell():
+    # trtllm-gen FMHA (the sub-backend Gemma4/flashinfer pins) hard-restricts to
+    # Blackwell: TllmGenFmhaRunner asserts mSM == kSM_100 || kSM_103
+    # ("Unsupported architecture", fmhaRunner.cuh:37@1.3.0rc20). run_attention_torch
+    # must therefore raise a classified skip for the FLASHINFER path on any SM other
+    # than 100/103, instead of building the op and eating a CUDA-level abort. AST-only
+    # check (run_attention_torch cannot be exec'd on CUDA-free CI).
+    source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    run_fn = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+    )
+    guards = [
+        node
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.If)
+        and any(isinstance(n, ast.Name) and n.id == "is_flashinfer" for n in ast.walk(node.test))
+        and any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version"
+            for n in ast.walk(node.test)
+        )
+        and {c.value for c in ast.walk(node.test) if isinstance(c, ast.Constant)} >= {100, 103}
+        and any(isinstance(n, ast.Raise) for n in ast.walk(node))
+    ]
+    assert len(guards) == 1, (
+        "run_attention_torch must fail closed (raise) for the FLASHINFER path when "
+        "get_sm_version() is not a Blackwell arch (100/103)"
+    )
+
+
 def test_dense_attention_uses_full_kv_cache_for_every_backend():
     source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
