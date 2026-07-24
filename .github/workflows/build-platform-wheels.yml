@@ -153,7 +153,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
-          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
           ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
           UPLOAD_UPPER: ${{ matrix.upload_upper }}
@@ -187,14 +187,14 @@ jobs:
       - name: Mark the validated matrix complete
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
-          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
           ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
           : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
-          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_PR_TOKEN is not configured}"
+          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
           : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
           if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
             echo "::error::ARTIFACTORY_URL must use HTTPS"
