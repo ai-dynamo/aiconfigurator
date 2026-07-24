@@ -114,9 +114,10 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - The experimental Spica smart sweeper now lives in Dynamo's standalone
-  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/4871677d0c4419070729fced4963164bdb1b5221/docs/components/aisimulate/spica/README.md).
+  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
   From a matching Dynamo checkout, install it with `python -m pip install ./aisimulate`, then use
-  `python -m spica` for Spica searches.
+  `python -m aisimulate.spica` for Spica searches. Runnable configurations and tools live under
+  `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
