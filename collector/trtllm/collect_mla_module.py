@@ -125,7 +125,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
-from collector.helper import benchmark_with_power, get_sm_version, log_perf
+from collector.helper import _resolve_local_model_path, benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
 if "glm_moe_dsa" not in _CONFIG_REGISTRY:
@@ -480,6 +480,18 @@ def create_attention_layer(
     the model's config.json automatically (model_type, sparse_attention_config).
     """
     mapping = Mapping(world_size=1, rank=0, tp_size=1, pp_size=1)
+
+    # Resolve the model id to a local, auto_map-stripped config dir before any
+    # transformers/TRT-LLM load, mirroring the sglang/vllm module collectors
+    # (collector/sglang/collect_mla_module.py:1091). The raw HF id would send
+    # get_config_dict()/ModelConfig.from_pretrained() through the trust_remote_code
+    # path, whose ~/.cache/huggingface/modules/_remote_code.lock serializes the 8
+    # parallel workers and caused mass file-lock Timeouts on the *_module ops. The
+    # bundled config (src/aiconfigurator/model_configs/) carries every dimension the
+    # bare-layer build needs — including the sparse index_* fields read below — and
+    # already omits both auto_map and the layer_types field, so this also makes the
+    # GLM-5.2 layer_types shim a no-op for bundled models.
+    model_path = _resolve_local_model_path(model_path)
 
     # GLM-5 uses model_type "glm_moe_dsa" / arch "GlmMoeDsaForCausalLM" which
     # TRT-LLM doesn't recognise.  ModelConfig.from_pretrained() only auto-builds
