@@ -74,9 +74,6 @@ dev = [
     "prometheus-api-client==0.6.0",
     "import-ipynb==0.2",
 ]
-webapp = [
-    "gradio==6.8.0"
-]
 service = [
     "fastapi>=0.115.12",
     "orjson>=3.10.16",
@@ -100,11 +97,10 @@ include-package-data = false
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
-"aiconfigurator.webapp.components.profiling" = ["styles.css", "js/*.js", "standalone/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.sdk*", "aiconfigurator.webapp*"]
+include = ["aiconfigurator", "aiconfigurator.cli*", "aiconfigurator.generator*", "aiconfigurator.sdk*"]
 exclude = ["aiconfigurator_core*"]
 
 [tool.uv.sources]
@@ -164,6 +160,3 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["aiconfigurator", "aiconfigurator_core", "utils", "helper"]
-
-[tool.ruff.lint.per-file-ignores]
-"src/aiconfigurator/webapp/components/**/*.py" = ["E501", "W291", "SIM117"]

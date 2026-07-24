@@ -5,7 +5,7 @@
 Unit tests for MTP (Multi-Token Prediction) speculative decoding scaling.
 
 Tests that verify:
-1. the mtp_scale_factor helper (formula + nextn/nextn_accepted validation)
+1. the mtp_scale_factor helper models compute-side nextn only
 2. generation ops ARE scaled by mtp_scale_factor while context ops are NOT
    (context_p2p bug-fix regression), incl. the Qwen3.5 hybrid GDN arch
 """
@@ -22,41 +22,44 @@ pytestmark = pytest.mark.unit
 class TestMTPScaling:
     """Tests for MTP speculative decoding scaling behavior."""
 
-    def _create_model_config(self, nextn=0, nextn_accepted=None):
+    def _create_model_config(self, nextn=0):
         """Helper to create a ModelConfig for testing."""
-        if nextn_accepted is None and nextn > 0:
-            nextn_accepted = 0.5 * nextn
         return sdk_config.ModelConfig(
             tp_size=1,
             pp_size=1,
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             nextn=nextn,
-            nextn_accepted=nextn_accepted,
         )
 
     def test_mtp_scale_factor_calculation(self):
         """
         Test the mtp_scale_factor helper.
 
-        Formula: (nextn + num_layers) / num_layers / (1 + nextn_accepted)
+        Formula: (nextn + num_layers) / num_layers
         """
         from aiconfigurator.sdk.models import mtp_scale_factor
 
-        assert mtp_scale_factor(0, None, 64) == 1.0
-        assert mtp_scale_factor(1, 0.85, 64) == pytest.approx((1 + 64) / 64 / 1.85)
-        assert mtp_scale_factor(3, 2.0, 61) == pytest.approx((3 + 61) / 61 / 3.0)
+        assert mtp_scale_factor(0, 64) == 1.0
+        assert mtp_scale_factor(2, 64) == pytest.approx((2 + 64) / 64)
+        assert mtp_scale_factor(1, 64) == pytest.approx((1 + 64) / 64)
+        assert mtp_scale_factor(3, 61) == pytest.approx((3 + 61) / 61)
 
-    def test_mtp_scale_factor_validation(self):
-        """nextn_accepted is required when nextn > 0, and must lie in [0, nextn]."""
-        from aiconfigurator.sdk.models import mtp_scale_factor
+    def test_model_config_contains_compute_side_nextn_only(self):
+        """Core model configuration does not carry workload acceptance."""
+        model_config = sdk_config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            nextn=2,
+        )
 
-        with pytest.raises(ValueError, match="required"):
-            mtp_scale_factor(2, None, 64)
-        with pytest.raises(ValueError, match="within"):
-            mtp_scale_factor(2, 2.5, 64)
-        with pytest.raises(ValueError, match="within"):
-            mtp_scale_factor(2, -0.1, 64)
+        model = models.get_model("Qwen/Qwen3-32B", model_config, "trtllm")
+
+        assert not hasattr(model_config, "nextn_accepted")
+        assert not hasattr(model, "_nextn_accepted")
+        assert model._mtp_scale_factor == pytest.approx((2 + model._num_layers) / model._num_layers)
 
     def test_generation_ops_scaled_by_mtp(self):
         """
@@ -138,7 +141,6 @@ class TestMTPScaling:
                 gemm_quant_mode=common.GEMMQuantMode.bfloat16,
                 kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
                 nextn=nextn,
-                nextn_accepted=(0.85 if nextn else None),
             )
             return models.get_model("Qwen/Qwen3-32B", mc, "trtllm")
 

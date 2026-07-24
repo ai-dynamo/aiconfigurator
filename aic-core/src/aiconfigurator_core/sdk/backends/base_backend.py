@@ -16,6 +16,7 @@ from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 from aiconfigurator_core.sdk.rust_engine_step import (
+    RustEngineUnsupportedError,
     estimate_decode_step_latency_with_rust,
     estimate_mixed_step_latency_with_rust,
     estimate_static_latency_breakdown_with_rust,
@@ -420,33 +421,43 @@ class BaseBackend:
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
         if should_use_rust_engine_step(runtime_config, database):
-            rust_runtime_config = runtime_config
-            if img_ctx_tokens:
-                rust_runtime_config = copy.copy(runtime_config)
-                rust_runtime_config.isl = isl_eff
-            (
-                context_latency_dict,
-                generation_latency_dict,
-                context_source_dict,
-                generation_source_dict,
-            ) = estimate_static_latency_breakdown_with_rust(
-                model,
-                database,
-                rust_runtime_config,
-                mode,
-                stride,
-                latency_correction_scale,
-            )
-            context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
-            generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
-            return (
-                context_latency_dict,
-                context_energy_wms_dict,
-                generation_latency_dict,
-                generation_energy_wms_dict,
-                context_source_dict,
-                generation_source_dict,
-            )
+            try:
+                rust_runtime_config = runtime_config
+                if img_ctx_tokens:
+                    rust_runtime_config = copy.copy(runtime_config)
+                    rust_runtime_config.isl = isl_eff
+                (
+                    context_latency_dict,
+                    generation_latency_dict,
+                    context_source_dict,
+                    generation_source_dict,
+                ) = estimate_static_latency_breakdown_with_rust(
+                    model,
+                    database,
+                    rust_runtime_config,
+                    mode,
+                    stride,
+                    latency_correction_scale,
+                )
+                context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+                generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
+                return (
+                    context_latency_dict,
+                    context_energy_wms_dict,
+                    generation_latency_dict,
+                    generation_energy_wms_dict,
+                    context_source_dict,
+                    generation_source_dict,
+                )
+            except RustEngineUnsupportedError as exc:
+                # Op graph not expressible as a compiled EngineSpec: fall back
+                # to the Python step (parity by delegation — Python computes
+                # what Rust cannot yet express). Perf-data misses are NOT
+                # caught here; they must stay error-symmetric.
+                logger.warning(
+                    "engine-step backend 'rust' cannot compile this model; using the python step: %s",
+                    exc,
+                )
 
         if mode == "static_ctx":
             context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
@@ -931,21 +942,29 @@ class BaseBackend:
         per-ops summary.
         """
         if should_use_rust_engine_step(runtime_config, database):
-            latency_ms = estimate_mixed_step_latency_with_rust(
-                model,
-                database,
-                ctx_tokens=ctx_tokens,
-                gen_tokens=gen_tokens,
-                isl=isl,
-                osl=osl,
-                prefix=prefix,
-            )
-            return (
-                latency_ms,
-                0.0,
-                {"rust_engine_step_mixed": latency_ms},
-                {"rust_engine_step_mixed": "rust"},
-            )
+            try:
+                latency_ms = estimate_mixed_step_latency_with_rust(
+                    model,
+                    database,
+                    ctx_tokens=ctx_tokens,
+                    gen_tokens=gen_tokens,
+                    isl=isl,
+                    osl=osl,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                )
+                return (
+                    latency_ms,
+                    0.0,
+                    {"rust_engine_step_mixed": latency_ms},
+                    {"rust_engine_step_mixed": "rust"},
+                )
+            except RustEngineUnsupportedError as exc:
+                logger.warning(
+                    "engine-step backend 'rust' cannot compile this model; using the python step: %s",
+                    exc,
+                )
 
         ctx_scale = runtime_config.seq_imbalance_correction_scale
         gen_scale = runtime_config.gen_seq_imbalance_correction_scale
@@ -1057,19 +1076,26 @@ class BaseBackend:
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
         if should_use_rust_engine_step(runtime_config, database):
-            latency_ms = estimate_decode_step_latency_with_rust(
-                model,
-                database,
-                gen_tokens=gen_tokens,
-                isl=isl,
-                osl=osl,
-            )
-            return (
-                latency_ms,
-                0.0,
-                {"rust_engine_step_generation": latency_ms},
-                {"rust_engine_step_generation": "rust"},
-            )
+            try:
+                latency_ms = estimate_decode_step_latency_with_rust(
+                    model,
+                    database,
+                    gen_tokens=gen_tokens,
+                    isl=isl,
+                    osl=osl,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                )
+                return (
+                    latency_ms,
+                    0.0,
+                    {"rust_engine_step_generation": latency_ms},
+                    {"rust_engine_step_generation": "rust"},
+                )
+            except RustEngineUnsupportedError as exc:
+                logger.warning(
+                    "engine-step backend 'rust' cannot compile this model; using the python step: %s",
+                    exc,
+                )
 
         gen_scale = runtime_config.gen_seq_imbalance_correction_scale
         summary = self.run_static(

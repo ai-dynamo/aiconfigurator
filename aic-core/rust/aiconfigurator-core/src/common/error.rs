@@ -34,6 +34,12 @@ pub enum AicError {
     ModelConfig(String),
     #[error("perf database error: {0}")]
     PerfDatabase(String),
+    /// The HYBRID/EMPIRICAL path found no calibration data for the requested
+    /// slice — no own-shape, cross-shape, or sibling transfer reference.
+    /// Mirrors Python's `EmpiricalNotImplementedError`: a coverage gap, never
+    /// converted into a fabricated `SOL / constant` value.
+    #[error("empirical estimation not implemented: {0}")]
+    EmpiricalNotImplemented(String),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -52,5 +58,18 @@ pub enum AicError {
         #[source]
         source: parquet::errors::ParquetError,
     },
+}
+
+impl AicError {
+    /// The "missing silicon data" class that HYBRID converts into an
+    /// empirical estimate. Mirrors Python's
+    /// `_MISSING_SILICON_DATA_EXCEPTIONS` (`PerfDataNotAvailableError`,
+    /// `InterpolationDataNotAvailableError`) — the same set `Op::Fallback`
+    /// catches. `EmpiricalNotImplemented` is deliberately NOT in this set:
+    /// it is the terminal miss raised after the empirical path itself found
+    /// no calibration data.
+    pub fn is_missing_perf_data(&self) -> bool {
+        matches!(self, Self::PerfDatabase(_) | Self::Io { .. })
+    }
 }
 

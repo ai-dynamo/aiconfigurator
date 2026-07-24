@@ -102,6 +102,8 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
             },
             speculative: None,
             perf_db_sources: BTreeMap::new(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             extra: BTreeMap::new(),
         },
         max_num_tokens: 8192,

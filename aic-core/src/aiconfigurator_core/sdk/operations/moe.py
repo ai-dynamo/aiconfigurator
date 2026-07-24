@@ -2288,6 +2288,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
                 quant_mode,
                 node_num,
+                kernel_source,
             )
 
         return database._query_silicon_or_hybrid(

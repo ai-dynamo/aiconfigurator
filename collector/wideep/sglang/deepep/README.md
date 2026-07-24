@@ -105,3 +105,8 @@ python collector/wideep/sglang/deepep/extract_data.py \
 After validation and parquet finalization, publish
 `wideep_deepep_{normal,ll}_perf.parquet` under
 `aic-core/src/aiconfigurator_core/systems/data/<system>/comm/sglang/<sglang_version>/`.
+Publishing must also write or refresh the corresponding table entry in
+`collection_meta.yaml`; never copy a parquet table without its provenance.
+Do not merge fresh provenance into a `provenance: legacy` directory—publish
+to a fresh runtime directory or migrate every table in that directory
+together.

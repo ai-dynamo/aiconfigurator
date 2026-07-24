@@ -27,8 +27,13 @@ from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
-from aiconfigurator.sdk.config_builders import validate_nextn as _validate_nextn
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
+from aiconfigurator.sdk.speculative import (
+    SpeculativeDecodingProfile,
+)
+from aiconfigurator.sdk.speculative import (
+    normalize_speculative_decoding as _normalize_nextn,
+)
 from aiconfigurator.sdk.task_v2 import Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
@@ -250,7 +255,7 @@ def cli_default(
     # nextn="auto" resolves the draft depth from the checkpoint first.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-    _validate_nextn(nextn, nextn_accepted)
+    nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     # Reuse build_default_tasks from main.py
     tasks = build_default_tasks(
@@ -811,7 +816,7 @@ def cli_estimate(
     # estimate path (agg/disagg/static/afd) sees a plain int.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-    _validate_nextn(nextn, nextn_accepted)
+    nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     active_systems_paths = None
     if systems_paths is not None:
@@ -1166,7 +1171,7 @@ def _run_agg_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
-    _apply_nextn(model_config, nextn, nextn_accepted)
+    _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
     # before building the model (mirrors the sweep/task_v2 path).
     resolve_context_fmha_by_data(
@@ -1194,6 +1199,7 @@ def _run_agg_estimate(
         max_seq_len=max_seq_len,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
+    summary = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted).project_summary(summary, role="agg")
 
     if summary.check_oom():
         raise RuntimeError(
@@ -1300,7 +1306,7 @@ def _run_static_estimate(
         moe_quant_mode,
         comm_quant_mode,
     )
-    _apply_nextn(model_config, nextn, nextn_accepted)
+    _apply_nextn(model_config, nextn)
     # static / static_ctx run context attention; static_gen is generation-only
     # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
     resolve_context_fmha_by_data(
@@ -1331,6 +1337,12 @@ def _run_static_estimate(
         runtime_config=runtime_config,
         mode=static_mode,
         stride=stride,
+    )
+    projection_role = (
+        "prefill" if static_mode == "static_ctx" else ("decode" if static_mode == "static_gen" else "static")
+    )
+    summary = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted).project_summary(
+        summary, role=projection_role
     )
 
     static_warning = None
@@ -1455,8 +1467,8 @@ def _run_disagg_estimate(
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
-    _apply_nextn(prefill_model_config, nextn, nextn_accepted)
-    _apply_nextn(decode_model_config, nextn, nextn_accepted)
+    _apply_nextn(prefill_model_config, nextn)
+    _apply_nextn(decode_model_config, nextn)
     # Prefill runs context attention → resolve fmha against the perf data. Decode
     # is generation-only and keeps fp8, so it needs no adjustment.
     resolve_context_fmha_by_data(
@@ -1505,6 +1517,7 @@ def _run_disagg_estimate(
         decode_model_config=decode_model_config,
         decode_batch_size=decode_batch_size,
         decode_num_worker=decode_num_workers,
+        speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
     )
 
     if summary.check_oom():
@@ -1745,8 +1758,8 @@ def _run_afd_estimate(
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
     # MTP transfer amplification once the serving semantics are finalized.
-    _apply_nextn(a_model_config, nextn, nextn_accepted)
-    _apply_nextn(f_model_config, nextn, nextn_accepted)
+    _apply_nextn(a_model_config, nextn)
+    _apply_nextn(f_model_config, nextn)
     # The A-worker runs context attention whenever the phase covers prefill
     # ("prefill" or "both"); resolve fmha against the perf data then. The
     # F-worker is FFN/MoE only and never touches FMHA. The decode-phase static
@@ -1792,6 +1805,7 @@ def _run_afd_estimate(
         phase=afd_phase,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
     )
 
     if summary.check_oom():

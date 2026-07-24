@@ -71,7 +71,7 @@ let decode = engine.decode_latency_ms(/* bs */ 1, /* isl */ 1024, /* osl */ 2)?;
 The `EngineConfig` identity carried by the spec groups its fields into cohesive
 sub-structs — `ParallelMapping` (`tp_size`, `pp_size`, `attention_dp_size`,
 `moe_tp_size`, `moe_ep_size`, `cp_size`), `QuantizationConfig`, and an optional
-`SpeculativeConfig` (`nextn`, `nextn_accepted`) — all `#[serde(flatten)]`-ed
+`SpeculativeConfig` (`nextn`) — all `#[serde(flatten)]`-ed
 so the wire JSON stays the flat object Python emits.
 
 ## Supported vs. not supported

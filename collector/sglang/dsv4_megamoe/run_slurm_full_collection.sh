@@ -239,6 +239,20 @@ for phase in $(_csv_items "${PHASE_ORDER}"); do
   esac
 done
 
+LOCAL_HEAD="$(git -C "${LOCAL_REPO}" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! "${LOCAL_HEAD}" =~ ^[0-9a-f]{40,64}$ ]]; then
+  echo "unable to resolve an exact collector Git commit from ${LOCAL_REPO}" >&2
+  exit 1
+fi
+COLLECTOR_HASH="not-requested"
+if [[ "${COPY_VALIDATED}" == "1" ]]; then
+  COLLECTOR_HASH="$(
+    PYTHONPATH="${LOCAL_REPO}${PYTHONPATH:+:${PYTHONPATH}}" python3 -c \
+      'import sys; from pathlib import Path; from collector import provenance; root = Path(sys.argv[1]); closures = provenance.load_closures(root / "collector/hash_closures.yaml"); print(provenance.collector_hash("collector.sglang.collect_dsv4_megamoe", root, closures))' \
+      "${LOCAL_REPO}"
+  )"
+fi
+
 cat >"${LOCAL_RESULT_DIR}/run_metadata.env" <<EOF
 RUN_ID=${RUN_ID}
 JOB_PREFIX=${JOB_PREFIX}
@@ -265,7 +279,8 @@ DECODE_TOKENS=${DECODE_TOKENS}
 DISTRIBUTIONS=${DISTRIBUTIONS}
 SOURCE_POLICY=${SOURCE_POLICY}
 CAP_POLICY=${CAP_POLICY}
-LOCAL_HEAD=$(git -C "${LOCAL_REPO}" rev-parse HEAD 2>/dev/null || true)
+LOCAL_HEAD=${LOCAL_HEAD}
+COLLECTOR_HASH=${COLLECTOR_HASH}
 EOF
 
 _write_cancel_script
@@ -294,6 +309,11 @@ python3 "${SCRIPT_DIR}/validate_perf.py" merge \
   --perf-file "${PERF_FILE}" \
   --output "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}"
 
+validation_allow_version_mismatch="${ALLOW_VERSION_MISMATCH}"
+if [[ "${COPY_VALIDATED}" == "1" ]]; then
+  validation_allow_version_mismatch=0
+fi
+
 python3 "${SCRIPT_DIR}/validate_perf.py" validate \
   --perf-path "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" \
   --prefill-ep-sizes "${PREFILL_EP_SIZES}" \
@@ -303,20 +323,40 @@ python3 "${SCRIPT_DIR}/validate_perf.py" validate \
   --distributions "${DISTRIBUTIONS}" \
   --phase-order "${PHASE_ORDER}" \
   --target-sglang-version "${TARGET_SGLANG_VERSION}" \
-  --allow-version-mismatch "${ALLOW_VERSION_MISMATCH}" \
+  --allow-version-mismatch "${validation_allow_version_mismatch}" \
   --summary-path "${LOCAL_RESULT_DIR}/validation_summary.txt"
 
 if [[ "${COPY_VALIDATED}" == "1" ]]; then
   target_system="$(printf '%s' "${SYSTEM_NAME}" | tr '[:upper:]' '[:lower:]')"
   target_dir="${LOCAL_REPO}/aic-core/src/aiconfigurator_core/systems/data/${target_system}/moe/sglang/${TARGET_SGLANG_VERSION}"
-  target_staging="${target_dir}/${PERF_FILE}"
-  mkdir -p "${target_dir}"
-  cp "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" "${target_staging}"
   PYTHONPATH="${LOCAL_REPO}${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 -c 'import sys; from collector.helper import convert_perf_csv_to_parquet; convert_perf_csv_to_parquet(sys.argv[1])' \
-    "${target_staging}"
-  finalized_file="${target_staging%.txt}.parquet"
-  echo "FINALIZED_TO=${finalized_file}" | tee -a "${LOCAL_RESULT_DIR}/runner.log"
+    python3 "${SCRIPT_DIR}/finalize_validated.py" \
+      --staging-csv "${LOCAL_RESULT_DIR}/merged/${PERF_FILE}" \
+      --validation-summary "${LOCAL_RESULT_DIR}/validation_summary.txt" \
+      --target-dir "${target_dir}" \
+      --target-sglang-version "${TARGET_SGLANG_VERSION}" \
+      --image "${IMAGE}" \
+      --collector-ref "${LOCAL_HEAD}" \
+      --collector-hash "${COLLECTOR_HASH}" \
+      --model-config "${MODEL_CONFIG}" \
+      --prefill-ep-sizes "${PREFILL_EP_SIZES}" \
+      --decode-ep-sizes "${DECODE_EP_SIZES}" \
+      --prefill-tokens "${PREFILL_TOKENS}" \
+      --decode-tokens "${DECODE_TOKENS}" \
+      --distributions "${DISTRIBUTIONS}" \
+      --phase-order "${PHASE_ORDER}" \
+      --routing-seed "${ROUTING_SEED}" \
+      --routing-seeds "${ROUTING_SEEDS}" \
+      --source-policy "${SOURCE_POLICY}" \
+      --pre-dispatch "${PRE_DISPATCH}" \
+      --cap-policy "${CAP_POLICY}" \
+      --prefill-num-max-tokens-per-rank "${PREFILL_NUM_MAX_TOKENS_PER_RANK}" \
+      --decode-num-max-tokens-per-rank "${DECODE_NUM_MAX_TOKENS_PER_RANK}" \
+      --include-routed-scale "${INCLUDE_ROUTED_SCALE}" \
+      --renormalize-topk-weights "${RENORMALIZE_TOPK_WEIGHTS}" \
+      --num-warmup "${NUM_WARMUP}" \
+      --num-iterations "${NUM_ITERATIONS}" \
+    | tee -a "${LOCAL_RESULT_DIR}/runner.log"
 fi
 
 echo "RUNNER_ALL_JOBS_COMPLETE $(date '+%Y-%m-%d %H:%M:%S')" | tee -a "${LOCAL_RESULT_DIR}/runner.log"

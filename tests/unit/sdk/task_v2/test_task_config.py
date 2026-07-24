@@ -325,7 +325,9 @@ def test_build_model_config_agg_uses_resolved_quant():
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
     assert mc.nextn == t.nextn == 2
-    assert mc.nextn_accepted == t.nextn_accepted == 1.2
+    assert not hasattr(mc, "nextn_accepted")
+    assert t.nextn_accepted == 1.2
+    assert t.build_speculative_profile().expected_accepted_tokens == 1.2
 
 
 def test_sweep_agg_kwargs_shape():
@@ -618,7 +620,7 @@ def test_nextn_never_auto_enabled(caplog):
 
 
 def test_nextn_auto_resolves_depth_from_checkpoint():
-    """nextn='auto' takes the draft DEPTH from num_nextn_predict_layers; the
+    """nextn='auto' takes the draft depth from num_nextn_predict_layers; the
     acceptance value is still required -- it is never inferred."""
     import pytest as _pytest
 

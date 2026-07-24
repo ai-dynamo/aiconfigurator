@@ -680,6 +680,18 @@ impl SiteIndex {
     }
 }
 
+/// Flatten a nested table into `(coords, latency_ms)` points with `f64`
+/// coordinates — the input shape of the operator-layer util-calibration
+/// grids (`operators::util_empirical::build_samples`, mirroring Python's
+/// `iter_grid` over a nested dict slice).
+pub(crate) fn node_points(node: &Node) -> Vec<(Vec<f64>, f64)> {
+    let mut out = Vec::new();
+    walk_leaves(node, &mut Vec::new(), &mut out);
+    out.into_iter()
+        .map(|(coords, latency)| (coords.into_iter().map(|c| c as f64).collect(), latency))
+        .collect()
+}
+
 fn walk_leaves(node: &Node, prefix: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, f64)>) {
     match node {
         Node::Leaf(v) => out.push((prefix.clone(), *v)),

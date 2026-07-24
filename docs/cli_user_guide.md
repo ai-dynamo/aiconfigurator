@@ -870,6 +870,11 @@ the checkpoint declares them):
   no built-in acceptance assumption. Use a measured value from your deployment
   (e.g. the engine's reported average acceptance length minus 1).
 
+`nextn` is part of the `aic-core` operation and iteration-cost model.
+`nextn_accepted` is a workload assumption applied by the SDK predictor/sweep
+after core timing, so acceptance values can be swept without recompiling or
+rerunning the `aic-core` engine.
+
 Example:
 ```bash
 aiconfigurator cli default \
@@ -1024,7 +1029,7 @@ This is long; the basics:
     - `backend_name`: `trtllm` (default), `vllm`, or `sglang`.  
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: same meaning as in `default` mode (shared, top-level).  
     - `*_enable_wideep`: enables wide-EP for fine-grained MoE models.  
-    - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when `nextn > 0`).  
+    - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when the resolved `nextn > 0`).
     - The replica/correction knobs (`num_gpu_per_replica`, `max_*_workers`, `*_latency_correction`, ...) are covered in [Advanced Tuning](advanced_tuning.md). Typically the only thing you need to touch is the quantization.
 
 Quantization override order: explicit `*_quant_mode` fields take precedence; any mode left unset is filled from the model's HF quantization metadata.

@@ -4,9 +4,9 @@
 # Authored per-module hash closures for collector_hash (Collector V3 design
 # §5: docs/perf_database/collector-v3-op-centric-design.md).
 #
-# Every module referenced by an OpEntry across the five registries enumerated
-# by collector.framework_manifest._REGISTRY_MODULES (sglang, trtllm, vllm,
-# wideep_sglang, wideep_trtllm) MUST have an entry below.
+# Every module returned by collector.provenance.enumerate_provenance_modules
+# MUST have an entry below. This includes OpEntry modules across the five
+# registries and explicitly declared standalone distributed collectors.
 # collector.provenance.load_closures() fails closed (KeyError) on any module
 # missing one — this file rides CI the same way the manifest-resolution gate
 # does (tests/unit/collector/test_provenance.py).
@@ -45,6 +45,17 @@ collector.sglang.collect_computescale:
   - __model_cases__
 collector.sglang.collect_dsv4_attn:
   - __model_cases__
+collector.sglang.collect_dsv4_megamoe:
+  # Standalone multi-node Slurm/Kubernetes flow: include every script that
+  # expands, renders, executes, merges, or validates the published table.
+  - collector/sglang/dsv4_megamoe/finalize_validated.py
+  - collector/sglang/dsv4_megamoe_workload.py
+  - collector/sglang/dsv4_megamoe/render_k8s_indexed_job.py
+  - collector/sglang/dsv4_megamoe/render_slurm_job.py
+  - collector/sglang/dsv4_megamoe/run_k8s_full_collection.sh
+  - collector/sglang/dsv4_megamoe/run_slurm_full_collection.sh
+  - collector/sglang/dsv4_megamoe/run_torchrun.sh
+  - collector/sglang/dsv4_megamoe/validate_perf.py
 collector.sglang.collect_gdn:
   - collector/cases/base_ops/gdn.yaml
   - __model_cases__

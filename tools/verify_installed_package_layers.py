@@ -138,13 +138,13 @@ def _verify_upper(*, import_runtime: bool) -> str:
             "aiconfigurator/sdk/engine.py",
             "aiconfigurator/sdk/memory.py",
             "aiconfigurator/sdk/task_v2.py",
-            "aiconfigurator/webapp/main.py",
         ),
     )
     if import_runtime:
         for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api"):
             importlib.import_module(module)
-    _forbid_module("spica")
+    for module in ("aiconfigurator.webapp", "spica"):
+        _forbid_module(module)
     return aic_version
 
 

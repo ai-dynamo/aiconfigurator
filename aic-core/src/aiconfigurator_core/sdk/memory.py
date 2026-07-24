@@ -262,7 +262,6 @@ class KVCacheEstimator:
         fmha_quant_mode: str | None = None,
         comm_quant_mode: str | None = None,
         nextn: int = 0,
-        nextn_accepted: float | None = None,
         systems_path: str | None = None,
     ) -> KVCacheEstimator:
         """Build the model/backend/perf-DB and the non-KV memory breakdown.
@@ -302,10 +301,9 @@ class KVCacheEstimator:
         # spec-decode aware (e.g. for any draft-module weights). This does NOT scale
         # the capacity activation by (nextn+1); that multiplier is suppressed below
         # (see mtp_activation_scaling). Mirrors the agg/disagg/static estimate paths.
-        # Memory is cost-side only: nextn_accepted (the acceptance benefit) never
-        # enters capacity math, so feed apply_nextn a neutral 0.0 when the caller
-        # did not supply one instead of forcing a benefit-side parameter here.
-        apply_nextn(model_config, nextn, nextn_accepted if nextn_accepted is not None else 0.0)
+        # Memory is cost-side only; accepted-token progress never enters
+        # capacity math.
+        apply_nextn(model_config, nextn)
         model = get_model(model_path, model_config, backend)
         backend_obj = get_backend(backend)
         database = perf_database.get_database(system, backend, backend_version, systems_paths=systems_path)
@@ -479,15 +477,33 @@ class NaiveKVCacheEstimator:
     and the token-capacity inverse from that geometry.
     """
 
-    def __init__(self, geometry: dict, *, dtype_bytes: int, tp_size: int, pp_size: int):
+    def __init__(
+        self,
+        geometry: dict,
+        *,
+        dtype_bytes: int,
+        tp_size: int,
+        pp_size: int,
+        moe_ep_size: int = 1,
+        moe_tp_size: int = 1,
+    ):
         self.geometry = geometry
         self.dtype_bytes = int(dtype_bytes)
         self.tp_size = int(tp_size)
         self.pp_size = int(pp_size)
+        self.moe_ep_size = max(int(moe_ep_size), 1)
+        self.moe_tp_size = max(int(moe_tp_size), 1)
 
     @classmethod
     def from_model_path(
-        cls, model_path: str, *, tp_size: int, pp_size: int, allow_hf_config_download: bool
+        cls,
+        model_path: str,
+        *,
+        tp_size: int,
+        pp_size: int,
+        allow_hf_config_download: bool,
+        moe_ep_size: int = 1,
+        moe_tp_size: int = 1,
     ) -> NaiveKVCacheEstimator:
         """Build from an HF ``config.json`` (local dir / pre-cached / optional download).
 
@@ -511,6 +527,8 @@ class NaiveKVCacheEstimator:
             dtype_bytes=cls._dtype_bytes(hf_config),
             tp_size=tp_size,
             pp_size=pp_size,
+            moe_ep_size=moe_ep_size,
+            moe_tp_size=moe_tp_size,
         )
 
     # ----------------------------- config -> geometry ----------------------------- #
@@ -701,15 +719,21 @@ class NaiveKVCacheEstimator:
         attn_params_per_layer = 4 * hidden * hidden
 
         n_experts = int(geom.get("num_experts") or 0)
+        pp = max(self.pp_size, 1)
+        tp = max(self.tp_size, 1)
         if n_experts > 0:
             moe_inter = int(geom.get("moe_inter") or inter)
-            ffn_params_per_layer = n_experts * 3 * hidden * moe_inter
+            # Expert FFN is sharded by moe_tp * moe_ep, not by the attention TP.
+            moe_divisor = self.moe_tp_size * self.moe_ep_size
+            expert_params = n_experts * 3 * hidden * moe_inter // moe_divisor
+            non_expert_params = embed_params + layers * attn_params_per_layer
+            non_expert_bytes = non_expert_params * self.dtype_bytes // (tp * pp)
+            expert_bytes = layers * expert_params * self.dtype_bytes // pp
+            return non_expert_bytes + expert_bytes
         else:
             ffn_params_per_layer = 3 * hidden * inter
-
-        total_params = embed_params + layers * (attn_params_per_layer + ffn_params_per_layer)
-        divisor = max(self.tp_size, 1) * max(self.pp_size, 1)
-        return (total_params * self.dtype_bytes) // max(divisor, 1)
+            total_params = embed_params + layers * (attn_params_per_layer + ffn_params_per_layer)
+            return (total_params * self.dtype_bytes) // (tp * pp)
 
     # --------------------------- byte budget -> tokens ---------------------------- #
 
@@ -858,7 +882,6 @@ def estimate_kv_cache(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accepted: float | None = None,
     systems_path: str | None = None,
     gpu_memory_capacity_bytes_override: int | None = None,
     tolerance_fraction: float | None = None,
@@ -916,11 +939,8 @@ def estimate_kv_cache(
     fraction = float(memory_fraction_value)
     is_of_free = memory_fraction_kind == "of_free"
 
-    # Validate MTP inputs up front: an out-of-range value must surface as-is, not
-    # be swallowed by the naive fallback below (which ignores MTP entirely).
-    # Unlike the latency paths, nextn_accepted is OPTIONAL here: capacity math
-    # never consumes the acceptance benefit, so only range-check it when given.
-    validate_nextn(nextn, nextn_accepted if nextn_accepted is not None else 0.0)
+    # Validate the compute-side MTP depth before any fallback path.
+    validate_nextn(nextn)
 
     try:
         native = KVCacheEstimator.from_request(
@@ -941,7 +961,6 @@ def estimate_kv_cache(
             fmha_quant_mode=fmha_quant_mode,
             comm_quant_mode=comm_quant_mode,
             nextn=int(nextn),
-            nextn_accepted=nextn_accepted,
             systems_path=systems_path,
         )
     except Exception as exc:  # native model build unsupported (model/backend/perf DB)
@@ -955,6 +974,8 @@ def estimate_kv_cache(
             tp_size=int(tp_size),
             pp_size=int(pp_size),
             allow_hf_config_download=allow_hf_config_download,
+            moe_ep_size=int(moe_ep_size or 1),
+            moe_tp_size=int(moe_tp_size or 1),
         ).estimate(
             capacity=gpu_memory_capacity_bytes_override,
             naive_kv_reservation=float(naive_kv_reservation),
@@ -999,7 +1020,6 @@ def estimate_num_gpu_blocks(
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
     nextn: int = 0,
-    nextn_accepted: float | None = None,
     systems_path: str | None = None,
     gpu_memory_capacity_bytes_override: int | None = None,
     tolerance_fraction: float | None = None,
@@ -1054,7 +1074,6 @@ def estimate_num_gpu_blocks(
         fmha_quant_mode=fmha_quant_mode,
         comm_quant_mode=comm_quant_mode,
         nextn=int(nextn),
-        nextn_accepted=nextn_accepted,
         systems_path=systems_path,
         gpu_memory_capacity_bytes_override=gpu_memory_capacity_bytes_override,
         tolerance_fraction=tolerance_fraction,
