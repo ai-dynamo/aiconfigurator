@@ -87,6 +87,7 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_DSV4_VLLM_024_NATIVE_W4A8_SYSTEMS = frozenset({"b200_sxm", "b300_sxm", "gb200", "gb300"})
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -251,15 +252,14 @@ def _is_known_framework_incompatible_gap(
     ):
         return True
 
-    # Version-agnostic: vLLM has no consumable path for the native DeepSeek-V4
-    # w4a8_mxfp4_mxfp8 MoE label on any collected version (0.24.0 selects
-    # W4A16 on SM90 vs W4A8 on Blackwell and the SDK MoE key carries no
-    # system dimension — see the DeepseekV4ForCausalLM case yaml). Pinning
-    # this to 0.19.0 made the same deterministic gap regress to plain FAIL
-    # on newer databases.
+    # vLLM has no consumable path for the native DeepSeek-V4
+    # w4a8_mxfp4_mxfp8 MoE label outside the collected 0.24.0 Blackwell
+    # systems. On those supported combinations, either error is a data-path
+    # regression and must remain FAIL rather than being rescued by HYBRID.
     if (
         backend == common.BackendName.vllm.value
         and "DeepSeek-V4" in model
+        and not (version == "0.24.0" and system in _DSV4_VLLM_024_NATIVE_W4A8_SYSTEMS)
         and (
             "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
             or "deepseek-v4 mhc module data not loaded" in normalized

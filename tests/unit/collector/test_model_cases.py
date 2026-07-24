@@ -536,11 +536,14 @@ def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():
         }
 
     # The trtllm-gen MXFP4xMXFP8 kernel exists only on the SM100 capability
-    # family; SM90 serves this artifact as Marlin W4A16 and SM120 routes to
-    # DeepGemmFP4/Marlin, so the label must not be collected there.
+    # family (10.x); SM90 serves this artifact as Marlin W4A16 and SM110+
+    # routes elsewhere, so the label must not be collected there.
     assert selected_modes(90) == set()
     assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
     assert selected_modes(103) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(109) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(110) == set()
+    assert selected_modes(119) == set()
     assert selected_modes(120) == set()
     # The mxfp4 runtime-feature gate must hold even inside the SM interval.
     assert selected_modes(100, mxfp4=False) == set()
