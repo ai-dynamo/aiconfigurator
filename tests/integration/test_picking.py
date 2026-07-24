@@ -176,6 +176,64 @@ class TestLoadMatchPicking:
         assert (tmp_path / chosen / "generator_config.yaml").exists()
 
 
+class TestRecommendPicking:
+    """Recommend mode: find minimum GPUs for a target load via cli_recommend."""
+
+    def test_recommend_by_request_rate(self):
+        """cli_recommend should return results with total_gpus_needed."""
+        from aiconfigurator.cli.api import cli_recommend
+
+        result = cli_recommend(
+            model_path=MODEL,
+            system=SYSTEM,
+            backend=BACKEND,
+            target_request_rate=5.0,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
+        )
+
+        assert result.chosen_exp in result.best_configs
+        has_results = False
+        for mode, df in result.best_configs.items():
+            if df is not None and not df.empty:
+                has_results = True
+                assert "replicas_needed" in df.columns, f"{mode} missing replicas_needed"
+                assert "total_gpus_needed" in df.columns, f"{mode} missing total_gpus_needed"
+                assert (df["total_gpus_needed"] > 0).all(), f"{mode} has zero GPU recommendations"
+                assert (df["replicas_needed"] >= 1).all(), f"{mode} has replicas < 1"
+        assert has_results, "cli_recommend returned no results"
+
+    def test_recommend_higher_rate_needs_more_gpus(self):
+        """Doubling the target rate should need at least as many GPUs."""
+        from aiconfigurator.cli.api import cli_recommend
+
+        common = dict(
+            model_path=MODEL,
+            system=SYSTEM,
+            backend=BACKEND,
+            isl=4000,
+            osl=1000,
+            ttft=2000,
+            tpot=50,
+        )
+        result_low = cli_recommend(target_request_rate=2.0, **common)
+        result_high = cli_recommend(target_request_rate=20.0, **common)
+
+        def min_gpus(cli_result):
+            for df in cli_result.best_configs.values():
+                if df is not None and not df.empty and "total_gpus_needed" in df.columns:
+                    return int(df["total_gpus_needed"].min())
+            return 0
+
+        low_gpus = min_gpus(result_low)
+        high_gpus = min_gpus(result_high)
+        assert high_gpus >= low_gpus, (
+            f"Higher rate (20 req/s) recommended fewer GPUs ({high_gpus}) than lower rate (2 req/s, {low_gpus})"
+        )
+
+
 class TestAutoscalePicking:
     """Autoscale mode: independent P/D picking, 1 replica each."""
 
