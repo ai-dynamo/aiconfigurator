@@ -18,7 +18,7 @@ class TestCLIArgumentParsing:
     """Test CLI argument parsing and validation."""
 
     def test_default_mode_core_args_are_required(self, cli_parser):
-        """Default mode requires the model, GPU budget, and system."""
+        """Default mode requires model and system; total_gpus is optional when a load target is provided."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
         assert len(subparsers) == 1
 
@@ -29,8 +29,9 @@ class TestCLIArgumentParsing:
         required_args = [action.dest for action in required_actions]
 
         assert "model_path" in required_args
-        assert "total_gpus" in required_args
         assert "system" in required_args
+        # total_gpus is optional -- omitting it with a load target triggers recommend
+        assert "total_gpus" not in required_args
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""

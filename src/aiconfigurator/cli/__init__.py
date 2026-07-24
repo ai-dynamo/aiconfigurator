@@ -16,7 +16,7 @@ Python API usage:
         system="h200_sxm",
     )
 
-    # cli_recommend: Find minimum GPUs for a performance target
+    # recommend: Find minimum GPUs for a performance target
     result = cli_recommend(
         model_path="Qwen/Qwen3-32B",
         system="h200_sxm",

@@ -404,11 +404,15 @@ def log_final_summary(
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
         if load_match and "replicas_needed" in best_conf_details.index:
+            per_gpu = float(best_conf_details["tokens/s/gpu"])
             display_total_gpus = int(best_conf_details["total_gpus_needed"])
+            total_throughput = per_gpu * display_total_gpus
         else:
+            per_gpu = best_throughput
             display_total_gpus = chosen_task.total_gpus
-        summary_box.append(f"    - Best Throughput: {best_throughput * display_total_gpus:,.2f} tokens/s")
-        summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
+            total_throughput = best_throughput * display_total_gpus
+        summary_box.append(f"    - Best Throughput: {total_throughput:,.2f} tokens/s")
+        summary_box.append(f"    - Per-GPU Throughput: {per_gpu:.2f} tokens/s/gpu")
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         if load_match and "replicas_needed" in best_conf_details.index:
             cluster_rr = float(best_conf_details["request_rate"]) * int(best_conf_details["replicas_needed"])

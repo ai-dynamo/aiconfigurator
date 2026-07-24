@@ -25,6 +25,7 @@ from aiconfigurator.sdk.errors import (
     NoResultsError,
     is_expected_cli_error,
     is_expected_no_result_cause,
+    is_gpu_retriable,
 )
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
@@ -168,3 +169,37 @@ def test_cli_classifier_rejects_wrapper_around_real_bug() -> None:
         raise RuntimeError("task failed") from KeyError("unexpected")
     except RuntimeError as exc:
         assert not is_expected_cli_error(exc)
+
+
+# is_gpu_retriable — classify whether more GPUs could fix a failure
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        InsufficientMemoryError("model does not fit"),
+        KVCacheCapacityError("KV-cache too small"),
+    ],
+)
+def test_gpu_retriable_accepts_memory_errors(exc) -> None:
+    assert is_gpu_retriable(exc)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        NoFeasibleConfigError("SLA impossible"),
+        PerfDataNotAvailableError("no data"),
+        EmpiricalNotImplementedError("no basis"),
+        ValueError("unsupported quant mode"),
+    ],
+)
+def test_gpu_retriable_rejects_non_memory_errors(exc) -> None:
+    assert not is_gpu_retriable(exc)
+
+
+def test_gpu_retriable_walks_exception_chain() -> None:
+    try:
+        raise RuntimeError("wrapper") from InsufficientMemoryError("OOM")
+    except RuntimeError as exc:
+        assert is_gpu_retriable(exc)

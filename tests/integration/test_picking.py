@@ -177,10 +177,10 @@ class TestLoadMatchPicking:
 
 
 class TestRecommendPicking:
-    """Recommend mode: find minimum GPUs for a target load via cli_recommend."""
+    """Recommend mode: find minimum GPUs for a target load via recommend."""
 
     def test_recommend_by_request_rate(self):
-        """cli_recommend should return results with total_gpus_needed."""
+        """recommend should return results with total_gpus_needed."""
         from aiconfigurator.cli.api import cli_recommend
 
         result = cli_recommend(
@@ -203,7 +203,7 @@ class TestRecommendPicking:
                 assert "total_gpus_needed" in df.columns, f"{mode} missing total_gpus_needed"
                 assert (df["total_gpus_needed"] > 0).all(), f"{mode} has zero GPU recommendations"
                 assert (df["replicas_needed"] >= 1).all(), f"{mode} has replicas < 1"
-        assert has_results, "cli_recommend returned no results"
+        assert has_results, "recommend returned no results"
 
     def test_recommend_higher_rate_needs_more_gpus(self):
         """Doubling the target rate should need at least as many GPUs."""
