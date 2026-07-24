@@ -76,11 +76,6 @@ jobs:
             fork_runner: macos-14
             build_method: native-macos
             upload_upper: false
-          - platform_name: win_amd64
-            runner: windows-2022
-            fork_runner: windows-2022
-            build_method: native-windows
-            upload_upper: false
 
     steps:
       - name: Checkout repository
@@ -127,25 +122,6 @@ jobs:
           delocate-wheel --wheel-dir repaired-wheelhouse --verbose wheelhouse/aiconfigurator_core-*.whl
           rm wheelhouse/aiconfigurator_core-*.whl
           mv repaired-wheelhouse/*.whl wheelhouse/
-          python tools/verify_release_wheels.py wheelhouse
-
-      - name: Select Rust toolchain for Windows wheel
-        if: matrix.build_method == 'native-windows'
-        shell: pwsh
-        run: |
-          rustup toolchain install 1.96.0 --profile minimal
-          rustup default 1.96.0
-
-      - name: Build and verify Windows wheel
-        if: matrix.build_method == 'native-windows'
-        shell: pwsh
-        run: |
-          python -m pip install --quiet 'build>=1,<2' 'maturin>=1.12,<2'
-          New-Item -ItemType Directory -Force wheelhouse | Out-Null
-          Push-Location aic-core
-          maturin build --release --out ../wheelhouse
-          Pop-Location
-          python -m build --wheel --outdir wheelhouse
           python tools/verify_release_wheels.py wheelhouse
 
       - name: Smoke-test native extension
