@@ -126,6 +126,12 @@ def _skip_trtllm_sm89_rc15_fp8_context_mha(
     use_fp8_kv_cache: bool,
     use_fp8_context_fmha: bool,
 ) -> bool:
+    # FIXME(kernel-limit): the SM89 fp8-context-MHA IMA family REPRODUCES on
+    # 1.3.0rc20 (L40S probe 2026-07-24: cudaErrorIllegalAddress at the
+    # smallest region member h=kv=96/hd=256/32768 tokens). Kept version-scoped
+    # to rc15 by owner decision (SM89 handoff): rc20 cases fail classified
+    # instead of being skipped; re-verify against framework source on the next
+    # version bump.
     if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
         return False
 
