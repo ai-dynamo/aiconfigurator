@@ -239,13 +239,14 @@ for phase in $(_csv_items "${PHASE_ORDER}"); do
   esac
 done
 
-LOCAL_HEAD="$(git -C "${LOCAL_REPO}" rev-parse HEAD 2>/dev/null || true)"
-if [[ ! "${LOCAL_HEAD}" =~ ^[0-9a-f]{40,64}$ ]]; then
-  echo "unable to resolve an exact collector Git commit from ${LOCAL_REPO}" >&2
-  exit 1
-fi
+LOCAL_HEAD="not-requested"
 COLLECTOR_HASH="not-requested"
 if [[ "${COPY_VALIDATED}" == "1" ]]; then
+  LOCAL_HEAD="$(git -C "${LOCAL_REPO}" rev-parse HEAD 2>/dev/null || true)"
+  if [[ ! "${LOCAL_HEAD}" =~ ^[0-9a-f]{40,64}$ ]]; then
+    echo "unable to resolve an exact collector Git commit from ${LOCAL_REPO}" >&2
+    exit 1
+  fi
   COLLECTOR_HASH="$(
     PYTHONPATH="${LOCAL_REPO}${PYTHONPATH:+:${PYTHONPATH}}" python3 -c \
       'import sys; from pathlib import Path; from collector import provenance; root = Path(sys.argv[1]); closures = provenance.load_closures(root / "collector/hash_closures.yaml"); print(provenance.collector_hash("collector.sglang.collect_dsv4_megamoe", root, closures))' \
