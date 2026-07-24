@@ -9,6 +9,7 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 
 pytestmark = pytest.mark.unit
 
@@ -190,8 +191,8 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     """Regression: osl=1 (no-decode) must not raise and tokens/s/user must be 0.0."""
     monkeypatch.setattr(
         backend,
-        "_get_mix_step_latency",
-        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=1.0, energy_wms=1.0),
     )
     monkeypatch.setattr(
         backend,
@@ -214,6 +215,154 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     row = summary.get_summary_df().iloc[0]
     assert row["tpot"] > 0.0
     assert row["tokens/s/user"] == 0.0
+
+
+def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    calls: list[dict] = []
+
+    class _RecordingOp(_StaticOp):
+        def query(self, *args, **kwargs) -> _LatencyResult:
+            calls.append(kwargs)
+            return super().query(*args, **kwargs)
+
+    model._nextn = 2
+    model.context_ops = [
+        _StaticOp("context_attention", latency_ms=11.0, energy_wms=110.0),
+        _RecordingOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
+    ]
+
+    estimate = backend.run_mixed(
+        model,
+        database,
+        RuntimeConfig(isl=8, osl=5, prefix=2),
+        MixedStepInput(
+            context_tokens=8,
+            num_decode_requests=2,
+        ),
+    )
+
+    assert estimate.num_decode_requests == 2
+    assert estimate.num_decode_query_tokens == 6
+    assert estimate.latency_ms == pytest.approx(sum(estimate.component_latency_ms.values()))
+    assert set(estimate.component_latency_ms) == {
+        "shared_non_attention",
+        "context_attention",
+        "decode_attention",
+    }
+    # Six new prefill tokens plus two requests verifying three target tokens each.
+    assert calls[0]["x"] == 12
+
+
+def test_run_mixed_rust_path_returns_the_same_structured_contract(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    model._nextn = 2
+    monkeypatch.setattr(base_backend_module, "should_use_rust_engine_step", lambda *args: True)
+    monkeypatch.setattr(
+        base_backend_module,
+        "estimate_mixed_step_breakdown_with_rust",
+        lambda *args, **kwargs: {
+            "total": 8.5,
+            "shared_non_attention": 5.0,
+            "context_attention": 2.0,
+            "decode_attention": 1.5,
+        },
+    )
+
+    estimate = backend.run_mixed(
+        model,
+        database,
+        RuntimeConfig(isl=8, osl=5, engine_step_backend="rust"),
+        MixedStepInput(context_tokens=8, num_decode_requests=2),
+    )
+
+    assert estimate.latency_ms == 8.5
+    assert estimate.component_latency_ms == {
+        "shared_non_attention": 5.0,
+        "context_attention": 2.0,
+        "decode_attention": 1.5,
+    }
+    assert estimate.num_decode_requests == 2
+    assert estimate.num_decode_query_tokens == 6
+
+
+def test_run_agg_applies_speculative_progress_in_scheduler(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    model._nextn = 1
+    seen_steps: list[MixedStepInput] = []
+
+    def _run_mixed(*args, **kwargs):
+        step = args[-1]
+        seen_steps.append(step)
+        return StepEstimate(
+            latency_ms=10.0,
+            energy_wms=100.0,
+            component_latency_ms={"shared_non_attention": 10.0},
+            component_energy_wms={"shared_non_attention": 100.0},
+            num_decode_requests=step.num_decode_requests,
+            num_decode_query_tokens=step.num_decode_requests * 2,
+        )
+
+    monkeypatch.setattr(backend, "run_mixed", _run_mixed)
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        ctx_tokens=8,
+        decode_tokens_per_iteration=2.0,
+    )
+    row = summary.get_summary_df().iloc[0]
+    scheduling = summary.get_step_estimates()["scheduling"]
+
+    assert seen_steps[0].num_decode_requests == 1
+    assert scheduling["decode_iterations"] == 3.0
+    assert scheduling["num_mix_steps"] == 2.0
+    assert scheduling["num_genonly_steps"] == 1.0
+    assert row["tpot"] == pytest.approx(4.167)
+    assert row["tokens/s"] == pytest.approx(320.0)
+
+
+@pytest.mark.parametrize("progress", [0.0, 3.0, float("inf"), float("nan")])
+def test_run_agg_rejects_invalid_speculative_progress(
+    progress,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    model._nextn = 1
+
+    with pytest.raises(ValueError, match="decode_tokens_per_iteration"):
+        backend.run_agg(
+            model,
+            database,
+            RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+            ctx_tokens=8,
+            decode_tokens_per_iteration=progress,
+        )
+
+
+def test_mixed_step_requires_context_tokens() -> None:
+    with pytest.raises(ValueError, match="context_tokens"):
+        MixedStepInput(context_tokens=0, num_decode_requests=1)
 
 
 def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:

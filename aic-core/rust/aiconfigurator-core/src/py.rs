@@ -257,6 +257,26 @@ impl AicEngine {
         .map_err(aic_to_py)
     }
 
+    /// Component latencies for one mixed engine step. Returns
+    /// ``(total, shared_non_attention, context_attention, decode_attention)``.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0))]
+    fn mixed_step_breakdown(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+    ) -> PyResult<(f64, f64, f64, f64)> {
+        py.allow_threads(|| {
+            self.inner
+                .mixed_step_breakdown(ctx_tokens, gen_tokens, isl, osl, prefix)
+        })
+        .map(|parts| (parts[0], parts[1], parts[2], parts[3]))
+        .map_err(aic_to_py)
+    }
+
     /// One generation-only engine-step latency in ms. Binds
     /// [`Engine::decode_step_latency`]; the Python agg orchestration
     /// (`base_backend._get_genonly_step_latency`) calls this per genonly step.
@@ -1092,6 +1112,18 @@ mod tests {
         let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
         let mixed = Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0)).unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
+        let raw_breakdown = raw.mixed_step_breakdown(1024, 2, 1024, 8, 0).unwrap();
+        let breakdown =
+            Python::with_gil(|py| aic.mixed_step_breakdown(py, 1024, 2, 1024, 8, 0)).unwrap();
+        assert_eq!(
+            breakdown,
+            (
+                raw_breakdown[0],
+                raw_breakdown[1],
+                raw_breakdown[2],
+                raw_breakdown[3],
+            )
+        );
 
         let raw_decode = raw.decode_step_latency(4, 1024, 8).unwrap();
         let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8)).unwrap();

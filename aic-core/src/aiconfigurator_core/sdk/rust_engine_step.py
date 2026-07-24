@@ -319,6 +319,33 @@ def estimate_mixed_step_latency_with_rust(
     )
 
 
+def estimate_mixed_step_breakdown_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    ctx_tokens: int,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+    prefix: int,
+) -> dict[str, float]:
+    """Estimate one mixed step and retain its three execution components."""
+    handle = _cached_engine_handle(model, database)
+    total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
+        int(ctx_tokens),
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        int(prefix or 0),
+    )
+    return {
+        "total": float(total),
+        "shared_non_attention": float(shared_non_attention),
+        "context_attention": float(context_attention),
+        "decode_attention": float(decode_attention),
+    }
+
+
 def estimate_decode_step_latency_with_rust(
     model: Any,
     database: Any,

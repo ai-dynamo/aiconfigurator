@@ -98,6 +98,9 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
             mixed_calls.append(args)
             return 8.5
 
+        def mixed_step_breakdown(self, *args):
+            return 8.5, 5.0, 2.0, 1.5
+
         def decode_step_latency(self, *args):
             decode_calls.append(args)
             return 9.5
@@ -128,6 +131,21 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
     assert decode_ms == 9.5
     assert mixed_calls == [(384, 7, 256, 256, 128)]
     assert decode_calls == [(7, 256, 256)]
+
+    assert rust_engine_step.estimate_mixed_step_breakdown_with_rust(
+        model,
+        database,
+        ctx_tokens=384,
+        gen_tokens=7,
+        isl=256,
+        osl=256,
+        prefix=128,
+    ) == {
+        "total": 8.5,
+        "shared_non_attention": 5.0,
+        "context_attention": 2.0,
+        "decode_attention": 1.5,
+    }
 
 
 def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:

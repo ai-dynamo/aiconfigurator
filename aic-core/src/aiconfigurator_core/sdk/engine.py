@@ -903,5 +903,22 @@ class EngineHandle:
     def mixed_step_latency(self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int = 0) -> float:
         return self._engine.mixed_step_latency(int(ctx_tokens), int(gen_tokens), int(isl), int(osl), int(prefix))
 
+    def mixed_step_breakdown(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+    ) -> tuple[float, float, float, float]:
+        """Return total/shared-non-attn/context-attn/decode-attn latency."""
+        return self._engine.mixed_step_breakdown(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+        )
+
     def decode_step_latency(self, gen_tokens: int, isl: int, osl: int) -> float:
         return self._engine.decode_step_latency(int(gen_tokens), int(isl), int(osl))

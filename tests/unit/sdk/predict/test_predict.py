@@ -14,6 +14,7 @@ import pytest
 
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 
 pytestmark = pytest.mark.unit
 
@@ -124,3 +125,30 @@ def test_predict_agg_worker_forwards_extra_kwargs():
         enable_chunked_prefill=True,
         some_backend_specific_flag="hello",
     )
+
+
+def test_predict_agg_worker_passes_speculative_progress_to_scheduler():
+    model, backend, database, rt = _make_mocks(return_value="raw-summary")
+    profile = MagicMock(spec=SpeculativeDecodingProfile)
+    profile.expected_accepted_tokens = 1.0
+    profile.tokens_per_iteration = 2.0
+    profile.project_summary.return_value = "projected-summary"
+
+    result = predict_agg_worker(
+        model=model,
+        backend=backend,
+        database=database,
+        runtime_config=rt,
+        ctx_tokens=2048,
+        speculative_profile=profile,
+    )
+
+    backend.run_agg.assert_called_once_with(
+        model,
+        database,
+        rt,
+        ctx_tokens=2048,
+        decode_tokens_per_iteration=2.0,
+    )
+    profile.project_summary.assert_called_once_with("raw-summary", role="agg")
+    assert result == "projected-summary"

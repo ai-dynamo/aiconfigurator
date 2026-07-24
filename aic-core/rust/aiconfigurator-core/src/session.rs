@@ -14,6 +14,20 @@ use crate::common::error::AicError;
 use crate::operators::{Op, RuntimeContext};
 use crate::perf_database::PerfDatabase;
 
+/// Component latencies for one mixed prefill/decode forward pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MixedStepBreakdown {
+    pub(crate) shared_non_attention_ms: f64,
+    pub(crate) context_attention_ms: f64,
+    pub(crate) decode_attention_ms: f64,
+}
+
+impl MixedStepBreakdown {
+    pub(crate) fn total_ms(self) -> f64 {
+        self.shared_non_attention_ms + self.context_attention_ms + self.decode_attention_ms
+    }
+}
+
 /// Python `_run_context_phase` (`base_backend.py:144`) — one full pass over
 /// the context op list. A free function so the compiled
 /// [`crate::engine::Engine`] iterates one canonical body over its op list.
@@ -97,7 +111,7 @@ pub(crate) fn run_generation_ops_step(
 /// 3. Decode attention contribution: iterate `generation_ops`, only
 ///    generation-attention ops, with the decode batch shape.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn get_mix_step_ops(
+pub(crate) fn get_mix_step_breakdown(
     context_ops: &[Op],
     generation_ops: &[Op],
     db: &PerfDatabase,
@@ -108,7 +122,7 @@ pub(crate) fn get_mix_step_ops(
     combined_prefix: u32,
     kv_per_decode_req: u32,
     decode_batch: u32,
-) -> Result<f64, AicError> {
+) -> Result<MixedStepBreakdown, AicError> {
     // ---- Pass 1: combined non-attention work (batch=1, isl=ctx+gen) ----
     // Python: `run_static` is called with `isl = num_tokens_combined`
     // and `prefix = prefix * floor(ctx_tokens / isl)`, which makes
@@ -127,7 +141,7 @@ pub(crate) fn get_mix_step_ops(
     // For non-attention ops (GEMM, MoE, etc.) the prefix field is
     // ignored, so threading it through is harmless.
     let effective_isl_combined = (ctx_tokens + gen_tokens).max(1);
-    let mut total = 0.0_f64;
+    let mut shared_non_attention_ms = 0.0_f64;
     for op in context_ops {
         if op.is_context_attention() {
             continue;
@@ -147,7 +161,7 @@ pub(crate) fn get_mix_step_ops(
             gen_seq_imbalance_correction_scale: 1.0,
             num_image_tokens: 0,
         };
-        total += op.query(db, &ctx)?.latency_ms;
+        shared_non_attention_ms += op.query(db, &ctx)?.latency_ms;
     }
 
     // ---- Pass 2: context attention with prefill batch ----
@@ -165,6 +179,7 @@ pub(crate) fn get_mix_step_ops(
     let isl_eff_pass2 = new_tokens_per_prefill_req.max(1);
     let ctx_attn_batch = ((ctx_tokens + isl_eff_pass2 - 1) / isl_eff_pass2).max(1);
     let scale_factor = ((isl_eff_pass2 + ctx_tokens - 1) / ctx_tokens.max(1)).max(1) as f64;
+    let mut context_attention_ms = 0.0_f64;
     for op in context_ops {
         if !op.is_context_attention() {
             continue;
@@ -179,7 +194,7 @@ pub(crate) fn get_mix_step_ops(
             gen_seq_imbalance_correction_scale: 1.0,
             num_image_tokens: 0,
         };
-        total += op.query(db, &ctx)?.latency_ms / scale_factor;
+        context_attention_ms += op.query(db, &ctx)?.latency_ms / scale_factor;
     }
 
     // ---- Pass 3: generation attention with decode batch ----
@@ -189,6 +204,7 @@ pub(crate) fn get_mix_step_ops(
     // batch), Python contributes zero — so we must skip the pass entirely rather
     // than query at the `decode_batch.max(1)` floor, which would add a spurious
     // batch-1 generation_attention and inflate the step latency.
+    let mut decode_attention_ms = 0.0_f64;
     if decode_batch > 0 {
         for op in generation_ops {
             if !op.is_generation_attention() {
@@ -204,9 +220,41 @@ pub(crate) fn get_mix_step_ops(
                 gen_seq_imbalance_correction_scale: 1.0,
                 num_image_tokens: 0,
             };
-            total += op.query(db, &ctx)?.latency_ms;
+            decode_attention_ms += op.query(db, &ctx)?.latency_ms;
         }
     }
 
-    Ok(total)
+    Ok(MixedStepBreakdown {
+        shared_non_attention_ms,
+        context_attention_ms,
+        decode_attention_ms,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn get_mix_step_ops(
+    context_ops: &[Op],
+    generation_ops: &[Op],
+    db: &PerfDatabase,
+    ctx_tokens: u32,
+    gen_tokens: u32,
+    new_tokens_per_prefill_req: u32,
+    prefix_per_req: u32,
+    combined_prefix: u32,
+    kv_per_decode_req: u32,
+    decode_batch: u32,
+) -> Result<f64, AicError> {
+    Ok(get_mix_step_breakdown(
+        context_ops,
+        generation_ops,
+        db,
+        ctx_tokens,
+        gen_tokens,
+        new_tokens_per_prefill_req,
+        prefix_per_req,
+        combined_prefix,
+        kv_per_decode_req,
+        decode_batch,
+    )?
+    .total_ms())
 }
