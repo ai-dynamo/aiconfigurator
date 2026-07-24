@@ -90,6 +90,8 @@ class InferenceSummary:
         # per-ops data source breakdown, parallel to _per_ops_data: same key
         # structure but values are "silicon" / "empirical" / "sol" / "mixed" strings.
         self._per_ops_source: dict | None = None
+        # Raw forward-pass estimates used by the agg analytic scheduler.
+        self._step_estimates: dict | None = None
 
         # Capacity probing context. Populated by set_memory_and_check_oom
         # (capacity) and by backends running static-mode estimation (kv per seq).
@@ -463,6 +465,14 @@ class InferenceSummary:
     def get_per_ops_source(self) -> dict | None:
         """Get per-operation data-source breakdown, parallel to per_ops_data."""
         return self._per_ops_source
+
+    def set_step_estimates(self, step_estimates: dict) -> None:
+        """Set raw per-iteration estimates used by aggregate scheduling."""
+        self._step_estimates = step_estimates
+
+    def get_step_estimates(self) -> dict | None:
+        """Get raw aggregate step estimates and scheduling metadata."""
+        return self._step_estimates
 
     def set_encoder_source_dict(self, encoder_source_dict: dict) -> None:
         """Set the per-op data source dict for the encoder phase."""

@@ -22,7 +22,9 @@ use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::Op;
 use crate::perf_database::PerfDatabase;
-use crate::session::{get_mix_step_ops, run_context_ops, run_generation_ops_step};
+use crate::session::{
+    get_mix_step_breakdown, get_mix_step_ops, run_context_ops, run_generation_ops_step,
+};
 use crate::{validate_forward_pass_metrics, ForwardPassMetrics};
 
 /// Per-call runtime inputs. Field-for-field mirror of the Python
@@ -340,6 +342,19 @@ impl Engine {
         osl: u32,
         prefix: u32,
     ) -> Result<f64, AicError> {
+        Ok(self.mixed_step_breakdown(ctx_tokens, gen_tokens, isl, osl, prefix)?[0])
+    }
+
+    /// Return ``[total, shared_non_attention, context_attention,
+    /// decode_attention]`` for one mixed engine iteration.
+    pub fn mixed_step_breakdown(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+    ) -> Result<[f64; 4], AicError> {
         let isl = isl.max(1);
         let osl = osl.max(1);
 
@@ -367,7 +382,7 @@ impl Engine {
         };
 
         if sum_prefill_tokens == 0 && num_decode_requests == 0 {
-            return Ok(0.0);
+            return Ok([0.0; 4]);
         }
 
         // ---- Session unpack (mirrors session::rank_latency_ms) ----
@@ -377,7 +392,7 @@ impl Engine {
         let n_decode_safe = num_decode_requests.max(1);
         let kv_per_decode = sum_decode_kv_tokens / n_decode_safe;
 
-        crate::session::get_mix_step_ops(
+        let breakdown = get_mix_step_breakdown(
             &self.context_ops,
             &self.generation_ops,
             &self.db,
@@ -388,7 +403,13 @@ impl Engine {
             sum_prefill_kv_tokens,
             kv_per_decode,
             num_decode_requests,
-        )
+        )?;
+        Ok([
+            breakdown.total_ms(),
+            breakdown.shared_non_attention_ms,
+            breakdown.context_attention_ms,
+            breakdown.decode_attention_ms,
+        ])
     }
 
     /// One generation-only step latency. Mirrors Python
@@ -726,6 +747,9 @@ mod tests {
         let engine = build_engine(None);
         let ms = engine.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
         assert!(ms > 0.0 && ms.is_finite(), "mixed-step latency must be > 0, got {ms}");
+        let breakdown = engine.mixed_step_breakdown(1024, 2, 1024, 8, 0).unwrap();
+        assert_eq!(breakdown[0], breakdown[1] + breakdown[2] + breakdown[3]);
+        assert_eq!(ms, breakdown[0]);
     }
 
     /// Lock the one piece of orchestration that lives ONLY in the Engine: the

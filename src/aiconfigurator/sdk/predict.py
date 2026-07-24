@@ -130,6 +130,9 @@ def predict_agg_worker(
     Returns:
         InferenceSummary for the aggregated worker.
     """
+    if speculative_profile is not None and speculative_profile.expected_accepted_tokens > 0:
+        backend_kwargs["decode_tokens_per_iteration"] = speculative_profile.tokens_per_iteration
+
     summary = (predictor or DEFAULT_PREDICTOR).predict_agg_worker(
         model=model,
         backend=backend,

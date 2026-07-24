@@ -95,6 +95,13 @@ class SpeculativeDecodingProfile:
 
         frame = frame.copy(deep=True)
         progress = self.tokens_per_iteration
+        if role == "agg":
+            step_estimates = projected.get_step_estimates()
+            scheduling = step_estimates.get("scheduling", {}) if step_estimates else {}
+            applied_progress = scheduling.get("decode_tokens_per_iteration")
+            if applied_progress is not None and math.isclose(float(applied_progress), progress):
+                return projected
+
         original_request_latency = frame.get("request_latency")
 
         if "tpot" in frame:

@@ -81,6 +81,24 @@ def test_expected_progress_projects_service_metrics_not_core_breakdown():
     assert original.get_result_dict()["tpot"] == 10.0
 
 
+def test_aggregate_projection_does_not_double_apply_scheduler_progress():
+    original = _summary()
+    original.set_step_estimates(
+        {
+            "scheduling": {
+                "decode_tokens_per_iteration": 2.0,
+                "decode_iterations": 5.0,
+            }
+        }
+    )
+
+    projected = SpeculativeDecodingProfile(1.0).project_summary(original, role="agg")
+
+    assert projected is not original
+    assert projected.get_result_dict()["tpot"] == 10.0
+    assert projected.get_result_dict()["tokens/s"] == 45.0
+
+
 def test_aggregate_projection_reapplies_vllm_little_law_cap():
     original = _summary()
     frame = original.get_summary_df().copy()

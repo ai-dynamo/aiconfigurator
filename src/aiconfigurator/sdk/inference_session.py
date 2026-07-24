@@ -20,6 +20,7 @@ from aiconfigurator.sdk.picking import (
     _build_disagg_summary_dict,
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
+from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class InferenceSession:
     Methods:
         run_static (static, static_ctx, static_gen): to support static batching and disagg,
             returns details of a static run
+        run_mixed: estimate one mixed prefill/decode engine iteration
         run_agg (static, static_ctx, static_gen): run agg inference, returns summary of the
             perf result with given agg config and runtime config (concurrency)
         find_best_agg_result_under_constraints (static, static_ctx, static_gen):
@@ -103,6 +105,14 @@ class InferenceSession:
         return self._backend.run_static_latency_only(
             self._model, self._database, runtime_config, mode, stride, latency_correction_scale
         )
+
+    def run_mixed(
+        self,
+        runtime_config: config.RuntimeConfig,
+        step: MixedStepInput,
+    ) -> StepEstimate:
+        """Estimate one mixed prefill/decode engine iteration."""
+        return self._backend.run_mixed(self._model, self._database, runtime_config, step)
 
     def run_agg(self, runtime_config: config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """

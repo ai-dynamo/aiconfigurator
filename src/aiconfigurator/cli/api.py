@@ -1193,13 +1193,15 @@ def _run_agg_estimate(
     database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
+    speculative_profile = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted)
     summary = session.run_agg(
         runtime_config,
         ctx_tokens=ctx_tokens,
         max_seq_len=max_seq_len,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
+        decode_tokens_per_iteration=speculative_profile.tokens_per_iteration,
     )
-    summary = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted).project_summary(summary, role="agg")
+    summary = speculative_profile.project_summary(summary, role="agg")
 
     if summary.check_oom():
         raise RuntimeError(
