@@ -42,7 +42,7 @@ def test_agg_with_model_resolves_identity_and_backend():
     assert t.nextn is not None
     assert t.backend_version is not None  # resolved to latest
     # Search space defaults populated
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
 
 
@@ -967,8 +967,8 @@ def test_sglang_agg_default_moe_ep_search():
     EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
     masked by always passing explicit candidates, caught by default-path parity."""
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
@@ -977,7 +977,58 @@ def test_sglang_agg_default_moe_ep_search():
         moe_backend="deepep_moe",
     )
     assert t2.agg_moe_tp_candidates == [1]
-    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
+
+
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+    """NVFP4 models on non-Blackwell systems should have quant modes remapped to nvfp4_wo
+    (FP4 weight memory, BF16 compute speed) for correct perf predictions."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_preserved_on_blackwell():
+    """NVFP4 models on Blackwell should keep native nvfp4 quant modes."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_nvfp4_hopper_explicit_gemm_preserves_supplied_mode():
+    """Explicit gemm_quant_mode is preserved; omitted moe_quant_mode is remapped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_hopper_explicit_moe_preserves_supplied_mode():
+    """Explicit moe_quant_mode is preserved; omitted gemm_quant_mode is remapped."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.bfloat16
 
 
 def test_run_validates_by_default():
@@ -1790,7 +1841,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
     # Backend version resolved automatically
     assert d["backend_version"] is not None
     # Search candidates populated
-    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8, 16]
 
 
 def test_to_dict_excludes_internal_fields():
