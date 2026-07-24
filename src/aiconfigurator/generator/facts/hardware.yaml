@@ -10,8 +10,8 @@
 #   - nccl_env: derived from platform hardware configs (§9 hardware-level silicon facts).
 #   - shared_memory: standard values from k8s deployment baseline tests and guard rails.
 #   - moe_backend: per design doc §9.3 (CUTLASS on Hopper sm90; WIDEEP on Blackwell sm100/GB200;
-#     sglang deepep_moe is a Blackwell/wide-EP selection only — see webapp/events/event_fn.py
-#     moe_backend="deepep_moe" when enable_wideep+sglang, cli/exps/deepseek_wideep_trtllm.yaml).
+#     sglang deepep_moe is a Blackwell/wide-EP selection only — see cli/main.py
+#     _sglang_moe_backend_override and cli/exps/deepseek_disagg_sglang.yaml).
 #
 # SCOPE: hardware-only facts. No NIC names, storage classes, or cluster secrets.
 
@@ -70,8 +70,7 @@ profiles:
       # for H200 is present in systems/data/h200_sxm/trtllm/ but CUTLASS is the
       # correct default selection for this silicon generation.
       trtllm: CUTLASS
-      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path,
-      # source: webapp/events/event_fn.py moe_backend="deepep_moe" when enable_wideep+sglang).
+      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path).
       # Not set on Hopper — deepep_moe requires sm100+ wide-EP fabric.
 
   # ---------------------------------------------------------------------------
@@ -103,7 +102,8 @@ profiles:
       # and cli/exps/deepseek_wideep_trtllm.yaml (gb200/b200 wideep configs).
       trtllm: WIDEEP
       # SGLang: deepep_moe is the default wideep-compatible MoE runner on Blackwell.
-      # Source: webapp/events/event_fn.py  moe_backend="deepep_moe" when enable_wideep+sglang
+      # Source: cli/main.py _sglang_moe_backend_override and
+      # cli/exps/deepseek_disagg_sglang.yaml.
       sglang: deepep_moe
 
   # ---------------------------------------------------------------------------
@@ -153,7 +153,8 @@ profiles:
       # (all gb200_wideep_* experiments), systems/data/gb200/trtllm/*/wideep_moe_perf.txt
       trtllm: WIDEEP
       # SGLang: deepep_moe for the wideep DeepEP path on GB200 NVLink fabric.
-      # Source: webapp/events/event_fn.py, cli/exps/deepseek_wideep_trtllm.yaml
+      # Source: cli/main.py _sglang_moe_backend_override and
+      # cli/exps/deepseek_disagg_sglang.yaml.
       sglang: deepep_moe
 
   # ---------------------------------------------------------------------------

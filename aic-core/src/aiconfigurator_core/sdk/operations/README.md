@@ -206,8 +206,8 @@ def query_my_op(self, *args, database_mode=None):
 
 ### 7. Wire the support matrix (optional)
 
-If your op contributes a quant-mode dimension to the dropdown the
-web app shows, add a resolver in
+If your op contributes a quant-mode dimension to support-matrix output,
+add a resolver in
 `perf_database.py:_LazySupportMatrix._resolve` and add your key name
 to the relevant entries in `_BACKEND_KEYS`. Skip this if your op's
 quant modes are already covered by another key.
