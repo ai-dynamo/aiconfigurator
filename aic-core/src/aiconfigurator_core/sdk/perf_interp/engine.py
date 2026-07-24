@@ -258,8 +258,15 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     site_key = tuple(coords[p] for p in site_pos)
     q = coords[curve_pos]
 
-    if site_key in sites:  # collected shape: its own curve answers alone
-        return _eval_curve(cfg, sites[site_key], q, n_axes, curve_pos, site_pos, site_key, coords)
+    excluded_site = None
+    if site_key in sites:  # collected shape: its own curve answers alone...
+        curve = sites[site_key]
+        if not (res.own_curve_coverage_fallback and (q < curve[0][0] or q > curve[-1][0])):
+            return _eval_curve(cfg, curve, q, n_axes, curve_pos, site_pos, site_key, coords)
+        # ...unless the curve does not cover the query and the config opted
+        # into coverage fallback: treat the own site as absent (degenerate
+        # sites must not anchor far extrapolation).
+        excluded_site = site_key
 
     # Unknown shape: transfer util from the nearest collected sites.
     if not site_keys:
@@ -269,7 +276,7 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     def dist(i: int) -> float:
         return math.sqrt(sum((a - b) ** 2 for a, b in zip(site_logs[i], q_log, strict=True)))
 
-    candidates = list(range(len(site_keys)))
+    candidates = [i for i in range(len(site_keys)) if site_keys[i] != excluded_site]
     if res.require_curve_coverage:
         covering = [i for i in candidates if sites[site_keys[i]][0][0] <= q <= sites[site_keys[i]][-1][0]]
         if covering:  # else: fall back to all sites, each held at its own curve end
