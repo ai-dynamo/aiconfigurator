@@ -23,6 +23,9 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
+    # Vision encoder data parallelism: the ViT is replicated unsharded on every rank of
+    # the TP group, images are sharded across the tp_size ranks
+    enable_encoder_dp: bool = True
     cp_size: int = 1  # context parallelism: splits sequence tokens (not heads); folds into attn_width = tp*cp*dp
     # CP variant ("none" / "allgather" / "ulysses" / "ring"). Set by get_model
     # from backend_name when cp_size > 1; default "none". Dense models branch on
