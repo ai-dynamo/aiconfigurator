@@ -85,9 +85,12 @@ def _skip_trtllm_sm89_rc15_long_context_gqa(
     # FIXME(kernel-limit): the SM89 long-context GQA IMA family REPRODUCES on
     # 1.3.0rc20 (L40S gate100 2026-07-21: cudaErrorIllegalAddress at
     # h=96/kv=8/hd=256/131072 tokens and h=48/kv=4/hd=256/131072 tokens, both
-    # inside this predicate's region). Kept version-scoped to rc15 by owner
-    # decision (SM89 handoff): rc20 cases fail classified instead of being
-    # skipped; re-verify against framework source on the next version bump.
+    # inside this predicate's region). The same IMA family also reproduces on
+    # SM90/H20 (2026-07-24 full run: cudaErrorIllegalAddress at
+    # h=96/kv=1/hd=128/131072 tokens, both bf16 and fp8-KV), so it is not
+    # SM89-exclusive. Kept version-scoped to rc15 by owner decision (SM89
+    # handoff): rc20 cases fail classified instead of being skipped; re-verify
+    # against framework source on the next version bump.
     if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
         return False
 
@@ -167,6 +170,24 @@ def run_attention_torch(
     if attn_backend_name not in {"TRTLLM", "FLASHINFER"}:
         raise ValueError(f"Unsupported TRT-LLM dense attention backend: {attn_backend_name}")
     is_flashinfer = attn_backend_name == "FLASHINFER"
+    # FIXME(kernel-limit): the FLASHINFER path pins the trtllm-gen FMHA sub-backend
+    # below (attn.flashinfer_backend = "trtllm-gen"), mirroring the sole FLASHINFER-
+    # routed model, Gemma4, which forces it unconditionally on every SM
+    # (models/modeling_gemma4.py:263-270@1.3.0rc20). trtllm-gen's FMHA runner
+    # hard-restricts to Blackwell — TllmGenFmhaRunner asserts
+    # ``mSM == kSM_100 || mSM == kSM_103`` ("Unsupported architecture",
+    # flashinfer/data/include/flashinfer/trtllm/fmha/fmhaRunner.cuh:37@1.3.0rc20) —
+    # and fa2 lacks the head_dim-256 SWA / head_dim-512 cubins, so there is NO dense
+    # attention kernel for Gemma4 on Hopper/SM90 (or any non-Blackwell) in rc20;
+    # serving hits the identical assertion. Fail closed with a cited, classified skip
+    # instead of paying model construction + a CUDA-level abort per case. Re-verify the
+    # supported-arch set against fmhaRunner.cuh on the next framework version bump.
+    if is_flashinfer and get_sm_version() not in (100, 103):
+        raise ValueError(
+            f"FlashInfer trtllm-gen FMHA is Blackwell-only (SM100/103); Gemma4 dense "
+            f"attention has no kernel on SM{get_sm_version()} "
+            f"(fmhaRunner.cuh:37 + modeling_gemma4.py:270 @1.3.0rc20)"
+        )
     if is_flashinfer and use_fp8_context_fmha:
         # Mirror of the sglang collector's compute-dtype labeling rule:
         # TRT-LLM 1.3.0rc20 FlashInferAttention has no FP8 FMHA compute path,
@@ -196,13 +217,28 @@ def run_attention_torch(
     if use_fp8_context_fmha:
         assert use_fp8_kv_cache
         quant_algo = QuantAlgo.FP8
+    else:
+        quant_algo = None
+
+    # The framework forces fp8 attention output (mFP8ContextFMHA) whenever the KV
+    # cache is fp8 — context via paged-context FMHA (attentionOp.cpp:738:
+    # ``is_fp8_out || is_fp4_out || (hasFp8KvCache() && use_paged_context_fmha)``,
+    # and SM90 forces paged-context FMHA, trtllm.py:1434 nvbug 5624818) and
+    # generation unconditionally (attentionOp.cpp:947:
+    # ``hasFp8KvCache() || hasFp4KvCache()``). That path then asserts an
+    # attention_out_scale is present (attentionOp.cpp:671). Serving supplies it from
+    # the fp8 model's o_proj.inv_input_scale (modules/attention.py:758-761); a dummy
+    # unit scale mirrors that for the bare-layer benchmark. Provide it for EVERY
+    # fp8-KV case (not only the fp8-context-FMHA one) — otherwise the kernel the
+    # framework actually runs for an fp8 KV cache cannot be measured and the case
+    # aborts on the assertion.
+    if use_fp8_kv_cache:
         out_scale = torch.tensor(
             [1.0],
             dtype=torch.float32,
             device=device,
-        )  # fp8 fmha
+        )
     else:
-        quant_algo = None
         out_scale = None
 
     if use_fp8_kv_cache:
