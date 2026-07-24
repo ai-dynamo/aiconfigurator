@@ -1372,7 +1372,7 @@ def build_default_tasks(
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set moe_backend for SGLang wideep to preserve existing UI parity.
+        # Auto-set the DeepEP MoE runner for SGLang WideEP unless explicitly overridden.
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:

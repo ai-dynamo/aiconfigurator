@@ -40,7 +40,7 @@ Let's get started.
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI, generator, and webapp.
+The upper `aiconfigurator` wheel contains the CLI and generator.
 It depends on the exact matching `aiconfigurator-core` wheel, which independently
 owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
@@ -175,19 +175,6 @@ print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
-
-### Web App
-
-AIConfigurator includes an interactive Gradio web interface for exploring
-configurations visually:
-
-```bash
-pip install 'aiconfigurator[webapp]'   # or pip install -e '.[webapp]' for dev
-python -m aiconfigurator.webapp.main
-```
-
-The app binds to `0.0.0.0:7860` by default (all interfaces). Use `--server-name 127.0.0.1` for local-only access.
-Refer to the [Web App User Guide](docs/webapp_user_guide.md) for flags and tab descriptions.
 
 An example here,
 ```bash

@@ -113,7 +113,6 @@ def test_sdk_modules_do_not_import_upper_layer() -> None:
         (Path("memory.py"), "import aiconfigurator\n"),
         (Path("memory.py"), "import aiconfigurator.generator\n"),
         (Path("memory.py"), "from aiconfigurator.logging_utils import setup_logging\n"),
-        (Path("memory.py"), "from aiconfigurator import webapp\n"),
         (Path("memory.py"), "from aiconfigurator import main\n"),
         (Path("subpkg/module.py"), "from aiconfigurator.generator import api\n"),
     ],
