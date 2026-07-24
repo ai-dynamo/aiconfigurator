@@ -250,3 +250,42 @@ def test_backend_element_reaches_the_trtllm_case_tuples(monkeypatch):
     # fail closed at runtime (classified) — population never silently drops
     # them.
     assert any(case[7] for case in context_cases)
+
+
+def test_out_scale_mirrors_serving_use_quantize_output():
+    # out_scale must mirror serving's Attention._use_quantize_output()
+    # (_torch/modules/attention.py:648-670,758-761@1.3.0rc20): only a quantized
+    # model supplies o_proj.inv_input_scale. Passing a scale is not inert — the
+    # backend allocates fp8 attention output whenever out_scale is present
+    # (is_quantize_output, attention_backend/trtllm.py:1452), so an
+    # unconditional fp8-KV scale would measure the fp8-output path under an
+    # attn_dtype=bfloat16 label on SMs where serving keeps bf16 output (any
+    # non-SM90 context). The sanctioned condition:
+    # use_fp8_context_fmha (the fp8-model context case) OR fp8-KV generation
+    # (the sweep's only fp8-model generation flavor) — no SM sniffing. AST-only
+    # check (run_attention_torch cannot be exec'd on CUDA-free CI).
+    source_path = REPO_ROOT / "collector" / "trtllm" / "collect_attn.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    run_fn = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_attention_torch"
+    )
+    guards = [
+        node
+        for node in ast.walk(run_fn)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "out_scale" for t in n.targets)
+            for n in ast.walk(node)
+        )
+    ]
+    assert len(guards) == 1, "expected exactly one conditional out_scale assignment"
+    test_names = {n.id for n in ast.walk(guards[0].test) if isinstance(n, ast.Name)}
+    assert test_names == {"use_fp8_context_fmha", "use_fp8_kv_cache", "is_context_phase"}, (
+        "out_scale must be given exactly for use_fp8_context_fmha or fp8-KV "
+        f"generation cases, got condition over {sorted(test_names)}"
+    )
+    assert not any(
+        isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version"
+        for n in ast.walk(guards[0])
+    ), "out_scale must not be SM-conditioned; SM90 behavior is the framework's own"

@@ -220,19 +220,29 @@ def run_attention_torch(
     else:
         quant_algo = None
 
-    # The framework forces fp8 attention output (mFP8ContextFMHA) whenever the KV
-    # cache is fp8 — context via paged-context FMHA (attentionOp.cpp:738:
-    # ``is_fp8_out || is_fp4_out || (hasFp8KvCache() && use_paged_context_fmha)``,
-    # and SM90 forces paged-context FMHA, trtllm.py:1434 nvbug 5624818) and
-    # generation unconditionally (attentionOp.cpp:947:
-    # ``hasFp8KvCache() || hasFp4KvCache()``). That path then asserts an
-    # attention_out_scale is present (attentionOp.cpp:671). Serving supplies it from
-    # the fp8 model's o_proj.inv_input_scale (modules/attention.py:758-761); a dummy
-    # unit scale mirrors that for the bare-layer benchmark. Provide it for EVERY
-    # fp8-KV case (not only the fp8-context-FMHA one) — otherwise the kernel the
-    # framework actually runs for an fp8 KV cache cannot be measured and the case
-    # aborts on the assertion.
-    if use_fp8_kv_cache:
+    # out_scale mirrors serving's Attention._use_quantize_output()
+    # (_torch/modules/attention.py:648-670,758-761@1.3.0rc20): an fp8-quantized
+    # model supplies o_proj.inv_input_scale; a model with no weight/activation
+    # quant (``not has_any_quant(exclude_kv_cache=True)``) supplies None, fp8 KV
+    # cache or not. Passing a scale is not inert: the backend allocates fp8
+    # attention output whenever out_scale is present (is_quantize_output,
+    # attention_backend/trtllm.py:1452) and the op then takes the fp8-output path
+    # (is_fp8_out, thop/attentionOp.cpp:1155:
+    # ``is_fp8_out || is_fp4_out || (hasFp8KvCache() && use_paged_context_fmha)``).
+    # Per phase:
+    # - context: the fp8-model flavor is the dedicated use_fp8_context_fmha case,
+    #   so the fp8-KV-only case means "unquantized model + fp8 KV" -> None. On
+    #   SM90 the framework then aborts on its own ("attention output scale should
+    #   be provided", common/attentionOp.cpp:681) because fp8-KV plus the forced
+    #   paged-context FMHA (trtllm.py:1434, nvbug 5624818) select the fp8-output
+    #   path with no scale — serving aborts identically for that config on
+    #   SM90/rc20, so the case fails classified rather than being measured under
+    #   the wrong label (the row records attn_dtype=bfloat16).
+    # - generation: the sweep has no separate fp8-model case, so the fp8-KV row
+    #   is the fp8-model deployment; its serving path provides the scale and
+    #   writes fp8 attention output on every SM. A dummy unit scale mirrors
+    #   o_proj.inv_input_scale for the bare-layer benchmark.
+    if use_fp8_context_fmha or (use_fp8_kv_cache and not is_context_phase):
         out_scale = torch.tensor(
             [1.0],
             dtype=torch.float32,
