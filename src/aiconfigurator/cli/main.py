@@ -23,7 +23,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.config_builders import resolve_nextn_auto, validate_nextn
+from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
@@ -31,6 +31,7 @@ from aiconfigurator.sdk.errors import (
 )
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
+from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
@@ -190,7 +191,7 @@ def _resolve_and_validate_nextn(args) -> None:
                 "MTP stays disabled."
             )
         try:
-            validate_nextn(resolved, args.nextn_accepted)
+            resolved, args.nextn_accepted = normalize_speculative_decoding(resolved, args.nextn_accepted)
         except ValueError as exc:
             raise SystemExit(
                 f"--nextn auto resolved to nextn={resolved} from the checkpoint's num_nextn_predict_layers: {exc}"
@@ -198,7 +199,7 @@ def _resolve_and_validate_nextn(args) -> None:
         args.nextn = resolved
         return
     try:
-        validate_nextn(args.nextn, args.nextn_accepted)
+        args.nextn, args.nextn_accepted = normalize_speculative_decoding(args.nextn, args.nextn_accepted)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -374,9 +375,9 @@ def _add_default_mode_arguments(parser):
         type=float,
         default=None,
         help="Average accepted draft tokens per decode step (0 <= nextn_accepted <= nextn). "
-        "Required when --nextn > 0; there is no built-in acceptance assumption — "
-        "use a measured value from your deployment (e.g. the engine's reported "
-        "average acceptance length minus 1).",
+        "Required when --nextn resolves to > 0; there is no built-in acceptance "
+        "assumption — use a measured value from your deployment (e.g. the engine's "
+        "reported average acceptance length minus 1).",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -872,15 +873,16 @@ def _add_estimate_mode_arguments(parser):
         help="(common) MTP draft length (compute cost side), or 'auto' to use the checkpoint's "
         "num_nextn_predict_layers. Default: 0 (disabled); MTP is never enabled implicitly. "
         "Applied to agg, disagg, and all static modes. Requires --nextn-accepted when the "
-        "depth is > 0.",
+        "resolved depth is > 0.",
     )
     parser.add_argument(
         "--nextn-accepted",
         type=float,
         default=None,
         help="(common) Average accepted draft tokens per decode step "
-        "(0 <= nextn_accepted <= nextn). Required when --nextn > 0; there is no "
-        "built-in acceptance assumption — use a measured value from your deployment.",
+        "(0 <= nextn_accepted <= nextn). Required when --nextn resolves to > 0; "
+        "there is no built-in acceptance assumption — use a measured value from "
+        "your deployment.",
     )
     parser.add_argument(
         "--stride",

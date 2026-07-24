@@ -48,7 +48,7 @@ class LLAMAModel(BaseModel):
         super().__init__(*args)
 
         # MTP scale factor: throughput boost / compute overhead
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         h = self._hidden_size
         tp_size = self.config.tp_size

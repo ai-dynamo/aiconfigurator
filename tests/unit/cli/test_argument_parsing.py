@@ -282,6 +282,47 @@ class TestCLIArgumentParsing:
         )
         assert args.nextn == "auto"
 
+    def test_nextn_requires_explicit_acceptance(self, cli_parser):
+        from aiconfigurator.cli.main import _resolve_and_validate_nextn
+
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "2",
+            ]
+        )
+
+        with pytest.raises(SystemExit, match="nextn_accepted"):
+            _resolve_and_validate_nextn(args)
+
+    def test_nextn_auto_requires_explicit_acceptance_when_resolved_positive(self, cli_parser, monkeypatch):
+        import aiconfigurator.cli.main as cli_main
+
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+            ]
+        )
+        monkeypatch.setattr(cli_main, "resolve_nextn_auto", lambda _model_path: 2)
+
+        with pytest.raises(SystemExit, match=r"resolved to nextn=2.*nextn_accepted"):
+            cli_main._resolve_and_validate_nextn(args)
+
     @pytest.mark.parametrize("bad_value", ["-1", "1.5", "always", ""])
     def test_nextn_rejects_non_auto_junk(self, cli_parser, bad_value):
         """--nextn takes a non-negative integer or the literal 'auto'."""

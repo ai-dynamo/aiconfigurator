@@ -77,7 +77,7 @@ class DeepSeekV4Model(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._power_law_alpha = 1.01
 
         h = self._hidden_size

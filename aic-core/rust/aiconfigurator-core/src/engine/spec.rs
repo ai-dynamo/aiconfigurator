@@ -615,7 +615,6 @@ mod tests {
             },
             speculative: Some(SpeculativeConfig {
                 nextn: Some(1),
-                nextn_accepted: Some(0.85),
             }),
             perf_db_sources: Default::default(),
             extra: BTreeMap::new(),

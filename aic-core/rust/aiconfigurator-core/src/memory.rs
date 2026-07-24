@@ -250,10 +250,6 @@ fn fetch_python_estimate(
         .as_ref()
         .and_then(|s| s.nextn)
         .unwrap_or(0);
-    let nextn_accepted = engine
-        .speculative
-        .as_ref()
-        .and_then(|s| s.nextn_accepted);
     let (fraction_kind, fraction_value) = req.kv_cache_memory_fraction.to_wire();
 
     Python::with_gil(|py| -> PyResult<KvCacheEstimate> {
@@ -286,7 +282,6 @@ fn fetch_python_estimate(
         // overhead comes from `system_spec` (`nccl_mem` / `other_mem`), not the
         // comm quant mode, so it does not affect the non-KV breakdown.
         kwargs.set_item("nextn", nextn)?;
-        kwargs.set_item("nextn_accepted", nextn_accepted)?;
         kwargs.set_item(
             "systems_path",
             engine.systems_path.as_deref().and_then(|p| p.to_str()),

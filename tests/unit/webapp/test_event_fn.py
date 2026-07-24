@@ -17,6 +17,9 @@ silently for the model families we explicitly own. Each test owns
 exactly one family.
 """
 
+import ast
+import inspect
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -26,7 +29,21 @@ pytestmark = pytest.mark.unit
 # runtime, so this is purely a test-environment shim.
 pytest.importorskip("gradio")
 
+from aiconfigurator.webapp.events import event_fn
 from aiconfigurator.webapp.events.event_fn import EventFn
+
+
+def test_model_config_calls_do_not_receive_acceptance_assumption():
+    """The webapp keeps acceptance above the aic-core ModelConfig boundary."""
+    tree = ast.parse(inspect.getsource(event_fn))
+    model_config_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "ModelConfig"
+    ]
+
+    assert model_config_calls
+    assert all("nextn_accepted" not in {keyword.arg for keyword in call.keywords} for call in model_config_calls)
 
 
 class TestUpdateModelRelatedComponents:
