@@ -381,9 +381,9 @@ The output includes `total_gpus_needed` and `replicas_needed` columns, showing b
 
 **Python API equivalent:**
 ```python
-from aiconfigurator.cli import cli_recommend
+from aiconfigurator.cli import recommend
 
-result = cli_recommend(
+result = recommend(
     model_path="Qwen/Qwen3-32B",
     system="h200_sxm",
     target_request_rate=50.0,

@@ -1426,15 +1426,9 @@ class EventFn:
         ttft,
         tpot,
         request_latency,
-        gemm_quant_mode,
-        kvcache_quant_mode,
-        fmha_quant_mode,
-        moe_quant_mode,
-        comm_quant_mode,
         nextn,
         nextn_accept_rates,
         enable_wideep,
-        enable_eplb,
         target_request_rate,
         target_concurrency,
     ):
@@ -1447,13 +1441,13 @@ class EventFn:
             LogCapture() as (logger, log_buffer),
         ):
             try:
-                from aiconfigurator.cli.api import cli_recommend
+                from aiconfigurator.cli.api import recommend
 
                 rate = float(target_request_rate) if target_request_rate else None
                 conc = float(target_concurrency) if target_concurrency else None
                 req_lat = float(request_latency) if request_latency else None
 
-                result = cli_recommend(
+                result = recommend(
                     model_path=model_path,
                     system=system_name,
                     target_request_rate=rate,

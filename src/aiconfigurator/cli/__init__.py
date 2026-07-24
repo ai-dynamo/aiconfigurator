@@ -7,7 +7,7 @@ CLI module for aiconfigurator.
 Provides both command-line interface and programmatic Python API.
 
 Python API usage:
-    from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_recommend, cli_support
+    from aiconfigurator.cli import cli_default, cli_exp, cli_generate, recommend, cli_support
 
     # cli_default: Run agg vs disagg comparison
     result = cli_default(
@@ -16,8 +16,8 @@ Python API usage:
         system="h200_sxm",
     )
 
-    # cli_recommend: Find minimum GPUs for a performance target
-    result = cli_recommend(
+    # recommend: Find minimum GPUs for a performance target
+    result = recommend(
         model_path="Qwen/Qwen3-32B",
         system="h200_sxm",
         target_request_rate=50.0,
@@ -51,8 +51,8 @@ from aiconfigurator.cli.api import (
     cli_default,
     cli_exp,
     cli_generate,
-    cli_recommend,
     cli_support,
+    recommend,
 )
 
 __all__ = [
@@ -60,6 +60,6 @@ __all__ = [
     "cli_default",
     "cli_exp",
     "cli_generate",
-    "cli_recommend",
     "cli_support",
+    "recommend",
 ]

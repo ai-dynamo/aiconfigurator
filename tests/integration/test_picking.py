@@ -177,13 +177,13 @@ class TestLoadMatchPicking:
 
 
 class TestRecommendPicking:
-    """Recommend mode: find minimum GPUs for a target load via cli_recommend."""
+    """Recommend mode: find minimum GPUs for a target load via recommend."""
 
     def test_recommend_by_request_rate(self):
-        """cli_recommend should return results with total_gpus_needed."""
-        from aiconfigurator.cli.api import cli_recommend
+        """recommend should return results with total_gpus_needed."""
+        from aiconfigurator.cli.api import recommend
 
-        result = cli_recommend(
+        result = recommend(
             model_path=MODEL,
             system=SYSTEM,
             backend=BACKEND,
@@ -203,11 +203,11 @@ class TestRecommendPicking:
                 assert "total_gpus_needed" in df.columns, f"{mode} missing total_gpus_needed"
                 assert (df["total_gpus_needed"] > 0).all(), f"{mode} has zero GPU recommendations"
                 assert (df["replicas_needed"] >= 1).all(), f"{mode} has replicas < 1"
-        assert has_results, "cli_recommend returned no results"
+        assert has_results, "recommend returned no results"
 
     def test_recommend_higher_rate_needs_more_gpus(self):
         """Doubling the target rate should need at least as many GPUs."""
-        from aiconfigurator.cli.api import cli_recommend
+        from aiconfigurator.cli.api import recommend
 
         common = dict(
             model_path=MODEL,
@@ -218,8 +218,8 @@ class TestRecommendPicking:
             ttft=2000,
             tpot=50,
         )
-        result_low = cli_recommend(target_request_rate=2.0, **common)
-        result_high = cli_recommend(target_request_rate=20.0, **common)
+        result_low = recommend(target_request_rate=2.0, **common)
+        result_high = recommend(target_request_rate=20.0, **common)
 
         def min_gpus(cli_result):
             for df in cli_result.best_configs.values():

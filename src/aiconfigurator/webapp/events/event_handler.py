@@ -522,15 +522,9 @@ class EventHandler:
                 components["runtime_config_components"]["ttft"],
                 components["runtime_config_components"]["tpot"],
                 components["runtime_config_components"]["request_latency"],
-                components["model_quant_components"]["gemm_quant_mode"],
-                components["model_quant_components"]["kvcache_quant_mode"],
-                components["model_quant_components"]["fmha_quant_mode"],
-                components["model_quant_components"]["moe_quant_mode"],
-                components["model_quant_components"]["comm_quant_mode"],
                 components["model_misc_config_components"]["nextn"],
                 components["model_misc_config_components"]["nextn_accept_rates"],
                 components["model_misc_config_components"]["enable_wideep"],
-                components["model_misc_config_components"]["enable_eplb"],
                 components["target_request_rate"],
                 components["target_concurrency"],
             ],
@@ -540,11 +534,9 @@ class EventHandler:
             ],
         )
 
-        EventHandler.setup_common_events(
+        EventHandler.setup_system_events(
             components["model_path_components"],
             components["model_system_components"],
-            components["model_quant_components"],
-            components["model_misc_config_components"],
         )
 
         components["model_path_components"]["model_path"].change(

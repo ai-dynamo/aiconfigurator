@@ -25,6 +25,7 @@ from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
+    ExperimentOutcome,
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
     is_expected_cli_error,
@@ -204,6 +205,16 @@ def _resolve_and_validate_nextn(args) -> None:
         raise SystemExit(str(exc)) from exc
 
 
+def _positive_float(value: str) -> float:
+    """Argparse type for positive finite floats (load targets, SLA thresholds)."""
+    import math
+
+    f = float(value)
+    if not (math.isfinite(f) and f > 0):
+        raise argparse.ArgumentTypeError(f"must be a positive finite number, got {value!r}")
+    return f
+
+
 def _validate_model_path(model_path: str) -> str:
     """
     Validate model_path which can be:
@@ -247,7 +258,28 @@ def _add_default_mode_arguments(parser):
         help="Model path: HuggingFace model path (e.g., 'Qwen/Qwen3-32B') or "
         "local path to directory containing config.json.",
     )
-    parser.add_argument("--total-gpus", type=int, required=True, help="Total GPUs for deployment.")
+    parser.add_argument(
+        "--total-gpus",
+        type=int,
+        default=None,
+        help="Total GPUs for deployment. "
+        "Omit and provide --target-request-rate or --target-concurrency to find minimum GPUs.",
+    )
+    load_group = parser.add_mutually_exclusive_group()
+    load_group.add_argument(
+        "--target-request-rate",
+        type=_positive_float,
+        default=None,
+        help="Target system request rate in req/s. When provided without --total-gpus, "
+        "finds the minimum GPU count (recommend mode).",
+    )
+    load_group.add_argument(
+        "--target-concurrency",
+        type=_positive_float,
+        default=None,
+        help="Target number of concurrent users. When provided without --total-gpus, "
+        "finds the minimum GPU count (recommend mode).",
+    )
     parser.add_argument(
         "--system",
         type=str,
@@ -431,13 +463,13 @@ def _add_recommend_mode_arguments(parser):
     load_group = parser.add_mutually_exclusive_group(required=True)
     load_group.add_argument(
         "--target-request-rate",
-        type=float,
+        type=_positive_float,
         default=None,
         help="Target system request rate in req/s. Find minimum GPUs to serve this rate.",
     )
     load_group.add_argument(
         "--target-concurrency",
-        type=float,
+        type=_positive_float,
         default=None,
         help="Target number of concurrent users. Find minimum GPUs to serve this concurrency.",
     )
@@ -478,10 +510,11 @@ def _add_recommend_mode_arguments(parser):
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
-        default=common.DatabaseMode.SILICON.name,
+        default=common.DatabaseMode.HYBRID.name,
         help="Database mode for performance estimation. "
-        "SILICON (default): uses silicon-collected data. "
-        "HYBRID (recommended for frontier/new models): extends SILICON with SOL+empirical estimates. "
+        "HYBRID (default for recommend): extends SILICON with SOL+empirical estimates — "
+        "produces results even for frontier/new models without full silicon data. "
+        "SILICON: silicon-collected data only; results are fully reproducible. "
         "EMPIRICAL: SOL+empirical factor only. SOL: theoretical Speed-of-Light only.",
     )
     parser.add_argument(
@@ -1763,7 +1796,14 @@ def _execute_tasks(
     max_total_gpus: int | None = None,
     strict_sla: bool = False,
     inclusive_tpot: bool = False,
-) -> tuple[str, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, float], dict[str, dict[str, float]]]:
+) -> tuple[
+    str,
+    dict[str, pd.DataFrame],
+    dict[str, pd.DataFrame],
+    dict[str, float],
+    dict[str, dict[str, float]],
+    dict[str, ExperimentOutcome],
+]:
     """
     Execute task configs and return the chosen experiment, best configs, results, best
     throughputs, and estimated latencies.
@@ -1793,9 +1833,11 @@ def _execute_tasks(
               extracted from the rank-1 config.
     """
     results: dict[str, dict[str, pd.DataFrame]] = {}
-    failure_messages: list[str] = []
+    outcomes: dict[str, ExperimentOutcome] = {}
     start_time = time.time()
-    # TODO, can run in parallel
+    # TODO: outcomes are per-experiment and immutable — this loop can be
+    # parallelised with ThreadPoolExecutor once the perf-database cache
+    # (databases_cache / functools.cache in perf_database.py) is thread-safe.
     for exp_name, task in tasks.items():
         try:
             logger.info("Starting experiment: %s", exp_name)
@@ -1804,6 +1846,7 @@ def _execute_tasks(
             task_result = {"pareto_df": pareto_df}
             if pareto_df is not None and not pareto_df.empty:
                 results[exp_name] = task_result
+                outcomes[exp_name] = ExperimentOutcome(exp_name)
                 logger.info("Experiment %s completed with %d results.", exp_name, len(pareto_df))
             else:
                 db_mode = getattr(task, "database_mode", None)
@@ -1812,29 +1855,30 @@ def _execute_tasks(
                     if db_mode == common.DatabaseMode.SILICON.name
                     else ""
                 )
+                gpu_hint = (
+                    "(2) the model does not fit — try a quantized model; "
+                    if mode == "recommend"
+                    else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
+                )
                 msg = (
                     f"Experiment {exp_name} returned no results. Possible causes: "
                     "(1) TTFT/TPOT constraints are too tight — try relaxing --ttft or --tpot; "
-                    "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
+                    f"{gpu_hint}"
                     f"(3) no perf data in the database for this configuration.{hybrid_hint}"
                 )
                 logger.warning(msg)
-                failure_messages.append(msg)
+                outcomes[exp_name] = ExperimentOutcome(exp_name)
         except NoFeasibleConfigError as exc:
             msg = f"Experiment {exp_name} found no SLA-feasible configuration: {exc}"
             logger.warning(msg)
-            failure_messages.append(msg)
+            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
         except Exception as exc:
             if is_expected_cli_error(exc):
-                # Expected failure (no feasible config / OOM / KV-cache capacity,
-                # a per-op perf-data miss, or an unsupported quant/compatibility
-                # config): report cleanly. Keep the traceback at DEBUG for
-                # diagnosis via --log-level DEBUG.
                 logger.log(logging.ERROR, "Error running experiment %s: %s", exp_name, exc)
                 logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
                 logger.exception("Error running experiment %s", exp_name)
-            failure_messages.append(f"Experiment {exp_name} failed: {exc}")
+            outcomes[exp_name] = ExperimentOutcome(exp_name, error=exc)
 
     if len(results) < 1:
         first_config = next(iter(tasks.values()), None)
@@ -1847,9 +1891,10 @@ def _execute_tasks(
             )
         else:
             logger.error("No successful experiment runs to compare.")
-        for msg in failure_messages:
-            logger.error("  -> %s", msg)
-        raise SystemExit(1)
+        for outcome in outcomes.values():
+            if outcome.error is not None:
+                logger.error("  -> Experiment %s failed: %s", outcome.experiment, outcome.error)
+        return "none", {}, {}, {}, {}, outcomes
 
     best_configs: dict[str, pd.DataFrame] = {}
     best_throughputs: dict[str, float] = {}
@@ -1897,7 +1942,7 @@ def _execute_tasks(
     end_time = time.time()
     logger.info("All experiments completed in %.2f seconds", end_time - start_time)
 
-    return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies
+    return chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies, outcomes
 
 
 def _run_generate_mode(args):
@@ -2511,6 +2556,77 @@ def _validate_fpm_sweep_tasks(args, tasks: dict[str, Task]) -> None:
         )
 
 
+def _run_recommend(args) -> None:
+    """Run recommend mode: find minimum GPUs for a load target."""
+    from aiconfigurator.cli.api import recommend
+
+    logger.info(
+        "Finding minimum GPUs for %s on %s (backend=%s)",
+        args.model_path,
+        args.system,
+        args.backend,
+    )
+    recommend(
+        model_path=args.model_path,
+        system=args.system,
+        target_request_rate=getattr(args, "target_request_rate", None),
+        target_concurrency=getattr(args, "target_concurrency", None),
+        decode_system=args.decode_system,
+        backend=args.backend,
+        backend_version=args.backend_version,
+        database_mode=args.database_mode,
+        transfer_policy=args.transfer_policy,
+        isl=args.isl,
+        osl=args.osl,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images=args.num_images,
+        ttft=args.ttft,
+        tpot=args.tpot,
+        request_latency=args.request_latency,
+        prefix=args.prefix,
+        nextn=args.nextn,
+        nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+        strict_sla=getattr(args, "strict_sla", False),
+        enable_chunked_prefill=args.enable_chunked_prefill,
+        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        max_seq_len=args.max_seq_len,
+        enable_wideep=getattr(args, "enable_wideep", False),
+        moe_backend=getattr(args, "moe_backend", None),
+        top_n=args.top_n,
+        save_dir=args.save_dir,
+        engine_step_backend=args.engine_step_backend,
+    )
+
+
+def _validate_default_mode_inputs(args) -> None:
+    """Validate default-mode args that are conditional on the selected sweeper."""
+    if args.mode != "default":
+        return
+    if getattr(args, "thorough_config", None):
+        return
+
+    required = {
+        "model_path": "--model-path/--model",
+        "system": "--system",
+    }
+    missing = [flag for attr, flag in required.items() if getattr(args, attr, None) is None]
+    if missing:
+        raise SystemExit(
+            "default mode requires "
+            + ", ".join(missing)
+            + " unless --thorough-config provides a native Spica SmartSearchConfig."
+        )
+    has_gpus = getattr(args, "total_gpus", None) is not None
+    has_load_target = (
+        getattr(args, "target_request_rate", None) is not None or getattr(args, "target_concurrency", None) is not None
+    )
+    if not has_gpus and not has_load_target:
+        raise SystemExit(
+            "default mode requires either --total-gpus or a load target (--target-request-rate / --target-concurrency)."
+        )
+
+
 def main(args):
     setup_logging(
         level=_resolve_cli_log_level(args),
@@ -2557,50 +2673,21 @@ def main(args):
             raise SystemExit("recommend mode requires --model-path")
         if not getattr(args, "system", None):
             raise SystemExit("recommend mode requires --system")
-
-        from aiconfigurator.cli.api import cli_recommend
-
-        logger.info(
-            "Recommend mode: finding minimum GPUs for %s on %s (backend=%s)",
-            args.model_path,
-            args.system,
-            args.backend,
-        )
-        cli_recommend(
-            model_path=args.model_path,
-            system=args.system,
-            target_request_rate=args.target_request_rate,
-            target_concurrency=args.target_concurrency,
-            decode_system=args.decode_system,
-            backend=args.backend,
-            backend_version=args.backend_version,
-            database_mode=args.database_mode,
-            transfer_policy=args.transfer_policy,
-            isl=args.isl,
-            osl=args.osl,
-            image_height=args.image_height,
-            image_width=args.image_width,
-            num_images=args.num_images,
-            ttft=args.ttft,
-            tpot=args.tpot,
-            request_latency=args.request_latency,
-            prefix=args.prefix,
-            nextn=args.nextn,
-            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
-            strict_sla=getattr(args, "strict_sla", False),
-            enable_chunked_prefill=args.enable_chunked_prefill,
-            free_gpu_memory_fraction=args.free_gpu_memory_fraction,
-            max_seq_len=args.max_seq_len,
-            enable_wideep=getattr(args, "enable_wideep", False),
-            moe_backend=getattr(args, "moe_backend", None),
-            top_n=args.top_n,
-            save_dir=args.save_dir,
-            engine_step_backend=args.engine_step_backend,
-        )
+        _run_recommend(args)
         return
 
     if args.mode == "default":
         _resolve_and_validate_nextn(args)
+        _validate_default_mode_inputs(args)
+
+        # No --total-gpus but a load target means recommend mode
+        has_load_target = (
+            getattr(args, "target_request_rate", None) is not None
+            or getattr(args, "target_concurrency", None) is not None
+        )
+        if getattr(args, "total_gpus", None) is None and has_load_target:
+            _run_recommend(args)
+            return
 
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}
@@ -2673,12 +2760,14 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _ = _execute_tasks(
+    _, best_configs, pareto_fronts, _, _, _ = _execute_tasks(
         tasks,
         args.mode,
         top_n=args.top_n,
         **execute_kwargs,
     )
+    if not best_configs:
+        raise SystemExit(1)
 
     if args.save_dir:
         save_results(

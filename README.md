@@ -149,7 +149,7 @@ Refer to [CLI User Guide](docs/cli_user_guide.md)
 You can also use `aiconfigurator` programmatically in Python:
 
 ```python
-from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_recommend, cli_support
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate, recommend, cli_support
 
 # 1. Run default agg vs disagg comparison
 result = cli_default(model_path="Qwen/Qwen3-32B-FP8", total_gpus=32, system="h200_sxm")
@@ -170,7 +170,7 @@ result = cli_exp(config={
 })
 
 # 3. Find minimum GPUs for a performance target (procurement sizing)
-result = cli_recommend(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm", target_request_rate=50.0, ttft=2000, tpot=30)
+result = recommend(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm", target_request_rate=50.0, ttft=2000, tpot=30)
 for mode, df in result.best_configs.items():
     print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
 
