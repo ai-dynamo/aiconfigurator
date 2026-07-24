@@ -1383,6 +1383,17 @@ class EventFn:
                 gr.update(visible=False),
             )
 
+    @staticmethod
+    def update_model_capabilities(model_path):
+        is_moe = check_is_moe(model_path)
+        model_family = models.get_model_family(model_path)
+        show_nextn = is_moe or model_family == "LLAMA"
+        return (
+            gr.update(value=0, visible=show_nextn),
+            gr.update(visible=show_nextn),
+            gr.update(visible=is_moe),
+        )
+
     # static clear button func and event
     @staticmethod
     def clear_records(record_df):
@@ -1401,3 +1412,80 @@ class EventFn:
         csv_filename = "data.csv"
         combined_df.to_csv(csv_filename, index=False)
         return csv_filename
+
+    @staticmethod
+    def run_recommender(
+        model_path,
+        system_name,
+        backend_name,
+        version,
+        database_mode,
+        isl,
+        osl,
+        prefix,
+        ttft,
+        tpot,
+        request_latency,
+        nextn,
+        nextn_accept_rates,
+        enable_wideep,
+        target_request_rate,
+        target_concurrency,
+    ):
+        traceback_log = ""
+        stdout_buffer = StringIO()
+        stderr_buffer = StringIO()
+        with (
+            contextlib.redirect_stdout(stdout_buffer),
+            contextlib.redirect_stderr(stderr_buffer),
+            LogCapture() as (logger, log_buffer),
+        ):
+            try:
+                from aiconfigurator.cli.api import recommend
+
+                rate = float(target_request_rate) if target_request_rate else None
+                conc = float(target_concurrency) if target_concurrency else None
+                req_lat = float(request_latency) if request_latency else None
+
+                result = recommend(
+                    model_path=model_path,
+                    system=system_name,
+                    target_request_rate=rate,
+                    target_concurrency=conc,
+                    backend=backend_name,
+                    backend_version=version,
+                    database_mode=database_mode,
+                    isl=int(isl),
+                    osl=int(osl),
+                    prefix=int(prefix),
+                    ttft=float(ttft),
+                    tpot=float(tpot),
+                    request_latency=req_lat,
+                    nextn=int(nextn),
+                    nextn_accept_rates=[float(x) for x in nextn_accept_rates.split(",")],
+                    enable_wideep=enable_wideep,
+                )
+
+                dfs = []
+                for mode, df in result.best_configs.items():
+                    if df is not None and not df.empty:
+                        df = df.copy()
+                        df.insert(0, "mode", mode)
+                        dfs.append(df)
+
+                if dfs:
+                    results_df = pd.concat(dfs, ignore_index=True)
+                else:
+                    results_df = pd.DataFrame()
+                    logger.error("No recommendations found. Try relaxing SLA targets or changing the backend.")
+
+            except Exception:
+                results_df = pd.DataFrame()
+                traceback_log = traceback.format_exc()
+        stdout_text = stdout_buffer.getvalue() + log_buffer.getvalue()
+        stderr_text = stderr_buffer.getvalue()
+
+        return (
+            gr.update(value=results_df),
+            gr.update(value=stdout_text + stderr_text + traceback_log),
+        )

@@ -88,14 +88,17 @@ def _plot_worker_setup_table(
         return ""
 
     config_df = config_df.copy()
-    config_df["tokens/s/gpu_cluster"] = (
-        config_df["tokens/s/gpu"]
-        * (total_gpus // config_df["num_total_gpus"])
-        * config_df["num_total_gpus"]
-        / total_gpus
-        if total_gpus > 0
-        else 0
-    )
+    if "replicas_needed" in config_df.columns:
+        config_df["tokens/s/gpu_cluster"] = config_df["tokens/s/gpu"]
+    else:
+        config_df["tokens/s/gpu_cluster"] = (
+            config_df["tokens/s/gpu"]
+            * (total_gpus // config_df["num_total_gpus"])
+            * config_df["num_total_gpus"]
+            / total_gpus
+            if total_gpus > 0
+            else 0
+        )
     constraint_col = "tpot"
     constraint_target = tpot_target
     constraint_label = "TPOT"
@@ -107,16 +110,24 @@ def _plot_worker_setup_table(
         top_configs = config_df[config_df[constraint_col] <= constraint_target].copy()
     else:
         top_configs = config_df.copy()
-    top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
+    if "replicas_needed" in top_configs.columns:
+        top_configs = top_configs.sort_values(by="total_gpus_needed", ascending=True)
+    else:
+        top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
     top_configs = top_configs.head(top).copy()
 
     if top_configs.empty:
         return f"\nNo configurations for {exp_name} met the {constraint_label} constraint."
 
-    top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
-    top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
+    if "replicas_needed" in top_configs.columns:
+        top_configs["replicas"] = top_configs["replicas_needed"].astype(int)
+        top_configs["total_gpus_used"] = top_configs["total_gpus_needed"].astype(int)
+    else:
+        top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
+        top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
-    buf.append(f"\n{exp_name} Top Configurations: (Ranked by tokens/s/gpu)")
+    ranking_label = "total_gpus_needed" if "replicas_needed" in top_configs.columns else "tokens/s/gpu"
+    buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
 
     # Check if it is disagg config by checking for prefill/decode specific columns
@@ -150,7 +161,7 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = total_gpus
+            display_total_gpus = row["total_gpus_used"] if "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] * row["replicas"]
             if is_moe:
                 p_parallel = (
@@ -244,7 +255,7 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = total_gpus
+            display_total_gpus = row["total_gpus_used"] if "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] * row["replicas"]
             if is_moe:
                 parallel = (
@@ -342,7 +353,8 @@ def log_final_summary(
         chosen_task = tasks[chosen_exp]
 
     summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
-    summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
+    if not load_match:
+        summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
 
     if load_match:
         # Load-match mode summary
@@ -391,11 +403,18 @@ def log_final_summary(
 
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
-        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
+        if load_match and "replicas_needed" in best_conf_details.index:
+            display_total_gpus = int(best_conf_details["total_gpus_needed"])
+        else:
+            display_total_gpus = chosen_task.total_gpus
+        summary_box.append(f"    - Best Throughput: {best_throughput * display_total_gpus:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
-        replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
-        cluster_rr = float(best_conf_details["request_rate"]) * replicas
+        if load_match and "replicas_needed" in best_conf_details.index:
+            cluster_rr = float(best_conf_details["request_rate"]) * int(best_conf_details["replicas_needed"])
+        else:
+            replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
+            cluster_rr = float(best_conf_details["request_rate"]) * replicas
         summary_box.append(f"    - Request Rate: {cluster_rr:.2f} req/s")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")

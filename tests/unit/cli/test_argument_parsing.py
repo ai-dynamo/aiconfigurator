@@ -18,7 +18,7 @@ class TestCLIArgumentParsing:
     """Test CLI argument parsing and validation."""
 
     def test_default_mode_core_args_are_required(self, cli_parser):
-        """Default mode requires the model, GPU budget, and system."""
+        """Default mode requires model and system; total_gpus is optional when a load target is provided."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]
         assert len(subparsers) == 1
 
@@ -29,8 +29,9 @@ class TestCLIArgumentParsing:
         required_args = [action.dest for action in required_actions]
 
         assert "model_path" in required_args
-        assert "total_gpus" in required_args
         assert "system" in required_args
+        # total_gpus is optional -- omitting it with a load target triggers recommend
+        assert "total_gpus" not in required_args
 
     def test_exp_mode_required_args(self, cli_parser):
         """Test that exp mode requires the yaml_path argument."""
@@ -48,7 +49,7 @@ class TestCLIArgumentParsing:
     def test_mode_choices(self, cli_parser):
         """Ensure supported CLI modes are exposed."""
         action = next(action for action in cli_parser._actions if action.dest == "mode")
-        assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate"}
+        assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate", "recommend"}
 
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
@@ -423,3 +424,77 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
+
+    def test_recommend_mode_parses_request_rate(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "50.0",
+            ]
+        )
+        assert args.mode == "recommend"
+        assert args.target_request_rate == 50.0
+        assert args.target_concurrency is None
+
+    def test_recommend_mode_parses_concurrency(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-concurrency",
+                "200",
+            ]
+        )
+        assert args.mode == "recommend"
+        assert args.target_request_rate is None
+        assert args.target_concurrency == 200.0
+
+    def test_recommend_mode_rejects_both_targets(self, cli_parser):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "recommend",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--system",
+                    "h200_sxm",
+                    "--target-request-rate",
+                    "50.0",
+                    "--target-concurrency",
+                    "200",
+                ]
+            )
+
+    def test_recommend_mode_requires_a_target(self, cli_parser):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "recommend",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--system",
+                    "h200_sxm",
+                ]
+            )
+
+    def test_recommend_mode_has_no_total_gpus(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+            ]
+        )
+        assert not hasattr(args, "total_gpus")

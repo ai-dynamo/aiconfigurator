@@ -77,6 +77,7 @@ def main(args):
     from aiconfigurator.webapp.components.pareto_comparison_tab import create_pareto_comparison_tab
     from aiconfigurator.webapp.components.profiling.create_profiling_tab import create_profiling_tab
     from aiconfigurator.webapp.components.readme_tab import create_readme_tab
+    from aiconfigurator.webapp.components.recommender_tab import create_recommender_tab
     from aiconfigurator.webapp.components.static_tab import create_static_tab
     from aiconfigurator.webapp.components.support_matrix_tab import create_support_matrix_tab
     from aiconfigurator.webapp.events.event_handler import EventHandler
@@ -85,6 +86,7 @@ def main(args):
         "enable_agg": args.enable_agg,
         "enable_disagg_pd_ratio": args.enable_disagg_pd_ratio,
         "enable_profiling": args.enable_profiling,
+        "enable_recommender": True,
         "experimental": args.experimental,
         "debug": args.debug,
     }
@@ -168,6 +170,8 @@ def main(args):
             pareto_comparison_components = create_pareto_comparison_tab(app_config)
             if app_config["enable_profiling"]:
                 profiling_components = create_profiling_tab(app_config)
+            if app_config["enable_recommender"]:
+                recommender_components = create_recommender_tab(app_config)
             support_matrix_components = create_support_matrix_tab(app_config)  # noqa: F841
 
         # setup events
@@ -195,6 +199,8 @@ def main(args):
         EventHandler.setup_pareto_comparison_events(pareto_comparison_components, pareto_results_state)
         if app_config["enable_profiling"]:
             EventHandler.setup_profiling_events(profiling_components)
+        if app_config["enable_recommender"]:
+            EventHandler.setup_recommender_events(recommender_components)
 
         demo.launch(server_name=args.server_name, server_port=args.server_port, css=_css)
 

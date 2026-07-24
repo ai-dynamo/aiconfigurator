@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import dataclasses
 import inspect
 import logging
 from collections import defaultdict
@@ -180,9 +181,7 @@ class BaseBackend:
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
-        candidate = copy.deepcopy(runtime_config)
-        candidate.batch_size = batch_size
-        return candidate
+        return dataclasses.replace(runtime_config, batch_size=batch_size)
 
     def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
@@ -746,7 +745,7 @@ class BaseBackend:
             ]
         ]
 
-        summary_df = pd.DataFrame(data, columns=common.ColumnsStatic).round(3)
+        summary.set_deferred_row(data, common.ColumnsStatic)
 
         summary.set_encoder_latency_dict(encoder_latency_dict)
         summary.set_context_latency_dict(context_latency_dict)
@@ -774,8 +773,6 @@ class BaseBackend:
 
         if encoder_memory:
             summary.set_encoder_memory(encoder_memory)
-
-        summary.set_summary_df(summary_df)
 
         return summary
 
@@ -1374,7 +1371,6 @@ class BaseBackend:
             "system": database.system,
             "power_w": agg_power_avg_w,
         }
-        result = pd.DataFrame([result_dict], columns=common.ColumnsAgg).round(3)
         summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
         summary.set_memory_and_check_oom(
             memory,
@@ -1385,7 +1381,6 @@ class BaseBackend:
         summary.set_encoder_energy_wms_dict(encoder_energy_wms_dict)
         summary.set_encoder_power_avg(encoder_energy_wms / encoder_latency_ms if encoder_latency_ms > 0 else 0.0)
         summary.set_encoder_source_dict(encoder_source_dict)
-        summary.set_summary_df(result)
         summary.set_result_dict(result_dict)
         if encoder_memory:
             summary.set_encoder_memory(encoder_memory)
