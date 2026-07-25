@@ -161,8 +161,10 @@ class VisionEncoderConfig:
             encoder parallelism (TP sharding, or full replicas under encoder DP).
         projector_n_instances (int): Number of projector instances to model (e.g.,
             1 + len(deepstack_visual_indexes) for Qwen3VL deepstack variants).
-        partial_rotary_factor (float): Fraction of head_dim that RoPE rotates on Q/K
-            in each ViT attention block. 0.0 means no RoPE.
+        partial_rotary_factor (float): Engine-side rotary-table parameter, not a
+            rotated fraction — the 2-axis vision RoPE always rotates the full
+            head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
+            the encoder_rope_apply op; 0.0 means no RoPE.
     """
 
     depth: int
