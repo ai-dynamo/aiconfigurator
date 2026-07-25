@@ -678,8 +678,18 @@ def run_moe_torch(
 
     if moe_type != "w4a16_mxfp4":
         cleanup_empty_json_files(moe_tune_path)
+        # The tuned-tactic cache MUST be SM-scoped: tactic indices are positions
+        # in the runner's per-arch config table, and replaying another arch's
+        # indices overruns the table (hardware-observed on RTX PRO 6000
+        # 2026-07-25: SM100-tuned fp8 cache replayed on SM120 →
+        # "vector::_M_range_check: __n (which is 29) >= this->size() (which is
+        # 21)" in FusedMoeRunner.run_moe; same failure family as the wideep
+        # collector's 2026-07-19 fix in collect_moe_compute.py). Pre-fix cache
+        # files without the sm prefix are dead — their tuning SM is not
+        # recorded, so they are never trusted again.
         cache_path = (
-            f"{moe_tune_path}/{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
+            f"{moe_tune_path}/sm{get_sm_version()}_"
+            f"{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
         )
         existing_files = glob.glob(f"{cache_path}*")
         cache_loaded = False
