@@ -1238,9 +1238,10 @@ mod tests {
         let mixed =
             Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)).unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
-        let raw_breakdown = raw.mixed_step_breakdown(1024, 2, 1024, 8, 0).unwrap();
+        let raw_breakdown = raw.mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
         let breakdown =
-            Python::with_gil(|py| aic.mixed_step_breakdown(py, 1024, 2, 1024, 8, 0)).unwrap();
+            Python::with_gil(|py| aic.mixed_step_breakdown(py, 1024, 2, 1024, 8, 0, 1.0, 1.0))
+                .unwrap();
         assert_eq!(
             breakdown,
             (
