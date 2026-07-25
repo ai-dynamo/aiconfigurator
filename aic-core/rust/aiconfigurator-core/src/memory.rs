@@ -399,6 +399,8 @@ fn dtype_str(dt: &crate::DataType) -> &'static str {
         W4afp8 => "w4afp8",
         W4a16Mxfp4 => "w4a16_mxfp4",
         W4a8Mxfp4Mxfp8 => "w4a8_mxfp4_mxfp8",
+        W4a8Mxfp4Mxfp8Trtllm => "w4a8_mxfp4_mxfp8_trtllm",
+        W4a16Mxfp4Cutlass => "w4a16_mxfp4_cutlass",
     }
 }
 

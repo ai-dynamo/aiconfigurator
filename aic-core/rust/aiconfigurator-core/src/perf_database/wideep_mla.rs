@@ -160,7 +160,11 @@ impl WideEpMlaTable {
         // reads it (memory scales by fmha.memory).
         let _ = kv_quant;
         let spec = &self.system_spec;
-        let sol = move |c: &[f64]| wideep_context_mla_sol_ms(spec, fmha_quant, c[0], c[1], c[2]);
+        // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`
+        // (Python `get_silicon`'s lambda), prefix = 0 (samples are prefix=0).
+        let sol = move |c: &[f64]| {
+            wideep_context_mla_sol_ms(spec, fmha_quant, wideep_num_head(c[0]), c[1], 0.0, c[2])
+        };
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
         perf_interp::query(
             &cfg,
@@ -209,13 +213,77 @@ impl WideEpMlaTable {
             FmhaQuantMode::Bfloat16
         };
         let spec = &self.system_spec;
-        let sol = move |c: &[f64]| wideep_generation_mla_sol_ms(spec, fmha_quant, c[0], c[1], c[2]);
+        // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`.
+        let sol = move |c: &[f64]| {
+            wideep_generation_mla_sol_ms(spec, fmha_quant, wideep_num_head(c[0]), c[1], c[2])
+        };
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
         perf_interp::query(
             &cfg,
             node,
             &[num_heads as f64, b as f64, sequence_tokens as f64],
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Point accessors for the util-space empirical layer (algorithm-free:
+    // typed `AicError::PerfDatabase` miss on absent slice / empty node, no
+    // estimation logic). Coordinate order matches the Python `depth=3`
+    // iteration of each `require_data_slice` slice.
+    // -----------------------------------------------------------------------
+
+    /// Collected `(num_heads, seq, batch) -> latency` points of the
+    /// `(kernel_source, fmha, kv)` context slice. Typed miss when
+    /// absent/empty.
+    pub fn context_points(
+        &self,
+        kernel_source: &str,
+        kv_quant: KvCacheQuantMode,
+        fmha_quant: FmhaQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_context()?;
+        let key = ContextKey {
+            kernel_source: kernel_source.to_string(),
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("WideEP context MLA", &self.data_root, format!("{key:?}")))?;
+        non_empty_points(node, "WideEP context MLA", &self.data_root)
+    }
+
+    /// Collected `(num_heads, batch, seq) -> latency` points of the
+    /// `(kernel_source, kv)` generation slice. Typed miss when absent/empty.
+    pub fn generation_points(
+        &self,
+        kernel_source: &str,
+        kv_quant: KvCacheQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_generation()?;
+        let key = GenerationKey {
+            kernel_source: kernel_source.to_string(),
+            kv_quant: kv_quant.name().to_string(),
+        };
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("WideEP generation MLA", &self.data_root, format!("{key:?}")))?;
+        non_empty_points(node, "WideEP generation MLA", &self.data_root)
+    }
+
+    /// Probe the context table load. Typed missing-data error when the
+    /// perf file is absent — Python `get_silicon`'s `raise_if_not_loaded()`
+    /// step, which PRECEDES the attn-backend whitelist (`mla.py:1449-1461`).
+    pub fn ensure_context_loaded(&self) -> Result<(), AicError> {
+        self.load_context().map(|_| ())
+    }
+
+    /// Generation-table counterpart of [`Self::ensure_context_loaded`]
+    /// (`mla.py:1188-1192`).
+    pub fn ensure_generation_loaded(&self) -> Result<(), AicError> {
+        self.load_generation().map(|_| ())
     }
 
     fn load_context(&self) -> Result<&WideEpContextMlaGrids, AicError> {
@@ -246,30 +314,42 @@ fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
     spec.gpu.bfloat16_tc_flops.unwrap_or(0.0)
 }
 
-/// The tables key by `num_heads`; the Python SOLs take `tp_size` and derive
-/// `num_head = 128 // tp_size`, with the sol_fn lambdas mapping
-/// `tp = 128 // n`. Compose both floor divisions exactly.
-fn wideep_num_head(n: f64) -> f64 {
+/// The tables key by `num_heads`; the Python SILICON `sol_fn` lambdas take
+/// `tp_size` derived as `tp = 128 // n` and the SOLs then use
+/// `num_head = 128 // tp_size`. Compose both floor divisions exactly. (The
+/// util-empirical sample mapping differs — Python rounds there:
+/// `tp = round(128 / n)`; see `operators/wideep_mla.rs`.)
+pub(crate) fn wideep_num_head(n: f64) -> f64 {
     let tp_size = (128.0 / n).floor();
     (128.0 / tp_size).floor()
 }
 
-/// WideEP context MLA SOL in ms at prefix = 0. Structure (per Python):
+/// WideEP context MLA SOL in ms. `num_head` is the per-rank head count
+/// (Python's `128 // tp_size`; the `n -> num_head` mapping lives at the
+/// call sites because silicon and empirical map differently). `s` is the
+/// chunk / isl length; silicon sol_fns pass `prefix = 0` (samples are
+/// prefix=0), the util-empirical query SOL carries the real prefix.
+/// Structure (per Python):
 /// - q_b / kv_b projections + attention output projection -> `ops`
 ///   (divided by `bf16_tc_flops * fmha.compute`)
-/// - attention flops `2 * nh * (nope*2 + rope) * b * full_s^2 // 2` added at
-///   full bf16 throughput (no fmha compute factor)
+/// - attention flops `2 * nh * (nope*2 + rope) * b * (full_s^2 - prefix^2) // 2`
+///   added at full bf16 throughput (no fmha compute factor)
 /// - `mem = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha.memory`
 /// - `sol = max(sol_math, sol_mem)`
-fn wideep_context_mla_sol_ms(spec: &SystemSpec, fmha_quant: FmhaQuantMode, n: f64, s: f64, b: f64) -> f64 {
+pub(crate) fn wideep_context_mla_sol_ms(
+    spec: &SystemSpec,
+    fmha_quant: FmhaQuantMode,
+    num_head: f64,
+    s: f64,
+    prefix: f64,
+    b: f64,
+) -> f64 {
     let hidden_size = 7168.0_f64;
     let q_lora_rank = 1536.0_f64;
     let kv_lora_rank = 512.0_f64;
     let qk_rope_head_dim = 64.0_f64;
     let qk_nope_head_dim = 128.0_f64;
     let v_head_dim = 128.0_f64;
-    let num_head = wideep_num_head(n);
-    let prefix = 0.0_f64;
 
     // q_b projection
     let q_b_flop = 2.0 * q_lora_rank * num_head * (qk_rope_head_dim + qk_nope_head_dim) * b * s;
@@ -311,20 +391,27 @@ fn wideep_context_mla_sol_ms(spec: &SystemSpec, fmha_quant: FmhaQuantMode, n: f6
     sol_math.max(sol_mem)
 }
 
-/// WideEP generation MLA SOL in ms. Structure (per Python): q_b, q_w_kc,
+/// WideEP generation MLA SOL in ms. `num_head` is the per-rank head count
+/// (see [`wideep_context_mla_sol_ms`] for the mapping split between
+/// silicon and empirical call sites). Structure (per Python): q_b, q_w_kc,
 /// s_w_vc and attention-output projections -> `ops` (divided by
 /// `bf16_tc_flops * fmha.compute`); the MQA attention flops
 /// `2 * b * s * nh * (rope + kv_lora*2)` added at full bf16 throughput;
 /// `mem = (q_b + q_w_kc + attn*2 + s_w_vc + attn_out) * fmha.memory`;
 /// `sol = max(sol_math, sol_mem)`.
-fn wideep_generation_mla_sol_ms(spec: &SystemSpec, fmha_quant: FmhaQuantMode, n: f64, b: f64, s: f64) -> f64 {
+pub(crate) fn wideep_generation_mla_sol_ms(
+    spec: &SystemSpec,
+    fmha_quant: FmhaQuantMode,
+    num_head: f64,
+    b: f64,
+    s: f64,
+) -> f64 {
     let hidden_size = 7168.0_f64;
     let q_lora_rank = 1536.0_f64;
     let kv_lora_rank = 512.0_f64;
     let qk_rope_head_dim = 64.0_f64;
     let qk_nope_head_dim = 128.0_f64;
     let v_head_dim = 128.0_f64;
-    let num_head = wideep_num_head(n);
 
     // NOTE: qkv_a projection is modeled as a standalone GEMM op
     // (generation_qkv_a_proj_gemm) outside the MLA attention forward path,
@@ -501,6 +588,24 @@ fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
         "{table} data missing for {descriptor} at {}",
         data_root.display()
     ))
+}
+
+/// Flatten a slice node into `(coords, latency)` points, treating an empty
+/// node as a typed coverage miss (mirrors `require_data_slice`'s empty-node
+/// check).
+fn non_empty_points(
+    node: &Node,
+    table: &str,
+    data_root: &Path,
+) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+    let points = perf_interp::node_points(node);
+    if points.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "{table} perf data empty for the requested slice at {}",
+            data_root.display()
+        )));
+    }
+    Ok(points)
 }
 
 fn clone_err(err: &AicError) -> AicError {

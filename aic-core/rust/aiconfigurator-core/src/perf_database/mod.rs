@@ -11,10 +11,14 @@
 //! the WideEP/DeepEP all-to-all variants.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
+use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::util_empirical::{DeltaLookupCache, ProvenanceTier, UtilGridCache};
 
 /// The five known legacy/framework-agnostic backend directory names. Mirrors the
 /// SDK loader's `KNOWN_BACKEND_DIRS`
@@ -148,6 +152,7 @@ pub mod attention;
 pub mod communication;
 pub mod dsa;
 pub mod dsv4;
+pub mod dsv4_megamoe;
 pub mod gemm;
 mod interpolation;
 pub mod mhc;
@@ -164,6 +169,7 @@ pub use attention::AttentionTable;
 pub use communication::CommunicationTable;
 pub use dsa::DsaTable;
 pub use dsv4::{AttnKind, Dsv4Table};
+pub use dsv4_megamoe::Dsv4MegaMoeTable;
 pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
@@ -173,13 +179,10 @@ pub use wideep::WideEpTable;
 pub use wideep_mla::WideEpMlaTable;
 pub use wideep_moe::WideEpMoeTable;
 
-/// Modular performance database for a specific
-/// `<system>/<backend>/<version>` tuple.
-///
-/// `load` does the cheap work: resolves the data directory from the system
-/// YAML and constructs empty per-family tables. The first query on each
-/// family triggers the CSV read.
-pub struct PerfDatabase {
+/// The loaded per-family perf tables for one `<system>/<backend>/<version>`
+/// tuple — the mode-independent, immutable-after-load data half of
+/// [`PerfDatabase`]. Shared (via `Arc`) between mode views.
+pub struct PerfTables {
     pub system: String,
     pub backend: String,
     pub version: String,
@@ -192,11 +195,61 @@ pub struct PerfDatabase {
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
     pub dsv4: Dsv4Table,
+    pub dsv4_megamoe: Dsv4MegaMoeTable,
     pub mhc: MhcTable,
     pub wideep: WideEpTable,
     pub wideep_mla: WideEpMlaTable,
     pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+}
+
+/// Modular performance database for a specific
+/// `<system>/<backend>/<version>` tuple.
+///
+/// `load` does the cheap work: resolves the data directory from the system
+/// YAML and constructs empty per-family tables. The first query on each
+/// family triggers the CSV read.
+///
+/// Structurally this is a mode-configured VIEW over shared [`PerfTables`]
+/// (mirroring Python's configured query views): the tables deref through, so
+/// `db.gemm` / `db.system_spec` read as before, while `database_mode` /
+/// `transfer_policy` are per-view. [`PerfDatabase::silicon_view`] derives the
+/// SILICON view `FallbackOp` (and MSA's cross-op DSA probe) evaluate against
+/// under HYBRID.
+pub struct PerfDatabase {
+    tables: Arc<PerfTables>,
+    /// Query mode (Python's `database._default_database_mode`). SILICON
+    /// queries collected tables only; HYBRID falls back to the util-space
+    /// empirical layer on a typed silicon miss; EMPIRICAL always answers
+    /// `SOL/util`. Defaults to SILICON; `Engine::from_spec_bytes` overwrites
+    /// it from the spec.
+    pub database_mode: DatabaseMode,
+    /// Enabled empirical transfer kinds (Python's `database.transfer_policy`).
+    pub transfer_policy: TransferPolicy,
+    /// Memo of built util-calibration grids, keyed by op/slice identity
+    /// (see `operators::util_empirical`). Tables are immutable after load and
+    /// grid keys name their slice, so the memo is shared across mode views
+    /// and never needs invalidation.
+    pub util_grids: Arc<UtilGridCache>,
+    /// Memo of zero-aware delta lookups (the `compute_scale` empirical
+    /// mechanism); same keying/lifetime rationale as `util_grids`.
+    pub delta_lookups: Arc<DeltaLookupCache>,
+    /// Max-rank empirical provenance tier fired since the last
+    /// [`PerfDatabase::reset_provenance`] (Rust mirror of Python's
+    /// `capture_provenance` contextvar in `sdk/operations/util_empirical.py`).
+    /// Shared across mode views (`silicon_view` clones) like `util_grids`, so
+    /// notes made through a derived view land on the run's accumulator. The
+    /// engine FFI resets it per `run_static`/step call and reads the worst
+    /// tier back for the Python bridge / support-matrix HYBRID labelling.
+    provenance: Arc<AtomicU8>,
+}
+
+impl std::ops::Deref for PerfDatabase {
+    type Target = PerfTables;
+
+    fn deref(&self) -> &PerfTables {
+        &self.tables
+    }
 }
 
 impl PerfDatabase {
@@ -265,7 +318,7 @@ impl PerfDatabase {
             .oneccl_version
             .as_ref()
             .map(|v| comm_root(&system_data_root, "oneccl", v));
-        Ok(Self {
+        let tables = PerfTables {
             system: system.to_string(),
             backend: backend.to_string(),
             version: version.to_string(),
@@ -286,6 +339,10 @@ impl PerfDatabase {
             ),
             dsa: DsaTable::with_sources(data_root.clone(), perf_db_sources),
             dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
+            // Single-primary by design: the Python MegaMoE loader reads one
+            // unified path and never the shared-layer source list (see
+            // `dsv4_megamoe.rs`).
+            dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
             wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
@@ -298,7 +355,76 @@ impl PerfDatabase {
             ),
             system_spec: spec,
             data_root,
+        };
+        Ok(Self {
+            tables: Arc::new(tables),
+            database_mode: DatabaseMode::default(),
+            transfer_policy: TransferPolicy::ALL,
+            util_grids: Arc::new(UtilGridCache::new()),
+            delta_lookups: Arc::new(DeltaLookupCache::new()),
+            provenance: Arc::new(AtomicU8::new(ProvenanceTier::Silicon as u8)),
         })
+    }
+
+    /// Record that an empirical path of tier `tier` produced a value.
+    /// Max-rank accumulation, so the cell always holds the run's
+    /// least-confident (worst) tier — Python's `worst_provenance` semantics.
+    ///
+    /// Call sites mirror Python `note_provenance` exactly: after each
+    /// successful `util_empirical::estimate` with the tier the site knows
+    /// (own-data "empirical", attention head_size ref grid "xshape", the MoE
+    /// ladder's `reference_provenance`, communication rank-overflow "xshape",
+    /// MSA cross-op "xop", ...).
+    pub fn note_provenance(&self, tier: ProvenanceTier) {
+        self.provenance.fetch_max(tier as u8, Ordering::Relaxed);
+    }
+
+    /// Clear the accumulator back to `Silicon` (start of a run).
+    pub fn reset_provenance(&self) {
+        self.provenance
+            .store(ProvenanceTier::Silicon as u8, Ordering::Relaxed);
+    }
+
+    /// The least-confident tier fired since the last reset; `Silicon` when no
+    /// empirical path fired (Python `worst_provenance` of an empty capture).
+    pub fn worst_provenance(&self) -> ProvenanceTier {
+        ProvenanceTier::from_rank(self.provenance.load(Ordering::Relaxed))
+    }
+
+    /// Configure the query mode + transfer policy (both immutable per
+    /// database instance afterwards, mirroring Python's configured query
+    /// views). Called by `Engine::from_spec_bytes` with the spec's values.
+    pub fn with_mode(mut self, database_mode: DatabaseMode, transfer_policy: TransferPolicy) -> Self {
+        self.database_mode = database_mode;
+        self.transfer_policy = transfer_policy;
+        self
+    }
+
+    /// Test-only mutable access to the shared tables (panics if the view has
+    /// been cloned — synthetic-table injection must happen before any
+    /// `silicon_view`). Production code never mutates loaded tables.
+    #[cfg(test)]
+    pub(crate) fn tables_mut(&mut self) -> &mut PerfTables {
+        Arc::get_mut(&mut self.tables).expect("tables Arc must be unique for test mutation")
+    }
+
+    /// The SILICON view over the same loaded tables (cheap: `Arc` clones).
+    ///
+    /// Mirrors Python `FallbackOp.query`'s
+    /// `_get_configured_database_view(database, SILICON, transfer_policy)`:
+    /// under HYBRID the primary op is evaluated silicon-only so the module
+    /// table's absence falls to the granular fallback chain instead of being
+    /// hybrid-estimated at module level. Also used by MSA's cross-op DSA
+    /// utilisation probe.
+    pub fn silicon_view(&self) -> PerfDatabase {
+        PerfDatabase {
+            tables: Arc::clone(&self.tables),
+            database_mode: DatabaseMode::Silicon,
+            transfer_policy: self.transfer_policy,
+            util_grids: Arc::clone(&self.util_grids),
+            delta_lookups: Arc::clone(&self.delta_lookups),
+            provenance: Arc::clone(&self.provenance),
+        }
     }
 }
 
@@ -330,6 +456,28 @@ mod tests {
             gemm_sources[0].0.is_file(),
             "resolved GEMM source must exist"
         );
+    }
+
+    #[test]
+    fn provenance_cell_accumulates_worst_tier_and_is_shared_with_views() {
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0")
+            .expect("b200_sxm/vllm/0.19.0 must load");
+        assert_eq!(db.worst_provenance(), ProvenanceTier::Silicon);
+
+        // Max-rank accumulation: a lower tier never overwrites a higher one.
+        db.note_provenance(ProvenanceTier::XShape);
+        db.note_provenance(ProvenanceTier::Empirical);
+        assert_eq!(db.worst_provenance(), ProvenanceTier::XShape);
+
+        // Notes through a derived silicon view land on the same accumulator
+        // (the MSA xop probe evaluates against `silicon_view`).
+        let view = db.silicon_view();
+        view.note_provenance(ProvenanceTier::XOp);
+        assert_eq!(db.worst_provenance(), ProvenanceTier::XOp);
+
+        db.reset_provenance();
+        assert_eq!(db.worst_provenance(), ProvenanceTier::Silicon);
+        assert_eq!(view.worst_provenance(), ProvenanceTier::Silicon);
     }
 
     #[test]

@@ -161,6 +161,8 @@ mod tests {
         let spec = SystemSpec::load(&systems_root().join("b200_sxm.yaml"))
             .expect("b200_sxm.yaml parse must succeed");
         assert_eq!(spec.data_dir, PathBuf::from("data/b200_sxm"));
+        // 7.7 TB/s since PR #1246 (was 8.0; this pin went stale unnoticed
+        // because cargo test was not in the gating CI).
         assert_eq!(spec.gpu.mem_bw, 7_700_000_000_000.0);
         assert_eq!(spec.gpu.mem_bw_empirical_scaling_factor, 0.8);
         assert_eq!(spec.gpu.bfloat16_tc_flops, Some(2_250_000_000_000_000.0));

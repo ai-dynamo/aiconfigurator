@@ -54,6 +54,14 @@ pub struct DsaTable {
     generation_sources: Vec<PerfSource>,
     context: OnceLock<Result<DsaGrids, AicError>>,
     generation: OnceLock<Result<DsaGrids, AicError>>,
+    /// GLM-5.2 skip-indexer (reuse-layer) tables — same files, rows tagged by
+    /// `op_name` `*_skip_indexer`. Loaded lazily; empty when the parquet
+    /// carries no skip rows (DeepSeek-V3.2 / GLM-5), in which case the skip
+    /// query fails loud exactly like Python's `None` slot.
+    context_skip: OnceLock<Result<DsaGrids, AicError>>,
+    generation_skip: OnceLock<Result<DsaGrids, AicError>>,
+    context_skip_nodes: OnceLock<Result<NodeCache, AicError>>,
+    generation_skip_nodes: OnceLock<Result<NodeCache, AicError>>,
     /// Engine-ready per-`DsaKey` context tables with the raw shape
     /// `[num_heads][step][isl][batch]`, built once from the loaded grids.
     context_nodes: OnceLock<Result<NodeCache, AicError>>,
@@ -208,6 +216,10 @@ impl DsaTable {
             generation_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
+            context_skip: OnceLock::new(),
+            generation_skip: OnceLock::new(),
+            context_skip_nodes: OnceLock::new(),
+            generation_skip_nodes: OnceLock::new(),
             context_nodes: OnceLock::new(),
             generation_nodes: OnceLock::new(),
             perf_db_sources: perf_db_sources.clone(),
@@ -310,8 +322,16 @@ impl DsaTable {
         prefix: u32,
         index_topk: u32,
         dsa_backend: &str,
+        skip_indexer: bool,
     ) -> Result<f64, AicError> {
-        let nodes = self.load_context_nodes()?;
+        // `skip_indexer=true` reads the GLM-5.2 reuse-layer table (rows tagged
+        // `*_skip_indexer` in the same parquet) and zeroes the indexer terms
+        // in the SOL — mirroring Python `_query_context_dsa_module_table`.
+        let nodes = if skip_indexer {
+            self.load_context_skip_nodes()?
+        } else {
+            self.load_context_nodes()?
+        };
         let key = DsaKey {
             architecture: architecture.to_string(),
             fmha_quant: fmha_quant.name().to_string(),
@@ -342,6 +362,7 @@ impl DsaTable {
                 c[2] as i64, // s
                 c[1] as i64, // prefix
                 c[0] as i64, // num_heads
+                skip_indexer,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "prefix", "seq_len", "batch"], &sol);
@@ -374,8 +395,16 @@ impl DsaTable {
         gemm_quant: GemmQuantMode,
         architecture: &str,
         dsa_backend: &str,
+        skip_indexer: bool,
     ) -> Result<f64, AicError> {
-        let nodes = self.load_generation_nodes()?;
+        // `skip_indexer=true` reads the GLM-5.2 reuse-layer generation table.
+        // The generation SOL is skip-independent (Python's generation get_sol
+        // has no skip branch) — only the table slice differs.
+        let nodes = if skip_indexer {
+            self.load_generation_skip_nodes()?
+        } else {
+            self.load_generation_nodes()?
+        };
         // NOTE: Python's generation table is keyed (kv, gemm, arch) only —
         // no mla_dtype axis. The Rust key retains `fmha_quant` from the
         // parquet `mla_dtype` column (uniformly `bfloat16` in collected
@@ -414,10 +443,81 @@ impl DsaTable {
         )
     }
 
+    /// RAW context slice `[num_heads][prefix][isl][batch]` for the exact
+    /// (arch, quants) key, with Python `_select_dsa_backend`'s fallback chain
+    /// applied. This is the calibration view the util-empirical path reads:
+    /// with load-time pre-expansion gone, Python's `_raw_context_dsa_module_data`
+    /// is a plain alias of the loaded table, and these grids ARE that table.
+    /// Typed `AicError::PerfDatabase` when the table/slice is missing — the
+    /// operator maps it to a typed coverage miss, mirroring Python
+    /// `_raw_slice` raising `PerfDataNotAvailableError`.
+    pub fn context_raw_slice(
+        &self,
+        key: &DsaKey,
+        dsa_backend: &str,
+        skip_indexer: bool,
+    ) -> Result<&DsaHeadGrid, AicError> {
+        // `skip_indexer=true` reads the GLM-5.2 reuse-layer rows (same file,
+        // `op_name` `*_skip_indexer`), matching the silicon `query_context`
+        // slice selection so HYBRID's two stages always agree.
+        let grids = if skip_indexer {
+            self.load_context_skip()?
+        } else {
+            self.load_context()?
+        };
+        grids
+            .by_keys
+            .get(key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
+            .ok_or_else(|| {
+                missing(
+                    "raw context DSA module",
+                    &self.data_root,
+                    format!("{key:?} (dsa_backend={dsa_backend})"),
+                )
+            })
+    }
+
+    /// RAW generation slice for the exact (arch, quants) key, backend-selected
+    /// like [`Self::context_raw_slice`]. The load-time (isl, step) -> seq
+    /// collapse stores `step = 0, isl = seq`, so the returned grid reads as
+    /// `[num_heads][0][seq][batch]` — the same measured rows Python's
+    /// `_raw_generation_dsa_module_data` alias exposes as `[num_heads][b][s]`.
+    pub fn generation_raw_slice(
+        &self,
+        key: &DsaKey,
+        dsa_backend: &str,
+        skip_indexer: bool,
+    ) -> Result<&DsaHeadGrid, AicError> {
+        let grids = if skip_indexer {
+            self.load_generation_skip()?
+        } else {
+            self.load_generation()?
+        };
+        grids
+            .by_keys
+            .get(key)
+            .and_then(|by_backend| select_dsa_backend(by_backend, dsa_backend))
+            .ok_or_else(|| {
+                missing(
+                    "raw generation DSA module",
+                    &self.data_root,
+                    format!("{key:?} (dsa_backend={dsa_backend})"),
+                )
+            })
+    }
+
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
-            .get_or_init(|| load_dsa_parquet(&self.context_sources, false));
+            .get_or_init(|| load_dsa_parquet(&self.context_sources, false, false));
+        cell.as_ref().map_err(clone_err)
+    }
+
+    fn load_context_skip(&self) -> Result<&DsaGrids, AicError> {
+        let cell = self
+            .context_skip
+            .get_or_init(|| load_dsa_parquet(&self.context_sources, false, true));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -427,7 +527,15 @@ impl DsaTable {
         // (last file row wins within a source; first source wins across).
         let cell = self
             .generation
-            .get_or_init(|| load_dsa_parquet(&self.generation_sources, true));
+            .get_or_init(|| load_dsa_parquet(&self.generation_sources, true, false));
+        cell.as_ref().map_err(clone_err)
+    }
+
+    fn load_generation_skip(&self) -> Result<&DsaGrids, AicError> {
+        // Same load-time (isl, step) -> seq collapse as the full table.
+        let cell = self
+            .generation_skip
+            .get_or_init(|| load_dsa_parquet(&self.generation_sources, true, true));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -439,9 +547,25 @@ impl DsaTable {
         cell.as_ref().map_err(clone_err)
     }
 
+    fn load_context_skip_nodes(&self) -> Result<&NodeCache, AicError> {
+        let cell = self.context_skip_nodes.get_or_init(|| {
+            let grids = self.load_context_skip()?;
+            Ok(build_context_nodes(grids))
+        });
+        cell.as_ref().map_err(clone_err)
+    }
+
     fn load_generation_nodes(&self) -> Result<&NodeCache, AicError> {
         let cell = self.generation_nodes.get_or_init(|| {
             let grids = self.load_generation()?;
+            Ok(build_generation_nodes(grids))
+        });
+        cell.as_ref().map_err(clone_err)
+    }
+
+    fn load_generation_skip_nodes(&self) -> Result<&NodeCache, AicError> {
+        let cell = self.generation_skip_nodes.get_or_init(|| {
+            let grids = self.load_generation_skip()?;
             Ok(build_generation_nodes(grids))
         });
         cell.as_ref().map_err(clone_err)
@@ -537,7 +661,8 @@ fn indexer_cache_entry_bytes(index_head_dim: i64) -> i64 {
 /// attention group (fmha_quant) whose exact KV pair count is
 /// `sum_{i=0..s-1} min(prefix+i+1, index_topk)`.
 #[allow(clippy::too_many_arguments)]
-fn dsa_context_sol_ms(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_context_sol_ms(
     spec: &SystemSpec,
     dims: &DsaDims,
     index_topk: i64,
@@ -548,6 +673,7 @@ fn dsa_context_sol_ms(
     s: i64,
     prefix: i64,
     num_heads: i64,
+    skip_indexer: bool,
 ) -> f64 {
     let (hidden, q_lora, kv_lora) = (dims.hidden_size, dims.q_lora_rank, dims.kv_lora_rank);
     let (inh, ihd) = (dims.index_n_heads, dims.index_head_dim);
@@ -575,8 +701,10 @@ fn dsa_context_sol_ms(
         + 2 * num_heads * tokens * kv_lora * v_dim;
 
     // Indexer logits group: always FP8; off when the full sequence fits the
-    // top-k window (regime split).
-    let indexer_logits_ops = if full_s <= topk {
+    // top-k window (regime split). A skip-indexer (reuse) layer never runs
+    // the per-layer indexer, so the group is zero regardless of full_s
+    // (Python operations/dsa.py get_sol).
+    let indexer_logits_ops = if skip_indexer || full_s <= topk {
         0
     } else {
         2 * tokens * inh * ihd * full_s
@@ -606,7 +734,8 @@ fn dsa_context_sol_ms(
 
     let kv_cache_bytes =
         (b * num_heads * effective_kv * attn_head_dim) as f64 * kv_quant.mapping().memory;
-    let indexer_cache_bytes = if full_s <= topk {
+    // Skip layers never store the index-K cache (the indexer never runs).
+    let indexer_cache_bytes = if skip_indexer || full_s <= topk {
         0.0
     } else {
         (b * full_s * indexer_cache_entry_bytes(dims.index_head_dim) as i128) as f64
@@ -632,7 +761,7 @@ fn dsa_context_sol_ms(
 /// `GenerationDSAModule._query_generation_dsa_module_table::get_sol`
 /// (1 token per request; the attention group is hardcoded bfloat16 in
 /// Python — `fmha_mode = FMHAQuantMode.bfloat16` — so no fmha arg here).
-fn dsa_generation_sol_ms(
+pub(crate) fn dsa_generation_sol_ms(
     spec: &SystemSpec,
     dims: &DsaDims,
     kv_quant: KvCacheQuantMode,
@@ -738,6 +867,7 @@ fn dsa_generation_sol_ms(
 fn load_dsa_parquet(
     sources: &[PerfSource],
     collapse_isl_step_to_seq: bool,
+    want_skip_rows: bool,
 ) -> Result<DsaGrids, AicError> {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, DsaHeadGrid>> = BTreeMap::new();
     let mut any_source = false;
@@ -770,12 +900,12 @@ fn load_dsa_parquet(
             }
             // Full vs skip-indexer share one file, split by op_name (Python:
             // `if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind
-            // == "skip"): continue` with op_kind="full").
-            if row
+            // == "skip"): continue`).
+            let is_skip_row = row
                 .str_optional(op_name_col)?
                 .unwrap_or("")
-                .contains("skip_indexer")
-            {
+                .contains("skip_indexer");
+            if is_skip_row != want_skip_rows {
                 continue;
             }
             let key = DsaKey {
@@ -1068,6 +1198,7 @@ mod tests {
                 0,
                 INDEX_TOPK,
                 "trtllm",
+                false,
             )
             .expect("DSA context query must succeed");
         assert!(
@@ -1123,6 +1254,7 @@ mod tests {
                 0,
                 INDEX_TOPK,
                 "trtllm",
+                false,
             )
             .expect("DSA context query must succeed");
         approx_rel(latency, 7.756);
@@ -1145,6 +1277,7 @@ mod tests {
                 0,
                 INDEX_TOPK,
                 "trtllm",
+                false,
             )
             .unwrap_err();
         assert!(matches!(err, AicError::PerfDatabase(_)));
@@ -1176,6 +1309,7 @@ mod tests {
                     prefix,
                     INDEX_TOPK,
                     "trtllm",
+                    false,
                 )
                 .unwrap()
         };
@@ -1401,6 +1535,7 @@ mod tests {
                     GemmQuantMode::Bfloat16,
                     "DeepseekV32ForCausalLM",
                     "trtllm",
+                    false,
                 )
                 .unwrap()
         };
@@ -1539,6 +1674,7 @@ mod tests {
                     0,
                     INDEX_TOPK,
                     dsa_backend,
+                    false,
                 )
                 .expect("query must succeed")
         };
@@ -1581,6 +1717,7 @@ mod tests {
                     0,
                     INDEX_TOPK,
                     dsa_backend,
+                    false,
                 )
                 .expect("query must succeed")
         };
@@ -1699,6 +1836,7 @@ mod tests {
                 GemmQuantMode::Bfloat16,
                 "DeepseekV32ForCausalLM",
                 "flashmla_kv",
+                false,
             )
             .expect("query must succeed");
         assert_eq!(got, 222.0);
@@ -1729,6 +1867,7 @@ mod tests {
                 0,
                 INDEX_TOPK,
                 "flashmla_kv", // absent: falls back to the trtllm slice
+                false,
             )
             .expect("query must succeed");
         assert_eq!(got, 3.5);

@@ -14,37 +14,46 @@ use crate::common::error::AicError;
 use crate::operators::{Op, RuntimeContext};
 use crate::perf_database::PerfDatabase;
 
-/// Component latencies for one mixed prefill/decode forward pass.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct MixedStepBreakdown {
-    pub(crate) shared_non_attention_ms: f64,
-    pub(crate) context_attention_ms: f64,
-    pub(crate) decode_attention_ms: f64,
+/// Context-op selection for [`run_context_ops`]. Mirrors the name-based
+/// filtering Python's `_get_mix_step_latency` applies to `run_static`'s
+/// per-op breakdown: pass 1 keeps every op EXCEPT `"context_attention"`,
+/// pass 2 keeps ONLY `"context_attention"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextOpFilter {
+    All,
+    SkipContextAttention,
+    OnlyContextAttention,
 }
 
-impl MixedStepBreakdown {
-    pub(crate) fn total_ms(self) -> f64 {
-        self.shared_non_attention_ms + self.context_attention_ms + self.decode_attention_ms
-    }
-}
-
-/// Python `_run_context_phase` (`base_backend.py:144`) — one full pass over
-/// the context op list. A free function so the compiled
+/// Python `_run_context_phase` (`base_backend.py:144`) — one pass over the
+/// context op list. A free function so the compiled
 /// [`crate::engine::Engine`] iterates one canonical body over its op list.
 ///
 /// `effective_isl = isl - prefix` is the caller's responsibility (Python
 /// computes it in `_run_context_phase` and `_run_static_breakdown`); this
 /// fn takes the already-effective ISL and does NOT validate it (the Engine
 /// caller performs Python's `effective_isl > 0` check before calling).
+///
+/// `seq_imbalance_correction_scale` mirrors Python's per-op kwarg
+/// (`base_backend.py:331`) — the context-attention ops multiply their result
+/// by it (`operations/attention.py:550-552`); every other op ignores it.
 pub(crate) fn run_context_ops(
     ops: &[Op],
     db: &PerfDatabase,
     batch_size: u32,
     effective_isl: u32,
     prefix: u32,
+    seq_imbalance_correction_scale: f64,
+    filter: ContextOpFilter,
 ) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {
+        match filter {
+            ContextOpFilter::All => {}
+            ContextOpFilter::SkipContextAttention if op.is_context_attention() => continue,
+            ContextOpFilter::OnlyContextAttention if !op.is_context_attention() => continue,
+            _ => {}
+        }
         let x = if op.is_logits_gemm() {
             batch_size
         } else {
@@ -56,7 +65,7 @@ pub(crate) fn run_context_ops(
             s: effective_isl,
             prefix,
             num_tokens: x,
-            seq_imbalance_correction_scale: 1.0,
+            seq_imbalance_correction_scale,
             gen_seq_imbalance_correction_scale: 1.0,
             num_image_tokens: 0,
         };
@@ -71,22 +80,59 @@ pub(crate) fn run_context_ops(
 /// `kv_seq_tokens` (= Python `s = isl + i + 1`); the stride quadrature
 /// (`for i in range(0, osl-1, stride)` × `repeat_count`) and the `(nextn + 1)`
 /// decode-batch multiplier are applied by the caller (the Engine).
+///
+/// `gen_seq_imbalance_correction_scale` mirrors Python's per-op kwarg
+/// (`base_backend.py:372`) — generation-attention ops multiply their result
+/// by it (`operations/attention.py:899-906`). `only_generation_attention`
+/// mirrors the mixed-step pass-3 name filter (only
+/// `latency_dict["generation_attention"]` is read).
 pub(crate) fn run_generation_ops_step(
     ops: &[Op],
     db: &PerfDatabase,
     batch_size: u32,
     kv_seq_tokens: u32,
+    gen_seq_imbalance_correction_scale: f64,
+    only_generation_attention: bool,
+) -> Result<f64, AicError> {
+    run_generation_ops_step_beamed(
+        ops,
+        db,
+        batch_size,
+        1,
+        kv_seq_tokens,
+        gen_seq_imbalance_correction_scale,
+        only_generation_attention,
+    )
+}
+
+/// [`run_generation_ops_step`] with an explicit beam width. Python's
+/// `_run_generation_phase` queries with `x = batch_size * beam_width` while
+/// `batch_size` itself stays unscaled (`base_backend.py:368-372`) — token-major
+/// ops (GEMM, elementwise, comm) see the beam-scaled token count, attention
+/// ops key on the raw decode batch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_generation_ops_step_beamed(
+    ops: &[Op],
+    db: &PerfDatabase,
+    batch_size: u32,
+    beam_width: u32,
+    kv_seq_tokens: u32,
+    gen_seq_imbalance_correction_scale: f64,
+    only_generation_attention: bool,
 ) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {
+        if only_generation_attention && !op.is_generation_attention() {
+            continue;
+        }
         let ctx = RuntimeContext {
             batch_size,
-            beam_width: 1,
+            beam_width: beam_width.max(1),
             s: kv_seq_tokens,
             prefix: 0,
-            num_tokens: batch_size,
+            num_tokens: batch_size.saturating_mul(beam_width.max(1)),
             seq_imbalance_correction_scale: 1.0,
-            gen_seq_imbalance_correction_scale: 1.0,
+            gen_seq_imbalance_correction_scale,
             num_image_tokens: 0,
         };
         total += op.query(db, &ctx)?.latency_ms;
@@ -94,13 +140,12 @@ pub(crate) fn run_generation_ops_step(
     Ok(total)
 }
 
-/// Python `_get_mix_step_latency` (Rust-shaped) — the three-pass mix-step
-/// composition for the agg path's chunked-prefill + decode step. A free
-/// function driven by the compiled [`crate::engine::Engine`]. The passes filter
-/// differently from the full-pass loops — pass 1 skips `context_attention`,
-/// pass 2 keeps only `context_attention`, pass 3 keeps only
-/// `generation_attention` — so it does NOT route through [`run_context_ops`] /
-/// [`run_generation_ops_step`].
+/// FPM-telemetry mix-step composition (the Dynamo mocker contract). Consumed
+/// ONLY by `Engine::rank_latency_ms` (observed `ForwardPassMetrics`
+/// dispatch); the live SDK engine-step path (`Engine::mixed_step_latency`)
+/// mirrors Python's `_get_mix_step_latency` three-pass composition directly
+/// via [`run_context_ops`] / [`run_generation_ops_step`] filters and does NOT
+/// route through here.
 ///
 /// Algorithm (mirrors Python):
 /// 1. Combined non-attention pass: iterate `context_ops`, **skip**
@@ -111,7 +156,7 @@ pub(crate) fn run_generation_ops_step(
 /// 3. Decode attention contribution: iterate `generation_ops`, only
 ///    generation-attention ops, with the decode batch shape.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn get_mix_step_breakdown(
+pub(crate) fn get_mix_step_ops(
     context_ops: &[Op],
     generation_ops: &[Op],
     db: &PerfDatabase,
@@ -122,7 +167,7 @@ pub(crate) fn get_mix_step_breakdown(
     combined_prefix: u32,
     kv_per_decode_req: u32,
     decode_batch: u32,
-) -> Result<MixedStepBreakdown, AicError> {
+) -> Result<f64, AicError> {
     // ---- Pass 1: combined non-attention work (batch=1, isl=ctx+gen) ----
     // Python: `run_static` is called with `isl = num_tokens_combined`
     // and `prefix = prefix * floor(ctx_tokens / isl)`, which makes
@@ -141,7 +186,7 @@ pub(crate) fn get_mix_step_breakdown(
     // For non-attention ops (GEMM, MoE, etc.) the prefix field is
     // ignored, so threading it through is harmless.
     let effective_isl_combined = (ctx_tokens + gen_tokens).max(1);
-    let mut shared_non_attention_ms = 0.0_f64;
+    let mut total = 0.0_f64;
     for op in context_ops {
         if op.is_context_attention() {
             continue;
@@ -161,7 +206,7 @@ pub(crate) fn get_mix_step_breakdown(
             gen_seq_imbalance_correction_scale: 1.0,
             num_image_tokens: 0,
         };
-        shared_non_attention_ms += op.query(db, &ctx)?.latency_ms;
+        total += op.query(db, &ctx)?.latency_ms;
     }
 
     // ---- Pass 2: context attention with prefill batch ----
@@ -179,7 +224,6 @@ pub(crate) fn get_mix_step_breakdown(
     let isl_eff_pass2 = new_tokens_per_prefill_req.max(1);
     let ctx_attn_batch = ((ctx_tokens + isl_eff_pass2 - 1) / isl_eff_pass2).max(1);
     let scale_factor = ((isl_eff_pass2 + ctx_tokens - 1) / ctx_tokens.max(1)).max(1) as f64;
-    let mut context_attention_ms = 0.0_f64;
     for op in context_ops {
         if !op.is_context_attention() {
             continue;
@@ -194,7 +238,7 @@ pub(crate) fn get_mix_step_breakdown(
             gen_seq_imbalance_correction_scale: 1.0,
             num_image_tokens: 0,
         };
-        context_attention_ms += op.query(db, &ctx)?.latency_ms / scale_factor;
+        total += op.query(db, &ctx)?.latency_ms / scale_factor;
     }
 
     // ---- Pass 3: generation attention with decode batch ----
@@ -204,7 +248,6 @@ pub(crate) fn get_mix_step_breakdown(
     // batch), Python contributes zero — so we must skip the pass entirely rather
     // than query at the `decode_batch.max(1)` floor, which would add a spurious
     // batch-1 generation_attention and inflate the step latency.
-    let mut decode_attention_ms = 0.0_f64;
     if decode_batch > 0 {
         for op in generation_ops {
             if !op.is_generation_attention() {
@@ -220,13 +263,9 @@ pub(crate) fn get_mix_step_breakdown(
                 gen_seq_imbalance_correction_scale: 1.0,
                 num_image_tokens: 0,
             };
-            decode_attention_ms += op.query(db, &ctx)?.latency_ms;
+            total += op.query(db, &ctx)?.latency_ms;
         }
     }
 
-    Ok(MixedStepBreakdown {
-        shared_non_attention_ms,
-        context_attention_ms,
-        decode_attention_ms,
-    })
+    Ok(total)
 }

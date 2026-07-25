@@ -22,7 +22,14 @@ class AicEngine:
     def predict_decode_latency(self, bs: int, isl: int, osl: int = 2) -> float: ...
     def mixed_step_latency(self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int = 0) -> float: ...
     def mixed_step_breakdown(
-        self, ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int = 0
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> tuple[float, float, float, float]: ...
     def decode_step_latency(self, gen_tokens: int, isl: int, osl: int) -> float: ...
 
