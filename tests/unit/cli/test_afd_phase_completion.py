@@ -231,8 +231,9 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
             captured["a_model_config"] = kwargs["a_model_config"]
             captured["f_model_config"] = kwargs["f_model_config"]
 
-        def run_afd(self, runtime_config, **_kwargs):
+        def run_afd(self, runtime_config, **kwargs):
             captured["runtime_config"] = runtime_config
+            captured["speculative_profile"] = kwargs["speculative_profile"]
             summary = InferenceSummary(runtime_config)
             summary.set_oom(False)
             summary.set_result_dict(
@@ -286,14 +287,15 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
         max_seq_len=None,
         prefix=32,
         nextn=2,
-        nextn_accept_rates=[0.85, 0.3],
+        nextn_accepted=0.85,
     )
 
     assert captured["runtime_config"].prefix == 32
     assert captured["a_model_config"].nextn == 2
     assert captured["f_model_config"].nextn == 2
-    assert captured["a_model_config"].nextn_accept_rates == [0.85, 0.3]
-    assert captured["f_model_config"].nextn_accept_rates == [0.85, 0.3]
+    assert not hasattr(captured["a_model_config"], "nextn_accepted")
+    assert not hasattr(captured["f_model_config"], "nextn_accepted")
+    assert captured["speculative_profile"].expected_accepted_tokens == 0.85
 
 
 def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
@@ -778,13 +780,16 @@ def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch)
     monkeypatch.setattr(api, "_run_static_estimate", fake_run_static_estimate)
 
     result = api.cli_estimate(
-        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True),
+        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True, enable_encoder_dp=False),
     )
 
     # Merged result should reflect static_ctx TTFT and AFD TPOT, plus the
     # summed GPU budget — the canonical "AFD-decode + regular-prefill" sizing.
     assert "afd_kwargs" in captured and "static_kwargs" in captured
     assert captured["static_kwargs"]["static_mode"] == "static_ctx"
+    # The encoder-parallelism choice must reach the static complement: a
+    # non-default value proves forwarding rather than the callee default.
+    assert captured["static_kwargs"]["enable_encoder_dp"] is False
     assert result.ttft == 50.0
     assert result.tpot == 5.0
     assert result.num_total_gpus == 12

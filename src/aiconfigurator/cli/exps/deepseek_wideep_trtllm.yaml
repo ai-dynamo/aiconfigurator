@@ -19,12 +19,7 @@ gb200_wideep_agg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   model_path: nvidia/DeepSeek-V3.1-NVFP4
   system_name: gb200
   enable_wideep: true
@@ -36,12 +31,7 @@ gb200_wideep_eplb_agg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   model_path: deepseek-ai/DeepSeek-V3
   system_name: gb200
   enable_wideep: true
@@ -57,12 +47,7 @@ gb200_wideep_eplb_slots288_agg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   model_path: deepseek-ai/DeepSeek-V3
   system_name: gb200
   enable_wideep: true
@@ -77,12 +62,7 @@ gb200_wideep_disagg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   prefill_model_path: nvidia/DeepSeek-V3.1-NVFP4
   prefill_enable_wideep: true
   decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
@@ -98,12 +78,7 @@ gb200_wideep_eplb_disagg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_enable_wideep: true
   prefill_enable_eplb: true
@@ -126,12 +101,7 @@ gb200_wideep_eplb_slots288_disagg:
   ttft: 1000.0
   osl: 1000
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0.3
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_enable_wideep: true
   prefill_enable_eplb: true

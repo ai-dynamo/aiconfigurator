@@ -94,10 +94,6 @@ reviews:
       instructions: |
         - Treat this as a compatibility bridge between profiler/SDK outputs and generator inputs.
         - Flag field renames, default changes, or type conversions unless corresponding tests and downstream generator expectations are updated.
-    - path: "src/aiconfigurator/webapp/**"
-      instructions: |
-        - Verify UI changes preserve support-matrix navigation, filtering, and rendering behavior across local static previews and the webapp.
-        - Check that webapp flows handle missing Git LFS performance data gracefully when the change touches default-mode or support data loading.
     - path: "tools/generator_validator/**"
       instructions: |
         - Check that validator changes keep generated artifact coverage aligned across supported backends and versions.

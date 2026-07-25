@@ -274,8 +274,9 @@ def generate_backend_artifacts(
         templates_dir: Optional directory containing templates
         output_dir: Optional directory to save generated files
         backend_version: Optional version string for version-specific template selection
-        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d-helm', or 'llm-d-kustomize').
-            'dynamo-j2' uses Jinja2 templates, 'dynamo-python' uses Dynamo's Python config modifiers,
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d-helm',
+            'llm-d-kustomize', or 'fpm').
+            'dynamo-j2' uses typed Dynamo builders, 'dynamo-python' uses Dynamo's Python config modifiers,
             'llm-d-helm' generates Helm values for llm-d-modelservice chart, and 'llm-d-kustomize'
             generates Kustomize overlays for llm-d modelserver guides.
         use_dynamo_generator: If True, use Dynamo's Python config modifiers
@@ -314,6 +315,7 @@ def generate_backend_artifacts(
             output_dir=os.path.abspath(output_dir),
             prefer_disagg=prefer_disagg,
             has_agg_role=has_agg,
+            preserve_run_sh=deployment_target == "fpm",
         )
         try:
             writer.write(artifacts)
@@ -670,7 +672,8 @@ def generate_naive_config(
             template versions and runtime image defaults.
         generator_overrides: Optional generator config overrides from
             --generator-config and --generator-set.
-        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', or 'llm-d').
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python',
+            'llm-d-helm', 'llm-d-kustomize', or 'fpm').
 
     Returns:
         Dictionary containing:
@@ -771,6 +774,7 @@ def generate_naive_config(
             output_dir=os.path.abspath(actual_output_dir),
             prefer_disagg=prefer_disagg,
             has_agg_role=has_agg,
+            preserve_run_sh=deployment_target == "fpm",
         )
         try:
             writer.write(artifacts)

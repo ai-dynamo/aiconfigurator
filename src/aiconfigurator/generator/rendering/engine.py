@@ -252,7 +252,8 @@ def render_backend_templates(
         backend: Backend name (e.g., 'trtllm', 'vllm', 'sglang')
         templates_dir: Directory containing backend-specific template directories
         version: Version string (e.g., '1.1.0rc5'). If None, uses default templates
-        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d-helm', or 'llm-d-kustomize')
+        deployment_target: Deployment platform ('dynamo-j2', 'dynamo-python', 'llm-d-helm',
+            'llm-d-kustomize', or 'fpm')
         resolved_facts: Optional ``ResolvedFacts`` (typed ``Any`` to avoid an import
             cycle). When it carries a matched model profile, model ``defaults:``
             cli flags are appended (facts-default precedence: fill-if-absent) at the
@@ -705,6 +706,23 @@ def render_backend_templates(
                 rendered_templates["llm-d-values.yaml"] = rendered
             except Exception as e:
                 logger.warning(f"Failed to render template llm-d-values.yaml.j2: {e}")
+    elif deployment_target == "fpm":
+        # FPM is deliberately isolated from the normal DGD/run-script path. It
+        # emits exactly two artifacts: a reusable, keepalive resource Pod and a
+        # complete engine launch script. The builder consumes the same fully
+        # resolved vLLM context as the normal typed K8s builder, so rule/mapping/
+        # versioned-template output remains the source of the base argv.
+        from aiconfigurator.generator.builders.fpm_builder import build_fpm_artifacts
+
+        fpm_context = _assemble_k8s_context(context, has_engine_templates)
+        if _context_sink is not None:
+            _context_sink(fpm_context)
+        return build_fpm_artifacts(
+            fpm_context,
+            backend,
+            resolved_facts=resolved_facts,
+            param_values=param_values,
+        )
     elif deployment_target == "dynamo-python":
         # Dynamo deployment using Dynamo's Python config modifiers
         try:

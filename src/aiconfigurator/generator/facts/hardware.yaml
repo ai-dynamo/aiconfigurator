@@ -10,8 +10,8 @@
 #   - nccl_env: derived from platform hardware configs (§9 hardware-level silicon facts).
 #   - shared_memory: standard values from k8s deployment baseline tests and guard rails.
 #   - moe_backend: per design doc §9.3 (CUTLASS on Hopper sm90; WIDEEP on Blackwell sm100/GB200;
-#     sglang deepep_moe is a Blackwell/wide-EP selection only — see webapp/events/event_fn.py
-#     moe_backend="deepep_moe" when enable_wideep+sglang, cli/exps/deepseek_wideep_trtllm.yaml).
+#     sglang deepep_moe is a Blackwell/wide-EP selection only — see cli/main.py
+#     _sglang_moe_backend_override and cli/exps/deepseek_disagg_sglang.yaml).
 #
 # SCOPE: hardware-only facts. No NIC names, storage classes, or cluster secrets.
 
@@ -66,12 +66,12 @@ profiles:
         effect: NoSchedule
     moe_backend:
       # Hopper (sm90): CUTLASS is the recommended TRT-LLM MoE kernel.
-      # WIDEEP requires sm100+ (Blackwell FP4 tensor core path); wideep_moe_perf data
-      # for H200 is present in systems/data/h200_sxm/trtllm/ but CUTLASS is the
-      # correct default selection for this silicon generation.
+      # WIDEEP requires sm100+ (Blackwell FP4 tensor core path);
+      # wideep_moe_perf data for H200 is present under
+      # aic-core/src/aiconfigurator_core/systems/data/h200_sxm/moe/trtllm/,
+      # but CUTLASS is the correct default selection for this silicon generation.
       trtllm: CUTLASS
-      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path,
-      # source: webapp/events/event_fn.py moe_backend="deepep_moe" when enable_wideep+sglang).
+      # SGLang: deepep_moe is a Blackwell/wide-EP selection (enable_wideep+sglang path).
       # Not set on Hopper — deepep_moe requires sm100+ wide-EP fabric.
 
   # ---------------------------------------------------------------------------
@@ -99,11 +99,13 @@ profiles:
     moe_backend:
       # Blackwell (sm100): WIDEEP uses FP4 tensor cores available on B200/GB200.
       # Crashes on Hopper (no FP4 path). Source: guard_rails.md §WIDEEP,
-      # systems/data/b200_sxm/trtllm/*/wideep_moe_perf.txt data collected,
+      # aic-core/src/aiconfigurator_core/systems/data/b200_sxm/moe/trtllm/
+      # <version>/wideep_moe_perf.parquet data collected,
       # and cli/exps/deepseek_wideep_trtllm.yaml (gb200/b200 wideep configs).
       trtllm: WIDEEP
       # SGLang: deepep_moe is the default wideep-compatible MoE runner on Blackwell.
-      # Source: webapp/events/event_fn.py  moe_backend="deepep_moe" when enable_wideep+sglang
+      # Source: cli/main.py _sglang_moe_backend_override and
+      # cli/exps/deepseek_disagg_sglang.yaml.
       sglang: deepep_moe
 
   # ---------------------------------------------------------------------------
@@ -150,10 +152,13 @@ profiles:
     moe_backend:
       # Blackwell (sm100): WIDEEP uses FP4 tensor cores; mandatory on GB200 for
       # optimal MoE throughput. Source: cli/exps/deepseek_wideep_trtllm.yaml
-      # (all gb200_wideep_* experiments), systems/data/gb200/trtllm/*/wideep_moe_perf.txt
+      # (all gb200_wideep_* experiments),
+      # aic-core/src/aiconfigurator_core/systems/data/gb200/moe/trtllm/
+      # <version>/wideep_moe_perf.parquet
       trtllm: WIDEEP
       # SGLang: deepep_moe for the wideep DeepEP path on GB200 NVLink fabric.
-      # Source: webapp/events/event_fn.py, cli/exps/deepseek_wideep_trtllm.yaml
+      # Source: cli/main.py _sglang_moe_backend_override and
+      # cli/exps/deepseek_disagg_sglang.yaml.
       sglang: deepep_moe
 
   # ---------------------------------------------------------------------------

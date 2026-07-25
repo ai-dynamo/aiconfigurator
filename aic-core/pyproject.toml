@@ -3,7 +3,7 @@
 
 [project]
 name = "aiconfigurator-core"
-version = "0.10.0"
+version = "0.11.0"
 authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
@@ -38,5 +38,6 @@ include = [
     "src/aiconfigurator_core/systems/**/*.json",
     "src/aiconfigurator_core/systems/**/*.txt",
     "src/aiconfigurator_core/systems/**/*.parquet",
+    "src/aiconfigurator_core/systems/data/**/*.yaml",
     "src/aiconfigurator_core/model_configs/*.json",
 ]

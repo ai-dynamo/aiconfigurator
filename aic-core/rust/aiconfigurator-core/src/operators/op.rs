@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4ModuleOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
+    Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    MsaModuleOp, TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
 };
@@ -109,6 +111,11 @@ pub enum Op {
     Vision(VisionEncoderOp),
     DsaContext(DsaModuleOp),
     DsaGeneration(DsaModuleOp),
+    /// MiniMax Sparse Attention (MSA) context module — no silicon data;
+    /// answers only under HYBRID/EMPIRICAL via cross-op DSA util transfer.
+    MsaContext(MsaModuleOp),
+    /// MSA generation module (`s` = total KV length).
+    MsaGeneration(MsaModuleOp),
     Dsv4Context(Dsv4ModuleOp),
     Dsv4Generation(Dsv4ModuleOp),
     Mhc(MhcModuleOp),
@@ -122,8 +129,12 @@ pub enum Op {
     WideEpGenerationMla(WideEpGenerationMlaOp),
     /// TensorRT-LLM WideEP MoE compute. Used by the
     /// `TrtllmWideEPDeepSeekModel` variant; dispatch / combine cost is
-    /// modeled separately by `MoEDispatchOp` (TrtllmAlltoall flavor).
+    /// modeled separately by `WideEpMoeDispatch`.
     WideEpMoe(WideEpMoeOp),
+    /// TensorRT-LLM WideEP All2All dispatch (prepare+dispatch / combine).
+    /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
+    /// subclass, NOT a `MoEDispatch` flavor.
+    WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -134,6 +145,16 @@ pub enum Op {
     /// transitional state where some systems have module-level profiling
     /// data and others still ship per-kernel granular data.
     Fallback(FallbackOp),
+    /// SGLang DeepSeek-V4 MegaMoE routed module (Python
+    /// `DeepSeekV4MegaMoEModule`): one variant for both phases — the op's
+    /// `is_context` field selects the phase inside the unified table.
+    /// Measured-SILICON-only; see `operators/dsv4.rs::Dsv4MegaMoeOp`.
+    ///
+    /// APPENDED after `Fallback` on purpose: bincode enum indices are
+    /// positional, so appending does not shift existing variants and
+    /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
+    /// variants mid-enum.
+    Dsv4MegaMoe(Dsv4MegaMoeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -200,6 +221,8 @@ impl Op {
             Op::Vision(o) => &o.name,
             Op::DsaContext(o) => &o.name,
             Op::DsaGeneration(o) => &o.name,
+            Op::MsaContext(o) => &o.name,
+            Op::MsaGeneration(o) => &o.name,
             Op::Dsv4Context(o) => &o.name,
             Op::Dsv4Generation(o) => &o.name,
             Op::Mhc(o) => &o.name,
@@ -208,8 +231,10 @@ impl Op {
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
             Op::WideEpMoe(o) => &o.name,
+            Op::WideEpMoeDispatch(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
+            Op::Dsv4MegaMoe(o) => &o.name,
         }
     }
 
@@ -280,6 +305,8 @@ impl Op {
             Op::Vision(op) => op.query(db, ctx.num_image_tokens),
             Op::DsaContext(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::DsaGeneration(op) => op.query_generation(db, ctx.batch_size, ctx.s),
+            Op::MsaContext(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
+            Op::MsaGeneration(op) => op.query_generation(db, ctx.batch_size, ctx.s),
             Op::Dsv4Context(op) => op.query_context(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::Dsv4Generation(op) => op.query_generation(db, ctx.batch_size, ctx.s),
             Op::Mhc(op) => op.query(db, ctx.num_tokens),
@@ -288,6 +315,7 @@ impl Op {
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
+            Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
                 // independently, then `max(group_a_total, group_b_total)` is
@@ -326,7 +354,22 @@ impl Op {
                 // skip subsequent retries — we don't bother here because the
                 // hot-path penalty is one `OnceLock::get` per call on a
                 // populated path and one retry on a missing one.)
-                match op.primary.query(db, ctx) {
+                //
+                // Under HYBRID the primary is evaluated against a SILICON
+                // view (Python swaps in `_get_configured_database_view(db,
+                // SILICON, transfer_policy)`): a missing module table must
+                // fall to the granular fallback chain, not be hybrid-
+                // estimated at module level. The fallback ops then run
+                // against the ORIGINAL (hybrid) database.
+                let silicon_db;
+                let primary_db: &PerfDatabase =
+                    if db.database_mode == crate::common::enums::DatabaseMode::Hybrid {
+                        silicon_db = db.silicon_view();
+                        &silicon_db
+                    } else {
+                        db
+                    };
+                match op.primary.query(primary_db, ctx) {
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
                         let mut total = 0.0_f64;
@@ -345,6 +388,10 @@ impl Op {
                     Err(other) => Err(other),
                 }
             }
+            // Rank-LOCAL token count, like Moe/MoeDispatch (Python passes the
+            // same `x`); the megamoe table is indexed by local-rank tokens
+            // and the op must NOT re-multiply by attention_dp_size.
+            Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

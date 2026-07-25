@@ -41,7 +41,7 @@ import numpy as np
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 
 logger = logging.getLogger(__name__)
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
@@ -317,8 +317,9 @@ class DeepSeekV4MHCModule(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.mhc_module.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mhc_module.value
+            )
             sources = database._build_op_sources(PerfDataFilename.mhc_module, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_mhc_module_data(sources), PerfDataFilename.mhc_module, primary_path
@@ -645,10 +646,11 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
             def _load(filename_enum):
-                primary_path = os.path.join(data_dir, filename_enum.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, filename_enum.value
+                )
                 sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
                 return LoadedOpData(load_context_dsv4_kind_module_data(sources), filename_enum, primary_path)
 
@@ -663,7 +665,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             cls._raw_data_cache[key] = ctx_merged
 
             def _load_sparse(filename_enum):
-                primary_path = os.path.join(data_dir, filename_enum.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, filename_enum.value
+                )
                 sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
                 return LoadedOpData(load_dsv4_sparse_kernel_data(sources), filename_enum, primary_path)
 
@@ -1139,10 +1143,10 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
         from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
-        data_dir = os.path.join(
-            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        path = resolve_op_data_path(
+            system_data_root, database.backend, database.version, PerfDataFilename.dsv4_csa_topk_calib.value
         )
-        path = os.path.join(data_dir, PerfDataFilename.dsv4_csa_topk_calib.value)
         by_bs: dict = {}
         if os.path.exists(path):
             df = pd.read_parquet(path)
@@ -1190,10 +1194,11 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
             def _load(filename_enum):
-                primary_path = os.path.join(data_dir, filename_enum.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, filename_enum.value
+                )
                 sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
                 return LoadedOpData(load_generation_dsv4_kind_module_data(sources), filename_enum, primary_path)
 
@@ -1489,8 +1494,9 @@ class DeepSeekV4MegaMoEModule(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.dsv4_megamoe_module.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.dsv4_megamoe_module.value
+            )
             cls._data_cache[key] = LoadedOpData(
                 load_dsv4_megamoe_module_data(primary_path), PerfDataFilename.dsv4_megamoe_module, primary_path
             )
@@ -1847,9 +1853,8 @@ def _get_dsv4_topk_calib(database):
     from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
     system_data_root = _os.path.join(database.systems_root, database.system_spec["data_dir"])
-    data_dir = _os.path.join(system_data_root, database.backend, database.version)
     enum = PerfDataFilename.dsv4_csa_topk_calib
-    primary_path = _os.path.join(data_dir, enum.value)
+    primary_path = resolve_op_data_path(system_data_root, database.backend, database.version, enum.value)
     sources = database._build_op_sources(enum, primary_path, system_data_root)
     by_mode = load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)
     calib = _build_topk_calib_from_rows(by_mode)

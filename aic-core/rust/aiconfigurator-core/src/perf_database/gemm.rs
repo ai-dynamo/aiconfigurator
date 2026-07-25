@@ -27,10 +27,13 @@ use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
 
-/// GEMM-family perf-data owner for one `<system>/<backend>/<version>` slice.
+/// GEMM-family perf-data owner for one logical
+/// `<system>/<backend>/<version>` selection.
 ///
-/// Holds the data directory and three lazy CSV-loaded tables. Construct via
-/// `GemmTable::new`; queries trigger the relevant table's load on first use.
+/// Resolves the physical files under
+/// `<system>/<family>/<backend>/<version>` and lazily loads the three parquet
+/// tables. Construct via `GemmTable::new`; queries trigger the relevant
+/// table's load on first use.
 ///
 /// `system_spec` is kept for SOL clamping at load time, mirroring Python's
 /// `GEMM._correct_sol`. The supporting `compute_scale` / `scale_matrix`
@@ -170,6 +173,66 @@ impl GemmTable {
         query_scale_table(&grids.by_quant, lookup.name(), m, k, &sol, true, &self.data_root)
     }
 
+    /// Collected `(m, n, k) -> latency` points for the quant's table, for the
+    /// operator-layer util-calibration grid (Python's
+    /// `require_data_slice(_gemm_data, tqm)` + `iter_grid(..., depth=3)`).
+    /// Missing quant / empty table is a typed `PerfDatabase` miss.
+    pub fn gemm_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_gemm()?;
+        let quant_name = normalize_fp8_static_quant(quant).name();
+        let (node, _) = grids.by_quant.get(quant_name).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "GEMM perf data missing for quant '{quant_name}' at {}",
+                self.data_root.display()
+            ))
+        })?;
+        let points = crate::perf_database::perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "GEMM perf data empty for quant '{quant_name}' at {}",
+                self.data_root.display()
+            )));
+        }
+        Ok(points)
+    }
+
+    /// Collected `(m, k) -> delta` points of the compute_scale table (zeroes
+    /// included — they are measured deltas). Typed miss when absent.
+    pub fn compute_scale_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_compute_scale()?;
+        Self::two_d_points(grids, normalize_fp8_static_quant(quant), "compute_scale", &self.data_root)
+    }
+
+    /// Collected `(m, k) -> latency` points of the scale_matrix table.
+    /// Typed miss when absent.
+    pub fn scale_matrix_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = self.load_scale_matrix()?;
+        Self::two_d_points(grids, normalize_fp8_static_quant(quant), "scale_matrix", &self.data_root)
+    }
+
+    fn two_d_points(
+        grids: &TwoDGrids,
+        quant: GemmQuantMode,
+        table_name: &str,
+        data_root: &Path,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let quant_name = quant.name();
+        let node = grids.by_quant.get(quant_name).ok_or_else(|| {
+            AicError::PerfDatabase(format!(
+                "{table_name} perf data missing for quant '{quant_name}' at {}",
+                data_root.display()
+            ))
+        })?;
+        let points = crate::perf_database::perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "{table_name} perf data empty for quant '{quant_name}' at {}",
+                data_root.display()
+            )));
+        }
+        Ok(points)
+    }
+
     fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {
         let cell = self.gemm.get_or_init(|| {
             let mut grids = load_gemm_parquet(&self.gemm_sources)?;
@@ -303,7 +366,7 @@ fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
 /// the fp8 perf tables — the perf-DB never stores rows under
 /// `fp8_static`. Applied uniformly to the GEMM, compute_scale, and
 /// scale_matrix table queries.
-fn normalize_fp8_static_quant(quant: GemmQuantMode) -> GemmQuantMode {
+pub(crate) fn normalize_fp8_static_quant(quant: GemmQuantMode) -> GemmQuantMode {
     if quant == GemmQuantMode::Fp8Static {
         GemmQuantMode::Fp8
     } else {
@@ -544,7 +607,7 @@ mod tests {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join(format!(
-                "src/aiconfigurator_core/systems/data/b200_sxm/{backend}/{version}/gemm_perf.parquet"
+                "src/aiconfigurator_core/systems/data/b200_sxm/gemm/{backend}/{version}/gemm_perf.parquet"
             ))
     }
 
@@ -616,7 +679,8 @@ mod tests {
     #[test]
     fn gemm_exact_hit_returns_recorded_latency() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        // First row of b200_sxm/vllm/0.19.0/gemm_perf.txt (bfloat16 32768x65536x16384).
+        // First row of b200_sxm/gemm/vllm/0.19.0/gemm_perf.parquet
+        // (bfloat16 32768x65536x16384).
         let latency = table
             .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
             .expect("query must succeed");

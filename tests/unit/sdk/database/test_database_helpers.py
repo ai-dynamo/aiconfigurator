@@ -592,10 +592,10 @@ def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf
     cache_snapshot = dict(perf_database.databases_cache)
     try:
         perf_database.databases_cache.clear()
-        perf_database.databases_cache[("root", "system", False)]["backend"]["1.0.0"] = clear_db
-        perf_database.databases_cache[("root", "system", True)]["backend"]["1.0.0"] = clear_db
-        perf_database.databases_cache[("root", "system", False)]["backend"]["2.0.0"] = keep_db
-        perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] = keep_db
+        perf_database.databases_cache[("root", "system", False, False)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", True, False)]["backend"]["1.0.0"] = clear_db
+        perf_database.databases_cache[("root", "system", False, False)]["backend"]["2.0.0"] = keep_db
+        perf_database.databases_cache[("root", "other-system", False, False)]["backend"]["1.0.0"] = keep_db
 
         perf_database.clear_database_runtime_caches("system", "backend", "1.0.0")
 
@@ -619,15 +619,15 @@ def test_unload_database_removes_matching_database_and_clears_runtime_cache(perf
     cache_snapshot = dict(perf_database.databases_cache)
     try:
         perf_database.databases_cache.clear()
-        perf_database.databases_cache[("root", "system", False)]["backend"]["1.0.0"] = unload_db
-        perf_database.databases_cache[("root", "system", False)]["backend"]["2.0.0"] = keep_db
-        perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] = keep_db
+        perf_database.databases_cache[("root", "system", False, False)]["backend"]["1.0.0"] = unload_db
+        perf_database.databases_cache[("root", "system", False, False)]["backend"]["2.0.0"] = keep_db
+        perf_database.databases_cache[("root", "other-system", False, False)]["backend"]["1.0.0"] = keep_db
 
         perf_database.unload_database("system", "backend", "1.0.0")
 
         assert unload_db.clear_count == 1
-        assert perf_database.databases_cache[("root", "system", False)]["backend"] == {"2.0.0": keep_db}
-        assert perf_database.databases_cache[("root", "other-system", False)]["backend"]["1.0.0"] is keep_db
+        assert perf_database.databases_cache[("root", "system", False, False)]["backend"] == {"2.0.0": keep_db}
+        assert perf_database.databases_cache[("root", "other-system", False, False)]["backend"]["1.0.0"] is keep_db
     finally:
         perf_database.databases_cache.clear()
         perf_database.databases_cache.update(cache_snapshot)

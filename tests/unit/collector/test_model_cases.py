@@ -345,8 +345,8 @@ def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
         "vllm": {
-            "deepseek-ai/DeepSeek-V4-Flash": set(),
-            "deepseek-ai/DeepSeek-V4-Pro": set(),
+            "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
+            "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
         },
@@ -521,6 +521,31 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
 
+def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():
+    from collector.case_generator import get_moe_quantization_modes
+
+    def selected_modes(sm_version, *, mxfp4=True):
+        return {
+            mode
+            for mode in get_moe_quantization_modes(
+                "vllm",
+                sm_version=sm_version,
+                runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": mxfp4},
+            )
+            if moe_model_allows_quantization("vllm", "deepseek-ai/DeepSeek-V4-Flash", mode)
+        }
+
+    # The trtllm-gen MXFP4xMXFP8 kernel exists only on the SM100 capability
+    # family; SM90 serves this artifact as Marlin W4A16 and SM120 routes to
+    # DeepGemmFP4/Marlin, so the label must not be collected there.
+    assert selected_modes(90) == set()
+    assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(103) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(120) == set()
+    # The mxfp4 runtime-feature gate must hold even inside the SM interval.
+    assert selected_modes(100, mxfp4=False) == set()
+
+
 def test_sglang_mxfp4_quant_labels_select_explicit_activation_precision():
     source_path = REPO_ROOT / "collector/sglang/collect_moe.py"
     tree = ast.parse(source_path.read_text(), filename=str(source_path))
@@ -602,11 +627,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    # +117 vs pre-GLM-5.2: nvidia/GLM-5.2-NVFP4 registered in moe.model_paths
-    # (same MoE dims as GLM-5-NVFP4). The sglang collector's get_moe_test_cases
-    # dedups GLM-5-NVFP4 vs GLM-5.2-NVFP4; this backend-agnostic common layer
-    # keeps both.
-    assert len(moe_cases) == 4326
+    # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
+    # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
+    # registered in moe.yaml base_ops.
+    assert len(moe_cases) == 4911
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -731,7 +755,7 @@ def test_vllm_moe_quantization_metadata_is_yaml_backed():
         "vllm",
         sm_version=100,
         runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
-    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4"]
+    ) == ["bfloat16", "int4_wo", "fp8", "fp8_block", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
     assert get_moe_quantization_modes(
         "vllm",
         sm_version=120,
@@ -932,6 +956,11 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "zai-org/GLM-5",
         "zai-org/GLM-5-FP8",
         "nvidia/GLM-5-NVFP4",
+        "zai-org/GLM-5.1",
+        "zai-org/GLM-5.1-FP8",
+        "nvidia/GLM-5.1-NVFP4",
+        "zai-org/GLM-5.2",
+        "zai-org/GLM-5.2-FP8",
         "nvidia/GLM-5.2-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}

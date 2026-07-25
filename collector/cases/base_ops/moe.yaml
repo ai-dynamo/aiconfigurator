@@ -133,6 +133,7 @@ common_case_values:
       allowed_model_paths:
       - nvidia/DeepSeek-V3.1-NVFP4
       - nvidia/GLM-5-NVFP4
+      - nvidia/GLM-5.1-NVFP4
       - nvidia/GLM-5.2-NVFP4
       - nvidia/Kimi-K2.5-NVFP4
       - nvidia/MiniMax-M2.5-NVFP4
@@ -226,6 +227,24 @@ common_case_values:
     - name: w4a16_mxfp4
       requires_runtime_feature: mxfp4
       requires_model_quantization_config: true
+    - name: w4a8_mxfp4_mxfp8
+      min_sm: 100
+      # vLLM 0.24.0 serves the native (expert_dtype=fp4) DeepSeek-V4
+      # checkpoints through DeepseekV4FP8Config -> Mxfp4MoEMethod
+      # (models/deepseek_v4/quant_config.py:142-152 @0.24.0). Auto backend
+      # selection prefers FLASHINFER_TRTLLM_MXFP4_MXFP8
+      # (fused_moe/oracle/mxfp4.py:336-344), and that trtllm-gen kernel
+      # accepts only the SM100 capability family
+      # (fused_moe/experts/trtllm_mxfp4_moe.py:87). Below SM100 the oracle
+      # falls through to Marlin — weight-only BF16 activation, the distinct
+      # w4a16_mxfp4 identity — and on SM120 to DeepGemmFP4 (fp8-block
+      # activation, fused_moe/experts/deep_gemm_moe.py:423-428) or Marlin,
+      # so the MXFP8-activation label exists only on SM100/103.
+      max_sm_exclusive: 120
+      requires_runtime_feature: mxfp4
+      allowed_model_paths:
+      - deepseek-ai/DeepSeek-V4-Flash
+      - deepseek-ai/DeepSeek-V4-Pro
   moe_vllm_xpu:
     token_counts:
     - 1

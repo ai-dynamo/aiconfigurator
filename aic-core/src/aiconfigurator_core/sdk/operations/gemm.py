@@ -31,7 +31,7 @@ from aiconfigurator_core.sdk.errors import (
     PerfDataNotAvailableError,
 )
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -195,10 +195,11 @@ class GEMM(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache or key not in cls._compute_scale_cache or key not in cls._scale_matrix_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
             def _load(filename_enum, loader):
-                primary_path = os.path.join(data_dir, filename_enum.value)
+                primary_path = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, filename_enum.value
+                )
                 sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
                 return LoadedOpData(loader(sources), filename_enum, primary_path)
 
