@@ -30,6 +30,7 @@ def build_model_config(
     fmha_quant_mode: str | None = None,
     moe_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
+    enable_encoder_dp: bool = True,
 ) -> ModelConfig:
     """Build a ModelConfig with optional quant mode overrides."""
     return ModelConfig(
@@ -43,6 +44,7 @@ def build_model_config(
         fmha_quant_mode=FMHAQuantMode[fmha_quant_mode] if fmha_quant_mode else None,
         moe_quant_mode=MoEQuantMode[moe_quant_mode] if moe_quant_mode else None,
         comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
+        enable_encoder_dp=enable_encoder_dp,
     )
 
 

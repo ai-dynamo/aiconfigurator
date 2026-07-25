@@ -423,3 +423,15 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
+
+    def test_disable_encoder_dp_flag(self, cli_parser):
+        """--disable-encoder-dp exists on default and estimate modes, default off (encoder DP on)."""
+        common_args = ["--model-path", "Qwen/Qwen3-VL-32B-Instruct", "--system", "h200_sxm"]
+        args = cli_parser.parse_args(["default", "--total-gpus", "8", *common_args])
+        assert args.disable_encoder_dp is False
+        args = cli_parser.parse_args(["default", "--total-gpus", "8", *common_args, "--disable-encoder-dp"])
+        assert args.disable_encoder_dp is True
+        args = cli_parser.parse_args(["estimate", *common_args])
+        assert args.disable_encoder_dp is False
+        args = cli_parser.parse_args(["estimate", *common_args, "--disable-encoder-dp"])
+        assert args.disable_encoder_dp is True

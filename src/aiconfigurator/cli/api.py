@@ -152,6 +152,7 @@ def cli_default(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -186,6 +187,9 @@ def cli_default(
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
         osl: Output sequence length. Default is 1000.
+        enable_encoder_dp: Model the vision encoder data-parallel (default True;
+            vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
+            False models the legacy TP-sharded encoder.
         ttft: Time to first token target in ms. Default is 2000.
         tpot: Time per output token target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
@@ -272,6 +276,7 @@ def cli_default(
         image_height=image_height,
         image_width=image_width,
         num_images=num_images,
+        enable_encoder_dp=enable_encoder_dp,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -632,6 +637,7 @@ def cli_estimate(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     batch_size: int = 128,
     ctx_tokens: int | None = None,
     tp_size: int = 1,
@@ -708,6 +714,9 @@ def cli_estimate(
         image_height: Image height in pixels for VL models. Default 0 disables encoder modeling.
         image_width: Image width in pixels for VL models. Default 0 disables encoder modeling.
         num_images: Number of images per request for VL models. Default 1.
+        enable_encoder_dp: Model the vision encoder data-parallel (default True;
+            vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
+            False models the legacy TP-sharded encoder.
         batch_size: Batch size (max concurrent requests, used for agg mode). Default is 128.
         ctx_tokens: Context tokens budget for IFB scheduling (agg mode only).
             Default is None, which uses ``isl`` as the budget.
@@ -884,6 +893,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
             tp_size=tp_size,
@@ -917,6 +927,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else isl,
             tp_size=tp_size,
@@ -969,6 +980,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             # Prefill config (fall back to shared args)
             prefill_tp_size=prefill_tp_size if prefill_tp_size is not None else tp_size,
             prefill_pp_size=prefill_pp_size if prefill_pp_size is not None else pp_size,
@@ -1080,6 +1092,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
             tp_size=tp_size,
@@ -1128,6 +1141,7 @@ def _run_agg_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     batch_size,
     ctx_tokens,
     tp_size,
@@ -1170,6 +1184,7 @@ def _run_agg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
@@ -1257,6 +1272,7 @@ def _run_static_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     batch_size,
     prefix,
     tp_size,
@@ -1305,6 +1321,7 @@ def _run_static_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
     # static / static_ctx run context attention; static_gen is generation-only
@@ -1393,6 +1410,7 @@ def _run_disagg_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     prefill_tp_size,
     prefill_pp_size,
     prefill_attention_dp_size,
@@ -1452,6 +1470,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     decode_model_config = _build_model_config(
         decode_tp_size,
@@ -1464,6 +1483,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.

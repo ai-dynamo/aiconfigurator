@@ -780,13 +780,16 @@ def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch)
     monkeypatch.setattr(api, "_run_static_estimate", fake_run_static_estimate)
 
     result = api.cli_estimate(
-        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True),
+        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True, enable_encoder_dp=False),
     )
 
     # Merged result should reflect static_ctx TTFT and AFD TPOT, plus the
     # summed GPU budget — the canonical "AFD-decode + regular-prefill" sizing.
     assert "afd_kwargs" in captured and "static_kwargs" in captured
     assert captured["static_kwargs"]["static_mode"] == "static_ctx"
+    # The encoder-parallelism choice must reach the static complement: a
+    # non-default value proves forwarding rather than the callee default.
+    assert captured["static_kwargs"]["enable_encoder_dp"] is False
     assert result.ttft == 50.0
     assert result.tpot == 5.0
     assert result.num_total_gpus == 12

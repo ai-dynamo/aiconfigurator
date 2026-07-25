@@ -332,6 +332,8 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
+    # Vision encoder data parallelism (ModelConfig default).
+    enable_encoder_dp: bool = True
     ttft: float = 1000.0
     tpot: float = 50.0
     # When True (default), sweep TPOT over the legacy grid to build the full Pareto
@@ -1120,6 +1122,7 @@ class Task:
             fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
             nextn=self.nextn,
+            enable_encoder_dp=self.enable_encoder_dp,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
             # moe_backend / attention_backend / wideep_num_slots are shared across roles
