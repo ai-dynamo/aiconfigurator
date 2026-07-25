@@ -50,7 +50,7 @@ def _skip_trtllm_sm120_fp8_context_fmha(
     num_key_value_heads: int,
     head_dim: int,
 ) -> bool:
-    if not (tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10")) and get_sm_version() >= 120):
+    if not (tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10", "1.3.0rc20")) and get_sm_version() >= 120):
         return False
 
     num_tokens = batch_size * input_len
@@ -63,11 +63,25 @@ def _skip_trtllm_sm120_fp8_context_fmha(
             or head_dim == 256
         )
 
+    if tensorrt_llm.__version__.startswith("1.3.0rc20"):
+        # rc20 reproduces BOTH earlier SM120 FP8 context FMHA crash families,
+        # hardware-verified on RTX PRO 6000 2026-07-25 with per-shape boundary
+        # probes (below-threshold shapes all pass, at/above all abort):
+        # - the rc10 qkv_256 IMA regions, byte-identical thresholds, faulting
+        #   in fmha_v2_flash_attention_e4m3_fp32_64_32_S_qkv_256_sm120.cu:222
+        #   (h96/kv8 >=81920 tok IMA, 65536 OK; h48/kv8 >=131072 IMA, 98304
+        #   OK; h96/kv96 b>=2&isl>=16384 IMA, b=1 OK);
+        # - the rc5 MHA hd128 h=kv=96 65536-token family (CUDA abort/SIGABRT;
+        #   32768 tokens OK), which rc10 did not exhibit.
+        if num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens >= 65536:
+            return True
+        # fall through to the shared qkv_256 region table below
+
     if head_dim != 256:
         return False
 
     return (
-        # TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes with
+        # TRT-LLM 1.3.0rc10 and rc20 SM120 qkv_256 FP8 context FMHA crash with
         # cudaErrorIllegalAddress for these verified high-token regions.
         (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
         or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
