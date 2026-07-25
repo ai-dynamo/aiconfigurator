@@ -829,6 +829,24 @@ def run_mla_module(
     test_ite: int = 6,
 ):
     """Run a single MLA / DSA module-level benchmark point."""
+    # FIXME(kernel-limit): DeepGEMM's sparse-attention API (the DSA fp8
+    # lightning indexer both DSA phases route through) hard-asserts
+    # "Unsupported architecture" off the datacenter SMs — RTX Blackwell is
+    # rejected (_deps/deepgemm-src/csrc/apis/attention.hpp:203 context /
+    # :259 generation @1.3.0rc20). Hardware-observed on RTX PRO 6000
+    # (SM120) 2026-07-25: smoke 0/8 across gemm bf16/nvfp4/fp8_block and
+    # bf16/fp8 KV; fp8_block context cases additionally die by async IMA +
+    # SIGABRT at KV-cache teardown instead of the catchable assert. Fail
+    # closed with a cited, classified raise before model construction
+    # (Gemma4 dense-attention precedent in collect_attn.py) instead of
+    # paying construction + a CUDA-level abort per case. Re-verify against
+    # deepgemm's supported-arch set on the next framework version bump.
+    if attn_type == "dsa" and get_sm_version() >= 120:
+        raise ValueError(
+            f"DeepGEMM sparse-attention indexer has no RTX Blackwell kernel; DSA "
+            f"modules are unsupported on SM{get_sm_version()} "
+            f"(deepgemm attention.hpp:203/:259 'Unsupported architecture' @1.3.0rc20)"
+        )
     torch.cuda.set_device(device)
     torch_device = torch.device(device)
 
