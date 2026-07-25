@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from case_generator import get_gemm_case_specs
 from tensorrt_llm._torch.modules.linear import Linear
+from tensorrt_llm._utils import is_sm_100f
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 from helper import benchmark_with_power, get_sm_version, log_perf
@@ -252,7 +253,13 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     ) as results:
         pass
 
-    kernel_source = "deepgemm" if gemm_type == "fp8_block" and sm_version >= 100 else "torch_flow"
+    # fp8_block Linear dispatch is is_sm_100f-scoped, not sm>=100: SM100/103
+    # take the DeepGEMM fp8_swap_ab_gemm path, while SM120 has its own branch
+    # (per_token_quant_and_transform + torch.ops.trtllm.fp8_block_scaling_gemm)
+    # and Hopper the fp8_quantize_1x128 + fp8_block_scaling_gemm pair, both
+    # labeled torch_flow (modules/linear.py:1111-1133@1.3.0rc20). The previous
+    # sm>=100 predicate mislabeled SM120 rows as deepgemm.
+    kernel_source = "deepgemm" if gemm_type == "fp8_block" and is_sm_100f(sm_version) else "torch_flow"
 
     log_perf(
         item_list=[
