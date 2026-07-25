@@ -67,6 +67,9 @@ shared:
     owners: [generators, docs]
   - glob: aic-core/
     owners: [runtime, docs]
+  # Cargo license policy changes require DevOps review.
+  - glob: "**/deny.toml"
+    owners: ["@ai-dynamo/devops"]
   - glob: collector/
     owners: [runtime, docs]
   - glob: tools/
@@ -117,10 +120,9 @@ shared:
   # Preserve the existing cross-area documentation exception.
   - glob: docs/dynamo_deployment_guide.md
     owners: [runtime, infra, docs]
-  # Ownership policy changes require infra and maintainer review (docs area
-  # is the maintainers team), mirroring the previous hand-written policy.
+  # Ownership policy changes require DevOps review.
   - glob: CODEOWNERS
-    owners: [infra, docs]
+    owners: ["@ai-dynamo/devops"]
 
 classify:
   keyword_rules:

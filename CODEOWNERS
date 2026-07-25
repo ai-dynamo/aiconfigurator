@@ -77,11 +77,12 @@
 /AGENTS.md                        @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /aic-core/                        @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /.gitignore                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
-/CODEOWNERS                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
+/CODEOWNERS                       @ai-dynamo/devops
 /Cargo.toml                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /collector/                       @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /pytest.ini                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /SECURITY.md                      @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
+/**/deny.toml                     @ai-dynamo/devops
 /.dockerignore                    @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /.gitattributes                   @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /DEVELOPMENT.md                   @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
