@@ -44,6 +44,7 @@ _MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
 from collector.case_generator import (
     get_common_moe_test_cases,
+    get_moe_quantization_modes,
     get_moe_quantization_module_config,
     moe_model_allows_quantization,
 )
@@ -225,24 +226,17 @@ def cleanup_empty_json_files(directory):
 
 def get_moe_test_cases():
     """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
-    moe_list = ["bfloat16"]
     sm_version = get_sm_version()
-    if sm_version > 86:
-        moe_list += ["fp8"]
-        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
-        # SM90 uses CUTLASS backend with FP32 scale.
-        # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
-    if sm_version >= 90:
-        moe_list += ["fp8_block"]
-
-    # SM90 specific quant mode.
-    if 86 < sm_version < 100:
-        moe_list += ["w4a16_mxfp4"]
-
-    if sm_version >= 100:
-        # Keep plain INT4/W4A16 in the collector sweep so unsupported model rows
-        # can fail in TensorRT-LLM itself instead of stopping at AIC validation.
-        moe_list += ["int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
+    # Quant-mode axis (SM floors/intervals) is declared on moe.yaml's
+    # moe_trtllm quantization_modes and filtered here, same as the sglang and
+    # vllm collectors. The previous hand-coded if-chain silently bypassed the
+    # YAML axis, so quant-mode gates (e.g. w4a16_mxfp4 max_sm_exclusive: 120)
+    # never took effect for trtllm. Mode-by-mode the YAML axis reproduces the
+    # old chain exactly, except w4a16_mxfp4 at sm>=120 which is the sanctioned
+    # gate (see the citation on its moe.yaml entry). int4_wo stays in the
+    # sweep (min_sm: 100) so unsupported model rows fail in TensorRT-LLM
+    # itself instead of stopping at AIC validation.
+    moe_list = get_moe_quantization_modes("trtllm", sm_version=sm_version)
 
     test_cases = []
     seen = set()
