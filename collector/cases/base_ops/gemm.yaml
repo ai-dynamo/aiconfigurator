@@ -164,6 +164,33 @@ framework_specific_op_cases:
         - 8192
         - 10240
         - 12288
+        # Extend the output (n) axis to vocab scale for LM-head coverage
+        # (vocab/tp = 128256/tp; tp2=64128, tp1=128256 exceed the 2-octave
+        # interp cap over 12288). k stays capped at 12288
+        output_feature_sizes:
+        - 32
+        - 64
+        - 128
+        - 256
+        - 512
+        - 768
+        - 1024
+        - 1536
+        - 2048
+        - 2560
+        - 3072
+        - 3584
+        - 4096
+        - 5120
+        - 6144
+        - 7168
+        - 8192
+        - 10240
+        - 12288
+        - 16384
+        - 32768
+        - 51200
+        - 65536
         gemm_types:
         - bfloat16
         - fp8
