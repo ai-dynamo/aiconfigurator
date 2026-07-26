@@ -13,9 +13,35 @@ requires either extracting the dispatch to a helper or mocking the full TRT-LLM
 KV-cache stack. That is left for a follow-up if the function is ever refactored.
 """
 
+import sys
+from unittest.mock import MagicMock
+
 import pytest
 
-torch = pytest.importorskip("torch")
+# test_collect_provenance_writer deliberately leaves a MagicMock cached as
+# sys.modules["torch"] (collect.py's fork-worker tests depend on it), so a
+# plain importorskip("torch") can "succeed" with the mock and every tensor
+# assertion below dies with `TypeError: '<' not supported between instances
+# of 'MagicMock' and 'int'` — whether that happens depends only on which
+# module pytest-xdist imports first on the worker (same pattern as
+# test_dsv4_megamoe_workload). Evict the mock, import the real torch (or
+# skip when it isn't installed), then put the mock back for the siblings
+# that rely on it. The restore lives in a `finally` so even an unexpected
+# import failure (e.g. an OSError loading torch's native libraries) cannot
+# leave the eviction in place; do NOT let collect.py see the real torch —
+# its fork-worker tests deadlock on macOS with a real torch cached.
+_saved_mock = sys.modules.get("torch")
+_restore_mock = isinstance(_saved_mock, MagicMock)
+if _restore_mock:
+    sys.modules.pop("torch")
+try:
+    import torch
+except ImportError:
+    # pytest.skip raises; the mock is restored by the finally during unwind.
+    pytest.skip("real torch required for tensor operations", allow_module_level=True)
+finally:
+    if _restore_mock:
+        sys.modules["torch"] = _saved_mock
 
 from collector.helper import (
     _generate_power_law_distribution,
@@ -23,6 +49,18 @@ from collector.helper import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _real_torch_in_sys_modules(monkeypatch):
+    """Pin the real torch for the duration of each test.
+
+    ``collector/helper.py`` imports torch lazily inside the functions under
+    test, so binding the real module at collection time is not enough — the
+    call-time ``import torch`` resolves whatever sits in ``sys.modules`` at
+    that moment.
+    """
+    monkeypatch.setitem(sys.modules, "torch", torch)
 
 
 # ---------------------------------------------------------------------------
