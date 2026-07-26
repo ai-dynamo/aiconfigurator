@@ -634,15 +634,16 @@ def get_wideep_moe_compute_all_test_cases():
 
         for moe_type in moe_list:
             for use_eplb, num_slots in eplb_configs:
-                if moe_type == "nvfp4" and use_eplb and get_sm_version() == 120:
-                    continue
                 # Skip if num_slots is not divisible by ep_size
                 if num_slots % ep_size != 0:
                     continue
-                if moe_type == "nvfp4" and get_sm_version() >= 120 and num_slots // ep_size < common_moe_testcase.topk:
-                    # TRT-LLM 1.3.0rc5 SM120 nvfp4 crashes when a WideEP rank owns
-                    # fewer slots than top-k routed experts.
-                    continue
+                # The two rc5-era SM120 nvfp4 skips that lived here (nvfp4+eplb,
+                # and rank-owns-fewer-slots-than-topk) no longer reproduce:
+                # hardware-verified on RTX PRO 6000 (SM120) 1.3.0rc20 2026-07-26,
+                # both combos run clean and emit finite perf rows through
+                # wideep_compute_cutlass. They were also silent generation-time
+                # filters, which layer_permissions.md forbids — future
+                # regressions should fail at runtime and be recorded instead.
 
                 test_cases.append(
                     [
