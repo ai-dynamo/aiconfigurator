@@ -8,7 +8,7 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import attention_modules_excluded_from_quant, mtp_scale_factor
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +47,22 @@ class DeepSeekModel(BaseModel):
         )
         extra_params = model_info["extra_params"]
         family = model_info["model_family"]
+        # Per-checkpoint fact: NVFP4/INT4 releases keep attention projections in
+        # BF16 (quantization ignore/exclude lists), DeepSeek native FP8 quantizes
+        # them. Drives the MLA-module perf-row selection below.
+        attn_quant_ignored = attention_modules_excluded_from_quant(model_info.get("raw_config") or {})
 
         if family == "KIMIK25":
             # Kimi K2.5 reuses the DeepSeek architecture, but skips the WideEP
             # dispatch below since the WideEP variants are DEEPSEEK-V3-specific
             # (different hidden_size, layer count, etc.).
-            return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
+            return cls(
+                *moe_args,
+                *base_args,
+                extra_params,
+                backend_name=backend_name,
+                attention_quant_ignored=attn_quant_ignored,
+            )
 
         # DEEPSEEK family — three-way dispatch on WideEP.
         if backend_name == "sglang" and model_config.moe_backend == "deepep_moe":
@@ -73,9 +83,23 @@ class DeepSeekModel(BaseModel):
         # Thread backend_name through so backend-specific modeling (e.g. vLLM
         # TP allreduce, vLLM-specific attention head size) fires for the
         # DEEPSEEK family too, not just KIMIK25.
-        return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
+        return cls(
+            *moe_args,
+            *base_args,
+            extra_params,
+            backend_name=backend_name,
+            attention_quant_ignored=attn_quant_ignored,
+        )
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        backend_name: str = "",
+        attention_quant_ignored: bool = False,
+    ) -> None:
         super().__init__(*args)
         # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
         # in extra_params; generic hidden_size // n_heads would give the wrong value (e.g., 112).
@@ -124,6 +148,15 @@ class DeepSeekModel(BaseModel):
             else common.GEMMQuantMode.bfloat16
         )
 
+        # Perf-row key for the profiled MLA attention module. When the
+        # checkpoint keeps attention projections unquantized (every NVFP4
+        # DeepSeek/Kimi release), serving executes BF16 projection GEMMs, so
+        # querying the module table at the global gemm_quant_mode (nvfp4)
+        # selects rows for kernels that never run. Weights accounting is NOT
+        # switched here: attention byte-width, MoE layer count and encoder
+        # residency are coupled and land together in a follow-up (#1396).
+        mla_module_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if attention_quant_ignored else gemm_quant_mode
+
         h = self._hidden_size  # 7168
         tp_size = self.config.tp_size
         moe_tp_size = self.config.moe_tp_size
@@ -157,10 +190,13 @@ class DeepSeekModel(BaseModel):
                         "context_mla_module",
                         self._num_layers / attn_count_div,
                         True,
-                        128 // tp_size,
+                        # Model head count, not the DSV3 literal: Kimi K2.5 has 64
+                        # heads, so tp1 must hit the heads=64 rows (present in the
+                        # module tables as the DSV3 tp2 shard).
+                        self._num_heads // tp_size,
                         kvcache_quant_mode,
                         fmha_quant_mode,
-                        gemm_quant_mode,
+                        mla_module_gemm_quant_mode,
                     ),
                     fallback=[
                         ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode, seq_split=cp),
@@ -359,10 +395,10 @@ class DeepSeekModel(BaseModel):
                         "generation_mla_module",
                         self._num_layers * self._mtp_scale_factor,
                         False,
-                        128 // tp_size,
+                        self._num_heads // tp_size,
                         kvcache_quant_mode,
                         fmha_quant_mode,
-                        gemm_quant_mode,
+                        mla_module_gemm_quant_mode,
                     ),
                     fallback=[
                         ops.GEMM(

@@ -1391,3 +1391,60 @@ class TestDSAAttentionQuantExclusion:
 
     def test_empty_config_returns_false(self):
         assert self._excluded({}) is False
+
+
+class TestMLAModuleQueryKeys:
+    """DeepSeek/Kimi MLA-module perf-row keys must reflect the model and checkpoint.
+
+    Regression for two DSV3-shaped hardcodes on the KIMIK25 path
+    (ai-dynamo/aiconfigurator#1396): the MLAModule head count was the literal
+    ``128 // tp`` (Kimi K2.5 has 64 heads), and the module's gemm key used the
+    global gemm_quant_mode (nvfp4) although every NVFP4 DeepSeek/Kimi release
+    keeps attention projections in BF16 (quantization ignore/exclude lists) —
+    together selecting perf rows for kernels serving never runs.
+    """
+
+    @staticmethod
+    def _generation_mla_module(hf_id: str, tp_size: int, dp_size: int, **moe_kw):
+        model_config = config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            attention_dp_size=dp_size,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            **moe_kw,
+        )
+        model = models.get_model(hf_id, model_config, backend_name="vllm")
+        for op in model.generation_ops:
+            if getattr(op, "_name", "") == "generation_mla_block":
+                return op._primary
+        raise AssertionError("generation_mla_block not found")
+
+    def test_kimik25_uses_model_head_count(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=1, dp_size=4, moe_tp_size=1, moe_ep_size=4
+        )
+        assert module._num_heads == 64
+
+    def test_kimik25_tp_shards_model_head_count(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+        )
+        assert module._num_heads == 16
+
+    def test_kimik25_attention_excluded_uses_bf16_gemm_key(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=1, dp_size=4, moe_tp_size=1, moe_ep_size=4
+        )
+        assert module._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+
+    def test_deepseek_v3_keeps_global_gemm_key_and_heads(self):
+        # Official DeepSeek FP8 checkpoints quantize attention too (empty ignore
+        # list): the module key must stay on the configured global mode.
+        module = self._generation_mla_module(
+            "deepseek-ai/DeepSeek-V3", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+        )
+        assert module._num_heads == 32
+        assert module._gemm_quant_mode == common.GEMMQuantMode.nvfp4

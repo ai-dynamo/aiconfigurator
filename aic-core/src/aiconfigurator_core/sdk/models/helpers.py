@@ -36,6 +36,44 @@ _MOE_MODEL_FAMILIES = {
 }
 
 
+def quant_exclude_patterns(raw_config: dict) -> list:
+    """All module-exclusion globs a ModelOpt/HF quant config can carry.
+
+    Reads both declaration formats kept on ``raw_config`` by
+    ``get_model_config_from_model_path``: the checkpoint's own
+    ``quantization_config`` (compressed-tensors ``ignore`` /
+    ``modules_to_not_convert`` / ``exclude_modules``) and the retained
+    ``hf_quant_config`` (ModelOpt ``exclude_modules`` / ``ignore``).
+    """
+    quant_config = raw_config.get("quantization_config")
+    quant_config = quant_config if isinstance(quant_config, dict) else {}
+
+    hf_quant_config = raw_config.get("hf_quant_config")
+    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
+    hf_quant = hf_quant_config.get("quantization")
+    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
+
+    return [
+        *list(quant_config.get("modules_to_not_convert") or []),
+        *list(quant_config.get("exclude_modules") or []),
+        *list(quant_config.get("ignore") or []),
+        *list(hf_quant.get("exclude_modules") or []),
+        *list(hf_quant.get("ignore") or []),
+    ]
+
+
+def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
+    """Whether the checkpoint keeps self-attention projections unquantized (bf16).
+
+    Matches either full projection names (e.g. ``self_attn.q_a_proj``) or the
+    layer-prefixed globs the ModelOpt exporter emits (``model.layers.N.self_attn*``).
+    Per-checkpoint fact, not a family constant: the NVFP4 releases of
+    DeepSeek-R1/V3.2, Kimi-K2.5 and GLM-5 exclude attention (and lm_head),
+    while DeepSeek's native FP8 checkpoints quantize attention too.
+    """
+    return any("self_attn" in str(pattern) for pattern in quant_exclude_patterns(raw_config))
+
+
 def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
     backend / wideep combination.

@@ -8,7 +8,11 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import (
+    attention_modules_excluded_from_quant,
+    mtp_scale_factor,
+    quant_exclude_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,30 +48,12 @@ def _dsa_full_layer_fraction(raw_config: dict, num_layers: int) -> float:
 
 def _quant_exclude_patterns(raw_config: dict) -> list:
     """All module-exclusion globs a ModelOpt/HF quant config can carry."""
-    quant_config = raw_config.get("quantization_config")
-    quant_config = quant_config if isinstance(quant_config, dict) else {}
-
-    hf_quant_config = raw_config.get("hf_quant_config")
-    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
-    hf_quant = hf_quant_config.get("quantization")
-    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
-
-    return [
-        *list(quant_config.get("modules_to_not_convert") or []),
-        *list(quant_config.get("exclude_modules") or []),
-        *list(quant_config.get("ignore") or []),
-        *list(hf_quant.get("exclude_modules") or []),
-        *list(hf_quant.get("ignore") or []),
-    ]
+    return quant_exclude_patterns(raw_config)
 
 
 def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
-    # Match either a full projection name (e.g. "self_attn.q_a_proj") or a
-    # layer-prefixed glob the ModelOpt exporter emits (e.g.
-    # "model.layers.10.self_attn*"). The latter is how nvidia/GLM-5-NVFP4
-    # excludes DSA attention from NVFP4; the full-name-only check missed it.
-    return any("self_attn" in str(pattern) for pattern in _quant_exclude_patterns(raw_config))
+    return attention_modules_excluded_from_quant(raw_config)
 
 
 def _shared_experts_excluded_from_quant(raw_config: dict) -> bool:
