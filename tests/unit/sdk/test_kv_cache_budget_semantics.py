@@ -74,3 +74,28 @@ def test_base_backend_static_check_defaults_off():
         pass
 
     assert _NoDefault()._static_oom_check_kwargs() == {}
+
+
+def test_sglang_backend_derives_capacity_tiered_fraction():
+    """SGLang's mem_fraction_static follows the framework's capacity-tiered derivation."""
+    from aiconfigurator.sdk.backends.sglang_backend import (
+        SGLANG_FALLBACK_MEM_FRACTION_STATIC,
+        SGLANGBackend,
+        derive_sglang_mem_fraction_static,
+    )
+
+    backend = SGLANGBackend()
+    assert backend.memory_fraction_of_free() is False
+    assert backend.get_default_free_gpu_memory_fraction() == SGLANG_FALLBACK_MEM_FRACTION_STATIC
+
+    # b200_sxm (180 GiB): >160 GB tier, chunked_prefill 16384 ->
+    # reserved 512 + 24576 MB -> (184320 - 25088) / 184320 = 0.864
+    b200_capacity = 193273528320
+    assert derive_sglang_mem_fraction_static(b200_capacity) == pytest.approx(0.864, abs=0.001)
+    kwargs = backend._static_oom_check_kwargs(b200_capacity)
+    assert kwargs["free_gpu_memory_fraction"] == pytest.approx(0.864, abs=0.001)
+    assert kwargs["fraction_of_free"] is False
+
+    # h100_sxm (80 GiB): 60-160 GB tier, chunked_prefill 8192 ->
+    # reserved max(512 + 12288, 10240) = 12800 -> (81920 - 12800) / 81920 = 0.844
+    assert derive_sglang_mem_fraction_static(80 * (1 << 30)) == pytest.approx(0.844, abs=0.001)

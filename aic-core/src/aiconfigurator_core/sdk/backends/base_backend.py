@@ -845,7 +845,7 @@ class BaseBackend:
         summary.set_memory_and_check_oom(
             memory,
             database.system_spec["gpu"]["mem_capacity"],
-            **self._static_oom_check_kwargs(),
+            **self._static_oom_check_kwargs(database.system_spec["gpu"]["mem_capacity"]),
         )
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
@@ -879,13 +879,16 @@ class BaseBackend:
         """
         return True
 
-    def _static_oom_check_kwargs(self) -> dict:
+    def _static_oom_check_kwargs(self, mem_capacity_bytes: int | None = None) -> dict:
         """Fraction-based KV budget kwargs for the static path.
 
         Built from the backend's defaults so the static (disagg component)
         evaluations enforce the same KV-cache budget as a real deployment.
         Backends without a default fraction return ``{}``, which skips the
         budget check (plain capacity OOM check still applies).
+        ``mem_capacity_bytes`` lets backends whose framework derives the
+        fraction from device capacity (SGLang) compute it; the base
+        implementation ignores it.
         """
         fraction = self.get_default_free_gpu_memory_fraction()
         if fraction is None:
