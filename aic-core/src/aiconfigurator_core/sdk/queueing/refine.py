@@ -298,7 +298,7 @@ def refine_report_rows(
     max_refines: int = 32,
     runtime_config=None,
     nextn: int | None = None,
-    nextn_accept_rates=None,
+    nextn_accepted: float | None = None,
     prefill_latency_correction: float = 1.0,
     decode_latency_correction: float = 1.0,
 ) -> pd.DataFrame:
@@ -314,8 +314,11 @@ def refine_report_rows(
     own metadata (model/backend/version/system + parallelism columns), so
     it can run at the report boundary where sweep-time objects are gone.
     Task-level resolution that is NOT recoverable from row metadata must be
-    passed in: ``nextn`` / ``nextn_accept_rates`` (MTP changes the decode
-    op graph) and the disagg ``prefill/decode_latency_correction`` factors
+    passed in: ``nextn`` / ``nextn_accepted`` (MTP changes the decode
+    op graph; acceptance amortizes decode-pass pricing — the same
+    projection the sweep applies above aic-core, see
+    ``sdk.speculative.SpeculativeDecodingProfile``) and the disagg
+    ``prefill/decode_latency_correction`` factors
     the disagg sweep applies to its static estimates. Any per-group rebuild
     failure is logged and skipped — the report path must never crash on a
     tier upgrade.
@@ -350,7 +353,6 @@ def refine_report_rows(
             moe_ep,
             cp,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
         )
         if rebuilt is None:
             continue
@@ -372,20 +374,20 @@ def refine_report_rows(
             mask_composed,
             budget,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
+            nextn_accepted=nextn_accepted,
             prefill_latency_correction=prefill_latency_correction,
             decode_latency_correction=decode_latency_correction,
         )
     return df.round(3)
 
 
-def _rebuild_stage(
-    model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp, nextn=None, nextn_accept_rates=None
-):
+def _rebuild_stage(model_path, backend_name, version, system, tp, pp, dp, moe_tp, moe_ep, cp, nextn=None):
     """Rebuild (model, database, backend) from row metadata; None on failure
-    (the report path must never crash on a tier upgrade). ``nextn`` /
-    ``nextn_accept_rates`` come from the task (MTP is not recoverable from
-    row metadata but changes the decode op graph)."""
+    (the report path must never crash on a tier upgrade). ``nextn`` comes
+    from the task (MTP is not recoverable from row metadata but changes the
+    decode op graph); acceptance no longer enters the core model — it is a
+    pricing projection applied by the caller (PR #1405 moved it above
+    aic-core)."""
     from aiconfigurator_core.sdk import config as sdk_config
     from aiconfigurator_core.sdk.backends.factory import get_backend
     from aiconfigurator_core.sdk.models import get_model
@@ -403,8 +405,6 @@ def _rebuild_stage(
         )
         if nextn is not None:
             model_config.nextn = int(nextn)
-            if nextn_accept_rates is not None:
-                model_config.nextn_accept_rates = list(nextn_accept_rates)
         model = get_model(model_path=model_path, model_config=model_config, backend_name=backend_name)
         return model, database, get_backend(backend_name)
     except Exception:
@@ -434,19 +434,28 @@ class _ScaledTiming:
     at the PER-RANK batch (the DP ranks decode their shards in parallel;
     verified against the disagg sweep's own static numbers). The tandem
     recursion tracks worker-global slots, so decode pricing divides by dp.
+
+    ``decode_progress`` is the expected output-token progress per decode
+    iteration (1 + nextn_accepted). aic-core prices the full verification
+    iteration; the sweep's reported tpot is that cost divided by progress
+    (``SpeculativeDecodingProfile.project_summary``), so decode passes
+    divide by the same factor to keep the tandem on the sweep's pricing
+    basis (itl_p50 == sweep tpot). This is the amortized cadence — the
+    real MTP gap distribution is lumpy (design doc §6.11).
     """
 
-    def __init__(self, inner, scale: float, decode_dp: int = 1):
+    def __init__(self, inner, scale: float, decode_dp: int = 1, decode_progress: float = 1.0):
         self._inner = inner
         self._scale = float(scale)
         self._decode_dp = max(1, int(decode_dp))
+        self._decode_progress = max(1.0, float(decode_progress))
 
     def prefill_ms(self, batch_size, mean_isl, mean_prefix):
         return self._inner.prefill_ms(batch_size, mean_isl, mean_prefix) * self._scale
 
     def decode_ms(self, batch_size, context_len):
         per_rank = -(-int(batch_size) // self._decode_dp)  # ceil division
-        return self._inner.decode_ms(max(1, per_rank), context_len) * self._scale
+        return self._inner.decode_ms(max(1, per_rank), context_len) * self._scale / self._decode_progress
 
 
 def _refine_disagg_report_rows(
@@ -454,7 +463,7 @@ def _refine_disagg_report_rows(
     mask_composed: pd.Series,
     budget: int,
     nextn: int | None = None,
-    nextn_accept_rates=None,
+    nextn_accepted: float | None = None,
     prefill_latency_correction: float = 1.0,
     decode_latency_correction: float = 1.0,
 ) -> int:
@@ -512,7 +521,6 @@ def _refine_disagg_report_rows(
             p_meta["(p)moe_ep"],
             p_meta["(p)cp"],
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
         )
         d_rebuilt = _rebuild_stage(
             model_path,
@@ -526,7 +534,6 @@ def _refine_disagg_report_rows(
             d_meta["(d)moe_ep"],
             1,
             nextn=nextn,
-            nextn_accept_rates=nextn_accept_rates,
         )
         if p_rebuilt is None or d_rebuilt is None:
             continue
@@ -534,8 +541,12 @@ def _refine_disagg_report_rows(
         d_model, d_db, d_backend = d_rebuilt
         p_timing = _ScaledTiming(DatabaseTimingModel(p_model, p_db, p_backend), prefill_latency_correction)
         d_dp = max(1, int(d_meta["(d)dp"]) if d_meta["(d)dp"] else 1)
+        progress = 1.0 + float(nextn_accepted or 0.0) if nextn and int(nextn) > 0 else 1.0
         d_timing = _ScaledTiming(
-            DatabaseTimingModel(d_model, d_db, d_backend), decode_latency_correction, decode_dp=d_dp
+            DatabaseTimingModel(d_model, d_db, d_backend),
+            decode_latency_correction,
+            decode_dp=d_dp,
+            decode_progress=progress,
         )
         try:
             kv_bpt = int(p_model.get_kvcache_bytes_per_sequence(1))

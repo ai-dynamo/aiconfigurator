@@ -26,13 +26,14 @@ The script emits three artifacts:
 
 Usage:
     python3 tools/perf_database/audit_kernel_source.py \\
-        --data-root src/aiconfigurator/systems/data \\
+        --data-root aic-core/src/aiconfigurator_core/systems/data \\
         --out-json $TMPDIR/op-kernel-sources.json \\
         --out-md   docs/perf_database/op-kernel-sources.md \\
-        --out-manifest src/aiconfigurator/systems/op_kernel_source_manifest.yaml
+        --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml
 
-The manifest lives under src/aiconfigurator/systems/ so the SDK loader
-(src/aiconfigurator/sdk/perf_database.py) reads it as package data and decides,
+The manifest lives under aic-core/src/aiconfigurator_core/systems/ so the SDK
+loader (aic-core/src/aiconfigurator_core/sdk/perf_database.py) reads it as
+package data and decides,
 per (op_file, kernel_source), which sibling backend/version directories the
 active backend may inherit from. No perf data is moved or rewritten on disk.
 """
@@ -66,10 +67,22 @@ _LATENCY_COLUMNS_PRIORITY = (
 )
 
 # Files to skip entirely (markers, already-shared layers, irregular formats).
-_SKIP_FILE_BASENAMES = {"INCOMPLETE.txt"}
+# reuse.yaml/collection_meta.yaml (Collector V3 structured markers) never match
+# the *.parquet/*.txt glob in _iter_data_files below, so listing them here is
+# defensive/documentation-only, not currently load-bearing.
+_SKIP_FILE_BASENAMES = {"INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"}
 
 # Backend directory names to skip — these are framework-agnostic by construction.
 _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
+
+# Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
+# other first-level directory under a system dir as a family dir containing
+# <backend>/<version> subtrees. Keep this set textually identical to the
+# CANONICAL _KNOWN_BACKEND_DIRS in
+# aic-core/src/aiconfigurator_core/sdk/operations/base.py minus
+# _SKIP_BACKEND_DIRS (a deliberate 3-entry variant: consumer backends only,
+# no comm pseudo-backends; base.py lists every copy that must stay in sync).
+_LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 
 def classify_tier(kernel_source: str) -> str:
@@ -190,14 +203,31 @@ def _build_shape_key(row: dict[str, str], header: list[str], latency_col: str) -
     return tuple((c, row.get(c, "")) for c in keys)
 
 
+def _iter_backend_dirs(system_dir: Path) -> Iterable[tuple[str, Path]]:
+    """Yield (backend, backend_path) for every backend dir under a system dir,
+    across both the legacy (<backend>/<version>) and family-first
+    (<family>/<backend>/<version>) layouts. `_SKIP_BACKEND_DIRS` entries are
+    excluded at whichever level they appear (top-level or inside a family dir).
+    """
+    for entry in sorted(system_dir.iterdir()):
+        if not entry.is_dir() or entry.name in _SKIP_BACKEND_DIRS:
+            continue
+        if entry.name in _LEGACY_BACKEND_DIRS:
+            yield entry.name, entry
+        else:  # family dir
+            for backend_dir in sorted(entry.iterdir()):
+                if not backend_dir.is_dir() or backend_dir.name in _SKIP_BACKEND_DIRS:
+                    continue
+                yield backend_dir.name, backend_dir
+
+
 def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
-    """Yield (system, backend, version, path) for every perf data table."""
+    """Yield (system, backend, version, path) for every perf data table, across
+    both the legacy and family-first (Collector V3) tree layouts."""
     for system_dir in sorted(data_root.iterdir()):
         if not system_dir.is_dir():
             continue
-        for backend_dir in sorted(system_dir.iterdir()):
-            if not backend_dir.is_dir() or backend_dir.name in _SKIP_BACKEND_DIRS:
-                continue
+        for backend, backend_dir in _iter_backend_dirs(system_dir):
             for version_dir in sorted(backend_dir.iterdir()):
                 if not version_dir.is_dir():
                     continue
@@ -205,7 +235,7 @@ def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
                 for path in paths:
                     if path.name in _SKIP_FILE_BASENAMES:
                         continue
-                    yield system_dir.name, backend_dir.name, version_dir.name, path
+                    yield system_dir.name, backend, version_dir.name, path
 
 
 @dataclass
@@ -486,9 +516,11 @@ def render_manifest(summaries: list[dict]) -> str:
         "#   the kernel belongs to ('shared' or 'shared_fallback').",
         "#",
         "# How it's used:",
-        "#   src/aiconfigurator/sdk/perf_database.py reads this file at PerfDatabase",
+        "#   aic-core/src/aiconfigurator_core/sdk/perf_database.py reads this file",
+        "#   at PerfDatabase",
         "#   construction time. When the database is loaded in HYBRID mode, the loader",
-        "#   walks sibling <sys>/<framework>/<version>/<op_file> directories and inherits",
+        "#   walks sibling <system>/<family>/<framework>/<version>/<op_file> directories",
+        "#   and inherits",
         "#   rows tagged with the kernel_sources this manifest declares the active backend",
         "#   may consume — keeping the active backend's own rows on key conflict. Both",
         "#   `tier=shared` and `tier=shared_fallback` (kernel_source=default,",
@@ -497,12 +529,13 @@ def render_manifest(summaries: list[dict]) -> str:
         "#",
         "# How to regenerate:",
         "#   Generated by tools/perf_database/audit_kernel_source.py from the data tree —",
-        "#   do not hand-edit. Re-run whenever a perf table under src/aiconfigurator/systems/data/",
+        "#   do not hand-edit. Re-run whenever a perf table under",
+        "#   aic-core/src/aiconfigurator_core/systems/data/",
         "#   is added, removed, or has its kernel_source values changed:",
         "#",
         "#     python3 tools/perf_database/audit_kernel_source.py \\",
-        "#         --data-root src/aiconfigurator/systems/data \\",
-        "#         --out-manifest src/aiconfigurator/systems/op_kernel_source_manifest.yaml",
+        "#         --data-root aic-core/src/aiconfigurator_core/systems/data \\",
+        "#         --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
         "#",
         "# Schema (per group):",
         "#   op_file:                     perf table basename, e.g. gemm_perf.parquet",
@@ -535,7 +568,7 @@ def main() -> None:
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("src/aiconfigurator/systems/data"),
+        default=Path("aic-core/src/aiconfigurator_core/systems/data"),
         help="Root of the systems/data tree.",
     )
     parser.add_argument("--out-json", type=Path, default=None, help="Write per-group summaries as JSON.")

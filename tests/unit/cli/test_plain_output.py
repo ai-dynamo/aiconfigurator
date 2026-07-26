@@ -215,84 +215,42 @@ def test_log_final_summary_no_disagg_results():
     )
 
 
-def test_log_final_summary_uses_native_objective_and_keeps_zero_sla_rows(caplog):
-    caplog.set_level("INFO")
-    setup_logging(no_color=True)
-    logging.getLogger().addHandler(caplog.handler)
-
-    task = MagicMock()
-    task.primary_model_path = "unit-test-model"
-    task.primary_backend_name = "trtllm"
-    task.is_moe = False
-    task.total_gpus = 2
-    task.tpot = 0.0
-    task.request_latency = None
-
-    row = {
-        "backend": "trtllm",
-        "objective_target": "throughput",
-        "objective_score": 1000.0,
-        "objective_value": 1000.0,
-        "throughput": 1000.0,
-        "average_gpus": 1.5,
-        "tokens/s/gpu": 666.67,
-        "tokens/s/gpu_cluster": 666.67,
-        "tokens/s/user": 100.0,
-        "request_rate": 3.0,
-        "ttft": 100.0,
-        "tpot": 10.0,
-        "request_latency": 250.0,
-        "concurrency": 2.0,
-        "num_total_gpus": 2,
-        "tp": 2,
-        "pp": 1,
-        "dp": 1,
-        "moe_tp": 1,
-        "moe_ep": 1,
-        "bs": 64,
-    }
-    config_df = pd.DataFrame([row])
-
-    log_final_summary(
-        chosen_exp="agg",
-        best_throughputs={"agg": 666.67},
-        best_configs={"agg": config_df},
-        pareto_fronts={"agg": config_df},
-        tasks={"agg": task},
-        mode="default",
-        pareto_x_axis={"agg": "tokens/s/user"},
-        pareto_y_axis={"agg": "objective_value"},
-        objective_target="throughput",
-        best_objective_scores={"agg": 1000.0},
-        objective_directions={"throughput": True},
-        top_n=1,
+def test_worker_setup_table_keeps_rows_when_sla_disabled():
+    config_df = pd.DataFrame(
+        [
+            {
+                "backend": "trtllm",
+                "tokens/s/gpu": 500.0,
+                "tokens/s/user": 100.0,
+                "request_rate": 3.0,
+                "ttft": 100.0,
+                "tpot": 10.0,
+                "request_latency": 250.0,
+                "concurrency": 2.0,
+                "num_total_gpus": 2,
+                "tp": 2,
+                "pp": 1,
+                "dp": 1,
+                "moe_tp": 1,
+                "moe_ep": 1,
+                "bs": 64,
+            }
+        ]
     )
 
-    logged = "\n".join(record.message for record in caplog.records)
-    assert "Optimization Objective: throughput (maximize)" in logged
-    assert "Best Experiment Chosen: agg at 1,000.00 tokens/s throughput" in logged
-    assert "Throughput: 1,000.00 tokens/s" in logged
-    # A native config with no SLA has a zero task TPOT target; its ranked row must
-    # still be displayed instead of being filtered as an SLA violation.
-    assert "agg Top Configurations: (Ranked by throughput)" in logged
-    assert "No configurations for agg met the TPOT constraint" not in logged
-
-    # Goodput is measured per request. A selected row whose aggregate mean TPOT
-    # exceeds the SLA must not be re-gated by the legacy report table.
-    goodput_table = _plot_worker_setup_table(
+    table = _plot_worker_setup_table(
         "agg",
         config_df,
         total_gpus=2,
-        tpot_target=5.0,
+        tpot_target=0.0,
         top=1,
         is_moe=False,
         request_latency_target=None,
         show_power=False,
-        preserve_ranking=True,
-        objective_target="goodput_per_gpu",
     )
-    assert "agg Top Configurations: (Ranked by goodput_per_gpu)" in goodput_table
-    assert "No configurations for agg met the TPOT constraint" not in goodput_table
+
+    assert "agg Top Configurations: (Ranked by tokens/s/gpu)" in table
+    assert "No configurations for agg met the TPOT constraint" not in table
 
 
 def test_draw_pareto_plain_output_is_pure_ascii():

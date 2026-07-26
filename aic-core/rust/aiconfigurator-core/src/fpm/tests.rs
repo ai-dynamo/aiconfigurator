@@ -34,6 +34,7 @@ fn context_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
         }),
         Op::Gemm(GemmOp {
@@ -67,6 +68,7 @@ fn generation_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
         }),
         Op::GenerationAttention(GenerationAttentionOp {
@@ -106,6 +108,8 @@ fn fixture_engine_config() -> EngineConfig {
         },
         speculative: None,
         perf_db_sources: Default::default(),
+        database_mode: Default::default(),
+        transfer_policy: None,
         extra: BTreeMap::new(),
     }
 }
@@ -203,6 +207,8 @@ fn forward_pass_prefill_matches_run_context_ops() {
         4,
         1024,
         0,
+        1.0,
+        crate::session::ContextOpFilter::All,
     )
     .unwrap();
     assert_close(via_fpm, direct);
@@ -228,6 +234,8 @@ fn forward_pass_decode_matches_run_generation_ops_step() {
         engine.database(),
         8,
         2048,
+        1.0,
+        false,
     )
     .unwrap();
     assert_close(via_fpm, direct);

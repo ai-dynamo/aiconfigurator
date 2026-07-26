@@ -255,10 +255,16 @@ Silent (each with a designated detector):
    with matching N.
 11. **Speculative decoding (`nextn > 0`).** The engine emits up to nextn+1
    tokens per verified step (vLLM: `num_tokens_with_spec`), breaking the
-   1-token-per-pass invariant. AIC models MTP by amortized per-op scaling
-   (`_mtp_scale_factor`), so throughput and TPOT stay consistent — but
-   `itl_*` for nextn rows describes the amortized cadence, not the real
-   lumpy gap distribution (a full step gap followed by zero-gaps).
+   1-token-per-pass invariant. Since PR #1405 aic-core prices the FULL
+   verification iteration (nextn shapes the op graph) and acceptance is a
+   summary-level projection above core (`SpeculativeDecodingProfile`:
+   tpot ÷ (1 + nextn_accepted)). The tandem tier divides decode-pass
+   pricing by the same progress factor so `itl_p50` stays on the sweep's
+   projected-tpot basis (amortized cadence, not the real lumpy gap
+   distribution — a full step gap followed by zero-gaps). Screening and
+   agg-evaluator `itl_*` for nextn rows are NOT projected: they describe
+   the full verification-step cadence, which is the physical gap length
+   but sits `(1 + nextn_accepted)×` above the row's projected tpot.
    Detector: compare against a token-timestamped benchmark of an MTP model.
 12. **Attention-DP prefill cadence (`dp > 1`).** Under data parallelism
    vLLM defers new prefills on non-cadence steps (prefill throttling, so

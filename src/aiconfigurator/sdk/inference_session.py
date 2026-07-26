@@ -19,6 +19,7 @@ from aiconfigurator.sdk.picking import (
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
     _build_disagg_summary_dict,
 )
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,7 @@ class DisaggInferenceSession:
         decode_model_config: config.ModelConfig,
         decode_batch_size: int,
         decode_num_worker: int,
+        speculative_profile: SpeculativeDecodingProfile | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -287,6 +289,8 @@ class DisaggInferenceSession:
             decode_model_config (ModelConfig): the decode model config
             decode_batch_size (int): the decode batch size
             decode_num_worker (int): the number of decode workers
+            speculative_profile: Optional accepted-token progress assumption.
+                Projects decode metrics before prefill/decode rate matching.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -313,6 +317,8 @@ class DisaggInferenceSession:
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
         )
+        if speculative_profile is not None:
+            decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
         disagg_summary_df = self._get_disagg_summary_df(
             prefill_summary.get_summary_df(),
             prefill_num_worker,
@@ -1559,6 +1565,7 @@ class AFDInferenceSession:
         phase: str | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_seq_len: int | None = None,
+        speculative_profile: SpeculativeDecodingProfile | None = None,
     ) -> InferenceSummary:
         """Run AFD performance simulation, possibly for prefill, decode, or both.
 
@@ -1574,6 +1581,8 @@ class AFDInferenceSession:
             free_gpu_memory_fraction: Fraction of free GPU memory allocated
                              for KV cache. Defaults to backend behavior.
             max_seq_len:    Optional runtime max sequence length for KV cache.
+            speculative_profile: Optional accepted-token progress assumption.
+                             The projection role is derived from ``phase``.
 
         Returns:
             InferenceSummary.  ``check_oom()`` reflects the per-pool HBM check.
@@ -1608,12 +1617,16 @@ class AFDInferenceSession:
                 max_seq_len=max_seq_len,
             )
 
-        return self._build_summary(
+        summary = self._build_summary(
             runtime_config=runtime_config,
             phase=phase,
             prefill_metrics=prefill_metrics,
             decode_metrics=decode_metrics,
         )
+        if speculative_profile is None:
+            return summary
+        projection_role = "prefill" if phase == "prefill" else ("decode" if phase == "decode" else "static")
+        return speculative_profile.project_summary(summary, role=projection_role)
 
     def run_afd_decode(
         self,

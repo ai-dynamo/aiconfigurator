@@ -15,14 +15,9 @@ exp_disagg_wideep:
   ttft: 1000.0
   osl: 100
   nextn: 1
+  nextn_accepted: 0.85
   moe_backend: deepep_moe
   attention_backend: flashinfer
-  nextn_accept_rates:
-  - 0.85
-  - 0
-  - 0
-  - 0
-  - 0
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: sglang
   prefill_enable_wideep: true
@@ -98,12 +93,7 @@ exp_disagg_non_wideep:
   ttft: 1000.0
   osl: 100
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: sglang
   prefill_enable_wideep: false

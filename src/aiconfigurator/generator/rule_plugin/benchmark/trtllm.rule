@@ -32,9 +32,13 @@ when (ModelConfig.prefix or 0) > 0:
 
 
 # Speculative decoding
+# Guard: in disagg, the PREFILL engine needs speculative_config too -- TRT-LLM
+# sizes the KV cache with get_num_spec_layers(spec_config) extra MTP-layer
+# pools, so a ctx engine without it has a mismatched KV layout vs the gen
+# engine (official disaggregated benchmark config carries it on both sides).
 when (ModelConfig.nextn or 0) > 0:
-    agg_decode speculative_decoding_type = "MTP"
-    agg_decode num_nextn_predict_layers = ModelConfig.nextn
+    agg_prefill_decode speculative_decoding_type = "MTP"
+    agg_prefill_decode num_nextn_predict_layers = ModelConfig.nextn
 
 when kv_cache_dtype in ("float16", "bfloat16"):
     kv_cache_dtype = "auto"

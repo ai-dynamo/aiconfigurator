@@ -128,6 +128,11 @@ inputs:
     required: false
   - key: K8sConfig.frontend_extra_pod_spec
     required: false
+  # FPM-only resource-workload controls. Other deployment targets ignore them.
+  - key: K8sConfig.fpm_shared_memory_size
+    required: false
+  - key: K8sConfig.fpm_resource_labels
+    required: false
 
   # Worker config
   - key: WorkerConfig.prefill_workers

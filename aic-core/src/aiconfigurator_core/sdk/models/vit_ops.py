@@ -22,11 +22,19 @@ For a ViT with depth D and projector_dims with P (in, out) pairs::
     encoder_act           ElementWise
     encoder_ffn2_gemm     GEMM  (low_precision_input=True)
     encoder_ar_2          CustomAllReduce
+    encoder_rope_apply    ElementWise  (only if partial_rotary_factor > 0;
+                                        replaces the attention-internal RoPE term)
 
   _projector_ops  →  2*P ops + 1 AR  (or 0 ops if projector_dims is empty):
     encoder_projector_fc{i}_gemm  GEMM
     encoder_projector_fc{i}_act   ElementWise  (omitted for final layer)
     encoder_projector_ar          CustomAllReduce
+
+  Encoder DP (enable_encoder_dp, default; vLLM mm_encoder_tp_mode="data" /
+  SGLang --mm-enable-dp-encoder) builds all of the above with tp=1 — full
+  replica per rank, images ceil-sharded across the tp_size ranks at query
+  time in BaseBackend._run_encoder_phase — and appends for tp_size > 1:
+    encoder_dp_all_gather         NCCL all_gather of post-merge embeddings
 
 TP parallelism for projector layers
 ------------------------------------
@@ -50,7 +58,8 @@ from aiconfigurator_core.sdk import common
 
 
 def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
-    """Build the 10 ViT transformer block ops (each repeated enc_cfg.depth times).
+    """Build the 10 ViT transformer block ops (each repeated enc_cfg.depth times),
+    plus the optional encoder_rope_apply elementwise op.
 
     Raises ValueError if num_heads or intermediate_size is not divisible by tp_size.
     """
@@ -70,7 +79,7 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
     vit_gemm_mode = common.GEMMQuantMode.bfloat16
     vit_fmha_mode = common.FMHAQuantMode.bfloat16
 
-    return [
+    result = [
         ops.ElementWise("encoder_add_norm_1", depth, 2 * h_vit, 2 * h_vit, 0.8),
         ops.GEMM(
             "encoder_qkv_gemm",
@@ -85,7 +94,7 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
             n_vit // tp_size,
             head_size_vit,
             fmha_quant_mode=vit_fmha_mode,
-            partial_rotary_factor=enc_cfg.partial_rotary_factor,
+            partial_rotary_factor=0.0,
         ),
         ops.GEMM(
             "encoder_proj_gemm",
@@ -121,6 +130,15 @@ def _vit_transformer_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> l
         ),
         ops.CustomAllReduce("encoder_ar_2", depth, h_vit, tp_size),
     ]
+
+    if enc_cfg.partial_rotary_factor > 0:
+        # the attention op's internal RoPE term is disabled in exchange (partial_rotary_factor=0.0).
+        # partial_rotary_factor gates the op but does not shrink it: the eager kernel
+        # duplicates the half-dim cos/sin table to full head_dim and rotates all of Q/K.
+        rope_dim = 6 * (n_vit // tp_size) * head_size_vit
+        result.append(ops.ElementWise("encoder_rope_apply", depth, rope_dim, rope_dim, 0.8))
+
+    return result
 
 
 def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
@@ -169,7 +187,7 @@ def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
     return result
 
 
-def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
+def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int, enable_encoder_dp: bool = True) -> list:
     """Build the complete list of encoder ops for a ViT-based vision encoder.
 
     Combines ViT transformer ops (10 ops x depth repetitions) with projector ops
@@ -177,10 +195,29 @@ def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list
 
     Args:
         enc_cfg: VisionEncoderConfig populated with ViT and projector parameters.
-        tp_size: Tensor-parallel degree.  Must evenly divide num_heads and
-                 intermediate_size when tp_size > 1.
+        tp_size: Worker tensor-parallel degree — the DP degree under encoder DP,
+                 else the ViT weight-sharding degree (must evenly divide
+                 num_heads and intermediate_size when tp_size > 1).
+        enable_encoder_dp: Encoder data parallelism over the TP group (default
+                 True) — see module docstring.
 
     Returns:
         Flat list of operation objects ready to assign to model.encoder_ops.
     """
-    return _vit_transformer_ops(enc_cfg, tp_size) + _projector_ops(enc_cfg, tp_size)
+    if not enable_encoder_dp:
+        return _vit_transformer_ops(enc_cfg, tp_size) + _projector_ops(enc_cfg, tp_size)
+
+    # DP: full-replica ops (tp=1); the per-layer AllReduces degenerate to no-ops.
+    result = _vit_transformer_ops(enc_cfg, 1) + _projector_ops(enc_cfg, 1)
+    if tp_size > 1:
+        result.append(
+            ops.NCCL(
+                "encoder_dp_all_gather",
+                1,
+                "all_gather",
+                num_elements_per_token=enc_cfg.out_hidden_size * enc_cfg.projector_n_instances * tp_size,
+                num_gpus=tp_size,
+                comm_quant_mode=common.CommQuantMode.half,
+            )
+        )
+    return result

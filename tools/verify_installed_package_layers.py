@@ -13,9 +13,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
-# Running this file directly prepends ``tools/`` to sys.path. That directory
-# contains helper scripts under ``tools/spica/``, which must not be mistaken for
-# the separately packaged top-level ``spica`` namespace during isolation checks.
+# Running this file directly prepends ``tools/`` to sys.path. Remove that path
+# so installed-package checks cannot accidentally resolve repository helpers.
 _TOOLS_DIR = Path(__file__).resolve().parent
 sys.path[:] = [entry for entry in sys.path if Path(entry or ".").resolve() != _TOOLS_DIR]
 
@@ -48,7 +47,9 @@ def _verify_core(*, exercise_engine: bool) -> str:
         "aiconfigurator-core",
         (
             "aiconfigurator_core/__init__.py",
+            "aiconfigurator_core/_aiconfigurator_core.pyi",
             "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
+            "aiconfigurator_core/py.typed",
             "aiconfigurator_core/sdk/__init__.py",
             "aiconfigurator_core/sdk/engine.py",
             "aiconfigurator_core/sdk/memory.py",
@@ -59,6 +60,31 @@ def _verify_core(*, exercise_engine: bool) -> str:
     core = importlib.import_module("aiconfigurator_core")
     if core._build_smoke() != 1:
         raise RuntimeError("native core extension returned an unexpected schema version")
+
+    sdk = importlib.import_module("aiconfigurator_core.sdk")
+    protected_sdk_modules = {
+        "aiconfigurator_core.sdk.engine",
+        "aiconfigurator_core.sdk.memory",
+        "aiconfigurator_core.sdk.rust_engine_step",
+    }
+    eagerly_loaded_modules = protected_sdk_modules.intersection(sys.modules)
+    if eagerly_loaded_modules:
+        raise RuntimeError(f"aiconfigurator_core.sdk eagerly loaded modules: {sorted(eagerly_loaded_modules)}")
+
+    expected_facade = {
+        "EngineHandle",
+        "ModelConfig",
+        "RuntimeConfig",
+        "RustForwardPassPerfModel",
+        "compile_engine",
+        "estimate_kv_cache",
+        "estimate_num_gpu_blocks",
+    }
+    if set(sdk.__all__) != expected_facade:
+        raise RuntimeError(f"unexpected aiconfigurator_core.sdk facade: {sdk.__all__!r}")
+    for public_name in expected_facade:
+        if getattr(sdk, public_name, None) is None:
+            raise RuntimeError(f"aiconfigurator_core.sdk is missing {public_name}")
 
     for module in (
         "aiconfigurator_core.sdk.engine",
@@ -71,7 +97,9 @@ def _verify_core(*, exercise_engine: bool) -> str:
     required_resources = (
         resources / "model_configs" / "meta-llama--Meta-Llama-3.1-8B_config.json",
         resources / "systems" / "h100_sxm.yaml",
-        resources / "systems" / "data" / "b200_sxm" / "vllm" / "0.19.0" / "gemm_perf.parquet",
+        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "gemm_perf.parquet",
+        resources / "systems" / "data" / "l40s" / "gemm" / "vllm" / "0.22.0" / "reuse.yaml",
+        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "collection_meta.yaml",
     )
     missing = [str(path) for path in required_resources if not path.is_file()]
     if missing:
@@ -110,13 +138,13 @@ def _verify_upper(*, import_runtime: bool) -> str:
             "aiconfigurator/sdk/engine.py",
             "aiconfigurator/sdk/memory.py",
             "aiconfigurator/sdk/task_v2.py",
-            "aiconfigurator/webapp/main.py",
-            "spica/config.py",
         ),
     )
     if import_runtime:
-        for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api", "spica.config"):
+        for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api"):
             importlib.import_module(module)
+    for module in ("aiconfigurator.webapp", "spica"):
+        _forbid_module(module)
     return aic_version
 
 

@@ -381,13 +381,31 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
 
     assert len(cases) == 1887
     assert sum(len(case[1]) for case in cases) == 50949
-    # Native artifacts stay excluded (their w4a8_mxfp4_mxfp8 label has no
-    # consumable vLLM path); the converted FP8 artifacts are collected as
-    # fp8_block only — the layout vLLM serves with the documented
-    # expert_dtype override.
+    # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
+    # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
+    # expand); the converted FP8 artifacts are collected as fp8_block only —
+    # the layout vLLM serves with the documented expert_dtype override.
     assert not any(case[8] in native_dsv4_models for case in cases)
     converted_modes = {case[0] for case in cases if case[8] in converted_dsv4_models}
     assert converted_modes == {"fp8_block"}
+
+
+def test_vllm_sm100_repository_moe_getter_expands_native_dsv4_w4a8_cases(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 100)
+
+    cases = module.get_moe_test_cases()
+    native_dsv4_models = {
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+    }
+
+    # On the SM100 family the native artifacts run the trtllm-gen
+    # MXFP4xMXFP8 serving path, and only under that label.
+    native_modes = {case[0] for case in cases if case[8] in native_dsv4_models}
+    assert native_modes == {"w4a8_mxfp4_mxfp8"}
 
 
 @pytest.mark.parametrize(

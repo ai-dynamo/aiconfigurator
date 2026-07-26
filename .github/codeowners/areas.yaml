@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# CODEOWNERS-as-code taxonomy for ai-dynamo/aiconfigurator.
+# Translated from the existing hand-written .github/CODEOWNERS (same teams),
+# extended to cover trees that file leaves to the catch-all (rust/, agent
+# instructions, and repository metadata).
+
+meta:
+  catch_all: "@ai-dynamo/contributors-aiconfigurator"
+
+areas:
+  - label: runtime
+    github_team: "@ai-dynamo/aiconfigurator-runtime"
+    path_globs:
+      - src/
+      - aic-core/            # rust core relocated here by main #1322 (was rust/)
+      - collector/
+      - tools/sanity_check/
+      - tools/simple_sdk_demo/
+      - tools/support_matrix/
+  - label: generators
+    github_team: "@ai-dynamo/aiconfigurator-generators"
+    path_globs:
+      - src/aiconfigurator/generator/
+      - src/aiconfigurator/cli/
+      - tools/
+  - label: infra
+    github_team: "@ai-dynamo/aiconfigurator-infra"
+    path_globs:
+      - .coderabbit.yaml
+      - .dockerignore
+      - .gitattributes
+      - .gitignore
+      - .pre-commit-config.yaml
+      - Cargo.toml
+      - AGENTS.md
+      - .github/
+      - .claude/
+      - .agents/
+      - docker/
+      - pyproject.toml
+      - pytest.ini
+      - uv.lock
+      - eslint.config.js
+      - DEVELOPMENT.md
+      - SECURITY.md
+  - label: docs
+    github_team: "@ai-dynamo/maintainers-aiconfigurator"
+    path_globs:
+      - docs/
+      - README.md
+      - CONTRIBUTORS.md
+      - ATTRIBUTIONS.md
+      - CODE_OF_CONDUCT.md
+      - CONTRIBUTING.md
+      - LICENSE
+
+shared:
+  # Preserve the existing policy: maintainers co-own every runtime,
+  # generator, and infra path. More-specific entries sort after their parent
+  # path and retain the same last-match routing as the hand-written file.
+  - glob: src/
+    owners: [runtime, docs]
+  - glob: src/aiconfigurator/generator/
+    owners: [generators, docs]
+  - glob: src/aiconfigurator/cli/
+    owners: [generators, docs]
+  - glob: aic-core/
+    owners: [runtime, docs]
+  - glob: collector/
+    owners: [runtime, docs]
+  - glob: tools/
+    owners: [generators, docs]
+  - glob: tools/sanity_check/
+    owners: [runtime, docs]
+  - glob: tools/simple_sdk_demo/
+    owners: [runtime, docs]
+  - glob: tools/support_matrix/
+    owners: [runtime, docs]
+  - glob: .github/
+    owners: [infra, docs]
+  - glob: .claude/
+    owners: [infra, docs]
+  - glob: .agents/
+    owners: [infra, docs]
+  - glob: docker/
+    owners: [infra, docs]
+  - glob: .coderabbit.yaml
+    owners: [infra, docs]
+  - glob: .dockerignore
+    owners: [infra, docs]
+  - glob: .gitattributes
+    owners: [infra, docs]
+  - glob: .gitignore
+    owners: [infra, docs]
+  - glob: .pre-commit-config.yaml
+    owners: [infra, docs]
+  - glob: Cargo.toml
+    owners: [infra, docs]
+  - glob: AGENTS.md
+    owners: [infra, docs]
+  - glob: pyproject.toml
+    owners: [infra, docs]
+  - glob: pytest.ini
+    owners: [infra, docs]
+  - glob: uv.lock
+    owners: [infra, docs]
+  - glob: eslint.config.js
+    owners: [infra, docs]
+  - glob: DEVELOPMENT.md
+    owners: [infra, docs]
+  - glob: SECURITY.md
+    owners: [infra, docs]
+  # Tests retain all four existing reviewer teams.
+  - glob: tests/
+    owners: [runtime, generators, infra, docs]
+  # Preserve the existing cross-area documentation exception.
+  - glob: docs/dynamo_deployment_guide.md
+    owners: [runtime, infra, docs]
+  # Ownership policy changes require infra and maintainer review (docs area
+  # is the maintainers team), mirroring the previous hand-written policy.
+  - glob: CODEOWNERS
+    owners: [infra, docs]
+
+classify:
+  keyword_rules:
+    - match: generator
+      area: generators
+  filetype_rules: []

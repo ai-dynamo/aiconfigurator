@@ -145,6 +145,7 @@ def test_from_yaml_flat_agg():
         "ttft": 1000.0,
         "tpot": 40.0,
         "nextn": 1,
+        "nextn_accepted": 0.85,
         "gemm_quant_mode": "fp8_block",
         "kvcache_quant_mode": "bfloat16",
         "agg_num_gpu_candidates": [4, 8],
@@ -318,10 +319,15 @@ def test_build_model_config_agg_uses_resolved_quant():
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        nextn=2,
+        nextn_accepted=1.2,
     )
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-    assert mc.nextn == t.nextn
+    assert mc.nextn == t.nextn == 2
+    assert not hasattr(mc, "nextn_accepted")
+    assert t.nextn_accepted == 1.2
+    assert t.build_speculative_profile().expected_accepted_tokens == 1.2
 
 
 def test_sweep_agg_kwargs_shape():
@@ -598,21 +604,119 @@ def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
     assert any("context_mla_granular" in r.message for r in caplog.records)
 
 
-def test_nextn_default_respects_hf_then_family_fallback():
-    """nextn: HF num_nextn_predict_layers wins (incl. explicit 0, e.g. Kimi-K2.5);
-    field absent -> family-based fallback (Qwen3.5 -> 1, DeepSeek -> 1).
-    """
+def test_nextn_never_auto_enabled(caplog):
+    """MTP is never auto-enabled: nextn stays 0 even for checkpoints that ship
+    MTP layers; a hint log surfaces the unused capability."""
+    import logging
 
     def mk(mp):
         return Task(serving_mode="agg", model_path=mp, system_name="h200_sxm", backend_name="trtllm").nextn
 
-    assert mk("deepseek-ai/DeepSeek-V3") == 1  # HF declares 1
-    assert mk("moonshotai/Kimi-K2.5") == 0  # HF declares 0 -- respected, not forced to 1
-    assert mk("Qwen/Qwen3.5-27B") == 1  # HF field absent -> family fallback
+    with caplog.at_level(logging.INFO, logger="aiconfigurator.sdk.task_v2"):
+        assert mk("deepseek-ai/DeepSeek-V3") == 0  # HF declares 1 -- still off by default
+        assert mk("moonshotai/Kimi-K2.5") == 0
+        assert mk("Qwen/Qwen3.5-27B") == 0
+    assert any("ships MTP" in r.message for r in caplog.records)
+
+
+def test_nextn_auto_resolves_depth_from_checkpoint():
+    """nextn='auto' takes the draft depth from num_nextn_predict_layers; the
+    acceptance value is still required -- it is never inferred."""
+    import pytest as _pytest
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+        nextn_accepted=0.7,
+    )
+    assert t.nextn == 1  # checkpoint declares num_nextn_predict_layers=1
+    assert t.nextn_accepted == 0.7
+
+    # No MTP layers in the checkpoint -> auto resolves to disabled, no
+    # acceptance value needed.
+    t2 = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+    )
+    assert t2.nextn == 0
+
+    # auto resolving to a positive depth still demands nextn_accepted, and the
+    # error says what the depth resolved to.
+    with _pytest.raises(ValueError, match=r"auto.*resolved to nextn=1.*nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn="auto",
+        )
+
+    # auto cannot resolve without a checkpoint to read.
+    with _pytest.raises(ValueError, match="requires a model path"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn="auto")
+
+
+def test_nextn_requires_nextn_accepted():
+    """nextn > 0 without nextn_accepted is a hard error -- no built-in acceptance assumption."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=1.5,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=-0.1,
+        )
+    # Validation must not depend on model-identity resolution (which is skipped
+    # when no primary model path is set).
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn=1)
+    with _pytest.raises(ValueError, match=">= 0"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=-1,
+        )
+    with _pytest.raises(ValueError, match="integer"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1.5,
+            nextn_accepted=0.5,
+        )
 
 
 def test_nextn_explicit_override_warns(caplog):
-    """An explicit nextn diverging from the checkpoint warns (MTP layer stacking)."""
+    """An explicit nextn diverging from the checkpoint warns (MTP module reuse)."""
     import logging
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
@@ -622,9 +726,11 @@ def test_nextn_explicit_override_warns(caplog):
             system_name="h200_sxm",
             backend_name="trtllm",
             nextn=3,
+            nextn_accepted=1.8,
         )
     assert t.nextn == 3
-    assert any("overrides" in r.message for r in caplog.records)
+    assert t.nextn_accepted == 1.8
+    assert any("differs from" in r.message for r in caplog.records)
 
 
 def test_moe_backend_flows_into_model_config():
@@ -667,6 +773,56 @@ def test_dsv4_native_sglang_moe_remap():
     assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
     # FP8 requant artifacts keep their own (fp8_block-family) resolution.
     assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+
+def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
+    """Third-party FP4-expert DSV4 checkpoints (e.g. RedHatAI) get the sglang
+    MoE remap based on expert_dtype rather than hardcoded model paths.
+    Hopper -> w4a16_mxfp4_cutlass; Blackwell -> w4a8_mxfp4_mxfp8_trtllm."""
+    hopper = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert hopper.moe_quant_mode == common.MoEQuantMode.w4a16_mxfp4_cutlass
+    blackwell = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="b200_sxm",
+        backend_name="sglang",
+    )
+    assert blackwell.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # FP8-only requants (no expert_dtype=fp4) are NOT remapped.
+    fp8_requant = Task(
+        serving_mode="agg",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert fp8_requant.moe_quant_mode not in (
+        common.MoEQuantMode.w4a16_mxfp4_cutlass,
+        common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ],
+)
+def test_dsv4_fp8_kvcache_enforced(model_path):
+    """All DSV4 models use FP8 KV cache, regardless of HF config."""
+    t = Task(
+        serving_mode="agg",
+        model_path=model_path,
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
 
 
 def test_pareto_sweep_controls_tpot_grid():

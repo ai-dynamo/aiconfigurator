@@ -49,19 +49,15 @@ from aiconfigurator.sdk.perf_database import (
     is_hopper_system,
     load_system_spec,
 )
+from aiconfigurator.sdk.speculative import (
+    SpeculativeDecodingProfile,
+    normalize_speculative_decoding,
+)
 from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
 
 ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
-
-
-_DEFAULT_NEXTN_ACCEPT_RATES: list[float] = [0.85, 0.8, 0.6, 0.0, 0.0]
-
-# Families that natively ship MTP (nextn=1) -- used only as a fallback when the
-# checkpoint's HF config does NOT declare ``num_nextn_predict_layers`` at all.
-# A config that explicitly states the field (including 0, e.g. Kimi-K2.5) wins.
-_MTP_DEFAULT_FAMILIES = {"DEEPSEEK", "DEEPSEEKV32", "DEEPSEEKV4", "KIMIK25", "QWEN35"}
 
 
 def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
@@ -336,6 +332,8 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
+    # Vision encoder data parallelism (ModelConfig default).
+    enable_encoder_dp: bool = True
     ttft: float = 1000.0
     tpot: float = 50.0
     # When True (default), sweep TPOT over the legacy grid to build the full Pareto
@@ -380,8 +378,15 @@ class Task:
     enable_wideep: bool = False
     enable_chunked_prefill: bool = False
     enable_eplb: bool = False
-    nextn: int | None = None
-    nextn_accept_rates: list[float] = field(default_factory=lambda: list(_DEFAULT_NEXTN_ACCEPT_RATES))
+    # MTP speculative decoding is OFF unless explicitly requested: nextn is the
+    # draft length (compute cost), nextn_accepted the average accepted draft tokens
+    # per step (generation benefit, 0 <= nextn_accepted <= nextn). nextn_accepted is
+    # required when nextn > 0 -- there is no built-in acceptance assumption.
+    # nextn="auto" resolves the draft depth from the checkpoint's
+    # num_nextn_predict_layers (absent/0 -> disabled); the acceptance value is
+    # still never inferred.
+    nextn: int | str = 0
+    nextn_accepted: float | None = None
     moe_backend: str | None = None
     attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
@@ -575,8 +580,17 @@ class Task:
 
     def __post_init__(self) -> None:
         self._check_prefix_discipline()
+        # Validate the MTP pair BEFORE model-identity resolution: the latter is
+        # skipped when no primary model path is set, and the check must not
+        # depend on it (non-negative integer nextn; finite acceptance in range).
+        # nextn="auto" is the one exception: its depth comes from the checkpoint,
+        # so it is resolved and validated in _resolve_model_identity.
+        if self.nextn != "auto":
+            self.nextn, self.nextn_accepted = normalize_speculative_decoding(self.nextn, self.nextn_accepted)
         self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
+        if self.nextn == "auto":
+            raise ValueError("nextn='auto' requires a model path to resolve num_nextn_predict_layers.")
         self._resolve_backend_version()
         self._normalize_wideep_moe_backend()
         self._resolve_quant_modes()
@@ -677,24 +691,47 @@ class Task:
 
         text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(self._architecture)
         cfg = self._raw_config[text_key] if text_key and text_key in self._raw_config else self._raw_config
-        # ``None`` distinguishes "field absent" from an explicit 0 (e.g. Kimi-K2.5).
+        # MTP is never enabled implicitly: nextn defaults to 0 and must be set
+        # explicitly. Surface a hint when the checkpoint ships MTP layers.
         hf_nextn = cfg.get("num_nextn_predict_layers")
-        if self.nextn is not None:
-            # User-supplied value wins. Warn when it diverges from the checkpoint --
-            # nextn can stack extra MTP layers beyond what the checkpoint ships, so
-            # an override is a deliberate choice worth surfacing.
+        if self.nextn == "auto":
+            # "auto" trusts the checkpoint for the draft DEPTH only; the
+            # acceptance value is a workload measurement and is never inferred.
+            resolved = int(hf_nextn or 0)
+            if resolved > 0:
+                try:
+                    resolved, self.nextn_accepted = normalize_speculative_decoding(resolved, self.nextn_accepted)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"nextn='auto' resolved to nextn={resolved} from the checkpoint's "
+                        f"num_nextn_predict_layers: {exc}"
+                    ) from exc
+                logger.info(
+                    "nextn='auto': modeling MTP with nextn=%d from the checkpoint's num_nextn_predict_layers.",
+                    resolved,
+                )
+            else:
+                logger.info(
+                    "nextn='auto': checkpoint ships no MTP layers (num_nextn_predict_layers absent or 0); "
+                    "modeling WITHOUT speculative decoding."
+                )
+            self.nextn = resolved
+        if self.nextn > 0:
+            # Range/required-ness already validated in __post_init__ (validate_nextn).
             if hf_nextn is not None and self.nextn != hf_nextn:
                 logger.warning(
-                    "nextn=%d overrides the checkpoint's num_nextn_predict_layers=%d (stacking additional MTP layers).",
+                    "nextn=%d differs from the checkpoint's num_nextn_predict_layers=%d "
+                    "(the single MTP module is reused for extra draft steps).",
                     self.nextn,
                     hf_nextn,
                 )
-        elif hf_nextn is not None:
-            # Checkpoint declares it explicitly (including 0) -- respect it.
-            self.nextn = hf_nextn
-        else:
-            # Field absent -> fall back to family-based default inference.
-            self.nextn = 1 if self._model_family in _MTP_DEFAULT_FAMILIES else 0
+        elif hf_nextn:
+            logger.info(
+                "Checkpoint ships MTP (num_nextn_predict_layers=%d) but nextn is not set; "
+                "modeling WITHOUT speculative decoding. Pass nextn (or nextn='auto') and "
+                "nextn_accepted to model it.",
+                hf_nextn,
+            )
 
     def _resolve_backend_version(self) -> None:
         def _resolve(system: str, backend: str, current: str | None) -> str | None:
@@ -1127,8 +1164,8 @@ class Task:
             kvcache_quant_mode=self._role_attr(role, "kvcache_quant_mode"),
             fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
-            nextn=self.nextn or 0,
-            nextn_accept_rates=self.nextn_accept_rates,
+            nextn=self.nextn,
+            enable_encoder_dp=self.enable_encoder_dp,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
             # moe_backend / attention_backend / wideep_num_slots are shared across roles
@@ -1141,6 +1178,10 @@ class Task:
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
         )
+
+    def build_speculative_profile(self) -> SpeculativeDecodingProfile:
+        """Build the upper-layer expected-progress assumption for prediction."""
+        return SpeculativeDecodingProfile.from_inputs(self.nextn, self.nextn_accepted)
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
         """Yield (tp, pp, dp, moe_tp, moe_ep, cp) tuples for the role.
@@ -1347,6 +1388,13 @@ class Task:
                 return  # DB doesn't record support for this op; skip
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
+                return
+            # Modes that normalize to a different table name for perf queries
+            # (nvfp4_wo -> bfloat16, w4a16_mxfp4_cutlass -> w4a16_mxfp4) are
+            # accepted when the target table mode is supported.
+            validation_aliases = {"nvfp4_wo": "bfloat16", "w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            alias = validation_aliases.get(name)
+            if alias and alias in modes:
                 return
             if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
                 return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
@@ -1571,6 +1619,7 @@ class Task:
             return sweep_agg(
                 **self.sweep_agg_kwargs(database=database),
                 predictor=self.predictor,
+                speculative_profile=self.build_speculative_profile(),
             )
         if self.serving_mode == "disagg":
             prefill_database = self._load_database(
@@ -1583,6 +1632,7 @@ class Task:
                 **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
                 autoscale=autoscale,
                 predictor=self.predictor,
+                speculative_profile=self.build_speculative_profile(),
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
 
@@ -1659,6 +1709,7 @@ class Task:
             runtime_config=runtime_config,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
             **backend_kwargs,
         )
         if summary.check_oom():
@@ -1735,6 +1786,7 @@ class Task:
             role="prefill",
             latency_correction=self.prefill_latency_correction,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
         )
         if p_summary.check_oom():
             raise RuntimeError(
@@ -1763,6 +1815,7 @@ class Task:
             role="decode",
             latency_correction=self.decode_latency_correction,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
         )
         if d_summary.check_oom():
             raise RuntimeError(

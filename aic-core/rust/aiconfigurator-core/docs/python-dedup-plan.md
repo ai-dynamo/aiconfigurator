@@ -40,7 +40,7 @@ the `perf_database.py` latency-query methods, and the Python op-walk in
 The Rust path exists but is **opt-in**: `should_use_rust_engine_step`
 (`sdk/rust_engine_step.py:222`) returns `"python"` unless
 `runtime_config.engine_step_backend == "rust"` or the env var is set. Every
-default CLI / SDK / webapp run still walks ops in Python.
+default CLI / SDK run still walks ops in Python.
 
 Phase 2 makes Rust the default execution path and removes the duplicated
 Python latency code.
@@ -92,7 +92,7 @@ Every candidate is **partial** — none of these files is deleted whole.
 | `sdk/operations/*.py` | 11 952 | `query()` methods + query-time helpers (the latency math, dominant fraction) | `__init__`, attribute storage, `get_weights()`, `get_*` config accessors | `compile_engine` (`_to_opspec`) + memory model depend on the kept parts. |
 | `sdk/backends/base_backend.py` | 1 429 | Python step-latency branch: `_run_context_phase`, `_run_generation_phase`, the `else` after `should_use_rust_engine_step`, Python mixed/decode-step math | agg-sweep scheduler (`run_agg`, `find_best_agg_result_under_constraints`), `_get_memory_usage`, Rust-routing branch, cache-key helpers | After the flip the Python branch is dead; the scheduler still drives and calls the Rust step helpers. |
 | `sdk/perf_database.py` | 2 474 | latency-query methods (`query_gemm`/`query_attention`/`query_moe`/… — callers were `operations.query()`, now deleted) | parquet loaders, `system_spec`, weight/metadata accessors, support-matrix reads | Consumed by memory model, support matrix, `task.py`, `predict*` — those stay. |
-| `sdk/interpolation.py` | 785 | nothing yet | all | Still used by `perf_database.py` (kept readers) and `webapp/.../profiling`. The `operations/*.py` callers go away, but it is not orphaned. Re-audit at delete time. |
+| `sdk/interpolation.py` | 785 | nothing yet | all | Still used by `perf_database.py` (kept readers). The `operations/*.py` callers go away, but it is not orphaned. Re-audit at delete time. |
 | `sdk/inference_session.py` | 1 888 | nothing structural | all | `run_static`/`run_agg` are thin delegations to `base_backend`; the op-walk is not here. Stays as orchestration. |
 | `sdk/rust_engine_step.py` | 479 | the `should_use_rust_engine_step` gate (once `"python"` is removed) | the Rust step-estimate helpers + handle cache | Becomes unconditional; the live bridge. |
 
@@ -157,8 +157,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 
 - Re-running collectors or regenerating perf-DB data.
 - Perf-DB schema or support-matrix CSV format changes.
-- CLI / generator / Pareto / webapp behaviour changes (the flip is internal
-  to `sdk/`; webapp keeps its `interpolation.py` use).
+- CLI / generator / Pareto behaviour changes (the flip is internal to `sdk/`).
 - The Dynamo-side `estimate_num_gpu_blocks` rewrite — completed downstream in
   the Dynamo repo; no longer tracked here.
 - The `#1208` OOM-budget-sharing follow-up.
@@ -170,7 +169,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 | Default flip silently regresses a DRIFT family. | P0 gate: triage/accept the residual DRIFT (4 in the completed scan) before P1. |
 | Deleting Python destroys the differential oracle. | Gate 2: capture goldens + rewire tests before any deletion. |
 | `query()` deletion nicks a kept consumer (memory / OpSpec walk). | AST pass to confirm `query()` has no caller outside the deleted branch; `get_weights()` / attrs / loaders explicitly retained. |
-| `interpolation.py` assumed dead but webapp/perf-DB still use it. | Marked "keep, re-audit"; not in P3's delete set without a fresh consumer grep. |
+| `interpolation.py` assumed dead but perf-DB still uses it. | Marked "keep, re-audit"; not in P3's delete set without a fresh consumer grep. |
 | `rust_engine_step` handle cache or rayon introduces non-determinism once it is the only path. | Smoke harness runs `RAYON_NUM_THREADS=1` and `=8`, asserts identical output (carried over from Phase 1.5 E5). |
 
 ## Acceptance criteria
@@ -180,7 +179,7 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 2. **Goldens replace the live oracle**; parity tests are Rust-vs-golden and green.
 3. **Python `query()` latency math removed**; `compile_engine` and
    `_get_memory_usage` unaffected (their kept dependencies proven).
-4. **No CLI / generator / Pareto / webapp behaviour change.**
+4. **No CLI / generator / Pareto behaviour change.**
 5. **LoC discipline:** net −3 to −5 kLoC on `sdk/`; `sdk/models/` unchanged.
 
 ## Pointers

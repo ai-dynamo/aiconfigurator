@@ -75,6 +75,7 @@ import json
 import multiprocessing as mp
 import pstats
 import signal
+import subprocess
 import time
 import traceback
 from collections import Counter
@@ -1110,13 +1111,13 @@ def collect_sglang(
         logger.info(f"SGLang version: {version}")
     except Exception:
         logger.exception("SGLang is not installed")
-        return
+        return None, None
 
     from collector.framework_manifest import require_collector_runtime
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
-    require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    runtime = require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
@@ -1138,7 +1139,13 @@ def collect_sglang(
     )
 
     generate_collection_summary(all_errors, "sglang", version)
-    return all_errors
+    provenance_ctx = {
+        "framework": runtime.framework,
+        "installed_version": version,
+        "runtime": runtime,
+        "collections": collections,
+    }
+    return all_errors, provenance_ctx
 
 
 def collect_vllm(
@@ -1168,7 +1175,13 @@ def collect_vllm(
         version = vllm_version
     except Exception:
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
-        return
+        return None, None
+
+    from collector.framework_manifest import require_collector_runtime
+
+    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    wideep_ops = {entry.op for entry in _wideep_registry_for_backend("vllm")}
+    runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     registry = _registry_with_requested_wideep(REGISTRY, "vllm", ops, case_plan)
     collections = build_collections(registry, "vllm", version, ops, logger=logger)
@@ -1187,7 +1200,13 @@ def collect_vllm(
     )
 
     generate_collection_summary(all_errors, "vllm", version)
-    return all_errors
+    provenance_ctx = {
+        "framework": runtime.framework,
+        "installed_version": version,
+        "runtime": runtime,
+        "collections": collections,
+    }
+    return all_errors, provenance_ctx
 
 
 def collect_trtllm(
@@ -1220,7 +1239,13 @@ def collect_trtllm(
         logger.info(f"TensorRT LLM version: {version}")
     except Exception:
         logger.exception("TensorRT LLM is not installed")
-        return
+        return None, None
+
+    from collector.framework_manifest import require_collector_runtime
+
+    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    wideep_ops = {entry.op for entry in _wideep_registry_for_backend("trtllm")}
+    runtime = require_collector_runtime("trtllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     registry = _registry_with_requested_wideep(REGISTRY, "trtllm", ops, case_plan)
     collections = build_collections(registry, "trtllm", version, ops, logger=logger)
@@ -1239,7 +1264,13 @@ def collect_trtllm(
     )
 
     generate_collection_summary(all_errors, "trtllm", version)
-    return all_errors
+    provenance_ctx = {
+        "framework": runtime.framework,
+        "installed_version": version,
+        "runtime": runtime,
+        "collections": collections,
+    }
+    return all_errors, provenance_ctx
 
 
 def generate_collection_summary(all_errors, backend, version):
@@ -1318,6 +1349,155 @@ def _all_op_names() -> list[str]:
                 seen.add(entry.op)
                 ops.append(entry.op)
     return ops
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _git_collector_ref(repo_root: Path) -> str:
+    """The repo SHA the collector ran from (design §5), "unknown" outside a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        logger.warning(f"collector_ref: `git rev-parse HEAD` failed ({error}); recording 'unknown'")
+        return "unknown"
+
+
+def _split_image_digest(image_ref: str) -> tuple[str, str | None]:
+    """Split "repo/image:tag@sha256:<hex>" into (image, digest); digest is None for bare internal images."""
+    image, sep, digest = image_ref.partition("@")
+    return image, (digest if sep else None)
+
+
+def _write_collector_provenance(
+    output_root: Path,
+    converted: list[Path],
+    provenance_ctx: dict,
+    run_errors: list[dict],
+    *,
+    backend: str,
+    checkpoint_dir: str,
+) -> None:
+    """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
+
+    Reuses the checkpoint files ResumeCheckpoint already persisted per op
+    (case ids + unresolved failures) instead of re-plumbing case-id tracking
+    through parallel_run.
+    """
+    import pyarrow.parquet as pq
+    import yaml
+
+    from collector import provenance
+
+    collections = provenance_ctx.get("collections") or []
+    ops_by_table: dict[str, list[str]] = {}
+    module_by_table: dict[str, str] = {}
+    for collection in collections:
+        table = Path(str(collection["perf_filename"])).stem
+        full_name = f"{collection['name']}.{collection['type']}"
+        ops_by_table.setdefault(table, []).append(full_name)
+        module_by_table.setdefault(table, collection["module"])
+
+    module_failure_names = {e["module"] for e in run_errors if e.get("error_type") == "ModuleCollectionFailure"}
+    checkpoint_root = Path(checkpoint_dir).expanduser().resolve() / backend
+    closures = provenance.load_closures(_REPO_ROOT / "collector" / "hash_closures.yaml")
+    collector_ref = _git_collector_ref(_REPO_ROOT)
+
+    runtime = provenance_ctx["runtime"]
+    image, image_digest = _split_image_digest(runtime.image())
+    runtime_meta = {"framework": runtime.framework, "version": runtime.version, "image": image}
+    if image_digest:
+        runtime_meta["image_digest"] = image_digest
+    collected_at = datetime.now().strftime("%Y-%m-%d")
+
+    tables: dict[str, dict] = {}
+    for parquet_path in converted:
+        table = parquet_path.stem
+        full_names = ops_by_table.get(table)
+        module = module_by_table.get(table)
+        if not full_names or module is None:
+            logger.warning(f"collection_meta: {table} has no registry mapping this run; skipping its provenance entry")
+            continue
+
+        case_ids: set[str] = set()
+        unresolved_failed = 0
+        for full_name in full_names:
+            checkpoint_path = checkpoint_root / f"{full_name}.json"
+            if not checkpoint_path.exists():
+                continue
+            try:
+                with open(checkpoint_path) as checkpoint_file:
+                    checkpoint_data = json.load(checkpoint_file)
+            except Exception as error:
+                logger.warning(f"collection_meta: failed to read checkpoint {checkpoint_path}: {error}")
+                continue
+            done = checkpoint_data.get("done", [])
+            failed = checkpoint_data.get("failed", [])
+            case_ids.update(done)
+            case_ids.update(failed)
+            unresolved_failed += len(failed)
+
+        if not case_ids:
+            # ResumeCheckpoint only writes a checkpoint file after >=1 case is
+            # marked done/failed (flush is dirty-gated), so empty case_ids
+            # means this table has ZERO checkpoint evidence: every op's
+            # checkpoint is missing or unreadable (or was hand-emptied).
+            # Finalized parquet with zero attempted cases is unattestable —
+            # fail closed instead of writing a fabricated 'complete' sidecar
+            # whose case_plan_hash covers an empty case set.
+            raise RuntimeError(
+                f"collection_meta: table '{table}' has finalized parquet ({parquet_path}) but no "
+                f"readable checkpoint evidence for any of its ops ({', '.join(full_names)}) under "
+                f"{checkpoint_root}. Zero attempted cases cannot explain produced parquet; writing "
+                "a sidecar here would attest provenance that was never observed. Verify the "
+                "checkpoint dir matches the one this collection ran with."
+            )
+
+        tables[table] = {
+            "collector_ref": collector_ref,
+            "collector_hash": provenance.collector_hash(module, _REPO_ROOT, closures),
+            "case_plan_hash": provenance.case_plan_hash(sorted(case_ids)),
+            "collected_at": collected_at,
+            "rows": pq.read_metadata(parquet_path).num_rows,
+            "status": provenance.derive_table_status(
+                unresolved_failed_count=unresolved_failed,
+                had_module_failure=any(full_name in module_failure_names for full_name in full_names),
+            ),
+        }
+
+    if not tables:
+        return
+
+    # A prior invocation against the same scratch dir (e.g. --ops split across
+    # runs) may have already written a sidecar for other tables; preserve them.
+    existing_meta = output_root / "collection_meta.yaml"
+    if existing_meta.exists():
+        try:
+            existing_doc = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as error:
+            logger.warning(f"collection_meta: could not parse existing {existing_meta}, overwriting it: {error}")
+            existing_doc = {}
+        if existing_doc.get("provenance") == "legacy":
+            raise RuntimeError(
+                f"{output_root}: existing collection_meta.yaml is a legacy-tier sidecar "
+                "(provenance: legacy). A fresh collection finalizing into this directory "
+                "must not silently merge into it — that would drop the legacy tier tag. "
+                "Remove the legacy sidecar first if this directory is being deliberately "
+                "replaced by a new collection."
+            )
+        existing_tables = existing_doc.get("tables") or {}
+        if isinstance(existing_tables, dict):
+            tables = {**existing_tables, **tables}
+
+    meta_path = provenance.write_collection_meta(output_root, runtime_meta, tables)
+    logger.info(f"Wrote collector provenance sidecar: {meta_path}")
 
 
 def main():
@@ -1597,7 +1777,7 @@ def main():
     # Use profiling context manager
     with ProfilerContext(args.backend, enabled=args.profile):
         collect_backend = {"trtllm": collect_trtllm, "sglang": collect_sglang, "vllm": collect_vllm}[args.backend]
-        run_errors = collect_backend(
+        run_errors, provenance_ctx = collect_backend(
             num_processes,
             ops,
             limit=limit,
@@ -1609,6 +1789,7 @@ def main():
             case_filters=args.case_filters,
         )
 
+    converted: list[Path] = []
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
@@ -1621,6 +1802,16 @@ def main():
         converted = finalize_perf_files(touched_perf_outputs)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
+
+    if converted and provenance_ctx is not None:
+        _write_collector_provenance(
+            output_root,
+            converted,
+            provenance_ctx,
+            run_errors or [],
+            backend=args.backend,
+            checkpoint_dir=args.checkpoint_dir,
+        )
 
     # A ModuleCollectionFailure means an op failed before running a single case
     # (population raised, or the run infrastructure crashed) — the op collected

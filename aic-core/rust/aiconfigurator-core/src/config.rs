@@ -15,13 +15,21 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
-// Bumped to 2 for the 0.10.0 op-payload layout change (context-parallelism +
-// perf-DB refactor added serialized fields such as `seq_split` / `cp_size` to
-// `OpSpec`). bincode op payloads are positional, so a producer/consumer skew is
-// only distinguishable by this version — `EngineSpec::from_bincode` reads and
+// bincode op payloads are positional, so a producer/consumer skew is only
+// distinguishable by this version — `EngineSpec::from_bincode` reads and
 // checks it before decoding the op lists. Bump whenever an `OpSpec` field
 // changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
+// History:
+// - 2 (v0.10.0): op-payload layout change — the context-parallelism +
+//   perf-DB refactor added serialized fields such as `seq_split` /
+//   `cp_size` to `OpSpec`.
+// - 3 (PR #1405): MTP acceptance moved above aic-core —
+//   `nextn_accept_rates` removed from the spec payload.
+// - 4 (PR #1355): `Msa{Context,Generation}` variants inserted (bincode enum
+//   indices after `DsaGeneration` shifted). The MSA insertion and #1405
+//   each claimed version 3 on their own branch, so their merge needed a
+//   fresh number.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 4;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -71,6 +79,20 @@ pub struct EngineConfig {
     /// specs).
     #[serde(default)]
     pub perf_db_sources: PerfDbSources,
+
+    /// Perf-database lookup mode (Python's `database._default_database_mode`).
+    /// SILICON queries collected tables only; HYBRID falls back to the
+    /// util-space empirical layer on a typed silicon miss; EMPIRICAL always
+    /// answers `SOL/util`. Absent on old specs -> Silicon (back-compat).
+    #[serde(default)]
+    pub database_mode: crate::common::enums::DatabaseMode,
+
+    /// Enabled empirical transfer kinds as explicit tokens (`xshape` /
+    /// `xquant` / `xprofile` / `xop`). Python resolves preset names before
+    /// serialising, so no preset vocabulary exists on the wire. `None` =
+    /// the default ALL-transfers policy (mirrors `common.ALL_TRANSFERS`).
+    #[serde(default)]
+    pub transfer_policy: Option<Vec<String>>,
 
     #[serde(default)]
     pub extra: BTreeMap<String, String>,
@@ -130,22 +152,15 @@ pub struct QuantizationConfig {
 
 /// Multi-Token Prediction speculative-decoding parameters. Wrapped in
 /// `Option<>` on [`EngineConfig`] so models without MTP don't carry the
-/// noise, and `#[serde(flatten)]`-ed so the flat wire keys (`nextn`,
-/// `nextn_accept_rates`) parse unchanged.
+/// noise, and `#[serde(flatten)]`-ed so the flat wire key (`nextn`) parses
+/// unchanged. Accepted-token progress is modeled above `aic-core`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SpeculativeConfig {
-    /// Multi-Token Prediction speculative decoding depth (Python's
-    /// `task_config.nextn`). `None`/0 disables MTP scaling. Python sets this
-    /// to 1 for DeepSeek-family + Qwen3.5 models (`sdk/task.py:448-449`);
-    /// other families leave it at 0/None.
+    /// Multi-Token Prediction speculative decoding depth / draft length
+    /// (Python's `task_config.nextn`). `None`/0 disables MTP scaling. MTP is
+    /// never auto-enabled; the user opts in explicitly.
     #[serde(default)]
     pub nextn: Option<u32>,
-
-    /// Per-step accept-rate prior used by MTP scaling. Mirrors Python's
-    /// `task_config.nextn_accept_rates` (default `[0.85, 0.3, 0.0, 0.0,
-    /// 0.0]`). Ignored when `nextn` is `None` or 0.
-    #[serde(default)]
-    pub nextn_accept_rates: Option<Vec<f64>>,
 }
 
 /// Backend performance database family.
@@ -193,6 +208,10 @@ pub enum DataType {
     W4a16Mxfp4,
     #[serde(rename = "w4a8_mxfp4_mxfp8")]
     W4a8Mxfp4Mxfp8,
+    #[serde(rename = "w4a8_mxfp4_mxfp8_trtllm")]
+    W4a8Mxfp4Mxfp8Trtllm,
+    #[serde(rename = "w4a16_mxfp4_cutlass")]
+    W4a16Mxfp4Cutlass,
 }
 
 #[cfg(test)]
@@ -224,7 +243,6 @@ mod engine_config_wire_tests {
             "kv_cache_dtype": "bfloat16",
             "kv_block_size": null,
             "nextn": null,
-            "nextn_accept_rates": null,
             "extra": {}
         }"#;
 

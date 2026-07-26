@@ -41,11 +41,15 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # vLLM 0.24.0 selects W4A16 on SM90 but W4A8 on Blackwell for this
-          # artifact. The SDK currently requests only W4A8 and its MoE key has
-          # no system/backend dimension, so neither label is consumable across
-          # platforms yet.
-          allowed_modes: []
+          # Native-FP4 serving path: DeepseekV4FP8Config -> Mxfp4MoEMethod ->
+          # trtllm-gen MXFP4xMXFP8 on the SM100 family (see the base moe_vllm
+          # w4a8_mxfp4_mxfp8 entry for the dispatch citations). The label is
+          # SM-gated there (min_sm 100 / max_sm_exclusive 120), so SM90 —
+          # where vLLM 0.24.0 serves this artifact as Marlin W4A16 — never
+          # collects under it; Hopper stays an observed gap in the failure
+          # log rather than a mislabeled row.
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
     - model_path: sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       inter_size: 2048
@@ -104,8 +108,9 @@ model_case_values:
           allowed_modes:
             - w4a8_mxfp4_mxfp8
         vllm:
-          # See the native Flash consumer-contract note above.
-          allowed_modes: []
+          # See the native Flash note above (same SM100-gated trtllm-gen path).
+          allowed_modes:
+            - w4a8_mxfp4_mxfp8
     - model_path: sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       inter_size: 3072
