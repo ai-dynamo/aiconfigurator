@@ -87,3 +87,54 @@ jobs:
           name: changed-ops
           path: changed-ops.yaml
           retention-days: 30
+
+  # Informational (never blocks the PR): full-tree cross-backend consistency
+  # sweep (~4 min). Unlike the check job above, this reads parquet CONTENT and
+  # therefore pulls LFS (the whole data tree is ~124 MB compressed).
+  # continue-on-error also covers fork PRs that cannot authenticate to LFS.
+  # Gate mode (--fail-on-anomalies with per-kind thresholds) is deliberately
+  # NOT enabled until the existing finding backlog is triaged.
+  cross-backend-consistency:
+    name: Cross-backend consistency (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code (with LFS)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install check script dependencies
+        run: pip install pandas pyarrow numpy pyyaml "tqdm>=4.0.0"
+
+      - name: Cross-backend consistency check
+        run: |
+          python3 tools/perf_database/check_cross_backend.py \
+            --out-md cross-backend-consistency.md \
+            --out-json cross-backend-consistency.json
+
+      - name: Post triage section to job summary
+        run: |
+          {
+            sed -n '/^# Cross-backend/,/^## Layer 1/p' cross-backend-consistency.md | sed '$d'
+            echo ""
+            echo "_Full report in the \`cross-backend-consistency\` artifact._"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload consistency report artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cross-backend-consistency
+          path: |
+            cross-backend-consistency.md
+            cross-backend-consistency.json
+          retention-days: 30

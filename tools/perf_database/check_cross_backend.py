@@ -139,11 +139,21 @@ _DELTA_LATENCY_OP_FILES = {
     "glm5_topk_module_perf.parquet",
 }
 
-# Layer-1 kinds that trip --fail-on-anomalies. machine_op_deviation is a hint
-# by design (version skew / hardware-ratio spread) and stays ungated.
-_GATED_KINDS = frozenset(
-    {"nonpositive_latency", "below_sol", "pair_outlier", "region_deviation", "mono_violation", "spike_violation"}
-)
+# --fail-on-anomalies trips when a kind's tally EXCEEDS its allowance below
+# (override per kind with --gate-threshold KIND=N). Tallies: nonpositive rows
+# and below-SOL points are summed; other kinds count findings. Rationale for
+# the nonzero defaults: point outliers / regions / curve violations carry
+# statistical noise, and even below-SOL tolerates a few points of spec
+# rounding — a gate should fire on a PATTERN, not a stray point.
+# machine_op_deviation is a hint by design and stays ungated.
+_GATE_THRESHOLDS = {
+    "nonpositive_latency": 0,
+    "below_sol": 10,
+    "pair_outlier": 100,
+    "region_deviation": 20,
+    "mono_violation": 100,
+    "spike_violation": 50,
+}
 
 _PRE_RELEASE_TAGS = {"rc", "a", "b", "c", "alpha", "beta", "dev", "pre", "preview"}
 
@@ -1428,7 +1438,16 @@ def main() -> None:
     parser.add_argument("--out-md", type=Path, default=None, help="Write the Markdown report.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write all findings as JSON.")
     parser.add_argument(
-        "--fail-on-anomalies", action="store_true", help="Exit nonzero when Layer 1 anomalies are found (CI gate mode)."
+        "--fail-on-anomalies",
+        action="store_true",
+        help="Exit nonzero when any gated kind's tally exceeds its threshold (CI gate mode).",
+    )
+    parser.add_argument(
+        "--gate-threshold",
+        action="append",
+        default=[],
+        metavar="KIND=N",
+        help=f"Override a gate allowance, repeatable (defaults: {_GATE_THRESHOLDS}).",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -1441,6 +1460,12 @@ def main() -> None:
         parser.error("--offset-factor must be > 1")
     if args.spike_factor <= 1.0:
         parser.error("--spike-factor must be > 1")
+    gate_thresholds = dict(_GATE_THRESHOLDS)
+    for spec in args.gate_threshold:
+        kind, _, n = spec.partition("=")
+        if kind not in gate_thresholds or not n.isdigit():
+            parser.error(f"--gate-threshold expects KIND=N with KIND in {sorted(gate_thresholds)}")
+        gate_thresholds[kind] = int(n)
 
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
@@ -1524,8 +1549,23 @@ def main() -> None:
             f"refs: {', '.join(c['reference_backends'])}"
         )
 
-    if args.fail_on_anomalies and any(a["kind"] in _GATED_KINDS for a in anomalies):
-        raise SystemExit(1)
+    if args.fail_on_anomalies:
+        tallies: Counter[str] = Counter()
+        for a in anomalies:
+            if a["kind"] == "nonpositive_latency":
+                tallies[a["kind"]] += a["rows"]
+            elif a["kind"] == "below_sol":
+                tallies[a["kind"]] += a["points"]
+            elif a["kind"] in gate_thresholds:
+                tallies[a["kind"]] += 1
+        breaches = {k: n for k, n in tallies.items() if n > gate_thresholds[k]}
+        if breaches:
+            print(
+                "\nGATE FAILED — tallies over allowance: "
+                + ", ".join(f"{k}: {n} (allowed {gate_thresholds[k]})" for k, n in sorted(breaches.items()))
+            )
+            raise SystemExit(1)
+        print("\nGATE OK — all tallies within allowance")
 
 
 if __name__ == "__main__":
