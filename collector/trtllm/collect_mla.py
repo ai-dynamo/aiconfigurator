@@ -201,10 +201,17 @@ def run_mla(
     # default path (attn_backend='TRTLLM', llm_args.py:4544; no SM-conditional
     # switch in modeling_deepseekv3.py). This is a REGRESSION, not a permanent
     # architectural wall: trtllm 1.0.0 collected full SM89 MLA data
-    # (l40s/mla/trtllm/1.0.0: 2436 ctx + 5068 gen rows), and since 1.3.0rc15
-    # the tree only carries an approved reuse of that 1.0.0 data. Fail closed
-    # with a cited, classified raise (Gemma4/DSA precedent). Re-verify on the
-    # next framework version bump.
+    # (l40s/mla/trtllm/1.0.0: 2436 ctx + 5068 gen rows, bf16 AND fp8 KV), and
+    # since 1.3.0rc15 the tree only carries an approved reuse of that 1.0.0
+    # data. Root cause (source diff v1.0.0 vs v1.3.0rc20): MLA context moved
+    # from the PACKED_QKV/Q_PAGED_KV layouts (whose hd192 kernels SM89 had)
+    # to SEPARATE_Q_K_V, and the new layout's kernel-generation whitelist is
+    # `kspec.sm in [90, 100, 120]` — SM89 absent
+    # (cpp/kernels/fmha_v2/setup.py:6926-6931@v1.3.0rc20); the hand-added
+    # sm89 576x512 generation cubin entry from 1.0.0 was dropped in the same
+    # window. Layout-level, so it kills every dtype at once. Fail closed with
+    # a cited, classified raise (Gemma4/DSA precedent). Re-verify on the next
+    # framework version bump.
     if get_sm_version() < 90:
         phase = "context" if is_context_phase else "generation"
         raise ValueError(
