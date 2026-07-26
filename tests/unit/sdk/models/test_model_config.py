@@ -1471,3 +1471,35 @@ class TestMLAModuleQueryKeys:
                 assert op.get_weights() / (1 << 30) == pytest.approx(11.49, abs=0.05)
                 return
         raise AssertionError("context_mla_block not found")
+
+
+class TestDSV32NVFP4AttentionExclusion:
+    """The DSA attention/shared-expert dtype exclusion is checkpoint-driven,
+    not GLM-gated: nvidia/DeepSeek-V3.2-NVFP4 excludes every self_attn*
+    (including the indexer) exactly like the GLM-5 NVFP4 releases, and vLLM
+    honors ModelOpt exclude_modules wildcards for any architecture."""
+
+    @staticmethod
+    def _build(hf_id: str):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        return models.get_model(hf_id, model_config, backend_name="vllm")
+
+    def test_dsv32_nvfp4_gets_bf16_dsa_gemm_mode(self):
+        model = self._build("nvidia/DeepSeek-V3.2-NVFP4")
+        assert model.extra_params.get("dsa_gemm_quant_mode") == common.GEMMQuantMode.bfloat16
+
+    def test_dsv32_official_keeps_global_mode(self):
+        # deepseek-ai/DeepSeek-V3.2 quantizes attention (empty ignore list):
+        # no bf16 override may be injected.
+        model = self._build("deepseek-ai/DeepSeek-V3.2")
+        assert "dsa_gemm_quant_mode" not in model.extra_params

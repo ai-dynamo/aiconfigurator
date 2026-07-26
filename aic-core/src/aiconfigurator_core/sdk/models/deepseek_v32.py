@@ -112,13 +112,16 @@ class DeepSeekV32Model(BaseModel):
             model_config,
         )
         extra_params = dict(model_info["extra_params"])
-        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _dsa_attention_modules_excluded_from_quant(
-            model_info.get("raw_config", {})
-        ):
+        # Checkpoint-driven, not architecture-gated: nvidia/DeepSeek-V3.2-NVFP4
+        # excludes every self_attn* (incl. the indexer) exactly like the GLM-5
+        # NVFP4 releases, and vLLM honors ModelOpt exclude_modules wildcards for
+        # any architecture (hf_quant_config.json is read in
+        # transformers_utils/config.py:726; excluded prefixes fall back to the
+        # unquantized path via ModelOptNvFp4Config.is_layer_excluded /
+        # is_layer_skipped, modelopt.py:150-161 @0.24.0).
+        if _dsa_attention_modules_excluded_from_quant(model_info.get("raw_config", {})):
             extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
-        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _shared_experts_excluded_from_quant(
-            model_info.get("raw_config", {})
-        ):
+        if _shared_experts_excluded_from_quant(model_info.get("raw_config", {})):
             extra_params.setdefault("dsa_shared_expert_quant_mode", common.GEMMQuantMode.bfloat16)
         # GLM-5.2 shares one DSA topk index across ``index_topk_freq`` layers
         # (GLM-5 / DeepSeek-V3.2 omit it => 1). The DSA modules amortize the
