@@ -26,7 +26,10 @@ import pytest
 # module pytest-xdist imports first on the worker (same pattern as
 # test_dsv4_megamoe_workload). Evict the mock, import the real torch (or
 # skip when it isn't installed), then put the mock back for the siblings
-# that rely on it.
+# that rely on it. The restore lives in a `finally` so even an unexpected
+# import failure (e.g. an OSError loading torch's native libraries) cannot
+# leave the eviction in place; do NOT let collect.py see the real torch —
+# its fork-worker tests deadlock on macOS with a real torch cached.
 _saved_mock = sys.modules.get("torch")
 _restore_mock = isinstance(_saved_mock, MagicMock)
 if _restore_mock:
@@ -34,11 +37,11 @@ if _restore_mock:
 try:
     import torch
 except ImportError:
+    # pytest.skip raises; the mock is restored by the finally during unwind.
+    pytest.skip("real torch required for tensor operations", allow_module_level=True)
+finally:
     if _restore_mock:
         sys.modules["torch"] = _saved_mock
-    pytest.skip("real torch required for tensor operations", allow_module_level=True)
-if _restore_mock:
-    sys.modules["torch"] = _saved_mock
 
 from collector.helper import (
     _generate_power_law_distribution,
