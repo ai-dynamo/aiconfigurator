@@ -1150,7 +1150,9 @@ def get_quant_tc_flops(system_spec: dict, quant_mode) -> float:
     # be a placeholder or a typo, and letting it through turns every SOL into
     # inf and load-time clamps into silent data corruption.
     value = system_spec["gpu"].get(key)
-    if value is None or value <= 0:
+    # `not value > 0` (rather than `value <= 0`) also rejects NaN, matching
+    # the Rust resolver's `filter(|v| *v > 0.0)`.
+    if value is None or not value > 0:
         raise MissingSystemFlopsError(
             f"quant mode '{quant_mode.value.name}' needs '{key}', which this system's YAML "
             f"does not define (or defines as a non-positive placeholder): either the platform "

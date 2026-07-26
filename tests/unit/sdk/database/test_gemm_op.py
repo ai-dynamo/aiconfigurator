@@ -97,6 +97,9 @@ class TestStaticHelpers:
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 0}}
         with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
             common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": float("nan")}}
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
 
     def test_get_quant_tc_flops_memory_only_mode_raises(self):
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0}}

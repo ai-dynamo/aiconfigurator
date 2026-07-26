@@ -1076,8 +1076,10 @@ class WideEPGenerationMLA(Operation):
         """Query WideEP generation MLA table. Verbatim port of the legacy body."""
         # Strict eager resolution (parity with the Rust engine, which resolves
         # flops with `?` at query entry): reject a missing *_tc_flops entry up
-        # front — a SILICON exact hit never invokes the get_sol closure.
-        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
+        # front — a SILICON exact hit never invokes the get_sol closure. The
+        # fmha label is inert for generation SOL (re-derived from the kv dtype
+        # just below), so validate the DERIVED dtype, not the label.
+        generation_attn_flops(database.system_spec, kvcache_quant_mode)
         common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (kernel tables key on kv dtype).

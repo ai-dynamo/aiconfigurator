@@ -100,6 +100,34 @@ class TestEagerResolution:
                 database_mode=database_mode,
             )
 
+    def test_wideep_generation_mla_validates_derived_dtype_not_label(self, comprehensive_perf_db, monkeypatch):
+        """The generation SOL dtype is re-derived from the kv-cache dtype; the
+        fmha label is inert. The eager check must follow the derivation: an
+        fp8 KV with a bf16 label needs fp8_tc_flops (no exact-hit bypass),
+        while a bf16 KV with an fp8 label must not be falsely rejected."""
+        gpu = comprehensive_perf_db.system_spec["gpu"]
+        monkeypatch.delitem(gpu, "fp8_tc_flops", raising=False)
+
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            comprehensive_perf_db.query_wideep_generation_mla(
+                4,
+                1024,
+                8,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.bfloat16,
+                database_mode=common.DatabaseMode.SOL,
+            )
+
+        result = comprehensive_perf_db.query_wideep_generation_mla(
+            4,
+            1024,
+            8,
+            common.KVCacheQuantMode.bfloat16,
+            common.FMHAQuantMode.fp8,
+            database_mode=common.DatabaseMode.SOL,
+        )
+        assert float(result) > 0
+
     def test_gemm_missing_fp8_entry_rejected_in_silicon_mode(self, stub_perf_db, monkeypatch):
         """SILICON specifically: an exact table hit must not bypass the check."""
         gpu = stub_perf_db.system_spec["gpu"]
