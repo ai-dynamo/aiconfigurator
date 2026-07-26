@@ -349,6 +349,12 @@ class ContextDSAModule(Operation):
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table
         (``_context_dsa_module_skip_data``) instead of the full table; all other
         lookup logic is identical."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -1144,6 +1150,12 @@ class GenerationDSAModule(Operation):
     ):
         """Query generation DSA module table.
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module

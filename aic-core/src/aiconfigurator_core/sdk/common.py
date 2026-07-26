@@ -1146,11 +1146,15 @@ def get_quant_tc_flops(system_spec: dict, quant_mode) -> float:
     if compute_dtype is None:
         raise MissingSystemFlopsError(f"quant mode '{quant_mode.value.name}' is memory-only and has no compute FLOPS")
     key = _COMPUTE_DTYPE_TO_FLOPS_KEY[compute_dtype]
-    gpu = system_spec["gpu"]
-    if key not in gpu:
+    # A non-positive value is treated the same as a missing entry: it can only
+    # be a placeholder or a typo, and letting it through turns every SOL into
+    # inf and load-time clamps into silent data corruption.
+    value = system_spec["gpu"].get(key)
+    if value is None or value <= 0:
         raise MissingSystemFlopsError(
             f"quant mode '{quant_mode.value.name}' needs '{key}', which this system's YAML "
-            f"does not define: either the platform does not support {compute_dtype} compute "
-            f"and the quant mode cannot be modeled on it, or the system YAML is missing the entry."
+            f"does not define (or defines as a non-positive placeholder): either the platform "
+            f"does not support {compute_dtype} compute and the quant mode cannot be modeled on "
+            f"it, or the system YAML is missing the entry."
         )
-    return gpu[key]
+    return value

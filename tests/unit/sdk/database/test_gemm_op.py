@@ -90,6 +90,14 @@ class TestStaticHelpers:
         with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
             common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.nvfp4)
 
+    def test_get_quant_tc_flops_non_positive_entry_raises(self):
+        """A zero/negative entry is a placeholder or a typo: letting it
+        through would turn SOL into inf and load-time clamps into silent
+        data corruption, so it is rejected like a missing entry."""
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 0}}
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+
     def test_get_quant_tc_flops_memory_only_mode_raises(self):
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0}}
         with pytest.raises(MissingSystemFlopsError, match="memory-only"):

@@ -353,6 +353,10 @@ class DeepSeekV4MHCModule(Operation):
         The SOL estimate models the combined attention-site and FFN-site mHC work
         inside one decoder layer, matching the collector's module boundary.
         """
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         cls.load_data(database)
 
@@ -795,6 +799,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         prefix: int = 0,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         cls.load_data(database)
 
         def get_sol(b_: int = b, s_: int = s, prefix_: int = prefix) -> tuple[float, float, float]:
@@ -1245,6 +1256,12 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
         cls.load_data(database)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (the table keys on kv dtype).  Derive

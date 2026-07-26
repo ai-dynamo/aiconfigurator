@@ -296,6 +296,10 @@ class MoE(Operation):
         enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_moe`` body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         cls.load_data(database)
@@ -1592,6 +1596,10 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         cls.load_data(database)
 
         num_gemms = 3 if is_gated else 2

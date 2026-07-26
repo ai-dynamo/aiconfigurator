@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use super::{kernel_source_ok, resolve_op_sources};
-use crate::common::enums::{ComputeDtype, GemmQuantMode, QuantMapping};
+use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
@@ -301,35 +301,10 @@ pub(crate) fn gemm_sol_latency_ms_with_flops(
     sol_math.max(sol_mem)
 }
 
-/// Strict tensor-core FLOPS resolver. Mirrors Python
-/// `common.get_quant_tc_flops`: the quant mode's `compute_dtype` selects the
-/// `<dtype>_tc_flops` spec entry; a missing entry is an error (the platform
-/// either lacks hardware for that dtype or the YAML is incomplete) — never
-/// a `bfloat16_tc_flops * compute_factor` extrapolation.
-pub(crate) fn quant_tc_flops(spec: &SystemSpec, mapping: QuantMapping) -> Result<f64, AicError> {
-    let Some(dtype) = mapping.compute_dtype else {
-        return Err(AicError::MissingSystemFlops(format!(
-            "quant mode '{}' is memory-only and has no compute FLOPS",
-            mapping.name
-        )));
-    };
-    let value = match dtype {
-        ComputeDtype::Bfloat16 => spec.gpu.bfloat16_tc_flops,
-        ComputeDtype::Int8 => spec.gpu.int8_tc_flops,
-        ComputeDtype::Fp8 => spec.gpu.fp8_tc_flops,
-        ComputeDtype::Fp4 => spec.gpu.fp4_tc_flops,
-    };
-    value.ok_or_else(|| {
-        AicError::MissingSystemFlops(format!(
-            "quant mode '{}' needs '{}', which this system's YAML does not define: either the \
-             platform does not support {:?} compute and the quant mode cannot be modeled on it, \
-             or the system YAML is missing the entry.",
-            mapping.name,
-            dtype.flops_key(),
-            dtype
-        ))
-    })
-}
+// Strict resolver lives in common/system_spec.rs (it depends only on
+// common-layer types); re-exported here because every SOL caller in the
+// perf_database/operators layers already imports it from this module.
+pub(crate) use crate::common::system_spec::quant_tc_flops;
 
 /// In-place SOL clamp for every entry in the GEMM grid set.
 ///

@@ -423,6 +423,10 @@ class GEMM(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query GEMM table — preserves PR #721 exact-hit → 1D → 3D fast path."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         def get_sol(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> tuple[float, float, float]:
             tc_flops = common.get_quant_tc_flops(database.system_spec, qm)
