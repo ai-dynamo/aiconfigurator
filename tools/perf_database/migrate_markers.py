@@ -22,7 +22,7 @@ migration, PR 2, already made every marker dir single-family):
   cross-version shape-filling is wrong there). A `SHARED_LAYER_REUSE.txt`
   marker inside a `<system>/comm/<backend>/<version>` dir is deleted with NO
   `reuse.yaml` emitted — a comm `reuse.yaml` would be a standing
-  contradiction of that rule, and PR 4's loader/CI audit must never see one.
+  contradiction of that rule, and PR 4's loader/CI check must never see one.
 - `INCOMPLETE.txt` -> `collection_meta.yaml`: a synthesized `provenance:
   legacy` sidecar (T6 amendment to design §5 — no hashes, since legacy data
   predates the collector's provenance writer) marking every table the

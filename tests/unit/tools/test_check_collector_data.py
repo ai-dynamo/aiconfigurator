@@ -12,7 +12,7 @@ for family-placement checks -- same convention as
 (`gemm_perf`/`gemm`, `context_attention_perf`/`attention`,
 `custom_allreduce_perf`/`comm`) are real catalog entries, not fixtures.
 
-Also runs the audit against the REAL data tree
+Also runs the checks against the REAL data tree
 (aic-core/src/aiconfigurator_core/systems/data) -- this is the CI-riding
 gate: it must pass on the tree as committed.
 """
@@ -125,17 +125,17 @@ def _build_compliant_tree(root: Path) -> None:
 
 def test_compliant_tree_is_all_green(mod, tmp_path):
     _build_compliant_tree(tmp_path)
-    results = mod.run_audit(tmp_path, REAL_CATALOG)
+    results = mod.run_checks(tmp_path, REAL_CATALOG)
     for rule, failures in results.items():
         assert failures == [], f"{rule} unexpectedly failed: {failures}"
 
 
 def test_compliant_tree_render_report_ok(mod, tmp_path):
     _build_compliant_tree(tmp_path)
-    results = mod.run_audit(tmp_path, REAL_CATALOG)
+    results = mod.run_checks(tmp_path, REAL_CATALOG)
     report, failed = mod.render_report(results)
     assert failed is False
-    assert "audit OK" in report
+    assert "check OK" in report
     for rule in mod.RULES:
         assert f"[OK]   {rule}" in report
 
@@ -361,13 +361,13 @@ class TestR6NoLegacyMarkers:
 
 
 # ---------------------------------------------------------------------------
-# orchestration: run_audit / render_report / main
+# orchestration: run_checks / render_report / main
 # ---------------------------------------------------------------------------
 
 
 class TestOrchestration:
-    def test_run_audit_missing_data_root_fails_closed(self, mod, tmp_path):
-        results = mod.run_audit(tmp_path / "does-not-exist", REAL_CATALOG)
+    def test_run_checks_missing_data_root_fails_closed(self, mod, tmp_path):
+        results = mod.run_checks(tmp_path / "does-not-exist", REAL_CATALOG)
         assert results["R1"] and "does not exist" in results["R1"][0]
         assert results["R2"] and "does not exist" in results["R2"][0]
         assert results["R6"] and "does not exist" in results["R6"][0]
@@ -377,11 +377,11 @@ class TestOrchestration:
 
     def test_render_report_groups_failures_by_rule(self, mod, tmp_path):
         _touch(tmp_path, "h200_sxm/gemm/sglang/0.5.10/SHARED_LAYER_REUSE.txt")
-        results = mod.run_audit(tmp_path, REAL_CATALOG)
+        results = mod.run_checks(tmp_path, REAL_CATALOG)
         report, failed = mod.render_report(results)
         assert failed is True
         assert "[FAIL] R6" in report
-        assert "collector data audit FAILED" in report
+        assert "collector data check FAILED" in report
 
     def test_main_exit_code_nonzero_on_failure(self, mod, tmp_path, capsys):
         _touch(tmp_path, "h200_sxm/gemm/sglang/0.5.10/SHARED_LAYER_REUSE.txt")
@@ -393,7 +393,7 @@ class TestOrchestration:
         _build_compliant_tree(tmp_path)
         rc = mod.main(["--data-root", str(tmp_path), "--catalog", str(REAL_CATALOG)])
         assert rc == 0
-        assert "audit OK" in capsys.readouterr().out
+        assert "check OK" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -401,10 +401,10 @@ class TestOrchestration:
 # ---------------------------------------------------------------------------
 
 
-def test_real_tree_passes_the_audit(mod):
-    """This is the gate collector-audit.yml runs on every PR: the committed
+def test_real_tree_passes_the_check(mod):
+    """This is the gate collector-check.yml runs on every PR: the committed
     data tree, as-is, must satisfy every rule.
     """
-    results = mod.run_audit(REAL_DATA_ROOT, REAL_CATALOG)
+    results = mod.run_checks(REAL_DATA_ROOT, REAL_CATALOG)
     report, failed = mod.render_report(results)
     assert not failed, report

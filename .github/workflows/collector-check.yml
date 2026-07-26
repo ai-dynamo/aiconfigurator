@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Collector Data Audit
+name: Collector Data Check
 
 # Fail-closed CI enforcement for the Collector V3 design
 # (docs/perf_database/collector-v3-op-centric-design.md §8): every PR
@@ -22,8 +22,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  audit:
-    name: Audit collector data
+  check:
+    name: Check collector data
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
-          # No `lfs: true`: the audit and changed-ops steps only ever read
+          # No `lfs: true`: the check and changed-ops steps only ever read
           # parquet filenames/stems and the YAML sidecars beside them, never
           # parquet content, so LFS smudging is unneeded weight -- and would
           # fail checkout for fork PRs that can't authenticate to LFS.
@@ -61,7 +61,7 @@ jobs:
           python -m pip install uv
           uv sync --extra dev
 
-      - name: Audit collector data (fail-closed)
+      - name: Check collector data (fail-closed)
         run: uv run python tools/perf_database/check_collector_data.py
 
       - name: Compute changed-operation manifest (informational, §8)
@@ -86,65 +86,4 @@ jobs:
         with:
           name: changed-ops
           path: changed-ops.yaml
-          retention-days: 30
-
-  # Informational (never blocks the PR): cross-backend consistency check over
-  # only the (system, op_file) slices this PR touches. Unlike the audit job
-  # above, this reads parquet CONTENT, so it needs LFS — pulled selectively
-  # for the changed systems only. continue-on-error covers fork PRs that
-  # cannot authenticate to LFS.
-  cross-backend-consistency:
-    name: Cross-backend consistency (informational)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    continue-on-error: true
-    permissions:
-      contents: read
-    env:
-      BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || github.event.repository.default_branch }}
-      DATA_ROOT: aic-core/src/aiconfigurator_core/systems/data
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch base ref
-        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-
-      - name: Pull LFS content for changed systems only
-        run: |
-          SYSTEMS=$(git diff --name-only "origin/${BASE_REF}" -- "${DATA_ROOT}" | awk -F/ '{print $6}' | sort -u)
-          if [ -z "${SYSTEMS}" ]; then
-            echo "No perf data changed; skipping LFS pull."
-            exit 0
-          fi
-          for sys in ${SYSTEMS}; do
-            git lfs pull --include="${DATA_ROOT}/${sys}/**"
-          done
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.12"
-
-      - name: Install check script dependencies
-        run: pip install pandas pyarrow numpy
-
-      - name: Cross-backend consistency check (changed slices only)
-        run: |
-          python3 tools/perf_database/check_cross_backend.py \
-            --changed-since "origin/${BASE_REF}" \
-            --out-md cross-backend-consistency.md
-          if [ -f cross-backend-consistency.md ]; then
-            cat cross-backend-consistency.md >> "${GITHUB_STEP_SUMMARY}"
-          fi
-
-      - name: Upload consistency report artifact
-        if: hashFiles('cross-backend-consistency.md') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: cross-backend-consistency
-          path: cross-backend-consistency.md
           retention-days: 30

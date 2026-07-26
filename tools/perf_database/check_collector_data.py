@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed CI audit of the collected perf-database tree (Collector V3 §8).
+"""Fail-closed CI check of the collected perf-database tree (Collector V3 §8).
 
 The primary enforcement surface of the whole Collector V3 design: run on every
 PR touching `data/`, `collector/`, or the manifest (sibling of
@@ -25,7 +25,7 @@ Six rules, each named after the design section it enforces:
   backend field, so its donor is always resolved under the same
   `<family>/<backend>/` subtree it lives in. `from_version` may be newer or
   older than the declaring dir's own version — that asymmetry is exactly what
-  a declaration is for (§6.3); this audit does not re-derive direction.
+  a declaration is for (§6.3); this check does not re-derive direction.
 - **R3 comm exclusion** (design §6.5 rule 5): no `reuse.yaml` may exist
   anywhere under a `comm` family dir (NCCL/oneCCL curves are topology-bound).
 - **R4 family placement** (design §2, catalog-driven): every parquet table's
@@ -298,7 +298,7 @@ def check_r6_no_legacy_markers(data_root: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def run_audit(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
+def run_checks(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
     """Run all six rules and return {rule: [failure messages]} (empty list = pass).
 
     Pure function of (data_root, catalog_path); never raises on data
@@ -338,9 +338,9 @@ def render_report(results: dict[str, list[str]]) -> tuple[str, bool]:
     total = sum(len(v) for v in results.values())
     if any_failures:
         failed_rules = [rule for rule in RULES if results[rule]]
-        lines.append(f"\ncollector data audit FAILED: {total} failure(s) across rule(s) {', '.join(failed_rules)}")
+        lines.append(f"\ncollector data check FAILED: {total} failure(s) across rule(s) {', '.join(failed_rules)}")
     else:
-        lines.append("\ncollector data audit OK: all rules passed")
+        lines.append("\ncollector data check OK: all rules passed")
     return "\n".join(lines), any_failures
 
 
@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, default=CATALOG_PATH, help="Path to the op backend catalog yaml.")
     args = parser.parse_args(argv)
 
-    results = run_audit(args.data_root, args.catalog)
+    results = run_checks(args.data_root, args.catalog)
     report, failed = render_report(results)
     print(report)
     return 1 if failed else 0

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Bootstrap and audit `collector/op_backend_facts.yaml`.
+Bootstrap and check `collector/op_backend_facts.yaml`.
 
 The registry records, for every (op table, framework, version, system,
 fact-axis slice), which backend(s) the op actually runs on. The perf tables
@@ -21,7 +21,7 @@ This tool has exactly two jobs:
     to seed the file, and afterwards only to draft entries for a new
     framework version/system from freshly collected data — the diff is then
     reviewed like any hand edit.
-  - `--check`: audit the committed registry against the perf database labels.
+  - `--check`: verify the committed registry against the perf database labels.
     Drift means either the data is mislabeled or the registry is stale; both
     must be resolved explicitly. Exits non-zero on drift.
 
@@ -34,7 +34,7 @@ to investigate, not to average away.
 
 Usage:
     python3 tools/perf_database/backend_facts.py                # bootstrap/draft
-    python3 tools/perf_database/backend_facts.py --check        # drift audit
+    python3 tools/perf_database/backend_facts.py --check        # drift check
 """
 
 from __future__ import annotations
@@ -310,7 +310,7 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]], 
         "# tools/perf_database/backend_facts.py (2026-07-11). From then on it is",
         "# maintained deliberately: a collector-upgrade PR that changes backend",
         "# dispatch updates the affected entries (the tool can draft them from",
-        "# freshly collected data; review the diff like a hand edit). Audit with:",
+        "# freshly collected data; review the diff like a hand edit). Check with:",
         "#",
         "#   python3 tools/perf_database/backend_facts.py --check",
         "#",
@@ -392,7 +392,7 @@ def main() -> None:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Audit the committed registry against the perf database instead of writing it.",
+        help="Check the committed registry against the perf database instead of writing it.",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
