@@ -842,7 +842,11 @@ class BaseBackend:
         summary.set_context_power_avg(context_power_avg)
         summary.set_generation_power_avg(generation_power_avg)
         summary.set_e2e_power_avg(e2e_power_avg)
-        summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
+        summary.set_memory_and_check_oom(
+            memory,
+            database.system_spec["gpu"]["mem_capacity"],
+            **self._static_oom_check_kwargs(),
+        )
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
             kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
@@ -865,6 +869,34 @@ class BaseBackend:
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
         """Return backend-specific KV cache reserved fraction and tolerance."""
         return 0.0, 0.0
+
+    def memory_fraction_of_free(self) -> bool:
+        """Whether the memory fraction applies to FREE memory (after non-KV).
+
+        ``True`` for TRT-LLM's ``free_gpu_memory_fraction``; ``False`` for
+        backends whose fraction caps TOTAL device memory (vLLM
+        ``gpu_memory_utilization`` / SGLang ``mem_fraction_static``).
+        """
+        return True
+
+    def _static_oom_check_kwargs(self) -> dict:
+        """Fraction-based KV budget kwargs for the static path.
+
+        Built from the backend's defaults so the static (disagg component)
+        evaluations enforce the same KV-cache budget as a real deployment.
+        Backends without a default fraction return ``{}``, which skips the
+        budget check (plain capacity OOM check still applies).
+        """
+        fraction = self.get_default_free_gpu_memory_fraction()
+        if fraction is None:
+            return {}
+        reserved, tolerance = self.get_kv_cache_memory_check_params()
+        return {
+            "free_gpu_memory_fraction": fraction,
+            "kv_cache_reserved_fraction": reserved,
+            "kv_cache_tolerance": tolerance,
+            "fraction_of_free": self.memory_fraction_of_free(),
+        }
 
     def get_partition_memory_usage(
         self,

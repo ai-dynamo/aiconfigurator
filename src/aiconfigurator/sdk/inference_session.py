@@ -332,6 +332,15 @@ class DisaggInferenceSession:
         decode_oom = decode_summary.check_oom()
         if prefill_oom or decode_oom:
             disagg_summary.set_oom(True)
+        # KV-cache budget infeasibility (per-worker fraction-based check from
+        # run_static) disqualifies the combination just like a capacity OOM:
+        # the deployed engine could not admit the assumed decode batch, so the
+        # projected throughput would be unreachable (#1396).
+        prefill_kv_oom = prefill_summary.check_kv_cache_oom()
+        decode_kv_oom = decode_summary.check_kv_cache_oom()
+        if prefill_kv_oom or decode_kv_oom:
+            disagg_summary.set_kv_cache_oom(True)
+            disagg_summary.set_oom(True)
 
         disagg_summary.set_summary_df(disagg_summary_df)
 
@@ -461,14 +470,21 @@ class DisaggInferenceSession:
                         runtime_config=overwritten_runtime_config,
                         latency_correction_scale=latency_correction_scale,
                     )
-                    if not summary.check_oom():
+                    if not summary.check_oom() and not summary.check_kv_cache_oom():
                         all_configs_oom = False
                         summary_df = pd.concat(
                             [summary_df, summary.get_summary_df()],
                             axis=0,
                             ignore_index=True,
                         )
-                    else:  # larger b will always OOM
+                    else:
+                        # Larger b will always OOM. check_kv_cache_oom covers
+                        # the fraction-based budget (e.g. vLLM only exposes
+                        # gpu_memory_utilization of total memory): a worker
+                        # whose KV for batch b cannot actually be allocated
+                        # must not enter the candidate pool, or the search
+                        # selects deployments whose projected concurrency is
+                        # physically unreachable (#1396).
                         break
             except Exception as e:
                 logger.warning(
@@ -1231,6 +1247,7 @@ class AFDInferenceSession:
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             kv_cache_reserved_fraction=reserved_fraction,
             kv_cache_tolerance=tolerance,
+            fraction_of_free=self._backend.memory_fraction_of_free(),
         )
         return summary
 

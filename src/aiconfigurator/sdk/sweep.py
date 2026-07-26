@@ -600,10 +600,17 @@ def _get_disagg_worker_candidates(
                     predictor=predictor,
                     speculative_profile=speculative_profile,
                 )
-                if not summary.check_oom():
+                if not summary.check_oom() and not summary.check_kv_cache_oom():
                     all_configs_oom = False
                     result_rows.append(summary.get_summary_df())
                 else:
+                    # Larger b will always OOM. check_kv_cache_oom covers the
+                    # fraction-based budget (e.g. vLLM only manages
+                    # gpu_memory_utilization of total memory): a worker whose
+                    # KV for batch b cannot actually be allocated must not
+                    # enter the candidate pool, or the search selects
+                    # deployments whose projected concurrency is physically
+                    # unreachable (#1396).
                     break
         except Exception as e:
             logger.warning(
