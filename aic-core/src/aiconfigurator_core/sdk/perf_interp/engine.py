@@ -7,9 +7,9 @@ Executes the four-step resolution declared in :mod:`config`:
     1. exact hit            -> return the measured leaf verbatim
     2. resolve in the data  -> Grid: nested bracket+blend (value_transform space)
                                ScatteredSites: site curve eval; unknown site ->
-                               nearest-site transfer in util space (a site
-                               beyond the scale-up frontier that fails the
-                               distance gate falls back to boundary util-hold)
+                               nearest-site transfer in util space (the distance
+                               gate is waived for a site beyond the scale-up
+                               frontier)
     3. beyond the range     -> hold the boundary util (k_tail median anchor),
                                latency = SOL(query) / util
     4. nothing to anchor on -> raise InterpolationDataNotAvailableError
@@ -268,38 +268,6 @@ def _beyond_frontier_scale_up(site_keys: list, site_key: tuple) -> bool:
     return all(site_key[a] >= min(s[a] for s in site_keys) for a in axes)
 
 
-def _hold_frontier(cfg: OpInterpConfig, sites, site_keys, ranked, dist, q, n_axes, curve_pos, site_pos, coords):
-    """Boundary util-hold for a query site beyond the scale-up frontier, where
-    the distance gate found no neighbour. The log-nearest sites to such a query
-    ARE the frontier sites; anchor on the median util of the nn_sites nearest
-    (coverage-filtered upstream) and let SOL(query) carry the growth — median,
-    not IDW, matching the util-hold convention (robust to one bad anchor)."""
-    utils, powers = [], []
-    for i in ranked[: cfg.resolver.nn_sites]:
-        neigh = site_keys[i]
-        try:
-            lat_i, p_i = _eval_curve(cfg, sites[neigh], q, n_axes, curve_pos, site_pos, neigh, coords)
-        except InterpolationDataNotAvailableError:  # one bad anchor must not poison the query
-            continue
-        sol_i = cfg.sol_fn(*_full_coords(n_axes, curve_pos, site_pos, q, neigh))
-        if math.isfinite(lat_i) and lat_i > 0 and math.isfinite(sol_i) and sol_i > 0:
-            utils.append(sol_i / lat_i)
-            powers.append(p_i)
-    if not utils:
-        raise _miss(cfg, coords, "no positive-util frontier anchor")
-    sol_q = cfg.sol_fn(*coords)
-    if sol_q <= 0:
-        raise _miss(cfg, coords, "non-positive SOL at query")
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "perf_interp util-hold (site frontier): coords=%s anchor_util=%.4g nearest_distance=%.3f",
-            dict(zip(cfg.axes, coords, strict=True)),
-            statistics.median(utils),
-            dist(ranked[0]),
-        )
-    return sol_q / statistics.median(utils), statistics.median(powers)
-
-
 def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     sites, site_keys, site_logs, curve_pos, site_pos, n_axes = _site_index(cfg, data)
     res = cfg.resolver
@@ -326,11 +294,14 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     ranked = sorted(candidates, key=dist)
     if res.max_site_distance is not None:
         gated = [i for i in ranked if dist(i) <= res.max_site_distance]
-        if not gated:
-            if _beyond_frontier_scale_up(site_keys, site_key):
-                return _hold_frontier(cfg, sites, site_keys, ranked, dist, q, n_axes, curve_pos, site_pos, coords)
+        if gated:
+            ranked = gated
+        elif not _beyond_frontier_scale_up(site_keys, site_key):
             raise _miss(cfg, coords, "no site within max_site_distance")
-        ranked = gated
+        # else: beyond the scale-up frontier the gate is waived — the ungated
+        # nearest (near-frontier) sites anchor the transfer below, and
+        # SOL(query) carries the growth (frontier-holdout LOO: median vs IDW
+        # anchoring measured equivalent, so the ordinary transfer path serves).
 
     wsum = u_acc = p_acc = 0.0
     for i in ranked[: res.nn_sites]:

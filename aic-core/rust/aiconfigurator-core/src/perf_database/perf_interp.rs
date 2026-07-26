@@ -14,8 +14,8 @@
 //!                             the dropped axis). ScatteredSites: site curve
 //!                             eval; unknown site -> nearest-site transfer in
 //!                             util space (log2 IDW, curve-coverage filter,
-//!                             distance gate; a site beyond the scale-up
-//!                             frontier falls back to boundary util-hold).
+//!                             distance gate; the gate is waived for a site
+//!                             beyond the scale-up frontier).
 //! 3. beyond the range      -> hold the boundary util (k_tail-median anchor),
 //!                             latency = SOL(query) / util
 //! 4. nothing to anchor on  -> Err (structured miss; never fabricate)
@@ -568,18 +568,19 @@ impl SiteIndex {
         let cmp =
             |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
         if let Some(gate) = max_site_distance {
-            if !ranked.iter().any(|&(d, _)| d <= *gate) {
-                // Direction-aware frontier fallback: a query site beyond the
-                // collected frontier in the scale-up direction holds the
-                // boundary util instead of missing (big-vocab LM heads at low
-                // tp). Interior holes and scale-down queries keep the miss.
+            if ranked.iter().any(|&(d, _)| d <= *gate) {
+                ranked.retain(|&(d, _)| d <= *gate);
+            } else {
+                // The gate is waived for a query site beyond the collected
+                // frontier in the scale-up direction (big-vocab LM heads at
+                // low tp): the ungated nearest (near-frontier) sites anchor
+                // the transfer below and SOL(query) carries the growth.
+                // Interior holes and scale-down queries keep the miss.
                 let q_site: Vec<f64> = site_axes.iter().map(|&p| coords[p]).collect();
-                if self.beyond_frontier_scale_up(&q_site) {
-                    return self.hold_frontier(cfg, ranked, coords, q);
+                if !self.beyond_frontier_scale_up(&q_site) {
+                    return Err(miss(cfg, coords, "no site within max_site_distance"));
                 }
-                return Err(miss(cfg, coords, "no site within max_site_distance"));
             }
-            ranked.retain(|&(d, _)| d <= *gate);
         }
         let k = (*nn_sites).min(ranked.len());
         if k < ranked.len() {
@@ -643,65 +644,6 @@ impl SiteIndex {
                 .expect("beyond_frontier_scale_up on empty index");
             q_site[a] >= min_a as f64
         })
-    }
-
-    /// Boundary util-hold for a query site beyond the scale-up frontier, where
-    /// the distance gate found no neighbour. The log-nearest sites to such a
-    /// query ARE the frontier sites; anchor on the median util of the nn_sites
-    /// nearest (coverage-filtered upstream) and let SOL(query) carry the
-    /// growth — median, not IDW, matching the util-hold convention (robust to
-    /// one bad anchor). `ranked` is the ungated `(distance, site index)`
-    /// buffer from `resolve`.
-    fn hold_frontier(
-        &self,
-        cfg: &OpInterpConfig,
-        mut ranked: Vec<(f64, usize)>,
-        coords: &[f64],
-        q: f64,
-    ) -> Result<f64, AicError> {
-        let Resolver::ScatteredSites {
-            site_axes,
-            curve_axis,
-            nn_sites,
-            ..
-        } = &cfg.resolver
-        else {
-            unreachable!()
-        };
-        let cmp =
-            |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
-        let k = (*nn_sites).min(ranked.len());
-        if k < ranked.len() {
-            ranked.select_nth_unstable_by(k, cmp);
-            ranked.truncate(k);
-        }
-
-        let mut utils: Vec<f64> = Vec::with_capacity(ranked.len());
-        for &(_, i) in &ranked {
-            let neigh = &self.site_logs[i].0;
-            let curve = &self.sites[neigh];
-            // one bad anchor must not poison the query
-            let Ok(lat_i) = self.eval_curve(cfg, curve, neigh, q, coords) else {
-                continue;
-            };
-            let mut n_coords = coords.to_vec();
-            for (&p, &v) in site_axes.iter().zip(neigh) {
-                n_coords[p] = v as f64;
-            }
-            n_coords[*curve_axis] = q;
-            let sol_i = (cfg.sol_fn)(&n_coords);
-            if lat_i.is_finite() && lat_i > 0.0 && sol_i.is_finite() && sol_i > 0.0 {
-                utils.push(sol_i / lat_i);
-            }
-        }
-        if utils.is_empty() {
-            return Err(miss(cfg, coords, "no positive-util frontier anchor"));
-        }
-        let sol_q = (cfg.sol_fn)(coords);
-        if !(sol_q > 0.0) {
-            return Err(miss(cfg, coords, "non-positive SOL at query"));
-        }
-        Ok(sol_q / median(&mut utils))
     }
 
     /// Evaluate one site's curve at coordinate `q`.
