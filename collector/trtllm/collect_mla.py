@@ -197,9 +197,14 @@ def run_mla(
     # generation part" (:3091) when the FMHA dispatcher reports the Deepseek
     # head layout unsupported. Hardware-observed on L40 (SM89) 2026-07-26:
     # smoke 0/8 across both phases, every case a C++ SIGABRT Python cannot
-    # catch (worker reset per case). Serving hits the identical assert in
-    # AttentionOp::initialize(). Fail closed with a cited, classified raise
-    # (Gemma4/DSA precedent). Re-verify on the next framework version bump.
+    # catch (worker reset per case). Serving hits the identical assert on its
+    # default path (attn_backend='TRTLLM', llm_args.py:4544; no SM-conditional
+    # switch in modeling_deepseekv3.py). This is a REGRESSION, not a permanent
+    # architectural wall: trtllm 1.0.0 collected full SM89 MLA data
+    # (l40s/mla/trtllm/1.0.0: 2436 ctx + 5068 gen rows), and since 1.3.0rc15
+    # the tree only carries an approved reuse of that 1.0.0 data. Fail closed
+    # with a cited, classified raise (Gemma4/DSA precedent). Re-verify on the
+    # next framework version bump.
     if get_sm_version() < 90:
         phase = "context" if is_context_phase else "generation"
         raise ValueError(
