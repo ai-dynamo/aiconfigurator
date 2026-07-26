@@ -242,7 +242,13 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         x_b = m * k * 2
         per_copy_b = (n * k + m * n) * 2 * 2  # weight + output, doubled for graph
         fit = int((budget_b - x_b) // max(per_copy_b, 1))
-        outside_loop_count = max(1, min(outside_loop_count, fit))
+        if fit < 1:
+            raise RuntimeError(
+                f"GEMM shape ({m}, {n}, {k}) does not fit on {device}: "
+                f"estimated budget={budget_b:.0f} bytes, "
+                f"required per-copy memory={per_copy_b} bytes"
+            )
+        outside_loop_count = min(outside_loop_count, fit)
     op_list = []
     for i in range(outside_loop_count):
         op_list.append(create_gemm())
