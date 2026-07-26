@@ -10,7 +10,9 @@ of each backend on the shape key and emit findings on two layers:
     - `nonpositive_latency`: rows whose latency is <= 0 — a classic collector
                            corruption mode (timer failure, unit bug). Counted
                            per (backend, kernel_source) and excluded from the
-                           statistical checks below.
+                           statistical checks below. Tables whose latency is a
+                           difference/calibration value (see
+                           _DELTA_LATENCY_OP_FILES) are exempt.
     - `pair_outlier`     : a shape point whose cross-backend latency ratio
                            deviates from its *local baseline* by more than
                            --anomaly-factor (default 3x). The baseline is
@@ -102,6 +104,22 @@ _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
 
 # Legacy top-level backend dirs (see check_kernel_source.py for the sync note).
 _LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
+
+# Tables whose latency is a DIFFERENCE or calibration value, where <= 0 is
+# semantically valid — exempt from the nonpositive_latency check (their <= 0
+# rows are still excluded from the log-ratio statistics, which need positives):
+#   - computescale: latency = dynamic - static quant pass
+#     (collector/trtllm/collect_computescale.py:78 stores it unclamped, so
+#     negatives are expected; sglang/vllm clamp to 0.0)
+#   - dsv4_csa_topk_calib / glm5_topk_module: flat/top_last score_mode row
+#     pairs consumed as DELTA = flat - top_last by perf_database
+#     (collector/sglang/deepseekv4_sparse_modules.py:233); sub-resolution
+#     kernels legitimately record 0.0
+_DELTA_LATENCY_OP_FILES = {
+    "computescale_perf.parquet",
+    "dsv4_csa_topk_calib_perf.parquet",
+    "glm5_topk_module_perf.parquet",
+}
 
 _PRE_RELEASE_TAGS = {"rc", "a", "b", "c", "alpha", "beta", "dev", "pre", "preview"}
 
@@ -623,7 +641,7 @@ def run_checks(
         for backend, versions in sorted(by_backend.items()):
             version, path = max(versions, key=lambda vp: _version_key(vp[0]))
             table, npos_by_ks = _load_op_table(path, backend, version)
-            if npos_by_ks:
+            if npos_by_ks and op_file not in _DELTA_LATENCY_OP_FILES:
                 anomalies.append(
                     {
                         "kind": "nonpositive_latency",
