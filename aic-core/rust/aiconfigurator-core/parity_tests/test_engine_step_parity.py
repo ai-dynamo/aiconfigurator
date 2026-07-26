@@ -1358,25 +1358,33 @@ class TestRustTypedErrorsAcrossFfi:
         message = str(excinfo.value)
         assert "perf database error" in message or "I/O error" in message, message
 
-    def test_hybrid_ladder_miss_raises_typed_empirical_miss(
+    def test_missing_dtype_flops_raises_typed_missing_flops_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # NVFP4 MoE on Hopper: no own-shape/cross-shape/sibling reference
-        # anywhere (the HYBRID_CASES ladder-miss config). Rust raises
-        # `AicError::EmpiricalNotImplemented`, which must surface as the sdk's
-        # EmpiricalNotImplementedError — the typed hybrid-miss — and NOT be
-        # classified as a plain perf-data miss.
+        # NVFP4 MoE on Hopper: h200 has no fp4 hardware and its YAML defines
+        # no fp4_tc_flops, so the strict per-dtype resolver rejects the
+        # configuration up front (#1398) — before the HYBRID ladder is even
+        # consulted (this vehicle previously exercised the ladder-miss
+        # contract; symmetric EmpiricalNotImplementedError coverage lives in
+        # the MSA/GDN HYBRID tests above). Rust raises
+        # `AicError::MissingSystemFlops`, which must surface as the sdk's
+        # MissingSystemFlopsError — the expected-CLI-error ValueError class —
+        # and NOT be classified as a plain perf-data miss.
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(
             model_path="nvidia/MiniMax-M2.5-NVFP4",
             system_name="h200_sxm",
             database_mode="HYBRID",
         )
-        with pytest.raises(errors.EmpiricalNotImplementedError) as excinfo:
+        with pytest.raises(errors.MissingSystemFlopsError) as excinfo:
             _rust_static_breakdown(case)
         message = str(excinfo.value)
-        assert "empirical estimation not implemented" in message, message
+        assert "fp4_tc_flops" in message, message
+        # The AicError display prefix pins the raise to the rust side of the
+        # FFI (a Python-side raise would carry the sdk's own wording).
+        assert "missing system flops" in message, message
+        assert isinstance(excinfo.value, ValueError)
         assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
 
 
