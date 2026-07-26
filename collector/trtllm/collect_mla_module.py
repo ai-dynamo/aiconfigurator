@@ -440,9 +440,15 @@ def _config_dir_without_layer_types(model_path: str) -> str:
     import json
     import shutil
 
-    from huggingface_hub import snapshot_download
+    if os.path.isdir(model_path):
+        # create_attention_layer resolves ids through _resolve_local_model_path
+        # before this shim, so model_path is normally already a local config
+        # dir; snapshot_download requires a Hub repo id and would reject it.
+        src = model_path
+    else:
+        from huggingface_hub import snapshot_download
 
-    src = snapshot_download(model_path, allow_patterns=["*.json"])
+        src = snapshot_download(model_path, allow_patterns=["*.json"])
     dst = os.path.join(
         os.path.expanduser("~/.cache/aic_collector/glm_dsa_config_norm"),
         hashlib.sha1(src.encode()).hexdigest()[:16],
@@ -450,17 +456,27 @@ def _config_dir_without_layer_types(model_path: str) -> str:
     config_path = os.path.join(dst, "config.json")
     if not os.path.exists(config_path):
         staging = f"{dst}.tmp-{os.getpid()}"
-        shutil.copytree(src, staging, dirs_exist_ok=True)
-        with open(os.path.join(staging, "config.json"), encoding="utf-8") as f:
-            cfg = json.load(f)
-        cfg.pop("layer_types", None)
-        with open(os.path.join(staging, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
         try:
-            os.replace(staging, dst)
-        except OSError:
-            # Another worker won the atomic-rename race; use its copy.
+            shutil.copytree(src, staging, dirs_exist_ok=True)
+            with open(os.path.join(staging, "config.json"), encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg.pop("layer_types", None)
+            with open(os.path.join(staging, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                os.replace(staging, dst)
+            except OSError:
+                # Another worker may have won the atomic-rename race — but
+                # verify before trusting that assumption: a permission or
+                # disk-full failure would otherwise be swallowed and a
+                # non-existent path returned.
+                if not os.path.exists(config_path):
+                    raise
+        finally:
+            # Covers both the race-loser branch and any earlier failure
+            # (copytree/json), so a partial staging dir never leaks under
+            # ~/.cache/aic_collector/.
             shutil.rmtree(staging, ignore_errors=True)
     return dst
 

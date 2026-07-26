@@ -115,7 +115,19 @@ def _cutlass_compute_moe_with_slot_lora_pad(self, *args, **kwargs):
     return _original_cutlass_compute_moe(self, *args, **kwargs)
 
 
-CutlassMoEOp.compute_moe = _cutlass_compute_moe_with_slot_lora_pad
+def _install_slot_lora_pad_patch():
+    """Idempotently wrap CutlassMoEOp.compute_moe with the slot-LoRA pad shim.
+
+    Applied at RUN time from run_wideep_moe_compute, not at import time:
+    collect.py imports collector modules before validating their __compat__
+    pin, so an import-time patch would already be live on a pre-rc20 runtime
+    when the CompatibilityError fires — and any other collector in the same
+    process using CutlassMoEOp would then feed run_moe the 7 trailing
+    optionals its runtime does not accept.
+    """
+    if CutlassMoEOp.compute_moe is not _cutlass_compute_moe_with_slot_lora_pad:
+        CutlassMoEOp.compute_moe = _cutlass_compute_moe_with_slot_lora_pad
+
 
 moe_tune_path = os.path.join(THIS_DIR, "wideep_moe_compute_tuned_cache_path")
 
@@ -706,6 +718,7 @@ def run_wideep_moe_compute(
             - Router and MoE both use full num_tokens
             This is simpler but less accurate for WideEP simulation.
     """
+    _install_slot_lora_pad_patch()
     # Default num_slots to num_experts (no redundancy)
     if num_slots is None:
         num_slots = num_experts
