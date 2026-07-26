@@ -47,6 +47,9 @@ class _Slot:
     remaining_prefill: int
     generated: int = 0
     arrival_ms: float = 0.0
+    # when the scheduler can first SEE this request (arrival + client/
+    # frontend turnaround); TTFT is still measured from arrival_ms
+    eligible_ms: float = 0.0
     first_token_ms: float = -1.0
     last_token_ms: float = -1.0
     gaps: list = field(default_factory=list)
@@ -264,7 +267,9 @@ def evaluate_closed_loop(
         raise ValueError("admission cap rejected all concurrency")
 
     slots = [_Slot(remaining_prefill=wl.effective_isl, is_initial_burst=True) for _ in range(c)]
+    pending: list[_Slot] = []  # dispatched replacements not yet visible to the scheduler
     now = 0.0
+    prev_pass_start = 0.0
     completions = 0
     warmup_reqs = warmup_generations * c
     target = (warmup_generations + window_generations) * c
@@ -281,12 +286,31 @@ def evaluate_closed_loop(
     for _ in range(max_passes):
         if completions >= target:
             break
+        # Admission horizon of the pass STARTING now: a synchronous
+        # scheduler builds it at its start (arrivals up to `now` make it);
+        # an async scheduler built it when the previous pass started, so
+        # only arrivals visible by then are in it (one-pass lookahead).
+        horizon = prev_pass_start if eng.async_scheduling else now
+        if pending:
+            admitted = [s for s in pending if s.eligible_ms <= horizon]
+            if admitted:
+                slots.extend(admitted)  # completion order == FCFS admission order
+                pending = [s for s in pending if s.eligible_ms > horizon]
+        pass_start = now
         duration, emitters = calendar.step(slots, wl, eng, timing)
         if not emitters and duration <= 0.0:
+            if pending:
+                # engine idle until the next replacement becomes visible;
+                # an idle scheduler builds the wake pass immediately, so
+                # the lookahead horizon catches up to the wake instant
+                now = max(now, min(s.eligible_ms for s in pending))
+                prev_pass_start = now
+                continue
             raise RuntimeError(
                 f"pass-calendar stalled (backend={backend}, C={c}, "
                 f"budget={eng.max_num_batched_tokens}) — invalid configuration"
             )
+        prev_pass_start = pass_start
         now += duration
 
         finished: list[_Slot] = []
@@ -318,7 +342,16 @@ def evaluate_closed_loop(
                 e2e.add(now - s.arrival_ms)
             idx = slots.index(s)
             slots[idx : idx + 1] = []
-            slots.append(_Slot(remaining_prefill=wl.effective_isl, arrival_ms=now))
+            # closed loop: the client dispatches the replacement at the
+            # completion instant (arrival_ms=now, the TTFT origin); the
+            # scheduler sees it only after the frontend turnaround
+            pending.append(
+                _Slot(
+                    remaining_prefill=wl.effective_isl,
+                    arrival_ms=now,
+                    eligible_ms=now + wl.turnaround_ms,
+                )
+            )
     else:
         raise RuntimeError("pass-calendar did not converge within max_passes")
 

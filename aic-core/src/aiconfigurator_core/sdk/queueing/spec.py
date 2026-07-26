@@ -58,12 +58,28 @@ class WorkloadSpec:
     concurrency: Optional[int] = None  # closed loop in-flight cap
     request_rate: Optional[float] = None  # open loop, requests/s
     num_requests: Optional[int] = None  # benchmark length N for mean(N)
+    # Per-request client/frontend turnaround: the time between a slot
+    # freeing (previous request's completion, which is when a closed-loop
+    # client dispatches the replacement) and the replacement becoming
+    # VISIBLE to the scheduler (HTTP receive -> tokenize -> IPC -> waiting
+    # queue). At 0 the replacement lands exactly on the pass boundary and
+    # always catches the next pass — a knife-edge that real deployments
+    # never hit: any eps > 0 makes arrivals miss the boundary and wait out
+    # the pass in flight, which cascades into cohort clumping (validated on
+    # b300/vllm-0.24: eps ~= 15 ms turns TTFT p50 from 135 into 523 ms at
+    # C=32 with throughput and ITL unchanged). This is a timing-layer
+    # quantity: measure it, don't fit it (e.g. c=1 TTFT minus the perf-DB
+    # prefill latency; it is the same physical overhead the legacy additive
+    # dispatch term approximates).
+    turnaround_ms: float = 0.0
 
     def __post_init__(self):
         if (self.concurrency is None) == (self.request_rate is None):
             raise ValueError("specify exactly one of concurrency / request_rate")
         if self.osl < 1 or self.isl < 1:
             raise ValueError("isl and osl must be >= 1")
+        if self.turnaround_ms < 0:
+            raise ValueError("turnaround_ms must be >= 0")
 
     @property
     def effective_isl(self) -> int:
@@ -78,6 +94,13 @@ class EngineSpec:
     max_num_batched_tokens: int = 8192
     max_num_seqs: int = 256
     enable_chunked_prefill: bool = True
+    # One-pass scheduling lookahead (vLLM AsyncScheduler, default-ON since
+    # vLLM 0.24): the batch for pass k+1 is fixed while pass k executes, so
+    # an arrival during pass k joins pass k+2 at the earliest — every
+    # admission pays up to one extra pass of TTFT. Decode-side effects of
+    # async scheduling (hidden per-step CPU gap) belong to the timing layer,
+    # not here. Default False preserves the synchronous calendar.
+    async_scheduling: bool = False
     # SGLang-specific (used by the sglang calendar only)
     max_prefill_tokens: Optional[int] = None  # defaults to max_num_batched_tokens
     chunked_prefill_size: Optional[int] = None  # defaults to max_num_batched_tokens
