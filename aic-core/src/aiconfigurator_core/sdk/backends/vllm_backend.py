@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 # device and selects decode batch sizes whose KV cache cannot be allocated in
 # a real deployment (see ai-dynamo/aiconfigurator#1396: predicted decode
 # bs=96/rank vs 29/rank actually admitted on B200 for Kimi-K2.5-NVFP4).
-VLLM_DEFAULT_GPU_MEMORY_UTILIZATION: float = 0.9
+# Value mirrors the framework default (CacheConfig.gpu_memory_utilization,
+# vllm/config/cache.py:66 @0.22.0, unchanged @0.24.0).
+VLLM_DEFAULT_GPU_MEMORY_UTILIZATION: float = 0.92
 # Small safety margin for KV block/page granularity and memory-profiler
 # variance between vLLM releases.
 KV_CACHE_MEMORY_TOLERANCE: float = 0.02

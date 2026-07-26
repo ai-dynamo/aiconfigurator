@@ -142,9 +142,16 @@ class DeepSeekModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
+        # Attention projections follow the checkpoint's per-layer dtype, not the
+        # global gemm mode: NVFP4/INT4 DeepSeek/Kimi releases exclude every
+        # self_attn* from quantization, so serving loads and executes them in
+        # BF16 (vLLM ReplicatedLinear/ColumnParallelLinear pick up the
+        # unquantized tensors). This drives both the fallback GEMM perf rows
+        # and their get_weights() byte width.
+        attn_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if attention_quant_ignored else gemm_quant_mode
         mla_bmm_quant_mode = (
             common.GEMMQuantMode.fp8
-            if gemm_quant_mode != common.GEMMQuantMode.bfloat16
+            if attn_gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
 
@@ -155,7 +162,6 @@ class DeepSeekModel(BaseModel):
         # selects rows for kernels that never run. Weights accounting is NOT
         # switched here: attention byte-width, MoE layer count and encoder
         # residency are coupled and land together in a follow-up (#1396).
-        mla_module_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if attention_quant_ignored else gemm_quant_mode
 
         h = self._hidden_size  # 7168
         tp_size = self.config.tp_size
@@ -196,24 +202,28 @@ class DeepSeekModel(BaseModel):
                         self._num_heads // tp_size,
                         kvcache_quant_mode,
                         fmha_quant_mode,
-                        mla_module_gemm_quant_mode,
+                        attn_gemm_quant_mode,
                     ),
                     fallback=[
-                        ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode, seq_split=cp),
+                        ops.GEMM(
+                            "context_downscale_gemm", self._num_layers, 2112, h, attn_gemm_quant_mode, seq_split=cp
+                        ),
                         ops.GEMM(
                             "context_q_b_proj_gemm",
                             self._num_layers,
-                            24576 // tp_size,
+                            # heads x (qk_nope 128 + qk_rope 64); DSV3's 128 heads gave the old 24576 literal
+                            self._num_heads * 192 // tp_size,
                             1536,
-                            gemm_quant_mode,
+                            attn_gemm_quant_mode,
                             seq_split=cp,
                         ),
                         ops.GEMM(
                             "context_kv_b_proj_gemm",
                             self._num_layers,
-                            32768 // tp_size,
+                            # heads x (qk_nope 128 + v_head_dim 128)
+                            self._num_heads * 256 // tp_size,
                             512,
-                            gemm_quant_mode,
+                            attn_gemm_quant_mode,
                             seq_split=cp,
                         ),
                         ops.ContextAttention(
@@ -238,8 +248,9 @@ class DeepSeekModel(BaseModel):
                             "context_proj_gemm",
                             self._num_layers,
                             h,
-                            128 * 128 // tp_size,
-                            gemm_quant_mode,
+                            # o_proj input: heads x v_head_dim 128
+                            self._num_heads * 128 // tp_size,
+                            attn_gemm_quant_mode,
                             seq_split=cp,
                         ),
                     ],
@@ -398,7 +409,7 @@ class DeepSeekModel(BaseModel):
                         self._num_heads // tp_size,
                         kvcache_quant_mode,
                         fmha_quant_mode,
-                        mla_module_gemm_quant_mode,
+                        attn_gemm_quant_mode,
                     ),
                     fallback=[
                         ops.GEMM(
@@ -406,14 +417,14 @@ class DeepSeekModel(BaseModel):
                             self._num_layers * self._mtp_scale_factor,
                             2112,
                             h,
-                            gemm_quant_mode,
+                            attn_gemm_quant_mode,
                         ),
                         ops.GEMM(
                             "generation_q_b_proj_gemm",
                             self._num_layers * self._mtp_scale_factor,
-                            24576 // tp_size,
+                            self._num_heads * 192 // tp_size,
                             1536,
-                            gemm_quant_mode,
+                            attn_gemm_quant_mode,
                         ),
                         *(
                             # KIMI K2.5 on vLLM: same reasoning as ContextAttention above —
@@ -458,8 +469,10 @@ class DeepSeekModel(BaseModel):
                             "generation_proj_gemm",
                             self._num_layers * self._mtp_scale_factor,
                             h,
-                            h // tp_size,
-                            gemm_quant_mode,
+                            # o_proj input is heads x v_head_dim 128 (the old h//tp
+                            # literal was wrong even for DSV3: 7168 vs 16384)
+                            self._num_heads * 128 // tp_size,
+                            attn_gemm_quant_mode,
                         ),
                     ],
                 ),

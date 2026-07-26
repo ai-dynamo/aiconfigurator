@@ -1448,3 +1448,26 @@ class TestMLAModuleQueryKeys:
         )
         assert module._num_heads == 32
         assert module._gemm_quant_mode == common.GEMMQuantMode.nvfp4
+
+    def test_kimik25_attention_weights_counted_at_bf16(self):
+        """Attention fallback GEMM weights follow the checkpoint dtype and the
+        model head count. Kimi-K2.5-NVFP4 keeps attention in BF16; per rank at
+        tp1: (q_a+kv_a 15.1M replicated + q_b 18.9M + kv_b 8.4M + o 58.7M)
+        x 61 layers x 2 bytes = 11.49 GiB (matches the vLLM load ledger)."""
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = models.get_model("nvidia/Kimi-K2.5-NVFP4", model_config, backend_name="vllm")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_mla_block":
+                assert op.get_weights() / (1 << 30) == pytest.approx(11.49, abs=0.05)
+                return
+        raise AssertionError("context_mla_block not found")
