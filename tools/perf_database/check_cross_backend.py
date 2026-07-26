@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Two-layer cross-backend validity audit of perf-database perf tables.
+Two-layer cross-backend consistency check of perf-database perf tables.
 
 For every (system, op_file) present in >= 2 backends, join the latest version
 of each backend on the shape key and emit findings on two layers:
@@ -37,17 +37,23 @@ of each backend on the shape key and emit findings on two layers:
       below --anomaly-factor are surfaced as significant-but-plausible
       framework differences, not data errors.
 
-Shape-key convention follows audit_kernel_source.py: every column that is not
+Shape-key convention follows check_kernel_source.py: every column that is not
 a meta column ({framework, version, device, op_name, kernel_source}) and not
 the latency column is part of the shape key. Sweep columns get log2-bucketed
 to form the local-baseline bucket key.
 
 Usage:
-    python3 tools/perf_database/audit_cross_backend.py \\
+    # Full sweep of one system:
+    python3 tools/perf_database/check_cross_backend.py \\
         --data-root aic-core/src/aiconfigurator_core/systems/data \\
         --systems h200_sxm \\
-        --out-md   $TMPDIR/cross-backend-audit.md \\
-        --out-json $TMPDIR/cross-backend-audit.json
+        --out-md   $TMPDIR/cross-backend-check.md \\
+        --out-json $TMPDIR/cross-backend-check.json
+
+    # Incremental (PR mode): only the (system, op_file) slices whose data
+    # files changed vs the given git ref are checked — each changed slice is
+    # still compared against ALL sibling backends, changed or not:
+    python3 tools/perf_database/check_cross_backend.py --changed-since origin/main
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ import json
 import logging
 import math
 import re
+import subprocess
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -68,7 +75,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Columns that never participate in the shape key (same set as audit_kernel_source.py).
+# Columns that never participate in the shape key (same set as check_kernel_source.py).
 _META_COLUMNS = {"framework", "version", "device", "op_name", "kernel_source"}
 
 # Latency-like columns. The first one found in the header is used as the metric.
@@ -86,7 +93,7 @@ _SWEEP_COLUMNS = ("batch_size", "isl", "m", "num_tokens", "step")
 # Backend directory names to skip — framework-agnostic by construction.
 _SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
 
-# Legacy top-level backend dirs (see audit_kernel_source.py for the sync note).
+# Legacy top-level backend dirs (see check_kernel_source.py for the sync note).
 _LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 
@@ -210,7 +217,7 @@ def _categorical_cols(df: pd.DataFrame, shape_cols: list[str]) -> list[str]:
     return [c for c in shape_cols if not pd.api.types.is_numeric_dtype(df[c])]
 
 
-def _audit_pair(
+def _check_pair(
     system: str,
     op_file: str,
     a: OpTable,
@@ -345,7 +352,7 @@ def _audit_pair(
     return anomalies, gaps
 
 
-def _audit_monotonicity(system: str, op_file: str, t: OpTable, mono_tolerance: float, noise_floor: float) -> list[dict]:
+def _check_monotonicity(system: str, op_file: str, t: OpTable, mono_tolerance: float, noise_floor: float) -> list[dict]:
     """Flag latency drops > (1 - mono_tolerance) while one sweep column grows
     and all other shape columns stay fixed. Points below noise_floor latency
     are exempt — sub-noise timings jitter without meaning."""
@@ -464,7 +471,43 @@ def cluster_mono(anomalies: list[dict]) -> list[dict]:
     return clusters
 
 
-def audit(
+def changed_slices(data_root: Path, git_ref: str) -> set[tuple[str, str]] | None:
+    """Derive the (system, op_file) slices whose data files changed vs git_ref.
+
+    Returns None when nothing under data_root changed (caller should skip the
+    whole run — distinct from an empty filter, which means "no restriction").
+    """
+    out = subprocess.run(
+        ["git", "diff", "--name-only", git_ref, "--", str(data_root)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    root_parts = Path(data_root).parts
+    slices: set[tuple[str, str]] = set()
+    for line in out.splitlines():
+        parts = Path(line).parts
+        if parts[: len(root_parts)] != root_parts:
+            continue
+        rel = parts[len(root_parts) :]
+        if len(rel) < 2:
+            continue
+        system = rel[0]
+        # <system>/.../<op_file>: a perf table selects its own slice.
+        if rel[-1].endswith((".parquet", ".txt")) and rel[-1] != "INCOMPLETE.txt":
+            slices.add((system, rel[-1]))
+        # A sidecar change (reuse.yaml / collection_meta.yaml) re-points or
+        # re-attests the whole version dir — select every table beside it.
+        elif rel[-1] in ("reuse.yaml", "collection_meta.yaml"):
+            version_dir = Path(data_root, *rel[:-1])
+            if version_dir.is_dir():
+                for table in itertools.chain(version_dir.glob("*.parquet"), version_dir.glob("*.txt")):
+                    if table.name != "INCOMPLETE.txt":
+                        slices.add((system, table.name))
+    return slices or None
+
+
+def run_checks(
     data_root: Path,
     systems: list[str] | None,
     backends: list[str] | None,
@@ -474,6 +517,7 @@ def audit(
     mono_tolerance: float,
     min_bucket_points: int,
     noise_floor: float,
+    slices: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Returns (anomalies, gaps) across the selected slice of the data tree."""
     # (system, op_file) -> backend -> [(version, path)]
@@ -484,6 +528,8 @@ def audit(
         if backends and backend not in backends:
             continue
         if op_files and op_file not in op_files:
+            continue
+        if slices is not None and (system, op_file) not in slices:
             continue
         tables.setdefault((system, op_file), {}).setdefault(backend, []).append((version, path))
 
@@ -501,12 +547,12 @@ def audit(
             continue
 
         for t in loaded:
-            anomalies.extend(_audit_monotonicity(system, op_file, t, mono_tolerance, noise_floor))
+            anomalies.extend(_check_monotonicity(system, op_file, t, mono_tolerance, noise_floor))
 
         if len(loaded) < 2:
             continue
         for a, b in itertools.combinations(loaded, 2):
-            pair_anoms, pair_gaps = _audit_pair(system, op_file, a, b, anomaly_factor, gap_factor, min_bucket_points)
+            pair_anoms, pair_gaps = _check_pair(system, op_file, a, b, anomaly_factor, gap_factor, min_bucket_points)
             anomalies.extend(pair_anoms)
             gaps.extend(pair_gaps)
         logger.info("%s/%s: %d backends compared", system, op_file, len(loaded))
@@ -518,7 +564,7 @@ def _fmt_shape(shape: dict) -> str:
 
 
 def render_markdown(anomalies: list[dict], gaps: list[dict], max_rows: int) -> str:
-    lines: list[str] = ["# Cross-backend validity audit\n"]
+    lines: list[str] = ["# Cross-backend consistency report\n"]
 
     outlier_clusters = cluster_pair_outliers(anomalies)
     mono_clusters = cluster_mono(anomalies)
@@ -626,6 +672,13 @@ def main() -> None:
         default=Path("aic-core/src/aiconfigurator_core/systems/data"),
         help="Root of the systems/data tree.",
     )
+    parser.add_argument(
+        "--changed-since",
+        default=None,
+        metavar="GIT_REF",
+        help="Incremental mode: only check (system, op_file) slices whose data files "
+        "changed vs this git ref (e.g. origin/main). Exits cleanly when no data changed.",
+    )
     parser.add_argument("--systems", nargs="*", default=None, help="Restrict to these systems.")
     parser.add_argument("--backends", nargs="*", default=None, help="Restrict to these backends.")
     parser.add_argument("--op-files", nargs="*", default=None, help="Restrict to these op file basenames.")
@@ -672,7 +725,15 @@ def main() -> None:
 
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
-    anomalies, gaps = audit(
+    slices: set[tuple[str, str]] | None = None
+    if args.changed_since:
+        slices = changed_slices(args.data_root, args.changed_since)
+        if slices is None:
+            print(f"No perf data changed vs {args.changed_since}; nothing to check.")
+            return
+        logger.info("incremental mode: %d changed (system, op_file) slices", len(slices))
+
+    anomalies, gaps = run_checks(
         data_root=args.data_root,
         systems=args.systems,
         backends=args.backends,
@@ -682,6 +743,7 @@ def main() -> None:
         mono_tolerance=args.mono_tolerance,
         min_bucket_points=args.min_bucket_points,
         noise_floor=args.noise_floor,
+        slices=slices,
     )
 
     outlier_clusters = cluster_pair_outliers(anomalies)

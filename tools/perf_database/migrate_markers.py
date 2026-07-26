@@ -212,7 +212,7 @@ def _table_files(version_dir: Path) -> list[Path]:
 def _parquet_table_stems(version_dir: Path) -> tuple[str, ...]:
     """Sorted parquet-file stems directly in a version dir — design §8's
     definition of a "table" for R1 sidecar-coverage purposes
-    (`audit_collector_data.py`'s `_parquet_stems` mirrors this exactly). Narrower
+    (`check_collector_data.py`'s `_parquet_stems` mirrors this exactly). Narrower
     than `_table_files`: only real `.parquet` data counts as a table to backfill
     or verify coverage for.
     """
@@ -507,7 +507,7 @@ def verify_tree(data_root: Path) -> list[str]:
 
     # Coverage completeness (AIC-1502 backfill): every parquet-holding version
     # dir must have a collection_meta.yaml whose `tables` key set covers every
-    # parquet stem present -- mirrors audit_collector_data.py's R1 rule, applied
+    # parquet stem present -- mirrors check_collector_data.py's R1 rule, applied
     # here as a self-check that plan/execute actually closed the gap.
     for version_dir in _iter_version_dirs(data_root):
         parquet_stems = set(_parquet_table_stems(version_dir))

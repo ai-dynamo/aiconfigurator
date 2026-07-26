@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for tools/perf_database/audit_collector_data.py.
+"""Unit tests for tools/perf_database/check_collector_data.py.
 
 Builds synthetic family-layout trees (`<system>/<family>/<backend>/<version>/`)
 under `tmp_path` and exercises each of the six fail-closed rules (R1-R6,
@@ -28,14 +28,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-MODULE_PATH = REPO_ROOT / "tools" / "perf_database" / "audit_collector_data.py"
+MODULE_PATH = REPO_ROOT / "tools" / "perf_database" / "check_collector_data.py"
 REAL_CATALOG = REPO_ROOT / "collector" / "op_backend_catalog.yaml"
 REAL_DATA_ROOT = REPO_ROOT / "aic-core" / "src" / "aiconfigurator_core" / "systems" / "data"
 
 
 @pytest.fixture
 def mod():
-    spec = importlib.util.spec_from_file_location("audit_collector_data", MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("check_collector_data", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

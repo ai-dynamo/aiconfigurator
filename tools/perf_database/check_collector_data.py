@@ -5,7 +5,7 @@
 
 The primary enforcement surface of the whole Collector V3 design: run on every
 PR touching `data/`, `collector/`, or the manifest (sibling of
-`audit_kernel_source.py`). Exits non-zero on ANY failure and prints every
+`check_kernel_source.py`). Exits non-zero on ANY failure and prints every
 failure it finds — never stops at the first one.
 
 Six rules, each named after the design section it enforces:
@@ -44,13 +44,13 @@ parsers `aiconfigurator_core.sdk.perf_database._parse_reuse_yaml` /
 `_load_collection_meta_yaml` (via the `aiconfigurator.sdk` compatibility
 alias, which is the same module object — see
 `src/aiconfigurator/sdk/_compat.py`). The tree-walking shape mirrors
-`audit_kernel_source.py`'s `_iter_data_files`, specialized to the
+`check_kernel_source.py`'s `_iter_data_files`, specialized to the
 post-migration family-first layout (`<system>/<family>/<backend>/<version>/`)
 that is now the only layout on disk.
 
 Usage:
-    python3 tools/perf_database/audit_collector_data.py
-    python3 tools/perf_database/audit_collector_data.py \\
+    python3 tools/perf_database/check_collector_data.py
+    python3 tools/perf_database/check_collector_data.py \\
         --data-root aic-core/src/aiconfigurator_core/systems/data \\
         --catalog collector/op_backend_catalog.yaml
 
@@ -68,7 +68,7 @@ from pathlib import Path
 # `collector/` is a standalone top-level package (not part of the installed
 # wheel — see .claude/rules/repo-guide.md), so it is only importable when the
 # repo root is on sys.path. Running this file directly (`python3
-# tools/perf_database/audit_collector_data.py`) puts the script's own
+# tools/perf_database/check_collector_data.py`) puts the script's own
 # directory on sys.path[0], not the repo root, so the insert below is
 # required (mirrors collect.py:1808 / changed_ops.py's REPO_ROOT). Harmless
 # under pytest, where pytest.ini's `pythonpath = .` already covers it.
