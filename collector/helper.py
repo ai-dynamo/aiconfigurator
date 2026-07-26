@@ -823,18 +823,27 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
     import pandas as pd
 
     log = logging.getLogger(__name__)
-    new_df = new_table.to_pandas()
-    old_df = pq.read_table(parquet_path).to_pandas()
+    old_table = pq.read_table(parquet_path)
 
-    if set(old_df.columns) != set(new_df.columns):
+    # Compare (name, type) pairs, not just column-name sets: matching names
+    # with drifted types would otherwise round-trip through pandas and
+    # silently rewrite the parquet under a different schema. Order-insensitive
+    # (the merge realigns column order below); Arrow metadata is ignored
+    # (pandas round-trips change it).
+    old_fields = sorted((f.name, str(f.type)) for f in old_table.schema)
+    new_fields = sorted((f.name, str(f.type)) for f in new_table.schema)
+    if old_fields != new_fields:
         log.warning(
             "convert_perf_csv_to_parquet: schema mismatch merging %s "
             "(existing=%s, new=%s); overwriting instead of merging.",
             parquet_path.name,
-            sorted(old_df.columns),
-            sorted(new_df.columns),
+            old_fields,
+            new_fields,
         )
         return new_table
+
+    new_df = new_table.to_pandas()
+    old_df = old_table.to_pandas()
 
     new_df = new_df[old_df.columns.tolist()]  # align column order
     identity = [c for c in old_df.columns if c not in PERF_METRIC_COLUMNS]

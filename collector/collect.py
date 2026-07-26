@@ -905,6 +905,45 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                     else:
                         processes[i] = None
 
+            # Escape hatch: every worker slot is permanently gone (restart
+            # limit, consumed sentinel, or no remaining work to justify a
+            # restart) while tasks are still unaccounted — e.g. a worker was
+            # SIGKILLed after queue.get() but before it recorded anything in
+            # done_tasks/current_task_ids. Without this the monitor loop
+            # would spin at 0.5s forever with nothing able to make progress.
+            # Record the orphaned ids as failures so the summary and resume
+            # checkpoint stay complete, then stop the loop.
+            if all(p is None for p in processes) and len(accounted) < len(task_infos):
+                while not error_queue.empty():
+                    error = error_queue.get()
+                    errors.append(error)
+                    process_stats[error["device_id"]]["errors"].append(error["task_id"])
+                sync_done_to_checkpoint()
+                orphaned = [info["id"] for info in task_infos if info["id"] not in accounted]
+                if orphaned:
+                    logger.error(
+                        f"All workers exited with {len(orphaned)} task(s) unaccounted; "
+                        f"recording them as failed (orphaned by worker death) and stopping the monitor loop."
+                    )
+                    for task_id in orphaned:
+                        errors.append(
+                            {
+                                "module": module_name,
+                                "device_id": None,
+                                "task_id": task_id,
+                                "task_params": None,
+                                "error_type": "WorkerOrphanedTask",
+                                "error_message": "all workers exited before this task was accounted",
+                                "classification": "unexpected",
+                                "group": None,
+                                "traceback": "",
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+                        failed_tasks[task_id] = True
+                    sync_done_to_checkpoint()
+                break
+
             current = len(accounted)
             if current > pbar.n:
                 pbar.update(current - pbar.n)

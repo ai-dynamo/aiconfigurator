@@ -266,13 +266,10 @@ def get_moe_test_cases():
             ):
                 continue
 
-            # SM100/103 DeepGEMM fp8_block has an additional TP-shard alignment
-            # requirement. Skip shapes that are known to trigger layout assert:
-            #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
-            # (SM120 fp8_block runs CUTLASS — the DeepGEMM constraint does not apply.)
-            fp8_block_deepgemm = moe_type == "fp8_block" and is_sm_100f(sm_version)
-            if fp8_block_deepgemm and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
-                continue
+            # SM100/103 DeepGEMM fp8_block TP-shard alignment is enforced at
+            # runtime in run_moe_torch (cited raise), not filtered here —
+            # generation-time drops are sanctioned for memory feasibility
+            # only (layer_permissions.md).
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
             weight_bits = {
@@ -460,6 +457,22 @@ def run_moe_torch(
         is_gated = True
 
     sm_version = get_sm_version()
+
+    # FIXME(kernel-limit): SM100/103 DeepGEMM fp8_block grouped GEMM requires
+    # the TP-sharded intermediate size to be 128-aligned; misaligned shards
+    # trip the scale-factor layout assert "layout.hpp:78: sf.size(-2) ==
+    # ceil_div(mn, gran_mn)" (hardware-observed on B200 during the rc20
+    # campaign). Raise a cited, classified error instead of filtering the
+    # shapes at generation time (layer_permissions.md sanctions only
+    # memory-feasibility drops there). SM120 fp8_block takes the Triton path
+    # and Hopper takes CUTLASS — the constraint does not apply to either.
+    # Re-verify against DeepGEMM on the next framework version bump.
+    if moe_type == "fp8_block" and is_sm_100f(sm_version) and (inter_size // moe_tp_size) % 128 != 0:
+        raise ValueError(
+            f"DeepGEMM fp8_block MoE requires 128-aligned TP-sharded intermediate size on "
+            f"SM100/103; got inter_size={inter_size} / moe_tp={moe_tp_size} = "
+            f"{inter_size // moe_tp_size} (deepgemm layout.hpp:78 assert)"
+        )
 
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(
