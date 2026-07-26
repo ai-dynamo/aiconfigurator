@@ -847,6 +847,15 @@ def run_mla_module(
             f"modules are unsupported on SM{get_sm_version()} "
             f"(deepgemm attention.hpp:203/:259 'Unsupported architecture' @1.3.0rc20)"
         )
+    # FIXME(kernel-limit): SM120 MLA context takes serving's dense-expand path
+    # (forward_context_default, attention.py:2015-2040@1.3.0rc20 — SM100/103
+    # route to the absorbed/trtllm-gen path instead), whose
+    # maybe_compiled_copy_ of k_nope into k fails under torch-inductor
+    # autotune at huge extents: h=128 cases with ~>=49k total tokens die with
+    # CUDA "invalid argument" (deterministic repro 2026-07-26 on RTX PRO 6000,
+    # CUDA_LAUNCH_BLOCKING=1: inductor copy kernel launched with
+    # xnumel=2147483648 for b=4/s=32768/h=128). ~72/5856 context cases fail
+    # classified; run-and-record. Re-verify on the next framework version bump.
     torch.cuda.set_device(device)
     torch_device = torch.device(device)
 
