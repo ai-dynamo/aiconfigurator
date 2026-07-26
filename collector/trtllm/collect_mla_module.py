@@ -847,6 +847,18 @@ def run_mla_module(
             f"modules are unsupported on SM{get_sm_version()} "
             f"(deepgemm attention.hpp:203/:259 'Unsupported architecture' @1.3.0rc20)"
         )
+    # FIXME(kernel-limit): no MLA FMHA below Hopper — AttentionOp::initialize()
+    # hard-asserts "Deepseek should be supported by fmha in context part"
+    # (attentionOp.cpp:3097) / generation (:3091). Hardware-observed on L40
+    # (SM89) 2026-07-26: module smoke 0/8, C++ SIGABRT per case; serving hits
+    # the identical assert. Same fail-closed treatment as the stock MLA
+    # collector (collect_mla.py). Re-verify on the next framework version bump.
+    if attn_type == "mla" and get_sm_version() < 90:
+        raise ValueError(
+            f"TRT-LLM MLA has no pre-Hopper FMHA kernel; MLA modules are "
+            f"unsupported on SM{get_sm_version()} "
+            f"(attentionOp.cpp:3091/:3097 assert @1.3.0rc20)"
+        )
     # FIXME(kernel-limit): SM120 MLA context takes serving's dense-expand path
     # (forward_context_default, attention.py:2015-2040@1.3.0rc20 — SM100/103
     # route to the absorbed/trtllm-gen path instead), whose

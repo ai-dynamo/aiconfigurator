@@ -191,6 +191,22 @@ def run_mla(
     perf_filename,
     device="cuda:0",
 ):
+    # FIXME(kernel-limit): TRT-LLM 1.3.0rc20 has no MLA FMHA kernel below
+    # Hopper — AttentionOp::initialize() hard-asserts "Deepseek should be
+    # supported by fmha in context part" (attentionOp.cpp:3097) / "... in
+    # generation part" (:3091) when the FMHA dispatcher reports the Deepseek
+    # head layout unsupported. Hardware-observed on L40 (SM89) 2026-07-26:
+    # smoke 0/8 across both phases, every case a C++ SIGABRT Python cannot
+    # catch (worker reset per case). Serving hits the identical assert in
+    # AttentionOp::initialize(). Fail closed with a cited, classified raise
+    # (Gemma4/DSA precedent). Re-verify on the next framework version bump.
+    if get_sm_version() < 90:
+        phase = "context" if is_context_phase else "generation"
+        raise ValueError(
+            f"TRT-LLM MLA has no pre-Hopper FMHA kernel; DeepSeek MLA {phase} "
+            f"is unsupported on SM{get_sm_version()} (attentionOp.cpp:"
+            f"{'3097' if is_context_phase else '3091'} assert @1.3.0rc20)"
+        )
     scenario = Scenario()
     q_lora_rank = scenario.q_lora_rank
     kv_lora_rank = scenario.kv_lora_rank
