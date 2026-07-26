@@ -281,7 +281,7 @@ def _scan_one_file(system: str, backend: str, version: str, path: Path) -> _File
         row_version = row.get("version") or version
         raw_ks = row.get("kernel_source")
         kernel_source = (raw_ks or "").strip()
-        if not kernel_source:
+        if not kernel_source or kernel_source == "<unknown>":
             out.rows_unnamed_kernel_source += 1
             if len(out.unnamed_examples) < 5:
                 out.unnamed_examples.append((str(path), repr(raw_ks)))

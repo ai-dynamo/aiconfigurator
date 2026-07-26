@@ -869,6 +869,15 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
+    if args.anomaly_factor <= 1.0:
+        parser.error("--anomaly-factor must be > 1")
+    if args.gap_factor <= 1.0:
+        parser.error("--gap-factor must be > 1")
+    if args.gap_factor > args.anomaly_factor:
+        parser.error("--gap-factor must be <= --anomaly-factor (the gap band sits below the anomaly threshold)")
+    if not 0.0 < args.mono_tolerance <= 1.0:
+        parser.error("--mono-tolerance must be in (0, 1]")
+
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
     anomalies, gaps = run_checks(
