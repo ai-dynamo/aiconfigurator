@@ -41,11 +41,17 @@ of each backend on the shape key and emit findings on two layers:
                            is auto-scaled for microsecond-unit tables).
 
   Layer 2 — GAP (framework-difference, informational):
-    - per shape-bucket median latency ratios between backend pairs, annotated
-      with each side's kernel_source (e.g. fa3 vs flash_attention vs triton).
-      Buckets whose median ratio exceeds --gap-factor (default 1.5x) are
-      surfaced as significant-but-plausible framework differences, not data
-      errors.
+    - `systematic_offset`: a backend pair whose op-level median ratio deviates
+      beyond --offset-factor (default 1.15x) in the SAME direction on every
+      covered system (>= --min-offset-systems). A shape-local kernel weakness
+      moves with shape and hardware; a uniform multiplier reproduced across
+      systems is the fingerprint of a framework-level collection or
+      configuration difference (eager mode, missing torch.compile, disabled
+      CUDA graphs) rather than of the shapes.
+    - per-pair summaries: joined points, median/p05/p95 ratio, bucket counts
+      beyond --gap-factor (default 1.5x), and both sides' kernel_source lists
+      (e.g. fa3 vs flash_attention vs triton) so implementation differences
+      are distinguishable from bad data.
 
 Backend pairs whose latest tables disagree on shape columns are NOT force-
 joined: extra columns that are constant in their table are dropped (noted in
@@ -405,21 +411,11 @@ def _check_pair(
             }
         )
 
+    # Bucket-level gaps are only COUNTED (in the pair summary below): a
+    # per-bucket listing proved unreviewable at tree scale, and the actionable
+    # signals live elsewhere — shape-local pathologies in region_deviation,
+    # framework-level configuration drift in detect_systematic_offsets().
     sig = grp[(grp["median_log_ratio"].abs() > log_gap) & (rel <= log_anomaly)]
-    for bucket, row in sig.sort_values("median_log_ratio", key=lambda s: s.abs(), ascending=False).iterrows():
-        gaps.append(
-            {
-                "kind": "framework_gap",
-                "system": system,
-                "op_file": op_file,
-                "pair": pair,
-                "bucket": bucket,
-                "median_ratio": float(np.exp(row["median_log_ratio"])),
-                "points": int(row["points"]),
-                "kernel_source_a": row["ks_a"],
-                "kernel_source_b": row["ks_b"],
-            }
-        )
 
     # Pair-level headline (always emitted, even when under the gap threshold).
     gaps.append(
@@ -585,6 +581,61 @@ def cluster_suspects(anomalies: list[dict]) -> tuple[list[dict], list[dict]]:
     return corroborated, undetermined
 
 
+def detect_systematic_offsets(gaps: list[dict], offset_factor: float, min_systems: int) -> list[dict]:
+    """Find backend pairs whose op-level median ratio deviates in the SAME
+    direction on every covered system.
+
+    A shape-local kernel weakness moves with the shape and the hardware; a
+    configuration/collection difference (missing torch.compile, eager mode,
+    disabled CUDA graphs) multiplies every measurement uniformly — so a
+    near-constant median offset reproduced across >= min_systems systems is
+    the fingerprint of a framework-level collection issue, not of the shapes.
+    Versions may differ per system; grouping is by backend name.
+    """
+    groups: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for s in gaps:
+        if s["kind"] != "pair_summary":
+            continue
+        b_label, _, a_label = s["pair"].partition(" vs ")
+        groups[(s["op_file"], a_label.split("/")[0], b_label.split("/")[0])].append(s)
+
+    log_thresh = math.log(offset_factor)
+    offsets: list[dict] = []
+    for (op_file, backend_a, backend_b), entries in groups.items():
+        if len(entries) < min_systems:
+            continue
+        logs = sorted(math.log(e["median_ratio"]) for e in entries)
+        if logs[0] > log_thresh:
+            slow, reference = backend_b, backend_a
+        elif logs[-1] < -log_thresh:
+            slow, reference = backend_a, backend_b
+        else:
+            continue
+        mid = logs[len(logs) // 2]
+        offsets.append(
+            {
+                "kind": "systematic_offset",
+                "op_file": op_file,
+                "slow_backend": slow,
+                "reference_backend": reference,
+                "systems": sorted(e["system"] for e in entries),
+                "overall_median_ratio": float(np.exp(abs(mid))),
+                "median_ratio_by_system": {
+                    e["system"]: round(float(np.exp(abs(math.log(e["median_ratio"])))), 2) for e in entries
+                },
+                "kernel_sources_slow": sorted(
+                    {
+                        ks
+                        for e in entries
+                        for ks in (e["kernel_sources_b"] if slow == backend_b else e["kernel_sources_a"])
+                    }
+                ),
+            }
+        )
+    offsets.sort(key=lambda o: (-len(o["systems"]), -o["overall_median_ratio"]))
+    return offsets
+
+
 def cluster_mono(anomalies: list[dict]) -> list[dict]:
     by_key: dict[tuple, list[dict]] = defaultdict(list)
     for a in anomalies:
@@ -675,7 +726,7 @@ def _fmt_shape(shape: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in shape.items() if v not in ("", None))
 
 
-def render_markdown(anomalies: list[dict], gaps: list[dict], max_rows: int) -> str:
+def render_markdown(anomalies: list[dict], gaps: list[dict], offsets: list[dict], max_rows: int) -> str:
     lines: list[str] = ["# Cross-backend consistency report\n"]
 
     suspects, undetermined = cluster_suspects(anomalies)
@@ -683,7 +734,6 @@ def render_markdown(anomalies: list[dict], gaps: list[dict], max_rows: int) -> s
     regions = [a for a in anomalies if a["kind"] == "region_deviation"]
     nonpositive = [a for a in anomalies if a["kind"] == "nonpositive_latency"]
     mismatches = [g for g in gaps if g["kind"] == "schema_mismatch"]
-    fw_gaps = [g for g in gaps if g["kind"] == "framework_gap"]
     summaries = [g for g in gaps if g["kind"] == "pair_summary"]
     n_outliers = sum(1 for a in anomalies if a["kind"] == "pair_outlier")
     n_mono = sum(1 for a in anomalies if a["kind"] == "mono_violation")
@@ -786,6 +836,26 @@ def render_markdown(anomalies: list[dict], gaps: list[dict], max_rows: int) -> s
         "backend b is faster. Different kernel_source values on the two sides mean the "
         "gap likely reflects a kernel implementation difference, not bad data.\n"
     )
+    if offsets:
+        lines.append("### Systematic cross-system offsets\n")
+        lines.append(
+            "The same backend pair shows a same-direction median offset on EVERY covered "
+            "system. A shape-local kernel weakness moves with shape and hardware; a uniform "
+            "multiplier reproduced across systems is the fingerprint of a framework-level "
+            "collection/configuration difference (eager mode, missing torch.compile, "
+            "disabled CUDA graphs).\n"
+        )
+        lines.append("| op_file | slow backend | reference | systems | median offset | per-system | slow kernels |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for o in offsets[:max_rows]:
+            per_sys = ", ".join(f"{k}:{v}" for k, v in sorted(o["median_ratio_by_system"].items()))
+            lines.append(
+                f"| {o['op_file']} | **{o['slow_backend']}** | {o['reference_backend']} | "
+                f"{len(o['systems'])} | {o['overall_median_ratio']:.2f}x | {per_sys} | "
+                f"`{', '.join(o['kernel_sources_slow'])}` |"
+            )
+        lines.append("")
+
     if summaries:
         lines.append("### Pair summaries\n")
         lines.append(
@@ -799,18 +869,6 @@ def render_markdown(anomalies: list[dict], gaps: list[dict], max_rows: int) -> s
                 f"{s['median_ratio']:.2f} | {s['p05_ratio']:.2f} | {s['p95_ratio']:.2f} | "
                 f"{s['gap_buckets']}/{s['region_deviation_buckets']}/{s['total_buckets']} | "
                 f"`{', '.join(s['kernel_sources_a'])}` | `{', '.join(s['kernel_sources_b'])}` |"
-            )
-        lines.append("")
-
-    if fw_gaps:
-        lines.append(f"### Significant gap buckets (top {min(max_rows, len(fw_gaps))} by |median ratio|)\n")
-        lines.append("| system | op_file | pair | bucket | median ratio | points | ks_a → ks_b |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for g in sorted(fw_gaps, key=lambda x: -abs(math.log(x["median_ratio"])))[:max_rows]:
-            lines.append(
-                f"| {g['system']} | {g['op_file']} | {g['pair']} | `{g['bucket']}` | "
-                f"{g['median_ratio']:.2f} | {g['points']} | "
-                f"`{g['kernel_source_a']}` → `{g['kernel_source_b']}` |"
             )
         lines.append("")
 
@@ -858,6 +916,19 @@ def main() -> None:
         default=5,
         help="Minimum joined points for a bucket/series to serve as a local baseline.",
     )
+    parser.add_argument(
+        "--offset-factor",
+        type=float,
+        default=1.15,
+        help="Layer 2: flag a backend pair whose op-level median deviates beyond this factor "
+        "in the same direction on every covered system (systematic offset).",
+    )
+    parser.add_argument(
+        "--min-offset-systems",
+        type=int,
+        default=3,
+        help="Minimum number of systems a pair must cover to qualify as a systematic offset.",
+    )
     parser.add_argument("--max-report-rows", type=int, default=50, help="Row cap per markdown table.")
     parser.add_argument("--out-md", type=Path, default=None, help="Write the Markdown report.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write all findings as JSON.")
@@ -877,6 +948,8 @@ def main() -> None:
         parser.error("--gap-factor must be <= --anomaly-factor (the gap band sits below the anomaly threshold)")
     if not 0.0 < args.mono_tolerance <= 1.0:
         parser.error("--mono-tolerance must be in (0, 1]")
+    if args.offset_factor <= 1.0:
+        parser.error("--offset-factor must be > 1")
 
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
@@ -894,6 +967,7 @@ def main() -> None:
 
     suspects, undetermined = cluster_suspects(anomalies)
     mono_clusters = cluster_mono(anomalies)
+    offsets = detect_systematic_offsets(gaps, args.offset_factor, args.min_offset_systems)
     regions = [a for a in anomalies if a["kind"] == "region_deviation"]
     nonpositive = [a for a in anomalies if a["kind"] == "nonpositive_latency"]
 
@@ -907,6 +981,7 @@ def main() -> None:
                     "suspect_clusters": suspects,
                     "undetermined_clusters": undetermined,
                     "mono_clusters": mono_clusters,
+                    "systematic_offsets": offsets,
                 },
                 indent=2,
             )
@@ -914,12 +989,11 @@ def main() -> None:
         logger.info("wrote %s", args.out_json)
     if args.out_md:
         args.out_md.parent.mkdir(parents=True, exist_ok=True)
-        args.out_md.write_text(render_markdown(anomalies, gaps, args.max_report_rows))
+        args.out_md.write_text(render_markdown(anomalies, gaps, offsets, args.max_report_rows))
         logger.info("wrote %s", args.out_md)
 
     n_outliers = sum(1 for a in anomalies if a["kind"] == "pair_outlier")
     n_mono = sum(1 for a in anomalies if a["kind"] == "mono_violation")
-    n_gap_buckets = sum(1 for g in gaps if g["kind"] == "framework_gap")
     n_mismatch = sum(1 for g in gaps if g["kind"] == "schema_mismatch")
     print(
         f"\nLayer 1: {sum(a['rows'] for a in nonpositive)} nonpositive-latency rows, "
@@ -928,10 +1002,16 @@ def main() -> None:
         f"{n_mono} mono violations in {len(mono_clusters)} clusters"
     )
     print(
-        f"Layer 2: {n_gap_buckets} significant gap buckets across "
+        f"Layer 2: {len(offsets)} systematic offsets across "
         f"{sum(1 for g in gaps if g['kind'] == 'pair_summary')} backend pairs"
         + (f"; {n_mismatch} pairs skipped (schema mismatch)" if n_mismatch else "")
     )
+    for o in offsets[: args.max_report_rows if args.max_report_rows < 10 else 10]:
+        print(
+            f"  OFFSET? {o['op_file']}: {o['slow_backend']} is ~{o['overall_median_ratio']:.2f}x slower than "
+            f"{o['reference_backend']} on all {len(o['systems'])} covered systems "
+            f"[{', '.join(o['kernel_sources_slow'])}]"
+        )
     for c in suspects[:10]:
         print(
             f"  SUSPECT? {c['system']}/{c['op_file']}: {c['suspect']} ({c['suspect_kind']}) "
