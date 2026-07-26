@@ -519,6 +519,38 @@ def _check_curve(
     return findings
 
 
+def _backends_of(pair: str) -> str:
+    b_label, _, a_label = pair.partition(" vs ")
+    return "+".join(sorted((a_label.split("/")[0], b_label.split("/")[0])))
+
+
+def _finding_key(a: dict) -> str:
+    """Stable identity of a gated finding for baseline/ratchet comparison.
+
+    Deliberately version-free (a backend version bump must not turn every
+    known finding into a 'new' one) and shape-anchored (the same bad point
+    keeps the same key across runs)."""
+    kind = a["kind"]
+    if kind == "pair_outlier":
+        return f"{kind}|{a['system']}|{a['op_file']}|{_backends_of(a['pair'])}|{_sig(a['shape'])}"
+    if kind == "region_deviation":
+        return f"{kind}|{a['system']}|{a['op_file']}|{_backends_of(a['pair'])}|{a['bucket']}"
+    if kind in ("mono_violation", "spike_violation"):
+        at = a.get("sweep_at", f"{a.get('sweep_from')}>{a.get('sweep_to')}")
+        return (
+            f"{kind}|{a['system']}|{a['op_file']}|{a['backend']}|{a['kernel_source']}|"
+            f"{a['sweep_col']}|{_sig(a['fixed_shape'])}|{at}"
+        )
+    # Group-level kinds: nonpositive_latency, below_sol, unreadable_table.
+    return f"{kind}|{a['system']}|{a['op_file']}|{a['backend']}|{a.get('gemm_dtype', '')}"
+
+
+def _key_hash(key: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
 def _sig(d: dict, sep: str = "|") -> str:
     return sep.join(f"{k}={v}" for k, v in d.items())
 
@@ -1481,6 +1513,18 @@ def main() -> None:
         metavar="KIND=N",
         help=f"Override a gate allowance, repeatable (defaults: {_GATE_THRESHOLDS}).",
     )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Ratchet mode: known-finding fingerprints; the gate tallies only findings NOT in this file.",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        type=Path,
+        default=None,
+        help="Write the current gated findings' fingerprints to this file (the ratchet snapshot).",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -1581,23 +1625,39 @@ def main() -> None:
             f"refs: {', '.join(c['reference_backends'])}"
         )
 
+    gated = [a for a in anomalies if a["kind"] in gate_thresholds]
+    if args.write_baseline:
+        args.write_baseline.parent.mkdir(parents=True, exist_ok=True)
+        args.write_baseline.write_text(
+            json.dumps({"schema": 1, "keys": sorted({_key_hash(_finding_key(a)) for a in gated})})
+        )
+        print(f"\nBaseline written: {len(gated)} findings -> {args.write_baseline}")
+
     if args.fail_on_anomalies:
+        if args.baseline:
+            if args.baseline.exists():
+                known = set(json.loads(args.baseline.read_text())["keys"])
+                before = len(gated)
+                gated = [a for a in gated if _key_hash(_finding_key(a)) not in known]
+                print(f"\nBaseline: {before - len(gated)} known findings suppressed; {len(gated)} new")
+            else:
+                logger.warning("baseline %s not found; gating ALL findings", args.baseline)
         tallies: Counter[str] = Counter()
-        for a in anomalies:
+        for a in gated:
             if a["kind"] == "nonpositive_latency":
                 tallies[a["kind"]] += a["rows"]
             elif a["kind"] == "below_sol":
                 tallies[a["kind"]] += a["points"]
-            elif a["kind"] in gate_thresholds:
+            else:
                 tallies[a["kind"]] += 1
         breaches = {k: n for k, n in tallies.items() if n > gate_thresholds[k]}
         if breaches:
             print(
-                "\nGATE FAILED — tallies over allowance: "
+                "GATE FAILED — new-finding tallies over allowance: "
                 + ", ".join(f"{k}: {n} (allowed {gate_thresholds[k]})" for k, n in sorted(breaches.items()))
             )
             raise SystemExit(1)
-        print("\nGATE OK — all tallies within allowance")
+        print("GATE OK — all tallies within allowance")
 
 
 if __name__ == "__main__":
