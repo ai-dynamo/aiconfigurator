@@ -796,6 +796,24 @@ def run_moe_torch(
 
         if moe_type == "fp8_block" and is_sm_100f(sm_version):
             source = "deepgemm"
+        elif moe_type == "fp8_block" and get_sm_version() == 120:
+            # SM120 fp8_block never reaches CUTLASS kernels: CutlassFusedMoE's
+            # forward dispatches to run_triton_fp8_block_scale_moe on SM120
+            # (fused_moe_cutlass.py:958-960@1.3.0rc20, "CUTLASS TMA fails on
+            # SM120 ... cuTensorMapEncodeTiled limitations"), so the ground
+            # truth is the Triton block-scale MoE kernel.
+            # FIXME(kernel-limit): that Triton kernel requires a power-of-2
+            # LOCAL expert count — _moe_prefix_kernel does
+            # tl.arange(0, NUM_EXPERTS) (fused_moe_triton_fp8_block_scale.py:
+            # 37-45,136-142@1.3.0rc20) and triton rejects non-power-of-2
+            # ranges at compile time. Hardware-observed on RTX PRO 6000
+            # 2026-07-26: every fp8_block model with 384 experts
+            # (DeepSeek-V4-Pro, Kimi-K2) or 160 experts (Qwen3-Coder-480B)
+            # fails on every EP split (384/ep and 160/ep are never pow2)
+            # while 256/128-expert models pass; serving hits the identical
+            # compile error. Cases fail fast and classified — re-verify on
+            # the next framework version bump.
+            source = "moe_torch_flow_triton_fp8_block"
         elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:
