@@ -167,8 +167,7 @@ def test_flashinfer_path_fails_closed_on_non_blackwell():
         if isinstance(node, ast.If)
         and any(isinstance(n, ast.Name) and n.id == "is_flashinfer" for n in ast.walk(node.test))
         and any(
-            isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version"
-            for n in ast.walk(node.test)
+            isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version" for n in ast.walk(node.test)
         )
         and {c.value for c in ast.walk(node.test) if isinstance(c, ast.Constant)} >= {100, 103}
         and any(isinstance(n, ast.Raise) for n in ast.walk(node))
@@ -274,8 +273,7 @@ def test_out_scale_mirrors_serving_use_quantize_output():
         for node in ast.walk(run_fn)
         if isinstance(node, ast.If)
         and any(
-            isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "out_scale" for t in n.targets)
+            isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "out_scale" for t in n.targets)
             for n in ast.walk(node)
         )
     ]
@@ -286,6 +284,5 @@ def test_out_scale_mirrors_serving_use_quantize_output():
         f"generation cases, got condition over {sorted(test_names)}"
     )
     assert not any(
-        isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version"
-        for n in ast.walk(guards[0])
+        isinstance(n, ast.Call) and getattr(n.func, "id", None) == "get_sm_version" for n in ast.walk(guards[0])
     ), "out_scale must not be SM-conditioned; SM90 behavior is the framework's own"
