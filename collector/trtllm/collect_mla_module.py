@@ -45,7 +45,7 @@
 
 # 1.3.0rc20 renamed the cache-manager sparse kwargs and moved attention
 # metadata to lowered SparseMetadataParams; this module follows those APIs.
-__compat__ = ">=1.3.0rc20"
+__compat__ = "trtllm>=1.3.0rc20"
 
 """
 MLA Module Collector for TRT-LLM — unified MLA and DSA benchmarking.
@@ -131,52 +131,9 @@ from collector.registry_types import PerfFile
 if "glm_moe_dsa" not in _CONFIG_REGISTRY:
     _CONFIG_REGISTRY["glm_moe_dsa"] = "DeepseekV3Config"
 
-# Fix NVFP4 weight_scale 2D bug in TRT-LLM <= rc6: weight_scale is allocated 1D
-# but post_load_weights() asserts dim()==2. Patch only if defined on the class
-# itself (rc9+ removed post_load_weights from DeepseekV32Attention).
-try:
-    from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV32Attention
-
-    if "post_load_weights" in DeepseekV32Attention.__dict__:
-
-        def _post_load_weights(self):
-            assert self.kv_a_proj_with_mqa.weight.data.dtype == self.indexer.wk.weight.data.dtype
-            offset = self.kv_lora_rank + self.qk_rope_head_dim + self.q_lora_rank
-            self.kv_a_proj_with_mqa.weight.data[offset : offset + self.indexer.head_dim].copy_(
-                self.indexer.wk.weight.data
-            )
-            if getattr(self.indexer.wk, "weight_scale", None) is not None:
-                _pad = lambda x, n: (x + n - 1) // n * n
-                for m in (self.kv_a_proj_with_mqa, self.indexer.wk):
-                    ws = m.weight_scale
-                    if ws.dim() == 1:
-                        nr = _pad(m.weight.shape[0], 128)
-                        m.weight_scale.data = ws.data.view(nr, ws.numel() // nr)
-                scale = self.indexer.wk.weight_scale.data
-                self.kv_a_proj_with_mqa.weight_scale.data[offset : offset + scale.shape[0]].copy_(scale)
-            self.indexer.wk = None
-
-        DeepseekV32Attention.post_load_weights = _post_load_weights
-except ImportError:
-    pass
-
 
 def _is_sm120_or_newer() -> bool:
     return get_sm_version() >= 120
-
-
-def _is_trtllm_sm120_dsa_module_unsupported() -> bool:
-    """Return True for TRT-LLM builds whose DSA module path rejects SM120."""
-    return _is_sm120_or_newer() and (
-        tensorrt_llm.__version__.startswith("1.3.0rc5") or tensorrt_llm.__version__.startswith("1.3.0rc10")
-    )
-
-
-def _is_trtllm_sm120_mla_module_fp8_block_unsupported() -> bool:
-    """Return True when dummy FP8-block MLA module weights assert in TRT-LLM."""
-    return _is_sm120_or_newer() and (
-        tensorrt_llm.__version__ == "1.3.0rc5.post1" or tensorrt_llm.__version__.startswith("1.3.0rc10")
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -210,7 +167,7 @@ def _get_precision_combos(phase: str, attn_type: str):
     # Some SM120 TRT-LLM builds allocate bf16 dummy weights for MLA projection
     # paths while attaching FP8-block scales, then assert in post_load_weights()
     # when resmoothing expects float8 weights.
-    if sm >= 89 and not (attn_type == "mla" and _is_trtllm_sm120_mla_module_fp8_block_unsupported()):
+    if sm >= 89:
         gemm_types.append("fp8_block")
     if sm >= 100:
         gemm_types.append("nvfp4")
@@ -321,21 +278,11 @@ def get_mla_generation_module_test_cases():
 
 def get_dsa_context_module_test_cases():
     """collect.py entrypoint for DSA context module collection."""
-    if _is_trtllm_sm120_dsa_module_unsupported():
-        # TRT-LLM rc5/rc10 abort or assert on RTX PRO 6000 Blackwell Server
-        # (SM120) DSA context paths, including:
-        # - "SEPARATE_Q_K_V requires valid K and V pointers"
-        # - DeepGEMM "Unsupported architecture"
-        # - FP8-block scale-layout assertions during post_load_weights().
-        return []
     return _build_module_test_cases(attn_type="dsa", mode="context")
 
 
 def get_dsa_generation_module_test_cases():
     """collect.py entrypoint for DSA generation module collection."""
-    if _is_trtllm_sm120_dsa_module_unsupported():
-        # The same SM120 TRT-LLM runtime path rejects DSA generation.
-        return []
     return _build_module_test_cases(attn_type="dsa", mode="generation")
 
 
@@ -686,11 +633,8 @@ def create_kv_cache_and_metadata(
     # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
     # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512) on Blackwell;
     # only P32 remains there.
-    if tensorrt_llm.__version__ >= "1.3.0rc0":
-        is_sm90_flash_mla = torch.cuda.get_device_capability() == (9, 0) and head_dim == 576
-        tokens_per_block = 64 if is_sm90_flash_mla else 32
-    else:
-        tokens_per_block = 64
+    is_sm90_flash_mla = torch.cuda.get_device_capability() == (9, 0) and head_dim == 576
+    tokens_per_block = 64 if is_sm90_flash_mla else 32
 
     prefix_len = int(prefix_len) if is_context else 0
 

@@ -8,7 +8,7 @@ context/generation MLA kernels. The module adapts shared MLA cases to current
 metadata objects, request/cache helpers, and backend-specific timing paths.
 """
 
-__compat__ = "trtllm>=1.1.0"
+__compat__ = "trtllm>=1.3.0rc20"
 
 import math
 from dataclasses import dataclass
@@ -48,9 +48,7 @@ def _mla_tokens_per_block() -> int:
     # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
     # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512) on Blackwell;
     # only P32 remains there.
-    if tensorrt_llm.__version__ >= "1.3.0rc0":
-        return 64 if get_sm_version() == 90 else 32
-    return 64
+    return 64 if get_sm_version() == 90 else 32
 
 
 def get_context_mla_test_cases():
@@ -524,25 +522,64 @@ def _run_attn_for_backend(
 
         latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
 
-        if tensorrt_llm.__version__ > "1.2.0rc2":
-            num_seqs = len(context_sequence_lengths)
-            cu_q_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
-            cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
-            fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
+        num_seqs = len(context_sequence_lengths)
+        cu_q_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+        cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+        fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
 
-            has_fp8_kv_cache = attn_mla.has_fp8_kv_cache if hasattr(attn_mla, "has_fp8_kv_cache") else False
-            if has_fp8_kv_cache:
-                mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
-                mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)
-                quant_q_buffer = torch.empty(
-                    num_tokens, num_heads * (kv_lora_rank + qk_rope_head_dim), dtype=torch.uint8, device=device
-                )
-            else:
-                mla_bmm1_scale = None
-                mla_bmm2_scale = None
-                quant_q_buffer = None
+        has_fp8_kv_cache = attn_mla.has_fp8_kv_cache if hasattr(attn_mla, "has_fp8_kv_cache") else False
+        if has_fp8_kv_cache:
+            mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
+            mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)
+            quant_q_buffer = torch.empty(
+                num_tokens, num_heads * (kv_lora_rank + qk_rope_head_dim), dtype=torch.uint8, device=device
+            )
+        else:
+            mla_bmm1_scale = None
+            mla_bmm2_scale = None
+            quant_q_buffer = None
 
-            # Call mla_rope_generation before forward
+        # Call mla_rope_generation before forward
+        attn_mla.mla_rope_generation(
+            fused_q,
+            q_pe,
+            latent_cache,
+            attn_metadata,
+            cu_q_seqlens,
+            cu_kv_seqlens,
+            fmha_scheduler_counter,
+            mla_bmm1_scale,
+            mla_bmm2_scale,
+            quant_q_buffer,
+        )
+        attn_mla.forward(
+            fused_q,
+            None,
+            None,
+            attn_metadata,
+            attention_input_type=AttentionInputType.generation_only,
+            latent_cache=latent_cache,
+            q_pe=q_pe,
+            cu_q_seqlens=cu_q_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            fmha_scheduler_counter=fmha_scheduler_counter,
+            mla_bmm1_scale=mla_bmm1_scale,
+            mla_bmm2_scale=mla_bmm2_scale,
+            quant_q_buffer=quant_q_buffer,
+        )
+
+    # Use benchmark_with_power context manager
+    def kernel_func():
+        if is_context_phase:
+            attn_mla.forward(
+                q,
+                k,
+                v,
+                attn_metadata,
+                attention_input_type=AttentionInputType.context_only,
+                latent_cache=latent_cache,
+            )
+        else:
             attn_mla.mla_rope_generation(
                 fused_q,
                 q_pe,
@@ -570,67 +607,6 @@ def _run_attn_for_backend(
                 mla_bmm2_scale=mla_bmm2_scale,
                 quant_q_buffer=quant_q_buffer,
             )
-        else:
-            attn_mla.forward(
-                fused_q,
-                None,
-                None,
-                attn_metadata,
-                attention_input_type=AttentionInputType.generation_only,
-                latent_cache=latent_cache,
-                q_pe=q_pe,
-            )
-
-    # Use benchmark_with_power context manager
-    def kernel_func():
-        if is_context_phase:
-            attn_mla.forward(
-                q,
-                k,
-                v,
-                attn_metadata,
-                attention_input_type=AttentionInputType.context_only,
-                latent_cache=latent_cache,
-            )
-        else:
-            if tensorrt_llm.__version__ > "1.2.0rc2":
-                attn_mla.mla_rope_generation(
-                    fused_q,
-                    q_pe,
-                    latent_cache,
-                    attn_metadata,
-                    cu_q_seqlens,
-                    cu_kv_seqlens,
-                    fmha_scheduler_counter,
-                    mla_bmm1_scale,
-                    mla_bmm2_scale,
-                    quant_q_buffer,
-                )
-                attn_mla.forward(
-                    fused_q,
-                    None,
-                    None,
-                    attn_metadata,
-                    attention_input_type=AttentionInputType.generation_only,
-                    latent_cache=latent_cache,
-                    q_pe=q_pe,
-                    cu_q_seqlens=cu_q_seqlens,
-                    cu_kv_seqlens=cu_kv_seqlens,
-                    fmha_scheduler_counter=fmha_scheduler_counter,
-                    mla_bmm1_scale=mla_bmm1_scale,
-                    mla_bmm2_scale=mla_bmm2_scale,
-                    quant_q_buffer=quant_q_buffer,
-                )
-            else:
-                attn_mla.forward(
-                    fused_q,
-                    None,
-                    None,
-                    attn_metadata,
-                    attention_input_type=AttentionInputType.generation_only,
-                    latent_cache=latent_cache,
-                    q_pe=q_pe,
-                )
 
     with benchmark_with_power(
         device=device,

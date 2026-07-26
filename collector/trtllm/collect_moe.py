@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.0.0,<=1.3.0rc20"
+__compat__ = "trtllm>=1.3.0rc20"
 
 import gc
 import glob
@@ -61,14 +61,6 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 _TRTLLM_VERSION = tensorrt_llm.__version__
-
-
-def _is_trtllm_130rc5_runtime():
-    return _TRTLLM_VERSION.startswith("1.3.0rc5")
-
-
-def _is_trtllm_130rc5_or_rc10_runtime():
-    return _TRTLLM_VERSION.startswith(("1.3.0rc5", "1.3.0rc10"))
 
 
 def _moe_model_behavior(model_name: str) -> str:
@@ -126,52 +118,6 @@ def _moe_consumer_keys(common_moe_testcase, moe_type: str, min_latency_mode: boo
         )
         for num_tokens in common_moe_testcase.num_tokens_list
     )
-
-
-def _patch_moe_runners_for_tuple_tactics():
-    """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
-
-    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return strings instead
-    of lists for some runners, causing the assertion to fail. This patch wraps
-    forward() to coerce tuples to lists before the call.
-    """
-    if tensorrt_llm.__version__ != "1.2.0rc5" or get_sm_version() < 100:
-        return
-
-    try:
-        from tensorrt_llm._torch.custom_ops import trtllm_gen_custom_ops as ops
-    except ImportError:
-        return
-
-    runner_classes = []
-    for name in [
-        "MxE4m3MxE2m1BlockScaleMoERunner",
-        "E4m3MxE2m1BlockScaleMoERunner",
-        "Bf16MxE2m1BlockScaleMoERunner",
-    ]:
-        cls = getattr(ops, name, None)
-        if cls is not None:
-            runner_classes.append(cls)
-
-    for cls in runner_classes:
-        orig_forward = cls.forward
-
-        def _patched_forward(self, inputs, tactic=[-1, -1], _orig=orig_forward, **kwargs):
-            if not isinstance(tactic, list):
-                if isinstance(tactic, str):
-                    import ast
-
-                    tactic = ast.literal_eval(tactic)
-                elif isinstance(tactic, (tuple, range)):
-                    tactic = list(tactic)
-                else:
-                    tactic = [tactic]
-            return _orig(self, inputs, tactic=tactic, **kwargs)
-
-        cls.forward = _patched_forward
-
-
-_patch_moe_runners_for_tuple_tactics()
 
 
 def gc_collect():
@@ -255,11 +201,6 @@ def get_moe_test_cases():
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
                 continue
 
-            if moe_type == "fp8_block" and sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
-                # DeepGEMM in TRT-LLM 1.3.0rc5/1.3.0rc10 rejects SM120 MoE
-                # with "Unknown recipe" before any supported row can be collected.
-                continue
-
             # fp8_block requires hidden_size divisible by block group_size (128)
             if moe_type == "fp8_block" and (
                 common_moe_testcase.hidden_size % 128 != 0 or (inter_s // moe_tp) % 128 != 0
@@ -283,16 +224,6 @@ def get_moe_test_cases():
                 "nvfp4": 4,
             }[moe_type]
             if (inter_s // moe_tp) % (256 // weight_bits) != 0:
-                continue
-
-            if (
-                moe_type == "nvfp4"
-                and sm_version >= 120
-                and _is_trtllm_130rc5_runtime()
-                and common_moe_testcase.num_experts // common_moe_testcase.ep < common_moe_testcase.topk
-            ):
-                # These standalone EP shapes crash the 1.3.0rc5 SM120 nvfp4 dry-run
-                # kernel. WideEP collectors cover the large-EP MoE path separately.
                 continue
 
             min_latency_mode_options = [False]

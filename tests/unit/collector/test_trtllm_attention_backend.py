@@ -210,8 +210,6 @@ def _case_functions():
         [
             "_int_list",
             "_skip_trtllm_sm120_fp8_context_fmha",
-            "_skip_trtllm_sm89_rc15_long_context_gqa",
-            "_skip_trtllm_sm89_rc15_fp8_context_mha",
             "_generation_target_sequence_lengths",
             "get_context_attention_test_cases",
             "get_generation_attention_test_cases",
@@ -225,8 +223,6 @@ def test_backend_element_reaches_the_trtllm_case_tuples(monkeypatch):
     (
         _int_list,
         skip_sm120,
-        skip_sm89_gqa,
-        skip_sm89_fp8,
         gen_targets,
         get_context_cases,
         get_generation_cases,
@@ -234,8 +230,6 @@ def test_backend_element_reaches_the_trtllm_case_tuples(monkeypatch):
     loaded = get_context_cases.__globals__
     loaded["_int_list"] = _int_list
     loaded["_skip_trtllm_sm120_fp8_context_fmha"] = skip_sm120
-    loaded["_skip_trtllm_sm89_rc15_long_context_gqa"] = skip_sm89_gqa
-    loaded["_skip_trtllm_sm89_rc15_fp8_context_mha"] = skip_sm89_fp8
     loaded["_generation_target_sequence_lengths"] = gen_targets
 
     context_cases = get_context_cases()

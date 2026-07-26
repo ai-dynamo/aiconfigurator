@@ -29,6 +29,8 @@ consumes the YAML-backed shape grid, sets up BF16/FP8 tensors, runs benchmarks,
 and logs MLA BMM perf rows for pre/post generation operations.
 """
 
+__compat__ = "trtllm>=1.3.0rc20"
+
 import tensorrt_llm
 import tensorrt_llm.quantization.utils.fp8_utils as fp8_utils
 import torch

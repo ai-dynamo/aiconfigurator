@@ -42,6 +42,8 @@ from collector.case_generator import (
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
+__compat__ = "trtllm>=1.3.0rc20"
+
 
 def _skip_trtllm_sm120_fp8_context_fmha(
     batch_size: int,
@@ -50,136 +52,35 @@ def _skip_trtllm_sm120_fp8_context_fmha(
     num_key_value_heads: int,
     head_dim: int,
 ) -> bool:
-    if not (tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10", "1.3.0rc20")) and get_sm_version() >= 120):
+    # rc20-scoped (this collector pins trtllm>=1.3.0rc20; a future rc reopens
+    # every region by construction). Hardware-verified on RTX PRO 6000
+    # 2026-07-25: boundary probes (below-threshold shapes pass, at/above
+    # abort) plus the full attention_context sweep's 29 recorded IMAs
+    # (all hd256 + fp8 context FMHA, faulting in
+    # fmha_v2_flash_attention_e4m3_fp32_64_32_S_qkv_256_sm120.cu:222).
+    # Regions are the observed clusters verbatim, no extrapolation:
+    # - MHA hd128 h=kv=96 >=65536 tok family (SIGABRT; 32768 OK);
+    # - hd256 MHA: h96 >=32768 tok (b1/s16384 passes), h64 >=49152,
+    #   h48 >=65536;
+    # - hd256 GQA: h96/kv1,4 >=98304; h96/kv8 >=81920 (65536 passes);
+    #   h64/kv1,2,4,8 >=131072; h48/kv8 >=131072 (98304 passes).
+    if not (tensorrt_llm.__version__.startswith("1.3.0rc20") and get_sm_version() >= 120):
         return False
 
     num_tokens = batch_size * input_len
-    if tensorrt_llm.__version__.startswith("1.3.0rc5"):
-        return (
-            # MHA h=128 max-token cases crash with an illegal memory access in
-            # the SM120 FP8 context FMHA kernel.
-            (num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens == 65536)
-            # h=256 cases fail in the qkv_256 SM120 FP8 FMHA kernel.
-            or head_dim == 256
-        )
-
-    if tensorrt_llm.__version__.startswith("1.3.0rc20"):
-        # rc20 reproduces BOTH earlier SM120 FP8 context FMHA crash families
-        # and widens the qkv_256 one. Hardware-verified on RTX PRO 6000
-        # 2026-07-25: boundary probes (below-threshold shapes pass, at/above
-        # abort) plus the full attention_context sweep's 29 recorded IMAs
-        # (all hd256 + fp8 context FMHA, faulting in
-        # fmha_v2_flash_attention_e4m3_fp32_64_32_S_qkv_256_sm120.cu:222).
-        # Regions are the observed clusters verbatim, no extrapolation:
-        # - rc5's MHA hd128 h=kv=96 65536-token family (SIGABRT; 32768 OK),
-        #   absent on rc10;
-        # - hd256 MHA: h96 >=32768 tok (b1/s16384 passes), h64 >=49152,
-        #   h48 >=65536;
-        # - hd256 GQA: h96/kv1,4 >=98304; h96/kv8 >=81920 (65536 passes);
-        #   h64/kv1,2,4,8 >=131072; h48/kv8 >=131072 (98304 passes).
-        if num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens >= 65536:
-            return True
-        if head_dim != 256:
-            return False
-        return (
-            (num_heads == num_key_value_heads == 96 and num_tokens >= 32768)
-            or (num_heads == num_key_value_heads == 64 and num_tokens >= 49152)
-            or (num_heads == num_key_value_heads == 48 and num_tokens >= 65536)
-            or (num_heads == 96 and num_key_value_heads in (1, 4) and num_tokens >= 98304)
-            or (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
-            or (num_heads == 64 and num_key_value_heads in (1, 2, 4, 8) and num_tokens >= 131072)
-            or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
-        )
-
+    if num_heads == num_key_value_heads == 96 and head_dim == 128 and num_tokens >= 65536:
+        return True
     if head_dim != 256:
         return False
-
     return (
-        # TRT-LLM 1.3.0rc10 SM120 qkv_256 FP8 context FMHA crashes with
-        # cudaErrorIllegalAddress for these verified high-token regions.
-        (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
+        (num_heads == num_key_value_heads == 96 and num_tokens >= 32768)
+        or (num_heads == num_key_value_heads == 64 and num_tokens >= 49152)
+        or (num_heads == num_key_value_heads == 48 and num_tokens >= 65536)
+        or (num_heads == 96 and num_key_value_heads in (1, 4) and num_tokens >= 98304)
+        or (num_heads == 96 and num_key_value_heads == 8 and num_tokens >= 81920)
+        or (num_heads == 64 and num_key_value_heads in (1, 2, 4, 8) and num_tokens >= 131072)
         or (num_heads == 48 and num_key_value_heads == 8 and num_tokens >= 131072)
-        or (num_heads == num_key_value_heads == 96 and batch_size >= 2 and input_len >= 16384)
     )
-
-
-def _skip_trtllm_sm89_rc15_long_context_gqa(
-    batch_size: int,
-    input_len: int,
-    num_heads: int,
-    num_key_value_heads: int,
-    head_dim: int,
-) -> bool:
-    # FIXME(kernel-limit): the SM89 long-context GQA IMA family REPRODUCES on
-    # 1.3.0rc20 (L40S gate100 2026-07-21: cudaErrorIllegalAddress at
-    # h=96/kv=8/hd=256/131072 tokens and h=48/kv=4/hd=256/131072 tokens, both
-    # inside this predicate's region). The same IMA family also reproduces on
-    # SM90/H20 (2026-07-24 full run: cudaErrorIllegalAddress at
-    # h=96/kv=1/hd=128/131072 tokens, both bf16 and fp8-KV), so it is not
-    # SM89-exclusive. Kept version-scoped to rc15 by owner decision (SM89
-    # handoff): rc20 cases fail classified instead of being skipped; re-verify
-    # against framework source on the next version bump.
-    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
-        return False
-
-    if num_key_value_heads not in {1, 2, 4, 8}:
-        return False
-
-    num_tokens = batch_size * input_len
-    if num_heads == 96:
-        if head_dim == 128:
-            return num_tokens >= 98304
-        if head_dim >= 256:
-            return num_tokens >= 49152
-        return head_dim >= 192 and num_tokens >= 65536
-    if num_heads == 64:
-        if head_dim >= 256:
-            return num_tokens >= 81920
-        return head_dim >= 192 and num_tokens >= 98304
-    if num_heads == 48:
-        if head_dim >= 256:
-            return num_tokens >= 98304
-        return head_dim >= 192 and num_tokens >= 131072
-    if num_heads == 40:
-        return head_dim >= 256 and num_tokens >= 131072
-    return False
-
-
-def _skip_trtllm_sm89_rc15_fp8_context_mha(
-    batch_size: int,
-    input_len: int,
-    num_heads: int,
-    num_key_value_heads: int,
-    head_dim: int,
-    use_fp8_kv_cache: bool,
-    use_fp8_context_fmha: bool,
-) -> bool:
-    # FIXME(kernel-limit): the SM89 fp8-context-MHA IMA family REPRODUCES on
-    # 1.3.0rc20 (L40S probe 2026-07-24: cudaErrorIllegalAddress at the
-    # smallest region member h=kv=96/hd=256/32768 tokens). Kept version-scoped
-    # to rc15 by owner decision (SM89 handoff): rc20 cases fail classified
-    # instead of being skipped; re-verify against framework source on the next
-    # version bump.
-    if not (tensorrt_llm.__version__.startswith("1.3.0rc15") and get_sm_version() == 89):
-        return False
-
-    if not (use_fp8_kv_cache and use_fp8_context_fmha and num_heads == num_key_value_heads):
-        return False
-
-    num_tokens = batch_size * input_len
-    if num_heads == 96:
-        if head_dim == 128:
-            return num_tokens >= 65536
-        if head_dim >= 256:
-            return num_tokens >= 32768
-        return head_dim >= 192 and num_tokens >= 40960
-    if num_heads == 64:
-        if head_dim >= 256:
-            return num_tokens >= 49152
-        return head_dim >= 192 and num_tokens >= 65536
-    if num_heads == 48:
-        return head_dim >= 256 and num_tokens >= 65536
-    return False
 
 
 def run_attention_torch(
@@ -601,24 +502,21 @@ def get_context_attention_test_cases():
                         num_kv_heads,
                         h,
                     )
-                    if _skip_trtllm_sm89_rc15_long_context_gqa(b, s, n, num_kv_heads, h):
-                        continue
+                    # FIXME(kernel-limit): two SM89 IMA families reproduce on
+                    # rc20 and fail classified here by owner decision (SM89
+                    # handoff — no rc20 skip): long-context GQA
+                    # (cudaErrorIllegalAddress, e.g. h96/kv8/hd256 and
+                    # h48/kv4/hd256 at 131072 tokens, L40S gate100 2026-07-21;
+                    # also seen on SM90/H20 2026-07-24) and fp8-context-MHA
+                    # (h=kv=96/hd256 >=32768 tokens, L40S probe 2026-07-24).
+                    # The rc15-scoped skip helpers that encoded these regions
+                    # were deleted when this collector pinned trtllm>=1.3.0rc20.
                     for precision_case in shape_sweep["precision_cases"]:
                         use_fp8_kv_cache = bool(precision_case["fp8_kv_cache"])
                         use_fp8_context_fmha = bool(precision_case["fp8_context_fmha"])
                         if not has_fp8 and use_fp8_kv_cache:
                             continue
                         if skip_fp8_context_fmha and use_fp8_context_fmha:
-                            continue
-                        if _skip_trtllm_sm89_rc15_fp8_context_mha(
-                            b,
-                            s,
-                            n,
-                            num_kv_heads,
-                            h,
-                            use_fp8_kv_cache,
-                            use_fp8_context_fmha,
-                        ):
                             continue
                         test_cases.append(
                             [
