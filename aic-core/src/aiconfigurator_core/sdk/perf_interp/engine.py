@@ -256,16 +256,17 @@ def _eval_curve(cfg: OpInterpConfig, curve: list, q, n_axes, curve_pos, site_pos
 
 def _beyond_frontier_scale_up(site_keys: list, site_key: tuple) -> bool:
     """True iff the query site exceeds the collected frontier in the scale-up
-    direction ONLY: no collected site weakly dominates it (>= on every site
-    axis), and it is not below the collected minimum on any axis. Interior
-    holes (dominated) and scale-down / mixed-direction queries keep the
-    distance-gate miss — util genuinely doesn't transfer downward, but at the
-    top of the collected range boundary efficiency is the best signal we have
-    (the same reasoning as the unbounded m-curve / Grid out-of-range hold)."""
+    direction ONLY: strictly above the collected maximum on at least one site
+    axis, and not below the collected minimum on any axis. Everything else —
+    dominated interior holes, incomparable notches inside the bounding box,
+    scale-down / mixed-direction queries — keeps the distance-gate miss: util
+    genuinely doesn't transfer downward, but at the top of the collected range
+    boundary efficiency is the best signal we have (the same reasoning as the
+    unbounded m-curve / Grid out-of-range hold)."""
     axes = range(len(site_key))
-    if any(all(s[a] >= site_key[a] for a in axes) for s in site_keys):
+    if any(site_key[a] < min(s[a] for s in site_keys) for a in axes):
         return False
-    return all(site_key[a] >= min(s[a] for s in site_keys) for a in axes)
+    return any(site_key[a] > max(s[a] for s in site_keys) for a in axes)
 
 
 def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):

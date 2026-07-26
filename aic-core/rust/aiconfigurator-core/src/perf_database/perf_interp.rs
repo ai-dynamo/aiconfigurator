@@ -621,29 +621,29 @@ impl SiteIndex {
     }
 
     /// True iff the query site exceeds the collected frontier in the scale-up
-    /// direction ONLY: no collected site weakly dominates it (>= on every site
-    /// axis), and it is not below the collected minimum on any axis. Interior
-    /// holes (dominated) and scale-down / mixed-direction queries keep the
-    /// distance-gate miss — util genuinely doesn't transfer downward, but at
+    /// direction ONLY: strictly above the collected maximum on at least one
+    /// site axis, and not below the collected minimum on any axis. Everything
+    /// else — dominated interior holes, incomparable notches inside the
+    /// bounding box, scale-down / mixed-direction queries — keeps the
+    /// distance-gate miss: util genuinely doesn't transfer downward, but at
     /// the top of the collected range boundary efficiency is the best signal
     /// we have (the same reasoning as the unbounded m-curve / grid hold).
     fn beyond_frontier_scale_up(&self, q_site: &[f64]) -> bool {
-        let dominated = self
-            .site_logs
-            .iter()
-            .any(|(key, _)| key.iter().zip(q_site).all(|(&s, &q)| s as f64 >= q));
-        if dominated {
-            return false;
+        let mut above_some_max = false;
+        for (a, &q) in q_site.iter().enumerate() {
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            for (key, _) in &self.site_logs {
+                lo = lo.min(key[a]);
+                hi = hi.max(key[a]);
+            }
+            if q < lo as f64 {
+                return false;
+            }
+            if q > hi as f64 {
+                above_some_max = true;
+            }
         }
-        (0..q_site.len()).all(|a| {
-            let min_a = self
-                .site_logs
-                .iter()
-                .map(|(key, _)| key[a])
-                .min()
-                .expect("beyond_frontier_scale_up on empty index");
-            q_site[a] >= min_a as f64
-        })
+        above_some_max
     }
 
     /// Evaluate one site's curve at coordinate `q`.
@@ -1016,6 +1016,22 @@ mod tests {
         }
         let cfg = gemm_cfg(&gemm_lat);
         assert!(query(&cfg, &t, &[32.0, 8192.0, 8192.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_incomparable_notch_inside_bounding_box_still_misses() {
+        // (4096, 4096) sits in the notch between (256, 65536) and (65536,
+        // 256): no site dominates it, yet it exceeds the collected maximum on
+        // NO axis — an interior hole in the Pareto staircase, not a scale-up
+        // frontier query. The waiver must not fire; the gate stands.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(256u32, 65536u32), (65536, 256)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 4096.0, 4096.0]).is_err());
     }
 
     #[test]

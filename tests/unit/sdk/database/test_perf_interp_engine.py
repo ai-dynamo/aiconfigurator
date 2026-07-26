@@ -120,6 +120,19 @@ def test_interior_hole_beyond_gate_still_misses():
         perf_interp.query(_gemm_cfg(), data, 32, 8192, 8192)
 
 
+def test_incomparable_notch_inside_bounding_box_still_misses():
+    # (4096, 4096) sits in the notch between (256, 65536) and (65536, 256): no
+    # site dominates it, yet it exceeds the collected maximum on NO axis — an
+    # interior hole in the Pareto staircase, not a scale-up frontier query.
+    # The waiver must not fire; the distance gate stands.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((256, 65536), (65536, 256)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 4096, 4096)
+
+
 def test_coverage_filter_prefers_sites_that_span_the_query_m():
     # Site A (2048, 2048) only has tiny m (decode-like sweep, m <= 4) with a
     # BAD tail util; site B (2000, 2000) covers large m with util == 1. A naive

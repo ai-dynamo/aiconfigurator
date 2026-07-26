@@ -127,12 +127,13 @@ class ScatteredSites:
     nn_sites: int = 4
     #: Log-space distance gate: no site within this radius -> genuine miss for
     #: interior holes and the scale-down direction. The gate is waived for a
-    #: query site beyond the collected frontier in the scale-up direction (no
-    #: site dominates it, and it is not below the collected minimum on any
-    #: axis): the ungated log-nearest (near-frontier) sites anchor the ordinary
-    #: util transfer — the same unbounded-extrapolation trust as the m curve
-    #: axis and Grid out-of-range (big-vocab LM heads, e.g. vocab/tp past the
-    #: collected n range). None = always accept the nearest site.
+    #: query site beyond the collected frontier in the scale-up direction
+    #: (strictly above the collected maximum on at least one site axis, and
+    #: not below the collected minimum on any axis): the ungated log-nearest
+    #: (near-frontier) sites anchor the ordinary util transfer — the same
+    #: unbounded-extrapolation trust as the m curve axis and Grid out-of-range
+    #: (big-vocab LM heads, e.g. vocab/tp past the collected n range).
+    #: None = always accept the nearest site.
     max_site_distance: float | None = None
     #: Only consider sites whose curve range covers the query coordinate (a
     #: decode-only site with m<=64 must not answer an m=8192 query). If no site
