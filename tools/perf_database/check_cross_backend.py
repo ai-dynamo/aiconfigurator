@@ -153,6 +153,7 @@ _DELTA_LATENCY_OP_FILES = {
 # rounding — a gate should fire on a PATTERN, not a stray point.
 # machine_op_deviation is a hint by design and stays ungated.
 _GATE_THRESHOLDS = {
+    "unreadable_table": 0,
     "nonpositive_latency": 0,
     "below_sol": 10,
     "pair_outlier": 100,
@@ -933,7 +934,21 @@ def run_checks(
         loaded: list[OpTable] = []
         for backend, versions in sorted(by_backend.items()):
             version, path = max(versions, key=lambda vp: _version_key(vp[0]))
-            table, npos_by_ks, kernel_costs = _load_op_table(path, backend, version)
+            try:
+                table, npos_by_ks, kernel_costs = _load_op_table(path, backend, version)
+            except Exception as exc:
+                anomalies.append(
+                    {
+                        "kind": "unreadable_table",
+                        "system": system,
+                        "op_file": op_file,
+                        "backend": backend,
+                        "version": version,
+                        "error": f"{type(exc).__name__}: {exc}"[:200],
+                    }
+                )
+                logger.warning("unreadable table %s: %s", path, exc)
+                continue
             for cost in kernel_costs:
                 gaps.append(
                     {
@@ -999,6 +1014,7 @@ def derive_views(anomalies: list[dict], gaps: list[dict]) -> dict:
         return [x for x in items if x["kind"] == k]
 
     return {
+        "unreadable": kind(anomalies, "unreadable_table"),
         "nonpositive": kind(anomalies, "nonpositive_latency"),
         "below_sol": kind(anomalies, "below_sol"),
         "regions": kind(anomalies, "region_deviation"),
@@ -1083,6 +1099,8 @@ def synthesize_problems(views: dict, offsets: list[dict], suspects: list[dict], 
                 add(backend, op_file, None, kind_key, f"{pts} {label} along sweep curves")
     for a in views["nonpositive"]:
         add(a["backend"], a["op_file"], a["system"], "nonpositive", f"{a['rows']} nonpositive-latency rows")
+    for a in views["unreadable"]:
+        add(a["backend"], a["op_file"], a["system"], "unreadable", f"unreadable table: {a['error']}", 100.0)
     for a in views["below_sol"]:
         add(
             a["backend"],
@@ -1156,8 +1174,16 @@ def render_markdown(
         f"- Below speed-of-light points (physically impossible): "
         f"**{sum(a['points'] for a in v['below_sol'])}** in {len(v['below_sol'])} groups"
     )
-    lines.append(f"- Machine-fingerprint deviations (hint, not gated): **{len(v['machine'])}**\n")
+    lines.append(f"- Machine-fingerprint deviations (hint, not gated): **{len(v['machine'])}**")
+    lines.append(f"- Unreadable tables: **{len(v['unreadable'])}**\n")
 
+    _md_section(
+        lines,
+        "Unreadable tables (corrupt or truncated files)",
+        "system | op_file | backend | error",
+        [f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['error']}" for a in v["unreadable"]],
+        top=max_rows,
+    )
     _md_section(
         lines,
         "Nonpositive-latency rows",
