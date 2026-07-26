@@ -14,7 +14,8 @@
 //!                             the dropped axis). ScatteredSites: site curve
 //!                             eval; unknown site -> nearest-site transfer in
 //!                             util space (log2 IDW, curve-coverage filter,
-//!                             distance gate).
+//!                             distance gate; a site beyond the scale-up
+//!                             frontier falls back to boundary util-hold).
 //! 3. beyond the range      -> hold the boundary util (k_tail-median anchor),
 //!                             latency = SOL(query) / util
 //! 4. nothing to anchor on  -> Err (structured miss; never fabricate)
@@ -564,14 +565,22 @@ impl SiteIndex {
         // tie-break reproduces the previous *stable* sort's order on equal
         // distances (sites are pushed in ascending-index order), so the selected
         // set and its ordering are identical.
-        if let Some(gate) = max_site_distance {
-            ranked.retain(|&(d, _)| d <= *gate);
-            if ranked.is_empty() {
-                return Err(miss(cfg, coords, "no site within max_site_distance"));
-            }
-        }
         let cmp =
             |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
+        if let Some(gate) = max_site_distance {
+            if !ranked.iter().any(|&(d, _)| d <= *gate) {
+                // Direction-aware frontier fallback: a query site beyond the
+                // collected frontier in the scale-up direction holds the
+                // boundary util instead of missing (big-vocab LM heads at low
+                // tp). Interior holes and scale-down queries keep the miss.
+                let q_site: Vec<f64> = site_axes.iter().map(|&p| coords[p]).collect();
+                if self.beyond_frontier_scale_up(&q_site) {
+                    return self.hold_frontier(cfg, ranked, coords, q);
+                }
+                return Err(miss(cfg, coords, "no site within max_site_distance"));
+            }
+            ranked.retain(|&(d, _)| d <= *gate);
+        }
         let k = (*nn_sites).min(ranked.len());
         if k < ranked.len() {
             ranked.select_nth_unstable_by(k, cmp);
@@ -608,6 +617,91 @@ impl SiteIndex {
             return Err(miss(cfg, coords, "non-positive SOL at query"));
         }
         Ok(sol_q / (u_acc / wsum))
+    }
+
+    /// True iff the query site exceeds the collected frontier in the scale-up
+    /// direction ONLY: no collected site weakly dominates it (>= on every site
+    /// axis), and it is not below the collected minimum on any axis. Interior
+    /// holes (dominated) and scale-down / mixed-direction queries keep the
+    /// distance-gate miss — util genuinely doesn't transfer downward, but at
+    /// the top of the collected range boundary efficiency is the best signal
+    /// we have (the same reasoning as the unbounded m-curve / grid hold).
+    fn beyond_frontier_scale_up(&self, q_site: &[f64]) -> bool {
+        let dominated = self
+            .site_logs
+            .iter()
+            .any(|(key, _)| key.iter().zip(q_site).all(|(&s, &q)| s as f64 >= q));
+        if dominated {
+            return false;
+        }
+        (0..q_site.len()).all(|a| {
+            let min_a = self
+                .site_logs
+                .iter()
+                .map(|(key, _)| key[a])
+                .min()
+                .expect("beyond_frontier_scale_up on empty index");
+            q_site[a] >= min_a as f64
+        })
+    }
+
+    /// Boundary util-hold for a query site beyond the scale-up frontier, where
+    /// the distance gate found no neighbour. The log-nearest sites to such a
+    /// query ARE the frontier sites; anchor on the median util of the nn_sites
+    /// nearest (coverage-filtered upstream) and let SOL(query) carry the
+    /// growth — median, not IDW, matching the util-hold convention (robust to
+    /// one bad anchor). `ranked` is the ungated `(distance, site index)`
+    /// buffer from `resolve`.
+    fn hold_frontier(
+        &self,
+        cfg: &OpInterpConfig,
+        mut ranked: Vec<(f64, usize)>,
+        coords: &[f64],
+        q: f64,
+    ) -> Result<f64, AicError> {
+        let Resolver::ScatteredSites {
+            site_axes,
+            curve_axis,
+            nn_sites,
+            ..
+        } = &cfg.resolver
+        else {
+            unreachable!()
+        };
+        let cmp =
+            |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
+        let k = (*nn_sites).min(ranked.len());
+        if k < ranked.len() {
+            ranked.select_nth_unstable_by(k, cmp);
+            ranked.truncate(k);
+        }
+
+        let mut utils: Vec<f64> = Vec::with_capacity(ranked.len());
+        for &(_, i) in &ranked {
+            let neigh = &self.site_logs[i].0;
+            let curve = &self.sites[neigh];
+            // one bad anchor must not poison the query
+            let Ok(lat_i) = self.eval_curve(cfg, curve, neigh, q, coords) else {
+                continue;
+            };
+            let mut n_coords = coords.to_vec();
+            for (&p, &v) in site_axes.iter().zip(neigh) {
+                n_coords[p] = v as f64;
+            }
+            n_coords[*curve_axis] = q;
+            let sol_i = (cfg.sol_fn)(&n_coords);
+            if lat_i.is_finite() && lat_i > 0.0 && sol_i.is_finite() && sol_i > 0.0 {
+                utils.push(sol_i / lat_i);
+            }
+        }
+        if utils.is_empty() {
+            return Err(miss(cfg, coords, "no positive-util frontier anchor"));
+        }
+        let sol_q = (cfg.sol_fn)(coords);
+        if !(sol_q > 0.0) {
+            return Err(miss(cfg, coords, "non-positive SOL at query"));
+        }
+        Ok(sol_q / median(&mut utils))
     }
 
     /// Evaluate one site's curve at coordinate `q`.
@@ -945,6 +1039,41 @@ mod tests {
         let cfg = gemm_cfg(&gemm_lat);
         // (64, 64): > 2 octaves from every collected site -> miss, not a guess.
         assert!(query(&cfg, &t, &[64.0, 64.0, 64.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_scale_up_beyond_frontier_holds_util() {
+        // Gemma-4-26B-A4B tp1 LM head (issue #1415): (n=262144, k=2816) is
+        // ~2.005 octaves from the nearest collected site — past the distance
+        // gate — but beyond the frontier in the scale-up direction, so the
+        // engine holds the frontier util instead of missing. util==1 fixture
+        // -> the hold is exact.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(65536u32, 2560u32), (65536, 3072), (4096, 2816)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        approx(
+            query(&cfg, &t, &[32.0, 262144.0, 2816.0]).unwrap(),
+            gemm_lat(&[32.0, 262144.0, 2816.0]),
+        );
+    }
+
+    #[test]
+    fn gemm_interior_hole_beyond_gate_still_misses() {
+        // (8192, 8192) is dominated by the collected (65536, 65536) corner but
+        // >2 octaves from every site — a sparse interior hole, not a frontier
+        // query. The gate must still refuse to guess.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(256u32, 256u32), (65536, 65536)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 8192.0, 8192.0]).is_err());
     }
 
     #[test]

@@ -87,9 +87,37 @@ def test_unknown_site_transfers_util_from_neighbours():
 
 
 def test_far_site_is_a_structured_miss():
-    # (16384, 512) is ~2.6 octaves from every collected shape -> miss, not a guess.
+    # (16384, 512) is ~2.6 octaves from every collected shape -> miss, not a
+    # guess. (Also the mixed-direction case: n is scale-up beyond the frontier
+    # but k is BELOW every collected k, so the frontier fallback must not fire.)
     with pytest.raises(InterpolationDataNotAvailableError):
         perf_interp.query(_gemm_cfg(), _gemm_table(), 1000, 16384, 512)
+
+
+def test_scale_up_beyond_frontier_holds_util():
+    # Gemma-4-26B-A4B tp1 LM head (issue #1415): (n=262144, k=2816) is ~2.005
+    # octaves from the nearest collected site (n caps at 65536 in every GPU
+    # database) — past the distance gate — but lies beyond the frontier in the
+    # scale-up direction, so the engine holds the frontier util instead of
+    # missing. util==1 fixture -> the hold is exact.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((65536, 2560), (65536, 3072), (4096, 2816)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    lat = _lat(perf_interp.query(_gemm_cfg(), data, 32, 262144, 2816))
+    assert lat == pytest.approx(_gemm_lat(32, 262144, 2816), rel=1e-6)
+
+
+def test_interior_hole_beyond_gate_still_misses():
+    # (8192, 8192) is dominated by the collected (65536, 65536) corner but >2
+    # octaves from every site — a sparse interior hole, not a frontier query.
+    # The gate must still refuse to guess.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((256, 256), (65536, 65536)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 8192, 8192)
 
 
 def test_coverage_filter_prefers_sites_that_span_the_query_m():
