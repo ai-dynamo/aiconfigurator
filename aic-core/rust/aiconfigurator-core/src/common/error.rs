@@ -34,6 +34,12 @@ pub enum AicError {
     ModelConfig(String),
     #[error("perf database error: {0}")]
     PerfDatabase(String),
+    /// A quant mode's compute dtype has no `*_tc_flops` entry in the system
+    /// YAML. Mirrors Python's `MissingSystemFlopsError`: the platform either
+    /// lacks hardware for that dtype or the YAML is incomplete — never
+    /// extrapolate a fictional throughput from bf16.
+    #[error("missing system flops: {0}")]
+    MissingSystemFlops(String),
     /// The HYBRID/EMPIRICAL path found no calibration data for the requested
     /// slice — no own-shape, cross-shape, or sibling transfer reference.
     /// Mirrors Python's `EmpiricalNotImplementedError`: a coverage gap, never

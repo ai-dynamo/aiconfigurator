@@ -43,13 +43,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::gemm::quant_tc_flops;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// Axes for the context table (sqrt-on-seq Grid).
@@ -150,21 +151,29 @@ impl WideEpMlaTable {
             fmha_quant: fmha_quant.name().to_string(),
             kv_quant: kv_quant.name().to_string(),
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| {
-            missing(
-                "WideEP context MLA",
-                &self.data_root,
-                format!("{key:?}"),
-            )
-        })?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("WideEP context MLA", &self.data_root, format!("{key:?}")))?;
         // kv_quant keys the table slice only; the Python context SOL never
         // reads it (memory scales by fmha.memory).
         let _ = kv_quant;
         let spec = &self.system_spec;
+        let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+        let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
         // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`
         // (Python `get_silicon`'s lambda), prefix = 0 (samples are prefix=0).
         let sol = move |c: &[f64]| {
-            wideep_context_mla_sol_ms(spec, fmha_quant, wideep_num_head(c[0]), c[1], 0.0, c[2])
+            wideep_context_mla_sol_ms(
+                spec,
+                fmha_quant,
+                wideep_num_head(c[0]),
+                c[1],
+                0.0,
+                c[2],
+                main_flops,
+                bf16_flops,
+            )
         };
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
         perf_interp::query(
@@ -190,13 +199,10 @@ impl WideEpMlaTable {
             kernel_source: kernel_source.to_string(),
             kv_quant: kv_quant.name().to_string(),
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| {
-            missing(
-                "WideEP generation MLA",
-                &self.data_root,
-                format!("{key:?}"),
-            )
-        })?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("WideEP generation MLA", &self.data_root, format!("{key:?}")))?;
         // Python's generation query is (num_heads, b, s) — middle axis is
         // batch, inner axis is sequence tokens; the node is built with that
         // nesting on load.
@@ -214,9 +220,19 @@ impl WideEpMlaTable {
             FmhaQuantMode::Bfloat16
         };
         let spec = &self.system_spec;
+        let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+        let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
         // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`.
         let sol = move |c: &[f64]| {
-            wideep_generation_mla_sol_ms(spec, fmha_quant, wideep_num_head(c[0]), c[1], c[2])
+            wideep_generation_mla_sol_ms(
+                spec,
+                fmha_quant,
+                wideep_num_head(c[0]),
+                c[1],
+                c[2],
+                main_flops,
+                bf16_flops,
+            )
         };
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
         perf_interp::query(
@@ -310,11 +326,6 @@ impl WideEpMlaTable {
 // v_head 128). Arithmetic ordering mirrors Python for float parity.
 // ---------------------------------------------------------------------------
 
-/// See `mla.rs::bf16_tc_flops` — Python indexes the spec directly.
-fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
-    spec.gpu.bfloat16_tc_flops.unwrap_or(0.0)
-}
-
 /// The tables key by `num_heads`; the Python SILICON `sol_fn` lambdas take
 /// `tp_size` derived as `tp = 128 // n` and the SOLs then use
 /// `num_head = 128 // tp_size`. Compose both floor divisions exactly. (The
@@ -332,11 +343,13 @@ pub(crate) fn wideep_num_head(n: f64) -> f64 {
 /// prefix=0), the util-empirical query SOL carries the real prefix.
 /// Structure (per Python):
 /// - q_b / kv_b projections + attention output projection -> `ops`
-///   (divided by `bf16_tc_flops * fmha.compute`)
+///   (divided by `main_flops`, the caller-resolved fmha-quant TC-FLOPS)
 /// - attention flops `2 * nh * (nope*2 + rope) * b * (full_s^2 - prefix^2) // 2`
-///   added at full bf16 throughput (no fmha compute factor)
+///   added at full bf16 throughput (`bf16_flops`, intentionally bf16 — no
+///   fmha compute scaling)
 /// - `mem = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha.memory`
 /// - `sol = max(sol_math, sol_mem)`
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wideep_context_mla_sol_ms(
     spec: &SystemSpec,
     fmha_quant: FmhaQuantMode,
@@ -344,6 +357,8 @@ pub(crate) fn wideep_context_mla_sol_ms(
     s: f64,
     prefix: f64,
     b: f64,
+    main_flops: f64,
+    bf16_flops: f64,
 ) -> f64 {
     let hidden_size = 7168.0_f64;
     let q_lora_rank = 1536.0_f64;
@@ -385,9 +400,10 @@ pub(crate) fn wideep_context_mla_sol_ms(
         b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2.0 * b * hidden_size * s;
 
     let ops = q_b_flop + kv_b_flop + attn_out_flop;
-    let mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2.0 + attn_out_mem) * fmha_quant.mapping().memory;
-    let mut sol_math = ops / (bf16_tc_flops(spec) * fmha_quant.mapping().compute) * 1000.0;
-    sol_math += attn_flop / bf16_tc_flops(spec) * 1000.0;
+    let mem_bytes =
+        (q_b_mem + kv_b_mem + attn_mem * 2.0 + attn_out_mem) * fmha_quant.mapping().memory;
+    let mut sol_math = ops / main_flops * 1000.0;
+    sol_math += attn_flop / bf16_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
@@ -396,8 +412,9 @@ pub(crate) fn wideep_context_mla_sol_ms(
 /// (see [`wideep_context_mla_sol_ms`] for the mapping split between
 /// silicon and empirical call sites). Structure (per Python): q_b, q_w_kc,
 /// s_w_vc and attention-output projections -> `ops` (divided by
-/// `bf16_tc_flops * fmha.compute`); the MQA attention flops
-/// `2 * b * s * nh * (rope + kv_lora*2)` added at full bf16 throughput;
+/// `main_flops`, the caller-resolved fmha-quant TC-FLOPS); the MQA
+/// attention flops `2 * b * s * nh * (rope + kv_lora*2)` added at full bf16
+/// throughput (`bf16_flops`, intentionally bf16);
 /// `mem = (q_b + q_w_kc + attn*2 + s_w_vc + attn_out) * fmha.memory`;
 /// `sol = max(sol_math, sol_mem)`.
 pub(crate) fn wideep_generation_mla_sol_ms(
@@ -406,6 +423,8 @@ pub(crate) fn wideep_generation_mla_sol_ms(
     num_head: f64,
     b: f64,
     s: f64,
+    main_flops: f64,
+    bf16_flops: f64,
 ) -> f64 {
     let hidden_size = 7168.0_f64;
     let q_lora_rank = 1536.0_f64;
@@ -447,10 +466,10 @@ pub(crate) fn wideep_generation_mla_sol_ms(
         b * num_head * v_head_dim + num_head * v_head_dim * hidden_size + 2.0 * b * hidden_size;
 
     let ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop;
-    let mem_bytes =
-        (q_b_mem + q_w_kc_mem + attn_mem * 2.0 + s_w_vc_mem + attn_out_mem) * fmha_quant.mapping().memory;
-    let mut sol_math = ops / (bf16_tc_flops(spec) * fmha_quant.mapping().compute) * 1000.0;
-    sol_math += attn_flop / bf16_tc_flops(spec) * 1000.0;
+    let mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2.0 + s_w_vc_mem + attn_out_mem)
+        * fmha_quant.mapping().memory;
+    let mut sol_math = ops / main_flops * 1000.0;
+    sol_math += attn_flop / bf16_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }

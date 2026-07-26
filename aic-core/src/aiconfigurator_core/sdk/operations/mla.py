@@ -161,7 +161,7 @@ class ContextMLA(Operation):
             mem_bytes = (
                 b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
             )  # 2 for qk, TODO
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -355,7 +355,7 @@ class GenerationMLA(Operation):
                 quant_mode_gen = common.FMHAQuantMode.bfloat16
             ops = 2 * b * num_heads * 1088 * s
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kvcache_quant_mode.value.memory)
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode_gen) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -517,7 +517,7 @@ class MLABmm(Operation):
         ) -> tuple[float, float, float]:
             ops = 2 * num_tokens * num_heads * 128 * 512
             mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -733,7 +733,7 @@ class MLAModule(Operation):
             full_s = s + prefix
             ops = b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
             mem_bytes = b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -849,14 +849,12 @@ class MLAModule(Operation):
             # MLA attention ops
             attn_ops = 2 * b * num_heads * 1088 * s
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kv_cache_dtype.value.memory)
-            sol_math = attn_ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = attn_ops / common.get_quant_tc_flops(database.system_spec, quant_mode_gen) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             # Add BMM pre + post SOL (same as query_mla_bmm)
             bmm_ops = 2 * 2 * b * num_heads * 128 * 512  # pre + post
             bmm_mem = 2 * num_heads * (b * 640 + 128 * 512) * gemm_quant_mode.value.memory
-            bmm_math = (
-                bmm_ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
-            )
+            bmm_math = bmm_ops / common.get_quant_tc_flops(database.system_spec, gemm_quant_mode) * 1000
             bmm_mem_time = bmm_mem / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_math += bmm_math
             sol_mem += bmm_mem_time
@@ -1126,7 +1124,7 @@ class WideEPGenerationMLA(Operation):
 
             ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
             mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_math += attn_flop / (database.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
@@ -1390,7 +1388,7 @@ class WideEPContextMLA(Operation):
 
             ops = q_b_flop + kv_b_flop + attn_out_flop
             mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_math += attn_flop / (database.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)

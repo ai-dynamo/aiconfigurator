@@ -14,13 +14,15 @@
 //! own SOL roofline — mirroring Python's `max(latency_floor, latency)` where
 //! `latency_floor = query_gemm(..., DatabaseMode.SOL)` — not at 0.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, GemmQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid, ZeroAwareDeltaLookup};
-use crate::perf_database::gemm::{gemm_sol_latency_ms, normalize_fp8_static_quant};
+use crate::perf_database::gemm::{
+    gemm_sol_latency_ms_with_flops, normalize_fp8_static_quant, quant_tc_flops,
+};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 /// GEMM operation: a dense matrix multiply of shape `M=x, N=n, K=k`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,9 +99,11 @@ impl GemmOp {
             // the GEMM's own roofline. Floor at the SOL (NOT at 0), and tag
             // the result "estimated" (fp8_static is modeled from dynamic FP8
             // plus overhead tables, not measured directly).
-            latency_floor = crate::perf_database::gemm::gemm_sol_latency_ms(
+            let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
+            latency_floor = gemm_sol_latency_ms_with_flops(
                 &db.system_spec,
                 quant,
+                tc_flops,
                 m as f64,
                 self.n as f64,
                 self.k as f64,
@@ -163,7 +167,8 @@ fn gemm_empirical(
     k: u32,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
-    let sol = |c: &[f64]| gemm_sol_latency_ms(spec, quant, c[0], c[1], c[2]);
+    let tc_flops = quant_tc_flops(spec, quant.mapping())?;
+    let sol = |c: &[f64]| gemm_sol_latency_ms_with_flops(spec, quant, tc_flops, c[0], c[1], c[2]);
     let key = format!("gemm:{}", normalize_fp8_static_quant(quant).name());
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.gemm.gemm_points(quant) {
@@ -189,7 +194,9 @@ fn query_compute_scale_table(
     k: u32,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((compute_scale_empirical(db, quant, m, k)?, Source::Empirical)),
+        DatabaseMode::Empirical => {
+            Ok((compute_scale_empirical(db, quant, m, k)?, Source::Empirical))
+        }
         DatabaseMode::Hybrid => match db.gemm.query_compute_scale(quant, m, k) {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => {
@@ -222,8 +229,9 @@ fn compute_scale_empirical(
         })?;
     // sol_mem = 2 m k / bw * 1000 (read + write of the activation).
     let spec = &db.system_spec;
-    let latency =
-        lookup.estimate(&[m as f64, k as f64], |c| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0)?;
+    let latency = lookup.estimate(&[m as f64, k as f64], |c| {
+        2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0
+    })?;
     // The delta lookup fired (Python `_ZeroAwareDeltaLookup.estimate` notes
     // "empirical"; zero deltas count — they are measured values).
     db.note_provenance(util_empirical::ProvenanceTier::Empirical);
@@ -238,7 +246,9 @@ fn query_scale_matrix_table(
     k: u32,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((scale_matrix_empirical(db, quant, m, k)?, Source::Empirical)),
+        DatabaseMode::Empirical => {
+            Ok((scale_matrix_empirical(db, quant, m, k)?, Source::Empirical))
+        }
         DatabaseMode::Hybrid => match db.gemm.query_scale_matrix(quant, m, k) {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => {
@@ -263,13 +273,15 @@ fn scale_matrix_empirical(
     let spec = &db.system_spec;
     let sol = |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
     let key = format!("scale_matrix:{}", normalize_fp8_static_quant(quant).name());
-    let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.gemm.scale_matrix_points(quant) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
-            Err(err) if err.is_missing_perf_data() => Ok(None),
-            Err(err) => Err(err),
-        }
-    })?;
+    let grid =
+        db.util_grids
+            .get_or_try_build(&key, || match db.gemm.scale_matrix_points(quant) {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    points, sol,
+                )))),
+                Err(err) if err.is_missing_perf_data() => Ok(None),
+                Err(err) => Err(err),
+            })?;
     let query = [m as f64, k as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
     // Own-shape util fired (Python estimate()'s default provenance).

@@ -327,7 +327,7 @@ class MoE(Operation):
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -1624,7 +1624,7 @@ class TrtLLMWideEPMoE(Operation):
                 // moe_tp_size
                 * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

@@ -28,6 +28,7 @@ from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import (
     EmpiricalNotImplementedError,
     InterpolationDataNotAvailableError,
+    MissingSystemFlopsError,
     PerfDataNotAvailableError,
 )
 from aiconfigurator_core.sdk.operations import util_empirical
@@ -268,26 +269,6 @@ class GEMM(Operation):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_quant_tc_flops(system_spec, quant_mode) -> float:
-        """Resolve actual tensor-core FLOPS for a given quant mode.
-
-        Maps the quant mode's compute factor (1/2/4) to the corresponding
-        ``*_tc_flops`` entry in the system GPU spec. Falls back to
-        ``bfloat16_tc_flops * compute_factor`` when the spec entry is
-        missing.
-
-        Static so non-GEMM SOL callers in perf_database.py (DSV4, MLA,
-        attention) can delegate without an instance. Until ISSUE-16
-        retires those wrappers, ``PerfDatabase._get_quant_tc_flops``
-        forwards here."""
-        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
-        gpu = system_spec["gpu"]
-        key = compute_to_flops_key.get(quant_mode.value.compute)
-        if key is not None and key in gpu:
-            return gpu[key]
-        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
-
-    @staticmethod
     def _normalize_gemm_quant_mode_for_table(
         quant_mode: common.GEMMQuantMode,
     ) -> common.GEMMQuantMode:
@@ -326,6 +307,15 @@ class GEMM(Operation):
             return
 
         for quant_mode in gemm_data:
+            # Silicon data can exist for a dtype whose *_tc_flops entry is
+            # missing from the system YAML (e.g. b60 fp8). Leave that slice
+            # unclamped rather than failing the whole database load; query-time
+            # SOL/HYBRID paths still reject the quant mode loudly.
+            try:
+                common.get_quant_tc_flops(database.system_spec, quant_mode)
+            except MissingSystemFlopsError as exc:
+                logger.debug(f"skipping SOL clamp for gemm quant {quant_mode}: {exc}")
+                continue
             for m in gemm_data[quant_mode]:
                 for n in gemm_data[quant_mode][m]:
                     for k in gemm_data[quant_mode][m][n]:
@@ -435,7 +425,7 @@ class GEMM(Operation):
         """Query GEMM table — preserves PR #721 exact-hit → 1D → 3D fast path."""
 
         def get_sol(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> tuple[float, float, float]:
-            tc_flops = cls._get_quant_tc_flops(database.system_spec, qm)
+            tc_flops = common.get_quant_tc_flops(database.system_spec, qm)
             sol_math = 2 * m_v * n_v * k_v / tc_flops * 1000
             sol_mem = (
                 qm.value.memory * (m_v * n_v + m_v * k_v + n_v * k_v) / database.system_spec["gpu"]["mem_bw"] * 1000

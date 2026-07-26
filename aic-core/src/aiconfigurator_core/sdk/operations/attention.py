@@ -26,7 +26,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common, perf_interp
-from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator_core.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
@@ -336,7 +336,7 @@ class ContextAttention(Operation):
             mem_bytes = 2 * b * (
                 n * (full_s - prefix) * h + n * (full_s - prefix) * h
             ) + kvcache_quant_mode.value.memory * b * (2 * n_kv * full_s * h)
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -657,6 +657,19 @@ class GenerationAttention(Operation):
             return
 
         for quant_mode in data_wrapper:
+            # Silicon data can exist for a dtype whose *_tc_flops entry is
+            # missing from the system YAML (e.g. b60 fp8). Mirror the FMHA-mode
+            # derivation in get_sol and leave that slice unclamped rather than
+            # failing the whole database load; query-time SOL/HYBRID paths
+            # still reject the quant mode loudly.
+            fmha_mode = (
+                common.FMHAQuantMode.fp8 if quant_mode == common.KVCacheQuantMode.fp8 else common.FMHAQuantMode.bfloat16
+            )
+            try:
+                common.get_quant_tc_flops(database.system_spec, fmha_mode)
+            except MissingSystemFlopsError as exc:
+                logger.debug(f"skipping SOL clamp for generation attention quant {quant_mode}: {exc}")
+                continue
             for n_kv in data_wrapper[quant_mode]:
                 for head_size in data_wrapper[quant_mode][n_kv]:
                     for window_size in data_wrapper[quant_mode][n_kv][head_size]:
@@ -729,7 +742,7 @@ class GenerationAttention(Operation):
             ops = 2 * b * n * h * 2 * (kv_len)
             mem_bytes = b * (n * h * 2 + 2 * n_kv * (kv_len) * h * kvcache_quant_mode.value.memory + n * h * 2)
 
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode_gen) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -1019,7 +1032,7 @@ class EncoderAttention(Operation):
             ops = 2 * b * s * s * n * h * 2  # 2 for fma, 2 for q*k^t + *v
             # Encoder has no KV cache read; Q/K/V are all read once
             mem_bytes = 2 * b * (3 * n * s * h + n * s * h)  # Q/K/V read + output write, bf16
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

@@ -16,15 +16,14 @@
 //! `prefix_correction = (full_s^2 - prefix^2) / full_s^2`. Generation has
 //! no prefix concept.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
-use crate::perf_database::wideep_mla::{
-    wideep_context_mla_sol_ms, wideep_generation_mla_sol_ms,
-};
+use crate::perf_database::gemm::quant_tc_flops;
+use crate::perf_database::wideep_mla::{wideep_context_mla_sol_ms, wideep_generation_mla_sol_ms};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     if full_s == 0 {
@@ -594,9 +593,20 @@ fn wideep_context_mla_empirical(
     attn_backend: &str,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
     // c = (num_heads, full_s, b); tp = round(128 / c[0]) per Python.
     let sol = |c: &[f64]| {
-        wideep_context_mla_sol_ms(spec, fmha_quant, wideep_sample_num_head(c[0]), c[1], 0.0, c[2])
+        wideep_context_mla_sol_ms(
+            spec,
+            fmha_quant,
+            wideep_sample_num_head(c[0]),
+            c[1],
+            0.0,
+            c[2],
+            main_flops,
+            bf16_flops,
+        )
     };
     let key = format!(
         "wideep_ctx_mla:{attn_backend}:{}:{}",
@@ -620,6 +630,8 @@ fn wideep_context_mla_empirical(
         s as f64,
         prefix as f64,
         b as f64,
+        main_flops,
+        bf16_flops,
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
@@ -686,9 +698,19 @@ fn wideep_generation_mla_empirical(
         FmhaQuantMode::Bfloat16
     };
     let spec = &db.system_spec;
+    let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
     // c = (num_heads, b, s); tp = round(128 / c[0]) per Python.
     let sol = |c: &[f64]| {
-        wideep_generation_mla_sol_ms(spec, fmha_quant, wideep_sample_num_head(c[0]), c[1], c[2])
+        wideep_generation_mla_sol_ms(
+            spec,
+            fmha_quant,
+            wideep_sample_num_head(c[0]),
+            c[1],
+            c[2],
+            main_flops,
+            bf16_flops,
+        )
     };
     let key = format!("wideep_gen_mla:{attn_backend}:{}", kv_quant.name());
     let grid = db.util_grids.get_or_try_build(&key, || {
@@ -699,7 +721,15 @@ fn wideep_generation_mla_empirical(
         }
     })?;
     // Query SOL uses the op's own head count (= Python's `128 // tp_size`).
-    let sol_query = wideep_generation_mla_sol_ms(spec, fmha_quant, num_heads as f64, b as f64, s as f64);
+    let sol_query = wideep_generation_mla_sol_ms(
+        spec,
+        fmha_quant,
+        num_heads as f64,
+        b as f64,
+        s as f64,
+        main_flops,
+        bf16_flops,
+    );
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
     // Own-slice util fired (Python mla.py:1162 estimate()'s default tier).

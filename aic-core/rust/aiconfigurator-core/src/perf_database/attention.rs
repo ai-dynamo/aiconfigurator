@@ -34,13 +34,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::gemm::quant_tc_flops;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
@@ -164,9 +165,18 @@ impl AttentionTable {
         // kv-head/window/head-size setup; c = [n, full_s, b].
         let spec = &self.system_spec;
         let n_kv_lookup = key.n_kv_lookup;
+        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
         let sol = move |c: &[f64]| {
             context_attention_sol_ms(
-                spec, n_kv_lookup, head_size, window_size, kv_quant, fmha_quant, c[0], c[1], c[2],
+                spec,
+                n_kv_lookup,
+                head_size,
+                window_size,
+                kv_quant,
+                c[0],
+                c[1],
+                c[2],
+                attn_flops,
             )
         };
         let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
@@ -207,9 +217,18 @@ impl AttentionTable {
         //   s_samples[i] = s_min + (s_max - s_min) * i // (sample_cnt - 1)
         let spec = &self.system_spec;
         let n_kv_lookup = key.n_kv_lookup;
+        let attn_flops = generation_attn_flops(spec, kv_quant)?;
         let sol = move |c: &[f64]| {
             generation_attention_sol_ms(
-                spec, n_kv_lookup, head_size, window_size, kv_quant, c[0], c[1], c[2],
+                spec,
+                n_kv_lookup,
+                head_size,
+                window_size,
+                kv_quant,
+                c[0],
+                c[1],
+                c[2],
+                attn_flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &sol);
@@ -249,8 +268,10 @@ impl AttentionTable {
         // only, raw elsewhere. The SOL differs from context: non-causal (no
         // /2) and no KV-cache read.
         let spec = &self.system_spec;
-        let sol =
-            move |c: &[f64]| encoder_attention_sol_ms(spec, head_size, fmha_quant, c[0], c[1], c[2]);
+        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+        let sol = move |c: &[f64]| {
+            encoder_attention_sol_ms(spec, head_size, c[0], c[1], c[2], attn_flops)
+        };
         let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
         perf_interp::query(&cfg, node, &[n as f64, s as f64, b as f64])
     }
@@ -604,15 +625,11 @@ pub(crate) fn context_attention_sol_ms(
     head_size: u32,
     window_size: u32,
     kv_quant: KvCacheQuantMode,
-    fmha_quant: FmhaQuantMode,
     n: f64,
     s: f64,
     b: f64,
+    attn_flops: f64,
 ) -> f64 {
-    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    if bf16_flops <= 0.0 {
-        return 0.0;
-    }
     let h = head_size as f64;
     let w = window_size as f64;
     let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup as f64 };
@@ -625,7 +642,7 @@ pub(crate) fn context_attention_sol_ms(
     // Q read + output write (bf16) + KV write at kv-cache precision.
     let mem_bytes =
         2.0 * b * (n * s * h + n * s * h) + kv_quant.mapping().memory * b * (2.0 * n_kv * s * h);
-    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
@@ -652,12 +669,8 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
     head_size: u32,
     window_size: u32,
     kv_quant: KvCacheQuantMode,
-    fmha_quant: FmhaQuantMode,
+    attn_flops: f64,
 ) -> f64 {
-    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    if bf16_flops <= 0.0 {
-        return 0.0;
-    }
     let h = head_size as f64;
     let w = window_size as f64;
     let full_s = s + prefix;
@@ -668,7 +681,7 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
     };
     let mem_bytes = 2.0 * b * (n * (full_s - prefix) * h + n * (full_s - prefix) * h)
         + kv_quant.mapping().memory * b * (2.0 * n_kv * full_s * h);
-    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
@@ -681,19 +694,15 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
 pub(crate) fn encoder_attention_sol_ms(
     spec: &SystemSpec,
     head_size: u32,
-    fmha_quant: FmhaQuantMode,
     n: f64,
     s: f64,
     b: f64,
+    attn_flops: f64,
 ) -> f64 {
-    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    if bf16_flops <= 0.0 {
-        return 0.0;
-    }
     let h = head_size as f64;
     let ops = 2.0 * b * s * s * n * h * 2.0; // 2 for fma, 2 for q*k^t + *v
     let mem_bytes = 2.0 * b * (3.0 * n * s * h + n * s * h); // Q/K/V read + output write, bf16
-    let sol_math = ops / bf16_flops * 1000.0 / fmha_quant.mapping().compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
@@ -713,29 +722,40 @@ pub(crate) fn generation_attention_sol_ms(
     n: f64,
     b: f64,
     s: f64,
+    attn_flops: f64,
 ) -> f64 {
-    let bf16_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    if bf16_flops <= 0.0 {
-        return 0.0;
-    }
-    let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup as f64 };
+    let n_kv = if n_kv_lookup == 0 {
+        n
+    } else {
+        n_kv_lookup as f64
+    };
     let kv_len = if window_size > 0 {
         (s - 1.0).min(window_size as f64)
     } else {
         s - 1.0
     };
-    let quant_mode_gen_compute = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8.mapping().compute
-    } else {
-        FmhaQuantMode::Bfloat16.mapping().compute
-    };
     let h = head_size as f64;
     let kv_mem = kv_quant.mapping().memory;
     let ops = 2.0 * b * n * h * 2.0 * kv_len;
     let mem_bytes = b * (n * h * 2.0 + 2.0 * n_kv * kv_len * h * kv_mem + n * h * 2.0);
-    let sol_math = ops / bf16_flops * 1000.0 / quant_mode_gen_compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
+}
+
+/// Decode-attention TC-FLOPS: Python derives the FMHA mode from the kv-cache
+/// dtype (`fp8` kv -> fp8 FMHA, else bf16) inside `get_sol`; resolve it
+/// strictly via `quant_tc_flops`.
+pub(crate) fn generation_attn_flops(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+) -> Result<f64, AicError> {
+    let fmha = if kv_quant == KvCacheQuantMode::Fp8 {
+        FmhaQuantMode::Fp8
+    } else {
+        FmhaQuantMode::Bfloat16
+    };
+    quant_tc_flops(spec, fmha.mapping())
 }
 
 /// In-place SOL clamp for every raw row in the generation-attention grid set.
@@ -744,11 +764,15 @@ fn clamp_generation_attention_grids_to_sol(
     spec: &SystemSpec,
     grids: &mut BTreeMap<GenerationKey, Grid3<f64>>,
 ) {
-    if spec.gpu.bfloat16_tc_flops.unwrap_or(0.0) <= 0.0 {
-        return;
-    }
     for (key, grid) in grids.iter_mut() {
         let Some(kv_quant) = kv_cache_quant_by_name(&key.kv_quant) else {
+            continue;
+        };
+        // Silicon data can exist for a dtype whose `*_tc_flops` entry is
+        // missing from the system YAML (e.g. b60 fp8): leave that slice
+        // unclamped rather than failing the load (mirrors Python
+        // `Attention._correct_sol`).
+        let Ok(attn_flops) = generation_attn_flops(spec, kv_quant) else {
             continue;
         };
         // Grid order is `[n][b][s]`: outer=n, middle=b, inner=s.
@@ -764,6 +788,7 @@ fn clamp_generation_attention_grids_to_sol(
                         n as f64,
                         b as f64,
                         s as f64,
+                        attn_flops,
                     );
                     if sol > *latency {
                         *latency = sol;

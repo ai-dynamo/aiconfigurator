@@ -18,13 +18,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::common::enums::GemmQuantMode;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
+use super::{kernel_source_ok, resolve_op_sources};
+use crate::common::enums::{ComputeDtype, GemmQuantMode, QuantMapping};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// GEMM-family perf-data owner for one logical
@@ -125,7 +125,10 @@ impl GemmTable {
             ))
         })?;
         let spec = &self.system_spec;
-        let sol = move |c: &[f64]| gemm_sol_latency_ms(spec, lookup_quant, c[0], c[1], c[2]);
+        let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        let sol = move |c: &[f64]| {
+            gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
+        };
         let cfg = gemm_engine_config(&sol);
         index.resolve(&cfg, &[m as f64, n as f64, k as f64])
     }
@@ -278,63 +281,76 @@ impl GemmTable {
     }
 }
 
-/// Speed-of-light GEMM latency in ms.
+/// Speed-of-light GEMM latency in ms, from a pre-resolved `tc_flops`.
 ///
 /// Mirrors Python's `GEMM._query_gemm_table::get_sol`:
-/// - `sol_math = 2 * m * n * k / tc_flops(quant) * 1000`
+/// - `sol_math = 2 * m * n * k / tc_flops * 1000`
 /// - `sol_mem  = quant.memory * (m*n + m*k + n*k) / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
-///
-/// `tc_flops(quant)` follows Python `_get_quant_tc_flops`: compute factor
-/// 1 maps to `bfloat16_tc_flops`, 2 to `fp8_tc_flops`, 4 to `fp4_tc_flops`,
-/// with a `bfloat16_tc_flops * compute_factor` fallback when the spec
-/// entry is missing.
-pub(crate) fn gemm_sol_latency_ms(
+pub(crate) fn gemm_sol_latency_ms_with_flops(
     spec: &SystemSpec,
     quant: GemmQuantMode,
+    tc_flops: f64,
     m: f64,
     n: f64,
     k: f64,
 ) -> f64 {
     let mapping = quant.mapping();
-    let (m_f, n_f, k_f) = (m, n, k);
-    let tc_flops = tc_flops_for_compute(spec, mapping.compute);
-    let sol_math = 2.0 * m_f * n_f * k_f / tc_flops * 1000.0;
-    let sol_mem = mapping.memory * (m_f * n_f + m_f * k_f + n_f * k_f)
-        / spec.gpu.mem_bw
-        * 1000.0;
+    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
+    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
 
-pub(crate) fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
-    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    let direct = match compute_factor as u32 {
-        1 => spec.gpu.bfloat16_tc_flops,
-        2 => spec.gpu.fp8_tc_flops,
-        4 => spec.gpu.fp4_tc_flops,
-        _ => None,
+/// Strict tensor-core FLOPS resolver. Mirrors Python
+/// `common.get_quant_tc_flops`: the quant mode's `compute_dtype` selects the
+/// `<dtype>_tc_flops` spec entry; a missing entry is an error (the platform
+/// either lacks hardware for that dtype or the YAML is incomplete) — never
+/// a `bfloat16_tc_flops * compute_factor` extrapolation.
+pub(crate) fn quant_tc_flops(spec: &SystemSpec, mapping: QuantMapping) -> Result<f64, AicError> {
+    let Some(dtype) = mapping.compute_dtype else {
+        return Err(AicError::MissingSystemFlops(format!(
+            "quant mode '{}' is memory-only and has no compute FLOPS",
+            mapping.name
+        )));
     };
-    direct.unwrap_or(bf16 * compute_factor)
+    let value = match dtype {
+        ComputeDtype::Bfloat16 => spec.gpu.bfloat16_tc_flops,
+        ComputeDtype::Int8 => spec.gpu.int8_tc_flops,
+        ComputeDtype::Fp8 => spec.gpu.fp8_tc_flops,
+        ComputeDtype::Fp4 => spec.gpu.fp4_tc_flops,
+    };
+    value.ok_or_else(|| {
+        AicError::MissingSystemFlops(format!(
+            "quant mode '{}' needs '{}', which this system's YAML does not define: either the \
+             platform does not support {:?} compute and the quant mode cannot be modeled on it, \
+             or the system YAML is missing the entry.",
+            mapping.name,
+            dtype.flops_key(),
+            dtype
+        ))
+    })
 }
 
 /// In-place SOL clamp for every entry in the GEMM grid set.
 ///
-/// `bfloat16_tc_flops` is required for the bf16 SOL path; if the system
-/// YAML omits it (no real system in the repo does, but the schema marks
-/// it optional), we leave the grids untouched so the caller sees raw data
-/// rather than a corrupted clamp using `tc_flops == 0`.
+/// Silicon data can exist for a dtype whose `*_tc_flops` entry is missing
+/// from the system YAML (e.g. b60 fp8). Mirror Python `GEMM._correct_sol`:
+/// leave that quant's slice unclamped rather than failing the whole
+/// database load; query-time SOL/HYBRID paths still reject the quant mode.
 fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
-    if spec.gpu.bfloat16_tc_flops.is_none() {
-        return;
-    }
     for (quant_name, grid) in grids.by_quant.iter_mut() {
         let Some(quant) = gemm_quant_by_name(quant_name) else {
+            continue;
+        };
+        let Ok(tc_flops) = quant_tc_flops(spec, quant.mapping()) else {
             continue;
         };
         for (&m, by_n) in grid.iter_mut() {
             for (&n, by_k) in by_n.iter_mut() {
                 for (&k, latency) in by_k.iter_mut() {
-                    let sol = gemm_sol_latency_ms(spec, quant, m as f64, n as f64, k as f64);
+                    let sol = gemm_sol_latency_ms_with_flops(
+                        spec, quant, tc_flops, m as f64, n as f64, k as f64,
+                    );
                     if sol > *latency {
                         *latency = sol;
                     }
@@ -773,5 +789,66 @@ mod tests {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// Mirror of Python `test_gemm_op.py::TestStaticHelpers`: dtype-keyed
+    /// resolution (sq -> int8, weight-only -> bf16), strict missing-key
+    /// error, and the b300 fp4 entry beating the old 4x-bf16 extrapolation.
+    #[test]
+    fn quant_tc_flops_resolves_by_compute_dtype() {
+        use crate::common::system_spec::{GpuSpec, MiscSpec, NodeSpec, SystemSpec};
+        let mut spec = SystemSpec {
+            data_dir: std::path::PathBuf::from("data/synthetic"),
+            gpu: GpuSpec {
+                mem_bw: 1.0,
+                mem_bw_empirical_scaling_factor: 1.0,
+                mem_empirical_constant_latency: 0.0,
+                mem_capacity: None,
+                bfloat16_tc_flops: Some(1000.0),
+                int8_tc_flops: Some(30.0),
+                fp8_tc_flops: Some(2000.0),
+                fp4_tc_flops: None,
+                power: None,
+                sm_version: None,
+            },
+            node: NodeSpec {
+                num_gpus_per_node: 8,
+                intra_node_bw: 900.0,
+                inter_node_bw: 100.0,
+                pcie_bw: None,
+                p2p_latency: 0.0,
+                num_gpus_per_rack: None,
+                inter_rack_bw: None,
+            },
+            misc: MiscSpec::default(),
+        };
+
+        use crate::common::enums::GemmQuantMode as Q;
+        assert_eq!(
+            quant_tc_flops(&spec, Q::Bfloat16.mapping()).unwrap(),
+            1000.0
+        );
+        assert_eq!(quant_tc_flops(&spec, Q::Fp8.mapping()).unwrap(), 2000.0);
+        // sq runs on the int8 pipeline, NOT fp8's (b300: int8 != fp8).
+        assert_eq!(quant_tc_flops(&spec, Q::Sq.mapping()).unwrap(), 30.0);
+        // weight-only modes dequantize to bf16 before the MMA.
+        assert_eq!(quant_tc_flops(&spec, Q::Int8Wo.mapping()).unwrap(), 1000.0);
+
+        // Missing fp4 entry: strict error, never bf16 * 4.
+        match quant_tc_flops(&spec, Q::Nvfp4.mapping()) {
+            Err(AicError::MissingSystemFlops(msg)) => assert!(msg.contains("fp4_tc_flops")),
+            other => panic!("expected MissingSystemFlops, got {other:?}"),
+        }
+
+        // Memory-only modes have no compute pipeline.
+        use crate::common::enums::KvCacheQuantMode;
+        match quant_tc_flops(&spec, KvCacheQuantMode::Fp8.mapping()) {
+            Err(AicError::MissingSystemFlops(msg)) => assert!(msg.contains("memory-only")),
+            other => panic!("expected MissingSystemFlops, got {other:?}"),
+        }
+
+        // b300 breaks the fixed 4x ratio: the YAML entry must win.
+        spec.gpu.fp4_tc_flops = Some(1.4e16);
+        assert_eq!(quant_tc_flops(&spec, Q::Nvfp4.mapping()).unwrap(), 1.4e16);
     }
 }

@@ -37,12 +37,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::gemm::quant_tc_flops;
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
@@ -348,6 +349,7 @@ impl DsaTable {
 
         let dims = dsa_dims(architecture);
         let topk = index_topk as i64;
+        let flops = dsa_context_sol_flops(spec, gemm_quant, fmha_quant)?;
         // Engine coordinates are (num_heads, prefix, seq, batch); the SOL is
         // Python's get_sol(b, s, prefix, num_heads, ...) re-ordered to match.
         let sol = move |c: &[f64]| {
@@ -363,6 +365,7 @@ impl DsaTable {
                 c[1] as i64, // prefix
                 c[0] as i64, // num_heads
                 skip_indexer,
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "prefix", "seq_len", "batch"], &sol);
@@ -422,6 +425,7 @@ impl DsaTable {
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
 
         let dims = dsa_dims(architecture);
+        let flops = dsa_generation_sol_flops(spec, gemm_quant)?;
         // Engine coordinates are (num_heads, batch, seq); the SOL is
         // Python's get_sol(b, s, num_heads, kv_cache_dtype) re-ordered.
         let sol = move |c: &[f64]| {
@@ -433,6 +437,7 @@ impl DsaTable {
                 c[1] as i64, // b
                 c[2] as i64, // s
                 c[0] as i64, // num_heads
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &sol);
@@ -631,18 +636,41 @@ fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
 // Analytic SOLs — verbatim ports of Python `operations/dsa.py` get_sol
 // ---------------------------------------------------------------------------
 
-/// Python `GEMM._get_quant_tc_flops`: compute factor 1 -> bf16 TC flops,
-/// 2 -> fp8, 4 -> fp4; fall back to `bf16 * factor` when the spec entry is
-/// missing.
-fn tc_flops(spec: &SystemSpec, compute_factor: f64) -> f64 {
-    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    let direct = match compute_factor as u32 {
-        1 => spec.gpu.bfloat16_tc_flops,
-        2 => spec.gpu.fp8_tc_flops,
-        4 => spec.gpu.fp4_tc_flops,
-        _ => None,
-    };
-    direct.unwrap_or(bf16 * compute_factor)
+/// Pre-resolved TC-FLOPS for the three DSA op groups. Resolved once per
+/// query via `quant_tc_flops` (strict: a missing `*_tc_flops` entry errors)
+/// so the hot sol closures stay `-> f64`.
+#[derive(Clone, Copy)]
+pub(crate) struct DsaSolFlops {
+    pub gemm: f64,
+    pub indexer_fp8: f64,
+    pub attn: f64,
+}
+
+/// Context flops set: GEMM group by `gemm_quant`, indexer always FP8,
+/// attention by `fmha_quant`.
+pub(crate) fn dsa_context_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+    fmha_quant: FmhaQuantMode,
+) -> Result<DsaSolFlops, AicError> {
+    Ok(DsaSolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        indexer_fp8: quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, fmha_quant.mapping())?,
+    })
+}
+
+/// Generation flops set: the attention group is hardcoded bfloat16 in
+/// Python (`fmha_mode = FMHAQuantMode.bfloat16`).
+pub(crate) fn dsa_generation_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+) -> Result<DsaSolFlops, AicError> {
+    Ok(DsaSolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        indexer_fp8: quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?,
+    })
 }
 
 /// Python `common.indexer_cache_entry_bytes`: FP8 indexer KV entry with one
@@ -674,6 +702,7 @@ pub(crate) fn dsa_context_sol_ms(
     prefix: i64,
     num_heads: i64,
     skip_indexer: bool,
+    flops: DsaSolFlops,
 ) -> f64 {
     let (hidden, q_lora, kv_lora) = (dims.hidden_size, dims.q_lora_rank, dims.kv_lora_rank);
     let (inh, ihd) = (dims.index_n_heads, dims.index_head_dim);
@@ -745,9 +774,11 @@ pub(crate) fn dsa_context_sol_ms(
     let total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes;
 
     // ── SOL ─────────────────────────────────────────────────────
-    let gemm_flops = tc_flops(spec, gemm_quant.mapping().compute);
-    let indexer_fp8_flops = tc_flops(spec, FmhaQuantMode::Fp8.mapping().compute);
-    let attn_flops = tc_flops(spec, fmha_quant.mapping().compute);
+    let DsaSolFlops {
+        gemm: gemm_flops,
+        indexer_fp8: indexer_fp8_flops,
+        attn: attn_flops,
+    } = flops;
 
     let sol_math = (gemm_group_ops as f64 / gemm_flops
         + indexer_logits_ops as f64 / indexer_fp8_flops
@@ -769,6 +800,7 @@ pub(crate) fn dsa_generation_sol_ms(
     b: i64,
     s: i64,
     num_heads: i64,
+    flops: DsaSolFlops,
 ) -> f64 {
     let (b, s, num_heads) = (b as i128, s as i128, num_heads as i128);
     let (hidden, q_lora, kv_lora) = (
@@ -815,9 +847,11 @@ pub(crate) fn dsa_generation_sol_ms(
     let kv_cache_bytes = (b * effective_kv * attn_head_dim) as f64 * kv_quant.mapping().memory;
     let total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes;
 
-    let gemm_flops = tc_flops(spec, gemm_quant.mapping().compute);
-    let indexer_fp8_flops = tc_flops(spec, FmhaQuantMode::Fp8.mapping().compute);
-    let attn_flops = tc_flops(spec, FmhaQuantMode::Bfloat16.mapping().compute);
+    let DsaSolFlops {
+        gemm: gemm_flops,
+        indexer_fp8: indexer_fp8_flops,
+        attn: attn_flops,
+    } = flops;
 
     let sol_math = (gemm_group_ops as f64 / gemm_flops
         + indexer_logits_ops as f64 / indexer_fp8_flops

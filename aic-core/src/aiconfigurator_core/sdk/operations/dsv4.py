@@ -136,12 +136,11 @@ def _deepseek_v4_attention_sol(
 
     Verbatim port of the legacy ``PerfDatabase._deepseek_v4_attention_sol``
     body. Reads ``database.system_spec``, ``database._causal_limited_pairs``,
-    ``database._compressed_context_pairs``, and ``GEMM._get_quant_tc_flops``.
+    ``database._compressed_context_pairs``, and ``common.get_quant_tc_flops``.
     """
-    from aiconfigurator_core.sdk.operations.gemm import GEMM
 
     def _tc_flops(quant_mode):
-        return GEMM._get_quant_tc_flops(database.system_spec, quant_mode)
+        return common.get_quant_tc_flops(database.system_spec, quant_mode)
 
     tokens = b * s if is_context else b
     kv_len = prefix + s if is_context else max(0, s - 1)
@@ -354,7 +353,6 @@ class DeepSeekV4MHCModule(Operation):
         The SOL estimate models the combined attention-site and FFN-site mHC work
         inside one decoder layer, matching the collector's module boundary.
         """
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
 
         cls.load_data(database)
 
@@ -383,7 +381,7 @@ class DeepSeekV4MHCModule(Operation):
             activation_bytes = sites * nt * hc_dim * quant_mode.value.memory * (3 if op_name == "both" else 2)
             if op_name in {"pre", "both"}:
                 activation_bytes += sites * nt * (2 * hc_mult + hc_mult * hc_mult) * 4
-            sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
 
