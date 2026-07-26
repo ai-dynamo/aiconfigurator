@@ -75,8 +75,8 @@ of each backend on the shape key and emit findings on two layers:
       family — the gap comes from the wrapper/config around it).
 
 Backend pairs whose latest tables disagree on shape columns are NOT force-
-joined: extra columns that are constant in their table are dropped (noted in
-the report); otherwise the pair is skipped and reported as `schema_mismatch`.
+joined: extra columns that are constant in their table are dropped (recorded
+in the pair-summary align_notes); otherwise the pair is skipped and reported as `schema_mismatch`.
 
 Shape-key convention follows check_kernel_source.py: every column that is not
 a meta column ({framework, version, device, op_name, kernel_source}) and not
@@ -99,6 +99,7 @@ import json
 import logging
 import math
 import re
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -107,30 +108,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
-
-# Columns that never participate in the shape key (same set as check_kernel_source.py).
-_META_COLUMNS = {"framework", "version", "device", "op_name", "kernel_source"}
-
-# Latency-like columns. The first one found in the header is used as the
-# metric; ALL of them are excluded from the shape key (some comm tables carry
-# two latency measurements side by side).
-_LATENCY_COLUMNS_PRIORITY = (
-    "latency",
-    "avg_ms",
-    "combine_avg_t_us",
-    "dispatch_avg_t_us",
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from backend_facts import load_backend_map, translate
+from check_kernel_source import (
+    _LATENCY_COLUMNS_PRIORITY,
+    _META_COLUMNS,
+    _iter_data_files,
+    _pick_latency_column,
 )
+
+logger = logging.getLogger(__name__)
 
 # Shape columns treated as sweep dimensions: log2-bucketed for the local
 # baseline, and checked for latency monotonicity within a backend.
 _SWEEP_COLUMNS = ("batch_size", "isl", "m", "num_tokens", "step")
-
-# Backend directory names to skip — framework-agnostic by construction.
-_SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
-
-# Legacy top-level backend dirs (see check_kernel_source.py for the sync note).
-_LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 # Tables whose latency is a DIFFERENCE or calibration value, where <= 0 is
 # semantically valid — exempt from the nonpositive_latency check (their <= 0
@@ -147,6 +138,12 @@ _DELTA_LATENCY_OP_FILES = {
     "dsv4_csa_topk_calib_perf.parquet",
     "glm5_topk_module_perf.parquet",
 }
+
+# Layer-1 kinds that trip --fail-on-anomalies. machine_op_deviation is a hint
+# by design (version skew / hardware-ratio spread) and stays ungated.
+_GATED_KINDS = frozenset(
+    {"nonpositive_latency", "below_sol", "pair_outlier", "region_deviation", "mono_violation", "spike_violation"}
+)
 
 _PRE_RELEASE_TAGS = {"rc", "a", "b", "c", "alpha", "beta", "dev", "pre", "preview"}
 
@@ -172,40 +169,15 @@ def _version_key(version: str) -> tuple:
 
 
 def _iter_op_tables(data_root: Path) -> Iterable[tuple[str, str, str, str, Path]]:
-    """Yield (system, backend, version, op_file, path) across legacy and
-    family-first layouts. Only *.parquet / *.txt tables are yielded."""
-    for system_dir in sorted(p for p in data_root.iterdir() if p.is_dir()):
-        backend_dirs: list[tuple[str, Path]] = []
-        for entry in sorted(p for p in system_dir.iterdir() if p.is_dir()):
-            if entry.name in _SKIP_BACKEND_DIRS:
-                continue
-            if entry.name in _LEGACY_BACKEND_DIRS:
-                backend_dirs.append((entry.name, entry))
-            else:  # family dir
-                backend_dirs.extend(
-                    (b.name, b)
-                    for b in sorted(p for p in entry.iterdir() if p.is_dir())
-                    if b.name not in _SKIP_BACKEND_DIRS
-                )
-        for backend, backend_dir in backend_dirs:
-            for version_dir in sorted(p for p in backend_dir.iterdir() if p.is_dir()):
-                for path in sorted(itertools.chain(version_dir.glob("*.parquet"), version_dir.glob("*.txt"))):
-                    if path.name in ("INCOMPLETE.txt",):
-                        continue
-                    yield system_dir.name, backend, version_dir.name, path.name, path
+    """(system, backend, version, op_file, path) via the sibling tool's dual-layout walker."""
+    for system, backend, version, path in _iter_data_files(data_root):
+        yield system, backend, version, path.name, path
 
 
 def _read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".parquet":
         return pd.read_parquet(path)
     return pd.read_csv(path)
-
-
-def _pick_latency_column(columns: Iterable[str]) -> str | None:
-    for candidate in _LATENCY_COLUMNS_PRIORITY:
-        if candidate in columns:
-            return candidate
-    return None
 
 
 def _log2_bucket(value) -> object:
@@ -264,8 +236,9 @@ def _load_op_table(path: Path, backend: str, version: str) -> tuple[OpTable | No
         return None, npos_by_ks, []
     df = df.rename(columns={latency_col: "latency"})
     kernel_costs: list[dict] = []
+    shape_gb = df.groupby(shape_cols, dropna=False)["latency"]
     if df["kernel_source"].nunique() > 1:
-        penalty = df["latency"] / df.groupby(shape_cols, dropna=False)["latency"].transform("min")
+        penalty = df["latency"] / shape_gb.transform("min")
         agg = penalty.groupby(df["kernel_source"].astype(str)).agg(["median", "max", "size"])
         for ks, row in agg.iterrows():
             if row["median"] > _KERNEL_COST_FACTOR:
@@ -278,7 +251,7 @@ def _load_op_table(path: Path, backend: str, version: str) -> tuple[OpTable | No
                     }
                 )
     # Min latency per shape key, keeping the winning kernel_source.
-    idx = df.groupby(shape_cols, dropna=False)["latency"].idxmin()
+    idx = shape_gb.idxmin()
     reduced = df.loc[idx, [*shape_cols, "latency", "kernel_source"]].reset_index(drop=True)
     table = OpTable(
         backend=backend,
@@ -319,29 +292,27 @@ def _align_shape_columns(a: OpTable, b: OpTable) -> tuple[list[str], pd.DataFram
     instead of producing a many-to-many join across different shapes.
     """
     notes: list[str] = []
-    frames = {id(a): a.frame, id(b): b.frame}
-    for own, other in ((a, b), (b, a)):
-        extra = [c for c in own.shape_cols if c not in other.shape_cols]
-        for col in extra:
-            values = frames[id(own)][col]
-            if values.nunique(dropna=False) == 1:
-                notes.append(f"{own.label}: dropped constant column {col}={values.iloc[0]!r}")
-                frames[id(own)] = frames[id(own)].drop(columns=[col])
-            else:
+
+    def _drop_constant_extras(own: OpTable, other: OpTable) -> pd.DataFrame | None:
+        frame = own.frame
+        for col in (c for c in own.shape_cols if c not in other.shape_cols):
+            values = frame[col]
+            if values.nunique(dropna=False) != 1:
                 return None
+            notes.append(f"{own.label}: dropped constant column {col}={values.iloc[0]!r}")
+            frame = frame.drop(columns=[col])
+        return frame
+
+    frame_a = _drop_constant_extras(a, b)
+    frame_b = _drop_constant_extras(b, a)
     shape_cols = [c for c in a.shape_cols if c in b.shape_cols]
-    if not shape_cols:
+    if frame_a is None or frame_b is None or not shape_cols:
         return None
-    return shape_cols, frames[id(a)], frames[id(b)], notes
+    return shape_cols, frame_a, frame_b, notes
 
 
 def _check_pair(
-    system: str,
-    op_file: str,
-    a: OpTable,
-    b: OpTable,
-    anomaly_factor: float,
-    min_bucket_points: int,
+    system: str, op_file: str, a: OpTable, b: OpTable, anomaly_factor: float, min_bucket_points: int
 ) -> tuple[list[dict], list[dict]]:
     """Compare two backends' tables. Returns (anomalies, gaps)."""
     pair = f"{b.label} vs {a.label}"
@@ -369,10 +340,12 @@ def _check_pair(
     # Hierarchical baseline: bucket -> series -> op-level median. Each level
     # only applies when it has enough points to be a baseline at all.
     global_med = merged["log_ratio"].median()
-    bucket_med = merged.groupby("bucket")["log_ratio"].transform("median")
-    bucket_n = merged.groupby("bucket")["log_ratio"].transform("size")
-    series_med = merged.groupby("series")["log_ratio"].transform("median")
-    series_n = merged.groupby("series")["log_ratio"].transform("size")
+    bucket_gb = merged.groupby("bucket")["log_ratio"]
+    series_gb = merged.groupby("series")["log_ratio"]
+    bucket_med = bucket_gb.transform("median")
+    bucket_n = bucket_gb.transform("size")
+    series_med = series_gb.transform("median")
+    series_n = series_gb.transform("size")
     baseline = pd.Series(global_med, index=merged.index)
     baseline = series_med.where(series_n >= min_bucket_points, baseline)
     baseline = bucket_med.where(bucket_n >= min_bucket_points, baseline)
@@ -389,11 +362,7 @@ def _check_pair(
     anomalies: list[dict] = []
     flagged = merged[merged["deviation"] > anomaly_factor]
     for row in flagged.itertuples():
-        above = row.log_ratio > row.baseline
-        candidates = [
-            {"side": b.label if above else a.label, "kind": "slower_than_expected"},
-            {"side": a.label if above else b.label, "kind": "faster_than_expected"},
-        ]
+        slow, fast = (b.label, a.label) if row.log_ratio > row.baseline else (a.label, b.label)
         shape = {c: _jsonable(getattr(row, c)) for c in shape_cols}
         anomalies.append(
             {
@@ -402,7 +371,6 @@ def _check_pair(
                 "op_file": op_file,
                 "pair": pair,
                 "shape": shape,
-                "shape_sig": "|".join(f"{k}={v}" for k, v in shape.items()),
                 "cat_shape": {c: shape[c] for c in cat_cols},
                 "latency_a": float(row.latency_a),
                 "latency_b": float(row.latency_b),
@@ -411,18 +379,16 @@ def _check_pair(
                 "ratio": float(np.exp(row.log_ratio)),
                 "local_baseline_ratio": float(np.exp(row.baseline)),
                 "deviation": float(row.deviation),
-                "candidates": candidates,
+                "candidates": [
+                    {"side": slow, "kind": "slower_than_expected"},
+                    {"side": fast, "kind": "faster_than_expected"},
+                ],
             }
         )
 
     # ---- Bucket-level stats: region deviations (L1) + gaps (L2) ------------
     gaps: list[dict] = []
-    grp = merged.groupby("bucket").agg(
-        median_log_ratio=("log_ratio", "median"),
-        points=("log_ratio", "size"),
-        ks_a=("kernel_source_a", lambda s: ",".join(sorted(set(s.astype(str))))),
-        ks_b=("kernel_source_b", lambda s: ",".join(sorted(set(s.astype(str))))),
-    )
+    grp = bucket_gb.agg(median_log_ratio="median", points="size")
     grp = grp[grp["points"] >= min_bucket_points]
 
     # A region deviates when its median is far from how these two backends
@@ -430,10 +396,7 @@ def _check_pair(
     # absolute gap is large, which would flag every bucket of a legitimately
     # slower backend.
     rel = (grp["median_log_ratio"] - global_med).abs()
-    regions = grp[rel > log_anomaly]
-    for bucket, row in regions.sort_values(
-        "median_log_ratio", key=lambda s: (s - global_med).abs(), ascending=False
-    ).iterrows():
+    for bucket, row in grp[rel > log_anomaly].iterrows():
         anomalies.append(
             {
                 "kind": "region_deviation",
@@ -445,8 +408,6 @@ def _check_pair(
                 "op_median_ratio": float(np.exp(global_med)),
                 "rel_deviation": float(np.exp(abs(row["median_log_ratio"] - global_med))),
                 "points": int(row["points"]),
-                "kernel_source_a": row["ks_a"],
-                "kernel_source_b": row["ks_b"],
             }
         )
 
@@ -461,7 +422,7 @@ def _check_pair(
             "median_ratio": float(np.exp(global_med)),
             "p05_ratio": float(np.exp(merged["log_ratio"].quantile(0.05))),
             "p95_ratio": float(np.exp(merged["log_ratio"].quantile(0.95))),
-            "region_deviation_buckets": len(regions),
+            "region_deviation_buckets": int((rel > log_anomaly).sum()),
             "total_buckets": len(grp),
             "kernel_sources_a": a.kernel_sources,
             "kernel_sources_b": b.kernel_sources,
@@ -496,19 +457,21 @@ def _check_curve(
             if len(lat) < 2:
                 continue
             fixed = dict(zip(others, key if isinstance(key, tuple) else (key,), strict=False))
-            fixed_shape = {k: _jsonable(v) for k, v in fixed.items()}
+            base = {
+                "system": system,
+                "op_file": op_file,
+                "backend": t.backend,
+                "version": t.version,
+                "sweep_col": sweep,
+                "fixed_shape": {k: _jsonable(v) for k, v in fixed.items()},
+            }
             drop = lat[1:] / lat[:-1]
             bad = np.nonzero((drop < mono_tolerance) & (lat[:-1] >= floor))[0]
             for i in bad:
                 findings.append(
                     {
                         "kind": "mono_violation",
-                        "system": system,
-                        "op_file": op_file,
-                        "backend": t.backend,
-                        "version": t.version,
-                        "sweep_col": sweep,
-                        "fixed_shape": fixed_shape,
+                        **base,
                         "sweep_from": _jsonable(sw[i]),
                         "sweep_to": _jsonable(sw[i + 1]),
                         "latency_from": float(lat[i]),
@@ -528,12 +491,7 @@ def _check_curve(
                     findings.append(
                         {
                             "kind": "spike_violation",
-                            "system": system,
-                            "op_file": op_file,
-                            "backend": t.backend,
-                            "version": t.version,
-                            "sweep_col": sweep,
-                            "fixed_shape": fixed_shape,
+                            **base,
                             "sweep_at": _jsonable(sw[i + 1]),
                             "latency": float(lat[i + 1]),
                             "neighbor_latency": float(neighbors[i]),
@@ -542,6 +500,10 @@ def _check_curve(
                         }
                     )
     return findings
+
+
+def _sig(d: dict, sep: str = "|") -> str:
+    return sep.join(f"{k}={v}" for k, v in d.items())
 
 
 def _jsonable(v):
@@ -657,27 +619,24 @@ def _check_gemm_sol(system: str, op_file: str, t: OpTable, spec: dict) -> tuple[
     return anomalies, efficiencies
 
 
-def load_kernel_map(path: Path) -> dict[tuple[str, str], str]:
-    """Load collector/kernel_source_backends.yaml: (framework, kernel_source)
-    -> runtime backend name (fa3, triton, flashinfer, ...). Returns {} when
-    the file is unavailable — attribution then falls back to raw label names."""
+def load_kernel_map(path: Path) -> list[dict]:
+    """collector/kernel_source_backends.yaml mapping entries, via the
+    backend_facts loader/translator (honors per-entry `match:` conditions).
+    Returns [] when unavailable — attribution then uses raw label names."""
     try:
-        import yaml
-
-        doc = yaml.safe_load(path.read_text())
-        return {(m["framework"], m["kernel_source"]): m["backend"] for m in doc.get("mappings", [])}
+        return load_backend_map(path)
     except (OSError, KeyError, TypeError) as exc:
         logger.warning("kernel map %s unavailable (%s); attribution uses raw kernel_source names", path, exc)
-        return {}
+        return []
 
 
-def _normalize_kernels(kmap: dict[tuple[str, str], str], framework: str, kernel_sources) -> set[str]:
+def _normalize_kernels(kmap: list[dict], framework: str, op_file: str, kernel_sources) -> set[str]:
     out: set[str] = set()
     for entry in kernel_sources:
         for ks in str(entry).split(","):
             ks = ks.strip()
             if ks:
-                out.add(kmap.get((framework, ks), ks.lower()))
+                out.add(translate(kmap, framework, op_file, {}, ks) or ks.lower())
     return out
 
 
@@ -698,7 +657,7 @@ def _attribution(slow_kernels: set[str], reference_kernels: set[str]) -> str:
     return "harness_config" if slow_kernels & reference_kernels else "kernel_choice"
 
 
-def cluster_suspects(anomalies: list[dict], kmap: dict[tuple[str, str], str]) -> tuple[list[dict], list[dict]]:
+def cluster_suspects(anomalies: list[dict], kmap: list[dict]) -> tuple[list[dict], list[dict]]:
     """Aggregate pair_outlier points into reviewable clusters.
 
     Every outlier names both sides as candidates. Points are grouped per
@@ -714,13 +673,27 @@ def cluster_suspects(anomalies: list[dict], kmap: dict[tuple[str, str], str]) ->
     for a in anomalies:
         if a["kind"] != "pair_outlier":
             continue
-        cat_sig = "|".join(f"{k}={v}" for k, v in a["cat_shape"].items())
+        cat_sig = _sig(a["cat_shape"])
         for cand in a["candidates"]:
             by_candidate[(a["system"], a["op_file"], cand["side"], cat_sig)].append((a, cand["kind"]))
 
     def _other_side(point: dict, side: str) -> str:
         left, _, right = point["pair"].partition(" vs ")
         return right if left == side else left
+
+    def _cluster_common(points: list[dict]) -> dict:
+        deviations = sorted(p["deviation"] for p in points)
+        worst = max(points, key=lambda p: p["deviation"])
+        return {
+            "system": worst["system"],
+            "op_file": worst["op_file"],
+            "categorical_shape": worst["cat_shape"],
+            "points": len({_sig(p["shape"]) for p in points}),
+            "deviation_min": deviations[0],
+            "deviation_max": deviations[-1],
+            "example_shape": worst["shape"],
+            "example": {"ratio": worst["ratio"], "local_baseline_ratio": worst["local_baseline_ratio"]},
+        }
 
     corroborated: list[dict] = []
     attributed_ids: set[int] = set()
@@ -729,39 +702,22 @@ def cluster_suspects(anomalies: list[dict], kmap: dict[tuple[str, str], str]) ->
         if len(refs) < 2:
             continue
         points = [p for p, _ in entries]
-        deviations = sorted(p["deviation"] for p in points)
-        worst = max(points, key=lambda p: p["deviation"])
         kinds = Counter(kind for _, kind in entries)
         slow_ks: set[str] = set()
         ref_ks: set[str] = set()
         for point in points:
             b_label, _, a_label = point["pair"].partition(" vs ")
-            if side == b_label:
-                slow_ks |= _normalize_kernels(kmap, side.split("/")[0], [point["kernel_source_b"]])
-                ref_ks |= _normalize_kernels(kmap, a_label.split("/")[0], [point["kernel_source_a"]])
-            else:
-                slow_ks |= _normalize_kernels(kmap, side.split("/")[0], [point["kernel_source_a"]])
-                ref_ks |= _normalize_kernels(kmap, b_label.split("/")[0], [point["kernel_source_b"]])
+            slow_sfx, ref_label = ("_b", a_label) if side == b_label else ("_a", b_label)
+            ref_sfx = "_a" if slow_sfx == "_b" else "_b"
+            slow_ks |= _normalize_kernels(kmap, side.split("/")[0], op_file, [point[f"kernel_source{slow_sfx}"]])
+            ref_ks |= _normalize_kernels(kmap, ref_label.split("/")[0], op_file, [point[f"kernel_source{ref_sfx}"]])
         corroborated.append(
             {
-                "system": system,
-                "op_file": op_file,
+                **_cluster_common(points),
                 "suspect": side,
                 "suspect_kind": kinds.most_common(1)[0][0],
                 "attribution": _attribution(slow_ks, ref_ks),
-                "categorical_shape": worst["cat_shape"],
-                "points": len({p["shape_sig"] for p in points}),
                 "reference_backends": refs,
-                "deviation_min": deviations[0],
-                "deviation_max": deviations[-1],
-                "example_shape": worst["shape"],
-                "example": {
-                    "pair": worst["pair"],
-                    "latency_a": worst["latency_a"],
-                    "latency_b": worst["latency_b"],
-                    "ratio": worst["ratio"],
-                    "local_baseline_ratio": worst["local_baseline_ratio"],
-                },
             }
         )
         attributed_ids.update(id(p) for p in points)
@@ -771,35 +727,15 @@ def cluster_suspects(anomalies: list[dict], kmap: dict[tuple[str, str], str]) ->
     for a in anomalies:
         if a["kind"] != "pair_outlier" or id(a) in attributed_ids:
             continue
-        cat_sig = "|".join(f"{k}={v}" for k, v in a["cat_shape"].items())
-        undetermined_by_key[(a["system"], a["op_file"], a["pair"], cat_sig)].append(a)
+        undetermined_by_key[(a["system"], a["op_file"], a["pair"], _sig(a["cat_shape"]))].append(a)
     undetermined: list[dict] = []
-    for (system, op_file, pair, _cat_sig), points in undetermined_by_key.items():
-        deviations = sorted(p["deviation"] for p in points)
-        worst = max(points, key=lambda p: p["deviation"])
-        undetermined.append(
-            {
-                "system": system,
-                "op_file": op_file,
-                "pair": pair,
-                "categorical_shape": worst["cat_shape"],
-                "points": len({p["shape_sig"] for p in points}),
-                "deviation_min": deviations[0],
-                "deviation_max": deviations[-1],
-                "example_shape": worst["shape"],
-                "example": {
-                    "ratio": worst["ratio"],
-                    "local_baseline_ratio": worst["local_baseline_ratio"],
-                },
-            }
-        )
+    for (_system, _op_file, pair, _cat_sig), points in undetermined_by_key.items():
+        undetermined.append({**_cluster_common(points), "pair": pair})
     undetermined.sort(key=lambda c: -c["points"])
     return corroborated, undetermined
 
 
-def detect_systematic_offsets(
-    gaps: list[dict], offset_factor: float, min_systems: int, kmap: dict[tuple[str, str], str]
-) -> list[dict]:
+def detect_systematic_offsets(gaps: list[dict], offset_factor: float, min_systems: int, kmap: list[dict]) -> list[dict]:
     """Find backend pairs whose op-level median ratio deviates in the SAME
     direction on every covered system.
 
@@ -830,14 +766,12 @@ def detect_systematic_offsets(
         else:
             continue
         mid = logs[len(logs) // 2]
-        slow_is_b = slow == backend_b
+        slow_sfx, ref_sfx = ("_b", "_a") if slow == backend_b else ("_a", "_b")
         slow_ks = _normalize_kernels(
-            kmap, slow, [ks for e in entries for ks in (e["kernel_sources_b"] if slow_is_b else e["kernel_sources_a"])]
+            kmap, slow, op_file, [ks for e in entries for ks in e[f"kernel_sources{slow_sfx}"]]
         )
         ref_ks = _normalize_kernels(
-            kmap,
-            reference,
-            [ks for e in entries for ks in (e["kernel_sources_a"] if slow_is_b else e["kernel_sources_b"])],
+            kmap, reference, op_file, [ks for e in entries for ks in e[f"kernel_sources{ref_sfx}"]]
         )
         offsets.append(
             {
@@ -913,12 +847,12 @@ def detect_machine_fingerprint(
     for (op_file, backend), by_system in fp_cache.items():
         if len(by_system) < 3:
             continue
+        # Series already hold log-latency (float32), so no log pass here.
         frame = pd.DataFrame({sys: series for sys, (_ver, series) in by_system.items()})
         frame = frame[frame.notna().sum(axis=1) >= 3]
         if len(frame) < min_shared_shapes:
             continue
-        log_frame = np.log(frame)
-        centered = log_frame.sub(log_frame.median(axis=1), axis=0)
+        centered = frame.sub(frame.median(axis=1), axis=0)
         for system, value in centered.median(axis=0).dropna().items():
             dev.setdefault((backend, system), {})[op_file] = float(value)
             versions[(backend, system, op_file)] = by_system[system][0]
@@ -1015,14 +949,9 @@ def run_checks(
         for t in loaded:
             anomalies.extend(_check_curve(system, op_file, t, mono_tolerance, spike_factor, noise_floor))
             if fingerprint_factor:
-                sig_hash = pd.util.hash_pandas_object(
-                    _join_cols(t.frame, t.shape_cols, bucket_sweeps=False), index=False
-                )
-                series = pd.Series(t.frame["latency"].to_numpy(), index=sig_hash.to_numpy())
-                fp_cache.setdefault((op_file, t.backend), {})[system] = (
-                    t.version,
-                    series[~series.index.duplicated()],
-                )
+                sig_hash = pd.util.hash_pandas_object(t.frame[t.shape_cols], index=False)
+                series = pd.Series(np.log(t.frame["latency"].to_numpy(dtype=np.float32)), index=sig_hash.to_numpy())
+                fp_cache.setdefault((op_file, t.backend), {})[system] = (t.version, series[~series.index.duplicated()])
             if op_file == "gemm_perf.parquet" and spec_root is not None:
                 spec = _load_gpu_spec(spec_root, system)
                 if spec:
@@ -1043,183 +972,205 @@ def run_checks(
 
 
 def _fmt_shape(shape: dict) -> str:
-    return ", ".join(f"{k}={v}" for k, v in shape.items() if v not in ("", None))
+    return _sig({k: v for k, v in shape.items() if v not in ("", None)}, sep=", ")
+
+
+def derive_views(anomalies: list[dict], gaps: list[dict]) -> dict:
+    """Per-kind slices and clusters, derived ONCE and shared by the markdown
+    report, the JSON dump, the console summary, and the CI gate."""
+
+    def kind(items: list[dict], k: str) -> list[dict]:
+        return [x for x in items if x["kind"] == k]
+
+    return {
+        "nonpositive": kind(anomalies, "nonpositive_latency"),
+        "below_sol": kind(anomalies, "below_sol"),
+        "regions": kind(anomalies, "region_deviation"),
+        "machine": kind(anomalies, "machine_op_deviation"),
+        "n_outliers": len(kind(anomalies, "pair_outlier")),
+        "mono_clusters": cluster_curve_findings(anomalies, "mono_violation"),
+        "spike_clusters": cluster_curve_findings(anomalies, "spike_violation"),
+        "n_mono": len(kind(anomalies, "mono_violation")),
+        "n_spike": len(kind(anomalies, "spike_violation")),
+        "mismatches": kind(gaps, "schema_mismatch"),
+        "summaries": kind(gaps, "pair_summary"),
+        "kernel_costs": kind(gaps, "kernel_choice_cost"),
+        "sol_effs": kind(gaps, "sol_efficiency"),
+    }
+
+
+def _md_section(
+    lines: list[str], title: str, headers: str, rows: list[str], note: str | None = None, top: int | None = None
+) -> None:
+    """Append one report section. `headers` is a pipe-separated header line;
+    each row is the matching pipe-separated cell string."""
+    if not rows:
+        return
+    suffix = f" (top {min(top, len(rows))})" if top else ""
+    lines.append(f"### {title}{suffix}\n")
+    if note:
+        lines.append(note + "\n")
+    lines.append(f"| {headers} |")
+    lines.append("|" + "---|" * (headers.count("|") + 1))
+    lines.extend(f"| {r} |" for r in rows[: top or len(rows)])
+    lines.append("")
 
 
 def render_markdown(
-    anomalies: list[dict],
-    gaps: list[dict],
-    offsets: list[dict],
-    suspects: list[dict],
-    undetermined: list[dict],
-    max_rows: int,
+    views: dict, offsets: list[dict], suspects: list[dict], undetermined: list[dict], max_rows: int
 ) -> str:
+    v = views
     lines: list[str] = ["# Cross-backend consistency report\n"]
 
-    mono_clusters = cluster_curve_findings(anomalies, "mono_violation")
-    spike_clusters = cluster_curve_findings(anomalies, "spike_violation")
-    regions = [a for a in anomalies if a["kind"] == "region_deviation"]
-    nonpositive = [a for a in anomalies if a["kind"] == "nonpositive_latency"]
-    mismatches = [g for g in gaps if g["kind"] == "schema_mismatch"]
-    summaries = [g for g in gaps if g["kind"] == "pair_summary"]
-    kernel_costs = [g for g in gaps if g["kind"] == "kernel_choice_cost"]
-    below_sol = [a for a in anomalies if a["kind"] == "below_sol"]
-    sol_effs = [g for g in gaps if g["kind"] == "sol_efficiency"]
-    machine = [a for a in anomalies if a["kind"] == "machine_op_deviation"]
-    n_outliers = sum(1 for a in anomalies if a["kind"] == "pair_outlier")
-    n_mono = sum(1 for a in anomalies if a["kind"] == "mono_violation")
-    n_spike = sum(1 for a in anomalies if a["kind"] == "spike_violation")
-
     lines.append("## Layer 1 — anomalies (suspected invalid data)\n")
-    lines.append(f"- Nonpositive-latency rows: **{sum(a['rows'] for a in nonpositive)}** in {len(nonpositive)} tables")
     lines.append(
-        f"- Cross-backend point outliers: **{n_outliers}** "
+        f"- Nonpositive-latency rows: **{sum(a['rows'] for a in v['nonpositive'])}** in {len(v['nonpositive'])} tables"
+    )
+    lines.append(
+        f"- Cross-backend point outliers: **{v['n_outliers']}** "
         f"({len(suspects)} corroborated suspect clusters, {len(undetermined)} undetermined clusters)"
     )
-    lines.append(f"- Whole-region deviations (bucket median far from op median): **{len(regions)}**")
-    lines.append(f"- Monotonicity violations: **{n_mono}** in **{len(mono_clusters)}** clusters")
-    lines.append(f"- Curve spikes (within-framework): **{n_spike}** in **{len(spike_clusters)}** clusters")
+    lines.append(f"- Whole-region deviations (bucket median far from op median): **{len(v['regions'])}**")
+    lines.append(f"- Monotonicity violations: **{v['n_mono']}** in **{len(v['mono_clusters'])}** clusters")
+    lines.append(f"- Curve spikes (within-framework): **{v['n_spike']}** in **{len(v['spike_clusters'])}** clusters")
     lines.append(
         f"- Below speed-of-light points (physically impossible): "
-        f"**{sum(a['points'] for a in below_sol)}** in {len(below_sol)} groups"
+        f"**{sum(a['points'] for a in v['below_sol'])}** in {len(v['below_sol'])} groups"
     )
-    lines.append(f"- Machine-fingerprint deviations (hint, not gated): **{len(machine)}**\n")
+    lines.append(f"- Machine-fingerprint deviations (hint, not gated): **{len(v['machine'])}**\n")
 
-    if nonpositive:
-        lines.append("### Nonpositive-latency rows\n")
-        lines.append("| system | op_file | backend | rows | by kernel_source |")
-        lines.append("|---|---|---|---|---|")
-        for a in sorted(nonpositive, key=lambda x: -x["rows"])[:max_rows]:
-            by_ks = ", ".join(f"{k}: {v}" for k, v in a["by_kernel_source"].items())
-            lines.append(f"| {a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['rows']} | {by_ks} |")
-        lines.append("")
-
-    if below_sol:
-        lines.append("### Below speed-of-light (physically impossible measurements)\n")
-        lines.append(
+    _md_section(
+        lines,
+        "Nonpositive-latency rows",
+        "system | op_file | backend | rows | by kernel_source",
+        [
+            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['rows']} | "
+            + ", ".join(f"{k}: {n}" for k, n in a["by_kernel_source"].items())
+            for a in sorted(v["nonpositive"], key=lambda x: -x["rows"])
+        ],
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Below speed-of-light (physically impossible measurements)",
+        "system | op_file | backend | dtype | points | worst x of SOL | worst example",
+        [
+            f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['gemm_dtype']} | "
+            f"{a['points']} | {a['worst_fraction_of_sol']:.2f} | "
+            f"{_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g}"
+            for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])
+        ],
+        note=(
             "Latency below max(peak-flops compute time, peak-bandwidth memory time) — "
-            "no kernel can be this fast; the measurement did not run what the table claims.\n"
-        )
-        lines.append("| system | op_file | backend | dtype | points | worst x of SOL | worst example |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for a in sorted(below_sol, key=lambda x: x["worst_fraction_of_sol"])[:max_rows]:
-            lines.append(
-                f"| {a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['gemm_dtype']} | "
-                f"{a['points']} | {a['worst_fraction_of_sol']:.2f} | "
-                f"{_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g} |"
-            )
-        lines.append("")
-
-    if suspects:
-        lines.append(f"### Corroborated suspects (top {min(max_rows, len(suspects))})\n")
-        lines.append(
+            "no kernel can be this fast; the measurement did not run what the table claims."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Corroborated suspects",
+        "system | op_file | suspect | kind | attribution | dtype cols | points | refs | deviation | worst example",
+        [
+            f"{c['system']} | {c['op_file']} | **{c['suspect']}** | {c['suspect_kind']} | {c['attribution']} | "
+            f"{_fmt_shape(c['categorical_shape'])} | {c['points']} | {', '.join(c['reference_backends'])} | "
+            f"{c['deviation_min']:.1f}-{c['deviation_max']:.1f}x | "
+            f"{_fmt_shape(c['example_shape'])}: ratio {c['example']['ratio']:.2f} "
+            f"vs baseline {c['example']['local_baseline_ratio']:.2f}"
+            for c in suspects
+        ],
+        note=(
             "The same side deviates against two or more reference backends — that side's "
             "data is the common factor. `suspect_kind` says how it deviates from the local "
-            "baseline (too slow or too fast; anomalously FAST usually means a broken measurement).\n"
-        )
-        lines.append(
-            "| system | op_file | suspect | kind | attribution | dtype cols | points | refs | "
-            "deviation | worst example |"
-        )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
-        for c in suspects[:max_rows]:
-            ex = c["example"]
-            lines.append(
-                f"| {c['system']} | {c['op_file']} | **{c['suspect']}** | {c['suspect_kind']} | {c['attribution']} | "
-                f"{_fmt_shape(c['categorical_shape'])} | {c['points']} | {', '.join(c['reference_backends'])} | "
-                f"{c['deviation_min']:.1f}-{c['deviation_max']:.1f}x | "
-                f"{_fmt_shape(c['example_shape'])}: ratio {ex['ratio']:.2f} "
-                f"vs baseline {ex['local_baseline_ratio']:.2f} |"
-            )
-        lines.append("")
-
-    if undetermined:
-        lines.append(f"### Undetermined pair mismatches (top {min(max_rows, len(undetermined))})\n")
-        lines.append(
+            "baseline (too slow or too fast; anomalously FAST usually means a broken measurement)."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Undetermined pair mismatches",
+        "system | op_file | pair | dtype cols | points | deviation | worst example",
+        [
+            f"{c['system']} | {c['op_file']} | {c['pair']} | {_fmt_shape(c['categorical_shape'])} | "
+            f"{c['points']} | {c['deviation_min']:.1f}-{c['deviation_max']:.1f}x | "
+            f"{_fmt_shape(c['example_shape'])}: ratio {c['example']['ratio']:.2f} "
+            f"vs baseline {c['example']['local_baseline_ratio']:.2f}"
+            for c in undetermined
+        ],
+        note=(
             "Only one reference backend exists for these points, so the deviating side "
-            "cannot be attributed — one of the two tables is off.\n"
-        )
-        lines.append("| system | op_file | pair | dtype cols | points | deviation | worst example |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for c in undetermined[:max_rows]:
-            ex = c["example"]
-            lines.append(
-                f"| {c['system']} | {c['op_file']} | {c['pair']} | {_fmt_shape(c['categorical_shape'])} | "
-                f"{c['points']} | {c['deviation_min']:.1f}-{c['deviation_max']:.1f}x | "
-                f"{_fmt_shape(c['example_shape'])}: ratio {ex['ratio']:.2f} "
-                f"vs baseline {ex['local_baseline_ratio']:.2f} |"
-            )
-        lines.append("")
-
-    if regions:
-        lines.append(f"### Whole-region deviations (top {min(max_rows, len(regions))})\n")
-        lines.append("| system | op_file | pair | bucket | median ratio | op median | rel deviation | points |")
-        lines.append("|---|---|---|---|---|---|---|---|")
-        for r in sorted(regions, key=lambda x: -x["rel_deviation"])[:max_rows]:
-            lines.append(
-                f"| {r['system']} | {r['op_file']} | {r['pair']} | `{r['bucket']}` | "
-                f"{r['median_ratio']:.2f} | {r['op_median_ratio']:.2f} | {r['rel_deviation']:.1f}x | {r['points']} |"
-            )
-        lines.append("")
-
-    if mono_clusters:
-        lines.append(f"### Monotonicity violation clusters (top {min(max_rows, len(mono_clusters))})\n")
-        lines.append("| system | op_file | backend | kernel_source | sweep | points | worst drop | worst example |")
-        lines.append("|---|---|---|---|---|---|---|---|")
-        for c in mono_clusters[:max_rows]:
-            ex = c["example"]
-            lines.append(
-                f"| {c['system']} | {c['op_file']} | {c['backend']} | `{c['kernel_source']}` | "
-                f"{c['sweep_col']} | {c['points']} | {c['worst_ratio']:.2f} | "
-                f"{_fmt_shape(ex['fixed_shape'])}: {ex['sweep_col']} {ex['sweep_from']}→{ex['sweep_to']}, "
-                f"lat {ex['latency_from']:.4g}→{ex['latency_to']:.4g} |"
-            )
-        lines.append("")
-
-    if spike_clusters:
-        lines.append(f"### Curve spike clusters (top {min(max_rows, len(spike_clusters))})\n")
-        lines.append(
+            "cannot be attributed — one of the two tables is off."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Whole-region deviations",
+        "system | op_file | pair | bucket | median ratio | op median | rel deviation | points",
+        [
+            f"{r['system']} | {r['op_file']} | {r['pair']} | `{r['bucket']}` | {r['median_ratio']:.2f} | "
+            f"{r['op_median_ratio']:.2f} | {r['rel_deviation']:.1f}x | {r['points']}"
+            for r in sorted(v["regions"], key=lambda x: -x["rel_deviation"])
+        ],
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Monotonicity violation clusters",
+        "system | op_file | backend | kernel_source | sweep | points | worst drop | worst example",
+        [
+            f"{c['system']} | {c['op_file']} | {c['backend']} | `{c['kernel_source']}` | {c['sweep_col']} | "
+            f"{c['points']} | {c['worst_ratio']:.2f} | "
+            f"{_fmt_shape(c['example']['fixed_shape'])}: {c['example']['sweep_col']} "
+            f"{c['example']['sweep_from']}→{c['example']['sweep_to']}, "
+            f"lat {c['example']['latency_from']:.4g}→{c['example']['latency_to']:.4g}"
+            for c in v["mono_clusters"]
+        ],
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Curve spike clusters",
+        "system | op_file | backend | kernel_source | sweep | points | worst spike | worst example",
+        [
+            f"{c['system']} | {c['op_file']} | {c['backend']} | `{c['kernel_source']}` | {c['sweep_col']} | "
+            f"{c['points']} | {c['worst_ratio']:.1f}x | "
+            f"{_fmt_shape(c['example']['fixed_shape'])}: {c['example']['sweep_col']}={c['example']['sweep_at']}, "
+            f"lat {c['example']['latency']:.4g} vs neighbors {c['example']['neighbor_latency']:.4g}"
+            for c in v["spike_clusters"]
+        ],
+        note=(
             "A point higher than BOTH sweep neighbors — a bad measurement (jitter, "
-            "preemption, missing warmup) needing no reference framework.\n"
-        )
-        lines.append("| system | op_file | backend | kernel_source | sweep | points | worst spike | worst example |")
-        lines.append("|---|---|---|---|---|---|---|---|")
-        for c in spike_clusters[:max_rows]:
-            ex = c["example"]
-            lines.append(
-                f"| {c['system']} | {c['op_file']} | {c['backend']} | `{c['kernel_source']}` | "
-                f"{c['sweep_col']} | {c['points']} | {c['worst_ratio']:.1f}x | "
-                f"{_fmt_shape(ex['fixed_shape'])}: {ex['sweep_col']}={ex['sweep_at']}, "
-                f"lat {ex['latency']:.4g} vs neighbors {ex['neighbor_latency']:.4g} |"
-            )
-        lines.append("")
-
-    if machine:
-        lines.append(f"### Machine-fingerprint deviations (top {min(max_rows, len(machine))}; hint only)\n")
-        lines.append(
+            "preemption, missing warmup) needing no reference framework."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Machine-fingerprint deviations",
+        "system | backend | op_file | direction | rel ratio | ops compared",
+        [
+            f"{a['system']} | {a['backend']}/{a['version']} | {a['op_file']} | {a['direction']} | "
+            f"{a['rel_ratio']:.2f}x | {a['ops_compared']}"
+            for a in v["machine"]
+        ],
+        note=(
             "The system's latency level on this op is off relative to how the same system "
             "compares to its peers on its OTHER ops (hardware factor removed). Version skew "
-            "and compute/memory hardware ratios add spread — triage before acting.\n"
-        )
-        lines.append("| system | backend | op_file | direction | rel ratio | ops compared |")
-        lines.append("|---|---|---|---|---|---|")
-        for a in machine[:max_rows]:
-            lines.append(
-                f"| {a['system']} | {a['backend']}/{a['version']} | {a['op_file']} | "
-                f"{a['direction']} | {a['rel_ratio']:.2f}x | {a['ops_compared']} |"
-            )
-        lines.append("")
-
-    if mismatches:
-        lines.append("### Skipped comparisons (shape schema mismatch)\n")
-        lines.append("| system | op_file | pair | shape_cols_a | shape_cols_b |")
-        lines.append("|---|---|---|---|---|")
-        for m in mismatches[:max_rows]:
-            lines.append(
-                f"| {m['system']} | {m['op_file']} | {m['pair']} | "
-                f"{', '.join(m['shape_cols_a'])} | {', '.join(m['shape_cols_b'])} |"
-            )
-        lines.append("")
+            "and compute/memory hardware ratios add spread — triage before acting."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Skipped comparisons (shape schema mismatch)",
+        "system | op_file | pair | shape_cols_a | shape_cols_b",
+        [
+            f"{m['system']} | {m['op_file']} | {m['pair']} | "
+            f"{', '.join(m['shape_cols_a'])} | {', '.join(m['shape_cols_b'])}"
+            for m in v["mismatches"]
+        ],
+        top=max_rows,
+    )
 
     lines.append("## Layer 2 — framework gaps (informational)\n")
     lines.append(
@@ -1227,74 +1178,70 @@ def render_markdown(
         "backend b is faster. Different kernel_source values on the two sides mean the "
         "gap likely reflects a kernel implementation difference, not bad data.\n"
     )
-    if offsets:
-        lines.append("### Systematic cross-system offsets\n")
-        lines.append(
+    _md_section(
+        lines,
+        "Systematic cross-system offsets",
+        "op_file | slow backend | reference | systems | median offset | attribution | per-system | slow kernels",
+        [
+            f"{o['op_file']} | **{o['slow_backend']}** | {o['reference_backend']} | {len(o['systems'])} | "
+            f"{o['overall_median_ratio']:.2f}x | {o['attribution']} | "
+            + ", ".join(f"{k}:{r}" for k, r in sorted(o["median_ratio_by_system"].items()))
+            + f" | `{', '.join(o['kernel_sources_slow'])}`"
+            for o in offsets
+        ],
+        note=(
             "The same backend pair shows a same-direction median offset on EVERY covered "
             "system. A shape-local kernel weakness moves with shape and hardware; a uniform "
             "multiplier reproduced across systems is the fingerprint of a framework-level "
             "collection/configuration difference (eager mode, missing torch.compile, "
-            "disabled CUDA graphs).\n"
-        )
-        lines.append(
-            "| op_file | slow backend | reference | systems | median offset | attribution | per-system | slow kernels |"
-        )
-        lines.append("|---|---|---|---|---|---|---|---|")
-        for o in offsets[:max_rows]:
-            per_sys = ", ".join(f"{k}:{v}" for k, v in sorted(o["median_ratio_by_system"].items()))
-            lines.append(
-                f"| {o['op_file']} | **{o['slow_backend']}** | {o['reference_backend']} | "
-                f"{len(o['systems'])} | {o['overall_median_ratio']:.2f}x | {o['attribution']} | {per_sys} | "
-                f"`{', '.join(o['kernel_sources_slow'])}` |"
-            )
-        lines.append("")
-
-    if kernel_costs:
-        lines.append(f"### Within-framework kernel choice cost (top {min(max_rows, len(kernel_costs))})\n")
-        lines.append(
+            "disabled CUDA graphs)."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "Within-framework kernel choice cost",
+        "system | op_file | backend | kernel_source | median penalty | max | rows",
+        [
+            f"{c['system']} | {c['op_file']} | {c['backend']}/{c['version']} | `{c['kernel_source']}` | "
+            f"{c['median_penalty']:.2f}x | {c['max_penalty']:.1f}x | {c['rows']}"
+            for c in sorted(v["kernel_costs"], key=lambda x: -x["median_penalty"])
+        ],
+        note=(
             "For tables that measured several kernel_sources on the same shapes: how much "
             "slower each kernel's median is than the per-shape best — the price of that "
-            "backend selection inside one framework.\n"
-        )
-        lines.append("| system | op_file | backend | kernel_source | median penalty | max | rows |")
-        lines.append("|---|---|---|---|---|---|---|")
-        for c in sorted(kernel_costs, key=lambda x: -x["median_penalty"])[:max_rows]:
-            lines.append(
-                f"| {c['system']} | {c['op_file']} | {c['backend']}/{c['version']} | `{c['kernel_source']}` | "
-                f"{c['median_penalty']:.2f}x | {c['max_penalty']:.1f}x | {c['rows']} |"
-            )
-        lines.append("")
-
-    if sol_effs:
-        lines.append("### gemm speed-of-light efficiency (environment health)\n")
-        lines.append(
+            "backend selection inside one framework."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
+        "gemm speed-of-light efficiency (environment health)",
+        "system | backend | dtype | points | median eff | p95 eff",
+        [
+            f"{e['system']} | {e['backend']}/{e['version']} | {e['gemm_dtype']} | {e['points']} | "
+            f"{e['median_efficiency']:.2f} | {e['p95_efficiency']:.2f}"
+            for e in sorted(v["sol_effs"], key=lambda x: (x["system"], x["backend"], x["gemm_dtype"]))
+        ],
+        note=(
             "Median achieved fraction of the physical bound per (system, backend, dtype). "
             "A system whose efficiencies sit well below its peers on the same hardware "
-            "generation points at a collection-environment problem, not at the kernels.\n"
-        )
-        lines.append("| system | backend | dtype | points | median eff | p95 eff |")
-        lines.append("|---|---|---|---|---|---|")
-        for e in sorted(sol_effs, key=lambda x: (x["system"], x["backend"], x["gemm_dtype"]))[: max_rows * 2]:
-            lines.append(
-                f"| {e['system']} | {e['backend']}/{e['version']} | {e['gemm_dtype']} | "
-                f"{e['points']} | {e['median_efficiency']:.2f} | {e['p95_efficiency']:.2f} |"
-            )
-        lines.append("")
-
-    if summaries:
-        lines.append("### Pair summaries\n")
-        lines.append(
-            "| system | op_file | pair | points | median | p05 | p95 | region/total buckets | kernels_a | kernels_b |"
-        )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
-        for s in sorted(summaries, key=lambda x: (x["system"], x["op_file"], x["pair"])):
-            lines.append(
-                f"| {s['system']} | {s['op_file']} | {s['pair']} | {s['joined_points']} | "
-                f"{s['median_ratio']:.2f} | {s['p05_ratio']:.2f} | {s['p95_ratio']:.2f} | "
-                f"{s['region_deviation_buckets']}/{s['total_buckets']} | "
-                f"`{', '.join(s['kernel_sources_a'])}` | `{', '.join(s['kernel_sources_b'])}` |"
-            )
-        lines.append("")
+            "generation points at a collection-environment problem, not at the kernels."
+        ),
+        top=max_rows * 2,
+    )
+    _md_section(
+        lines,
+        "Pair summaries",
+        "system | op_file | pair | points | median | p05 | p95 | region/total buckets | kernels_a | kernels_b",
+        [
+            f"{s['system']} | {s['op_file']} | {s['pair']} | {s['joined_points']} | {s['median_ratio']:.2f} | "
+            f"{s['p05_ratio']:.2f} | {s['p95_ratio']:.2f} | "
+            f"{s['region_deviation_buckets']}/{s['total_buckets']} | "
+            f"`{', '.join(s['kernel_sources_a'])}` | `{', '.join(s['kernel_sources_b'])}`"
+            for s in sorted(v["summaries"], key=lambda x: (x["system"], x["op_file"], x["pair"]))
+        ],
+    )
 
     return "\n".join(lines) + "\n"
 
@@ -1378,9 +1325,7 @@ def main() -> None:
     parser.add_argument("--out-md", type=Path, default=None, help="Write the Markdown report.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write all findings as JSON.")
     parser.add_argument(
-        "--fail-on-anomalies",
-        action="store_true",
-        help="Exit nonzero when Layer 1 anomalies are found (CI gate mode).",
+        "--fail-on-anomalies", action="store_true", help="Exit nonzero when Layer 1 anomalies are found (CI gate mode)."
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -1412,12 +1357,8 @@ def main() -> None:
 
     kmap = load_kernel_map(args.kernel_map)
     suspects, undetermined = cluster_suspects(anomalies, kmap)
-    mono_clusters = cluster_curve_findings(anomalies, "mono_violation")
-    spike_clusters = cluster_curve_findings(anomalies, "spike_violation")
     offsets = detect_systematic_offsets(gaps, args.offset_factor, args.min_offset_systems, kmap)
-    regions = [a for a in anomalies if a["kind"] == "region_deviation"]
-    nonpositive = [a for a in anomalies if a["kind"] == "nonpositive_latency"]
-    below_sol = [a for a in anomalies if a["kind"] == "below_sol"]
+    v = derive_views(anomalies, gaps)
 
     if args.out_json:
         args.out_json.parent.mkdir(parents=True, exist_ok=True)
@@ -1428,50 +1369,43 @@ def main() -> None:
                     "gaps": gaps,
                     "suspect_clusters": suspects,
                     "undetermined_clusters": undetermined,
-                    "mono_clusters": mono_clusters,
-                    "spike_clusters": spike_clusters,
+                    "mono_clusters": v["mono_clusters"],
+                    "spike_clusters": v["spike_clusters"],
                     "systematic_offsets": offsets,
-                },
-                indent=2,
+                }
             )
         )
         logger.info("wrote %s", args.out_json)
     if args.out_md:
         args.out_md.parent.mkdir(parents=True, exist_ok=True)
-        args.out_md.write_text(render_markdown(anomalies, gaps, offsets, suspects, undetermined, args.max_report_rows))
+        args.out_md.write_text(render_markdown(v, offsets, suspects, undetermined, args.max_report_rows))
         logger.info("wrote %s", args.out_md)
 
-    n_outliers = sum(1 for a in anomalies if a["kind"] == "pair_outlier")
-    n_mono = sum(1 for a in anomalies if a["kind"] == "mono_violation")
-    n_spike = sum(1 for a in anomalies if a["kind"] == "spike_violation")
-    n_mismatch = sum(1 for g in gaps if g["kind"] == "schema_mismatch")
     print(
-        f"\nLayer 1: {sum(a['rows'] for a in nonpositive)} nonpositive-latency rows, "
-        f"{n_outliers} point outliers ({len(suspects)} corroborated suspects, "
-        f"{len(undetermined)} undetermined), {len(regions)} region deviations, "
-        f"{n_mono} mono violations in {len(mono_clusters)} clusters, "
-        f"{n_spike} spikes in {len(spike_clusters)} clusters, "
-        f"{sum(a['points'] for a in below_sol)} below-SOL points in {len(below_sol)} groups"
+        f"\nLayer 1: {sum(a['rows'] for a in v['nonpositive'])} nonpositive-latency rows, "
+        f"{v['n_outliers']} point outliers ({len(suspects)} corroborated suspects, "
+        f"{len(undetermined)} undetermined), {len(v['regions'])} region deviations, "
+        f"{v['n_mono']} mono violations in {len(v['mono_clusters'])} clusters, "
+        f"{v['n_spike']} spikes in {len(v['spike_clusters'])} clusters, "
+        f"{sum(a['points'] for a in v['below_sol'])} below-SOL points in {len(v['below_sol'])} groups"
     )
-    for a in sorted(below_sol, key=lambda x: x["worst_fraction_of_sol"])[:5]:
+    for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])[:5]:
         print(
             f"  BELOW-SOL! {a['system']}/{a['op_file']}: {a['backend']}/{a['version']} {a['gemm_dtype']} — "
             f"{a['points']} points, worst at {a['worst_fraction_of_sol']:.2f}x of physical bound "
             f"({_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g})"
         )
-    machine = [a for a in anomalies if a["kind"] == "machine_op_deviation"]
-    for a in machine[:5]:
+    for a in v["machine"][:5]:
         print(
             f"  MACHINE? {a['system']} {a['backend']}/{a['version']} {a['op_file']}: "
             f"{a['rel_ratio']:.2f}x {a['direction']} vs the system's own level on "
             f"{a['ops_compared']} other ops"
         )
     print(
-        f"Layer 2: {len(offsets)} systematic offsets across "
-        f"{sum(1 for g in gaps if g['kind'] == 'pair_summary')} backend pairs"
-        + (f"; {n_mismatch} pairs skipped (schema mismatch)" if n_mismatch else "")
+        f"Layer 2: {len(offsets)} systematic offsets across {len(v['summaries'])} backend pairs"
+        + (f"; {len(v['mismatches'])} pairs skipped (schema mismatch)" if v["mismatches"] else "")
     )
-    for o in offsets[: args.max_report_rows if args.max_report_rows < 10 else 10]:
+    for o in offsets[: min(args.max_report_rows, 10)]:
         print(
             f"  OFFSET? {o['op_file']}: {o['slow_backend']} is ~{o['overall_median_ratio']:.2f}x slower than "
             f"{o['reference_backend']} on all {len(o['systems'])} covered systems "
@@ -1485,7 +1419,7 @@ def main() -> None:
             f"refs: {', '.join(c['reference_backends'])}"
         )
 
-    if args.fail_on_anomalies and (nonpositive or below_sol or n_outliers or n_mono or n_spike or regions):
+    if args.fail_on_anomalies and any(a["kind"] in _GATED_KINDS for a in anomalies):
         raise SystemExit(1)
 
 
