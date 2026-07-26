@@ -999,6 +999,98 @@ def derive_views(anomalies: list[dict], gaps: list[dict]) -> dict:
     }
 
 
+def synthesize_problems(views: dict, offsets: list[dict], suspects: list[dict], top: int = 15) -> list[dict]:
+    """Merge all detectors' evidence into per-(backend, op_file) problems,
+    ranked by evidence strength — the triage list a human reads first.
+
+    A problem's score grows with the number of independent detectors that
+    corroborate it, the number of systems it reproduces on, and its size.
+    """
+    problems: dict[tuple[str, str], dict] = {}
+
+    def add(backend: str, op_file: str, system: str | None, detector: str, evidence: str, worst: float = 1.0):
+        prob = problems.setdefault(
+            (backend, op_file),
+            {"backend": backend, "op_file": op_file, "systems": set(), "detectors": {}, "worst": 1.0},
+        )
+        if system:
+            prob["systems"].add(system)
+        prob["detectors"].setdefault(detector, evidence)
+        prob["worst"] = max(prob["worst"], worst)
+
+    # Cross-system aggregation of per-system suspect clusters.
+    by_suspect: dict[tuple, list[dict]] = defaultdict(list)
+    for c in suspects:
+        by_suspect[(c["suspect"].split("/")[0], c["op_file"], _sig(c["categorical_shape"]))].append(c)
+    for (backend, op_file, _cat), cs in by_suspect.items():
+        worst = max(c["deviation_max"] for c in cs)
+        att = Counter(c["attribution"] for c in cs).most_common(1)[0][0]
+        add(
+            backend,
+            op_file,
+            None,
+            "suspect",
+            f"corroborated suspect on {len({c['system'] for c in cs})} system(s) "
+            f"({_fmt_shape(cs[0]['categorical_shape'])}, {att}): "
+            f"{sum(c['points'] for c in cs)} pts, dev up to {worst:.0f}x",
+            worst,
+        )
+        for c in cs:
+            problems[(backend, op_file)]["systems"].add(c["system"])
+    for o in offsets:
+        add(
+            o["slow_backend"],
+            o["op_file"],
+            None,
+            "offset",
+            f"uniform {o['overall_median_ratio']:.2f}x offset vs {o['reference_backend']} "
+            f"on all {len(o['systems'])} systems ({o['attribution']})",
+            o["overall_median_ratio"],
+        )
+        problems[(o["slow_backend"], o["op_file"])]["systems"].update(o["systems"])
+    for a in views["machine"]:
+        add(
+            a["backend"],
+            a["op_file"],
+            a["system"],
+            "machine",
+            f"machine-level {a['rel_ratio']:.1f}x {a['direction']} on {a['system']} "
+            f"(vs its own level on {a['ops_compared']} ops)",
+            a["rel_ratio"],
+        )
+    for kind_key, label in (("mono_clusters", "mono drops"), ("spike_clusters", "spikes")):
+        agg: dict[tuple[str, str], int] = defaultdict(int)
+        for c in views[kind_key]:
+            agg[(c["backend"].split("/")[0], c["op_file"])] += c["points"]
+        for (backend, op_file), pts in agg.items():
+            if pts >= 100:
+                add(backend, op_file, None, kind_key, f"{pts} {label} along sweep curves")
+    for a in views["nonpositive"]:
+        add(a["backend"], a["op_file"], a["system"], "nonpositive", f"{a['rows']} nonpositive-latency rows")
+    for a in views["below_sol"]:
+        add(
+            a["backend"],
+            a["op_file"],
+            a["system"],
+            "below_sol",
+            f"{a['points']} points below the physical bound (worst {a['worst_fraction_of_sol']:.2f}x of SOL)",
+        )
+
+    ranked = sorted(
+        problems.values(),
+        key=lambda p: -(len(p["detectors"]) * 10 + len(p["systems"]) * 2 + math.log10(p["worst"] + 1)),
+    )
+    return ranked[:top]
+
+
+def _problem_lines(problems: list[dict]) -> list[str]:
+    return [
+        f"{i}. **{p['backend']} · {p['op_file']}** ({len(p['systems'])} systems, "
+        f"{len(p['detectors'])} detector(s)) — " + "; ".join(p["detectors"].values())
+        for i, p in enumerate(problems, 1)
+    ]
+
+
 def _md_section(
     lines: list[str], title: str, headers: str, rows: list[str], note: str | None = None, top: int | None = None
 ) -> None:
@@ -1021,6 +1113,17 @@ def render_markdown(
 ) -> str:
     v = views
     lines: list[str] = ["# Cross-backend consistency report\n"]
+
+    problems = synthesize_problems(v, offsets, suspects)
+    if problems:
+        lines.append("## Triage — start here\n")
+        lines.append(
+            "Every detector's evidence merged per (backend, op) and ranked by strength "
+            "(independent detectors, systems reproduced on, magnitude). The tables below "
+            "are the appendix.\n"
+        )
+        lines.extend(_problem_lines(problems))
+        lines.append("")
 
     lines.append("## Layer 1 — anomalies (suspected invalid data)\n")
     lines.append(
@@ -1389,6 +1492,8 @@ def main() -> None:
         f"{v['n_spike']} spikes in {len(v['spike_clusters'])} clusters, "
         f"{sum(a['points'] for a in v['below_sol'])} below-SOL points in {len(v['below_sol'])} groups"
     )
+    for line in _problem_lines(synthesize_problems(v, offsets, suspects, top=10)):
+        print("  " + line.replace("**", ""))
     for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])[:5]:
         print(
             f"  BELOW-SOL! {a['system']}/{a['op_file']}: {a['backend']}/{a['version']} {a['gemm_dtype']} — "
