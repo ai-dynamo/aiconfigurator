@@ -157,12 +157,16 @@ def compare(name, des, formula, exempt=(), tolerances=None):
     for k, dv in des.items():
         fv = formula[k]
         tol = tolerances[k]
-        err = (fv - dv) / dv * 100 if dv else (0.0 if not fv else float("inf"))
+        if not math.isfinite(dv) or not math.isfinite(fv):
+            err = float("inf")  # fail closed: a NaN result must not pass the gate
+        else:
+            err = (fv - dv) / dv * 100 if dv else (0.0 if not fv else float("inf"))
         exempted = k in exempt
-        flag = "  <-- FAIL" if abs(err) > tol and not exempted else ""
+        failed = (not math.isfinite(err) or abs(err) > tol) and not exempted
+        flag = "  <-- FAIL" if failed else ""
         note = "  (info only)" if exempted else ""
         print(f"{k:<22}{dv:>12.2f}{fv:>13.2f}{err:>8.1f}%{tol:>6.0f}%{flag}{note}")
-        if abs(err) > tol and not exempted:
+        if failed:
             failures.append((k, round(err, 1)))
     return failures
 
@@ -171,11 +175,13 @@ def evaluator_stats(isl, osl, c, budget, chunked=True, prefix=0, n_mult=10, **_)
     from aiconfigurator.sdk.queueing import EngineSpec, WorkloadSpec, evaluate_closed_loop
 
     class _Timing:
+        # same clamps as the DES side's CallbackPerfModel, so both paths
+        # consume identical timings and residuals isolate scheduling
         def prefill_ms(self, b, mean_isl, mean_prefix):
-            return f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix)
+            return max(0.0, f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix))
 
         def decode_ms(self, b, ctx):
-            return f_decode(b, ctx)
+            return max(1.0, f_decode(b, ctx))
 
     wl = WorkloadSpec(isl=isl, osl=osl, prefix=prefix, concurrency=c, num_requests=n_mult * c)
     eng = EngineSpec(max_num_batched_tokens=budget, enable_chunked_prefill=chunked)
@@ -235,11 +241,13 @@ def disagg_evaluator_stats(isl, osl, c, n_prefill, n_decode, kv_bytes=0, bw=0.0,
     from aiconfigurator.sdk.queueing import DisaggSpec, EngineSpec, WorkloadSpec, evaluate_disagg
 
     class _Timing:
+        # same clamps as the DES side's CallbackPerfModel, so both paths
+        # consume identical timings and residuals isolate scheduling
         def prefill_ms(self, b, mean_isl, mean_prefix):
-            return f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix)
+            return max(0.0, f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix))
 
         def decode_ms(self, b, ctx):
-            return f_decode(b, ctx)
+            return max(1.0, f_decode(b, ctx))
 
     wl = WorkloadSpec(isl=isl, osl=osl, concurrency=c, num_requests=n_mult * c)
     spec = DisaggSpec(n_prefill, n_decode, kv_bytes_per_token=kv_bytes, egress_bytes_per_s=bw, ingress_bytes_per_s=bw)
@@ -339,7 +347,14 @@ def main():
         if failures:
             all_failures.append((f"{name} [tandem]", failures))
 
-    print("\n" + ("ALL WITHIN TOLERANCE" if not all_failures else f"FAILURES: {all_failures}"))
+    print(
+        "\n"
+        + (
+            "ALL GATED (EVALUATOR-TIER) METRICS WITHIN TOLERANCE"
+            if not all_failures
+            else f"EVALUATOR FAILURES: {all_failures}"
+        )
+    )
     return 1 if all_failures else 0
 
 

@@ -78,6 +78,14 @@ class WorkloadSpec:
             raise ValueError("specify exactly one of concurrency / request_rate")
         if self.osl < 1 or self.isl < 1:
             raise ValueError("isl and osl must be >= 1")
+        if not 0 <= self.prefix <= self.isl:
+            raise ValueError("prefix must be between 0 and isl")
+        if self.concurrency is not None and self.concurrency < 1:
+            raise ValueError("concurrency must be >= 1")
+        if self.request_rate is not None and self.request_rate <= 0:
+            raise ValueError("request_rate must be > 0")
+        if self.num_requests is not None and self.num_requests < 1:
+            raise ValueError("num_requests must be >= 1")
         if self.turnaround_ms < 0:
             raise ValueError("turnaround_ms must be >= 0")
 
@@ -111,6 +119,13 @@ class EngineSpec:
     # TRT-LLM-specific (used by the trtllm calendar only)
     guaranteed_no_evict: bool = False
     kv_capacity_tokens: Optional[int] = None  # needed by guaranteed_no_evict
+
+    def __post_init__(self):
+        if self.max_num_batched_tokens < 1 or self.max_num_seqs < 1:
+            raise ValueError("max_num_batched_tokens and max_num_seqs must be >= 1")
+        if self.guaranteed_no_evict and (self.kv_capacity_tokens is None or self.kv_capacity_tokens < 1):
+            # fail loudly instead of silently ignoring the admission cap
+            raise ValueError("guaranteed_no_evict requires positive kv_capacity_tokens")
 
 
 @dataclass

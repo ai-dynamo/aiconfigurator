@@ -427,7 +427,9 @@ class VllmSimCore:
     def __init__(self, args: EngineArgs, perf_model=None):
         self.args = args
         self.perf = perf_model or SyntheticPerfModel()
-        sharing = args.kv_mode == "block"
+        # prefix caching off must also disable hashed-block sharing: shared
+        # blocks change capacity/eviction behavior, not just cache hits
+        sharing = args.kv_mode == "block" and args.enable_prefix_caching
         self.kv = KvManager(args.num_gpu_blocks, args.block_size, enable_sharing=sharing)
         self.waiting: list[Request] = []  # deque semantics; preempted prepend
         self.running: list[Request] = []

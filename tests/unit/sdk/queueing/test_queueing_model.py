@@ -71,6 +71,29 @@ class TestWorkloadSpec:
         wl = WorkloadSpec(isl=100, osl=10, prefix=90, concurrency=1)
         assert wl.effective_isl == 10
 
+    def test_rejects_out_of_range_parameters(self):
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=100, osl=10, prefix=101, concurrency=4)
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=100, osl=10, concurrency=0)
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=100, osl=10, request_rate=0.0)
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=100, osl=10, concurrency=4, num_requests=0)
+
+
+class TestEngineSpecValidation:
+    def test_rejects_non_positive_limits(self):
+        with pytest.raises(ValueError):
+            EngineSpec(max_num_batched_tokens=0)
+        with pytest.raises(ValueError):
+            EngineSpec(max_num_seqs=0)
+
+    def test_guaranteed_no_evict_requires_kv_capacity(self):
+        with pytest.raises(ValueError):
+            EngineSpec(guaranteed_no_evict=True)
+        EngineSpec(guaranteed_no_evict=True, kv_capacity_tokens=1024)  # valid
+
 
 class TestClosedLoopEvaluator:
     def test_steady_state_shape(self):
@@ -207,6 +230,23 @@ class TestOperatingPointColumns:
         assert cols["itl_p50"] == 12.0
         assert cols["itl_p99"] == 180.0
         assert cols["ttft_steady_p99"] >= cols["ttft_steady_p50"]
+
+    def test_osl_leq_1_reports_zero_itl(self):
+        # run_agg emits tpot = 0.0 for no-decode points; itl_* must agree
+        cols = operating_point_columns(
+            isl=4096,
+            osl=1,
+            batch_size=8,
+            ctx_tokens=8192,
+            mix_step_ms=180.0,
+            genonly_step_ms=12.0,
+            prefill_step_ms=170.0,
+            num_mix_steps=16,
+            num_genonly_steps=0,
+        )
+        assert cols["itl_mean"] == 0.0
+        assert cols["itl_p50"] == 0.0
+        assert cols["itl_p99"] == 0.0
 
     def test_columns_registered_in_all_schemas(self):
         for schema in (common.ColumnsAgg, common.ColumnsStatic, common.ColumnsDisagg):
@@ -411,6 +451,16 @@ class TestBracketAndE2E:
 class TestDisaggTandem:
     """Tandem-recursion structural semantics (accuracy is gated by the
     oracle's disagg families — see tools/queueing_oracle)."""
+
+    def test_spec_rejects_invalid_workers_and_cap(self):
+        from aiconfigurator.sdk.queueing import DisaggSpec
+
+        with pytest.raises(ValueError):
+            DisaggSpec(num_prefill_workers=0, num_decode_workers=1)
+        with pytest.raises(ValueError):
+            DisaggSpec(num_prefill_workers=1, num_decode_workers=0)
+        with pytest.raises(ValueError):
+            DisaggSpec(num_prefill_workers=1, num_decode_workers=1, prefill_inflight_cap=0)
 
     def _spec(self, **kw):
         from aiconfigurator.sdk.queueing import DisaggSpec

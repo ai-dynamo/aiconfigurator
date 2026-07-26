@@ -114,6 +114,10 @@ def operating_point_columns(
     mix_frac = w_mix / total_w
     itl_p50 = t_mix if mix_frac >= 0.5 else t_gen
     itl_p99 = t_mix if mix_frac >= 0.01 else t_gen
+    if osl <= 1:
+        # no decode tokens -> no inter-token gaps; mirror run_agg's own
+        # tpot = 0.0 convention instead of reporting the mix-pass duration
+        itl_mean = itl_p50 = itl_p99 = 0.0
 
     # cohort bracket: the steady limit cycle can lock anywhere between solo
     # prompts (one per pass) and full-budget packing — both extremes are

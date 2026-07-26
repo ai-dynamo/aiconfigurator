@@ -62,6 +62,12 @@ class DisaggSpec:
     bw_efficiency: float = 0.8
     prefill_inflight_cap: Optional[int] = None  # kappa; None = engine-batched
 
+    def __post_init__(self) -> None:
+        if self.num_prefill_workers < 1 or self.num_decode_workers < 1:
+            raise ValueError("num_prefill_workers and num_decode_workers must be >= 1")
+        if self.prefill_inflight_cap is not None and self.prefill_inflight_cap < 1:
+            raise ValueError("prefill_inflight_cap must be None (engine-batched) or >= 1")
+
 
 class _TransferFabric:
     """Max-min fair sharing of per-worker NIC bandwidth (deterministic
