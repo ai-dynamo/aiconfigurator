@@ -55,9 +55,9 @@ jobs:
             --data-root aic-core/src/aiconfigurator_core/systems/data \
             --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml
 
-      # Daily archive of the cross-backend consistency report (informational;
+      # Daily archive of the perf-data sanity report (informational;
       # LFS is already pulled for the manifest step above).
-      - name: Cross-backend consistency full sweep
+      - name: Perf data sanity full sweep
         continue-on-error: true
         run: |
           python3 tools/perf_database/check_cross_backend.py \

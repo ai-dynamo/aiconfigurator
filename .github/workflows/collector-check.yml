@@ -88,14 +88,14 @@ jobs:
           path: changed-ops.yaml
           retention-days: 30
 
-  # Informational (never blocks the PR): full-tree cross-backend consistency
-  # sweep (~4 min). Unlike the check job above, this reads parquet CONTENT and
+  # Informational (never blocks the PR): full-tree perf-data sanity sweep
+  # (~4 min) — flags suspicious measurements for human double-checking. Unlike the check job above, this reads parquet CONTENT and
   # therefore pulls LFS (the whole data tree is ~124 MB compressed).
   # continue-on-error also covers fork PRs that cannot authenticate to LFS.
   # Gate mode (--fail-on-anomalies with per-kind thresholds) is deliberately
   # NOT enabled until the existing finding backlog is triaged.
   cross-backend-consistency:
-    name: Cross-backend consistency (informational)
+    name: Perf data sanity (informational)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
@@ -116,7 +116,7 @@ jobs:
       - name: Install check script dependencies
         run: pip install pandas pyarrow numpy pyyaml "tqdm>=4.0.0"
 
-      - name: Cross-backend consistency check
+      - name: Perf data sanity check
         run: |
           python3 tools/perf_database/check_cross_backend.py \
             --out-md cross-backend-consistency.md \

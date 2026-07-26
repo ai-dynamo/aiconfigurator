@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Two-layer cross-backend consistency check of perf-database perf tables.
+Multi-reference sanity checks of perf-database perf tables.
+
+Different backends legitimately differ — this tool does NOT demand
+consistency. It flags SUSPICIOUS measurements by checking each table against
+several independent reference frames (sibling backends' local baseline,
+sibling systems, the curve's own neighboring shapes, physical speed-of-light
+bounds) and asks a human to double-check them; nothing is blocked by default.
 
 For every (system, op_file) present in >= 2 backends, join the latest version
 of each backend on the shape key and emit findings on two layers:
@@ -1122,7 +1128,7 @@ def render_markdown(
     views: dict, offsets: list[dict], suspects: list[dict], undetermined: list[dict], max_rows: int
 ) -> str:
     v = views
-    lines: list[str] = ["# Cross-backend consistency report\n"]
+    lines: list[str] = ["# Perf data sanity report\n"]
 
     problems = synthesize_problems(v, offsets, suspects)
     if problems:
