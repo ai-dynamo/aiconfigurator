@@ -91,9 +91,7 @@ def _dsa_attention_quant_modes(
     if explicit is not None:
         modes = dict.fromkeys(("q", "kv", "o", "indexer"), explicit)
         return modes, explicit
-    modes = {
-        g: common.GEMMQuantMode.bfloat16 if g in exclusions else fallback for g in ("q", "kv", "o", "indexer")
-    }
+    modes = {g: common.GEMMQuantMode.bfloat16 if g in exclusions else fallback for g in ("q", "kv", "o", "indexer")}
     distinct = set(modes.values())
     return modes, (distinct.pop() if len(distinct) == 1 else modes["o"])
 
