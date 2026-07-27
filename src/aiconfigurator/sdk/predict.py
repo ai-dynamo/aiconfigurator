@@ -83,8 +83,13 @@ def predict_disagg_worker(
         workers, the predictor interface (and the call site) can be
         extended without touching every caller.
     """
+    # Forward the fraction only when set so injected Predictor
+    # implementations predating the kwarg keep working.
+    predictor_kwargs: dict[str, Any] = {}
+    if free_gpu_memory_fraction is not None:
+        predictor_kwargs["free_gpu_memory_fraction"] = free_gpu_memory_fraction
     summary = (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        **predictor_kwargs,
         model=model,
         backend=backend,
         database=database,

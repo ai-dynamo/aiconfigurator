@@ -1734,6 +1734,10 @@ class Task:
         p_backend = get_backend(self.prefill_backend_name)
         p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
 
+        worker_kwargs: dict[str, Any] = {}
+        if self.free_gpu_memory_fraction is not None:
+            worker_kwargs["free_gpu_memory_fraction"] = self.free_gpu_memory_fraction
+
         p_summary = predict_disagg_worker(
             model=p_model,
             backend=p_backend,
@@ -1743,11 +1747,12 @@ class Task:
             latency_correction=self.prefill_latency_correction,
             predictor=self.predictor,
             speculative_profile=self.build_speculative_profile(),
+            **worker_kwargs,
         )
-        if p_summary.check_oom():
+        if p_summary.check_oom() or p_summary.check_kv_cache_oom():
             raise RuntimeError(
                 f"OOM in prefill phase at tp={prefill_tp} pp={prefill_pp} dp={prefill_dp} "
-                f"batch_size={prefill_batch_size}."
+                f"batch_size={prefill_batch_size} (memory capacity or KV-cache budget exceeded)."
             )
 
         # --- Decode phase ---
@@ -1772,10 +1777,12 @@ class Task:
             latency_correction=self.decode_latency_correction,
             predictor=self.predictor,
             speculative_profile=self.build_speculative_profile(),
+            **worker_kwargs,
         )
-        if d_summary.check_oom():
+        if d_summary.check_oom() or d_summary.check_kv_cache_oom():
             raise RuntimeError(
-                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} batch_size={decode_batch_size}."
+                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} "
+                f"batch_size={decode_batch_size} (memory capacity or KV-cache budget exceeded)."
             )
 
         # --- Rate-match the pair ---
