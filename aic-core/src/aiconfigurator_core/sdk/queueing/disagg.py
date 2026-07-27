@@ -357,7 +357,17 @@ def evaluate_disagg(
             if r.gaps:
                 tpot.add(sum(r.gaps) / len(r.gaps))
             e2e.add(end_ms - r.arrival_ms)
-        prefill.dispatch(_Req(arrival_ms=end_ms, remaining_prefill=wl.effective_isl), end_ms)
+        # closed loop: the client dispatches the replacement at the completion
+        # instant (arrival_ms=end_ms, the TTFT origin); the prefill pool sees
+        # it only after the frontend turnaround — same visibility-delay
+        # semantics as the agg calendar. At turnaround 0 the replacement lands
+        # exactly on the completion/worker-free knife edge, which at high
+        # utilization locks the zero-wait pipeline attractor real deployments
+        # never hold (validated: h20e 2P1D kappa=1 at the saturation knee).
+        prefill.dispatch(
+            _Req(arrival_ms=end_ms, remaining_prefill=wl.effective_isl),
+            end_ms + wl.turnaround_ms,
+        )
 
     def _any_req(_r: _Req) -> bool:
         return True

@@ -516,6 +516,26 @@ class TestDisaggTandem:
         with pytest.raises(ValueError):
             evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
 
+    def test_turnaround_delays_replacement_visibility(self):
+        """Replacements become visible to the prefill pool only after the
+        client turnaround (same semantics as the agg calendar): the cycle
+        lengthens by ~eps per generation, so throughput strictly drops,
+        while the TTFT origin stays at the completion instant."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        base = WorkloadSpec(isl=1024, osl=8, concurrency=1)
+        delayed = WorkloadSpec(isl=1024, osl=8, concurrency=1, turnaround_ms=500.0)
+        rep0 = evaluate_disagg(base, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        rep1 = evaluate_disagg(delayed, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        # C=1: the cycle stretches by ~eps, so 1/X grows by ~eps
+        cycle0 = 1000.0 / rep0.throughput_rps
+        cycle1 = 1000.0 / rep1.throughput_rps
+        assert 400.0 < cycle1 - cycle0 < 600.0
+        # TTFT origin is the dispatch instant, so the visibility delay lands
+        # in TTFT — the same convention as the agg calendar (and as a real
+        # client, which times TTFT from its own send)
+        assert 400.0 < rep1.ttft_steady.mean - rep0.ttft_steady.mean < 600.0
+
 
 class TestDisaggReportUpgrade:
     def test_composed_rows_upgrade_to_quantitative(self, monkeypatch):
