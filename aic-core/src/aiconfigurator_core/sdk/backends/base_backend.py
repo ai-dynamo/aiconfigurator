@@ -407,6 +407,7 @@ class BaseBackend:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         img_ctx_tokens: int = 0,
+        include_energy: bool = True,
     ) -> tuple[
         dict[str, float],
         dict[str, float],
@@ -446,8 +447,29 @@ class BaseBackend:
                     stride,
                     latency_correction_scale,
                 )
-                context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
-                generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
+                if include_energy:
+                    # Rust engine tracks only latency; run the Python phase runners
+                    # for energy so power_w is populated when power overlay parquets
+                    # are present.  Sum each phase's energy into a single value stored
+                    # under the matching Rust synthetic key so that
+                    # has_sufficient_power_data() can pair energy with latency by name.
+                    ctx_energy_total = 0.0
+                    gen_energy_total = 0.0
+                    if mode in ("static_ctx", "both"):
+                        _, ctx_e, _ = self._run_context_phase(
+                            model, database, runtime_config, batch_size, isl_eff, prefix
+                        )
+                        ctx_energy_total = sum(ctx_e.values()) * latency_correction_scale
+                    if mode in ("static_gen", "both"):
+                        _, gen_e, _ = self._run_generation_phase(
+                            model, database, runtime_config, batch_size, beam_width, isl_eff, osl, stride
+                        )
+                        gen_energy_total = sum(gen_e.values()) * latency_correction_scale
+                    context_energy_wms_dict = {k: ctx_energy_total for k in context_latency_dict}
+                    generation_energy_wms_dict = {k: gen_energy_total for k in generation_latency_dict}
+                else:
+                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
                 return (
                     context_latency_dict,
                     context_energy_wms_dict,
@@ -543,6 +565,7 @@ class BaseBackend:
             stride,
             latency_correction_scale,
             img_ctx_tokens=img_ctx_tokens,
+            include_energy=False,
         )
         return encoder_latency + sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
 
