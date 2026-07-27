@@ -27,7 +27,10 @@ pytestmark = pytest.mark.unit
         ("gb200", 8, 4097, 128, common.GEMMQuantMode.bfloat16, 0.1536000000000000),
         ("gb200", 8, 3000, 128, common.GEMMQuantMode.bfloat16, 0.1519930664062500),
         ("gb200", 64, 4096, 128, common.GEMMQuantMode.bfloat16, 0.1999953125000000),
-        ("h200_sxm", 64, 4096, 16, common.GEMMQuantMode.fp8_block, 0.1904882812500000),
+        # Re-minted after the shared-layer first-wins fix: the old pin
+        # (0.19048828125) captured a 1.2.0rc5 sibling row that silently
+        # overrode 1.3.0rc10's own row at this key (last-wins loader bug).
+        ("h200_sxm", 64, 4096, 16, common.GEMMQuantMode.fp8_block, 0.1146884765625000),
     ],
 )
 def test_generation_mla_module_fp8_kv_exact_values(system, b, s, num_heads, gemm, expected_ms):

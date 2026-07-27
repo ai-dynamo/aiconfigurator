@@ -773,15 +773,18 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             let latency = row.f64(latency_col)?;
             // The CP composition consumes the context (v1) selector's raw
             // top_last latencies.
+            // First-wins parity with Python `load_dsv4_sparse_op_data`
+            // (skip-on-key-conflict; shared-layer contract, design §6.1).
             if mode == "v1_top_last" {
                 top_last
                     .entry(row.u32_optional(num_heads_col)?)
                     .or_default()
                     .entry(bs)
                     .or_default()
-                    .insert((isl, step), latency);
+                    .entry((isl, step))
+                    .or_insert(latency);
             }
-            by_mode.entry((step, isl, bs)).or_default().insert(mode, latency);
+            by_mode.entry((step, isl, bs)).or_default().entry(mode).or_insert(latency);
         }
     }
     if !any_source {
@@ -839,12 +842,14 @@ fn load_sparse_kernel_parquet(sources: &[PerfSource]) -> Result<Option<SparseKer
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
+            // First-wins parity with Python `load_dsv4_sparse_op_data`
+            // (skip-on-key-conflict; shared-layer contract, design §6.1).
             by_heads
                 .entry(row.u32(num_heads_col)?)
                 .or_default()
                 .entry(row.u32(tp_size_col)?)
                 .or_insert_with(Node::branch)
-                .insert(
+                .insert_first_wins(
                     &[row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?],
                     row.f64(latency_col)?,
                 );
@@ -1226,12 +1231,15 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
                 kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
-            // Last-wins parity with Python `load_*_dsv4_kind_module_data`, which
-            // assigns `data[...][b][s] = {...}` per row keyed on
-            // `(num_heads, compress_ratio, step, isl, batch)` but NOT on `tp_size`,
-            // so a later row (here: a higher tp_size, since the file is
-            // gemm-then-tp-ascending) overwrites the earlier one. We drop the tp
-            // axis and let `BTreeMap::insert` overwrite; do NOT use `or_insert`.
+            // Last-wins parity with Python `load_*_dsv4_kind_module_data`.
+            // FIXME(loader-key-identity): the key drops `model` and `tp_size`,
+            // but the b200 0.5.10 files carry three artifacts (DeepSeek-V4-Pro
+            // / -Flash / -Flash-FP8) whose rows collide on the remaining key
+            // with 30-50% latency spread — BOTH first-wins and last-wins pick
+            // an arbitrary artifact. Keep the historical last-row-wins
+            // (`BTreeMap::insert`, matching Python and the pinned oracles)
+            // until the key gains the missing identity dimensions; do NOT
+            // switch to `or_insert` without fixing the identity first.
             by_keys
                 .entry(key)
                 .or_default()

@@ -1696,11 +1696,16 @@ def load_mhc_module_data(mhc_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            mhc_data[op][hc_mult][hidden_size][num_tokens]
+            logger.debug(f"value conflict in mhc module data: {op} {hc_mult} {hidden_size} {num_tokens}")
+        except KeyError:
+            mhc_data[op][hc_mult][hidden_size][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mhc_data
 
@@ -1919,6 +1924,15 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
+        # FIXME(loader-key-identity): this table's key drops `model` and
+        # `tp_size`, but the b200 0.5.10 files carry three artifacts
+        # (DeepSeek-V4-Pro / -Flash / -Flash-FP8) whose rows collide on the
+        # remaining key with 30-50% latency spread — so BOTH first-wins and
+        # last-wins pick an arbitrary artifact. Deliberately keeping the
+        # historical last-row-wins direct assignment (matches the Rust port
+        # and the pinned oracles) until the key gains the missing identity
+        # dimensions; do NOT add the skip-on-conflict guard here without
+        # fixing the identity first.
         data[fmha_mode][kv_dtype][gemm_mode][num_heads_local][cr][prefix][s][b] = {
             "latency": latency,
             "power": power,
@@ -1968,6 +1982,9 @@ def load_generation_dsv4_kind_module_data(file_path: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
+        # FIXME(loader-key-identity): same artifact-collision caveat as
+        # `load_context_dsv4_kind_module_data` — keep last-row-wins until the
+        # key carries the missing identity dimensions.
         data[kv_dtype][gemm_mode][num_heads_local][cr][b][s_total] = {
             "latency": latency,
             "power": power,
@@ -2171,6 +2188,10 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
         node = root
         for k in keys[:-1]:
             node = node.setdefault(k, {})
+        if keys[-1] in node:
+            # Check for conflict: first source wins (shared-layer contract).
+            logger.debug(f"value conflict in dsv4 sparse-op data: {keys}")
+            continue
         node[keys[-1]] = {"latency": latency}
     return root or None
 
