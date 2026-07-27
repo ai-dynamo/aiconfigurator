@@ -116,14 +116,49 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_facts import load_backend_map, translate
-from check_kernel_source import (
-    _LATENCY_COLUMNS_PRIORITY,
-    _META_COLUMNS,
-    _iter_data_files,
-    _pick_latency_column,
-)
+from check_kernel_source import _META_COLUMNS, _iter_data_files
 
 logger = logging.getLogger(__name__)
+
+# op_name is metadata for the sibling scanner but NOT for this checker:
+# several tables store multiple logical operations in one file (e.g.
+# mla_bmm_perf's mla_gen_pre/mla_gen_post) and their shapes must never be
+# compared across op_name values.
+_SHAPE_EXCLUDED_META = _META_COLUMNS - {"op_name"}
+
+# Single latency columns, tried in order.
+_SINGLE_LATENCY_COLUMNS = ("latency", "avg_ms")
+
+# Multi-component schemas whose runtime consumer SUMS the components — the
+# checker must audit the same effective latency the consumer sees:
+#   - wideep_deepep_ll: combine + dispatch
+#   - wideep_deepep_normal: notify + transmit for both phases
+_LATENCY_COMPONENT_SETS = (
+    ("combine_avg_t_us", "dispatch_avg_t_us"),
+    ("combine_notify_us", "combine_transmit_us", "dispatch_notify_us", "dispatch_transmit_us"),
+)
+
+# Derived output metrics that must never enter the shape key.
+_DERIVED_METRIC_SUFFIXES = ("_bandwidth_gbps",)
+
+
+class _SchemaUnsupportedError(Exception):
+    """No recognized latency column or component set in the table."""
+
+
+def _resolve_latency(df: pd.DataFrame) -> tuple[pd.Series, str, set[str]]:
+    """Returns (effective latency, unit label column, all latency-ish columns
+    to exclude from the shape key)."""
+    excluded = set(_SINGLE_LATENCY_COLUMNS) | {c for s in _LATENCY_COMPONENT_SETS for c in s}
+    excluded |= {c for c in df.columns if c.endswith(_DERIVED_METRIC_SUFFIXES)}
+    for col in _SINGLE_LATENCY_COLUMNS:
+        if col in df.columns:
+            return df[col], col, excluded
+    for components in _LATENCY_COMPONENT_SETS:
+        if all(c in df.columns for c in components):
+            return df[list(components)].sum(axis=1), components[0], excluded
+    raise _SchemaUnsupportedError(f"no recognized latency column among {sorted(df.columns)}")
+
 
 # Shape columns treated as sweep dimensions: log2-bucketed for the local
 # baseline, and checked for latency monotonicity within a backend.
@@ -239,19 +274,19 @@ def _load_op_table(path: Path, backend: str, version: str) -> tuple[OpTable | No
     than the per-shape best — the price of picking that backend.
     """
     df = _read_table(path)
-    latency_col = _pick_latency_column(df.columns)
-    if latency_col is None:
-        logger.warning("No latency column in %s; skipping", path)
-        return None, {}, []
+    latency, unit_col, latency_excluded = _resolve_latency(df)
     if "kernel_source" not in df.columns:
         df["kernel_source"] = "<unknown>"
-    nonpositive = df[df[latency_col].notna() & (df[latency_col] <= 0)]
+    # A missing label must not hide a corrupt row (NaN groups vanish from
+    # value_counts by default).
+    df["kernel_source"] = df["kernel_source"].fillna("<unknown>")
+    nonpositive = df[latency.notna() & (latency <= 0)]
     npos_by_ks = {str(k): int(v) for k, v in nonpositive["kernel_source"].value_counts().items()}
-    shape_cols = [c for c in df.columns if c not in _META_COLUMNS and c not in _LATENCY_COLUMNS_PRIORITY]
-    df = df[df[latency_col] > 0]
+    shape_cols = [c for c in df.columns if c not in _SHAPE_EXCLUDED_META and c not in latency_excluded]
+    keep = latency > 0
+    df = df[keep].drop(columns=[c for c in latency_excluded if c in df.columns]).assign(latency=latency[keep])
     if df.empty or not shape_cols:
         return None, npos_by_ks, []
-    df = df.rename(columns={latency_col: "latency"})
     kernel_costs: list[dict] = []
     shape_gb = df.groupby(shape_cols, dropna=False)["latency"]
     if df["kernel_source"].nunique() > 1:
@@ -276,7 +311,7 @@ def _load_op_table(path: Path, backend: str, version: str) -> tuple[OpTable | No
         shape_cols=shape_cols,
         frame=reduced,
         kernel_sources=sorted(df["kernel_source"].astype(str).unique()),
-        noise_scale=1000.0 if latency_col.endswith("_us") else 1.0,
+        noise_scale=1000.0 if unit_col.endswith("_us") else 1.0,
     )
     return table, npos_by_ks, kernel_costs
 
@@ -545,6 +580,53 @@ def _finding_key(a: dict) -> str:
     return f"{kind}|{a['system']}|{a['op_file']}|{a['backend']}|{a.get('gemm_dtype', '')}"
 
 
+# Group-level kinds whose finding aggregates a COUNT: the baseline must
+# remember the count, not just the key, or growth inside a known group would
+# be invisible to the ratchet.
+_GROUP_COUNT_FIELDS = {"nonpositive_latency": "rows", "below_sol": "points"}
+_BASELINE_SCHEMA = 2
+
+
+def snapshot_baseline(gated: list[dict]) -> dict:
+    keys: set[str] = set()
+    counts: dict[str, int] = {}
+    for a in gated:
+        key = _key_hash(_finding_key(a))
+        if a["kind"] in _GROUP_COUNT_FIELDS:
+            counts[key] = counts.get(key, 0) + a[_GROUP_COUNT_FIELDS[a["kind"]]]
+        else:
+            keys.add(key)
+    return {"schema": _BASELINE_SCHEMA, "keys": sorted(keys), "counts": dict(sorted(counts.items()))}
+
+
+def evaluate_gate(
+    gated: list[dict], thresholds: dict[str, int], baseline: dict | None
+) -> tuple[dict[str, int], Counter, int]:
+    """Returns (breaches, new-finding tallies per kind, suppressed count).
+
+    With a baseline, point-level findings are suppressed by key membership;
+    group-level findings are suppressed only up to the baselined COUNT — a
+    known group that grows contributes its excess as new."""
+    known_keys = set(baseline["keys"]) if baseline else set()
+    known_counts = baseline.get("counts", {}) if baseline else {}
+    tallies: Counter = Counter()
+    suppressed = 0
+    for a in gated:
+        kind = a["kind"]
+        key = _key_hash(_finding_key(a))
+        if kind in _GROUP_COUNT_FIELDS:
+            current = a[_GROUP_COUNT_FIELDS[kind]]
+            known = known_counts.get(key, 0)
+            suppressed += min(current, known)
+            if current > known:
+                tallies[kind] += current - known
+        elif key in known_keys:
+            suppressed += 1
+        else:
+            tallies[kind] += 1
+    return {k: n for k, n in tallies.items() if n > thresholds[k]}, tallies, suppressed
+
+
 def _key_hash(key: str) -> str:
     import hashlib
 
@@ -679,13 +761,30 @@ def load_kernel_map(path: Path) -> list[dict]:
         return []
 
 
-def _normalize_kernels(kmap: list[dict], framework: str, op_file: str, kernel_sources) -> set[str]:
+def _normalize_kernels(
+    kmap: list[dict], framework: str, op_file: str, kernel_sources, axes: dict | None = None
+) -> set[str]:
+    """Normalize kernel_source labels via the registry. The registry keys ops
+    by STEM (gemm_perf, not gemm_perf.parquet) and its conditional entries
+    match on axis values (gemm_dtype, ...). Labels whose only registry entries
+    are conditional and whose conditions cannot be evaluated here resolve to
+    an `unresolved:` marker so attribution reports `unknown` rather than
+    guessing."""
+    stem = op_file.rsplit(".", 1)[0]
+    axis_map = {k: str(v) for k, v in (axes or {}).items()}
     out: set[str] = set()
     for entry in kernel_sources:
         for ks in str(entry).split(","):
             ks = ks.strip()
-            if ks:
-                out.add(translate(kmap, framework, op_file, {}, ks) or ks.lower())
+            if not ks:
+                continue
+            backend = translate(kmap, framework, stem, axis_map, ks)
+            if backend is not None:
+                out.add(backend)
+            elif any(m["framework"] == framework and m["kernel_source"] == ks for m in kmap):
+                out.add(f"unresolved:{ks}")
+            else:
+                out.add(ks.lower())
     return out
 
 
@@ -701,7 +800,11 @@ def _attribution(slow_kernels: set[str], reference_kernels: set[str]) -> str:
     opaque labels only cannot be attributed."""
     if not slow_kernels or not reference_kernels:
         return "unknown"
-    if slow_kernels <= _OPAQUE_KERNELS or reference_kernels <= _OPAQUE_KERNELS:
+
+    def _opaque(kernels: set[str]) -> bool:
+        return all(k in _OPAQUE_KERNELS or k.startswith("unresolved:") for k in kernels)
+
+    if _opaque(slow_kernels) or _opaque(reference_kernels):
         return "unknown"
     return "harness_config" if slow_kernels & reference_kernels else "kernel_choice"
 
@@ -758,8 +861,11 @@ def cluster_suspects(anomalies: list[dict], kmap: list[dict]) -> tuple[list[dict
             b_label, _, a_label = point["pair"].partition(" vs ")
             slow_sfx, ref_label = ("_b", a_label) if side == b_label else ("_a", b_label)
             ref_sfx = "_a" if slow_sfx == "_b" else "_b"
-            slow_ks |= _normalize_kernels(kmap, side.split("/")[0], op_file, [point[f"kernel_source{slow_sfx}"]])
-            ref_ks |= _normalize_kernels(kmap, ref_label.split("/")[0], op_file, [point[f"kernel_source{ref_sfx}"]])
+            axes = point["cat_shape"]
+            slow_ks |= _normalize_kernels(kmap, side.split("/")[0], op_file, [point[f"kernel_source{slow_sfx}"]], axes)
+            ref_ks |= _normalize_kernels(
+                kmap, ref_label.split("/")[0], op_file, [point[f"kernel_source{ref_sfx}"]], axes
+            )
         corroborated.append(
             {
                 **_cluster_common(points),
@@ -784,7 +890,9 @@ def cluster_suspects(anomalies: list[dict], kmap: list[dict]) -> tuple[list[dict
     return corroborated, undetermined
 
 
-def detect_systematic_offsets(gaps: list[dict], offset_factor: float, min_systems: int, kmap: list[dict]) -> list[dict]:
+def detect_systematic_offsets(
+    gaps: list[dict], offset_factor: float, min_systems: int, dispersion: float, kmap: list[dict]
+) -> list[dict]:
     """Find backend pairs whose op-level median ratio deviates in the SAME
     direction on every covered system.
 
@@ -814,6 +922,12 @@ def detect_systematic_offsets(gaps: list[dict], offset_factor: float, min_system
             slow, reference = backend_a, backend_b
         else:
             continue
+        # A systematic (configuration-level) offset must be a NEAR-CONSTANT
+        # multiplier: same-direction 1.2x/4x/20x is not one. Require the
+        # per-system medians to sit within `dispersion` of each other.
+        spread = float(np.exp(logs[-1] - logs[0]))
+        if spread > dispersion:
+            continue
         mid = logs[len(logs) // 2]
         slow_sfx, ref_sfx = ("_b", "_a") if slow == backend_b else ("_a", "_b")
         slow_ks = _normalize_kernels(
@@ -830,6 +944,7 @@ def detect_systematic_offsets(gaps: list[dict], offset_factor: float, min_system
                 "reference_backend": reference,
                 "systems": sorted(e["system"] for e in entries),
                 "overall_median_ratio": float(np.exp(abs(mid))),
+                "spread": round(spread, 2),
                 "median_ratio_by_system": {
                     e["system"]: round(float(np.exp(abs(math.log(e["median_ratio"])))), 2) for e in entries
                 },
@@ -968,6 +1083,23 @@ def run_checks(
             version, path = max(versions, key=lambda vp: _version_key(vp[0]))
             try:
                 table, npos_by_ks, kernel_costs = _load_op_table(path, backend, version)
+            except _SchemaUnsupportedError as exc:
+                # Deliberately informational, not gated: a new op family's
+                # schema must be added to _SINGLE_LATENCY_COLUMNS /
+                # _LATENCY_COMPONENT_SETS before this tool can audit it, and
+                # the report says so instead of silently skipping.
+                gaps.append(
+                    {
+                        "kind": "unsupported_schema",
+                        "system": system,
+                        "op_file": op_file,
+                        "backend": backend,
+                        "version": version,
+                        "error": str(exc)[:200],
+                    }
+                )
+                logger.warning("unsupported schema %s: %s", path, exc)
+                continue
             except Exception as exc:
                 anomalies.append(
                     {
@@ -1057,6 +1189,7 @@ def derive_views(anomalies: list[dict], gaps: list[dict]) -> dict:
         "n_mono": len(kind(anomalies, "mono_violation")),
         "n_spike": len(kind(anomalies, "spike_violation")),
         "mismatches": kind(gaps, "schema_mismatch"),
+        "unsupported": kind(gaps, "unsupported_schema"),
         "summaries": kind(gaps, "pair_summary"),
         "kernel_costs": kind(gaps, "kernel_choice_cost"),
         "sol_effs": kind(gaps, "sol_efficiency"),
@@ -1339,6 +1472,17 @@ def render_markdown(
     )
     _md_section(
         lines,
+        "Unsupported schemas (not audited)",
+        "system | op_file | backend | error",
+        [f"{a['system']} | {a['op_file']} | {a['backend']}/{a['version']} | {a['error']}" for a in v["unsupported"]],
+        note=(
+            "No recognized latency column or component set — add the schema to "
+            "_SINGLE_LATENCY_COLUMNS / _LATENCY_COMPONENT_SETS to bring these tables under audit."
+        ),
+        top=max_rows,
+    )
+    _md_section(
+        lines,
         "Skipped comparisons (shape schema mismatch)",
         "system | op_file | pair | shape_cols_a | shape_cols_b",
         [
@@ -1498,6 +1642,13 @@ def main() -> None:
         default=3,
         help="Minimum number of systems a pair must cover to qualify as a systematic offset.",
     )
+    parser.add_argument(
+        "--offset-dispersion",
+        type=float,
+        default=2.0,
+        help="Systematic offsets require per-system medians within this factor of each other "
+        "(a same-direction but wildly varying gap is not a configuration-level offset).",
+    )
     parser.add_argument("--max-report-rows", type=int, default=50, help="Row cap per markdown table.")
     parser.add_argument("--out-md", type=Path, default=None, help="Write the Markdown report.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write all findings as JSON.")
@@ -1534,6 +1685,8 @@ def main() -> None:
         parser.error("--mono-tolerance must be in (0, 1]")
     if args.offset_factor <= 1.0:
         parser.error("--offset-factor must be > 1")
+    if args.offset_dispersion <= 1.0:
+        parser.error("--offset-dispersion must be > 1")
     if args.spike_factor <= 1.0:
         parser.error("--spike-factor must be > 1")
     gate_thresholds = dict(_GATE_THRESHOLDS)
@@ -1561,7 +1714,7 @@ def main() -> None:
 
     kmap = load_kernel_map(args.kernel_map)
     suspects, undetermined = cluster_suspects(anomalies, kmap)
-    offsets = detect_systematic_offsets(gaps, args.offset_factor, args.min_offset_systems, kmap)
+    offsets = detect_systematic_offsets(gaps, args.offset_factor, args.min_offset_systems, args.offset_dispersion, kmap)
     v = derive_views(anomalies, gaps)
 
     if args.out_json:
@@ -1628,29 +1781,21 @@ def main() -> None:
     gated = [a for a in anomalies if a["kind"] in gate_thresholds]
     if args.write_baseline:
         args.write_baseline.parent.mkdir(parents=True, exist_ok=True)
-        args.write_baseline.write_text(
-            json.dumps({"schema": 1, "keys": sorted({_key_hash(_finding_key(a)) for a in gated})})
-        )
+        args.write_baseline.write_text(json.dumps(snapshot_baseline(gated)))
         print(f"\nBaseline written: {len(gated)} findings -> {args.write_baseline}")
 
     if args.fail_on_anomalies:
+        baseline = None
         if args.baseline:
             if args.baseline.exists():
-                known = set(json.loads(args.baseline.read_text())["keys"])
-                before = len(gated)
-                gated = [a for a in gated if _key_hash(_finding_key(a)) not in known]
-                print(f"\nBaseline: {before - len(gated)} known findings suppressed; {len(gated)} new")
+                baseline = json.loads(args.baseline.read_text())
+                if baseline.get("schema") != _BASELINE_SCHEMA:
+                    parser.error(f"baseline schema {baseline.get('schema')} != {_BASELINE_SCHEMA}; regenerate it")
             else:
                 logger.warning("baseline %s not found; gating ALL findings", args.baseline)
-        tallies: Counter[str] = Counter()
-        for a in gated:
-            if a["kind"] == "nonpositive_latency":
-                tallies[a["kind"]] += a["rows"]
-            elif a["kind"] == "below_sol":
-                tallies[a["kind"]] += a["points"]
-            else:
-                tallies[a["kind"]] += 1
-        breaches = {k: n for k, n in tallies.items() if n > gate_thresholds[k]}
+        breaches, tallies, suppressed = evaluate_gate(gated, gate_thresholds, baseline)
+        if baseline:
+            print(f"\nBaseline: {suppressed} known findings suppressed; {sum(tallies.values())} new")
         if breaches:
             print(
                 "GATE FAILED — new-finding tallies over allowance: "
