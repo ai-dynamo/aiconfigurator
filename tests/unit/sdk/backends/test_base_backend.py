@@ -175,8 +175,11 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert calls[0][3:] == ("static", 2, 1.25)
     assert summary.get_context_latency_dict() == {"rust_engine_step_context": 7.0}
     assert summary.get_generation_latency_dict() == {"rust_engine_step_generation": 3.0}
-    assert summary.get_context_energy_wms_dict() == {"rust_engine_step_context": 0.0}
-    assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": 0.0}
+    # Python phase runners supply energy (Rust tracks latency only).
+    # Context: (110.0 + 30.0) * scale=1.25 = 175.0
+    # Generation: 4 steps * (20.0 + 10.0) * scale=1.25 = 150.0
+    assert summary.get_context_energy_wms_dict() == {"rust_engine_step_context": pytest.approx(175.0)}
+    assert summary.get_generation_energy_wms_dict() == {"rust_engine_step_generation": pytest.approx(150.0)}
     assert summary.get_context_source_dict() == {"rust_engine_step_context": "rust"}
     assert summary.get_generation_source_dict() == {"rust_engine_step_generation": "rust"}
 
@@ -220,3 +223,40 @@ def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:
     assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=16) == 1.0
     assert backend._mix_step_efficiency(ctx_tokens=4096, gen_tokens=0) == 1.0
     assert backend._mix_step_efficiency(ctx_tokens=0, gen_tokens=0) == 1.0
+
+
+def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """include_energy=False must not invoke _run_context_phase or _run_generation_phase."""
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    monkeypatch.setattr(
+        base_backend_module,
+        "estimate_static_latency_breakdown_with_rust",
+        lambda *args, **kwargs: (
+            {"rust_engine_step_context": 7.0},
+            {"rust_engine_step_generation": 3.0},
+            {"rust_engine_step_context": "rust"},
+            {"rust_engine_step_generation": "rust"},
+        ),
+    )
+
+    ctx_phase = MagicMock(wraps=backend._run_context_phase)
+    gen_phase = MagicMock(wraps=backend._run_generation_phase)
+    monkeypatch.setattr(backend, "_run_context_phase", ctx_phase)
+    monkeypatch.setattr(backend, "_run_generation_phase", gen_phase)
+
+    backend.run_static_latency_only(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust"),
+        mode="static",
+        stride=2,
+    )
+
+    ctx_phase.assert_not_called()
+    gen_phase.assert_not_called()

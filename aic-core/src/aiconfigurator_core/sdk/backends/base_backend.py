@@ -455,18 +455,18 @@ class BaseBackend:
                     # has_sufficient_power_data() can pair energy with latency by name.
                     ctx_energy_total = 0.0
                     gen_energy_total = 0.0
-                    if mode in ("static_ctx", "both"):
+                    if mode in ("static_ctx", "static"):
                         _, ctx_e, _ = self._run_context_phase(
                             model, database, runtime_config, batch_size, isl_eff, prefix
                         )
                         ctx_energy_total = sum(ctx_e.values()) * latency_correction_scale
-                    if mode in ("static_gen", "both"):
+                    if mode in ("static_gen", "static"):
                         _, gen_e, _ = self._run_generation_phase(
                             model, database, runtime_config, batch_size, beam_width, isl_eff, osl, stride
                         )
                         gen_energy_total = sum(gen_e.values()) * latency_correction_scale
-                    context_energy_wms_dict = {k: ctx_energy_total for k in context_latency_dict}
-                    generation_energy_wms_dict = {k: gen_energy_total for k in generation_latency_dict}
+                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, ctx_energy_total)
+                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, gen_energy_total)
                 else:
                     context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
                     generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
