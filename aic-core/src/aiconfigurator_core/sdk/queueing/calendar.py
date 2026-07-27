@@ -141,7 +141,13 @@ class TrtllmCalendar(FusedCalendar):
     caps effective concurrency below max_num_seqs."""
 
     name = "trtllm"
-    validated = False
+    # h20e_sxm / trtllm 1.3.0rc20, Qwen3-32B tp4, isl4096/osl256, C 1..64:
+    # chunked-off ITL bimodal signature reproduced (spike 533-546 pred vs
+    # 541-590 meas), chunked-on spike tracks the budget (1067 pred vs ~1062
+    # meas), TPOT <=2% at C>=32, KV-capped deep queueing TTFT +-3% at 2-4x
+    # overload; known boundary: mid-bs TTFT residuals are timing-layer TPOT
+    # bias amplified by osl (failure mode 16), not calendar structure
+    validated = True
 
     def admission_cap(self, wl, eng):
         cap = eng.max_num_seqs
@@ -171,7 +177,15 @@ class AlternatingCalendar(BaseCalendar):
     both budgets (``num_mixed_decode_tokens``)."""
 
     name = "sglang"
-    validated = False
+    # h20e_sxm / sglang 0.5.14, Qwen3-32B tp1, isl4096/osl256, C 1..32, both
+    # branches: mixed-chunk spike tracks the shared chunk budget (3992/4010
+    # pred vs 3943/3960 meas at C=16/32), X +-3-7%; alternating (server
+    # default) TPOT within 1% and X exact at C=32, cohort-locked prefill
+    # waves reproduced (spike mass ~0.4% ~= 1/osl, amplitude = one cohort
+    # wave). TTFT residuals are timing-layer bias amplified by osl (failure
+    # mode 16). Measured with a clean thread-per-slot client; aiperf triggers
+    # a deterministic +1x-prefill TTFT artifact in non-mixed mode (tool-side)
+    validated = True
 
     def step(self, slots, wl, eng, timing):
         if eng.enable_mixed_chunk:
