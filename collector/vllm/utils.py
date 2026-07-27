@@ -516,20 +516,29 @@ def enable_engine_fused_ops() -> None:
     198.6→147.9 µs after this change, matching in-engine per-layer cost
     within ~10%; see ai-dynamo/aiconfigurator#1396).
 
-    ``vllm_c`` is a measured surrogate for the engine's fused execution, not
-    the identical dispatch: a serving worker compiles whole layers, and
-    inductor fuses these glue ops into the NEIGHBORING GEMM prologs — naive
-    ``torch.compile`` over the ops in isolation reproduces neither (glue
-    microbench, B300/vLLM 0.25: native-eager 74.6 us, vllm_c 20.5 us, bare
-    compile 64.3 us per MLA glue set; the engine-internal fused cost measured
-    from a B200 serving trace is 15-18 us). Exact parity therefore requires
-    running the module through vLLM's full compilation pipeline (fusion
-    passes + splitting + cudagraph modes) — tracked as a follow-up. The
-    surrogate is validated end-to-end at module level: 95-97 us vs the
-    in-engine 107 us/layer at the bs16 reference point (~10%), vs +37% for
-    the native chain. Installs it as the process-lifetime default:
-    ``IrOp.set_priority`` is a scoped context manager, ``set_default`` is
-    the permanent API (vllm/ir/op.py @0.24.0).
+    Why not ``torch.compile`` + CUDA graph instead? Outside a serving worker
+    every norm path — including ``forward_native`` — routes through the IR
+    torch custom op (``_ENABLE_TORCH_WRAP = True`` module default,
+    vllm/ir/op.py:50 @0.22.0), which is opaque to dynamo/inductor: compiling
+    through it fuses nothing (B200/vLLM 0.22 glue microbench, CUDA-graph
+    replay with kernel listing: native-eager 74.1 us, compile-through-wrap
+    64.6 us with the aten mean/pow/rsqrt chain intact; vllm_c-eager 21.0 us).
+    The engine escapes this two ways: worker init applies
+    ``ir_enable_torch_wrap`` (v1/worker/worker_base.py:94), and under
+    VLLM_COMPILE+inductor the wrapped op nodes are fused by vLLM's custom
+    lowerings into neighboring GEMMs (serving-trace kernel
+    ``triton_red_fused_..._fused_qkv_a_proj_rms_norm``); wrap-off is the
+    documented way to let dynamo trace the impl inline
+    (config/compilation.py:492-498 @0.22.0). Replicating that here —
+    ``vllm.ir.set_default_torch_wrap(False)`` + ``torch.compile`` — does
+    fuse fully (glue 8.0 us, module 87.7 us/layer) but OVERSHOOTS the
+    engine, whose fused glue is not free (norm+quant fused kernels, paged
+    rope): at the bs16 reference point the engine costs 107 us/layer,
+    vllm_c-eager 95-97 us (-10%), wrap-off-compile 87.7 us (-18%), the
+    native chain +37%. vllm_c-eager is therefore the closer surrogate and
+    needs no per-shape compile during sweeps. Installs it as the
+    process-lifetime default: ``IrOp.set_priority`` is a scoped context
+    manager, ``set_default`` is the permanent API (vllm/ir/op.py @0.24.0).
 
     Raises on vLLM builds without the IR-op registry or the ``vllm_c``
     provider — a silent fallback to the native chain would benchmark a kernel
