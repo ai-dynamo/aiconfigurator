@@ -9,3 +9,7 @@ runtime:
 tables:
   custom_allreduce_perf:
     status: complete
+  wideep_deepep_ll_perf:
+    status: complete
+  wideep_deepep_normal_perf:
+    status: complete
