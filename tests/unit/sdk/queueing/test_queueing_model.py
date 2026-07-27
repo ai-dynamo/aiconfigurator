@@ -572,6 +572,59 @@ class TestDisaggTandem:
         with pytest.raises(ValueError):
             evaluate_disagg(w2, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
 
+    def test_w3_joint_shapes_prefix_and_empirical_arrivals(self):
+        """Joint (isl, prefix, osl) strata carry per-request prefix hits
+        (more cached prefix -> strictly less prefill work -> lower TTFT) and
+        empirical inter-arrival strata express batched arrivals (zeros)."""
+        from aiconfigurator.sdk.queueing import evaluate_closed_loop, evaluate_open_loop
+        from aiconfigurator_core.sdk.queueing.spec import (
+            stratified_shape_tuples, workload_fidelity,
+        )
+
+        eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        # C=1, single tuple: TTFT is exactly one prefill of the EFFECTIVE
+        # prompt (isl - prefix) priced at (isl, prefix) — the per-slot prefix
+        # reaches the timing call unmangled
+        solo = WorkloadSpec(isl=4096, osl=8, concurrency=1,
+                            shape_tuples=((4096, 3072, 8),))
+        rep_solo = evaluate_closed_loop(solo, eng, TIMING)
+        assert rep_solo.ttft_steady.mean == pytest.approx(TIMING.prefill_ms(1, 4096, 3072))
+        cold = WorkloadSpec(isl=4096, osl=8, concurrency=8,
+                            shape_tuples=((2048, 0, 8), (6144, 0, 8)))
+        warm = WorkloadSpec(isl=4096, osl=8, concurrency=8,
+                            shape_tuples=((2048, 1024, 8), (6144, 3072, 8)))
+        assert workload_fidelity(warm) == "W3(closed-loop, joint-shapes)"
+        rep_cold = evaluate_closed_loop(cold, eng, TIMING)
+        rep_warm = evaluate_closed_loop(warm, eng, TIMING)
+        # strictly less prefill work per request -> throughput cannot drop
+        assert rep_warm.throughput_rps >= rep_cold.throughput_rps
+        assert rep_warm.workload_fidelity.startswith("W3")
+
+        # batched arrivals: 3 of 4 inter-arrival strata are zero
+        wl = WorkloadSpec(isl=1024, osl=8, request_rate=4.0,
+                          arrival_quantiles=(0.0, 0.0, 0.0, 1000.0))
+        rep = evaluate_open_loop(wl, eng, TIMING)
+        assert rep.throughput_rps == pytest.approx(4.0, rel=0.1)
+        assert "empirical-arrivals" in rep.workload_fidelity
+        # deterministic ordering helper
+        st_ = stratified_shape_tuples([(100, 0, 10), (200, 50, 20), (300, 0, 5)], k=2)
+        assert len(st_) == 2 and all(len(t) == 3 for t in st_)
+
+    def test_w3_validation(self):
+        with pytest.raises(ValueError):  # prefix >= isl
+            WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 512, 8),))
+        with pytest.raises(ValueError):  # exclusive with marginals
+            WorkloadSpec(isl=1024, osl=8, concurrency=2,
+                         shape_tuples=((512, 0, 8),), isl_quantiles=(512,))
+        with pytest.raises(ValueError):  # arrivals need open loop
+            WorkloadSpec(isl=1024, osl=8, concurrency=2, arrival_quantiles=(1.0,))
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+        with pytest.raises(ValueError):  # tandem rejects W3 inputs
+            evaluate_disagg(
+                WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 0, 8),)),
+                EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec(),
+            )
+
     def test_open_loop_rate_tracking_and_queueing(self):
         """Open loop: throughput tracks the arrival rate below capacity;
         TTFT at low utilization is ~one solo prefill, and it strictly grows

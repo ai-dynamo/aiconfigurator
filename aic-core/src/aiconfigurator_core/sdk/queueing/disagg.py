@@ -260,10 +260,10 @@ def evaluate_disagg(
     """
     if wl.concurrency is None:
         raise ValueError("the disagg tandem model requires a closed-loop workload")
-    if wl.isl_quantiles or wl.osl_quantiles:
+    if wl.isl_quantiles or wl.osl_quantiles or wl.shape_tuples:
         # fixed-shape only for now: rejecting loudly beats silently pricing a
         # homogeneous tandem while claiming shape-marginal fidelity
-        raise ValueError("the disagg tandem model is fixed-shape; shape quantiles are not consumed here")
+        raise ValueError("the disagg tandem model is fixed-shape; shape quantiles/tuples are not consumed here")
     c = wl.concurrency
     prefill = _Pool(spec.num_prefill_workers)
     decode = _Pool(spec.num_decode_workers)

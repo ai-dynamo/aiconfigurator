@@ -62,6 +62,7 @@ class _Slot:
     # throughput moves <10%).
     isl: int = 0
     osl: int = 0
+    prefix: int = 0
     gaps: list = field(default_factory=list)
     is_initial_burst: bool = False
 
@@ -107,7 +108,7 @@ class FusedCalendar(BaseCalendar):
                     # a whole prompt no longer fits the remaining budget
                     break
                 chunk = min(s.remaining_prefill, budget)
-                computed_before = wl.prefix + (max(1, s.isl - wl.prefix) - s.remaining_prefill)
+                computed_before = s.prefix + (max(1, s.isl - s.prefix) - s.remaining_prefill)
                 s.remaining_prefill -= chunk
                 budget -= chunk
                 batch_count += 1
@@ -130,7 +131,8 @@ class FusedCalendar(BaseCalendar):
             chunk_tokens = batch_total_isl - batch_total_prefix
             mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
             mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
-            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, wl.prefix), emitters
+            mean_dec_prefix = sum(s.prefix for s in decode_emitters) // len(decode_emitters)
+            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, mean_dec_prefix), emitters
 
         prefill_ms = 0.0
         if batch_count > 0:
@@ -218,7 +220,7 @@ class AlternatingCalendar(BaseCalendar):
             if budget <= 0:
                 break
             chunk = min(s.remaining_prefill, budget)
-            computed_before = wl.prefix + (max(1, s.isl - wl.prefix) - s.remaining_prefill)
+            computed_before = s.prefix + (max(1, s.isl - s.prefix) - s.remaining_prefill)
             s.remaining_prefill -= chunk
             budget -= chunk
             batch_count += 1
@@ -251,7 +253,8 @@ class AlternatingCalendar(BaseCalendar):
             chunk_tokens = batch_count * max(0, mean_isl - mean_prefix)
             mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
             mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
-            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, wl.prefix), emitters
+            mean_dec_prefix = sum(s.prefix for s in decode_emitters) // len(decode_emitters)
+            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, mean_dec_prefix), emitters
 
         prefill_ms = 0.0
         if batch_count:
@@ -318,22 +321,37 @@ def evaluate_closed_loop(
     # osl uses an offset start so isl/osl strata pair pseudo-independently
     from .spec import _shape_stream
 
-    isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
-    osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
-    if wl.osl_quantiles:
-        for _ in range(len(wl.osl_quantiles) // 2):
-            next(osl_stream)
+    if wl.shape_tuples:
+        tuple_stream = _shape_stream(tuple(range(len(wl.shape_tuples))), 0)
 
-    def _new_slot(**kw) -> _Slot:
-        isl_i = next(isl_stream)
-        osl_i = next(osl_stream)
-        return _Slot(
-            remaining_prefill=max(1, isl_i - wl.prefix), isl=isl_i, osl=osl_i, **kw
+        def _new_slot(**kw) -> _Slot:
+            isl_i, px_i, osl_i = wl.shape_tuples[next(tuple_stream)]
+            return _Slot(
+                remaining_prefill=max(1, isl_i - px_i), isl=isl_i, osl=osl_i, prefix=px_i, **kw
+            )
+
+        mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
+    else:
+        isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
+        osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
+        if wl.osl_quantiles:
+            for _ in range(len(wl.osl_quantiles) // 2):
+                next(osl_stream)
+
+        def _new_slot(**kw) -> _Slot:
+            isl_i = next(isl_stream)
+            osl_i = next(osl_stream)
+            return _Slot(
+                remaining_prefill=max(1, isl_i - wl.prefix),
+                isl=isl_i,
+                osl=osl_i,
+                prefix=wl.prefix,
+                **kw,
+            )
+
+        mean_osl = (
+            sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
         )
-
-    mean_osl = (
-        sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
-    )
 
     slots = [_new_slot(is_initial_burst=True) for _ in range(c)]
     pending: list[_Slot] = []  # dispatched replacements not yet visible to the scheduler
@@ -351,7 +369,9 @@ def evaluate_closed_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    max_osl = max(
+        (t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,))
+    )
     max_passes = 200 * (warmup_generations + window_generations) * max(1, max_osl)
     for _ in range(max_passes):
         if completions >= target:
@@ -503,16 +523,34 @@ def evaluate_open_loop(
     calendar = CALENDARS[backend]
     cap = calendar.admission_cap(wl, eng)
 
-    isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
-    osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
-    if wl.osl_quantiles:
-        for _ in range(len(wl.osl_quantiles) // 2):
-            next(osl_stream)
-    mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    if wl.shape_tuples:
+        tuple_stream = _shape_stream(tuple(range(len(wl.shape_tuples))), 0)
 
-    # deterministic exponential inter-arrival strata, exact-mean normalized
-    k = 64
-    strata = [-log(1.0 - (i + 0.5) / k) for i in range(k)]
+        def _next_shape():
+            return wl.shape_tuples[next(tuple_stream)]
+
+        mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
+    else:
+        isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
+        osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
+        if wl.osl_quantiles:
+            for _ in range(len(wl.osl_quantiles) // 2):
+                next(osl_stream)
+
+        def _next_shape():
+            return next(isl_stream), wl.prefix, next(osl_stream)
+
+        mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+
+    # deterministic inter-arrival strata, exact-mean normalized: empirical
+    # (W3, raw trace inter-arrivals — zeros express batched arrivals) when
+    # provided, else exponential (Poisson-like)
+    if wl.arrival_quantiles:
+        strata = list(wl.arrival_quantiles)
+    else:
+        k_exp = 64
+        strata = [-log(1.0 - (i + 0.5) / k_exp) for i in range(k_exp)]
+    k = len(strata)
     scale = (1000.0 / wl.request_rate) / (sum(strata) / k)
     stride = max(1, round(k * 0.6180339887))
     while gcd(stride, k) != 1:
@@ -523,12 +561,13 @@ def evaluate_open_loop(
     t_arr = 0.0
     for n in range(total):
         t_arr += strata[(n * stride) % k] * scale
-        isl_i = next(isl_stream)
+        isl_i, px_i, osl_i = _next_shape()
         pending.append(
             _Slot(
-                remaining_prefill=max(1, isl_i - wl.prefix),
+                remaining_prefill=max(1, isl_i - px_i),
                 isl=isl_i,
-                osl=next(osl_stream),
+                osl=osl_i,
+                prefix=px_i,
                 arrival_ms=t_arr,
                 eligible_ms=t_arr + wl.turnaround_ms,
             )
@@ -548,7 +587,9 @@ def evaluate_open_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    max_osl = max(
+        (t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,))
+    )
     max_passes = 400 * total * max(1, max_osl) // max(1, min(cap, total))
     for _ in range(max_passes):
         if completions >= total:

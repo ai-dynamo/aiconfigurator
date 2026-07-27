@@ -75,6 +75,17 @@ class WorkloadSpec:
     # fixed-shape for now.
     isl_quantiles: Optional[tuple] = None
     osl_quantiles: Optional[tuple] = None
+    # W3 joint shape strata: tuple of (isl, prefix, osl) triples drawn as a
+    # unit (one stratum = one real trace record at an isl-ordered quantile
+    # midpoint — see ``stratified_shape_tuples``), so isl<->osl correlation
+    # and per-request prefix hits survive; marginal quantile streams cannot
+    # carry either. Mutually exclusive with isl_quantiles/osl_quantiles.
+    shape_tuples: Optional[tuple] = None
+    # W3 empirical inter-arrival strata (ms), open loop only: replaces the
+    # default exponential strata, normalized so the stream mean is exactly
+    # 1000/request_rate — pass raw trace inter-arrivals (zeros allowed:
+    # batched arrivals) and control the rate independently.
+    arrival_quantiles: Optional[tuple] = None
     # Per-request client/frontend turnaround: the time between a slot
     # freeing (previous request's completion, which is when a closed-loop
     # client dispatches the replacement) and the replacement becoming
@@ -115,6 +126,20 @@ class WorkloadSpec:
                 raise ValueError(f"{name} must be a non-empty tuple of ints >= 1")
         if self.isl_quantiles is not None and self.prefix > min(self.isl_quantiles):
             raise ValueError("prefix must not exceed the smallest isl quantile")
+        if self.shape_tuples is not None:
+            if self.isl_quantiles or self.osl_quantiles:
+                raise ValueError("shape_tuples and isl/osl_quantiles are mutually exclusive")
+            tt = tuple((int(a), int(b), int(c)) for a, b, c in self.shape_tuples)
+            object.__setattr__(self, "shape_tuples", tt)
+            if not tt or any(i < 1 or o < 1 or not 0 <= px < i for i, px, o in tt):
+                raise ValueError("shape_tuples entries must satisfy isl>=1, osl>=1, 0<=prefix<isl")
+        if self.arrival_quantiles is not None:
+            if self.request_rate is None:
+                raise ValueError("arrival_quantiles requires an open-loop workload (request_rate)")
+            aq = tuple(float(v) for v in self.arrival_quantiles)
+            object.__setattr__(self, "arrival_quantiles", aq)
+            if not aq or any(v < 0 for v in aq) or sum(aq) <= 0:
+                raise ValueError("arrival_quantiles must be non-empty, non-negative, with positive mean")
 
     @property
     def effective_isl(self) -> int:
@@ -133,6 +158,18 @@ def stratified_quantiles(values, k: int = 16) -> tuple:
     return tuple(vs[min(n - 1, int((i + 0.5) / k * n))] for i in range(k))
 
 
+def stratified_shape_tuples(records, k: int = 32) -> tuple:
+    """Deterministic joint strata from trace records: sort (isl, prefix, osl)
+    triples by total work (isl + osl), then take the record at each stratum
+    midpoint. One stratum = one REAL record, so correlations and prefix hits
+    ride along for free. Zero-RNG companion to ``WorkloadSpec.shape_tuples``."""
+    rs = sorted(((int(i), int(p), int(o)) for i, p, o in records), key=lambda t: t[0] + t[2])
+    if not rs:
+        raise ValueError("records must be non-empty")
+    n = len(rs)
+    return tuple(rs[min(n - 1, int((j + 0.5) / k * n))] for j in range(k))
+
+
 def workload_fidelity(wl: "WorkloadSpec") -> str:
     """The W-tier of the workload description an evaluation consumed — the
     input side of the fidelity contract (design doc, "Workload-fidelity
@@ -142,12 +179,15 @@ def workload_fidelity(wl: "WorkloadSpec") -> str:
     collapse to the highest tier, with components spelled out so the string
     stays readable without the table."""
     open_loop = wl.request_rate is not None
+    joint = bool(wl.shape_tuples or wl.arrival_quantiles)
     marginals = bool(wl.isl_quantiles or wl.osl_quantiles)
-    tier = 2 if marginals else (1 if open_loop else 0)
+    tier = 3 if joint else (2 if marginals else (1 if open_loop else 0))
     parts = [
         "open-loop" if open_loop else "closed-loop",
-        "shape-marginals" if marginals else "fixed-shape",
+        "joint-shapes" if wl.shape_tuples else ("shape-marginals" if marginals else "fixed-shape"),
     ]
+    if wl.arrival_quantiles:
+        parts.append("empirical-arrivals")
     return f"W{tier}({', '.join(parts)})"
 
 
