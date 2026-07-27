@@ -483,6 +483,15 @@ def evaluate_open_loop(
 
     Raises RuntimeError when the waiting queue diverges (request_rate at or
     beyond the deployment's capacity — no steady state exists).
+
+    Known limits (measured, h20e trtllm tp4, lambda sweep 0.5-0.95x capacity):
+    (a) the low-discrepancy rotation ANTI-CLUSTERS by construction — it
+    reproduces the mean rate exactly and first-order variability, but lacks
+    Poisson burst clustering, so measured TTFT tails (p99) run ~2x heavier
+    than predicted at low utilization while p50 lands within ~5%; (b) near
+    capacity the 1/(1-rho) amplification turns any timing-layer service-rate
+    bias into a large TTFT/TPOT error — treat rho >~ 0.8 predictions as
+    optimistic bounds until the perf-DB decode bias is fixed.
     """
     if wl.request_rate is None:
         raise ValueError("evaluate_open_loop requires an open-loop workload (request_rate)")
