@@ -516,6 +516,38 @@ class TestDisaggTandem:
         with pytest.raises(ValueError):
             evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
 
+    def test_variable_shape_parity_and_desync(self):
+        """Degenerate quantile streams reproduce the fixed-shape recursion
+        exactly; genuinely heterogeneous isl at the same mean desynchronizes
+        the cohort and strictly lowers steady TTFT (the measured effect:
+        h20e trtllm tp4, isl cv=0.25 -> TTFT 1.8s -> 0.66s)."""
+        from aiconfigurator.sdk.queueing import evaluate_closed_loop
+
+        eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        wl_fixed = WorkloadSpec(isl=4096, osl=8, concurrency=16)
+        wl_degen = WorkloadSpec(isl=4096, osl=8, concurrency=16,
+                                isl_quantiles=(4096,) * 4, osl_quantiles=(8,) * 4)
+        rep_f = evaluate_closed_loop(wl_fixed, eng, TIMING, backend="vllm")
+        rep_d = evaluate_closed_loop(wl_degen, eng, TIMING, backend="vllm")
+        assert rep_d.ttft_steady.mean == pytest.approx(rep_f.ttft_steady.mean, abs=1e-9)
+        assert rep_d.throughput_rps == pytest.approx(rep_f.throughput_rps, rel=1e-12)
+
+        wl_var = WorkloadSpec(isl=4096, osl=8, concurrency=16,
+                              isl_quantiles=(1024, 3072, 5120, 7168))  # same mean 4096
+        rep_v = evaluate_closed_loop(wl_var, eng, TIMING, backend="vllm")
+        assert rep_v.ttft_steady.mean < rep_f.ttft_steady.mean
+        # throughput stays in the same regime (measured: <10% shift)
+        assert rep_v.throughput_rps == pytest.approx(rep_f.throughput_rps, rel=0.35)
+
+    def test_variable_shape_validation(self):
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=1024, osl=16, concurrency=2, isl_quantiles=())
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=1024, osl=16, concurrency=2, isl_quantiles=(0, 512))
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2,
+                         isl_quantiles=(256, 2048))
+
     def test_turnaround_delays_replacement_visibility(self):
         """Replacements become visible to the prefill pool only after the
         client turnaround (same semantics as the agg calendar): the cycle

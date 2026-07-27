@@ -52,6 +52,16 @@ class _Slot:
     eligible_ms: float = 0.0
     first_token_ms: float = -1.0
     last_token_ms: float = -1.0
+    # per-slot shape: equals the workload's (isl, osl) for fixed-shape
+    # workloads; drawn from the deterministic quantile streams when
+    # WorkloadSpec.isl_quantiles / osl_quantiles are set. Heterogeneity
+    # lives INSIDE the batch — a mixture of homogeneous runs cannot
+    # represent it (each component would keep its own convoy structure,
+    # which is exactly what shape diversity destroys; measured h20e
+    # trtllm tp4, isl cv=0.25: steady TTFT collapses 1.8s -> 0.66s while
+    # throughput moves <10%).
+    isl: int = 0
+    osl: int = 0
     gaps: list = field(default_factory=list)
     is_initial_burst: bool = False
 
@@ -97,7 +107,7 @@ class FusedCalendar(BaseCalendar):
                     # a whole prompt no longer fits the remaining budget
                     break
                 chunk = min(s.remaining_prefill, budget)
-                computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
+                computed_before = wl.prefix + (max(1, s.isl - wl.prefix) - s.remaining_prefill)
                 s.remaining_prefill -= chunk
                 budget -= chunk
                 batch_count += 1
@@ -105,7 +115,7 @@ class FusedCalendar(BaseCalendar):
                 batch_total_prefix += computed_before
                 if s.remaining_prefill == 0:
                     prefill_completers.append(s)
-            elif s.generated < wl.osl:
+            elif s.generated < s.osl:
                 if budget <= 0:
                     continue
                 budget -= 1
@@ -118,7 +128,9 @@ class FusedCalendar(BaseCalendar):
         mixed = getattr(timing, "mixed_pass_ms", None)
         if mixed is not None and batch_count > 0 and decode_emitters:
             chunk_tokens = batch_total_isl - batch_total_prefix
-            return mixed(chunk_tokens, len(decode_emitters), wl.isl, wl.osl, wl.prefix), emitters
+            mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
+            mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
+            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, wl.prefix), emitters
 
         prefill_ms = 0.0
         if batch_count > 0:
@@ -130,7 +142,7 @@ class FusedCalendar(BaseCalendar):
             # prefill completers are NOT decode rows: the fused pass samples
             # their first token off the final chunk's logits (gpu_model_runner
             # logits_indices) — no extra decode-row cost, no budget token
-            ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
+            ctx = sum(s.isl + s.generated for s in decode_emitters) // len(decode_emitters)
             decode_ms = timing.decode_ms(len(decode_emitters), ctx)
         return prefill_ms + decode_ms, emitters
 
@@ -206,7 +218,7 @@ class AlternatingCalendar(BaseCalendar):
             if budget <= 0:
                 break
             chunk = min(s.remaining_prefill, budget)
-            computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
+            computed_before = wl.prefix + (max(1, s.isl - wl.prefix) - s.remaining_prefill)
             s.remaining_prefill -= chunk
             budget -= chunk
             batch_count += 1
@@ -222,7 +234,7 @@ class AlternatingCalendar(BaseCalendar):
         # snapshot decode-ready BEFORE consuming prefill: a slot completing
         # its prefill in this pass emits once (as a completer), not twice
         prefilling = [s for s in slots if s.remaining_prefill > 0]
-        decode_emitters = [s for s in slots if s.remaining_prefill == 0 and s.generated < wl.osl]
+        decode_emitters = [s for s in slots if s.remaining_prefill == 0 and s.generated < s.osl]
         batch_count = 0
         mean_isl = mean_prefix = 0
         completers: list[_Slot] = []
@@ -237,14 +249,16 @@ class AlternatingCalendar(BaseCalendar):
         mixed = getattr(timing, "mixed_pass_ms", None)
         if mixed is not None and batch_count > 0 and decode_emitters:
             chunk_tokens = batch_count * max(0, mean_isl - mean_prefix)
-            return mixed(chunk_tokens, len(decode_emitters), wl.isl, wl.osl, wl.prefix), emitters
+            mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
+            mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
+            return mixed(chunk_tokens, len(decode_emitters), mean_dec_isl, mean_dec_osl, wl.prefix), emitters
 
         prefill_ms = 0.0
         if batch_count:
             prefill_ms = timing.prefill_ms(batch_count, mean_isl, mean_prefix)
         decode_ms = 0.0
         if decode_emitters:
-            ctx = sum(wl.isl + s.generated for s in decode_emitters) // len(decode_emitters)
+            ctx = sum(s.isl + s.generated for s in decode_emitters) // len(decode_emitters)
             decode_ms = timing.decode_ms(len(decode_emitters), ctx)
         return prefill_ms + decode_ms, emitters
 
@@ -254,10 +268,10 @@ class AlternatingCalendar(BaseCalendar):
             batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
             return timing.prefill_ms(batch_count, mean_isl, mean_prefix), completers
 
-        emitters = [s for s in slots if s.generated < wl.osl]
+        emitters = [s for s in slots if s.generated < s.osl]
         if not emitters:
             return 0.0, []
-        ctx = sum(wl.isl + s.generated for s in emitters) // len(emitters)
+        ctx = sum(s.isl + s.generated for s in emitters) // len(emitters)
         return timing.decode_ms(len(emitters), ctx), emitters
 
 
@@ -299,7 +313,29 @@ def evaluate_closed_loop(
     if c < 1:
         raise ValueError("admission cap rejected all concurrency")
 
-    slots = [_Slot(remaining_prefill=wl.effective_isl, is_initial_burst=True) for _ in range(c)]
+    # deterministic per-slot shape streams (fixed-shape workloads yield the
+    # nominal isl/osl forever, reproducing the homogeneous recursion exactly);
+    # osl uses an offset start so isl/osl strata pair pseudo-independently
+    from .spec import _shape_stream
+
+    isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
+    osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
+    if wl.osl_quantiles:
+        for _ in range(len(wl.osl_quantiles) // 2):
+            next(osl_stream)
+
+    def _new_slot(**kw) -> _Slot:
+        isl_i = next(isl_stream)
+        osl_i = next(osl_stream)
+        return _Slot(
+            remaining_prefill=max(1, isl_i - wl.prefix), isl=isl_i, osl=osl_i, **kw
+        )
+
+    mean_osl = (
+        sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    )
+
+    slots = [_new_slot(is_initial_burst=True) for _ in range(c)]
     pending: list[_Slot] = []  # dispatched replacements not yet visible to the scheduler
     now = 0.0
     prev_pass_start = 0.0
@@ -315,7 +351,8 @@ def evaluate_closed_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_passes = 200 * (warmup_generations + window_generations) * max(1, wl.osl)
+    max_osl = max(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    max_passes = 200 * (warmup_generations + window_generations) * max(1, max_osl)
     for _ in range(max_passes):
         if completions >= target:
             break
@@ -359,7 +396,7 @@ def evaluate_closed_loop(
             else:
                 s.gaps.append(now - s.last_token_ms)
             s.last_token_ms = now
-            if s.generated >= wl.osl:
+            if s.generated >= s.osl:
                 finished.append(s)
 
         for s in finished:
@@ -379,11 +416,7 @@ def evaluate_closed_loop(
             # completion instant (arrival_ms=now, the TTFT origin); the
             # scheduler sees it only after the frontend turnaround
             pending.append(
-                _Slot(
-                    remaining_prefill=wl.effective_isl,
-                    arrival_ms=now,
-                    eligible_ms=now + wl.turnaround_ms,
-                )
+                _new_slot(arrival_ms=now, eligible_ms=now + wl.turnaround_ms)
             )
     else:
         raise RuntimeError("pass-calendar did not converge within max_passes")
@@ -405,7 +438,11 @@ def evaluate_closed_loop(
         # client turnaround on a live vLLM 0.24 server moved steady TTFT p50
         # by 0.1 ms). So the calendar contributes the distribution SHAPE and
         # the identity pins its location; no client-side parameter survives.
-        identity_mean = wl.concurrency / throughput * 1000.0 - max(0, wl.osl - 1) * tpot.mean - wl.turnaround_ms
+        identity_mean = (
+            wl.concurrency / throughput * 1000.0
+            - max(0.0, mean_osl - 1.0) * tpot.mean
+            - wl.turnaround_ms
+        )
         if identity_mean > 0:
             delta = identity_mean - ttft_steady.mean
             ttft_steady = ttft_steady.shifted(delta)
@@ -418,7 +455,7 @@ def evaluate_closed_loop(
         tpot=tpot,
         e2e=e2e,
         throughput_rps=throughput,
-        output_tokens_per_s=throughput * wl.osl,
+        output_tokens_per_s=throughput * mean_osl,
         backend=backend,
         mode="agg",
         num_requests=wl.num_requests,

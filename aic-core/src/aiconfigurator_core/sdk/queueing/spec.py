@@ -58,6 +58,21 @@ class WorkloadSpec:
     concurrency: Optional[int] = None  # closed loop in-flight cap
     request_rate: Optional[float] = None  # open loop, requests/s
     num_requests: Optional[int] = None  # benchmark length N for mean(N)
+    # Variable-length workloads: deterministic stratified shape streams.
+    # Each entry is one stratum of the length distribution (inverse-CDF
+    # midpoints — see ``stratified_quantiles``); slots draw their own
+    # (isl, osl) from these streams via a coprime-stride rotation (zero
+    # RNG, converges to the marginal over the steady window). ``isl`` /
+    # ``osl`` above stay the NOMINAL means, used for capacity-style
+    # arithmetic (admission caps, identity anchor, output-token rate).
+    # Heterogeneity must live inside the batch: a mixture of homogeneous
+    # fixed-shape runs keeps each component's convoy structure and cannot
+    # reproduce the measured desynchronization (h20e trtllm tp4,
+    # isl cv=0.25: steady TTFT 1.8s -> 0.66s, throughput within 10%).
+    # Scope: closed-loop agg calendars; the disagg tandem stays
+    # fixed-shape for now.
+    isl_quantiles: Optional[tuple] = None
+    osl_quantiles: Optional[tuple] = None
     # Per-request client/frontend turnaround: the time between a slot
     # freeing (previous request's completion, which is when a closed-loop
     # client dispatches the replacement) and the replacement becoming
@@ -88,10 +103,52 @@ class WorkloadSpec:
             raise ValueError("num_requests must be >= 1")
         if self.turnaround_ms < 0:
             raise ValueError("turnaround_ms must be >= 0")
+        for name in ("isl_quantiles", "osl_quantiles"):
+            qs = getattr(self, name)
+            if qs is None:
+                continue
+            qs = tuple(int(v) for v in qs)
+            object.__setattr__(self, name, qs)
+            if not qs or any(v < 1 for v in qs):
+                raise ValueError(f"{name} must be a non-empty tuple of ints >= 1")
+        if self.isl_quantiles is not None and self.prefix > min(self.isl_quantiles):
+            raise ValueError("prefix must not exceed the smallest isl quantile")
 
     @property
     def effective_isl(self) -> int:
         return max(1, self.isl - self.prefix)
+
+
+def stratified_quantiles(values, k: int = 16) -> tuple:
+    """Deterministic inverse-CDF midpoints of an empirical length sample:
+    ``k`` strata, each represented by the sample quantile at the stratum
+    midpoint. Zero-RNG companion to ``WorkloadSpec.isl_quantiles`` /
+    ``osl_quantiles``."""
+    vs = sorted(int(v) for v in values)
+    if not vs:
+        raise ValueError("values must be non-empty")
+    n = len(vs)
+    return tuple(vs[min(n - 1, int((i + 0.5) / k * n))] for i in range(k))
+
+
+def _shape_stream(quantiles: Optional[tuple], fallback: int):
+    """Deterministic low-discrepancy rotation over the strata: index n maps
+    to quantiles[(n * stride) % k] with a golden-ratio stride coprime to k,
+    so consecutive draws sweep the distribution instead of clustering, and
+    the stream is exactly reproducible (resume-safe, no RNG)."""
+    if not quantiles:
+        while True:
+            yield fallback
+    k = len(quantiles)
+    stride = max(1, round(k * 0.6180339887))
+    from math import gcd
+
+    while gcd(stride, k) != 1:
+        stride += 1
+    n = 0
+    while True:
+        yield quantiles[(n * stride) % k]
+        n += 1
 
 
 @dataclass(frozen=True)
