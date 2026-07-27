@@ -30,6 +30,14 @@ def test_default_task_config_is_agg_with_default_workload():
     assert t.tpot == 50.0
 
 
+def test_enable_epd_pins_encoder_dp_off():
+    # EPD encode workers model the engines' encoder-instance default
+    # (weight-sharded ViT); the colocated encoder-DP default stays True
+    # only outside EPD.
+    assert Task().enable_encoder_dp is True
+    assert Task(enable_epd=True).enable_encoder_dp is False
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",

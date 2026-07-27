@@ -507,7 +507,9 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
-    # Vision encoder data parallelism (ModelConfig default).
+    # Vision encoder data parallelism (ModelConfig default).  Pinned off under
+    # enable_epd by _normalize_epd_encoder_dp: EPD encode workers model the
+    # engines' encoder-instance default (weight-sharded ViT).
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
     tpot: float = 50.0
@@ -836,6 +838,7 @@ class Task:
             raise ValueError("nextn='auto' requires a model path to resolve num_nextn_predict_layers.")
         self._resolve_backend_version()
         self._normalize_wideep_moe_backend()
+        self._normalize_epd_encoder_dp()
         self._resolve_quant_modes()
         # The search space is resolved BEFORE the data-driven FMHA fallback:
         # the attention-op keys the fallback consults depend on whether any
@@ -867,6 +870,19 @@ class Task:
         )
         if wideep:
             self.moe_backend = "deepep_moe"
+
+    def _normalize_epd_encoder_dp(self) -> None:
+        """enable_epd pins the colocated encoder-DP knob off.
+
+        EPD encode workers model the engines' encoder-instance default
+        parallelism -- a weight-sharded ViT over the worker's tp (vLLM
+        ``mm_encoder_tp_mode="weights"``, SGLang ``mm_enable_dp_encoder=False``,
+        both independent of their disaggregation flags) -- and the
+        language-only P/agg workers host no ViT, so the colocated DP layout
+        has nothing to act on.  Pinning the field keeps the task state and
+        any rendered engine args consistent with what the sweep modeled."""
+        if self.enable_epd:
+            self.enable_encoder_dp = False
 
     def _validate_megamoe_backend_support(self) -> None:
         """v1 _validate_megamoe_backend_support: megamoe is sglang + DeepSeek-V4-Pro + Blackwell only."""
