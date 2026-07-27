@@ -516,21 +516,41 @@ def enable_engine_fused_ops() -> None:
     198.6→147.9 µs after this change, matching in-engine per-layer cost
     within ~10%; see ai-dynamo/aiconfigurator#1396).
 
-    ``vllm_c`` is the closest eager-mode equivalent of the engine's fused
-    execution (exact parity would require running the module under
-    torch.compile with the engine's fusion passes). Installs it as the
-    process-lifetime default: ``IrOp.set_priority`` is a scoped context
-    manager, ``set_default`` is the permanent API (vllm/ir/op.py @0.24.0).
+    ``vllm_c`` is a measured surrogate for the engine's fused execution, not
+    the identical dispatch: a serving worker compiles whole layers, and
+    inductor fuses these glue ops into the NEIGHBORING GEMM prologs — naive
+    ``torch.compile`` over the ops in isolation reproduces neither (glue
+    microbench, B300/vLLM 0.25: native-eager 74.6 us, vllm_c 20.5 us, bare
+    compile 64.3 us per MLA glue set; the engine-internal fused cost measured
+    from a B200 serving trace is 15-18 us). Exact parity therefore requires
+    running the module through vLLM's full compilation pipeline (fusion
+    passes + splitting + cudagraph modes) — tracked as a follow-up. The
+    surrogate is validated end-to-end at module level: 95-97 us vs the
+    in-engine 107 us/layer at the bs16 reference point (~10%), vs +37% for
+    the native chain. Installs it as the process-lifetime default:
+    ``IrOp.set_priority`` is a scoped context manager, ``set_default`` is
+    the permanent API (vllm/ir/op.py @0.24.0).
 
     Raises on vLLM builds without the IR-op registry or the ``vllm_c``
     provider — a silent fallback to the native chain would benchmark a kernel
     path serving never runs and poison the database.
     """
+    # Imports stay function-scoped on purpose: kernel-level collectors that
+    # never touch this helper must keep importing utils on vLLM builds
+    # without the IR-op registry; module-level benchmarks fail HERE, loudly.
     import vllm.ir.ops as ir_ops
     import vllm.kernels.vllm_c  # noqa: F401 — import registers the 'vllm_c' impls
 
     ir_ops.rms_norm.set_default(["vllm_c"])
     ir_ops.fused_add_rms_norm.set_default(["vllm_c"])
+    # Assert the provider that will actually run (collector dispatch rule:
+    # persisted rows must describe the invocation that executed). set_default
+    # validates support, but verify the resolved priority explicitly so a
+    # future dispatch change cannot silently fall back to the native chain.
+    for op in (ir_ops.rms_norm, ir_ops.fused_add_rms_norm):
+        selected = [impl.provider for impl in op._priority_impls]
+        if selected[:1] != ["vllm_c"]:
+            raise RuntimeError(f"fused-op dispatch for {op.name} resolved to {selected}, expected vllm_c first")
 
 
 @functools.cache  # only run once per process
