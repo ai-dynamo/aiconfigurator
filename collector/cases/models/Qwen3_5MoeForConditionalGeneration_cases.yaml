@@ -24,6 +24,7 @@ model_case_values:
       num_key_value_heads: 2
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: qwen35_122b_attention
       model_path: Qwen/Qwen3.5-122B-A10B
@@ -31,6 +32,7 @@ model_case_values:
       num_key_value_heads: 2
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
     - id: qwen35_397b_attention
       model_path: Qwen/Qwen3.5-397B-A17B
@@ -38,6 +40,7 @@ model_case_values:
       num_key_value_heads: 2
       head_dim: 256
       window_size: 0
+      sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
   moe:
     - model_path: Qwen/Qwen3.5-35B-A3B
@@ -45,16 +48,28 @@ model_case_values:
       inter_size: 512
       topk: 8
       num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     - model_path: Qwen/Qwen3.5-122B-A10B
       hidden_size: 3072
       inter_size: 1024
       topk: 8
       num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     - model_path: Qwen/Qwen3.5-397B-A17B
       hidden_size: 4096
       inter_size: 1024
       topk: 10
       num_experts: 512
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
   gdn:
     - model_path: Qwen/Qwen3.5-35B-A3B
       d_model: 2048

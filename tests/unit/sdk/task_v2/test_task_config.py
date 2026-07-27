@@ -145,6 +145,7 @@ def test_from_yaml_flat_agg():
         "ttft": 1000.0,
         "tpot": 40.0,
         "nextn": 1,
+        "nextn_accepted": 0.85,
         "gemm_quant_mode": "fp8_block",
         "kvcache_quant_mode": "bfloat16",
         "agg_num_gpu_candidates": [4, 8],
@@ -318,10 +319,15 @@ def test_build_model_config_agg_uses_resolved_quant():
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        nextn=2,
+        nextn_accepted=1.2,
     )
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-    assert mc.nextn == t.nextn
+    assert mc.nextn == t.nextn == 2
+    assert not hasattr(mc, "nextn_accepted")
+    assert t.nextn_accepted == 1.2
+    assert t.build_speculative_profile().expected_accepted_tokens == 1.2
 
 
 def test_sweep_agg_kwargs_shape():
@@ -384,29 +390,138 @@ def test_sweep_disagg_require_same_tp_sglang_non_wideep():
     assert mk("trtllm")["require_same_tp"] is False
 
 
-def test_deepseek_decode_keeps_fp8_fmha_prefill_downgrades():
-    """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16; decode
-    (generation attention) keeps fp8. Matches v1, which gates this on validate_context.
+def test_deepseek_prefill_downgrades_decode_keeps_fp8_fmha(caplog):
+    """DeepSeek context attention (prefill) downgrades fp8 FMHA to bf16 via the
+    data fallback (the packaged context_mla tables carry no fp8 slice), with
+    one warning for the task.  Decode keeps the checkpoint-inferred fp8 label:
+    no generation table keys on fmha, so the label is inert for decode modeling
+    and the fallback skips decode roles.
     """
+    import logging
+
     from aiconfigurator.sdk import common
 
-    t = Task(
-        serving_mode="disagg",
-        prefill_model_path="deepseek-ai/DeepSeek-V3",
-        prefill_system_name="h200_sxm",
-        prefill_backend_name="sglang",
-        decode_model_path="deepseek-ai/DeepSeek-V3",
-        decode_system_name="h200_sxm",
-        decode_backend_name="sglang",
-    )
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="disagg",
+            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name="sglang",
+            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_system_name="h200_sxm",
+            decode_backend_name="sglang",
+        )
     assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("prefill ")
 
 
-def test_deepseek_v32_v4_downgrade_fmha_all_roles():
-    """DeepSeek-V3.2 / V4 use bf16 FMHA on EVERY role incl. decode (DSA / compressed
-    attention perf tables only carry bf16). Mirrors v1 _apply_model_quant_defaults,
-    which is unconditional (unlike the context-only V3/Kimi rule).
+def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
+    """A checkpoint-inferred fp8 FMHA on a platform whose context-attention table
+    has no fp8 slice (a100: no fp8 hardware) falls back to bfloat16 with a warning,
+    instead of leaving a mode that validate would reject.  The same model on a
+    platform WITH fp8 data (h200) keeps fp8 and does not warn.
+
+    kv is pinned to bfloat16 on a100: capability is judged jointly with the kv
+    mode, and a100's only slice is (bf16 fmha, bf16 kv) -- with an fp8 kv there
+    is nothing to fall back to and the inference is kept for validate to
+    report.
+    """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+    # With the inferred fp8 kv, no a100 slice can serve at all -> keep fp8
+    # (validate reports the gap); no misleading "falling back" warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        t_kv_fp8 = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+        )
+    assert t_kv_fp8.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        t2 = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+        )
+    assert t2.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+
+def test_fmha_data_fallback_skips_generation_only_decode(caplog):
+    """A generic-attention decode role never reads fmha data (generation tables
+    key on kv dtype; validate checks fmha only for context roles), so the
+    fallback must not warn about or downgrade decode even on a system whose
+    context table lacks fp8.  The prefill role on the same system DOES fall back.
+    """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="disagg",
+            prefill_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            prefill_system_name="a100_sxm",
+            prefill_backend_name="sglang",
+            prefill_kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            decode_model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            decode_system_name="a100_sxm",
+            decode_backend_name="sglang",
+            decode_kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        )
+    assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("prefill ")
+
+
+def test_fmha_data_fallback_without_bf16_slice_left_untouched(monkeypatch, caplog):
+    """When the context table has fmha data but neither fp8 nor bf16 slices
+    (e.g. wideep tables carry only fp8_block), the fallback must leave the
+    inferred fp8 alone -- there is nothing safe to fall back to, so validate
+    reports the gap instead."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role: ["fp8_block"])
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+
+def test_deepseek_v32_v4_context_fmha_downgrade_is_data_driven():
+    """DeepSeek-V3.2 / V4 context fmha resolves bf16 on sglang b200 because the
+    dsa/dsv4 context module tables there carry only bf16 slices -- decided by
+    the data fallback, not a hand-written model rule.  Decode keeps the fp8
+    label (no generation table keys on fmha).
     """
     from aiconfigurator.sdk import common
 
@@ -421,24 +536,187 @@ def test_deepseek_v32_v4_downgrade_fmha_all_roles():
             decode_backend_name="sglang",
         )
         assert t.prefill_fmha_quant_mode == common.FMHAQuantMode.bfloat16
-        assert t.decode_fmha_quant_mode == common.FMHAQuantMode.bfloat16
+        assert t.decode_fmha_quant_mode == common.FMHAQuantMode.fp8
 
 
-def test_nextn_default_respects_hf_then_family_fallback():
-    """nextn: HF num_nextn_predict_layers wins (incl. explicit 0, e.g. Kimi-K2.5);
-    field absent -> family-based fallback (Qwen3.5 -> 1, DeepSeek -> 1).
+def test_get_model_preserves_task_resolved_fmha():
+    """get_model()'s legacy FMHA guards fire only when fmha arrives unset: a
+    Task-resolved fp8 (data-backed -- b200 vLLM ships native fp8 dsa_context
+    slices) must survive model build.  Review regression: the guards in
+    _apply_model_quant_defaults used to re-downgrade on the value, silently
+    undoing the data-driven resolution at every sweep point."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.models import get_model
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3.2",
+        system_name="b200_sxm",
+        backend_name="vllm",
+    )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8
+    mc = t.build_model_config(role="agg")
+    mc.tp_size = 8
+    mc.moe_ep_size = 8
+    mc.moe_tp_size = 1
+    get_model("deepseek-ai/DeepSeek-V3.2", mc, "vllm")
+    assert mc.fmha_quant_mode == common.FMHAQuantMode.fp8
+
+
+def test_fmha_fallback_uses_joint_fmha_kv_capability(caplog):
+    """Capability is judged jointly with the role's kv mode: on b200 trtllm the
+    fp8 context_mla slice exists only under kv=fp8 (shared-layer module rows),
+    so inferred fp8 fmha survives with kv=fp8 but must downgrade with an
+    explicit bf16 kv -- the flat per-op list would keep fp8 and crash at query
+    time (review finding)."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="b200_sxm", backend_name="trtllm")
+    assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.fp8  # kv inferred fp8 -> joint slice present
+    with caplog.at_level(logging.WARNING):
+        t = Task(**base, kvcache_quant_mode=common.KVCacheQuantMode.bfloat16)
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
+
+
+def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
+    """trtllm wideep context queries the granular context_mla table directly, so
+    the fmha fallback must key capability off the granular slices -- the merged
+    context_mla list can contain module-only fp8 rows inherited cross-framework
+    via the shared layer (gb200: vllm module data), which the wideep path can
+    never hit.  Regression for the deepseek_wideep_trtllm.yaml e2e failure.
     """
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="gb200",
+            backend_name="trtllm",
+            enable_wideep=True,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("context_mla_granular" in r.message for r in caplog.records)
+
+
+def test_nextn_never_auto_enabled(caplog):
+    """MTP is never auto-enabled: nextn stays 0 even for checkpoints that ship
+    MTP layers; a hint log surfaces the unused capability."""
+    import logging
 
     def mk(mp):
         return Task(serving_mode="agg", model_path=mp, system_name="h200_sxm", backend_name="trtllm").nextn
 
-    assert mk("deepseek-ai/DeepSeek-V3") == 1  # HF declares 1
-    assert mk("moonshotai/Kimi-K2.5") == 0  # HF declares 0 -- respected, not forced to 1
-    assert mk("Qwen/Qwen3.5-27B") == 1  # HF field absent -> family fallback
+    with caplog.at_level(logging.INFO, logger="aiconfigurator.sdk.task_v2"):
+        assert mk("deepseek-ai/DeepSeek-V3") == 0  # HF declares 1 -- still off by default
+        assert mk("moonshotai/Kimi-K2.5") == 0
+        assert mk("Qwen/Qwen3.5-27B") == 0
+    assert any("ships MTP" in r.message for r in caplog.records)
+
+
+def test_nextn_auto_resolves_depth_from_checkpoint():
+    """nextn='auto' takes the draft depth from num_nextn_predict_layers; the
+    acceptance value is still required -- it is never inferred."""
+    import pytest as _pytest
+
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+        nextn_accepted=0.7,
+    )
+    assert t.nextn == 1  # checkpoint declares num_nextn_predict_layers=1
+    assert t.nextn_accepted == 0.7
+
+    # No MTP layers in the checkpoint -> auto resolves to disabled, no
+    # acceptance value needed.
+    t2 = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        nextn="auto",
+    )
+    assert t2.nextn == 0
+
+    # auto resolving to a positive depth still demands nextn_accepted, and the
+    # error says what the depth resolved to.
+    with _pytest.raises(ValueError, match=r"auto.*resolved to nextn=1.*nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn="auto",
+        )
+
+    # auto cannot resolve without a checkpoint to read.
+    with _pytest.raises(ValueError, match="requires a model path"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn="auto")
+
+
+def test_nextn_requires_nextn_accepted():
+    """nextn > 0 without nextn_accepted is a hard error -- no built-in acceptance assumption."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=1.5,
+        )
+    with _pytest.raises(ValueError, match="within"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1,
+            nextn_accepted=-0.1,
+        )
+    # Validation must not depend on model-identity resolution (which is skipped
+    # when no primary model path is set).
+    with _pytest.raises(ValueError, match="nextn_accepted"):
+        Task(serving_mode="agg", model_path="", system_name="h200_sxm", backend_name="trtllm", nextn=1)
+    with _pytest.raises(ValueError, match=">= 0"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=-1,
+        )
+    with _pytest.raises(ValueError, match="integer"):
+        Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            nextn=1.5,
+            nextn_accepted=0.5,
+        )
 
 
 def test_nextn_explicit_override_warns(caplog):
-    """An explicit nextn diverging from the checkpoint warns (MTP layer stacking)."""
+    """An explicit nextn diverging from the checkpoint warns (MTP module reuse)."""
     import logging
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
@@ -448,9 +726,11 @@ def test_nextn_explicit_override_warns(caplog):
             system_name="h200_sxm",
             backend_name="trtllm",
             nextn=3,
+            nextn_accepted=1.8,
         )
     assert t.nextn == 3
-    assert any("overrides" in r.message for r in caplog.records)
+    assert t.nextn_accepted == 1.8
+    assert any("differs from" in r.message for r in caplog.records)
 
 
 def test_moe_backend_flows_into_model_config():
@@ -466,24 +746,83 @@ def test_moe_backend_flows_into_model_config():
     assert t.build_model_config(role="agg").moe_backend == "deepep_moe"
 
 
-def test_dsv4_pro_sglang_moe_remap():
-    """DeepSeek-V4-Pro on sglang remaps MoE to the arch-specific kernel (v1 dsv4pro-moe-arch):
-    Blackwell -> w4a8_mxfp4_mxfp8_trtllm. megamoe and non-sglang backends are exempt.
+def test_dsv4_native_sglang_moe_remap():
+    """Native DeepSeek-V4 (Pro AND Flash) on sglang remaps MoE to the arch-specific
+    kernel (v1 dsv4pro-moe-arch): Blackwell -> w4a8_mxfp4_mxfp8_trtllm; on Hopper
+    the native FP4-expert checkpoints are rejected outright. megamoe, non-sglang
+    backends, and the sgl-project FP8 requant artifacts are exempt.
     """
     from aiconfigurator.sdk import common
 
-    def moe(be, **kw):
+    def moe(be, mp="deepseek-ai/DeepSeek-V4-Pro", system="b200_sxm", **kw):
         return Task(
             serving_mode="agg",
-            model_path="deepseek-ai/DeepSeek-V4-Pro",
-            system_name="b200_sxm",
+            model_path=mp,
+            system_name=system,
             backend_name=be,
             **kw,
         ).moe_quant_mode
 
-    assert moe("sglang") == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    for mp in ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash"):
+        assert moe("sglang", mp=mp) == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+        # Native FP4-expert checkpoints are rejected outright on Hopper.
+        with pytest.raises(ValueError, match="native FP4 routed-expert"):
+            moe("sglang", mp=mp, system="h200_sxm")
+        assert moe("trtllm", mp=mp) != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # megamoe keys its own quant table (packaged data exists only for V4-Pro).
     assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-    assert moe("trtllm") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # FP8 requant artifacts keep their own (fp8_block-family) resolution.
+    assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+
+def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
+    """Third-party FP4-expert DSV4 checkpoints (e.g. RedHatAI) get the sglang
+    MoE remap based on expert_dtype rather than hardcoded model paths.
+    Hopper -> w4a16_mxfp4_cutlass; Blackwell -> w4a8_mxfp4_mxfp8_trtllm."""
+    hopper = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert hopper.moe_quant_mode == common.MoEQuantMode.w4a16_mxfp4_cutlass
+    blackwell = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="b200_sxm",
+        backend_name="sglang",
+    )
+    assert blackwell.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # FP8-only requants (no expert_dtype=fp4) are NOT remapped.
+    fp8_requant = Task(
+        serving_mode="agg",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert fp8_requant.moe_quant_mode not in (
+        common.MoEQuantMode.w4a16_mxfp4_cutlass,
+        common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ],
+)
+def test_dsv4_fp8_kvcache_enforced(model_path):
+    """All DSV4 models use FP8 KV cache, regardless of HF config."""
+    t = Task(
+        serving_mode="agg",
+        model_path=model_path,
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
 
 
 def test_pareto_sweep_controls_tpot_grid():
@@ -869,8 +1208,9 @@ def test_run_dispatches_to_sweep_agg(monkeypatch):
     )
     result = t.run(validate=False)  # this test isolates dispatch; validate() is covered separately
     assert result == "agg-result"
-    # DB loaded for the (system, backend, version) triple
-    assert captured["dbs"] == [("h200_sxm", t.backend_name, t.backend_version)]
+    # DB loaded for the (system, backend, version) triple (the resolve-time
+    # fmha fallback loads the same view earlier; dispatch adds one more).
+    assert set(captured["dbs"]) == {("h200_sxm", t.backend_name, t.backend_version)}
     assert captured["agg_kwargs"]["model_path"] == "deepseek-ai/DeepSeek-V3"
     assert captured["agg_kwargs"]["database"] == f"db-h200_sxm-{t.backend_name}-{t.backend_version}"
 
@@ -1236,17 +1576,6 @@ def test_validate_agg_requires_model_path():
 def test_validate_agg_requires_system_name():
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3")
     with pytest.raises(ValueError, match="agg mode requires system_name"):
-        t.validate()
-
-
-def test_validate_agg_rejects_deepseek_on_vllm():
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="vllm",
-    )
-    with pytest.raises(NotImplementedError, match="DeepSeek family on the vLLM backend"):
         t.validate()
 
 

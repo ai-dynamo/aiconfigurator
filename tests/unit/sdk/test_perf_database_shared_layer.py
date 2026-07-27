@@ -369,22 +369,33 @@ def test_cross_backend_inheritance(env: Path) -> None:
 
 
 def test_fallback_emits_warning(env: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """Loading `tier=shared_fallback` rows in HYBRID mode emits a single WARNING per
-    sibling source so the user knows latency predictions for those shapes are
-    framework-implicit (kernel_source=default).
+    """Loading `tier=shared_fallback` rows via CROSS-BACKEND fill (design §6.4)
+    in HYBRID mode emits a single WARNING per sibling source so the user knows
+    latency predictions for those shapes are framework-implicit
+    (kernel_source=default).
+
+    Post-AIC-1503 the warning is specific to the `cross_backend` channel: a
+    same-backend older version (design §6.2 `fallback` / §6.3 `declared_reuse`)
+    is still the active backend's OWN measurement, not a framework-implicit
+    substitute, so it never emits this warning (see
+    ``test_reuse_ordering.py`` for that channel's coverage). This test's
+    sibling is therefore a *different* backend (vllm), not an older version of
+    the active one.
     """
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
     active_csv.write_text(_GEMM_HEADER)
 
-    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "default", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm"])])
+    _write_gemm_csv(_backend_csv(env, backend="vllm", version="0.5"), [("vllm", "default", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm", "vllm"])])
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database"):
         db = _build_db(env)  # HYBRID mode
-    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
-    fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
-    assert len(fallback_warnings) == 1
+        # The lazy GEMM.load_data (triggered by _gemm_lookup) emits the
+        # warning, so it must run while capture is active.
+        assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+        fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
+        assert len(fallback_warnings) == 1
 
 
 def test_same_framework_outranks_other_framework(env: Path) -> None:
@@ -432,3 +443,100 @@ def test_newest_same_framework_version_wins(env: Path) -> None:
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Explicit shared_layer override (regression-harness knob)
+# ---------------------------------------------------------------------------
+
+
+def test_shared_layer_override_off_in_silicon_mode(env: Path) -> None:
+    """shared_layer=False pins a SILICON database to its own version's rows."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    _write_gemm_csv(active_csv, [("trtllm", "torch_flow", 512, 512, 512, 0.3)])
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = PerfDatabase(
+        system="h100_sxm",
+        backend="trtllm",
+        version="1.0",
+        systems_root=str(env),
+        database_mode="SILICON",
+        shared_layer=False,
+    )
+    assert db.enable_shared_layer is False
+    # Own rows still load; sibling rows do not.
+    assert _gemm_lookup(db, 512, 512, 512) == 0.3
+    assert _gemm_lookup(db, 1024, 4096, 4096) is None
+
+
+def test_shared_layer_override_none_keeps_mode_derived_behavior(env: Path) -> None:
+    """shared_layer=None is the default and preserves mode-derived semantics."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    db = PerfDatabase(
+        system="h100_sxm",
+        backend="trtllm",
+        version="1.0",
+        systems_root=str(env),
+        database_mode="SILICON",
+        shared_layer=None,
+    )
+    assert db.enable_shared_layer is True
+    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+
+
+def test_get_database_shared_layer_override_cached_separately(env: Path) -> None:
+    """Overridden templates must not alias the mode-derived cache entry."""
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        shared_on = get_database("h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON")
+        shared_off = get_database(
+            "h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON", shared_layer=False
+        )
+        assert shared_on is not None and shared_off is not None
+        assert shared_on is not shared_off
+        assert shared_on.enable_shared_layer is True
+        assert shared_off.enable_shared_layer is False
+        assert _gemm_lookup(shared_on, 1024, 4096, 4096) == 0.7
+        assert _gemm_lookup(shared_off, 1024, 4096, 4096) is None
+    finally:
+        databases_cache.clear()
+
+
+def test_get_database_view_shared_layer_override(env: Path) -> None:
+    """get_database_view(shared_layer=False) yields a SILICON view without the shared layer."""
+    from aiconfigurator.sdk.perf_database import get_database_view
+
+    active_csv = _backend_csv(env)
+    active_csv.parent.mkdir(parents=True, exist_ok=True)
+    active_csv.write_text(_GEMM_HEADER)
+
+    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+
+    databases_cache.clear()
+    try:
+        view = get_database_view(
+            "h100_sxm", "trtllm", "1.0", systems_paths=str(env), database_mode="SILICON", shared_layer=False
+        )
+        assert view is not None
+        assert view.enable_shared_layer is False
+        assert _gemm_lookup(view, 1024, 4096, 4096) is None
+    finally:
+        databases_cache.clear()

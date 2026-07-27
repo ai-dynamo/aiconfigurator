@@ -23,6 +23,10 @@ COLLECTOR_ROOT = Path(__file__).resolve().parent
 BASE_OP_CASES_DIR = COLLECTOR_ROOT / "cases" / "base_ops"
 MODEL_CASES_DIR = COLLECTOR_ROOT / "cases" / "models"
 
+# Backend names a model_case_values row may target via `frameworks:`. A typo
+# here would otherwise silently exclude the row from its intended backend.
+_KNOWN_CASE_FRAMEWORKS = frozenset({"sglang", "trtllm", "vllm", "wideep"})
+
 
 def _load_yaml_mapping(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
@@ -110,12 +114,19 @@ def get_attention_encoder_shape_sweeps(backend: str) -> list[dict[str, object]]:
 
 @dataclasses.dataclass(frozen=True)
 class AttentionHeadConfig:
-    """One structural attention lookup key before the batch/sequence sweep."""
+    """One existing attention lookup key plus collector-only runtime metadata."""
 
     num_heads: int
     num_kv_heads: int
     head_dim: int
     window_size: int
+    v_head_dim: int | None = None
+    runtime_window_size: int | None = None
+    attention_chunk_size: int | None = None
+    has_attention_sink: bool = False
+    scaling: float | None = None
+    kernel_source: str | None = None
+    architecture: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,6 +157,8 @@ def _profile_int_values(
 def _head_profiles(
     shape_sweep: dict[str, object],
     op_name: str,
+    *,
+    include_model_profiles: bool = True,
 ) -> list[dict[str, object]]:
     raw_profiles = shape_sweep.get("head_profiles")
     if raw_profiles is None:
@@ -155,41 +168,195 @@ def _head_profiles(
             raise TypeError(f"{op_name}.head_profiles must be a list of mappings")
         base_profiles = raw_profiles
 
-    model_profiles = _model_case_values(op_name)
+    model_profiles = _model_case_values(op_name) if include_model_profiles else []
     if _get_model_path_filter() and model_profiles:
         return model_profiles
     return [*base_profiles, *model_profiles]
+
+
+def _sglang_attention_profiles(
+    shape_sweep: dict[str, object],
+    *,
+    include_model_profiles: bool,
+) -> list[dict[str, object]]:
+    """Select SGLang profiles without changing other collectors' population."""
+
+    raw_profiles = shape_sweep.get("head_profiles")
+    if raw_profiles is None:
+        base_profiles = [shape_sweep]
+    else:
+        if not isinstance(raw_profiles, list) or not all(isinstance(profile, dict) for profile in raw_profiles):
+            raise TypeError("attention.head_profiles must be a list of mappings")
+        base_profiles = raw_profiles
+
+    model_profiles = _model_case_values("attention") if include_model_profiles else []
+    framework_model_profiles = (
+        _framework_specific_model_case_values("attention", "sglang") if include_model_profiles else []
+    )
+    selected_model_profiles = []
+    for profile in model_profiles:
+        frameworks = profile.get("frameworks")
+        if frameworks is not None:
+            if not isinstance(frameworks, list):
+                raise TypeError("model_case_values.attention.frameworks must be a list")
+            if "sglang" not in {str(value) for value in frameworks}:
+                continue
+        selected_model_profiles.append(profile)
+
+    selected_model_profiles.extend(framework_model_profiles)
+
+    # Targeted collection uses only the requested model's topology when one is
+    # declared. A framework-filtered profile (for example Kimi's vLLM-only MHA)
+    # must not fall back to the broad SGLang compatibility grid.
+    if _get_model_path_filter() and selected_model_profiles:
+        return selected_model_profiles
+    if _get_model_path_filter() and (model_profiles or framework_model_profiles):
+        return []
+
+    # Model profiles come first so their runtime contract wins physical-key
+    # deduplication against the legacy rectangular interpolation grid.
+    return [*selected_model_profiles, *base_profiles]
 
 
 def get_attention_head_configs(
     shape_sweep: dict[str, object],
     *,
     phase: str,
+    include_model_profiles: bool = True,
+    backend: str | None = None,
+    sm_version: int | None = None,
 ) -> list[AttentionHeadConfig]:
     """Expand only valid ``(q, kv, head_dim, window)`` structural tuples.
 
-    Profiles may either describe a default rectangular sub-grid or one native
+    Profiles may either describe a legacy rectangular sub-grid or one native
     model topology plus its valid tensor-parallel sizes. The latter preserves
     correlations between query heads, KV heads, head dimension, and window.
     """
 
     if phase not in {"context", "generation"}:
         raise ValueError(f"Unknown attention phase: {phase}")
+    if backend not in {None, "sglang"}:
+        raise ValueError("backend is only accepted for the SGLang-specific attention collector")
+    if backend == "sglang" and sm_version is None:
+        raise ValueError("SGLang attention collection requires an explicit SM version")
 
     configs: list[AttentionHeadConfig] = []
-    seen: set[AttentionHeadConfig] = set()
+    seen: dict[tuple[int, int, int, int, str | None], AttentionHeadConfig] = {}
 
-    def append(num_heads: int, num_kv_heads: int, head_dim: int, window_size: int) -> None:
+    def append(
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        window_size: int,
+        *,
+        profile: dict[str, object],
+        kernel_source: str | None,
+    ) -> None:
         if num_heads <= 0 or num_kv_heads <= 0 or head_dim <= 0 or window_size < 0:
             return
         if num_kv_heads > num_heads or num_heads % num_kv_heads != 0:
             return
-        config = AttentionHeadConfig(num_heads, num_kv_heads, head_dim, window_size)
-        if config not in seen:
-            seen.add(config)
-            configs.append(config)
+        if kernel_source == "unsupported":
+            raise ValueError("SGLang attention profile resolves to an unsupported backend")
 
-    for profile in _head_profiles(shape_sweep, "attention"):
+        config = AttentionHeadConfig(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            window_size=window_size,
+        )
+        if backend == "sglang":
+            attention_chunk_size = profile.get("sglang_attention_chunk_size")
+            if attention_chunk_size is not None:
+                attention_chunk_size = int(attention_chunk_size)
+            config = dataclasses.replace(
+                config,
+                v_head_dim=int(profile.get("v_head_dim", head_dim)),
+                runtime_window_size=int(profile.get("sglang_runtime_window_size", window_size or -1)),
+                attention_chunk_size=attention_chunk_size,
+                has_attention_sink=bool(profile.get("sglang_has_attention_sink", False)),
+                scaling=float(profile["sglang_scaling"]) if profile.get("sglang_scaling") is not None else None,
+                kernel_source=kernel_source,
+                architecture=str(profile["architecture"]) if profile.get("architecture") else None,
+            )
+        # Source is recorded by the collector for provenance. The SDK keeps
+        # its historical query key and does not consume this distinction.
+        population_key = (num_heads, num_kv_heads, head_dim, window_size, kernel_source)
+        previous = seen.get(population_key)
+        if previous is None:
+            seen[population_key] = config
+            configs.append(config)
+            return
+
+        if backend == "sglang":
+            previous_signature = (
+                previous.v_head_dim,
+                previous.runtime_window_size,
+                previous.attention_chunk_size if previous.window_size > 0 else None,
+                previous.has_attention_sink,
+                previous.scaling,
+            )
+            current_signature = (
+                config.v_head_dim,
+                config.runtime_window_size,
+                config.attention_chunk_size if config.window_size > 0 else None,
+                config.has_attention_sink,
+                config.scaling,
+            )
+            if previous_signature == current_signature:
+                return
+            raise ValueError(
+                "SGLang attention profiles share one legacy-key/source pair but require "
+                f"different runtime semantics: {population_key=}, previous={previous_signature}, "
+                f"current={current_signature}"
+            )
+
+    profiles = (
+        _sglang_attention_profiles(
+            shape_sweep,
+            include_model_profiles=include_model_profiles,
+        )
+        if backend == "sglang"
+        else _head_profiles(
+            shape_sweep,
+            "attention",
+            include_model_profiles=include_model_profiles,
+        )
+    )
+    for profile in profiles:
+        kernel_source = None
+        if backend == "sglang":
+            raw_backends = profile.get("sglang_backends")
+            if raw_backends is not None:
+                if not isinstance(raw_backends, dict):
+                    raise TypeError("model_case_values.attention.sglang_backends must be a mapping")
+                kernel_source = raw_backends.get(sm_version, raw_backends.get(str(sm_version)))
+            if kernel_source is None:
+                # Mirrors SGLang 0.5.14 server_args._get_default_attn_backend
+                # (MHA), python/sglang/srt/server_args.py:4407-4455 at image
+                # source 49e384ce: SM90 Hopper+CUDA>=12.3 -> fa3 (line 4437);
+                # SM100/103 -> trtllm_mha (is_sm100_supported() matches
+                # major 10, lines 4438-4446); other supported CUDA SMs ->
+                # flashinfer unless the model has attention sinks (FlashInfer
+                # rejects sinks, lines 4451-4454) -> triton. Per-model
+                # deviations (Qwen3.5 hybrid-GDN -> triton on SM100,
+                # server_args.py:4188-4211; NemotronH -> flashinfer,
+                # arg_groups/nemotron_h_hook.py:60-62) are declared in the
+                # profile's sglang_backends map above. SM80/86 are outside the
+                # supported platform set {89, 90, 100, 103, 120} and fail
+                # closed below.
+                sink = bool(profile.get("sglang_has_attention_sink", False))
+                kernel_source = {
+                    89: "triton" if sink else "flashinfer",
+                    90: "fa3",
+                    100: "trtllm_mha",
+                    103: "trtllm_mha",
+                    120: "triton" if sink else "flashinfer",
+                }.get(sm_version)
+            if kernel_source is None:
+                raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
+            kernel_source = str(kernel_source)
+
         head_dims = _profile_int_values(
             profile,
             "head_dims",
@@ -222,7 +389,14 @@ def get_attention_head_configs(
                 num_kv_heads = (native_num_kv_heads + tp_size - 1) // tp_size
                 for head_dim in head_dims:
                     for window_size in window_sizes:
-                        append(num_heads, num_kv_heads, head_dim, window_size)
+                        append(
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                            window_size,
+                            profile=profile,
+                            kernel_source=kernel_source,
+                        )
             continue
 
         if phase == "context":
@@ -244,7 +418,14 @@ def get_attention_head_configs(
                         if num_kv_heads != num_heads and (num_kv_heads >= num_heads or num_heads % num_kv_heads != 0):
                             continue
                         for window_size in window_sizes:
-                            append(num_heads, num_kv_heads, head_dim, window_size)
+                            append(
+                                num_heads,
+                                num_kv_heads,
+                                head_dim,
+                                window_size,
+                                profile=profile,
+                                kernel_source=kernel_source,
+                            )
             continue
 
         mha_query_head_counts = _profile_int_values(
@@ -270,7 +451,14 @@ def get_attention_head_configs(
         for head_dim in head_dims:
             for num_heads in sorted(mha_query_head_counts, reverse=True):
                 for window_size in window_sizes:
-                    append(num_heads, num_heads, head_dim, window_size)
+                    append(
+                        num_heads,
+                        num_heads,
+                        head_dim,
+                        window_size,
+                        profile=profile,
+                        kernel_source=kernel_source,
+                    )
             for num_heads in sorted(xqa_query_head_counts, reverse=True):
                 for num_kv_heads in kv_head_counts:
                     if num_kv_heads > num_heads or (num_kv_heads == num_heads and not allow_xqa_mha):
@@ -278,7 +466,14 @@ def get_attention_head_configs(
                     if require_divisible and num_heads % num_kv_heads != 0:
                         continue
                     for window_size in window_sizes:
-                        append(num_heads, num_kv_heads, head_dim, window_size)
+                        append(
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                            window_size,
+                            profile=profile,
+                            kernel_source=kernel_source,
+                        )
     return configs
 
 
@@ -517,47 +712,78 @@ class MLAModulePrecisionSpec:
     gemm_type: str
     phases: tuple[str, ...]
     min_sm: int
+    attention_types: tuple[str, ...] = ("mla", "dsa")
+
+
+_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa")
 
 
 def get_mla_module_model_specs(
     attention_type: str | None = None,
     *,
+    backend: str | None = None,
     wideep_mla: bool | None = None,
     apply_model_filter: bool = True,
 ) -> list[MLAModuleModelSpec]:
     """Return YAML-backed model metadata for full MLA/DSA module collectors."""
 
-    values = []
-    model_path_filter = _get_model_path_filter() if apply_model_filter else None
-    for data in _load_model_cases_data():
-        raw_values = (data.get("model_case_values") or {}).get("mla_module", [])
-        if raw_values is None:
-            continue
-        if isinstance(raw_values, dict):
-            raw_values = [raw_values]
-        if not isinstance(raw_values, list):
-            raise TypeError("model_case_values.mla_module must be a list or mapping")
+    values = _model_case_values("mla_module", apply_model_filter=False)
+    if backend is not None:
+        values.extend(
+            _framework_specific_model_case_values(
+                "mla_module",
+                backend,
+                apply_model_filter=False,
+            )
+        )
 
-        architecture = data.get("architecture")
-        for index, raw_value in enumerate(raw_values):
-            for value in _expand_model_case_entry(raw_value, field_name=f"model_case_values.mla_module[{index}]"):
-                value.setdefault("architecture", architecture)
-                if model_path_filter and not _model_case_matches_path(value, model_path_filter):
-                    continue
-                if attention_type is not None and value.get("attention_type") != attention_type:
-                    continue
-                if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
-                    continue
-                values.append(
-                    MLAModuleModelSpec(
-                        model_path=str(value["model_path"]),
-                        attention_type=str(value["attention_type"]),
-                        architecture=str(value["architecture"]),
-                        native_num_heads=int(value["native_num_heads"]),
-                        wideep_mla=bool(value.get("wideep_mla", False)),
-                    )
-                )
-    return values
+    specs = []
+    model_path_filter = _get_model_path_filter() if apply_model_filter else None
+    for value in values:
+        if model_path_filter and not _model_case_matches_path(value, model_path_filter):
+            continue
+        if attention_type is not None and value.get("attention_type") != attention_type:
+            continue
+        if wideep_mla is not None and bool(value.get("wideep_mla", False)) != wideep_mla:
+            continue
+        specs.append(
+            MLAModuleModelSpec(
+                model_path=str(value["model_path"]),
+                attention_type=str(value["attention_type"]),
+                architecture=str(value["architecture"]),
+                native_num_heads=int(value["native_num_heads"]),
+                wideep_mla=bool(value.get("wideep_mla", False)),
+            )
+        )
+
+    if backend == "vllm" and apply_model_filter and model_path_filter is None:
+        # vLLM 0.24 builds every module with the case's explicit precision and
+        # head count, so checkpoint aliases no longer change the invocation.
+        # MLA has one architecture-less consumer table (the perf rows carry no
+        # lora/rope geometry key, so distinct-geometry models could not be
+        # represented anyway); DSA is keyed by architecture. Stable first-wins
+        # keeps DeepSeek-V3 and each DSA architecture canonical while targeted
+        # artifact runs remain exact. Revisit if an MLA model with different
+        # q_lora/kv_lora/rope geometry is declared — that first needs a new
+        # consumer key dimension (a contract change).
+        canonical_specs = {}
+        collapsed: dict[tuple, list[str]] = {}
+        for spec in specs:
+            key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
+            if key in canonical_specs:
+                collapsed.setdefault(key, []).append(spec.model_path)
+            else:
+                canonical_specs[key] = spec
+        specs = list(canonical_specs.values())
+        for key, dropped_paths in sorted(collapsed.items()):
+            canonical = canonical_specs[key]
+            print(
+                f"mla_module: collapsed {len(dropped_paths)} declared spec(s) into canonical "
+                f"{canonical.model_path!r} for {key[0]} (architecture-less consumer table): "
+                f"{', '.join(dropped_paths)}"
+            )
+
+    return specs
 
 
 def _required_mapping(value: object, *, field_name: str) -> dict[str, object]:
@@ -599,8 +825,14 @@ def get_mla_module_precision_specs(
     *,
     phase: str | None = None,
     sm_version: int | None = None,
+    attention_type: str | None = None,
 ) -> list[MLAModulePrecisionSpec]:
     """Return YAML-backed precision combos for module collectors."""
+
+    if attention_type is not None and attention_type not in _MLA_MODULE_ATTENTION_TYPES:
+        raise ValueError(
+            f"mla_module attention_type must be one of {_MLA_MODULE_ATTENTION_TYPES}, got {attention_type!r}"
+        )
 
     values = _merged_mla_module_values(backend)
     raw_precision_combos = values.get("module_precision_combos")
@@ -619,10 +851,26 @@ def get_mla_module_precision_specs(
         elif not isinstance(phases, tuple):
             raise TypeError("mla_module.module_precision_combos phases must be a string or list")
 
+        attention_types = combo.get("attention_types", _MLA_MODULE_ATTENTION_TYPES)
+        if isinstance(attention_types, str):
+            attention_types = (attention_types,)
+        elif isinstance(attention_types, list):
+            attention_types = tuple(str(item) for item in attention_types)
+        elif not isinstance(attention_types, tuple):
+            raise TypeError("mla_module.module_precision_combos attention_types must be a string or list")
+        invalid_attention_types = [item for item in attention_types if item not in _MLA_MODULE_ATTENTION_TYPES]
+        if invalid_attention_types:
+            raise ValueError(
+                "mla_module.module_precision_combos attention_types entries must be in "
+                f"{_MLA_MODULE_ATTENTION_TYPES}, got {invalid_attention_types!r}"
+            )
+
         min_sm = int(combo.get("min_sm", 0))
         if phase is not None and phase not in phases:
             continue
         if sm_version is not None and sm_version < min_sm:
+            continue
+        if attention_type is not None and attention_type not in attention_types:
             continue
         precision_specs.append(
             MLAModulePrecisionSpec(
@@ -631,6 +879,7 @@ def get_mla_module_precision_specs(
                 gemm_type=str(combo["gemm_type"]),
                 phases=phases,
                 min_sm=min_sm,
+                attention_types=attention_types,
             )
         )
     return precision_specs
@@ -785,6 +1034,21 @@ class MoeCommonTestCase:
     token_expert_distribution: str
     power_law_alpha: Optional[float]
     architecture: str = ""  # config-derived (cases-YAML architecture); for model-family checks
+    sglang_moe_backends: dict[str, object] = dataclasses.field(default_factory=dict)
+    sglang_moe_activation: str = "silu"
+    sglang_moe_is_gated: bool = True
+    sglang_moe_has_bias: bool = False
+    sglang_moe_gemm1_alpha: Optional[float] = None
+    sglang_moe_gemm1_clamp_limit: Optional[float] = None
+    sglang_moe_swiglu_limit: Optional[float] = None
+    sglang_moe_scoring_func: str = "softmax"
+    sglang_moe_routing_method_type: Optional[str] = None
+    sglang_moe_routed_scaling_factor: Optional[float] = None
+    sglang_moe_renormalize: bool = True
+    sglang_moe_has_correction_bias: bool = False
+    sglang_moe_num_expert_group: Optional[int] = None
+    sglang_moe_topk_group: Optional[int] = None
+    sglang_moe_apply_router_weight_on_input: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -794,6 +1058,7 @@ class MoeQuantizationSpec:
     name: str
     min_sm: Optional[int]
     min_sm_exclusive: Optional[int]
+    max_sm_exclusive: Optional[int]
     requires_runtime_feature: Optional[str]
     requires_model_quantization_config: bool
     allowed_model_paths: tuple[str, ...]
@@ -843,6 +1108,9 @@ def get_moe_quantization_specs(backend: str) -> list[MoeQuantizationSpec]:
                 min_sm_exclusive=(
                     None if raw_mode.get("min_sm_exclusive") is None else int(raw_mode["min_sm_exclusive"])
                 ),
+                max_sm_exclusive=(
+                    None if raw_mode.get("max_sm_exclusive") is None else int(raw_mode["max_sm_exclusive"])
+                ),
                 requires_runtime_feature=(
                     None
                     if raw_mode.get("requires_runtime_feature") is None
@@ -877,15 +1145,67 @@ def get_moe_quantization_modes(
             continue
         if spec.min_sm_exclusive is not None and sm_version <= spec.min_sm_exclusive:
             continue
+        if spec.max_sm_exclusive is not None and sm_version >= spec.max_sm_exclusive:
+            continue
         if spec.requires_runtime_feature and not features.get(spec.requires_runtime_feature, False):
             continue
         modes.append(spec.name)
     return modes
 
 
+def get_sglang_moe_backend(test_case: MoeCommonTestCase, moe_type: str, sm_version: int) -> str:
+    """Resolve SGLang's target-version MoE backend from YAML metadata."""
+
+    base_backends = _moe_backend_values("sglang").get("backends", {})
+    if not isinstance(base_backends, dict):
+        raise TypeError("common_case_values.moe_sglang.backends must be a mapping")
+
+    model_backends = test_case.sglang_moe_backends
+    mode_backends = (
+        model_backends.get(moe_type),
+        base_backends.get(moe_type),
+    )
+    backend_maps = (
+        mode_backends
+        if any(backend_map is not None for backend_map in mode_backends)
+        else (model_backends.get("default"), base_backends.get("default"))
+    )
+    for backend_map in backend_maps:
+        if backend_map is None:
+            continue
+        if isinstance(backend_map, str):
+            backend = backend_map
+        else:
+            if not isinstance(backend_map, dict):
+                raise TypeError("SGLang MoE backend entries must be strings or mappings")
+            backend = backend_map.get(sm_version, backend_map.get(str(sm_version), backend_map.get("default")))
+            if backend is None:
+                continue
+            backend = str(backend)
+        # Marlin is a weight-only (bf16-activation) runner, so it is a valid
+        # identity only for weight-only modes: INT4-WO, and MXFP4 w4a16 where
+        # SGLang 0.5.14 serving itself selects Marlin on SM120
+        # (server_args.py:3876-3887; mxfp4.py:520-521 asserts SM90-or-SM120).
+        # NVFP4 and mxfp8-activation modes measured through a Marlin repack
+        # would be mislabeled rows (MoE FP4/INT4 identity reversal) and stay
+        # rejected.
+        if backend == "marlin" and moe_type not in ("int4_wo", "w4a16_mxfp4"):
+            raise ValueError(
+                f"SGLang Marlin is only valid for the weight-only modes int4_wo/w4a16_mxfp4, got moe_type={moe_type!r}"
+            )
+        return backend
+    raise ValueError(f"No SGLang MoE backend for moe_type={moe_type!r}, sm_version={sm_version}")
+
+
 def _model_moe_backend_quantization(model_name: str, backend: str) -> dict[str, object]:
     for model_case in _model_case_values("moe", apply_model_filter=False):
         if not _model_case_matches_path(model_case, model_name):
+            continue
+        raw_frameworks = model_case.get("frameworks")
+        if raw_frameworks is not None and backend not in _as_str_list(
+            raw_frameworks,
+            field_name="model_case_values.moe.frameworks",
+        ):
             continue
         framework_quantization = model_case.get("framework_quantization", {})
         if not isinstance(framework_quantization, dict):
@@ -982,51 +1302,6 @@ def moe_model_allows_quantization(backend: str, model_name: str, moe_type: str) 
             field_name=f"moe_{backend}.model_quantization_policies.excluded_modes",
         ):
             return False
-    return True
-
-
-def moe_shape_satisfies_constraints(
-    backend: str,
-    moe_type: str,
-    *,
-    hidden_size: int,
-    inter_size: int,
-    tensor_parallel_size: int,
-    topk: int,
-) -> bool:
-    """Return whether a MoE shape satisfies backend YAML quantization limits."""
-
-    values = _moe_backend_values(backend)
-    raw_constraints = values.get("shape_constraints", [])
-    if not isinstance(raw_constraints, list):
-        raise TypeError(f"common_case_values.moe_{backend}.shape_constraints must be a list")
-
-    local_inter_size = inter_size // tensor_parallel_size
-    fields = {
-        "hidden_size": hidden_size,
-        "inter_size": inter_size,
-        "local_inter_size": local_inter_size,
-        "topk": topk,
-    }
-    for raw_constraint in raw_constraints:
-        if not isinstance(raw_constraint, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints entries must be mappings")
-        if str(raw_constraint.get("mode")) != moe_type:
-            continue
-
-        divisible_by = raw_constraint.get("divisible_by", {})
-        if not isinstance(divisible_by, dict):
-            raise TypeError(f"common_case_values.moe_{backend}.shape_constraints.divisible_by must be a mapping")
-        for field_name, divisor in divisible_by.items():
-            if field_name not in fields:
-                raise ValueError(f"Unknown MoE shape constraint field: {field_name}")
-            if fields[field_name] % int(divisor) != 0:
-                return False
-
-        max_topk = raw_constraint.get("max_topk")
-        if max_topk is not None and topk > int(max_topk):
-            return False
-
     return True
 
 
@@ -1158,7 +1433,7 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
     return test_cases
 
 
-def get_common_moe_test_cases():
+def get_common_moe_test_cases(*, backend: str | None = None):
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1166,7 +1441,40 @@ def get_common_moe_test_cases():
     num_gpu_list = _as_int_list(moe_sweep.get("gpu_counts"), field_name="moe.gpu_counts")
     token_distributions = _moe_token_expert_distributions(moe_sweep)
 
-    model_config_list = _model_case_values("moe")
+    allowed_parallel_topologies = None
+    if backend is not None:
+        raw_topologies = _moe_backend_values(backend).get("parallel_topologies")
+        if raw_topologies is not None:
+            if not isinstance(raw_topologies, list):
+                raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies must be a list")
+            allowed_parallel_topologies = set()
+            for index, topology in enumerate(raw_topologies):
+                if not isinstance(topology, dict):
+                    raise TypeError(f"common_case_values.moe_{backend}.parallel_topologies[{index}] must be a mapping")
+                topology_tps = _as_int_list(
+                    topology.get("tensor_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].tensor_parallel_sizes",
+                )
+                topology_eps = _as_int_list(
+                    topology.get("expert_parallel_sizes"),
+                    field_name=f"moe_{backend}.parallel_topologies[{index}].expert_parallel_sizes",
+                )
+                allowed_parallel_topologies.update(itertools.product(topology_tps, topology_eps))
+
+    model_config_list = []
+    for model_config in _model_case_values("moe"):
+        raw_frameworks = model_config.get("frameworks")
+        if raw_frameworks is not None:
+            frameworks = _as_str_list(raw_frameworks, field_name="model_case_values.moe.frameworks")
+            unknown_frameworks = sorted(set(frameworks) - _KNOWN_CASE_FRAMEWORKS)
+            if unknown_frameworks:
+                raise ValueError(
+                    f"model_case_values.moe row {model_config.get('model_path')!r} declares unknown "
+                    f"frameworks {unknown_frameworks}; known: {sorted(_KNOWN_CASE_FRAMEWORKS)}"
+                )
+            if backend is not None and backend not in frameworks:
+                continue
+        model_config_list.append(model_config)
 
     test_cases: list[MoeCommonTestCase] = []
 
@@ -1193,6 +1501,9 @@ def get_common_moe_test_cases():
         if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
             continue
 
+        if allowed_parallel_topologies is not None and (tp, ep) not in allowed_parallel_topologies:
+            continue
+
         if tp * ep != num_gpu:
             continue
         if ep > num_experts:
@@ -1216,6 +1527,51 @@ def get_common_moe_test_cases():
                 token_expert_distribution=token_distribution,
                 power_law_alpha=power_law_alpha,
                 architecture=str(model_config.get("architecture") or ""),
+                sglang_moe_backends=dict(model_config.get("sglang_moe_backends") or {}),
+                sglang_moe_activation=str(model_config.get("sglang_moe_activation", "silu")),
+                sglang_moe_is_gated=bool(model_config.get("sglang_moe_is_gated", True)),
+                sglang_moe_has_bias=bool(model_config.get("sglang_moe_has_bias", False)),
+                sglang_moe_gemm1_alpha=(
+                    None
+                    if model_config.get("sglang_moe_gemm1_alpha") is None
+                    else float(model_config["sglang_moe_gemm1_alpha"])
+                ),
+                sglang_moe_gemm1_clamp_limit=(
+                    None
+                    if model_config.get("sglang_moe_gemm1_clamp_limit") is None
+                    else float(model_config["sglang_moe_gemm1_clamp_limit"])
+                ),
+                sglang_moe_swiglu_limit=(
+                    None
+                    if model_config.get("sglang_moe_swiglu_limit") is None
+                    else float(model_config["sglang_moe_swiglu_limit"])
+                ),
+                sglang_moe_scoring_func=str(model_config.get("sglang_moe_scoring_func", "softmax")),
+                sglang_moe_routing_method_type=(
+                    None
+                    if model_config.get("sglang_moe_routing_method_type") is None
+                    else str(model_config["sglang_moe_routing_method_type"])
+                ),
+                sglang_moe_routed_scaling_factor=(
+                    None
+                    if model_config.get("sglang_moe_routed_scaling_factor") is None
+                    else float(model_config["sglang_moe_routed_scaling_factor"])
+                ),
+                sglang_moe_renormalize=bool(model_config.get("sglang_moe_renormalize", True)),
+                sglang_moe_has_correction_bias=bool(model_config.get("sglang_moe_has_correction_bias", False)),
+                sglang_moe_num_expert_group=(
+                    None
+                    if model_config.get("sglang_moe_num_expert_group") is None
+                    else int(model_config["sglang_moe_num_expert_group"])
+                ),
+                sglang_moe_topk_group=(
+                    None
+                    if model_config.get("sglang_moe_topk_group") is None
+                    else int(model_config["sglang_moe_topk_group"])
+                ),
+                sglang_moe_apply_router_weight_on_input=bool(
+                    model_config.get("sglang_moe_apply_router_weight_on_input", False)
+                ),
             )
         )
 
@@ -1918,6 +2274,26 @@ def _dsv4_module_filter_pairs(mode: str, batch_sizes, seq_lens):
                 continue
             pairs.append((bs, sl))
     return pairs
+
+
+def _dsv4_context_structural_manifest(
+    batch_size: int,
+    seq_lens,
+    prefix_lens,
+    max_position_embeddings: int,
+):
+    """Expand the model-position-valid DSV4 context inner grid."""
+    manifest = []
+    for prefix_len in prefix_lens:
+        retained = tuple(
+            seq_len
+            for seq_len in seq_lens
+            if _dsv4_module_is_valid_shape("context", batch_size, seq_len, prefix_len)
+            and prefix_len + seq_len <= max_position_embeddings
+        )
+        if retained:
+            manifest.append((int(prefix_len), retained))
+    return tuple(manifest)
 
 
 def _build_dsv4_module_test_cases(mode: str, attn_kinds=DSV4_ATTN_KINDS):

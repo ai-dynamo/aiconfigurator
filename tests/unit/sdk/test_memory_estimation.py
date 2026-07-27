@@ -118,13 +118,20 @@ def _naive_estimate(
     *,
     tp_size=1,
     pp_size=1,
+    moe_ep_size=1,
+    moe_tp_size=1,
     gpu_memory_capacity_bytes_override,
     naive_kv_reservation,
     allow_hf_config_download=False,
 ):
     """Build a NaiveKVCacheEstimator and run its estimate (mirrors the old helper)."""
     return memory.NaiveKVCacheEstimator.from_model_path(
-        model_path, tp_size=tp_size, pp_size=pp_size, allow_hf_config_download=allow_hf_config_download
+        model_path,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        allow_hf_config_download=allow_hf_config_download,
+        moe_ep_size=moe_ep_size,
+        moe_tp_size=moe_tp_size,
     ).estimate(capacity=gpu_memory_capacity_bytes_override, naive_kv_reservation=naive_kv_reservation)
 
 
@@ -182,7 +189,55 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
 
     def _fake_get_model(model_path, model_config, backend):
         captured["nextn"] = model_config.nextn
-        captured["rates"] = model_config.nextn_accept_rates
+        captured["has_nextn_accepted"] = hasattr(model_config, "nextn_accepted")
+
+        class _StubModel:
+            def get_kvcache_bytes_per_sequence(self, seq_len):
+                return 100.0 * seq_len
+
+            def get_kvcache_max_tokens(self, budget):
+                return int(budget // 100)
+
+        return _StubModel()
+
+    class _StubBackend:
+        def _get_memory_usage(self, *a, **k):
+            return {"weights": 1.0, "activations": 1.0, "others": 1.0, "nccl": 1.0, "kvcache": 0.0}
+
+    class _StubDB:
+        def __init__(self):
+            self.system_spec = {"gpu": {"mem_capacity": 100 * _GIB}}
+
+    monkeypatch.setattr(memory, "get_model", _fake_get_model)
+    monkeypatch.setattr(memory, "get_backend", lambda backend: _StubBackend())
+
+    def _fake_get_database(*args, **kwargs):
+        captured["systems_paths"] = kwargs.get("systems_paths")
+        return _StubDB()
+
+    monkeypatch.setattr(memory.perf_database, "get_database", _fake_get_database)
+
+    memory.KVCacheEstimator.from_request(
+        "Qwen/Qwen3-32B",
+        "h200_sxm",
+        "trtllm",
+        max_num_tokens=8192,
+        max_batch_size=256,
+        nextn=2,
+        systems_path="/tmp/aic-core-systems",
+    )
+    assert captured["nextn"] == 2
+    assert captured["has_nextn_accepted"] is False
+    assert captured["systems_paths"] == "/tmp/aic-core-systems"
+
+
+def test_breakdown_accepts_nextn_without_acceptance_field(monkeypatch):
+    # Capacity math consumes only the core-owned draft depth.
+    captured = {}
+
+    def _fake_get_model(model_path, model_config, backend):
+        captured["nextn"] = model_config.nextn
+        captured["has_nextn_accepted"] = hasattr(model_config, "nextn_accepted")
 
         class _StubModel:
             def get_kvcache_bytes_per_sequence(self, seq_len):
@@ -214,8 +269,7 @@ def test_breakdown_applies_nextn_to_model_config(monkeypatch):
         nextn=2,
     )
     assert captured["nextn"] == 2
-    # No explicit rates -> the project-wide MTP default is applied.
-    assert captured["rates"] == [0.85, 0.3, 0.0, 0.0, 0.0]
+    assert captured["has_nextn_accepted"] is False
 
 
 def test_native_capacity_override_wins():
@@ -238,8 +292,15 @@ def test_native_capacity_override_wins():
 # --------------------------------------------------------------------------- #
 
 
-def _estimator(geometry, *, dtype_bytes=2, tp_size=1, pp_size=1):
-    return memory.NaiveKVCacheEstimator(geometry, dtype_bytes=dtype_bytes, tp_size=tp_size, pp_size=pp_size)
+def _estimator(geometry, *, dtype_bytes=2, tp_size=1, pp_size=1, moe_ep_size=1, moe_tp_size=1):
+    return memory.NaiveKVCacheEstimator(
+        geometry,
+        dtype_bytes=dtype_bytes,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        moe_ep_size=moe_ep_size,
+        moe_tp_size=moe_tp_size,
+    )
 
 
 def test_naive_kv_per_token_mla():
@@ -292,6 +353,35 @@ def test_naive_geometry_from_raw_unsupported_arch():
 def test_naive_kv_per_token_empty_geometry_is_none():
     assert _estimator({}).kv_bytes_per_token() is None
     assert _estimator({}).weight_bytes() is None
+
+
+def test_naive_weight_bytes_moe_divides_by_ep_and_moe_tp():
+    # MoE model: 32 layers, hidden=4096, 64 experts, moe_inter=2048, bf16.
+    geom = {
+        "hidden": 4096,
+        "layers": 32,
+        "vocab": 128_000,
+        "inter": 11_008,
+        "num_experts": 64,
+        "moe_inter": 2048,
+    }
+    # EP=8 should reduce expert weight vs EP=1 (both at tp=8, moe_tp=1).
+    w_ep1 = _estimator(geom, tp_size=8, moe_ep_size=1).weight_bytes()
+    w_ep8 = _estimator(geom, tp_size=8, moe_ep_size=8).weight_bytes()
+    assert w_ep8 < w_ep1
+
+    # moe_tp=2,ep=4 vs moe_tp=1,ep=8: same total MoE sharding (product=8),
+    # so expert weight should be identical; non-expert params unchanged.
+    w_tp2_ep4 = _estimator(geom, tp_size=8, moe_tp_size=2, moe_ep_size=4).weight_bytes()
+    w_tp1_ep8 = _estimator(geom, tp_size=8, moe_tp_size=1, moe_ep_size=8).weight_bytes()
+    assert w_tp2_ep4 == w_tp1_ep8
+
+    # Expert weight should scale with the product moe_tp * moe_ep.
+    expert_params_per_layer = 64 * 3 * 4096 * 2048
+    # EP=1,moe_tp=1 vs EP=8,moe_tp=1: expert diff = (1 - 1/8) of expert params / pp=1.
+    expert_diff = w_ep1 - w_ep8
+    expected = expert_params_per_layer * 32 * (1 - 1 / 8) * 2  # bf16, pp=1
+    assert abs(expert_diff - expected) < 1024
 
 
 def test_dtype_bytes():
@@ -392,11 +482,13 @@ def test_naive_fallback_mla_fixture():
     # `deepseek-ai/DeepSeek-V3` is cached in model_configs (DefaultHFModels), so
     # `NaiveKVCacheEstimator._load_config` loads it without a download; the
     # supported arch goes through `_parse_hf_config_json` -> 70_272 bytes/token.
+    # moe_ep_size=16 shards the 256 experts across 16 GPUs (16 local each).
     capacity = 180 * _GIB
     out = _naive_estimate(
         "deepseek-ai/DeepSeek-V3",
         tp_size=16,
         pp_size=1,
+        moe_ep_size=16,
         gpu_memory_capacity_bytes_override=capacity,
         naive_kv_reservation=memory._DEFAULT_NAIVE_KV_RESERVATION,
         allow_hf_config_download=False,
@@ -575,6 +667,33 @@ def test_estimate_kv_cache_propagates_when_fallback_disabled(monkeypatch):
             gpu_memory_capacity_bytes_override=200 * _GIB,
             allow_naive_fallback=False,
         )
+
+
+def test_estimate_kv_cache_nextn_reaches_breakdown(monkeypatch):
+    # Acceptance is not part of the aic-core memory API.
+    reached = {"n": 0}
+
+    def _spy(*args, **kwargs):
+        reached["n"] += 1
+        reached["nextn"] = kwargs.get("nextn")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(memory.KVCacheEstimator, "from_request", classmethod(_spy))
+
+    with pytest.raises(ValueError, match="unsupported model/backend/GPU"):
+        memory.estimate_kv_cache(
+            "Qwen/Qwen3-32B",
+            "h200_sxm",
+            "trtllm",
+            max_num_tokens=8192,
+            max_batch_size=256,
+            memory_fraction_kind="of_free",
+            memory_fraction_value=0.9,
+            nextn=2,
+            allow_naive_fallback=False,
+        )
+    assert reached["n"] == 1
+    assert reached["nextn"] == 2
 
 
 def test_estimate_kv_cache_rejects_bad_fraction_before_breakdown(monkeypatch):

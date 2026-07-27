@@ -3,6 +3,7 @@
 
 """Unit tests for completing single-phase AFD estimates with regular static phases."""
 
+import logging
 import math
 from types import SimpleNamespace
 from typing import ClassVar
@@ -55,7 +56,12 @@ def _fake_phase_metrics(
 
 
 def _build_afd_session_with_phase_metrics(
-    monkeypatch, *, prefill_metrics, decode_metrics, combined_with_pd: bool = False
+    monkeypatch,
+    *,
+    prefill_metrics,
+    decode_metrics,
+    combined_with_pd: bool = False,
+    nextn: int = 0,
 ) -> AFDInferenceSession:
     """Wire ``AFDInferenceSession`` so ``_simulate_phase`` returns the
     caller-supplied prefill / decode metrics dicts.
@@ -92,8 +98,8 @@ def _build_afd_session_with_phase_metrics(
     )
     return AFDInferenceSession(
         model_path="test-model",
-        a_model_config=SimpleNamespace(),
-        f_model_config=SimpleNamespace(),
+        a_model_config=SimpleNamespace(nextn=nextn),
+        f_model_config=SimpleNamespace(nextn=nextn),
         database=FakeDatabase(),
         backend=SimpleNamespace(
             name=SimpleNamespace(value="test-backend"),
@@ -231,8 +237,9 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
             captured["a_model_config"] = kwargs["a_model_config"]
             captured["f_model_config"] = kwargs["f_model_config"]
 
-        def run_afd(self, runtime_config, **_kwargs):
+        def run_afd(self, runtime_config, **kwargs):
             captured["runtime_config"] = runtime_config
+            captured["speculative_profile"] = kwargs["speculative_profile"]
             summary = InferenceSummary(runtime_config)
             summary.set_oom(False)
             summary.set_result_dict(
@@ -286,14 +293,15 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
         max_seq_len=None,
         prefix=32,
         nextn=2,
-        nextn_accept_rates=[0.85, 0.3],
+        nextn_accepted=0.85,
     )
 
     assert captured["runtime_config"].prefix == 32
     assert captured["a_model_config"].nextn == 2
     assert captured["f_model_config"].nextn == 2
-    assert captured["a_model_config"].nextn_accept_rates == [0.85, 0.3]
-    assert captured["f_model_config"].nextn_accept_rates == [0.85, 0.3]
+    assert not hasattr(captured["a_model_config"], "nextn_accepted")
+    assert not hasattr(captured["f_model_config"], "nextn_accepted")
+    assert captured["speculative_profile"].expected_accepted_tokens == 0.85
 
 
 def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
@@ -388,6 +396,82 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
     assert captured["sum_latency_seq_lens"] == [80, 80]
 
 
+@pytest.mark.parametrize(("nextn", "verify_width"), [(0, 1), (1, 2)])
+def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, caplog, nextn, verify_width):
+    from aiconfigurator.sdk.inference_session import _AFDCommOps
+
+    captured = {"x_queries": [], "batch_sizes": []}
+
+    class FakeCommOp:
+        def __init__(self, name):
+            self._name = name
+
+        def query(self, _database, *, x):
+            captured["x_queries"].append(x)
+            return 0.0
+
+    def fake_build_comm_ops(self, _a_model, _f_model, *, rank_mapping="one_to_one"):
+        return _AFDCommOps(
+            a2f=FakeCommOp("afd_a2f_transfer"),
+            f2a=FakeCommOp("afd_f2a_transfer"),
+            f_ag=FakeCommOp("afd_f_node_allgather"),
+            f_rs=FakeCommOp("afd_f_node_reducescatter"),
+            a_combine=FakeCommOp("afd_a_side_combine"),
+        )
+
+    def fake_sum_latency(self, _ops, *, batch_size, **_kwargs):
+        captured["batch_sizes"].append(batch_size)
+        return 2.0, {}
+
+    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction):
+        summary = InferenceSummary(runtime_config)
+        summary.set_oom(False)
+        summary.set_kv_cache_oom(False)
+        return summary
+
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[]),
+    )
+    monkeypatch.setattr(AFDInferenceSession, "_build_afd_comm_ops", fake_build_comm_ops)
+    monkeypatch.setattr(AFDInferenceSession, "_sum_latency", fake_sum_latency)
+    monkeypatch.setattr(AFDInferenceSession, "_estimate_a_memory_dict", lambda *_args, **_kwargs: {"total": 1.0})
+    monkeypatch.setattr(AFDInferenceSession, "_estimate_f_memory_dict", lambda *_args, **_kwargs: {"total": 1.0})
+    monkeypatch.setattr(AFDInferenceSession, "_check_memory_dict", fake_memory_summary)
+
+    afd_config = AFDConfig(
+        n_a_nodes=1,
+        n_f_nodes=1,
+        gpus_per_node=8,
+        tp_a=2,
+        a_batch_size=3,
+        num_microbatches=1,
+        f_moe_ep_size=1,
+    )
+    session = AFDInferenceSession(
+        model_path="test-model",
+        a_model_config=SimpleNamespace(nextn=nextn),
+        f_model_config=SimpleNamespace(nextn=nextn),
+        database=object(),
+        backend=object(),
+        afd_config=afd_config,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        session._simulate_phase(
+            phase="decode",
+            runtime_config=RuntimeConfig(isl=128, osl=2),
+            a_model=SimpleNamespace(_num_layers=2),
+            f_model=SimpleNamespace(_num_layers=2),
+            free_gpu_memory_fraction=None,
+            max_seq_len=None,
+        )
+
+    assert captured["x_queries"] == [3 * verify_width] * 5
+    assert captured["batch_sizes"] == [3 * verify_width, 12 * verify_width]
+    assert ("verify positions share sequence KV history" in caplog.text) is (nextn > 0)
+
+
 def test_afd_summary_concurrency_reflects_total_in_flight_batch(monkeypatch):
     """``concurrency`` in the AFD summary equals the configured total batch.
 
@@ -446,6 +530,83 @@ def test_afd_summary_uses_global_batch_tpot_for_pipeline(monkeypatch):
     assert result["request_latency"] == pytest.approx(26.0 * 9)
     assert result["tokens/s"] == pytest.approx(expected_b_total * 1000.0 / 26.0, rel=1e-3)
     assert result["tokens/s/user"] == pytest.approx(1000.0 / 26.0, rel=1e-3)
+
+
+def test_afd_summary_marks_power_as_unknown(monkeypatch):
+    metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=2.0, balance_ratio=0.5)
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
+    )
+
+    result = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="decode").get_result_dict()
+
+    assert math.isnan(result["power_w"])
+
+
+def test_afd_summary_surfaces_effective_nextn(monkeypatch):
+    metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=2.0, balance_ratio=0.5)
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
+        nextn=2,
+    )
+
+    result = session.run_afd(RuntimeConfig(isl=128, osl=10), phase="decode").get_result_dict()
+
+    assert result["nextn"] == 2
+
+
+def test_afd_serial_pipeline_cycle_has_no_overlap(monkeypatch):
+    metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=2.0, balance_ratio=0.5)
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
+    )
+    session._afd_config.pipeline_model = "serial"
+
+    cycle, comm_hidden = session._pipeline_tcycle(1.0, 2.0, 0.5, 0.25)
+
+    assert cycle == pytest.approx(3.75)
+    assert comm_hidden is False
+
+
+def test_afd_serial_pipeline_global_step_is_strict_stage_sum(monkeypatch):
+    metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=2.0, balance_ratio=0.5)
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
+    )
+    session._afd_config.pipeline_model = "serial"
+
+    global_step, cycle, comm_hidden = session._pipeline_global_step_latency(
+        1.0,
+        2.0,
+        0.5,
+        0.25,
+        num_layers=4,
+    )
+
+    assert cycle == pytest.approx(3.75)
+    assert global_step == pytest.approx(3.75 * 3 * 4)
+    assert comm_hidden is False
+
+
+def test_afd_pipeline_cycle_rejects_unknown_model(monkeypatch):
+    metrics = _fake_phase_metrics(t_a_layer=1.0, t_f_layer=2.0, balance_ratio=0.5)
+    session = _build_afd_session_with_phase_metrics(
+        monkeypatch,
+        prefill_metrics=metrics,
+        decode_metrics=metrics,
+    )
+    session._afd_config.pipeline_model = "unexpected"
+
+    with pytest.raises(ValueError, match="Unsupported AFD pipeline_model: 'unexpected'"):
+        session._pipeline_tcycle(1.0, 2.0, 0.5, 0.25)
 
 
 def test_afd_summary_phase_both_paired_scalars_and_nan_unprefixed(monkeypatch):
@@ -823,13 +984,16 @@ def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch)
     monkeypatch.setattr(api, "_run_static_estimate", fake_run_static_estimate)
 
     result = api.cli_estimate(
-        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True),
+        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True, enable_encoder_dp=False),
     )
 
     # Merged result should reflect static_ctx TTFT and AFD TPOT, plus the
     # summed GPU budget — the canonical "AFD-decode + regular-prefill" sizing.
     assert "afd_kwargs" in captured and "static_kwargs" in captured
     assert captured["static_kwargs"]["static_mode"] == "static_ctx"
+    # The encoder-parallelism choice must reach the static complement: a
+    # non-default value proves forwarding rather than the callee default.
+    assert captured["static_kwargs"]["enable_encoder_dp"] is False
     assert result.ttft == 50.0
     assert result.tpot == 5.0
     assert result.num_total_gpus == 12

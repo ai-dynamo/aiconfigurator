@@ -1,3 +1,10 @@
+---
+description: >
+  Authoring generator rule-plugin (.rule DSL) files.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Rule Plugin Authoring Reference
 
 The rule plugin system (`.rule` files) computes derived parameters using a custom DSL.

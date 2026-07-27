@@ -6,7 +6,7 @@ import logging
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
     PerfDataNotAvailableError,

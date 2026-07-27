@@ -51,8 +51,10 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ── Constants ───────────────────────────────────────────────────────
 const REPO = 'ai-dynamo/aiconfigurator';
-const SUPPORT_MATRIX_PATH = 'src/aiconfigurator/systems/support_matrix';
-const SUPPORT_MATRIX_INDEX_PATH = `${SUPPORT_MATRIX_PATH}/index.json`;
+const SUPPORT_MATRIX_PATHS = [
+  'aic-core/src/aiconfigurator_core/systems/support_matrix', // split layout (>= 0.10)
+  'src/aiconfigurator/systems/support_matrix',               // pre-split branches
+];
 const LEGACY_CSV_PATH = 'src/aiconfigurator/systems/support_matrix.csv';
 const STATUS_HW_INCOMPATIBLE = 'HW_INCOMPATIBLE';
 const STATUS_FRAMEWORK_INCOMPATIBLE = 'FRAMEWORK_INCOMPATIBLE';
@@ -748,19 +750,25 @@ async function fetchOneCsv(branch, path) {
 }
 
 async function fetchCsv(branch) {
-  const indexRes = await fetch(rawUrl(branch, SUPPORT_MATRIX_INDEX_PATH), { cache: isLocalPreview() ? 'no-store' : 'default' });
-  if (!indexRes.ok) {
-    return fetchOneCsv(branch, LEGACY_CSV_PATH);
+  for (const supportMatrixPath of SUPPORT_MATRIX_PATHS) {
+    const indexPath = `${supportMatrixPath}/index.json`;
+    const indexRes = await fetch(rawUrl(branch, indexPath), { cache: isLocalPreview() ? 'no-store' : 'default' });
+    if (indexRes.status === 404) continue;
+    if (!indexRes.ok) {
+      throw new Error(`Failed to fetch support matrix index (HTTP ${indexRes.status}) from branch "${branch}"`);
+    }
+
+    const index = await indexRes.json();
+    const files = Array.isArray(index.files) ? index.files : [];
+    if (!files.length) throw new Error(`Support matrix index is empty on branch "${branch}"`);
+
+    const chunks = await Promise.all(
+      files.map(file => fetchOneCsv(branch, `${supportMatrixPath}/${file}`))
+    );
+    return chunks.flat();
   }
 
-  const index = await indexRes.json();
-  const files = Array.isArray(index.files) ? index.files : [];
-  if (!files.length) throw new Error(`Support matrix index is empty on branch "${branch}"`);
-
-  const chunks = await Promise.all(
-    files.map(file => fetchOneCsv(branch, `${SUPPORT_MATRIX_PATH}/${file}`))
-  );
-  return chunks.flat();
+  return fetchOneCsv(branch, LEGACY_CSV_PATH);
 }
 
 // ── React Components ────────────────────────────────────────────────

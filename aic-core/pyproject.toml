@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "aiconfigurator-core"
+version = "0.11.0"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+description = "Standalone core modeling, data, and Rust estimators for AIConfigurator"
+readme = { text = "Standalone core modeling, data, and Rust estimators for AIConfigurator.", content-type = "text/markdown" }
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "packaging>=20.0",
+    "numpy~=1.26.4",
+    "pandas>=2.2.3",
+    "pyarrow>=15.0.0",
+    "pyyaml>=6.0",
+    "scipy>=1.13.1",
+]
+
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "rust/aiconfigurator-core/Cargo.toml"
+module-name = "aiconfigurator_core._aiconfigurator_core"
+python-source = "src"
+abi3 = true
+features = ["pyo3/extension-module"]
+include = [
+    "src/aiconfigurator_core/sdk/**/*.md",
+    "src/aiconfigurator_core/systems/*.yaml",
+    "src/aiconfigurator_core/systems/*.csv",
+    "src/aiconfigurator_core/systems/**/*.csv",
+    "src/aiconfigurator_core/systems/**/*.json",
+    "src/aiconfigurator_core/systems/**/*.txt",
+    "src/aiconfigurator_core/systems/**/*.parquet",
+    "src/aiconfigurator_core/systems/data/**/*.yaml",
+    "src/aiconfigurator_core/model_configs/*.json",
+]

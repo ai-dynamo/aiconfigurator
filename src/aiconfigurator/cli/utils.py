@@ -61,8 +61,8 @@ def process_experiment_result(
     target_tpot = task.tpot
     target_request_latency = task.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
-    total_gpus = getattr(task, "total_gpus", None) or 0
     serving_mode = task.serving_mode
+    total_gpus = task.effective_total_gpus if serving_mode == "afd" else (task.total_gpus or 0)
 
     x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
 
@@ -116,12 +116,14 @@ def _merge_into_top_n(
         df = best_configs[exp_name].copy()
         if not df.empty:
             df["backend"] = backend_name
+            df["_task_key"] = exp_name
             best_configs_dfs.append(df)
 
         pf = pareto_fronts.get(exp_name)
         if pf is not None and not pf.empty:
             pf_copy = pf.copy()
             pf_copy["backend"] = backend_name
+            pf_copy["_task_key"] = exp_name
             pareto_dfs.append(pf_copy)
 
     # Merge all best configs and take top N

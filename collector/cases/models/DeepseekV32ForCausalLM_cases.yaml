@@ -42,5 +42,3 @@ framework_specific_op_cases:
       cases: all
     dsa_generation_module:
       cases: all
-    wideep_moe:
-      cases: all

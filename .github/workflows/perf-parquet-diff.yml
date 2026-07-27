@@ -7,8 +7,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - 'src/aiconfigurator/systems/data/**/*.parquet'
-      - 'src/aiconfigurator/systems/data/**/*_perf.txt'
+      - 'aic-core/src/aiconfigurator_core/systems/data/**/*.parquet'
+      - 'aic-core/src/aiconfigurator_core/systems/data/**/*_perf.txt'
       - 'tools/perf_database/parquet_diff.py'
       - 'tools/perf_database/parquet_textconv.py'
       - '.gitattributes'

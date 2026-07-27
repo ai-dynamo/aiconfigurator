@@ -21,7 +21,7 @@ import pyarrow as pa
 import pyarrow.csv as pc
 import pyarrow.parquet as pq
 
-PERF_DATA_PREFIX = "src/aiconfigurator/systems/data"
+PERF_DATA_PREFIX = "aic-core/src/aiconfigurator_core/systems/data"
 COMMENT_MARKER = "<!-- perf-parquet-diff-comment -->"
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 DEFAULT_DETAIL_DIR = "parquet-diff-details"

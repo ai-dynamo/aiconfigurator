@@ -56,12 +56,14 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     total_count = 0
     power_count = 0
 
-    for exp_name, config_df in best_configs.items():
+    for config_df in best_configs.values():
         if config_df is not None and not config_df.empty and "power_w" in config_df.columns:
-            power_values = config_df["power_w"].values
-            total_count += len(power_values)
-            # Count how many configs have meaningful power data (>= 1W)
-            power_count += sum(1 for p in power_values if p >= 1.0)
+            for power_value in config_df["power_w"].values:
+                if pd.isna(power_value):
+                    continue
+                total_count += 1
+                if power_value >= 1.0:
+                    power_count += 1
 
     if total_count == 0:
         return False
@@ -69,6 +71,10 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     # Show power column if >= threshold of configs have meaningful power data
     power_ratio = power_count / total_count
     return power_ratio >= threshold
+
+
+def _format_power(power_w: object) -> str:
+    return "" if pd.isna(power_w) else f"{float(power_w):.1f}W"
 
 
 def _plot_worker_setup_table(
@@ -80,8 +86,6 @@ def _plot_worker_setup_table(
     is_moe: bool,
     request_latency_target: float | None,
     show_power: bool = True,
-    preserve_ranking: bool = False,
-    objective_target: str | None = None,
 ) -> str:
     """Plot worker setup table for a single experiment."""
     buf = []
@@ -90,20 +94,14 @@ def _plot_worker_setup_table(
         return ""
 
     config_df = config_df.copy()
-    if preserve_ranking:
-        # A Spica replay row is already a complete evaluated deployment (and may
-        # have been planner-scaled). Do not extrapolate it to the search budget or
-        # re-rank it by the legacy throughput/GPU heuristic.
-        config_df["tokens/s/gpu_cluster"] = config_df["tokens/s/gpu"]
-    else:
-        config_df["tokens/s/gpu_cluster"] = (
-            config_df["tokens/s/gpu"]
-            * (total_gpus // config_df["num_total_gpus"])
-            * config_df["num_total_gpus"]
-            / total_gpus
-            if total_gpus > 0
-            else 0
-        )
+    config_df["tokens/s/gpu_cluster"] = (
+        config_df["tokens/s/gpu"]
+        * (total_gpus // config_df["num_total_gpus"])
+        * config_df["num_total_gpus"]
+        / total_gpus
+        if total_gpus > 0
+        else 0
+    )
     constraint_col = "tpot"
     constraint_target = tpot_target
     constraint_label = "TPOT"
@@ -111,31 +109,20 @@ def _plot_worker_setup_table(
         constraint_col = "request_latency"
         constraint_target = request_latency_target
         constraint_label = "request latency"
-    if preserve_ranking:
-        # Native Spica objectives already define feasibility/ranking. In
-        # particular, goodput uses per-request SLA accounting, so an aggregate
-        # mean-latency gate here would incorrectly hide a valid selected row.
-        top_configs = config_df.copy()
-    elif constraint_target is not None and constraint_target > 0:
+    if constraint_target is not None and constraint_target > 0:
         top_configs = config_df[config_df[constraint_col] <= constraint_target].copy()
     else:
         top_configs = config_df.copy()
-    if not preserve_ranking:
-        top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
+    top_configs = top_configs.sort_values(by="tokens/s/gpu_cluster", ascending=False)
     top_configs = top_configs.head(top).copy()
 
     if top_configs.empty:
         return f"\nNo configurations for {exp_name} met the {constraint_label} constraint."
 
-    if preserve_ranking:
-        top_configs["replicas"] = 1
-        top_configs["total_gpus_used"] = top_configs["num_total_gpus"]
-    else:
-        top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
-        top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
+    top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
+    top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
-    ranking_label = objective_target if preserve_ranking and objective_target else "tokens/s/gpu"
-    buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
+    buf.append(f"\n{exp_name} Top Configurations: (Ranked by tokens/s/gpu)")
     table = PrettyTable()
 
     # AFD frames also carry (p)-prefixed columns for the paired static
@@ -144,9 +131,7 @@ def _plot_worker_setup_table(
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = "(p)tp" in top_configs.columns and not is_afd
 
-    top_configs["cluster_request_rate"] = (
-        top_configs["request_rate"] if preserve_ranking else top_configs["request_rate"] * top_configs["replicas"]
-    )
+    top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
 
     if is_afd:
         field_names = [
@@ -179,7 +164,7 @@ def _plot_worker_setup_table(
             has_prefill_pool = prefill_workers is not None and not pd.isna(prefill_workers)
             if has_prefill_pool:
                 p_workers = int(prefill_workers)
-                p_gpus = p_workers * int(row.get("(p)tp", 1))
+                p_gpus = p_workers * int(row["(p)num_gpus"])
                 gpus_replica_str = f"{row['num_total_gpus']} (=A{a_gpus}+F{f_gpus}+P{p_gpus})"
                 p_workers_str = f"{p_workers} (tp{int(row.get('(p)tp', 1))})"
             else:
@@ -206,7 +191,7 @@ def _plot_worker_setup_table(
                 p_workers_str,
             ]
             if show_power:
-                row_data.append(f"{row['power_w']:.1f}W")
+                row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
     elif is_disagg:
         field_names = [
@@ -234,8 +219,8 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = row["total_gpus_used"] if preserve_ranking else total_gpus
-            display_concurrency = row["concurrency"] if preserve_ranking else row["concurrency"] * row["replicas"]
+            display_total_gpus = total_gpus
+            display_concurrency = row["concurrency"] * row["replicas"]
             if is_moe:
                 p_parallel = (
                     f"tp{_cli_underline(str(row['(p)tp']))}"
@@ -305,7 +290,7 @@ def _plot_worker_setup_table(
                 ]
             )
             if show_power:
-                row_data.append(f"{row['power_w']:.1f}W")
+                row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
     else:  # agg
         field_names = [
@@ -328,8 +313,8 @@ def _plot_worker_setup_table(
             field_names.append("power_w")
         table.field_names = field_names
         for i, row in enumerate(top_configs.to_dict("records")):
-            display_total_gpus = row["total_gpus_used"] if preserve_ranking else total_gpus
-            display_concurrency = row["concurrency"] if preserve_ranking else row["concurrency"] * row["replicas"]
+            display_total_gpus = total_gpus
+            display_concurrency = row["concurrency"] * row["replicas"]
             if is_moe:
                 parallel = (
                     f"tp{_cli_underline(str(row['tp']))}"
@@ -369,42 +354,84 @@ def _plot_worker_setup_table(
                 ]
             )
             if show_power:
-                row_data.append(f"{row['power_w']:.1f}W")
+                row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
 
     buf.append(table.get_string())
     return "\n".join(buf)
 
 
-_OBJECTIVE_LABELS = {
-    "throughput": "throughput",
-    "throughput_per_gpu": "throughput per GPU",
-    "throughput_per_user": "throughput per user",
-    "e2e_latency": "end-to-end latency",
-    "goodput": "goodput",
-    "goodput_per_gpu": "goodput per GPU",
-    "pareto": "Pareto",
-}
-
-_OBJECTIVE_UNITS = {
-    "throughput": "tokens/s",
-    "throughput_per_gpu": "tokens/s/gpu",
-    "throughput_per_user": "tokens/s/user",
-    "e2e_latency": "ms",
-    "goodput": "tokens/s",
-    "goodput_per_gpu": "tokens/s/gpu",
-}
+def _task_gpu_budget(task: Task) -> int | None:
+    return task.effective_total_gpus if task.serving_mode == "afd" else task.total_gpus
 
 
-def _format_objective_value(target: str, value: object) -> str:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return "n/a"
-    if pd.isna(numeric):
-        return "n/a"
-    unit = _OBJECTIVE_UNITS.get(target)
-    return f"{numeric:,.2f}{f' {unit}' if unit else ''}"
+def _auto_result_tasks(
+    exp_name: str,
+    tasks: dict[str, Task],
+    *result_dfs: pd.DataFrame | None,
+) -> dict[str, Task]:
+    task_keys: list[str] = []
+    backends: set[str] = set()
+    for result_df in result_dfs:
+        if result_df is None or result_df.empty:
+            continue
+        if "_task_key" in result_df.columns:
+            task_keys.extend(str(value) for value in result_df["_task_key"].dropna().unique())
+        if "backend" in result_df.columns:
+            backends.update(str(value) for value in result_df["backend"].dropna().unique())
+
+    if task_keys:
+        resolved: dict[str, Task] = {}
+        for task_key in dict.fromkeys(task_keys):
+            if task_key not in tasks:
+                raise ValueError(
+                    f"Cannot save result bucket {exp_name!r}: result references unknown task key "
+                    f"{task_key!r}; available task keys: {sorted(tasks)}."
+                )
+            task = tasks[task_key]
+            if task.serving_mode != exp_name:
+                raise ValueError(
+                    f"Cannot save result bucket {exp_name!r}: task {task_key!r} has serving_mode={task.serving_mode!r}."
+                )
+            resolved[task_key] = task
+        return resolved
+
+    mode_tasks = {key: task for key, task in tasks.items() if task.serving_mode == exp_name}
+    if not backends:
+        return mode_tasks
+
+    resolved = {}
+    for backend_name in sorted(backends):
+        matches = {key: task for key, task in mode_tasks.items() if task.primary_backend_name == backend_name}
+        if len(matches) != 1:
+            raise ValueError(
+                f"Cannot save result bucket {exp_name!r} for backend {backend_name!r}: "
+                f"expected exactly one matching task, found {sorted(matches)}; "
+                f"available task keys: {sorted(tasks)}."
+            )
+        resolved.update(matches)
+    return resolved
+
+
+def _task_for_result_row(exp_name: str, row: pd.Series, exp_tasks: dict[str, Task]) -> Task:
+    task_key = row.get("_task_key")
+    if task_key is not None and not pd.isna(task_key):
+        task_key = str(task_key)
+        if task_key not in exp_tasks:
+            raise ValueError(
+                f"Cannot save result row for {exp_name!r}: task key {task_key!r} is not in "
+                f"the bucket tasks {sorted(exp_tasks)}."
+            )
+        return exp_tasks[task_key]
+
+    backend_name = row.get("backend")
+    matches = [task for task in exp_tasks.values() if task.primary_backend_name == backend_name]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Cannot save result row for {exp_name!r}, backend {backend_name!r}: expected "
+            f"exactly one task, found {len(matches)} among {sorted(exp_tasks)}."
+        )
+    return matches[0]
 
 
 def log_final_summary(
@@ -419,11 +446,6 @@ def log_final_summary(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     inclusive_tpot: bool = False,
-    extra_input_lines: list[str] | None = None,
-    objective_target: str | None = None,
-    best_objective_scores: dict[str, float] | None = None,
-    pareto_y_axis: dict[str, str] | None = None,
-    objective_directions: dict[str, bool] | None = None,
 ):
     """Log final summary of configuration results"""
     # display_* copies carry inclusive TPOT for printed values only.
@@ -438,7 +460,6 @@ def log_final_summary(
         display_pareto_fronts = pareto_fronts
 
     load_match = target_request_rate is not None or target_concurrency is not None
-    objective_aware = objective_target is not None and best_objective_scores is not None
 
     # Consolidate and format results into a summary box for clear presentation
     summary_box = []
@@ -461,22 +482,10 @@ def log_final_summary(
             chosen_task = tasks[chosen_exp]
     else:
         chosen_task = tasks[chosen_exp]
+    chosen_total_gpus = _task_gpu_budget(chosen_task)
 
     summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
-    summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
-    if extra_input_lines:
-        for line in extra_input_lines:
-            summary_box.append(f"    {line}")
-    if objective_aware:
-        if objective_target == "pareto":
-            x_axis = (pareto_x_axis or {}).get(chosen_exp, "unknown")
-            y_axis = (pareto_y_axis or {}).get(chosen_exp, "unknown")
-            summary_box.append(f"    Optimization Objective: Pareto ({y_axis} vs {x_axis})")
-        else:
-            maximize = (objective_directions or {}).get(objective_target, objective_target != "e2e_latency")
-            direction = "maximize" if maximize else "minimize"
-            label = _OBJECTIVE_LABELS.get(objective_target, objective_target)
-            summary_box.append(f"    Optimization Objective: {label} ({direction})")
+    summary_box.append(f"    Total GPUs: {chosen_total_gpus}")
 
     if load_match:
         # Load-match mode summary
@@ -497,28 +506,6 @@ def log_final_summary(
                         line += f" -- WARNING: only {pct:.1f}% of target load can be served"
                 summary_box.append(line)
         summary_box.append(f"    Best Experiment Chosen: {_cli_bold(chosen_exp)}")
-    elif objective_aware:
-        chosen_row = best_configs[chosen_exp].iloc[0] if not best_configs[chosen_exp].empty else pd.Series(dtype=object)
-        if objective_target == "pareto":
-            primary_axis = (pareto_y_axis or {}).get(chosen_exp, "objective_value")
-            raw_value = chosen_row.get(primary_axis)
-            value_text = _format_objective_value(primary_axis, raw_value)
-            bold_msg = _cli_bold(f"{chosen_exp} at {primary_axis}={value_text}")
-            summary_box.append(f"    Representative Experiment: {bold_msg} (primary Pareto objective)")
-        else:
-            raw_value = chosen_row.get("objective_value")
-            value_text = _format_objective_value(objective_target, raw_value)
-            label = _OBJECTIVE_LABELS.get(objective_target, objective_target)
-            comparisons = []
-            for exp_name, config_df in best_configs.items():
-                if config_df is None or config_df.empty:
-                    continue
-                comparisons.append(
-                    f"{exp_name}={_format_objective_value(objective_target, config_df.iloc[0].get('objective_value'))}"
-                )
-            comparison_text = f"; {', '.join(comparisons)}" if len(comparisons) > 1 else ""
-            bold_msg = _cli_bold(f"{chosen_exp} at {value_text} {label}{comparison_text}")
-            summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
     elif mode == "default":
         agg_value = best_throughputs.get("agg", 0.0)
         disagg_value = best_throughputs.get("disagg", 0.0)
@@ -546,55 +533,23 @@ def log_final_summary(
     summary_box.append("  " + "-" * 76)
 
     # ============================= overall summary
-    summary_box.append("  Selected Configuration:" if objective_aware else "  Overall Best Configuration:")
+    summary_box.append("  Overall Best Configuration:")
     best_config_df = display_best_configs[chosen_exp]
     best_throughput = best_throughputs[chosen_exp]
 
     if not best_config_df.empty:
         best_conf_details = best_config_df.iloc[0]
-        if objective_aware:
-            if objective_target == "pareto":
-                x_axis = (pareto_x_axis or {}).get(chosen_exp)
-                y_axis = (pareto_y_axis or {}).get(chosen_exp)
-                if y_axis:
-                    summary_box.append(
-                        f"    - Primary Pareto Objective ({y_axis}): "
-                        f"{_format_objective_value(y_axis, best_conf_details.get(y_axis))}"
-                    )
-                if x_axis and x_axis != y_axis:
-                    summary_box.append(
-                        f"    - Secondary Pareto Objective ({x_axis}): "
-                        f"{_format_objective_value(x_axis, best_conf_details.get(x_axis))}"
-                    )
-            else:
-                label = _OBJECTIVE_LABELS.get(objective_target, objective_target)
-                summary_box.append(
-                    f"    - Objective ({label}): "
-                    f"{_format_objective_value(objective_target, best_conf_details.get('objective_value'))}"
-                )
-
-            physical_throughput = best_conf_details.get("throughput")
-            if physical_throughput is not None and not pd.isna(physical_throughput):
-                summary_box.append(f"    - Throughput: {float(physical_throughput):,.2f} tokens/s")
-            summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
-            average_gpus = best_conf_details.get("average_gpus")
-            if average_gpus is not None and not pd.isna(average_gpus):
-                summary_box.append(f"    - Average Provisioned GPUs: {float(average_gpus):.2f}")
-        else:
-            summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
-            summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
+        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_total_gpus:,.2f} tokens/s")
+        summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
-        if objective_aware:
-            cluster_rr = float(best_conf_details["request_rate"])
-        else:
-            replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
-            cluster_rr = float(best_conf_details["request_rate"]) * replicas
+        replicas = chosen_total_gpus // int(best_conf_details["num_total_gpus"])
+        cluster_rr = float(best_conf_details["request_rate"]) * replicas
         summary_box.append(f"    - Request Rate: {cluster_rr:.2f} req/s")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
         summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
-    elif not objective_aware:
-        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
+    else:
+        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_total_gpus:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
     summary_box.append("  " + "-" * 76)
 
@@ -605,16 +560,13 @@ def log_final_summary(
         target_y_axis = "tokens/s/gpu_cluster"
         if pareto_x_axis:
             target_x_axis = pareto_x_axis.get(chosen_exp, target_x_axis)
-        if pareto_y_axis:
-            target_y_axis = pareto_y_axis.get(chosen_exp, target_y_axis)
         series_payload = []
         if target_x_axis != target_y_axis:
             for name, df in display_pareto_fronts.items():
                 if df is None or df.empty:
                     continue
                 series_x_axis = pareto_x_axis.get(name, target_x_axis) if pareto_x_axis else target_x_axis
-                series_y_axis = pareto_y_axis.get(name, target_y_axis) if pareto_y_axis else target_y_axis
-                if series_x_axis != target_x_axis or series_y_axis != target_y_axis:
+                if series_x_axis != target_x_axis:
                     continue
                 if target_x_axis not in df.columns or target_y_axis not in df.columns:
                     continue
@@ -682,7 +634,7 @@ def log_final_summary(
             config_df["backend"] = tasks[task_key].primary_backend_name
 
         exp_task = tasks[task_key]
-        total_gpus = getattr(exp_task, "total_gpus", None) or 0
+        total_gpus = _task_gpu_budget(exp_task) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
@@ -692,8 +644,6 @@ def log_final_summary(
             exp_task.is_moe,
             exp_task.request_latency,
             show_power,
-            preserve_ranking=objective_aware,
-            objective_target=objective_target,
         )
         summary_box.append(table_buf)
 
@@ -854,12 +804,12 @@ def save_results(
             if best_config_df is not None:
                 if "_per_ops_source" in best_config_df.columns:
                     best_config_per_ops_source = best_config_df["_per_ops_source"].tolist()
-                    best_config_df = best_config_df.drop(columns=["_per_ops_source"])
+                best_config_df = best_config_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
                 best_config_df.to_csv(os.path.join(exp_dir, "best_config_topn.csv"), index=False)
 
             # 2. Save all pareto dataframe (also stripped of _per_ops_source)
             if pareto_df is not None:
-                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source"], errors="ignore")
+                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
                 pareto_csv_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
@@ -868,17 +818,19 @@ def save_results(
                 backend_version_str = exp_task.primary_backend_version
             else:
                 # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
+                exp_tasks = _auto_result_tasks(
+                    exp_name,
+                    tasks,
+                    best_configs.get(exp_name),
+                    pareto_fronts.get(exp_name),
+                )
                 actual_backend_versions = {
-                    task.primary_backend_name: task.primary_backend_version for task in tasks.values()
+                    task.primary_backend_name: task.primary_backend_version for task in exp_tasks.values()
                 }
                 backend_version_str = ", ".join(
                     f"({backend_name}){backend_version}"
                     for backend_name, backend_version in actual_backend_versions.items()
                 )
-                exp_tasks = {
-                    f"{exp_name}_{backend_name}": tasks[f"{exp_name}_{backend_name}"]
-                    for backend_name in actual_backend_versions
-                }
                 # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
@@ -1004,8 +956,7 @@ def save_results(
                     # For multi-backend mode, get the task for this row's backend
                     if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
-                        row_task_key = f"{exp_name}_{row_backend}"
-                        row_task = tasks[row_task_key]
+                        row_task = _task_for_result_row(exp_name, result_df, exp_tasks)
                         row_backend_version = generated_backend_versions.get(
                             row_backend, row_task.primary_backend_version
                         )
@@ -1023,6 +974,7 @@ def save_results(
                             afd_artifact_warning_emitted = True
                         continue
 
+                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
                     cfg = task_config_to_generator_config(
                         task_config=row_task,
                         result_df=result_df,

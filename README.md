@@ -17,7 +17,7 @@ TPOT (Time per Output Token), optimizing throughput at a given latency becomes e
 `aiconfigurator` helps you find a strong starting configuration for disaggregated serving. Given your model, GPU
 count, and GPU type, it searches the configuration space and generates configuration files you can use for deployment with Dynamo or llm-d.
 
-For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:  
+For a technical deep dive into the design and methodology of AIConfigurator, please refer to our paper:
 [**AIConfigurator: Lightning-Fast Configuration Optimization for Multi-Framework LLM Serving**](https://arxiv.org/abs/2601.06288).
 
 The tool models LLM inference using collected data for a target machine and framework. It evaluates thousands of
@@ -29,38 +29,74 @@ Let's get started.
 
 ### Install from PyPI
 
+> **Published-wheel support: Linux x86-64 only.** The required
+> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is built
+> as a `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). Linux
+> aarch64 has no published core wheel and must build `./aic-core` and the root
+> project from source; that path is not covered by published-wheel support.
+> macOS and Windows have no supported installation path.
+
 ```bash
 pip3 install aiconfigurator
 ```
 
-The `aiconfigurator` wheel is self-contained: it includes the CLI, SDK, model
-and system data, Spica, and the native core extension. The
-`aiconfigurator-core` distribution remains available as a payload-free
-compatibility package that installs the matching `aiconfigurator` version.
+The upper `aiconfigurator` wheel contains the CLI and generator.
+It depends on the exact matching `aiconfigurator-core` wheel, which independently
+owns the SDK, model/system data, and native extension. Installing
+`aiconfigurator` therefore installs the complete product, while core-only
+consumers can install `aiconfigurator-core` without pulling in the upper layer.
+
+`Task` and the orchestration APIs live in the application wheel only:
+
+```python
+from aiconfigurator.sdk.task_v2 import Task
+```
+
+The core wheel intentionally does not expose `task_v2`; the standalone core
+never depends back on the application package.
+
+#### Upgrading from 0.9
+
+Version 0.9 shipped core files inside `aiconfigurator`. Package installers cannot
+safely transfer those same paths to the new dependency during a normal in-place
+upgrade because dependencies are installed before dependents. Remove the old
+owner first when crossing this package boundary:
+
+```bash
+python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
+python3 -m pip install 'aiconfigurator==0.10.0'
+```
+
+If a normal upgrade was already attempted, repair the core payload with:
+
+```bash
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+```
 
 ### Build and Install from Source
 
 ```bash
-# 1. Install Git LFS
-apt-get install git-lfs  # (Linux)
-# brew install git-lfs   # (macOS)
-
-# 2. Clone the repo
+# 1. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
-git lfs pull
 
-# 3. Create and activate a virtual environment
+# 2. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install aiconfigurator
+# 3. Install the standalone core, then the upper package
+pip3 install ./aic-core
 pip3 install .
 ```
+
+Current performance profiles are checked-in Parquet files, so normal builds
+and usage do not require Git LFS. Install Git LFS and run `git lfs pull` only
+when working with retained legacy `*.txt` perf assets or their compatibility
+tests.
 
 ### Build with Docker
 
 ```bash
-# This creates the self-contained AIC wheel and a compatibility metapackage wheel
+# This creates disjoint upper AIC and standalone core wheels
 docker build -f docker/Dockerfile --no-cache --target build -t aiconfigurator:latest .
 docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist dist/ && docker rm aic
 ```
@@ -71,42 +107,36 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 
 ```bash
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --thorough-sweep
-aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
-- **Experimental:** Spica thorough mode is an early preview. Its CLI, config schema, search behavior, and generated artifacts may change in future releases, and sweeps can take substantially longer than the legacy estimator.
-- Use `default --thorough-sweep` to run Spica's replay-backed thorough sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
-- Install the optional `spica` extra when using thorough mode from a packaged wheel, for example `pip install 'aiconfigurator[spica]'`.
-- See the [Spica guide](docs/spica/README.md) for its design, examples, and development workflow.
-- Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.
-- A native config's `goal` owns ranking and SLA semantics; CLI `--ttft` / `--tpot` defaults are not applied. Scalar targets and custom Pareto objectives are reported in their own units and directions.
-- For replay-backed Spica sweeps, put `workload.trace_path` and `workload.trace_format` in the `--thorough-config` YAML. Today Spica supports `trace_format: mooncake`; example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
-- In Spica thorough mode, `--save-dir DIR` writes sweep result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
-- Spica candidates using router, planner, or KVBM features currently require `--deployment-target dynamo-j2` for faithful deployment artifacts; other targets fail closed instead of silently dropping those features. KVBM artifact activation is supported for vLLM and TensorRT-LLM, not SGLang.
+- The experimental Spica smart sweeper now lives in Dynamo's standalone
+  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+  From a matching Dynamo checkout, install it with `python -m pip install ./aisimulate`, then use
+  `python -m aisimulate.spica` for Spica searches. Runnable configurations and tools live under
+  `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
-- Use `--deployment-target` to specify the deployment platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Dynamo Python config modifiers), or `llm-d` (llm-d Helm values). Backends vllm and sglang support llm-d; trtllm is Dynamo-only.
+- Use `--deployment-target` to specify the artifact platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. FPM V1 supports one aggregated vLLM worker group and emits exactly two artifacts: a reusable keepalive Pod or LeaderWorkerSet, and `run.sh`; see the [Generator overview](docs/generator_overview.md#fpm-v1-target).
 - Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
-- Use `--save-dir DIR` to generate deployment configuration files (Dynamo K8s manifests or llm-d Helm values, depending on `--deployment-target`).
+- Use `--save-dir DIR` to generate deployment artifacts for the selected target (Dynamo manifests, llm-d values/overlays, or an FPM resource workload + script).
 - Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `--systems-paths` to override where system YAMLs and data are loaded from (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 - Use `-h` for more options and customization.
 - SLA constraints:
   - `--ttft` and `--tpot` filter configurations that exceed either bound; omit a flag to leave that constraint unset.
-  - `--request-latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated 
-  latency stays within that budget, optionally honoring a provided `--ttft`. 
+  - `--request-latency` applies an end-to-end per-request limit. The CLI searches for all configurations whose estimated
+  latency stays within that budget, optionally honoring a provided `--ttft`.
   When this flag is set, `--tpot` becomes implicit and is ignored.
 
-Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
-For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.  
+Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).
+For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
 Any quantization set via `profiles` or YAML `config` overrides the HF defaults.
 
 For a full end-to-end walkthrough (support check, sweep, deploy, benchmark), see the [CLI User Guide -- End-to-End Workflow](docs/cli_user_guide.md#end-to-end-workflow).
@@ -147,7 +177,7 @@ agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
 
-An example here, 
+An example here,
 ```bash
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --isl 4000 --osl 500 --prefix 500 --ttft 300 --tpot 10
 ```
@@ -199,8 +229,8 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
       │                                                                •       │
    0.0┤                                                                        │
       └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘
-       0                60                120              180              240 
-tokens/s/gpu_cluster                 tokens/s/user                              
+       0                60                120              180              240
+tokens/s/gpu_cluster                 tokens/s/user
 
   ----------------------------------------------------------------------------
   Deployment Details:
@@ -241,7 +271,7 @@ You will get different results.
 
 ### Customized Configuration for aiconfigurator
 
-The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.  
+The `default` mode will create two experiments, one is `agg` and another one is `disagg` and then compare the results.
 To further customize (including the search space and per-component quantization), parameters are defined in a YAML file.
 Built-in YAML files are under `src/aiconfigurator/cli/example.yaml` and `src/aiconfigurator/cli/exps/*.yaml`
 Refer to the YAML file and modify as needed. Pass your customized YAML file to `exp` mode:
@@ -249,8 +279,8 @@ Refer to the YAML file and modify as needed. Pass your customized YAML file to `
 ```bash
 aiconfigurator cli exp --yaml-path customized_config.yaml
 ```
-We can use `exp` mode to compare multiple results, including disagg vs. agg, homegenous vs. heterogenous, and more than 2 experiments. 
-We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`  
+We can use `exp` mode to compare multiple results, including disagg vs. agg, homogeneous vs. heterogeneous, and more than 2 experiments.
+We've crafted several examples in `src/aiconfigurator/cli/exps/*.yaml`
 For the full guide, refer to [CLI User Guide](docs/cli_user_guide.md).
 
 ### Deploying to llm-d Platform
@@ -290,47 +320,8 @@ You can customize llm-d-specific settings using generator overrides:
 
 Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
 
-To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool writes the search results to disk. The legacy estimator also generates configuration files for your chosen deployment target.
-The folder structure varies based on mode and `--deployment-target`:
-
-**For Spica thorough mode** (`default --thorough-sweep` or `default --thorough-config spica_smart_sweep.yaml`; trace replay is configured in the Spica YAML):
-
-```text
-results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
-├── agg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── agg_config.yaml
-│       ├── bench_run.sh
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── disagg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── bench_run.sh
-│       ├── decode_config.yaml
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── prefill_config.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── pareto.csv
-├── pareto_frontier.png
-├── spica_candidates.csv
-└── spica_candidates.yaml
-```
-
-Spica candidate knobs that map to Dynamo runtime fields are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. This includes the resolved backend version, engine batching and context limits, router weights, planner objective/SLA and GPU limits, KVBM host-offload controls, prefix caching, attention-DP, and NextN. Active router/planner/KVBM candidates currently require `--deployment-target dynamo-j2`; unsupported targets fail closed rather than producing a deployment that differs from the evaluated candidate. KV-router admission-control pins are also rejected until Dynamo replay can score them.
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for your chosen deployment target.
+The folder structure varies based on `--deployment-target`:
 
 **For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 
@@ -346,7 +337,7 @@ results/QWEN3_32B_FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_904495
 │   │   │   ├── bench_run.sh          # aiperf benchmark sweep script (bare-metal)
 │   │   │   ├── k8s_bench.yaml        # aiperf benchmark sweep Job (Kubernetes)
 │   │   │   ├── k8s_deploy.yaml
-│   │   │   └── node_0_run.sh 
+│   │   │   └── node_0_run.sh
 │   │   └── generator_config.yaml
 │   ...
 ├── disagg
@@ -392,7 +383,7 @@ Use `--generator-config path/to/file.yaml` to load a YAML payload with `ServiceC
 - `--generator-set ServiceConfig.model_path=Qwen/Qwen3-32B-FP8`
 - `--generator-set K8sConfig.k8s_namespace=dynamo \`
 
-Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`. 
+Run `aiconfigurator cli default --generator-help` to print information that is sourced directly from `src/aiconfigurator/generator/config/deployment_config.yaml` and `backend_config_mapping.yaml`.
 
 ## Tuning with Advanced Features
 
@@ -486,7 +477,7 @@ To go through the process, refer to the [guidance](collector/README.md) under th
 
 For a comprehensive, interactive view of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, visit the **[Support Matrix on GitHub Pages](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)**. The page fetches the split support matrix CSV files directly from GitHub at load time and supports filtering by system, mode, model search, and switching between branches.
 
-The raw data is also available as [per-system CSV files](src/aiconfigurator/systems/support_matrix).
+The raw data is also available as [per-system CSV files](aic-core/src/aiconfigurator_core/systems/support_matrix).
 
 You can also check support via the CLI:
 ```bash

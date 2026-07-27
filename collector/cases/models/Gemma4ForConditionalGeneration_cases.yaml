@@ -8,9 +8,16 @@ model_paths:
   - google/gemma-4-26B-A4B
 include_base: true
 base_ops:
-  - attention_context
-  - attention_generation
   - gemm
+framework_specific_base_ops:
+  # vLLM 0.24's Gemma 4 path requires multimodal-prefix semantics that the
+  # persisted generic attention schema cannot express.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
 description: >
   Gemma 4 hybrid SWA/global attention plus routed-MoE collection plan.
 
@@ -22,6 +29,9 @@ model_case_values:
       num_key_value_heads: 8
       head_dim: 256
       window_size: 1024
+      sglang_runtime_window_size: 1023
+      sglang_scaling: 1.0
+      sglang_backends: {90: triton, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: gemma4_global_attention
       model_path: google/gemma-4-26B-A4B
@@ -29,6 +39,8 @@ model_case_values:
       num_key_value_heads: 2
       head_dim: 512
       window_size: 0
+      sglang_scaling: 1.0
+      sglang_backends: {90: triton, 100: trtllm_mha, 103: trtllm_mha, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
   moe:
     - model_path: google/gemma-4-26B-A4B
@@ -36,6 +48,7 @@ model_case_values:
       inter_size: 704
       topk: 8
       num_experts: 128
+      sglang_moe_activation: gelu
 
 all_frameworks_op_cases:
   moe:

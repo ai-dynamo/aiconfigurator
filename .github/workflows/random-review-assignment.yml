@@ -14,12 +14,12 @@ jobs:
     if: github.event.pull_request.draft == false
     
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          sparse-checkout: .github/CODEOWNERS
+          sparse-checkout: CODEOWNERS
           sparse-checkout-cone-mode: false
       
-      - uses: actions/github-script@v8
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const fs = require('fs');
@@ -35,7 +35,7 @@ jobs:
             console.log(`Already assigned: ${existingReviewers.join(', ')}`);
             
             // Parse CODEOWNERS using simple whitespace splitting (Robust & Fast)
-            const content = fs.readFileSync('.github/CODEOWNERS', 'utf8');
+            const content = fs.readFileSync('CODEOWNERS', 'utf8');
             
             // Split by any whitespace to get tokens, then grab only those starting with @
             const tokens = content.split(/\s+/).filter(t => t.startsWith('@'));

@@ -184,7 +184,10 @@ def test_query_gemm_fp8_static_requires_dynamic_fp8_table(mutable_comprehensive_
         )
 
 
-def test_query_gemm_fp8_static_sparse_shape_miss_is_structured(mutable_comprehensive_perf_db):
+def test_query_gemm_fp8_static_sparse_shape_transfers_or_misses_structurally(mutable_comprehensive_perf_db):
+    """With only (n=4096, k=5120) collected: a NEARBY uncollected shape (k=4096,
+    ~0.3 octaves away) degrades gracefully via nearest-site util transfer, while
+    a FAR shape (many octaves from anything) stays a structured miss."""
     db = mutable_comprehensive_perf_db
     db.backend = common.BackendName.sglang.value
     db._gemm_data = LoadedOpData(
@@ -202,11 +205,15 @@ def test_query_gemm_fp8_static_sparse_shape_miss_is_structured(mutable_comprehen
     )
     db.query_gemm.cache_clear()
 
+    near = db.query_gemm(1, 4096, 4096, common.GEMMQuantMode.fp8_static, database_mode=common.DatabaseMode.SILICON)
+    assert float(near) > 0
+    assert near.source == "silicon"
+
     with pytest.raises(PerfDataNotAvailableError, match=r"GEMM perf data not available.*fp8_static"):
         db.query_gemm(
             1,
-            4096,
-            4096,
+            64,
+            64,
             common.GEMMQuantMode.fp8_static,
             database_mode=common.DatabaseMode.SILICON,
         )

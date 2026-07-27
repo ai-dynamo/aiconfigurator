@@ -111,6 +111,9 @@ class TestCheckCompat:
             # vLLM
             ("vllm>=0.11.0", "0.14.0", True),
             ("vllm>=0.11.0", "0.10.0", False),
+            ("vllm==0.24.0", "0.24.0", True),
+            ("vllm==0.24.0", "0.24.0+cu129", True),
+            ("vllm==0.24.0", "0.23.0", False),
         ],
     )
     def test_compat_constraints(self, compat, runtime, expected):
@@ -241,8 +244,19 @@ class TestBuildCollections:
     def test_output_dict_shape(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
         c = colls[0]
-        assert set(c.keys()) == {"name", "type", "module", "get_func", "run_func", "perf_filename"}
+        assert set(c.keys()) == {
+            "name",
+            "type",
+            "module",
+            "get_func",
+            "run_func",
+            "perf_filename",
+            "unverified",
+            "unverified_sms",
+        }
         assert c["name"] == "vllm"
+        assert c["unverified"] is False
+        assert c["unverified_sms"] == ()
 
     def test_perf_filename_propagated(self):
         colls = build_collections(self.SAMPLE_REGISTRY, "vllm", "0.17.0", ops=["gemm"])
@@ -355,7 +369,7 @@ class TestRegistryIntegrity:
         return {
             node.name
             for node in ast.iter_child_nodes(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
         }
 
     def test_module_exports_declared_functions(self, registry):

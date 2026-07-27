@@ -9,7 +9,7 @@ from pathlib import Path
 
 from aiconfigurator.cli.api import cli_estimate
 
-DEFAULT_INPUT = Path(__file__).resolve().parents[2] / "src/aiconfigurator/systems/silicon_sample.csv"
+DEFAULT_INPUT = Path(__file__).resolve().parents[2] / "aic-core/src/aiconfigurator_core/systems/silicon_sample.csv"
 PARALLEL_FIELDS = ("tp_size", "pp_size", "attention_dp_size", "moe_tp_size", "moe_ep_size")
 AGG_FIELDS = ("batch_size", *PARALLEL_FIELDS)
 DISAGG_FIELDS = tuple(

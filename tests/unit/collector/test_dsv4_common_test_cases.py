@@ -19,6 +19,17 @@ _PRO_FP8 = "sgl-project/DeepSeek-V4-Pro-FP8"
 _SUPPORTED_MODELS = (_FLASH, _PRO, _FLASH_FP8, _PRO_FP8)
 
 
+def test_dsv4_context_structural_manifest_owns_model_position_admission():
+    manifest = common_test_cases._dsv4_context_structural_manifest(
+        batch_size=2,
+        seq_lens=[16, 8, 1],
+        prefix_lens=[0, 8, 16],
+        max_position_embeddings=16,
+    )
+
+    assert manifest == ((0, (16, 8, 1)), (8, (8, 1)))
+
+
 def test_dsv4_no_filter_uses_one_canonical_model(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])

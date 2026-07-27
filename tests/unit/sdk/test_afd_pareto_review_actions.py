@@ -14,6 +14,7 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk import pareto_analysis as pa
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
+from aiconfigurator.sdk.utils import HuggingFaceDownloadError
 
 pytestmark = pytest.mark.unit
 
@@ -614,10 +615,10 @@ def test_static_prefill_options_inherit_base_model_config(monkeypatch):
     monkeypatch.setattr(pa, "get_backend", lambda _name: object())
     monkeypatch.setattr(pa, "get_model", fake_get_model)
     monkeypatch.setattr(pa, "InferenceSession", FakeInferenceSession)
+    monkeypatch.setattr(pa, "resolve_context_fmha_by_data", lambda *_args, **_kwargs: None)
 
     base_model_config = ModelConfig(
         nextn=2,
-        nextn_accept_rates=[0.7, 0.2, 0.0, 0.0, 0.0],
         moe_backend="deepep_moe",
         attention_backend="fa3",
         enable_wideep=True,
@@ -639,7 +640,6 @@ def test_static_prefill_options_inherit_base_model_config(monkeypatch):
     assert captured_model_configs
     for model_config in captured_model_configs:
         assert model_config.nextn == 2
-        assert model_config.nextn_accept_rates == [0.7, 0.2, 0.0, 0.0, 0.0]
         assert model_config.moe_backend == "deepep_moe"
         assert model_config.attention_backend == "fa3"
         assert model_config.enable_wideep is True
@@ -650,3 +650,60 @@ def test_static_prefill_options_inherit_base_model_config(monkeypatch):
         assert model_config.attention_dp_size == 1
         assert model_config.moe_tp_size == 1
         assert model_config.moe_ep_size == model_config.tp_size
+
+
+def test_static_prefill_model_compatibility_failure_is_not_swallowed(monkeypatch):
+    failure = HuggingFaceDownloadError("offline while loading model config")
+
+    monkeypatch.setattr(pa, "check_is_moe", lambda _model_path: True)
+    monkeypatch.setattr(pa, "get_backend", lambda _name: object())
+
+    def fail_compatibility(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(pa, "resolve_context_fmha_by_data", fail_compatibility)
+
+    with pytest.raises(HuggingFaceDownloadError, match="offline while loading model config") as exc_info:
+        pa._enumerate_afd_prefill_options(
+            model_path="Qwen/Qwen3-MoE",
+            runtime_config=RuntimeConfig(isl=128, osl=32),
+            database=_FakeDatabase(),
+            backend_name="trtllm",
+            gpus_per_node=4,
+            prefill_parallel_config_list=[(1, 1, 1, 1, 1)],
+            prefill_batch_size_list=[1],
+        )
+
+    assert exc_info.value is failure
+
+
+def test_static_prefill_candidate_failure_does_not_drop_other_candidates(monkeypatch):
+    class FakeInferenceSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_static(self, **_kwargs):
+            return _FakeSummary()
+
+    def get_model_with_one_bad_candidate(_model_path, model_config, _backend_name):
+        if model_config.tp_size == 1:
+            raise ValueError("candidate-specific failure")
+        return object()
+
+    monkeypatch.setattr(pa, "check_is_moe", lambda _model_path: False)
+    monkeypatch.setattr(pa, "get_backend", lambda _name: object())
+    monkeypatch.setattr(pa, "get_model", get_model_with_one_bad_candidate)
+    monkeypatch.setattr(pa, "InferenceSession", FakeInferenceSession)
+    monkeypatch.setattr(pa, "resolve_context_fmha_by_data", lambda *_args, **_kwargs: None)
+
+    options = pa._enumerate_afd_prefill_options(
+        model_path="unit-test-model",
+        runtime_config=RuntimeConfig(isl=128, osl=32),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        gpus_per_node=4,
+        prefill_parallel_config_list=[(1, 1, 1, 1, 1), (2, 1, 1, 2, 1)],
+        prefill_batch_size_list=[1],
+    )
+
+    assert [option["tp"] for option in options] == [2]

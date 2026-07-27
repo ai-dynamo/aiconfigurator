@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: context_attention_perf
+  from_version: 1.0.0
+  reason: 'self-overlap: dir holds native data for this table; declaration covers missing-shape forward-fill only; mechanically derived from legacy SHARED_LAYER_REUSE.txt (newest-first effective donor); NOT kernel-identity-reviewed'
+  approved_by: yimingl
+- table: generation_attention_perf
+  from_version: 1.0.0
+  reason: 'self-overlap: dir holds native data for this table; declaration covers missing-shape forward-fill only; mechanically derived from legacy SHARED_LAYER_REUSE.txt (newest-first effective donor); NOT kernel-identity-reviewed'
+  approved_by: yimingl

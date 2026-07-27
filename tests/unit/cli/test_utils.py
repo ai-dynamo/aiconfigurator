@@ -5,6 +5,7 @@
 Unit tests for CLI utility functions in utils.py.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -54,6 +55,32 @@ class TestProcessExperimentResult:
         assert best_throughput > 0.0
         assert x_axis_col == "tokens/s/user"
         assert not pareto_frontier_df.empty
+
+    def test_afd_uses_effective_gpu_budget_for_picking(self, monkeypatch):
+        import aiconfigurator.cli.utils as cli_utils
+
+        captured = {}
+
+        def fake_pick_default(**kwargs):
+            captured.update(kwargs)
+            return {
+                "best_config_df": pd.DataFrame(),
+                "best_throughput": 0.0,
+                "pareto_frontier_df": pd.DataFrame(),
+            }
+
+        monkeypatch.setattr(cli_utils, "pick_default", fake_pick_default)
+        task = SimpleNamespace(
+            serving_mode="afd",
+            total_gpus=16,
+            effective_total_gpus=32,
+            tpot=50.0,
+            request_latency=None,
+        )
+
+        process_experiment_result(task, {"pareto_df": pd.DataFrame()})
+
+        assert captured["total_gpus"] == 32
 
     def test_process_result_with_request_latency_constraint(self):
         """Test processing result with request_latency constraint."""

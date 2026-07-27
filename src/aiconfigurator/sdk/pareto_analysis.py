@@ -21,7 +21,7 @@ from aiconfigurator.sdk.inference_session import (
     DisaggInferenceSession,
     InferenceSession,
 )
-from aiconfigurator.sdk.models import check_is_moe, get_model, resolve_context_fmha_compat
+from aiconfigurator.sdk.models import check_is_moe, get_model, resolve_context_fmha_by_data
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, strip_unicode_to_ascii
 
@@ -472,20 +472,31 @@ def _enumerate_afd_prefill_options(
         else:
             raise ValueError(f"{message} Reduce afd_config.prefill_search or set candidate_overflow='truncate'.")
 
+    if not candidates:
+        return []
+
+    # Context-FMHA compatibility depends on the model and role, not on a
+    # candidate's parallel shape. Resolve it once outside the per-candidate
+    # error boundary so model metadata/download failures remain visible.
+    resolved_base_model_config = copy.deepcopy(base_model_config)
+    resolve_context_fmha_by_data(
+        resolved_base_model_config,
+        model_path,
+        effective_database,
+        effective_backend_name,
+        is_context_role=True,
+    )
+
     options: list[dict] = []
     for tp, pp, dp, moe_tp, moe_ep, cp, num_gpus, batch_size in candidates:
         try:
-            model_config = copy.deepcopy(base_model_config)
+            model_config = copy.deepcopy(resolved_base_model_config)
             model_config.tp_size = tp
             model_config.pp_size = pp
             model_config.attention_dp_size = dp
             model_config.moe_tp_size = moe_tp
             model_config.moe_ep_size = moe_ep
             model_config.cp_size = cp
-            # AFD static prefill pool runs context attention (static_ctx); align with
-            # disagg prefill (cli/api.py) by downgrading fp8 fmha -> bfloat16 for
-            # DeepSeek-V3/Kimi so sglang context_mla (which lacks the fp8 slice) is hit.
-            resolve_context_fmha_compat(model_config, model_path, is_context_role=True)
             model = get_model(model_path, model_config, effective_backend_name)
             sess = InferenceSession(model=model, database=effective_database, backend=backend)
             prefill_runtime_config = copy.deepcopy(runtime_config)
@@ -634,10 +645,14 @@ def _combine_afd_row_with_static_prefill(
     tokens_s = seq_s * osl
     request_latency = ttft + decode_time
     num_total_gpus = decode_gpus + best_workers * best_option["num_gpus"]
-    decode_power = float(row.get("power_w", 0.0) or 0.0)
-    power_w = (
-        (best_option["power_w"] * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
-    )
+    decode_power = float(row.get("power_w", float("nan")))
+    prefill_power = float(best_option.get("power_w", float("nan")))
+    if pd.isna(decode_power) or pd.isna(prefill_power):
+        power_w = float("nan")
+    else:
+        power_w = (
+            (prefill_power * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
+        )
 
     combined = dict(row)
     combined.update(

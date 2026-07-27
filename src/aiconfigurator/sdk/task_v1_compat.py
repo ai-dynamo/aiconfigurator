@@ -287,4 +287,33 @@ def convert_v1_to_v2(v1: dict) -> dict:
             "silently ignored and make V2 results differ from V1. Remove them from the config and "
             f"migrate to the flat V2 schema (see cli/example.yaml). Fields: {', '.join(unmapped)}"
         )
+
+    # V1 expressed MTP acceptance as a per-position rate list; V2 takes the
+    # folded scalar ``nextn_accepted`` (average accepted draft tokens per step).
+    rates = out.pop("nextn_accept_rates", None)
+    nextn = out.get("nextn") or 0
+    if nextn > 0:
+        # V1 defaulted the rates when absent -- preserve that behavior here so
+        # converted configs reproduce V1 results.
+        rates = rates if rates is not None else [0.85, 0.3, 0.0, 0.0, 0.0]
+        out["nextn_accepted"] = _fold_accept_rates(nextn, rates)
+        logger.warning(
+            "convert_v1_to_v2: folded nextn_accept_rates=%s into nextn_accepted=%.4f (V2 replaces the "
+            "rate list with the scalar average accepted draft tokens per step).",
+            rates,
+            out["nextn_accepted"],
+        )
     return out
+
+
+def _fold_accept_rates(nextn: int, rates: list[float]) -> float:
+    """Fold a V1 per-position acceptance-rate list into the expected number of
+    accepted draft tokens per step (chain acceptance: E = sum_i prod_{j<=i} p_j)."""
+    expectation = 0.0
+    prob = 1.0
+    for i in range(nextn):
+        # V1 rate lists carried 5 positions; treat positions beyond the list as
+        # zero acceptance so nextn > len(rates) stays defined.
+        prob *= rates[i] if i < len(rates) else 0.0
+        expectation += prob
+    return expectation

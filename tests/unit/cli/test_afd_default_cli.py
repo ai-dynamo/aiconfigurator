@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli.report_and_save import save_results
+from aiconfigurator.cli.report_and_save import (
+    _auto_result_tasks,
+    _plot_worker_setup_table,
+    _task_for_result_row,
+    save_results,
+)
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk import task_v2 as task_v2_module
@@ -39,7 +44,19 @@ class TestServingModeArgument:
         max_batch_action = next(action for action in default_parser._actions if action.dest == "afd_max_a_batch_size")
         assert max_batch_action.default == 1024
 
-        args = cli_parser.parse_args(["default", "--afd-max-a-batch-size", "1536"])
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "16",
+                "--system",
+                "h200_sxm",
+                "--afd-max-a-batch-size",
+                "1536",
+            ]
+        )
         assert args.afd_max_a_batch_size == 1536
 
     def test_afd_max_a_batch_size_rejects_values_below_search_floor(self, cli_parser):
@@ -60,6 +77,12 @@ class TestServingModeArgument:
         args = cli_parser.parse_args(
             [
                 "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "16",
+                "--system",
+                "h200_sxm",
                 "--afd-max-candidates",
                 "500",
                 "--afd-candidate-overflow",
@@ -148,6 +171,34 @@ class TestV2AfdTask:
             assert (n_a + n_f) * 8 <= 32
             assert 8 % tp_a == 0
 
+    def test_afd_total_gpus_overrides_total_gpus_across_search_and_sweep(self):
+        task = Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            total_gpus=16,
+            afd_total_gpus=32,
+            afd_combined_with_pd=False,
+        )
+
+        assert task.effective_total_gpus == 32
+        assert task.sweep_afd_kwargs(database=object())["total_gpus"] == 32
+        assert any((n_a + n_f) * 8 > 16 for n_a, n_f, *_ in task._afd_parallel_config_list)
+
+    def test_afd_total_gpus_is_sufficient_without_total_gpus(self):
+        task = Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            afd_total_gpus=16,
+            afd_combined_with_pd=False,
+        )
+
+        task.validate()
+        assert task.effective_total_gpus == 16
+
     def test_insufficient_nodes_raises(self):
         with pytest.raises(ValueError, match="at least 2 nodes"):
             Task(
@@ -223,6 +274,62 @@ class TestV2AfdTask:
         assert task._afd_parallel_config_list == []
         assert captured["afd_config"].n_a_workers == 2
         assert result["request_rate"].tolist() == [1.0]
+
+    def test_pinned_topology_uses_afd_total_gpus_budget(self):
+        task = Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            total_gpus=16,
+            afd_total_gpus=32,
+            afd_n_a_nodes=2,
+            afd_n_f_nodes=2,
+            afd_tp_a=4,
+        )
+
+        assert task._afd_topology_pinned is True
+        assert task.effective_total_gpus == 32
+
+    def test_pinned_moe_topology_rejects_ep_that_does_not_divide_experts(self):
+        with pytest.raises(ValueError, match=r"f_moe_ep_size=24.*256 experts"):
+            Task(
+                serving_mode="afd",
+                model_path="deepseek-ai/DeepSeek-V3",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                total_gpus=32,
+                afd_n_a_nodes=1,
+                afd_n_f_nodes=3,
+                afd_tp_a=4,
+            )
+
+    def test_pinned_moe_topology_rejects_ep_larger_than_expert_count(self):
+        with pytest.raises(ValueError, match=r"f_moe_ep_size=264.*256 experts"):
+            Task(
+                serving_mode="afd",
+                model_path="deepseek-ai/DeepSeek-V3",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                total_gpus=272,
+                afd_n_a_nodes=1,
+                afd_n_f_nodes=33,
+                afd_tp_a=4,
+            )
+
+    def test_pinned_moe_topology_accepts_ep_dividing_experts_and_f_ranks(self):
+        task = Task(
+            serving_mode="afd",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            total_gpus=24,
+            afd_n_a_nodes=1,
+            afd_n_f_nodes=2,
+            afd_tp_a=4,
+        )
+
+        assert task._afd_topology_pinned is True
 
     def test_partial_pinned_topology_is_rejected(self):
         with pytest.raises(ValueError, match="requires afd_n_a_nodes, afd_n_f_nodes, and afd_tp_a together"):
@@ -327,10 +434,12 @@ class TestMergeByModeIncludesAfd:
         assert not merged_fronts["afd"].empty
         # schemas are not cross-contaminated
         assert "(a)nodes" not in merged_best["agg"].columns
+        assert merged_best["afd"]["_task_key"].tolist() == ["afd_trtllm"]
 
     def test_columns_afd_contains_new_fields(self):
         for col in (
             "parallel",
+            "nextn",
             "request_rate",
             "(p)workers",
             "(p)tp",
@@ -347,6 +456,70 @@ class TestMergeByModeIncludesAfd:
             "(d)impl",
         ):
             assert col in common.ColumnsAFD
+
+
+def test_auto_result_tasks_are_scoped_to_mode_and_preserve_variant_identity():
+    tasks = {
+        "agg_trtllm_fast": SimpleNamespace(serving_mode="agg", primary_backend_name="trtllm"),
+        "agg_trtllm_safe": SimpleNamespace(serving_mode="agg", primary_backend_name="trtllm"),
+        "disagg_trtllm": SimpleNamespace(serving_mode="disagg", primary_backend_name="trtllm"),
+    }
+    result_df = pd.DataFrame(
+        [
+            {
+                "backend": "trtllm",
+                "_task_key": "agg_trtllm_safe",
+            }
+        ]
+    )
+
+    exp_tasks = _auto_result_tasks("agg", tasks, result_df)
+    row_task = _task_for_result_row("agg", result_df.iloc[0], exp_tasks)
+
+    assert list(exp_tasks) == ["agg_trtllm_safe"]
+    assert row_task is tasks["agg_trtllm_safe"]
+
+
+def test_afd_worker_table_uses_prefill_num_gpus_per_worker():
+    config_df = pd.DataFrame(
+        [
+            {
+                "backend": "trtllm",
+                "tokens/s/gpu": 10.0,
+                "tokens/s/user": 1.0,
+                "request_rate": 1.0,
+                "ttft": 10.0,
+                "tpot": 10.0,
+                "request_latency": 20.0,
+                "concurrency": 1,
+                "num_total_gpus": 24,
+                "(a)nodes": 1,
+                "(a)tp": 4,
+                "(a)bs": 8,
+                "(a)workers": 2,
+                "(f)nodes": 1,
+                "(f)ep": 1,
+                "(f)workers": 8,
+                "(p)workers": 2,
+                "(p)tp": 1,
+                "(p)dp": 4,
+                "(p)num_gpus": 4,
+            }
+        ]
+    )
+
+    table = _plot_worker_setup_table(
+        "afd",
+        config_df,
+        total_gpus=24,
+        tpot_target=50.0,
+        top=1,
+        is_moe=False,
+        request_latency_target=None,
+        show_power=False,
+    )
+
+    assert "24 (=A8+F8+P8)" in table
 
 
 class TestExpLoaderAcceptsAfd:
@@ -425,7 +598,7 @@ class TestExpLoaderAcceptsAfd:
                 "total_gpus": 32,
                 "database_mode": "HYBRID",
                 "nextn": 2,
-                "nextn_accept_rates": [0.9, 0.5],
+                "nextn_accepted": 1.35,
                 "gemm_quant_mode": "fp8",
                 "afd_combined_with_pd": False,
                 "afd_tp_a_candidates": [4],
@@ -439,7 +612,7 @@ class TestExpLoaderAcceptsAfd:
         task = build_experiment_tasks(config=config)["afd_fields"]
 
         assert task.nextn == 2
-        assert task.nextn_accept_rates == [0.9, 0.5]
+        assert task.nextn_accepted == pytest.approx(1.35)
         assert task.gemm_quant_mode == common.GEMMQuantMode.fp8
         assert task.afd_combined_with_pd is False
         assert task.afd_tp_a_candidates == [4]
@@ -538,7 +711,7 @@ def test_save_results_skips_afd_deployment_artifacts(tmp_path, monkeypatch, capl
         backend_version="test-version",
         total_gpus=16,
     )
-    result = pd.DataFrame([{"tokens/s/user": 10.0, "tokens/s/gpu": 2.0}])
+    result = pd.DataFrame([{"tokens/s/user": 10.0, "tokens/s/gpu": 2.0, "power_w": float("nan")}])
     monkeypatch.setattr(
         report_and_save,
         "task_config_to_generator_config",
@@ -558,5 +731,66 @@ def test_save_results_skips_afd_deployment_artifacts(tmp_path, monkeypatch, capl
 
     result_dir = next(tmp_path.rglob("exp_config.yaml")).parent
     assert (result_dir / "best_config_topn.csv").is_file()
+    assert pd.isna(pd.read_csv(result_dir / "best_config_topn.csv").loc[0, "power_w"])
     assert not (result_dir / "top1").exists()
     assert "Skipping deployment artifact generation for AFD experiment 'afd'" in caplog.text
+
+
+def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
+    tasks = {
+        "agg_trtllm": Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="test-version",
+            total_gpus=16,
+        ),
+        "agg_vllm": Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="vllm",
+            backend_version="test-version",
+            total_gpus=16,
+        ),
+        "disagg_trtllm": Task(
+            serving_mode="disagg",
+            prefill_model_path="Qwen/Qwen3-32B",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name="trtllm",
+            prefill_backend_version="test-version",
+            decode_model_path="Qwen/Qwen3-32B",
+            decode_system_name="h200_sxm",
+            decode_backend_name="trtllm",
+            decode_backend_version="test-version",
+            total_gpus=16,
+        ),
+        "afd_trtllm": Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="test-version",
+            total_gpus=16,
+            afd_combined_with_pd=False,
+        ),
+    }
+    empty_results = {mode: pd.DataFrame() for mode in ("agg", "disagg", "afd")}
+
+    save_results(
+        SimpleNamespace(inclusive_tpot=False),
+        best_configs=empty_results,
+        pareto_fronts=empty_results,
+        tasks=tasks,
+        save_dir=str(tmp_path),
+        backend="auto",
+    )
+
+    result_dir = next(tmp_path.rglob("pareto_frontier.png")).parent
+    assert (result_dir / "agg" / "trtllm_exp_config.yaml").is_file()
+    assert (result_dir / "agg" / "vllm_exp_config.yaml").is_file()
+    assert (result_dir / "disagg" / "trtllm_exp_config.yaml").is_file()
+    assert not (result_dir / "disagg" / "vllm_exp_config.yaml").exists()
+    assert (result_dir / "afd" / "trtllm_exp_config.yaml").is_file()
+    assert not (result_dir / "afd" / "vllm_exp_config.yaml").exists()

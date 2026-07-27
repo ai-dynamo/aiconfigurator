@@ -13,7 +13,9 @@ Sub-kernels (GLM-5 DSA prefill path, in order):
     1. ``deep_gemm.fp8_mqa_logits``  (mqa)      indexer scoring, NON-paged ragged
                                                 kv over the FULL context. 32 idx
                                                 heads x head_dim 128.
-    2. ``fast_topk_v2`` (sgl_kernel) (topk)     top-2048 over the mqa logits
+    2. ``fast_topk_transform_fused`` (sgl_kernel) (topk)
+                                                top-2048 plus the paged output
+                                                transform over the mqa logits
                                                 (FULL length, NOT /4).
     3. ``flash_mla_sparse_fwd``      (dsa_attn) sparse FMLA over topk-selected
                                                 positions; d_qk=576 (kv_lora 512
@@ -25,7 +27,10 @@ CSV schema matches the aic module CSVs (``isl``=M, ``step``=past_kv).
 
 from __future__ import annotations
 
+__compat__ = "sglang==0.5.14"
+
 import os
+import sys
 
 import torch
 
@@ -43,9 +48,9 @@ from collector.sglang.deepseekv4_sparse_modules import (
 )
 
 try:
-    from collector.sglang.helper import log_perf
+    from collector.sglang.helper import get_sm_version, log_perf
 except ModuleNotFoundError:
-    from helper import log_perf
+    from helper import get_sm_version, log_perf
 
 __all__ = [
     "get_glm5_dsa_attn_test_cases",
@@ -54,33 +59,31 @@ __all__ = [
     "run_glm5_dsa_sparse_kernel_worker",
 ]
 
-GLM5_DEFAULT_MODEL = "nvidia/GLM-5-NVFP4"
 GLM5_ARCHITECTURE = "GlmMoeDsaForCausalLM"
 
 
 def _selected_glm5_models():
     """GLM model to collect sparse kernels for. The kernels (mqa/topk/dsa_attn)
-    are bf16 and identical across GLM-5 variants, differing only in prefix range.
-    When both GLM-5-NVFP4 and GLM-5.2-NVFP4 are configured, collect only
-    GLM-5.2-NVFP4 (longest context — its range + the max_position ceiling in the
-    derived shapes covers GLM-5); otherwise the default."""
+    are checkpoint-quantization-independent and use only model geometry. On
+    SM90, select the registered BF16 GLM-5 identity to match the supported
+    full-module plan without advertising an NVFP4 artifact. On SM100/103,
+    prefer GLM-5.2-NVFP4 because its longer range covers GLM-5. Return no cases
+    when a targeted model filter selects an unsupported or non-GLM checkpoint."""
     try:
         from collector.sglang.collect_mla_module import get_mla_module_model_specs
     except ModuleNotFoundError:
         from collect_mla_module import get_mla_module_model_specs
-    # apply_model_filter=False: decide the representative from the configured
-    # set, independent of a COLLECTOR_MODEL_PATH pin, so a pin to GLM-5.2-NVFP4
-    # still resolves sparse to GLM-5.2-NVFP4 (not the default). Prefer the
-    # longest-context GLM present (GLM-5.2 covers GLM-5 via its range + the
-    # max_position ceiling in derived shapes); only the genuine absence of any
-    # GLM-5.x configured spec falls back to the default. Discovery errors
-    # propagate instead of being silently swallowed into the default path.
-    paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa", apply_model_filter=False)}
+    # Respect COLLECTOR_MODEL_PATH for targeted runs. Without a model filter,
+    # prefer the longest-context GLM representative so one full/raw sparse sweep
+    # covers the shorter GLM-5 range as well.
+    paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa")}
+    if get_sm_version() not in {100, 103, 120}:
+        return ["zai-org/GLM-5"] if "zai-org/GLM-5" in paths else []
     if "nvidia/GLM-5.2-NVFP4" in paths:
         return ["nvidia/GLM-5.2-NVFP4"]
     if "nvidia/GLM-5-NVFP4" in paths:
         return ["nvidia/GLM-5-NVFP4"]
-    return [GLM5_DEFAULT_MODEL]
+    return []
 
 
 def _glm5_sparse_config(model_path: str):
@@ -161,7 +164,7 @@ def _write_row(
     }
     if score_mode is not None:
         item["score_mode"] = score_mode
-    log_perf(
+    if not log_perf(
         item_list=[item],
         framework="SGLang",
         version="kernel-level",
@@ -169,12 +172,42 @@ def _write_row(
         op_name=op_name_map[kernel],
         kernel_source=kernel_source or KERNEL_TO_KERNEL_SOURCE[kernel],
         perf_filename=perf_filename,
-    )
+    ):
+        raise RuntimeError(f"failed to persist {architecture} sparse row to {perf_filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Kernel benches (standalone, synthetic inputs)
 # ═══════════════════════════════════════════════════════════════════════
+def _glm5_score_rows_per_chunk(num_q, num_k, device):
+    """Bound one standalone FP32 score workspace by query rows.
+
+    This keeps MQA logits and context top-k on the same production-derived
+    *standalone* policy.  It is not SGLang serving's complete policy: a real
+    Indexer also applies finalized ``mem_fraction_static`` state and caches the
+    first non-capture budget while the model and KV pool are resident.  The
+    kernel collector has none of that state, so it deliberately derives a
+    fresh, device-capacity-neutral bound rather than hard-coding an H20 budget.
+    """
+    if num_q * num_k < 8_000_000:
+        return num_q
+
+    from sglang.srt.environ import envs
+
+    free_mem, total_mem = torch.cuda.mem_get_info(device)
+    free_mem_fraction = envs.SGLANG_DSA_MQA_LOGITS_FREE_MEM_FRACTION.get()
+    budget_bytes = min(int(free_mem * free_mem_fraction), int(total_mem * 0.30))
+    rows = min(num_q, max(1, budget_bytes // (num_k * 4)))
+    if rows < num_q:
+        chunks = (num_q + rows - 1) // rows
+        print(
+            "  standalone score chunks: "
+            f"Q={num_q} K={num_k} rows={rows} chunks={chunks} "
+            f"budget_bytes={budget_bytes} free_bytes={free_mem} total_bytes={total_mem}"
+        )
+    return rows
+
+
 def _bench_glm5_mqa(M, past_kv, isl, *, index_n_heads, index_head_dim, device):  # noqa: N803
     """deep_gemm.fp8_mqa_logits — ragged batch of bs = M // isl requests.
     M = bs*isl query tokens over a CONCATENATED per-request KV cache (bs
@@ -198,23 +231,47 @@ def _bench_glm5_mqa(M, past_kv, isl, *, index_n_heads, index_head_dim, device): 
     ks = seg_start
     ke = (seg_start + past_kv + causal).clamp(max=full_s)
 
-    def kernel_fn():
-        return fp8_mqa_logits(q, (k_fp8, k_scale), weights, ks, ke, clean_logits=False)
+    # Match SGLang 0.5.14 Indexer._get_topk_ragged: fp8_mqa_logits
+    # materializes a float32 [query_rows, concatenated_kv_rows] workspace, so
+    # large ragged batches must be split along Q. Without this loop the
+    # standalone collector can request terabytes even though the serving path
+    # runs the same shape in bounded chunks.
+    query_rows_per_chunk = _glm5_score_rows_per_chunk(M, full_s, device)
 
-    return _bench_cuda_graph(kernel_fn, allow_graph_fail=True, device=device)
+    def kernel_fn():
+        logits = None
+        for start in range(0, M, query_rows_per_chunk):
+            end = min(start + query_rows_per_chunk, M)
+            logits = fp8_mqa_logits(
+                q[start:end],
+                (k_fp8, k_scale),
+                weights[start:end],
+                ks[start:end],
+                ke[start:end],
+                clean_logits=False,
+            )
+        return logits
+
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 def _glm5_fuse_topk_enabled() -> bool:
     """Whether SGLang runs the FUSED topk+index-transform (env default = True)."""
-    try:
-        from sglang.srt import environ as _environ
+    from sglang.srt import environ as _environ
 
-        return bool(_environ.envs.SGLANG_NSA_FUSE_TOPK.get())
-    except Exception:
-        return True  # sglang environ.py: SGLANG_NSA_FUSE_TOPK = EnvBool(True)
+    return bool(_environ.envs.SGLANG_DSA_FUSE_TOPK.get())
 
 
-def _make_glm5_topk_scores(mode, rows, seq, device, generator, topk_k):
+def _glm5_topk_metadata(bs, isl, past_kv):
+    """Return causal row lengths, ragged KV offsets, and full KV width."""
+    max_seqlen_k = max(1, past_kv + isl)
+    lengths = [past_kv + token_idx + 1 for _ in range(bs) for token_idx in range(isl)]
+    cu_seqlens_k = [request_idx * max_seqlen_k for request_idx in range(bs + 1)]
+    topk_indices_offset = [cu_seqlens_k[request_idx] for request_idx in range(bs) for _ in range(isl)]
+    return lengths, topk_indices_offset, max_seqlen_k
+
+
+def _make_glm5_topk_scores(mode, lengths, seq, device, generator, topk_k):
     """DSV4-style score distributions for the topk DELTA calibration.
 
     * ``flat``     — all zeros: degenerate worst case (every element ties, so
@@ -222,32 +279,46 @@ def _make_glm5_topk_scores(mode, rows, seq, device, generator, topk_k):
     * ``top_last`` — background ~-5 with the last ``topk_k`` positions ~+5:
                      representative (clear winners, the common real case).
 
-    Width padded to a multiple of 4 (kernel TMA 16B alignment); kernel reads
-    ``[:, :seq]``.
+    Each row's winners occupy its own causal ``[length-k:length)`` span.
+    This helper is used by paged decode.  SGLang's page size and DeepGEMM
+    block size are 64, so its MQA logits stride is ``ceil(seq / 64) * 64``.
     """
-    pad = ((seq + 3) // 4) * 4
+    rows = lengths.numel()
+    pad = ((seq + 63) // 64) * 64
     if mode == "flat":
         return torch.zeros(rows, pad, dtype=torch.float32, device=device)
     if mode == "top_last":
         s = -5.0 + 0.05 * torch.randn(rows, pad, dtype=torch.float32, device=device, generator=generator)
-        k = min(topk_k, seq)
-        s[:, seq - k : seq] = 5.0 + torch.randn(rows, k, dtype=torch.float32, device=device, generator=generator)
+        counts = lengths.to(torch.int64).clamp(min=0, max=min(topk_k, seq))
+        offsets = torch.arange(topk_k, device=device)
+        columns = lengths.to(torch.int64).unsqueeze(1) - counts.unsqueeze(1) + offsets.unsqueeze(0)
+        valid = offsets.unsqueeze(0) < counts.unsqueeze(1)
+        row_ids = torch.arange(rows, device=device).unsqueeze(1).expand_as(columns)
+        selected = int(valid.sum().item())
+        s[row_ids[valid], columns[valid]] = 5.0 + torch.randn(
+            selected, dtype=torch.float32, device=device, generator=generator
+        )
         return s.contiguous()
     raise ValueError(f"unknown topk score mode: {mode}")
 
 
 def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
-    """GLM-5 indexer top-k — the kernel SGLang's NSA backend ACTUALLY runs,
+    """GLM-5 indexer top-k — the kernel SGLang's DSA backend ACTUALLY runs,
     benched as a FLAT/TOP_LAST DELTA calibration (DSV4-style).
 
-    Kernel selection (``SGLANG_NSA_FUSE_TOPK`` env default = True → fused):
-      * prefill / context (isl > 1, ragged): ``fast_topk_transform_ragged_fused``
-      * decode  / generation (isl == 1, paged): ``fast_topk_transform_fused``
-      * fuse-topk disabled: plain ``fast_topk_v2``.
-    All metadata (``cu_seqlens`` / ``topk_indices_offset`` / page table /
-    lengths) is built from ``(bs, isl, past_kv)`` EXACTLY as the NSA backend
-    does — no model weights — so the standalone call is the real kernel with
-    real arg shapes.
+    Kernel selection for the fixed SGLang 0.5.14 retained profile
+    (``SGLANG_DSA_FUSE_TOPK`` env default = True): both context and decode use
+    the PAGED ``fast_topk_transform_fused`` output transform.  The emitted FP8
+    profile selects ``flashmla_kv`` on SM90 and ``flashmla_kv``/``trtllm`` on
+    SM100/103.  SGLang uses the RAGGED transform only for an explicitly forced
+    FP8 + ``flashmla_sparse`` EXTEND profile, which this collector does not
+    emit and must not merge into the same persisted contract.  Fuse-topk
+    disabled uses plain ``fast_topk_v2``.
+
+    Context still uses the production concatenated-ragged MQA score geometry
+    and absolute row starts; PAGED describes how selected local indices are
+    mapped through the request page table, not the score layout.  Decode keeps
+    this release collector's separate compact paged calibration.
 
     topk timing is DATA-DEPENDENT (measured 3-22% spread by score distribution),
     so instead of guessing the real logit distribution we bench two anchors —
@@ -256,47 +327,130 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
     DELTA as the data-dependent correction.  Trivial when the full per-request
     context ``<= topk`` (select-all, no data-dependent cost) → both ``0``.
 
+    Context rows use production's concatenated ragged-K geometry and bound the
+    synthetic FP32 score along Q.  Their reported latency is the sum of
+    independently warmed steady-state chunk-kernel measurements.  It excludes
+    score construction, Python orchestration, and power, and is not an
+    end-to-end timing of production's interleaved MQA/top-k/copy loop.  Decode
+    remains the existing single-kernel paged calibration.
+
     Returns ``(results, kernel_source)``.
     """
     from sgl_kernel import (
         fast_topk_transform_fused,
-        fast_topk_transform_ragged_fused,
         fast_topk_v2,
     )
 
-    try:
-        from sglang.srt.layers.attention.nsa_backend import compute_cu_seqlens
-    except Exception:
-        from sglang.srt.layers.attention.dsa.dsa_backend_mtp_precompute import compute_cu_seqlens
-
     fused = _glm5_fuse_topk_enabled()
-    if not fused:
-        kernel_src = "fast_topk_v2"
-    elif isl == 1:
-        kernel_src = "fast_topk_transform_fused"
-    else:
-        kernel_src = "fast_topk_transform_ragged_fused"
+    kernel_src = "fast_topk_transform_fused" if fused else "fast_topk_v2"
 
     # GLM-5 is uniform DSA (ratio=1): per-request full context = past_kv + isl.
-    seq = max(1, past_kv + isl)
-    if seq <= topk:
+    length_values, topk_offset_values, max_seqlen_k = _glm5_topk_metadata(bs, isl, past_kv)
+    if max_seqlen_k <= topk:
         # nothing to select -> no data-dependent cost; DELTA is 0.
         return [("flat", 0.0), ("top_last", 0.0)], kernel_src
 
-    lengths = torch.full((M,), seq, dtype=torch.int32, device=device)
-    ks = torch.zeros(M, dtype=torch.int32, device=device)
+    lengths = torch.tensor(length_values, dtype=torch.int32, device=device)
     generator = torch.Generator(device=device)
     generator.manual_seed(1234)
 
+    if isl > 1:
+        # SGLang's MQA output is [Q, sum(request KV lengths)], not one compact
+        # per-request score row. ``topk_offset_values`` is the absolute start
+        # of each request's valid span in that concatenated score.
+        full_k = bs * max_seqlen_k
+        row_starts = torch.tensor(topk_offset_values, dtype=torch.int32, device=device)
+        rows_per_chunk = _glm5_score_rows_per_chunk(M, full_k, device)
+        mode_latency_ms = {"flat": 0.0, "top_last": 0.0}
+        chunked = rows_per_chunk < M
+        if fused:
+            page_table = torch.arange(full_k, dtype=torch.int32, device=device).view(bs, max_seqlen_k)
+            request_for_row = torch.repeat_interleave(torch.arange(bs, dtype=torch.int64, device=device), isl)
+            base_cu_seqlens_q = torch.arange(bs + 1, dtype=torch.int32, device=device) * isl
+
+        for start in range(0, M, rows_per_chunk):
+            end = min(start + rows_per_chunk, M)
+            lengths_chunk = lengths[start:end]
+            starts_chunk = row_starts[start:end]
+            score = torch.empty((end - start, full_k), dtype=torch.float32, device=device)
+            if fused and chunked:
+                # Match Indexer._get_topk_ragged's PAGED chunk path: each query
+                # row is a length-one sequence and selects its request's page
+                # table row through token_to_batch_idx.
+                page_table_chunk = page_table[request_for_row[start:end]]
+                cu_seqlens_q_chunk = torch.arange(end - start + 1, dtype=torch.int32, device=device)
+            elif fused:
+                # The unchunked production call keeps the original request
+                # metadata rather than expanding one page-table row per token.
+                page_table_chunk = page_table
+                cu_seqlens_q_chunk = base_cu_seqlens_q
+
+            # Reuse one score allocation for the two calibration anchors.  A
+            # benchmark closure must be released before the buffer is changed
+            # because CUDA Graph capture fixes its input address and lifetime.
+            for mode in ("flat", "top_last"):
+                if mode == "flat":
+                    score.zero_()
+                else:
+                    score.normal_(mean=-5.0, std=0.05, generator=generator)
+                    counts = lengths_chunk.to(torch.int64).clamp(min=0, max=topk)
+                    offsets = torch.arange(topk, dtype=torch.int64, device=device)
+                    columns = (
+                        starts_chunk.to(torch.int64).unsqueeze(1)
+                        + lengths_chunk.to(torch.int64).unsqueeze(1)
+                        - counts.unsqueeze(1)
+                        + offsets.unsqueeze(0)
+                    )
+                    valid = offsets.unsqueeze(0) < counts.unsqueeze(1)
+                    row_ids = torch.arange(end - start, device=device).unsqueeze(1).expand_as(columns)
+                    selected = int(valid.sum().item())
+                    winners = torch.empty(selected, dtype=torch.float32, device=device)
+                    winners.normal_(mean=5.0, std=1.0, generator=generator)
+                    score[row_ids[valid], columns[valid]] = winners
+
+                if fused:
+                    kernel_fn = lambda: fast_topk_transform_fused(
+                        score=score,
+                        lengths=lengths_chunk,
+                        page_table_size_1=page_table_chunk,
+                        cu_seqlens_q=cu_seqlens_q_chunk,
+                        topk=topk,
+                        row_starts=starts_chunk,
+                    )
+                else:
+                    kernel_fn = lambda: fast_topk_v2(
+                        score,
+                        lengths_chunk,
+                        topk,
+                        row_starts=starts_chunk,
+                    )
+                # Fail closed if any context chunk cannot use the declared
+                # independent CUDA-graph benchmark boundary.  Mixing eager and
+                # graph timings inside one additive row would be ambiguous.
+                measured = _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
+                mode_latency_ms[mode] += measured["latency_ms"]
+                del kernel_fn
+            del score
+            if fused:
+                # Advanced indexing materializes the per-row page table for a
+                # real chunk. Release it before the next score/table pair is
+                # allocated; retaining one prior chunk can triple transient
+                # workspace at batch size one.
+                del page_table_chunk, cu_seqlens_q_chunk
+
+        return [(mode, round(mode_latency_ms[mode], 6)) for mode in ("flat", "top_last")], kernel_src
+
+    # Production _get_topk_paged omits row_starts for decode.  In sgl-kernel
+    # that optional argument is also the dispatch signal for the dedicated
+    # decode transform kernel, so a zero tensor is not equivalent here.
     if not fused:
 
         def make_fn(score):
-            return lambda: fast_topk_v2(score, lengths, topk, row_starts=ks)
-    elif isl == 1:
-        cols = max(topk, 1)
-        pt = torch.arange(cols, dtype=torch.int32, device=device).clamp(max=seq - 1)
-        page_table_size_1 = pt.view(1, cols).repeat(M, 1).contiguous()
-        cu_seqlens_q = compute_cu_seqlens(torch.ones(M, dtype=torch.int32, device=device))
+            return lambda: fast_topk_v2(score, lengths, topk)
+    else:
+        pt = torch.arange(max_seqlen_k, dtype=torch.int32, device=device)
+        page_table_size_1 = pt.view(1, max_seqlen_k).repeat(M, 1).contiguous()
+        cu_seqlens_q = torch.arange(M + 1, dtype=torch.int32, device=device)
 
         def make_fn(score):
             return lambda: fast_topk_transform_fused(
@@ -305,58 +459,44 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
                 page_table_size_1=page_table_size_1,
                 cu_seqlens_q=cu_seqlens_q,
                 topk=topk,
-                row_starts=ks,
-            )
-    else:
-        seqlens_q = torch.full((bs,), isl, dtype=torch.int32, device=device)
-        cu_seqlens_q_topk = compute_cu_seqlens(seqlens_q)
-        cu_topk_indices_offset = torch.repeat_interleave(cu_seqlens_q_topk[:-1], seqlens_q)
-
-        def make_fn(score):
-            return lambda: fast_topk_transform_ragged_fused(
-                score=score,
-                lengths=lengths,
-                topk_indices_offset=cu_topk_indices_offset,
-                topk=topk,
-                row_starts=ks,
             )
 
     results = []
     for mode in ("flat", "top_last"):
-        score = _make_glm5_topk_scores(mode, M, seq, device, generator, topk)
-        r = _bench_cuda_graph(make_fn(score), allow_graph_fail=True, device=device)
+        score = _make_glm5_topk_scores(mode, lengths, max_seqlen_k, device, generator, topk)
+        r = _bench_cuda_graph(make_fn(score), allow_graph_fail=False, device=device)
         results.append((mode, round(r["latency_ms"], 6)))
     return results, kernel_src
 
 
 def _bench_glm5_dsa_attn(M, past_kv, isl, *, native_heads, d_qk, d_v, topk, device):  # noqa: N803
     """flash_mla_sparse_fwd — sparse FMLA, ragged batch of bs = M // isl reqs.
-    q (M=bs*isl, heads->pad128, d_qk), kv = CONCATENATED bs segments of
+    q (M=bs*isl, heads->64 on SM90 / pad128 on SM100+, d_qk), kv = CONCATENATED bs segments of
     (past_kv + isl); indices (M, 1, K) are absolute into each token's own
-    segment. K = min(topk, per-request context)."""
+    segment. The production top-k transform always returns ``topk`` columns,
+    filling positions beyond the current context with -1."""
     from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
     bs = max(1, M // isl)
     seg = past_kv + isl
     full_s = max(1, bs * seg)  # concatenated bs segments of (past_kv + isl)
-    k = min(topk, seg)  # topk capped by PER-REQUEST context
-    pad_heads = 128 if (native_heads % 128) else native_heads
-    q = torch.randn(M, pad_heads, d_qk, dtype=torch.bfloat16, device=device)
+    valid_k = min(topk, seg)
+    sm_major, _ = torch.cuda.get_device_capability(device)
+    q_heads = 128 if sm_major >= 10 else native_heads
+    q = torch.randn(M, q_heads, d_qk, dtype=torch.bfloat16, device=device)
     kv = torch.randn(full_s, 1, d_qk, dtype=torch.bfloat16, device=device)
     # each token selects k positions inside its own segment [r*seg, r*seg+seg)
     seg_start = torch.repeat_interleave(torch.arange(bs, dtype=torch.int32, device=device) * seg, isl)
-    indices = seg_start.view(M, 1, 1) + torch.arange(k, dtype=torch.int32, device=device).view(1, 1, k)
-    if k % 64:
-        pad = 64 - k % 64
-        indices = torch.cat(
-            [indices, torch.full((M, 1, pad), -1, dtype=torch.int32, device=device)], dim=-1
-        ).contiguous()
+    indices = torch.full((M, 1, topk), -1, dtype=torch.int32, device=device)
+    indices[:, :, :valid_k] = seg_start.view(M, 1, 1) + torch.arange(valid_k, dtype=torch.int32, device=device).view(
+        1, 1, valid_k
+    )
     sm_scale = 1.0 / (d_qk**0.5)
 
     def kernel_fn():
         return flash_mla_sparse_fwd(q=q, kv=kv, indices=indices, sm_scale=sm_scale, d_v=d_v)
 
-    return _bench_cuda_graph(kernel_fn, allow_graph_fail=True, device=device)
+    return _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
 
 
 def _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
@@ -548,20 +688,32 @@ def run_glm5_dsa_sparse_kernel_worker(
     # this task owns one bs (collect.py distributes bs across GPU workers)
     shapes = [(prefix, isl, bs) for (prefix, isl, bs) in shapes if bs == bs_only]
     if not shapes:
-        print(f"[{label}-sparse {kernel} bs={bs_only}] no shapes; skipping.")
-        return
+        # A queued (kernel, bs) task with no derivable shapes is a case-plan
+        # inconsistency, not a clean completion: fail closed so it is recorded.
+        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: queued task resolved no shapes")
+    if "--smoke" in sys.argv and len(shapes) > 8:
+        sample_indices = sorted({round(i * (len(shapes) - 1) / 7) for i in range(8)})
+        shapes = [shapes[index] for index in sample_indices]
     device_name = torch.cuda.get_device_name(device)
     print(f"[{label}-sparse {kernel} bs={bs_only}] {len(shapes)} shapes -> {perf_path}")
     n_ok = 0
+    failures = []
     for prefix, isl, bs in shapes:
-        out = _guarded_bench(
+        shape_label = f"bs={bs} isl={isl} past_kv={prefix}"
+        out, error = _guarded_bench(
             lambda: _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device),
-            f"bs={bs} isl={isl} past_kv={prefix}",
+            shape_label,
         )
-        if out is None:
+        if error is not None:
+            failures.append(f"{shape_label}: {type(error).__name__}: {error}")
             continue
         kernel_source, results = out
-        n_ok += 1
+        expected_modes = {"flat", "top_last"} if kernel == "topk" else {None}
+        if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
+            message = f"expected score modes {expected_modes}, got {results}"
+            print(f"  incomplete result at {shape_label}: {message}")
+            failures.append(f"{shape_label}: RuntimeError: {message}")
+            continue
         for score_mode, latency_ms in results:
             _write_row(
                 perf_path,
@@ -579,10 +731,21 @@ def run_glm5_dsa_sparse_kernel_worker(
                 architecture=architecture,
                 op_name_map=op_name_map,
             )
-    print(f"  {kernel}: benched {n_ok}/{len(shapes)} unique shapes")
+        n_ok += 1
+    error_count = len(failures)
+    summary = f"ok={n_ok} error={error_count} skip=0 total={len(shapes)}"
+    print(f"  {kernel}: {summary}")
+    if not n_ok or failures:
+        details = "\n- ".join(failures) if failures else "no inner shapes produced a row"
+        raise RuntimeError(f"{label}-sparse {kernel} bs={bs_only}: {summary}; failures:\n- {details}")
 
 
 def _glm5_sparse_kernel_cases(kernel):
+    # Platform representation lives outside this getter: pre-Hopper is dropped
+    # by the op_min_sm=90 capability floors (the DeepGEMM fp8_mqa_logits /
+    # FlashMLA sparse family requires SM90+ kernel libraries, same rationale as
+    # the dsa_*_module floors) and SM120 is parked by the registry
+    # unverified_sms markers until its different indexer API is validated.
     # One task per (model, bs) so collect.py spreads bs across the GPU workers
     # (no single-worker cuda-graph private-pool buildup -> no 1-worker-sweep
     # deadlock). All sparse kernels run a single fixed head config: the FMLA

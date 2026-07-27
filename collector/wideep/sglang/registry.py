@@ -12,20 +12,6 @@ from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
     OpEntry(
-        op="wideep_mla_context",
-        module="collector.wideep.sglang.collect_mla_module",
-        get_func="get_wideep_mla_context_test_cases",
-        run_func="run_mla_module_worker",
-        perf_filename=PerfFile.WIDEEP_CONTEXT_MLA,
-    ),
-    OpEntry(
-        op="wideep_mla_generation",
-        module="collector.wideep.sglang.collect_mla_module",
-        get_func="get_wideep_mla_generation_test_cases",
-        run_func="run_mla_module_worker",
-        perf_filename=PerfFile.WIDEEP_GENERATION_MLA,
-    ),
-    OpEntry(
         op="wideep_moe",
         module="collector.wideep.sglang.collect_deepep_moe",
         get_func="get_wideep_moe_test_cases",

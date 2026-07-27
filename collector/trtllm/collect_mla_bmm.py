@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
+# against TRT-LLM source. TRT-LLM reportedly emits FP8 MLA BMM variants only
+# for 86 < SM < 100 (Ada/Hopper); the fp8 dtype axis currently fails at
+# runtime on SM100/103/120. On the next version bump: verify, then filter the
+# dtype axis by a framework probe (or raise) or delete this note. Never move
+# this back into YAML.
+
 """TensorRT-LLM MLA generation BMM micro-collector.
 
 Benchmarks the auxiliary MLA generation BMM shapes used by TRT-LLM modeling. It

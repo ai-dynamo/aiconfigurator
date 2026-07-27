@@ -1,22 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# vLLM 0.24.0 owns block-FP8 dispatch on Blackwell: its dynamic wrapper uses
+# FlashInfer for small token counts and DeepGEMM for larger ones. Keep every
+# grid M/N/K shape observable instead of hiding a presumed M-divisibility
+# restriction in population logic.
+
 """vLLM GEMM collector for CUDA backends.
 
 Builds vLLM RowParallelLinear layers with synthetic weights to benchmark BF16,
 FP8, FP8 block, and FP4-style paths where available. Shared GEMM shapes come
 from `case_generator.py`; this file handles vLLM config contexts, distributed setup,
-quantized-weight preparation, and backend-specific skips.
+quantized-weight preparation, and selected-kernel reporting.
 """
 
-__compat__ = "vllm>=0.14.0"
+__compat__ = "vllm==0.24.0"
 
-import os
 from types import SimpleNamespace
 
 import torch
+import vllm.envs as envs
+from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+)
 from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig as _CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.version import __version__ as vllm_version
@@ -27,18 +39,9 @@ from collector.vllm.utils import setup_distributed, with_exit_stack
 
 FP8_BLOCK_SHAPE = (128, 128)
 
-# NVFP4 GEMM support (Blackwell SM100+).
-# Uses CompressedTensors W4A4 scheme -> auto-selects FLASHINFER_CUTLASS by default.
-_nvfp4_gemm_available = False
-try:
-    from vllm._custom_ops import scaled_fp4_quant as _scaled_fp4_quant
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
-        CompressedTensorsConfig as _CompressedTensorsConfig,
-    )
-
-    _nvfp4_gemm_available = True
-except Exception:
-    pass
+# NVFP4 is source-supported by vLLM 0.24.0 on datacenter and RTX Blackwell
+# (SM100+). The SM100/SM103/SM120 paths remain hardware-unvalidated in this
+# effort.
 
 _NVFP4_QUANT_ARGS = {
     "num_bits": 4,
@@ -50,27 +53,26 @@ _NVFP4_QUANT_ARGS = {
 }
 
 
-def _skip_vllm_sm89_022_fp8_gemm(gemm_type: str) -> bool:
-    return vllm_version.startswith("0.22.0") and get_sm_version() == 89 and gemm_type == "fp8"
-
-
 def get_gemm_test_cases():
     sm = get_sm_version()
 
+    # Open floors matching cases/capabilities.yaml (fp8: 89, fp8_block: 89,
+    # nvfp4: 100) — a closed SM whitelist here would silently drop unlisted
+    # SMs (e.g. SM101/SM121) with no logged reason.
     gemm_list = ["bfloat16"]
-    if sm > 86:
+    if sm >= 89:
         gemm_list += ["fp8"]
-    # Blockwise FP8 kernels are available on Hopper/Blackwell+
-    if sm >= 90:
+    # Blockwise FP8 runs on fp8 hardware from SM89 (Ada): below SM90 the
+    # DeepGEMM/cutlass tiers of vLLM's block-scale dispatch are unavailable
+    # and _POSSIBLE_FP8_BLOCK_KERNELS falls through to the Marlin/Triton
+    # tiers (model_executor/kernels/linear/__init__.py:319-330 @0.24.0);
+    # verified end-to-end on L40S (SM89), with kernel_source recording the
+    # actually-selected kernel per row.
+    if sm >= 89:
         gemm_list += ["fp8_block"]
 
-    if sm >= 100 and _nvfp4_gemm_available:
+    if sm >= 100:
         gemm_list += ["nvfp4"]
-
-    requested_gemm_types = os.environ.get("AIC_COLLECT_GEMM_TYPES")
-    if requested_gemm_types:
-        requested = {item.strip() for item in requested_gemm_types.split(",") if item.strip()}
-        gemm_list = [gemm_type for gemm_type in gemm_list if gemm_type in requested]
 
     test_cases = []
 
@@ -79,21 +81,6 @@ def get_gemm_test_cases():
         n = gemm_common_testcase.n
         k = gemm_common_testcase.k
         for gemm_type in gemm_list:
-            if _skip_vllm_sm89_022_fp8_gemm(gemm_type):
-                continue
-            if gemm_type in ("nvfp4", "fp8_block") and (n < 128 or k < 128):
-                continue
-            if gemm_type == "nvfp4" and ((n % 16) != 0 or (k % 16) != 0):
-                continue
-            if gemm_type == "fp8_block":
-                block_n, block_k = FP8_BLOCK_SHAPE
-                # Block-wise kernels expect dimensions that align with the block.
-                if (n % block_n) != 0 or (k % block_k) != 0:
-                    continue
-                # Blackwell block kernel currently prefers m divisible by 4.
-                if sm >= 100 and (x % 4) != 0:
-                    continue
-
             test_cases.append([gemm_type, x, n, k])
 
     return test_cases
@@ -101,10 +88,14 @@ def get_gemm_test_cases():
 
 @with_exit_stack
 def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
-    # Force DeepGEMM path when available to capture the intended kernel.
-    os.environ["VLLM_USE_DEEP_GEMM"] = "1"
-
     setup_distributed(device)
+
+    if envs.VLLM_BATCH_INVARIANT:
+        # Batch-invariant mode reroutes bf16 linears to linear_batch_invariant
+        # (vllm/model_executor/layers/linear.py:224-226 @0.24.0) and per-tensor
+        # fp8 to a BF16-dequant F.linear path (fp8.py:453-487), so the
+        # kernel_source values recorded below would not be ground truth.
+        raise RuntimeError("VLLM_BATCH_INVARIANT is set; gemm kernel_source recording assumes default dispatch")
 
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)
@@ -121,6 +112,20 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
             weight_block_size=None,
         )
     elif gemm_type == "fp8_block":
+        # FIXME(kernel-limit): on SM120, vLLM 0.24.0's default block-fp8
+        # linear dispatch is broken end to end: support_deep_gemm claims the
+        # 12x family (platforms/cuda.py:663-669) so DeepGEMM takes shapes
+        # with N%64==0 and K%128==0 (should_use_deepgemm_for_fp8_linear,
+        # utils/deep_gemm.py:700-720) and asserts "Unknown SF transformation"
+        # (deepgemm csrc/apis/layout.hpp:59); the remaining shapes go to
+        # cutlass c3x which fails "Invalid status" (cutlass_gemm_caller.cuh
+        # :51). 29/30 sampled fp8_block shapes failed on RTX PRO 6000
+        # Blackwell; module collectors with fp8_block linears (mla/dsa/dsv4/
+        # moe) inherit the same failure at build time. Serving fails
+        # identically. Upstream: vllm#47436/#47130 (open, same assertion),
+        # DeepGEMM#318 (SM120 support PR, open); the Triton block-fp8 kernel
+        # works on SM120 (verified) and vllm#40929/#41834 move DSV4-on-SM120
+        # onto that fallback. Re-verify on the next vLLM/DeepGEMM bump.
         qc = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
@@ -160,36 +165,20 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         # TODO, to evaluate random weights impact
         gemm.to(torch.device(device))
 
-        if gemm_type == "fp8" and hasattr(gemm, "weight"):
-            new_weight = gemm.weight.data.t()
-            # print("new_weight stride:", new_weight.stride())
-            # mnk = 1,128,128 weight stride = (128,1)
-            # transpose to (1,128) for fp8 cutlass limit
-            gemm.weight = torch.nn.Parameter(new_weight)
-            # print("after fix, weight stride:", gemm.weight.data.stride())
+        if gemm_type == "fp8":
+            with torch.no_grad():
+                gemm.weight.fill_(0.01)
+                gemm.weight_scale.fill_(1.0)
+            gemm.quant_method.process_weights_after_loading(gemm)
         elif gemm_type == "fp8_block":
             block_n, block_k = FP8_BLOCK_SHAPE
             with torch.no_grad():
                 # Blockwise quantize a random weight to provide valid scales.
                 raw_weight = torch.randn((n, k), dtype=torch.float32, device=device)
                 q_weight, weight_scale = per_block_cast_to_fp8(raw_weight, [block_n, block_k], use_ue8m0=False)
-                if hasattr(gemm, "weight"):
-                    gemm.weight.copy_(q_weight)
-                if hasattr(gemm, "weight_scale_inv"):
-                    gemm.weight_scale_inv.copy_(weight_scale.contiguous().to(torch.float32))
-                    # Some versions expect `weight_scale` even for block quant.
-                    if not hasattr(gemm, "weight_scale"):
-                        gemm.weight_scale = gemm.weight_scale_inv
-
-                quant_method = getattr(gemm, "quant_method", None)
-                if quant_method is None or not hasattr(quant_method, "process_weights_after_loading"):
-                    raise RuntimeError("Unable to post-process vLLM fp8_block linear weights")
-                quant_method.process_weights_after_loading(gemm)
-
-                # Dynamic activation scheme does not create input_scale;
-                # the forward path still reads it, so set it explicitly.
-                if not hasattr(gemm, "input_scale"):
-                    gemm.input_scale = None
+                gemm.weight.copy_(q_weight)
+                gemm.weight_scale_inv.copy_(weight_scale.contiguous().to(torch.float32))
+                gemm.quant_method.process_weights_after_loading(gemm)
         elif gemm_type == "nvfp4":
             with torch.no_grad():
                 weight_bf16 = torch.randn(n, k, dtype=torch.bfloat16, device=device)
@@ -225,6 +214,26 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     for i in range(outside_loop_count):
         op_list.append(create_gemm())
 
+    if gemm_type in {"fp8", "fp8_block"}:
+        kernel_sources = set()
+        for op in op_list:
+            selected_kernel = op.quant_method.fp8_linear
+            if isinstance(selected_kernel, FlashInferFp8DeepGEMMDynamicBlockScaledKernel):
+                # vLLM 0.24's custom op selects the same two leaf objects at
+                # scaled_mm/flashinfer.py:301-315: DeepGEMM for m >= 32,
+                # FlashInfer swap-AB below. Its batch-invariant branch is
+                # unreachable here — run_gemm raises on VLLM_BATCH_INVARIANT
+                # at entry — so the label depends on m alone.
+                selected_kernel = selected_kernel.fallback if m >= 32 else selected_kernel.base
+            kernel_sources.add(type(selected_kernel).__name__)
+    elif gemm_type == "nvfp4":
+        kernel_sources = {type(op.scheme.kernel).__name__ for op in op_list}
+    else:
+        kernel_sources = {"torch.nn.functional.linear"}
+    if len(kernel_sources) != 1:
+        raise RuntimeError(f"vLLM selected inconsistent GEMM kernels: {sorted(kernel_sources)}")
+    kernel_source = kernel_sources.pop()
+
     def kernel_func():
         for op in op_list:
             op.forward(x)
@@ -253,7 +262,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
         version=vllm_version,
         device_name=torch.cuda.get_device_name(device),
         op_name="gemm",
-        kernel_source="vllm_default",
+        kernel_source=kernel_source,
         perf_filename=perf_filename,
         power_stats=results["power_stats"],
     )

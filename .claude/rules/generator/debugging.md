@@ -1,3 +1,10 @@
+---
+description: >
+  Backwards-tracing diagnostic approach for generator bugs.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Generator Debugging Reference
 
 Generator bugs have distinct patterns: silent output corruption, mode confusion,

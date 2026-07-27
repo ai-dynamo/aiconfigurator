@@ -66,9 +66,14 @@ class TestModelSystemCombinations:
         system,
         backend,
     ):
-        # Skip combinations that are known to be unsupported by the codebase.
-        if backend == "vllm" and get_model_family(model) == "DEEPSEEK":
-            pytest.skip("DeepSeek-V3/V3.1 family models are not supported on the vllm backend.")
+        # DeepSeek on vLLM runs on data now (mla module tables), but the latest
+        # repo vllm DBs still limit some systems: a100_sxm (SM80, no FP8
+        # hardware) and l40s (data predates the SM89 fp8_block floor) reject
+        # DeepSeek's default fp8_block quant at DB validation; h100_sxm finds
+        # no memory-feasible parallel config because the data carries no
+        # moe_ep>8 rows. Shrink this list as newer vllm data lands.
+        if backend == "vllm" and get_model_family(model) == "DEEPSEEK" and system in ("a100_sxm", "l40s", "h100_sxm"):
+            pytest.skip(f"DeepSeek on vllm lacks usable data on {system} (see comment).")
 
         # Skip combinations that don't have a database available for "latest".
         version = _latest_db_version(system, backend)

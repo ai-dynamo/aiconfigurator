@@ -134,13 +134,14 @@ class TestAllreduceEdgeCases:
 class TestInitializationEdgeCases:
     """Test edge cases during PerfDatabase initialization."""
 
-    def test_extrapolation_during_init(self, tmp_path, monkeypatch, caplog):
-        """Test that extrapolation runs when ContextAttention's data is loaded.
+    def test_load_binds_raw_grid_without_pre_expansion(self, tmp_path, monkeypatch, caplog):
+        """ContextAttention.load_data binds the RAW grid, without densifying it.
 
-        Previously ``PerfDatabase.__init__`` warmed every op eagerly, so
-        extrapolation ran during construction. Now the load is lazy: we
-        explicitly trigger ``ContextAttention.load_data`` below (with
-        the loader patches still active) and assert on the result."""
+        Earlier the op pre-expanded the grid at load time (eager extrapolation
+        during ``PerfDatabase.__init__``). perf_interp removed that: interp and
+        util-hold happen at query time on the raw grid, so loading must leave
+        the four collected points untouched. Guards against re-introducing
+        load-time pre-expansion."""
         # Set up minimal system spec
         import yaml
 
@@ -224,8 +225,8 @@ class TestInitializationEdgeCases:
         db = PerfDatabase("test", "backend", "v1", str(tmp_path))
         ContextAttention.load_data(db)
 
-        # Check that extrapolation created new data points
-        # Should have more than the 4 original points
+        # No load-time pre-expansion: the four collected points are preserved
+        # verbatim (perf_interp interpolates/holds lazily at query time).
         total_points = 0
         for quant_mode in db._context_attention_data:
             for kv_cache in db._context_attention_data[quant_mode]:
@@ -242,38 +243,35 @@ class TestInitializationEdgeCases:
                                         ][s]
                                     )
 
-        assert total_points > 4, "Extrapolation should have created additional data points"
+        assert total_points == 4, "Load must preserve the raw grid; pre-expansion was removed"
 
 
 class TestGemmInterpolation:
     """Test GEMM-specific interpolation behavior."""
 
     def test_query_gemm_interpolation(self, comprehensive_perf_db):
-        """Test GEMM interpolation between known points."""
+        """An uncollected (n, k) shape between collected shapes resolves via
+        nearest-site util transfer and lands close to the fixture's formula.
+
+        The fixture's latency (0.1 + tiny linear terms) is overhead-dominated
+        and deliberately NOT SOL-shaped — the worst case for util transfer —
+        so single-digit % deviation from the formula is the expected floor
+        (real tables are SOL-correlated and transfer better)."""
         quant_mode = common.GEMMQuantMode.bfloat16
 
-        # Query a point that requires interpolation
-        # Our test data has points at m=[1,2,4,8,...], n=[128,256,...], k=[128,256,...]
+        # Fixture grid: m=[1,2,4,...], n=[128,256,...], k=[128,256,...]
         result = comprehensive_perf_db.query_gemm(
             3,
             192,
             192,
-            quant_mode,  # All values between grid points
+            quant_mode,  # (n, k) between collected shapes; m between sweep points
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        # Should return a reasonable interpolated value
         assert result > 0
         assert result.source == "silicon"
-
-        # Should be between surrounding values
-        lower_bound = comprehensive_perf_db.query_gemm(
-            2, 128, 128, quant_mode, database_mode=common.DatabaseMode.SILICON
-        )
-        upper_bound = comprehensive_perf_db.query_gemm(
-            4, 256, 256, quant_mode, database_mode=common.DatabaseMode.SILICON
-        )
-        assert lower_bound < result < upper_bound
+        formula = 0.1 + 3 * 0.001 + 192 * 0.0001 + 192 * 0.00001
+        assert math.isclose(float(result), formula, rel_tol=0.10)
 
     def test_query_gemm_extrapolation(self, comprehensive_perf_db):
         """Test GEMM extrapolation beyond data range."""
@@ -317,28 +315,14 @@ class TestDatabaseCache:
 
         monkeypatch.setattr(PerfDatabase, "__init__", counting_init)
 
-        # Mock file operations
-        system_spec = {
-            "data_dir": "data",
-            "misc": {"nccl_version": "v1"},
-            "gpu": {
-                "bfloat16_tc_flops": 1000.0,
-                "mem_bw": 100.0,
-                "mem_bw_empirical_scaling_factor": 0.8,
-                "mem_empirical_constant_latency": 0.001,
-            },
-            "node": {
-                "inter_node_bw": 100.0,
-                "intra_node_bw": 200.0,
-                "num_gpus_per_node": 8,
-                "p2p_latency": 0.000001,
-            },
-        }
-        monkeypatch.setattr("yaml.load", lambda f, **kwargs: system_spec)
-        monkeypatch.setattr("os.path.exists", lambda path: True)
-        monkeypatch.setattr("builtins.open", lambda *args, **kwargs: MagicMock())
-        (tmp_path / "sys1.yaml").write_text("dummy")
-        (tmp_path / "sys2.yaml").write_text("dummy")
+        # Real synthetic tree: <system>.yaml pointing at data/<system>, with a
+        # legacy-layout backend/version dir holding a stub perf file so the
+        # declaration check (os.listdir/os.path.isdir) finds real directories.
+        for system in ("sys1", "sys2"):
+            (tmp_path / f"{system}.yaml").write_text(f"data_dir: data/{system}\n", encoding="utf-8")
+            version_dir = tmp_path / "data" / system / "backend1" / "v1"
+            version_dir.mkdir(parents=True)
+            (version_dir / "gemm_perf.parquet").write_bytes(b"PAR1stub")
 
         # First call should create new instance
         db1 = get_database("sys1", "backend1", "v1", systems_paths=str(tmp_path))

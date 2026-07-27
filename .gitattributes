@@ -1,5 +1,4 @@
-src/aiconfigurator/systems/**/*.txt filter=lfs diff=lfs merge=lfs -text
-src/aiconfigurator/systems/**/INCOMPLETE.txt -filter -diff -merge text
-src/aiconfigurator/systems/**/*.parquet diff=parquet -text
+aic-core/src/aiconfigurator_core/systems/**/*.txt filter=lfs diff=lfs merge=lfs -text
+aic-core/src/aiconfigurator_core/systems/**/INCOMPLETE.txt -filter -diff -merge text
+aic-core/src/aiconfigurator_core/systems/**/*.parquet diff=parquet -text
 ATTRIBUTIONS.md filter=lfs diff=lfs merge=lfs -text
-src/aiconfigurator/systems/data/h200_sxm/vllm/0.18.0/*.parquet filter=lfs diff=lfs merge=lfs -text

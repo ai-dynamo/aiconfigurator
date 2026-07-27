@@ -55,6 +55,7 @@ class DummyPerfDatabase:
         self.systems_root = systems_root_arg
         self.database_mode = database_mode
         self.enable_shared_layer = database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
+        self.strict_provenance = False
 
 
 def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
@@ -659,8 +660,11 @@ def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
     )
 
     assert float(result) == pytest.approx(2.0)
-    assert result.power == pytest.approx(175.0)
-    assert result.energy == pytest.approx(350.0)
+    # perf_interp blends the measured POWER column (100, 200 -> 150) and
+    # re-derives energy = power * latency; the legacy path lerped ENERGY
+    # directly (conflating the latency growth into the blend, -> 350/175).
+    assert result.power == pytest.approx(150.0)
+    assert result.energy == pytest.approx(300.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -958,10 +962,13 @@ def test_load_mla_bmm_data_basic(tmp_path):
 
 def test_load_wideep_moe_compute_data(tmp_path):
     """
-    Test loading wideep MoE compute data with the format from:
-    aiconfigurator/src/aiconfigurator/systems/data/gb200/trtllm/1.2.0rc6/wideep_moe_perf.txt
+    Test loading WideEP MoE compute data with the format from the production source:
+    aic-core/src/aiconfigurator_core/systems/data/gb200/moe/trtllm/1.3.0rc10/wideep_moe_perf.parquet
 
-    CSV columns:
+    The fixture below is a temporary CSV-formatted ``wideep_moe_perf.txt`` file
+    used to test the backward-compatible parser.
+
+    Table columns:
         framework,version,device,op_name,kernel_source,moe_dtype,moe_kernel,num_tokens,
         dp_num_tokens,rank0_num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,
         moe_tp_size,moe_ep_size,distribution,simulation_mode,latency
@@ -1080,7 +1087,7 @@ def test_load_generation_mla_module_data_nonexistent(tmp_path):
 def test_load_generation_mla_module_data_basic(tmp_path):
     """
     Test loading generation MLA module data.
-    Structure: data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
+    Structure: data[kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
     s = isl + step
     """
     csv_file = tmp_path / "mla_generation_module_perf.txt"
@@ -1096,17 +1103,17 @@ def test_load_generation_mla_module_data_basic(tmp_path):
 
     data = load_generation_mla_module_data(str(csv_file))
 
-    fmha = FMHAQuantMode.bfloat16
     kv = KVCacheQuantMode.fp8
     gemm = GEMMQuantMode.fp8_block
 
-    assert fmha in data
-    assert kv in data[fmha]
-    assert gemm in data[fmha][kv]
-    assert 16 in data[fmha][kv][gemm]  # num_heads
-    assert 4 in data[fmha][kv][gemm][16]  # b
-    assert 256 in data[fmha][kv][gemm][16][4]  # s = isl(1) + step(255)
-    assert data[fmha][kv][gemm][16][4][256]["latency"] == pytest.approx(0.135)
+    # The mla_dtype column is dropped: generation module data keys on
+    # kv_cache_dtype at the top level (decode compute follows kv dtype).
+    assert kv in data
+    assert gemm in data[kv]
+    assert 16 in data[kv][gemm]  # num_heads
+    assert 4 in data[kv][gemm][16]  # b
+    assert 256 in data[kv][gemm][16][4]  # s = isl(1) + step(255)
+    assert data[kv][gemm][16][4][256]["latency"] == pytest.approx(0.135)
 
 
 def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
@@ -1126,10 +1133,10 @@ def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
 
     data = load_generation_mla_module_data(str(csv_file))
 
-    # bfloat16/bfloat16/bfloat16 combo
-    entry1 = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1][257]
+    # bfloat16/bfloat16 combo
+    entry1 = data[KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1][257]
     assert entry1["latency"] == pytest.approx(0.13)
 
-    # bfloat16/fp8/fp8_block combo
-    entry2 = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
+    # fp8/fp8_block combo
+    entry2 = data[KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
     assert entry2["latency"] == pytest.approx(0.10)

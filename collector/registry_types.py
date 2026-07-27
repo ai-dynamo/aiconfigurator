@@ -61,9 +61,8 @@ class PerfFile(str, Enum):
     DSV4_PAGED_MQA_LOGITS_MODULE = "dsv4_paged_mqa_logits_module_perf.txt"
     DSV4_HCA_ATTN_MODULE = "dsv4_hca_attn_module_perf.txt"
     DSV4_CSA_ATTN_MODULE = "dsv4_csa_attn_module_perf.txt"
-    # DeepSeek-V4 CSA topk_512 degenerate-vs-representative DELTA calibration
-    # (flat vs top_last scores).  Consumed by perf_database's
-    # _load_dsv4_topk_calib / _dsv4_csa_topk_latency_delta_ms.
+    # DeepSeek-V4 CSA topk_512 degenerate-vs-representative DELTA calibration.
+    # SGLang 0.5.14 rows qualify flat/top_last by the executed v1/v2 variant.
     DSV4_CSA_TOPK_CALIB = "dsv4_csa_topk_calib_perf.txt"
     GLM5_MQA_LOGITS_MODULE = "glm5_mqa_logits_module_perf.txt"
     GLM5_TOPK_MODULE = "glm5_topk_module_perf.txt"
@@ -101,6 +100,14 @@ class OpEntry:
     perf_filename: str
     module: str | None = None
     versions: tuple[VersionRoute, ...] = field(default_factory=tuple)
+    # Maturity markers.  An unverified collector's real risk is not a crash
+    # but silently wrong data (successfully benchmarking the wrong kernel
+    # path), so collect.py skips it with an explicit summary entry instead of
+    # running it.  Remove the marker in the PR that debugs the collector.
+    #   unverified=True        — not debugged on this backend at all
+    #   unverified_sms=(120,)  — debugged elsewhere, not validated on these SMs
+    unverified: bool = False
+    unverified_sms: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.module and not self.versions:

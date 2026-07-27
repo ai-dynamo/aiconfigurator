@@ -410,25 +410,30 @@ class TestMoE:
         assert empirical.source == "empirical"
         assert hybrid.source == "empirical"
 
-    def test_query_moe_multi_point_underflow_keeps_existing_extrapolation(self, mutable_comprehensive_perf_db):
+    def test_query_moe_multi_point_underflow_holds_boundary_util(self, mutable_comprehensive_perf_db):
+        """num_tokens=4 below the min collected 8: the engine holds the boundary
+        util at the smallest token point and lets the MoE SOL carry the (small)
+        difference, instead of the legacy raw-linear downward extrapolation
+        (which can undershoot the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
+        kwargs = dict(
+            hidden_size=2048,
+            inter_size=8192,
+            topk=2,
+            num_experts=8,
+            moe_tp_size=2,
+            moe_ep_size=2,
+            quant_mode=common.MoEQuantMode.bfloat16,
+            workload_distribution="uniform",
+        )
         curve = db._moe_data[common.MoEQuantMode.bfloat16]["uniform"][2][8][2048][8192][2]
         curve[2] = {8: 0.8, 16: 1.6}
 
-        result = db.query_moe(
-            4,
-            2048,
-            8192,
-            2,
-            8,
-            2,
-            2,
-            common.MoEQuantMode.bfloat16,
-            "uniform",
-            database_mode=common.DatabaseMode.SILICON,
-        )
+        sol_anchor = float(db.query_moe(num_tokens=8, database_mode=common.DatabaseMode.SOL, **kwargs))
+        sol_query = float(db.query_moe(num_tokens=4, database_mode=common.DatabaseMode.SOL, **kwargs))
+        result = db.query_moe(num_tokens=4, database_mode=common.DatabaseMode.SILICON, **kwargs)
 
-        assert float(result) == pytest.approx(0.4)
+        assert float(result) == pytest.approx(0.8 * sol_query / sol_anchor)
 
     def test_query_moe_singleton_overflow_keeps_util_extrapolation(self, mutable_comprehensive_perf_db):
         db = mutable_comprehensive_perf_db
@@ -907,3 +912,43 @@ class TestMoECrossProfileTransfer:
             assert util_empirical.worst_provenance(tags) == "xprofile"
         finally:
             comprehensive_perf_db.set_transfer_policy(None)
+
+
+class TestAlltoallHybridFallbackClosure:
+    """Regression: the HYBRID fallback closure of
+    `TrtLLMWideEPMoEDispatch._query_alltoall_table` omitted the mandatory
+    `kernel_source` argument of `get_empirical_from_sol`, so a silicon miss
+    under HYBRID raised `TypeError` instead of running the empirical
+    estimate. The fallback must execute and surface the TYPED empirical
+    outcome (a value, or `EmpiricalNotImplementedError` when the slice has no
+    calibration data) — never a `TypeError`."""
+
+    def test_hybrid_silicon_miss_runs_empirical_closure(self):
+        from aiconfigurator.sdk import perf_database
+        from aiconfigurator.sdk.operations.moe import TrtLLMWideEPMoEDispatch
+
+        db = perf_database.get_database_view(
+            "gb200",
+            "trtllm",
+            "1.3.0rc10",
+            allow_missing_data=True,
+            database_mode="HYBRID",
+            shared_layer=False,
+        )
+        if db is None:
+            pytest.skip("gb200/trtllm/1.3.0rc10 data unavailable")
+
+        # Off-shape hidden_size forces a silicon miss; the HYBRID fallback
+        # closure must run (typed empirical miss here — the slice has no
+        # own-shape calibration data), not crash with TypeError.
+        with pytest.raises(EmpiricalNotImplementedError):
+            TrtLLMWideEPMoEDispatch._query_alltoall_table(
+                db,
+                op_name="alltoall_dispatch",
+                num_tokens=64,
+                hidden_size=7000,
+                topk=8,
+                num_experts=256,
+                moe_ep_size=8,
+                quant_mode=common.MoEQuantMode.nvfp4,
+            )

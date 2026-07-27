@@ -283,8 +283,8 @@ class TestSupportMatrix:
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
-            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", False, False),
-            ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", False, False),
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", True, True),
+            ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", True, True),
             ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
             ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
         ],

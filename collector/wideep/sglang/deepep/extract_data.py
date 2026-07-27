@@ -757,7 +757,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate TXT reports from all .log files in directory")
     parser.add_argument(
         "--log-dir",
-        default="path/to/aiconfigurator/src/aiconfigurator/systems/data/h200_sxm/sglang/0.5.0/",
+        default="path/to/deepep-logs/h200_sxm/sglang/0.5.0/",
         help="Directory path containing .log files",
     )
     parser.add_argument(

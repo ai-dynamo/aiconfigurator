@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# FIXME(kernel-limit): retired sm_exceptions rule (PR #1302), not verified
+# against TRT-LLM kernel-selection source. On SM100/103/120, TRT-LLM attention
+# kernels reportedly reject GQA ratios (num_heads/num_kv_heads) >= 32 unless
+# the ratio is a multiple of 32; affected cases currently fail at runtime.
+# On the next version bump: verify against the framework source, then either
+# probe-and-raise before invocation or delete this note. Never move this back
+# into YAML (see .claude/rules/collector/layer_permissions.md).
+
 """TensorRT-LLM dense attention collector.
 
 Constructs a single TRT-LLM torch-flow attention layer and synthetic metadata to
@@ -195,6 +203,14 @@ def run_attention_torch(
         exclude_modules=None,
     )
 
+    # FIXME(kernel-limit): head_dim > 256 hits "Head size N is not supported by MMHA"
+    # (std::terminate in AttentionOp::initialize); head_dim == 192 on SM >= 90 hits
+    # "Unsupported HeadDim for BMM2-N 192" in TllmGenFmha (SM89 is unaffected).
+    # Observed on 1.3.0rc15 (SM100/B200 and SM90/H200). Both are hard aborts before
+    # Python can catch them. Source anchors: grep "is not supported by MMHA" in
+    # tensorrt_llm/cpp/tensorrt_llm/kernels/; grep "Unsupported HeadDim for BMM2-N"
+    # in tensorrt_llm/cpp/tensorrt_llm/kernels/tllmGenKernels/.
+    # Re-verify on each TRT-LLM version bump; delete if the kernel gains support.
     attn = create_attention(
         backend_name=backend_name,
         layer_idx=layer_idx,

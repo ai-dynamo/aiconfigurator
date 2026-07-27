@@ -46,8 +46,6 @@ if "torch" not in sys.modules:
 import collect as _collect_mod
 from collect import parallel_run
 
-from collector.model_cases import CaseSelector, OpCasePlan
-
 _collect_mod.logger = logging.getLogger("test_parallel_run")
 _collect_mod.logger.setLevel(logging.DEBUG)
 _collect_mod.logger.addHandler(logging.StreamHandler(sys.stderr))
@@ -64,13 +62,41 @@ def _task_fn(label, behavior, device):
     """Dispatch based on *behavior* encoded in each task's params."""
     if behavior == "exit_restart":
         sys.exit(EXIT_CODE_RESTART)
+    elif behavior == "return_restart":
+        from helper import WORKER_RESTART
+
+        return WORKER_RESTART
+    elif behavior == "return_restart_int":
+        # A plain int equal to EXIT_CODE_RESTART is an ordinary result (e.g. a
+        # logged-row count) and must NOT trigger a worker recycle.
+        return EXIT_CODE_RESTART
     elif behavior == "sigabrt":
         os.kill(os.getpid(), signal.SIGABRT)
     elif behavior == "error":
         raise ValueError(f"simulated: {label}")
-    elif behavior == "expected_error":
-        raise RuntimeError(f"expected simulated: {label}")
+    elif behavior == "oom":
+        raise sys.modules["torch"].OutOfMemoryError(f"simulated: {label}")
     # "normal": return silently
+
+
+class _GroupedCase:
+    """Fake case for failure-group aggregation tests.
+
+    Carries ``model_name``/``dtype`` attributes so ``_failure_group`` labels
+    it, and unpacks (via ``func(*task)``) into ``_task_fn`` args that always
+    raise. Module-level so fork'd workers can unpickle it.
+    """
+
+    def __init__(self, label, model_name="test/always-fails", dtype="fp8"):
+        self.label = label
+        self.model_name = model_name
+        self.dtype = dtype
+
+    def __iter__(self):
+        return iter((self.label, "error"))
+
+    def __str__(self):
+        return f"_GroupedCase({self.label}, model={self.model_name}, dtype={self.dtype})"
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +133,13 @@ def _log_dir(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _run(tasks, num_processes, tmp_path, module_name="test", expected_failure_context=None):
+def _run(tasks, num_processes, tmp_path, module_name="test"):
     return parallel_run(
         tasks,
         _task_fn,
         num_processes=num_processes,
         module_name=module_name,
         resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint")},
-        expected_failure_context=expected_failure_context,
     )
 
 
@@ -140,17 +165,11 @@ def _load_failed_ids(tmp_path, module_name, backend="unknown"):
     return set(data.get("failed", []))
 
 
-def _load_expected_failed_ids(tmp_path, module_name, backend="unknown"):
-    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
-    return set(data.get("expected_failed", []))
-
-
 def _assert_all_tasks_attempted(tasks, tmp_path, module_name):
     expected = {task["id"] for task in tasks}
     done = _load_done_ids(tmp_path, module_name)
     failed = _load_failed_ids(tmp_path, module_name)
-    expected_failed = _load_expected_failed_ids(tmp_path, module_name)
-    attempted = done | failed | expected_failed
+    attempted = done | failed
     missing = expected - attempted
     extra = attempted - expected
     assert attempted == expected, f"attempted mismatch: missing={missing}, extra={extra}"
@@ -177,25 +196,18 @@ def _crash_errors(errors):
     return [e for e in errors if e.get("error_type") in ("WorkerSignalCrash", "WorkerAbnormalExit")]
 
 
-def _expected_failure_context():
-    return {
-        "plan": OpCasePlan(
-            expected_failures=CaseSelector(
-                contains={"expected_error"},
-            )
-        ),
-        "full_module_name": "test",
-        "run_func_name": "_task_fn",
-        "runtime_version": None,
-    }
-
-
 class TestCudaFatalExceptionDetection:
     def test_torch_accelerator_error_is_fatal(self):
         torch_mod = MagicMock()
         torch_mod.AcceleratorError = type("AcceleratorError", (Exception,), {})
 
         assert _collect_mod._is_cuda_fatal_exception(torch_mod.AcceleratorError("boom"), torch_mod)
+
+    def test_torch_out_of_memory_error_is_fatal(self):
+        torch_mod = MagicMock()
+        torch_mod.OutOfMemoryError = type("OutOfMemoryError", (Exception,), {})
+
+        assert _collect_mod._is_cuda_fatal_exception(torch_mod.OutOfMemoryError("boom"), torch_mod)
 
     @pytest.mark.parametrize(
         "message",
@@ -254,6 +266,24 @@ class TestExitCodeRestart:
         errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="restart_all")
         assert _crash_errors(errors) == []
 
+    def test_returned_restart_signal_uses_the_same_success_path(self, tmp_path):
+        tasks = _tasks([(f"t{i}", "return_restart") for i in range(6)])
+        errors = _run_and_assert_all_done(tasks, 2, tmp_path, module_name="return_restart_all")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "return_restart_all") == {f"t{i}" for i in range(6)}
+        assert _load_failed_ids(tmp_path, "return_restart_all") == set()
+
+    def test_plain_int_result_equal_to_exit_code_is_not_a_restart(self, tmp_path):
+        """A task returning the int 10 (e.g. a logged-row count) completes
+        normally without recycling its worker."""
+        tasks = _tasks([("count_a", "return_restart_int"), ("count_b", "normal")])
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="int_result_not_restart")
+
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "int_result_not_restart") == {"count_a", "count_b"}
+        assert _load_failed_ids(tmp_path, "int_result_not_restart") == set()
+
     def test_interleaved_restart_and_normal(self, tmp_path):
         tasks = _tasks(
             [
@@ -297,28 +327,47 @@ class TestTaskExceptions:
         assert _load_done_ids(tmp_path, "mixed_success_fail") == {"a", "c", "e"}
         assert _load_failed_ids(tmp_path, "mixed_success_fail") == {"b", "d"}
 
-    def test_expected_failures_are_logged_but_not_reported_as_errors(self, tmp_path):
-        tasks = _tasks(
-            [
-                ("a", "normal"),
-                ("b", "expected_error"),
-                ("c", "error"),
-                ("d", "expected_error"),
-            ]
-        )
-        errors = _run(
-            tasks,
-            2,
-            tmp_path,
-            module_name="expected_failures",
-            expected_failure_context=_expected_failure_context(),
-        )
+    def test_task_failures_are_classified_unexpected(self, tmp_path):
+        tasks = _tasks([("a", "error"), ("b", "normal")])
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="failure_classification")
+        task_errors = [e for e in errors if e.get("error_type") == "ValueError"]
+        assert len(task_errors) == 1
+        assert task_errors[0]["classification"] == "unexpected"
+        # Plain tuple tasks carry no model/dtype attributes: no group label.
+        assert task_errors[0]["group"] is None
 
-        _assert_all_tasks_attempted(tasks, tmp_path, "expected_failures")
-        assert len([e for e in errors if e.get("error_type") == "ValueError"]) == 1
-        assert _load_done_ids(tmp_path, "expected_failures") == {"a"}
-        assert _load_failed_ids(tmp_path, "expected_failures") == {"c"}
-        assert _load_expected_failed_ids(tmp_path, "expected_failures") == {"b", "d"}
+    def test_oom_records_once_and_restarts_worker(self, tmp_path, monkeypatch):
+        oom_error = type("OutOfMemoryError", (Exception,), {})
+        monkeypatch.setattr(sys.modules["torch"], "OutOfMemoryError", oom_error, raising=False)
+        tasks = _tasks([("oom", "oom"), ("after", "normal")])
+
+        errors = _run_and_assert_all_done(tasks, 1, tmp_path, module_name="oom_restart")
+
+        assert len([error for error in errors if error.get("error_type") == "OutOfMemoryError"]) == 1
+        assert _crash_errors(errors) == []
+        assert _load_done_ids(tmp_path, "oom_restart") == {"after"}
+        assert _load_failed_ids(tmp_path, "oom_restart") == {"oom"}
+
+
+class TestFailureGroups:
+    """Systemic (model, dtype) group failures are all run and all labeled."""
+
+    def test_failing_group_runs_every_case_and_labels_each_failure(self, tmp_path):
+        n_tasks = 8
+        tasks = [{"id": f"gr{i}", "params": _GroupedCase(f"gr{i}")} for i in range(n_tasks)]
+
+        errors = _run(tasks, 1, tmp_path, module_name="failure_group")
+
+        _assert_all_tasks_attempted(tasks, tmp_path, "failure_group")
+
+        task_failures = [e for e in errors if e.get("error_type") == "ValueError"]
+        # No breaker: every case runs, every failure is recorded and labeled.
+        assert len(task_failures) == n_tasks
+        assert all(e["classification"] == "unexpected" for e in task_failures)
+        assert all(e["group"] == "test/always-fails|fp8" for e in task_failures)
+
+        assert _load_done_ids(tmp_path, "failure_group") == set()
+        assert _load_failed_ids(tmp_path, "failure_group") == {f"gr{i}" for i in range(n_tasks)}
 
 
 class TestMixedFailureModes:
@@ -420,3 +469,44 @@ class TestSignalCrashRecovery:
         failed = _load_failed_ids(tmp_path, "sigabrt_restart_mix")
         assert {"b", "c", "e", "f"} == done  # exit_restart + normal = passed
         assert {"a", "d"} == failed  # sigabrt = failed
+
+
+class TestResumeIntegrity:
+    """Checkpoint binds runtime identity; resume surfaces unresolved failures."""
+
+    def test_checkpoint_binds_framework_version_and_sm(self, tmp_path):
+        kwargs = {
+            "backend": "unknown",
+            "module_name": "bind",
+            "run_func_name": "f",
+            "checkpoint_dir": str(tmp_path / ".checkpoint"),
+        }
+        first = _collect_mod.ResumeCheckpoint(framework_version="1.0.0", sm_version=90, **kwargs)
+        first.mark_failed("t1")
+        first.flush(force=True)
+
+        version_changed = _collect_mod.ResumeCheckpoint(framework_version="2.0.0", sm_version=90, **kwargs)
+        with pytest.raises(RuntimeError, match="framework_version"):
+            version_changed.load_existing()
+
+        sm_changed = _collect_mod.ResumeCheckpoint(framework_version="1.0.0", sm_version=100, **kwargs)
+        with pytest.raises(RuntimeError, match="sm_version"):
+            sm_changed.load_existing()
+
+    def test_resume_reports_unresolved_failures(self, tmp_path):
+        tasks = _tasks([("a", "error"), ("b", "normal")])
+        _run(tasks, 1, tmp_path, module_name="resume_unresolved")
+
+        # All tasks are skipped on resume (a failed, b passed) — the run must
+        # still surface the unresolved failure instead of reporting clean.
+        resumed = parallel_run(
+            tasks,
+            _task_fn,
+            num_processes=1,
+            module_name="resume_unresolved",
+            resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint"), "resume": True},
+        )
+        unresolved = [e for e in resumed if e.get("error_type") == "UnresolvedFailures"]
+        assert len(unresolved) == 1
+        assert unresolved[0]["classification"] == "unresolved_from_checkpoint"
+        assert "1 unresolved" in unresolved[0]["error_message"]

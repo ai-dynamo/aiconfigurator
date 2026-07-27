@@ -1,3 +1,10 @@
+---
+description: >
+  Which generator artifacts render via Jinja vs typed builders, where defaults live, render-path divergence.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Render-Path Policy Reference
 
 Which artifacts render via Jinja templates vs. typed Python builders, where

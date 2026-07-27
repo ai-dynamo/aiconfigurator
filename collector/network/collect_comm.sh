@@ -113,6 +113,14 @@ fi
 # NCCL
 if [[ "$skip_nccl" == "true" ]]; then
     echo "Skipping NCCL benchmarks (--skip-nccl enabled)"
+elif [[ "$device" == "cuda" ]] && ! command -v all_reduce_perf >/dev/null 2>&1; then
+    # Fail closed: silently producing no nccl_perf.txt looks identical to a
+    # successful skip. Images without nccl-tests (e.g. lmsysorg/sglang) must
+    # opt out explicitly.
+    echo "Error: nccl-tests binaries (all_reduce_perf ...) not found in PATH."
+    echo "This image cannot run the NCCL benchmarks; pass --skip-nccl to collect"
+    echo "only the framework custom-allreduce data."
+    exit 1
 elif [[ "$device" == "cuda" ]]; then
     nccl_ops=("all_gather" "alltoall" "reduce_scatter" "all_reduce")
     dtypes=("half" "int8")

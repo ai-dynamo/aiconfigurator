@@ -305,11 +305,21 @@ common_case_values:
         gemm_type: bfloat16
         min_sm: 90
         phases: [context, generation]
+      # FP8 prefill query compute: opt-in via vLLM's
+      # attention_config.use_prefill_query_quantization plus an explicit
+      # supporting mla_prefill_backend; requires FP8 KV cache and the SM100
+      # family (mla_attention.py:1371-1396 @0.24.0). Defined only for the
+      # dense-MLA prefill path: the feature lives on MLACommonMetadataBuilder,
+      # and the sparse DSA builders (FlashMLASparse / FlashInferMLASparse
+      # @0.24.0) derive from the plain AttentionMetadataBuilder with no
+      # prefill-query quantization concept, so no serving configuration can
+      # realize these combos for DSA.
       - compute_dtype: fp8
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 100
         phases: [context]
+        attention_types: [mla]
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: fp8_block
@@ -325,6 +335,7 @@ common_case_values:
         gemm_type: fp8_block
         min_sm: 100
         phases: [context]
+        attention_types: [mla]
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: nvfp4
@@ -340,6 +351,7 @@ common_case_values:
         gemm_type: nvfp4
         min_sm: 100
         phases: [context]
+        attention_types: [mla]
     context:
       max_tokens: 131072
       prefix_lengths:

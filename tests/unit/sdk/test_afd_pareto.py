@@ -76,6 +76,23 @@ def test_decode_latency_correction_recomputes_rate_fields():
 
 
 class TestCombineAfdWithStaticPrefill:
+    def test_power_remains_unknown_when_afd_decode_power_is_unknown(self):
+        row = _afd_decode_row(power_w=float("nan"))
+        options = [
+            {
+                "tp": 2,
+                "num_gpus": 2,
+                "ttft": 500.0,
+                "seq_s": 1.9,
+                "memory": 40.0,
+                "power_w": 300.0,
+            }
+        ]
+
+        combined = _combine_afd_row_with_static_prefill(row, options, target_ttft=2000.0)
+
+        assert math.isnan(combined["power_w"])
+
     def test_rate_matched_combination(self):
         row = _afd_decode_row()
         options = [{"tp": 2, "num_gpus": 2, "ttft": 500.0, "seq_s": 1.9, "memory": 40.0, "power_w": 0.0}]

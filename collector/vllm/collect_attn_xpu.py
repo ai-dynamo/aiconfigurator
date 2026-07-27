@@ -49,7 +49,7 @@ from collector.case_generator import (
     get_attention_head_configs,
 )
 from collector.helper import benchmark_with_power, get_device_module, log_perf
-from collector.vllm.utils import (
+from collector.vllm.utils_xpu import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,
@@ -254,7 +254,7 @@ def run_attention_torch(
     # Fix backend-specific kv cache layout.
     backend_name_str = backend_name if isinstance(backend_name, str) else backend_name.name
 
-    if backend_name_str in {"FLASHINFER", "TRITON_ATTN"}:
+    if backend_name_str in {"FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"}:
         # The collector helper populates cache as [2, num_blocks, ...] because
         # that layout makes K/V insertion simple. vLLM V1 backends consume it as
         # [num_blocks, 2, ...].

@@ -16,12 +16,6 @@ exp_disagg_prefill_wideep_decode_standard:
   ttft: 1000.0
   osl: 100
   nextn: 0
-  nextn_accept_rates:
-  - 0.85
-  - 0
-  - 0
-  - 0
-  - 0
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: trtllm
   prefill_enable_wideep: true
@@ -35,7 +29,7 @@ exp_disagg_prefill_wideep_decode_standard:
   prefill_gemm_quant_mode: nvfp4
   prefill_moe_quant_mode: nvfp4
   prefill_kvcache_quant_mode: fp8
-  prefill_fmha_quant_mode: fp8
+  prefill_fmha_quant_mode: bfloat16
   prefill_comm_quant_mode: half
   prefill_num_gpu_candidates:
   - 4
@@ -172,12 +166,7 @@ exp_disagg_both_wideep:
   ttft: 1000.0
   osl: 100
   nextn: 1
-  nextn_accept_rates:
-  - 0.85
-  - 0
-  - 0
-  - 0
-  - 0
+  nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: trtllm
   prefill_enable_wideep: true
@@ -190,7 +179,7 @@ exp_disagg_both_wideep:
   prefill_gemm_quant_mode: nvfp4
   prefill_moe_quant_mode: nvfp4
   prefill_kvcache_quant_mode: fp8
-  prefill_fmha_quant_mode: fp8
+  prefill_fmha_quant_mode: bfloat16
   prefill_comm_quant_mode: half
   prefill_num_gpu_candidates:
   - 4

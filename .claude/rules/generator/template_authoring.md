@@ -1,3 +1,10 @@
+---
+description: >
+  Safe practices for adding/modifying generator backend Jinja templates.
+paths:
+  - "src/aiconfigurator/generator/**"
+---
+
 # Template Authoring Reference
 
 Backend templates are the most error-prone part of the generator. This reference

@@ -7,6 +7,17 @@ model_path: XiaomiMiMo/MiMo-V2-Flash
 model_paths:
   - XiaomiMiMo/MiMo-V2-Flash
 include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  # vLLM 0.24 uses DiffKV (QK=192, V=128, plus sinks). The persisted generic
+  # attention schema cannot represent that path, so vLLM intentionally omits it.
+  sglang:
+    - attention_context
+    - attention_generation
+  trtllm:
+    - attention_context
+    - attention_generation
 description: >
   MiMo-V2-Flash hybrid model-centric collection plan. Starts with shared base
   cases and includes the hybrid MoE shape used by the support matrix.
@@ -18,14 +29,28 @@ model_case_values:
       num_attention_heads: 64
       num_key_value_heads: 4
       head_dim: 192
+      v_head_dim: 128
       window_size: 0
+      # TRTLLM MHA treats V as qk_head_dim=192 (B200 probe 2026-07-05:
+      # in-kernel failure), and the SM120 default flashinfer rejects the
+      # asymmetric K/V pool in both phases (RTX 6000 Pro probe 2026-07-05:
+      # prefill reshape '[-1, 4, 192]' on the 128-wide V pool, decode paged
+      # K/V stride check 768 vs 512). The SM89 default flashinfer rejects it
+      # the same way (L40S probe 2026-07-07: prefill reshape '[-1, 1, 192]'
+      # / '[-1, 2, 192]' on the 128-wide V pool, decode paged K/V stride
+      # check 384 vs 256 / 192 vs 128). Triton is the only runnable 0.5.14
+      # QK192/V128 path on Ada and Blackwell; SM103 remains source-derived.
+      sglang_backends: {89: triton, 90: fa3, 100: triton, 103: triton, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
     - id: mimo_v2_swa_attention
       model_path: XiaomiMiMo/MiMo-V2-Flash
       num_attention_heads: 64
       num_key_value_heads: 8
       head_dim: 192
+      v_head_dim: 128
       window_size: 128
+      sglang_has_attention_sink: true
+      sglang_backends: {89: triton, 90: fa3, 100: triton, 103: triton, 120: triton}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32, 64]
   moe:
     - model_path: XiaomiMiMo/MiMo-V2-Flash
@@ -33,6 +58,14 @@ model_case_values:
       inter_size: 2048
       topk: 8
       num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routed_scaling_factor: 1.0
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        fp8_block: {default: triton}
 
 all_frameworks_op_cases:
   moe:

@@ -19,6 +19,7 @@ from aiconfigurator.sdk.picking import (
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
     _build_disagg_summary_dict,
 )
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,7 @@ class DisaggInferenceSession:
         decode_model_config: config.ModelConfig,
         decode_batch_size: int,
         decode_num_worker: int,
+        speculative_profile: SpeculativeDecodingProfile | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -287,6 +289,8 @@ class DisaggInferenceSession:
             decode_model_config (ModelConfig): the decode model config
             decode_batch_size (int): the decode batch size
             decode_num_worker (int): the number of decode workers
+            speculative_profile: Optional accepted-token progress assumption.
+                Projects decode metrics before prefill/decode rate matching.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -313,6 +317,8 @@ class DisaggInferenceSession:
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
         )
+        if speculative_profile is not None:
+            decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
         disagg_summary_df = self._get_disagg_summary_df(
             prefill_summary.get_summary_df(),
             prefill_num_worker,
@@ -919,6 +925,11 @@ class AFDInferenceSession:
         self._model_path = model_path
         self._a_model_config = a_model_config
         self._f_model_config = f_model_config
+        a_nextn = int(getattr(a_model_config, "nextn", 0) or 0)
+        f_nextn = int(getattr(f_model_config, "nextn", 0) or 0)
+        if a_nextn != f_nextn:
+            raise ValueError(f"AFD A/F model configs must use the same nextn; got A={a_nextn}, F={f_nextn}.")
+        self._nextn = a_nextn
         self._database = database
         self._backend = backend
         self._afd_config = afd_config
@@ -1087,7 +1098,7 @@ class AFDInferenceSession:
     def _pipeline_tcycle(self, t_a: float, t_f: float, t_a2f: float, t_f2a: float) -> tuple[float, bool]:
         """Compute per-layer cycle time and whether comm is hidden.
 
-        Two pipeline regimes are supported:
+        Three pipeline regimes are supported:
 
         * **K=3 (optimistic, 3-batch overlap)** — the network round trip
           ``t_c = t_a2f + t_f2a`` is its own pipeline stage, so::
@@ -1102,6 +1113,11 @@ class AFDInferenceSession:
 
               TPOT_layer = max(t_a + t_a2f, t_f + t_f2a) (N_min = 2)
 
+        * **Serial (no overlap)** — all compute and communication stages
+          execute sequentially::
+
+              TPOT_layer = t_a + t_a2f + t_f + t_f2a
+
         The optimistic model falls back to conservative when there are
         not enough in-flight micro-batches to fill the K=3 pipeline.
 
@@ -1113,6 +1129,8 @@ class AFDInferenceSession:
         cfg = self._afd_config
         num_microbatches = max(int(cfg.num_microbatches or 1), 1)
         t_c = t_a2f + t_f2a
+        if cfg.pipeline_model == "serial":
+            return t_a + t_a2f + t_f + t_f2a, False
         if cfg.pipeline_model == "optimistic":
             # Need ≥ 2 + t_c / max(t_a, t_f) in-flight microbatches to
             # hide the network stage behind compute.  Equivalent to the
@@ -1130,8 +1148,9 @@ class AFDInferenceSession:
             t_cycle = max(t_a, t_f, t_c)
             comm_hidden = t_c <= max(t_a, t_f)
             return t_cycle, comm_hidden
-        # conservative K=2
-        return max(t_a + t_a2f, t_f + t_f2a), False
+        if cfg.pipeline_model == "conservative":
+            return max(t_a + t_a2f, t_f + t_f2a), False
+        raise ValueError(f"Unsupported AFD pipeline_model: {cfg.pipeline_model!r}.")
 
     def _pipeline_global_step_latency(
         self,
@@ -1292,6 +1311,7 @@ class AFDInferenceSession:
         time.
         """
         stride = self._AFD_DECODE_STRIDE
+        verify_width = self._nextn + 1
 
         t_a_layer_sum = 0.0
         t_f_layer_sum = 0.0
@@ -1314,7 +1334,7 @@ class AFDInferenceSession:
 
             t_a_step_i, a_per_op_i = self._sum_latency(
                 a_partition.attn_ops,
-                batch_size=a_batch_size,
+                batch_size=a_batch_size * verify_width,
                 seq_len=s_i,
                 model=a_model,
                 runtime_config=runtime_config,
@@ -1322,7 +1342,7 @@ class AFDInferenceSession:
             )
             t_f_step_i, f_per_op_i = self._sum_latency(
                 f_partition.ffn_ops,
-                batch_size=b_batch_size,
+                batch_size=b_batch_size * verify_width,
                 seq_len=s_i,
                 model=f_model,
                 runtime_config=runtime_config,
@@ -1409,6 +1429,12 @@ class AFDInferenceSession:
 
         cfg = self._afd_config
         ops_phase = "context" if phase == "prefill" else "generation"
+        if phase == "decode" and self._nextn > 0:
+            logger.warning(
+                "AFD MTP nextn=%d uses batch widening by nextn+1 for parity with the base backend. "
+                "This is an approximation: verify positions share sequence KV history.",
+                self._nextn,
+            )
         # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
         # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
         # them to the F-Worker for sensitivity studies.
@@ -1436,7 +1462,7 @@ class AFDInferenceSession:
         # step.  Each comm op's ``query(x=...)`` takes the number of tokens
         # held by a single A-rank; the op internally fans this out to the
         # global token count via ``n_a_workers``.
-        tokens_per_req = effective_prefill_len if phase == "prefill" else 1
+        tokens_per_req = effective_prefill_len if phase == "prefill" else self._nextn + 1
         afd_a_batch_tokens = a_micro_batch_size * tokens_per_req
 
         # Five comm-side ops model the per-layer AFD traffic:
@@ -1609,6 +1635,7 @@ class AFDInferenceSession:
         phase: str | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_seq_len: int | None = None,
+        speculative_profile: SpeculativeDecodingProfile | None = None,
     ) -> InferenceSummary:
         """Run AFD performance simulation, possibly for prefill, decode, or both.
 
@@ -1624,6 +1651,8 @@ class AFDInferenceSession:
             free_gpu_memory_fraction: Fraction of free GPU memory allocated
                              for KV cache. Defaults to backend behavior.
             max_seq_len:    Optional runtime max sequence length for KV cache.
+            speculative_profile: Optional accepted-token progress assumption.
+                             The projection role is derived from ``phase``.
 
         Returns:
             InferenceSummary.  ``check_oom()`` reflects the per-pool HBM check.
@@ -1658,12 +1687,16 @@ class AFDInferenceSession:
                 max_seq_len=max_seq_len,
             )
 
-        return self._build_summary(
+        summary = self._build_summary(
             runtime_config=runtime_config,
             phase=phase,
             prefill_metrics=prefill_metrics,
             decode_metrics=decode_metrics,
         )
+        if speculative_profile is None:
+            return summary
+        projection_role = "prefill" if phase == "prefill" else ("decode" if phase == "decode" else "static")
+        return speculative_profile.project_summary(summary, role=projection_role)
 
     def run_afd_decode(
         self,
@@ -1912,6 +1945,7 @@ class AFDInferenceSession:
             "parallel": (f"a{cfg.n_a_nodes}n-tp{cfg.tp_a}+f{cfg.n_f_nodes}n-ep{cfg.f_moe_ep_size}"),
             "pipeline_model": cfg.pipeline_model,
             "num_microbatches": num_microbatches,
+            "nextn": self._nextn,
             "combined_with_pd": bool(cfg.combined_with_pd),
             "boundary_on_attn": bool(cfg.boundary_on_attn),
             "num_total_gpus": total_gpus,
@@ -1919,7 +1953,10 @@ class AFDInferenceSession:
             "backend": self._backend.name.value,
             "version": str(self._database.version),
             "system": str(self._database.system),
-            "power_w": 0.0,
+            # AFD power is not modeled yet. NaN prevents these rows from
+            # being mistaken for zero-power deployments or ranked against
+            # configurations with measured power.
+            "power_w": float("nan"),
         }
 
         summary_df = pd.DataFrame([result_dict], columns=common.ColumnsAFD)

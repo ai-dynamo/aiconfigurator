@@ -164,6 +164,43 @@ class TestCLIEstimateUnit:
         assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
 
+class TestCLIDefaultNextn:
+    """cli_default exposes MTP control with the same semantics as the CLI flags."""
+
+    def test_nextn_without_accepted_fails_fast(self):
+        from aiconfigurator.cli import cli_default
+
+        with patch("aiconfigurator.cli.api.build_default_tasks") as mock_build:
+            with pytest.raises(ValueError, match="nextn_accepted"):
+                cli_default(
+                    model_path="Qwen/Qwen3-32B",
+                    total_gpus=8,
+                    system="h200_sxm",
+                    nextn=1,
+                )
+            mock_build.assert_not_called()
+
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    @patch("aiconfigurator.cli.api.build_default_tasks")
+    def test_nextn_is_forwarded_to_build_default_tasks(self, mock_build, mock_execute):
+        from aiconfigurator.cli import cli_default
+
+        mock_build.return_value = {}
+        mock_execute.return_value = MagicMock()
+
+        cli_default(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            nextn=1,
+            nextn_accepted=0.7,
+        )
+
+        kwargs = mock_build.call_args.kwargs
+        assert kwargs["nextn"] == 1
+        assert kwargs["nextn_accepted"] == 0.7
+
+
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
 

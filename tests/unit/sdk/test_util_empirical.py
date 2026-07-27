@@ -5,8 +5,7 @@ import math
 
 import pytest
 
-from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-from aiconfigurator.sdk.interpolation import InterpolationDataNotAvailableError
+from aiconfigurator.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.util_empirical import (
     ReferenceCandidate,
     UtilGrid,
