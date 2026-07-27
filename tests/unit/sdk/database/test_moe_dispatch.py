@@ -543,9 +543,11 @@ class TestWideEpDeepEpLlNodeNumFallback:
 
     def test_neither_present_raises(self, monkeypatch):
         """Neither the exact node_num nor node_num=1 has the shape -> not-available (as before)."""
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
-        with pytest.raises(AssertionError):
+        with pytest.raises(PerfDataNotAvailableError):
             self._query(db, node_num=4, num_experts=999)  # experts=999 absent at every node_num
 
 
