@@ -108,6 +108,13 @@ class EngineSpec:
     # admission pays up to one extra pass of TTFT. Decode-side effects of
     # async scheduling (hidden per-step CPU gap) belong to the timing layer,
     # not here. Default False preserves the synchronous calendar.
+    # The flag's semantics is "does a NEW ARRIVAL miss one extra pass", not
+    # "does the engine overlap anything": TRT-LLM's overlap scheduler
+    # (disable_overlap_scheduler=False, default) overlaps execution prep for
+    # the already-admitted batch while admission still sees fresh arrivals,
+    # so TRT-LLM maps to False. Measured (h20e_sxm, trtllm 1.3.0rc20,
+    # Qwen3-32B tp4, isl4096/osl256): True overpredicts steady TTFT by
+    # 25-30% at C>=32, False lands within ~4%.
     async_scheduling: bool = False
     # SGLang-specific (used by the sglang calendar only)
     max_prefill_tokens: Optional[int] = None  # defaults to max_num_batched_tokens
