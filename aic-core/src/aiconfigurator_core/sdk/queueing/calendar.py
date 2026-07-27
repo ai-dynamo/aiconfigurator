@@ -158,12 +158,17 @@ class AlternatingCalendar(BaseCalendar):
       share one iteration (SGLang merges the extend batch with the decode
       batch). Structurally fused like vLLM, except decodes do not debit the
       prefill token budget.
-    - mixed chunk off: prefill batches run as dedicated iterations (decode
-      paused — the structural source of SGLang ITL spikes), decode iterations
-      run alone.
+    - mixed chunk off (SGLang's own server default): prefill batches run as
+      dedicated iterations (decode paused — the structural source of SGLang
+      ITL spikes), decode iterations run alone.
 
-    Budgets are max_prefill_tokens per prefill batch with per-request chunks
-    capped at chunked_prefill_size."""
+    Budget semantics follow SGLang's ``PrefillAdder`` (schedule_policy.py,
+    verified against 0.5.14 source): ``chunked_prefill_size`` is the
+    per-iteration extend-token budget SHARED across the batch
+    (``alloc = min(extend_input_len, rem_chunk_tokens)``) — NOT a
+    per-request chunk cap; ``max_prefill_tokens`` separately caps the
+    admitted input tokens; and in mixed mode the running decode rows debit
+    both budgets (``num_mixed_decode_tokens``)."""
 
     name = "sglang"
     validated = False
@@ -173,11 +178,12 @@ class AlternatingCalendar(BaseCalendar):
             return self._mixed_step(slots, wl, eng, timing)
         return self._alternating_step(slots, wl, eng, timing)
 
-    def _prefill_batch(self, prefilling, wl, eng):
-        """Consume prefill budget over `prefilling` slots in admission order;
-        return (batch_count, mean_isl, mean_prefix, completers)."""
-        budget = eng.max_prefill_tokens or eng.max_num_batched_tokens
-        chunk_cap = eng.chunked_prefill_size or budget
+    def _prefill_batch(self, prefilling, wl, eng, mixed_decode_tokens=0):
+        """Consume the per-iteration extend budget over `prefilling` slots in
+        admission order; return (batch_count, mean_isl, mean_prefix, completers)."""
+        input_cap = eng.max_prefill_tokens or eng.max_num_batched_tokens
+        chunk_cap = eng.chunked_prefill_size or input_cap
+        budget = min(chunk_cap, input_cap) - mixed_decode_tokens
         completers = []
         batch_count = 0
         batch_total_isl = 0
@@ -185,7 +191,7 @@ class AlternatingCalendar(BaseCalendar):
         for s in prefilling:
             if budget <= 0:
                 break
-            chunk = min(s.remaining_prefill, budget, chunk_cap)
+            chunk = min(s.remaining_prefill, budget)
             computed_before = wl.prefix + (wl.effective_isl - s.remaining_prefill)
             s.remaining_prefill -= chunk
             budget -= chunk
@@ -207,7 +213,11 @@ class AlternatingCalendar(BaseCalendar):
         mean_isl = mean_prefix = 0
         completers: list[_Slot] = []
         if prefilling:
-            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
+            # mixed decode rows debit the extend budget (PrefillAdder's
+            # num_mixed_decode_tokens)
+            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(
+                prefilling, wl, eng, mixed_decode_tokens=len(decode_emitters)
+            )
         emitters = completers + decode_emitters
 
         mixed = getattr(timing, "mixed_pass_ms", None)
