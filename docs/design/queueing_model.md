@@ -54,9 +54,41 @@ measurement/interpolation), which this package consumes as a black box.
 
 | Backend | Calendar | Status |
 |---|---|---|
-| vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated** across 9 config families (§5) |
-| TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | structural, **not validated** against a TRT-LLM reference |
-| SGLang | mixed-chunk pass by default (prefill chunks share the iteration with running decodes; decodes do not debit the prefill budget) — matching AIC's own SGLang agg deployment rule (`rule_plugin/sglang.rule`: `enable_mixed_chunk = true`); with `EngineSpec.enable_mixed_chunk=False`, alternating passes (dedicated prefill batches pause decode → ITL spikes are whole prefill batches) | structural, **not validated** against an SGLang reference |
+| vLLM | fused pass (unified budget, chunked prefill shares remainder) | **validated** across 9 config families (§5) + live b300 vllm 0.24 (§6.16) |
+| TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | **validated** live on h20e_sxm trtllm 1.3.0rc20 (chunked on/off ITL signatures, KV-capped deep queueing ±3%, TPOT ≤2% at C≥32; see `TrtllmCalendar` flag comment) |
+| SGLang | mixed-chunk pass (per-iteration extend budget is `chunked_prefill_size` SHARED across the batch, and mixed decode rows debit it — verified against sglang 0.5.14 `PrefillAdder`); with `EngineSpec.enable_mixed_chunk=False` (SGLang's own server default), alternating passes (dedicated prefill batches pause decode → ITL spikes are whole cohort prefill waves) | **validated** live on h20e_sxm sglang 0.5.14, both branches (mixed budget spike ±1.7%; alternating TPOT <1%, X exact at C=32) |
+
+## 3.1 Workload-fidelity contract (input tiers × evaluator tiers × error bars)
+
+Two orthogonal axes grade every prediction. The INPUT axis (W-tiers) is
+"what you tell us about the traffic"; each tier buys a named capability and
+degrades gracefully — every tier's degenerate input reproduces the tier
+below bit-for-bit (parity-tested), so callers pass whatever they have.
+
+| Tier | Input | What it buys | Validation record |
+|---|---|---|---|
+| W0 | `(isl, osl)` + `concurrency` | structural signatures, saturated throughput, SLA ordering | h20e trtllm/sglang + b300 vllm, ±1–6% |
+| W1 | + `request_rate` (open loop) | queue-wait TTFT under real arrivals (closed loop cannot express it) | h20e trtllm tp4, TTFT p50 ±4–8% at ρ≤0.7 |
+| W2 | + `isl_quantiles` / `osl_quantiles` (marginals) | frees TTFT from the homogeneous-convoy artifact (measured 2× pessimism at cv 0.25) | h20e trtllm tp4, TTFT +2%/+31% at C=8/32 |
+| W3 | + joint shape/prefix streams, empirical inter-arrival quantiles | prefix-hit economics, isl↔osl correlation, super-Poisson burst first-order | contract placeholder — not implemented |
+| W4 | + temporal structure (windowed non-stationarity, burst ordering, sessions) | p99 tail fidelity, peak/off-peak capacity split | contract placeholder — not implemented |
+
+The EVALUATOR axis is the existing cost ladder: E0 closed-form static (µs,
+whole sweep), E1 pass-calendar recursion (ms, `--sla-refine`; sole consumer
+of W1+ inputs — E0 degrades them to means), E2 DES oracle (validation gate
+only), E3 live benchmark. Input upgrades do not change evaluator cost —
+W2/W3 run in the same pass loop.
+
+Error-bar clauses that travel with every tier (measured, see §5/§6):
+steady-TTFT precision is bounded by osl × (timing-layer TPOT error) in
+closed loop (§6.16) and amplified by 1/(1−ρ) near capacity in open loop —
+treat ρ ≳ 0.8 open-loop predictions as optimistic bounds; deterministic
+arrival streams anti-cluster, so open-loop p99 tails run ~2× light until
+W4. `QueueingReport.workload_fidelity` (set by every evaluator; see
+`workload_fidelity()`) declares the consumed tier so downstream consumers
+can gate on prediction quality without re-deriving it; evaluators that do
+not consume a tier REJECT its inputs loudly (e.g. the fixed-shape disagg
+tandem raises on shape quantiles) instead of silently downgrading.
 
 ## 4. New summary columns (additive; legacy `ttft`/`tpot` untouched)
 

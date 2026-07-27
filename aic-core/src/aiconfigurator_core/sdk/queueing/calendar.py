@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
+from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec, workload_fidelity
 
 
 # eq=False: slots are identity objects. Cohorts of identical requests reach
@@ -459,6 +459,7 @@ def evaluate_closed_loop(
         backend=backend,
         mode="agg",
         num_requests=wl.num_requests,
+        workload_fidelity=workload_fidelity(wl),
     )
 
 
@@ -628,4 +629,5 @@ def evaluate_open_loop(
         backend=backend,
         mode="agg",
         num_requests=wl.num_requests,
+        workload_fidelity=workload_fidelity(wl),
     )

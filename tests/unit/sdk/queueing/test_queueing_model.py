@@ -548,6 +548,30 @@ class TestDisaggTandem:
             WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2,
                          isl_quantiles=(256, 2048))
 
+    def test_workload_fidelity_contract(self):
+        """Reports declare the input tier they consumed; the disagg tandem
+        rejects inputs above its tier instead of silently downgrading."""
+        from aiconfigurator.sdk.queueing import (
+            evaluate_closed_loop, evaluate_disagg, evaluate_open_loop, static_report,
+        )
+        from aiconfigurator_core.sdk.queueing.spec import workload_fidelity
+
+        eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        w0 = WorkloadSpec(isl=1024, osl=8, concurrency=2)
+        w1 = WorkloadSpec(isl=1024, osl=8, request_rate=2.0)
+        w2 = WorkloadSpec(isl=1024, osl=8, concurrency=2, isl_quantiles=(512, 1536))
+        assert workload_fidelity(w0) == "W0(closed-loop, fixed-shape)"
+        assert workload_fidelity(w1) == "W1(open-loop, fixed-shape)"
+        assert workload_fidelity(w2) == "W2(closed-loop, shape-marginals)"
+        assert evaluate_closed_loop(w0, eng, TIMING).workload_fidelity.startswith("W0")
+        assert evaluate_open_loop(w1, eng, TIMING).workload_fidelity.startswith("W1")
+        assert evaluate_closed_loop(w2, eng, TIMING).workload_fidelity.startswith("W2")
+        assert static_report(100.0, 5.0, osl=8).workload_fidelity.startswith("W0")
+        rep = evaluate_disagg(w0, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        assert rep.workload_fidelity.startswith("W0")
+        with pytest.raises(ValueError):
+            evaluate_disagg(w2, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+
     def test_open_loop_rate_tracking_and_queueing(self):
         """Open loop: throughput tracks the arrival rate below capacity;
         TTFT at low utilization is ~one solo prefill, and it strictly grows

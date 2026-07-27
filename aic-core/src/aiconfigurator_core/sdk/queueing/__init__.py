@@ -26,7 +26,7 @@ from .closed_form import (
     static_degenerate_columns,
 )
 from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
-from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
+from .spec import stratified_quantiles, workload_fidelity, Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 from .timing import DatabaseTimingModel
 
 __all__ = [
@@ -40,6 +40,8 @@ __all__ = [
     "TimingModel",
     "WorkloadSpec",
     "evaluate_closed_loop",
+    "stratified_quantiles",
+    "workload_fidelity",
     "evaluate_open_loop",
     "evaluate_disagg",
     "evaluate_disagg_mixed",
@@ -77,4 +79,5 @@ def static_report(
         backend=backend,
         mode="static",
         num_requests=num_requests,
+        workload_fidelity="W0(static-degenerate)",
     )

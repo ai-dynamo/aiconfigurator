@@ -46,10 +46,12 @@ class TimingModel(Protocol):
 class WorkloadSpec:
     """Stationary workload characterization.
 
-    The model covers stationary regimes only: fixed (isl, osl, prefix) with
-    either a closed-loop concurrency cap or an open-loop Poisson rate.
-    Timestamped traces / non-stationary arrivals are out of scope for the
-    analytical correction — use simulation-level tooling for those.
+    The model covers stationary regimes: (isl, osl, prefix) — fixed, or
+    described by marginal quantile streams (W2) — under a closed-loop
+    concurrency cap or an open-loop Poisson-like rate (W1). Timestamped
+    traces enter by reduction: quasi-stationary windowing + empirical
+    quantile extraction (see the design doc's fidelity contract); raw
+    non-stationary replay stays out of scope for the analytical model.
     """
 
     isl: int
@@ -129,6 +131,24 @@ def stratified_quantiles(values, k: int = 16) -> tuple:
         raise ValueError("values must be non-empty")
     n = len(vs)
     return tuple(vs[min(n - 1, int((i + 0.5) / k * n))] for i in range(k))
+
+
+def workload_fidelity(wl: "WorkloadSpec") -> str:
+    """The W-tier of the workload description an evaluation consumed — the
+    input side of the fidelity contract (design doc, "Workload-fidelity
+    contract"): W0 fixed shape, W1 + open-loop arrivals, W2 + shape
+    marginals; W3 (joint shape/prefix streams) and W4 (temporal structure)
+    are contract placeholders, not implemented. Orthogonal features
+    collapse to the highest tier, with components spelled out so the string
+    stays readable without the table."""
+    open_loop = wl.request_rate is not None
+    marginals = bool(wl.isl_quantiles or wl.osl_quantiles)
+    tier = 2 if marginals else (1 if open_loop else 0)
+    parts = [
+        "open-loop" if open_loop else "closed-loop",
+        "shape-marginals" if marginals else "fixed-shape",
+    ]
+    return f"W{tier}({', '.join(parts)})"
 
 
 def _shape_stream(quantiles: Optional[tuple], fallback: int):
@@ -287,6 +307,11 @@ class QueueingReport:
     # disagg decomposition (0 for agg)
     kv_transfer_ms: float = 0.0
     prefill_queue_ms: float = 0.0
+    # input-side fidelity tier this report consumed (see workload_fidelity
+    # and the design doc's fidelity contract); evaluators set it so
+    # downstream consumers can gate on prediction quality without
+    # re-deriving what the workload description contained
+    workload_fidelity: str = "W0(closed-loop, fixed-shape)"
 
     @property
     def ttft_mean_n(self) -> float:

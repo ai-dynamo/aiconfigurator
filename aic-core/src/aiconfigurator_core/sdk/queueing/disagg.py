@@ -39,7 +39,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
+from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec, workload_fidelity
 
 
 @dataclass(frozen=True)
@@ -260,6 +260,10 @@ def evaluate_disagg(
     """
     if wl.concurrency is None:
         raise ValueError("the disagg tandem model requires a closed-loop workload")
+    if wl.isl_quantiles or wl.osl_quantiles:
+        # fixed-shape only for now: rejecting loudly beats silently pricing a
+        # homogeneous tandem while claiming shape-marginal fidelity
+        raise ValueError("the disagg tandem model is fixed-shape; shape quantiles are not consumed here")
     c = wl.concurrency
     prefill = _Pool(spec.num_prefill_workers)
     decode = _Pool(spec.num_decode_workers)
@@ -429,6 +433,7 @@ def evaluate_disagg(
         num_requests=wl.num_requests,
         kv_transfer_ms=(sum(xfer_durations) / len(xfer_durations)) if xfer_durations else 0.0,
         prefill_queue_ms=(sum(prefill_waits) / len(prefill_waits)) if prefill_waits else 0.0,
+        workload_fidelity=workload_fidelity(wl),
     )
 
 
@@ -488,4 +493,5 @@ def evaluate_disagg_mixed(
         num_requests=wl.num_requests,
         kv_transfer_ms=sum(r.kv_transfer_ms for r in reps) / n,
         prefill_queue_ms=sum(r.prefill_queue_ms for r in reps) / n,
+        workload_fidelity=workload_fidelity(wl),
     )
