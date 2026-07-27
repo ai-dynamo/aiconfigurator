@@ -548,6 +548,36 @@ class TestDisaggTandem:
             WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2,
                          isl_quantiles=(256, 2048))
 
+    def test_open_loop_rate_tracking_and_queueing(self):
+        """Open loop: throughput tracks the arrival rate below capacity;
+        TTFT at low utilization is ~one solo prefill, and it strictly grows
+        as the rate approaches capacity (queue wait the closed loop cannot
+        represent). Deterministic: identical inputs -> identical outputs."""
+        from aiconfigurator.sdk.queueing import evaluate_open_loop
+
+        eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        low = evaluate_open_loop(WorkloadSpec(isl=4096, osl=8, request_rate=2.0), eng, TIMING)
+        high = evaluate_open_loop(WorkloadSpec(isl=4096, osl=8, request_rate=9.5), eng, TIMING)
+        assert low.throughput_rps == pytest.approx(2.0, rel=0.05)
+        solo = TIMING.prefill_ms(1, 4096, 0)
+        assert low.ttft_steady.mean < solo * 2.5
+        assert high.ttft_steady.mean > low.ttft_steady.mean
+        again = evaluate_open_loop(WorkloadSpec(isl=4096, osl=8, request_rate=2.0), eng, TIMING)
+        assert again.ttft_steady.mean == low.ttft_steady.mean
+
+    def test_open_loop_requires_rate_and_diverges_beyond_capacity(self):
+        from aiconfigurator.sdk.queueing import evaluate_open_loop
+
+        eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        with pytest.raises(ValueError):
+            evaluate_open_loop(WorkloadSpec(isl=4096, osl=8, concurrency=4), eng, TIMING)
+        with pytest.raises(RuntimeError):
+            # far beyond capacity: the waiting queue must diverge, not hang
+            evaluate_open_loop(
+                WorkloadSpec(isl=4096, osl=8, request_rate=1000.0), eng, TIMING,
+                warmup_requests=512, window_requests=2048,
+            )
+
     def test_turnaround_delays_replacement_visibility(self):
         """Replacements become visible to the prefill pool only after the
         client turnaround (same semantics as the agg calendar): the cycle

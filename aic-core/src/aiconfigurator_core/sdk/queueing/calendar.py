@@ -460,3 +460,163 @@ def evaluate_closed_loop(
         mode="agg",
         num_requests=wl.num_requests,
     )
+
+
+def evaluate_open_loop(
+    wl: WorkloadSpec,
+    eng: EngineSpec,
+    timing: TimingModel,
+    backend: str = "vllm",
+    warmup_requests: int = 128,
+    window_requests: int = 512,
+) -> QueueingReport:
+    """Run the pass-calendar recursion for an OPEN-loop workload.
+
+    Arrivals come from a deterministic exponential quantile stream (64
+    inverse-CDF strata, normalized to an exact mean of 1/request_rate,
+    golden-ratio-stride rotation) — the zero-RNG counterpart of Poisson
+    arrivals, same construction as the per-slot shape streams. Unlike the
+    closed loop, arrivals do not self-throttle: the in-flight population
+    floats, arrivals beyond the admission cap wait in a FIFO queue, and
+    TTFT includes that queue wait. There is no Little's-law TTFT anchor
+    here — the closed-loop cycle identity does not apply to open arrivals.
+
+    Raises RuntimeError when the waiting queue diverges (request_rate at or
+    beyond the deployment's capacity — no steady state exists).
+    """
+    if wl.request_rate is None:
+        raise ValueError("evaluate_open_loop requires an open-loop workload (request_rate)")
+    from math import gcd, log
+
+    from .spec import _shape_stream
+
+    calendar = CALENDARS[backend]
+    cap = calendar.admission_cap(wl, eng)
+
+    isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
+    osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
+    if wl.osl_quantiles:
+        for _ in range(len(wl.osl_quantiles) // 2):
+            next(osl_stream)
+    mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+
+    # deterministic exponential inter-arrival strata, exact-mean normalized
+    k = 64
+    strata = [-log(1.0 - (i + 0.5) / k) for i in range(k)]
+    scale = (1000.0 / wl.request_rate) / (sum(strata) / k)
+    stride = max(1, round(k * 0.6180339887))
+    while gcd(stride, k) != 1:
+        stride += 1
+
+    total = warmup_requests + window_requests
+    pending: list[_Slot] = []
+    t_arr = 0.0
+    for n in range(total):
+        t_arr += strata[(n * stride) % k] * scale
+        isl_i = next(isl_stream)
+        pending.append(
+            _Slot(
+                remaining_prefill=max(1, isl_i - wl.prefix),
+                isl=isl_i,
+                osl=next(osl_stream),
+                arrival_ms=t_arr,
+                eligible_ms=t_arr + wl.turnaround_ms,
+            )
+        )
+
+    slots: list[_Slot] = []
+    waiting: list[_Slot] = []  # visible to the scheduler, above the admission cap
+    now = 0.0
+    prev_pass_start = 0.0
+    completions = 0
+    steady_start_ms = None
+
+    ttft_transient = Distribution()
+    ttft_steady = Distribution()
+    itl = Distribution()
+    tpot = Distribution()
+    e2e = Distribution()
+    steady_completions = 0
+
+    max_osl = max(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    max_passes = 400 * total * max(1, max_osl) // max(1, min(cap, total))
+    for _ in range(max_passes):
+        if completions >= total:
+            break
+        horizon = prev_pass_start if eng.async_scheduling else now
+        if pending:
+            visible = [s for s in pending if s.eligible_ms <= horizon]
+            if visible:
+                waiting.extend(visible)  # FIFO by arrival (pending is arrival-ordered)
+                pending = [s for s in pending if s.eligible_ms > horizon]
+        while waiting and len(slots) < cap:
+            slots.append(waiting.pop(0))
+        if len(waiting) > max(4 * cap, total // 2):
+            raise RuntimeError(
+                f"open-loop waiting queue diverged (backend={backend}, "
+                f"rate={wl.request_rate}/s, cap={cap}) — request_rate is at or "
+                "beyond this deployment's capacity; no steady state exists"
+            )
+
+        pass_start = now
+        duration, emitters = calendar.step(slots, wl, eng, timing)
+        if not emitters and duration <= 0.0:
+            nxt = min((s.eligible_ms for s in pending), default=float("inf"))
+            if waiting:
+                # capped out but idle passes cannot happen with waiting work
+                raise RuntimeError("open-loop recursion stalled with waiting work")
+            if nxt == float("inf"):
+                break  # drained: all arrivals processed
+            now = max(now, nxt)
+            prev_pass_start = now
+            continue
+        prev_pass_start = pass_start
+        now += duration
+
+        finished: list[_Slot] = []
+        for s in emitters:
+            s.generated += 1
+            if s.first_token_ms < 0:
+                s.first_token_ms = now
+                ttft_ms = now - s.arrival_ms
+                if completions >= warmup_requests:
+                    ttft_steady.add(ttft_ms)
+                else:
+                    ttft_transient.add(ttft_ms)
+            else:
+                s.gaps.append(now - s.last_token_ms)
+            s.last_token_ms = now
+            if s.generated >= s.osl:
+                finished.append(s)
+
+        for s in finished:
+            completions += 1
+            if completions == warmup_requests:
+                steady_start_ms = now
+            if completions > warmup_requests:
+                steady_completions += 1
+                for g in s.gaps:
+                    itl.add(g)
+                if s.gaps:
+                    tpot.add(sum(s.gaps) / len(s.gaps))
+                e2e.add(now - s.arrival_ms)
+            idx = slots.index(s)
+            slots[idx : idx + 1] = []
+    else:
+        raise RuntimeError("open-loop pass-calendar did not converge within max_passes")
+
+    window_ms = now - (steady_start_ms if steady_start_ms is not None else 0.0)
+    throughput = steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
+
+    return QueueingReport(
+        ttft_steady=ttft_steady,
+        ttft_transient=ttft_transient,
+        itl=itl,
+        tpot=tpot,
+        e2e=e2e,
+        throughput_rps=throughput,
+        output_tokens_per_s=throughput * mean_osl,
+        backend=backend,
+        mode="agg",
+        num_requests=wl.num_requests,
+    )

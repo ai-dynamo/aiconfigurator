@@ -19,7 +19,7 @@ concurrency). Open-loop rates and timestamped traces are out of scope.
 Validation methodology and recorded results: docs/design/queueing_model.md §5.
 """
 
-from .calendar import CALENDARS, evaluate_closed_loop
+from .calendar import CALENDARS, evaluate_closed_loop, evaluate_open_loop
 from .closed_form import (
     QUEUEING_COLUMNS,
     operating_point_columns,
@@ -40,6 +40,7 @@ __all__ = [
     "TimingModel",
     "WorkloadSpec",
     "evaluate_closed_loop",
+    "evaluate_open_loop",
     "evaluate_disagg",
     "evaluate_disagg_mixed",
     "operating_point_columns",
