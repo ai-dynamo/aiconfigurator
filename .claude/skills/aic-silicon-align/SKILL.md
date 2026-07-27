@@ -29,8 +29,14 @@ adjacent ones only. Never attribute a residual across more than one rung.
 
 ## What dummy weights do and don't preserve
 
-- Preserve: memory footprint (identical allocation), all data-independent
-  kernel timing (GEMM, attention, quantized kernels).
+- Usually preserve: memory footprint and data-independent kernel timing —
+  but this is loader-specific, NOT a guarantee. Before relying on it, verify
+  against the real checkpoint: parameter dtypes/shapes/layouts and quant
+  scales after loading, post-load weight transforms, and that the framework
+  dispatches the same kernels (some dummy loaders allocate a different dtype
+  than the checkpoint ships, or skip scale tensors that change dispatch).
+  If any of these differ, validate the affected measurement with real
+  weights before using it.
 - Do NOT preserve: anything routed by data — e.g. MoE expert distributions
   collapse (near-identical hidden states -> few unique experts -> weight
   reads shrink several-fold). Mark such measurements as biased and state the

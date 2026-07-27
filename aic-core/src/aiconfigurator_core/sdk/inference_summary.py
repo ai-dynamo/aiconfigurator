@@ -101,6 +101,9 @@ class InferenceSummary:
         self._free_gpu_memory_fraction: float | None = None
         self._kv_cache_reserved_fraction: float = 0.0
         self._kv_cache_tolerance: float = 0.0
+        # of_free (TRT-LLM) vs of_total (vLLM/SGLang) budget semantics; consumed
+        # by the estimate detail report so its displayed max batch matches the gate.
+        self._fraction_of_free: bool = True
         self._kv_bytes_per_seq: float | None = None
         self._kv_seq_len_used: int | None = None
 
@@ -136,6 +139,7 @@ class InferenceSummary:
         self._free_gpu_memory_fraction = free_gpu_memory_fraction
         self._kv_cache_reserved_fraction = kv_cache_reserved_fraction
         self._kv_cache_tolerance = kv_cache_tolerance
+        self._fraction_of_free = fraction_of_free
         if free_gpu_memory_fraction is not None:
             self._check_and_set_kv_cache_oom(
                 mem_capacity,

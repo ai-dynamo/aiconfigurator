@@ -289,12 +289,20 @@ def _format_memory_section(summary: InferenceSummary, bar_width: int) -> list[st
                 max_bs = int(free_for_kv_gib // kv_per_seq_gib)
                 extra = ""
                 if summary._free_gpu_memory_fraction is not None:
-                    eff_frac = (
-                        summary._free_gpu_memory_fraction
-                        * (1.0 - summary._kv_cache_reserved_fraction)
-                        * (1.0 - summary._kv_cache_tolerance)
+                    # Same formula as the feasibility gate (of_free for TRT-LLM,
+                    # of_total for vLLM/SGLang) so the displayed bound cannot
+                    # disagree with what the sweep accepts.
+                    from aiconfigurator.sdk.memory import kv_cache_budget_bytes
+
+                    kv_budget_gib = kv_cache_budget_bytes(
+                        capacity=cap_gib,
+                        non_kv=non_kv_gib,
+                        fraction=summary._free_gpu_memory_fraction,
+                        of_free=getattr(summary, "_fraction_of_free", True),
+                        reserved=summary._kv_cache_reserved_fraction,
+                        tolerance=summary._kv_cache_tolerance,
                     )
-                    max_bs_frac = int((free_for_kv_gib * eff_frac) // kv_per_seq_gib)
+                    max_bs_frac = int(max(0.0, kv_budget_gib) // kv_per_seq_gib)
                     extra = f"  /  {max_bs_frac} (under free_gpu_memory_fraction={summary._free_gpu_memory_fraction:g})"
                 lines.append(f"  max batch (KV-bound, same isl/osl) ≈ {max_bs}{extra}")
                 lines.append("    note: ignores activation growth with batch; treat as an upper bound.")
