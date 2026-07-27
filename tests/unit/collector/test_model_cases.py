@@ -516,9 +516,31 @@ def test_gptoss_mxfp4_modes_are_additive_on_blackwell():
         }
 
     assert selected_modes("sglang", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    assert selected_modes("sglang", 109) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+    assert selected_modes("sglang", 110) == {"w4a16_mxfp4"}
+    assert selected_modes("sglang", 119) == {"w4a16_mxfp4"}
     assert selected_modes("sglang", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 90) == {"w4a16_mxfp4"}
     assert selected_modes("trtllm", 100) == {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
+
+
+def test_sglang_dsv4_native_w4a8_mode_is_sm100_interval_gated():
+    from collector.case_generator import get_moe_quantization_modes
+
+    def selected_modes(sm_version):
+        return {
+            mode
+            for mode in get_moe_quantization_modes("sglang", sm_version=sm_version)
+            if moe_model_allows_quantization("sglang", "deepseek-ai/DeepSeek-V4-Flash", mode)
+        }
+
+    assert selected_modes(90) == set()
+    assert selected_modes(100) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(103) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(109) == {"w4a8_mxfp4_mxfp8"}
+    assert selected_modes(110) == set()
+    assert selected_modes(119) == set()
+    assert selected_modes(120) == set()
 
 
 def test_vllm_dsv4_native_w4a8_mode_is_sm100_interval_gated():

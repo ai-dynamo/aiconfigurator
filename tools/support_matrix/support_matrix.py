@@ -22,6 +22,7 @@ from itertools import groupby
 from pathlib import Path
 
 import pandas as pd
+from packaging.version import Version
 from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
@@ -87,7 +88,7 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
-_DSV4_VLLM_024_NATIVE_W4A8_SYSTEMS = frozenset({"b200_sxm", "b300_sxm", "gb200", "gb300"})
+_DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -222,6 +223,7 @@ def _is_known_framework_incompatible_gap(
     *,
     model: str,
     system: str,
+    system_spec: dict,
     backend: str,
     version: str,
     error_message: str | None,
@@ -253,13 +255,23 @@ def _is_known_framework_incompatible_gap(
         return True
 
     # vLLM has no consumable path for the native DeepSeek-V4
-    # w4a8_mxfp4_mxfp8 MoE label outside the collected 0.24.0 Blackwell
-    # systems. On those supported combinations, either error is a data-path
-    # regression and must remain FAIL rather than being rescued by HYBRID.
+    # w4a8_mxfp4_mxfp8 MoE label before 0.24.0 or outside the SM100
+    # capability family. On supported combinations, either error is a
+    # data-path regression and must remain FAIL rather than being rescued by
+    # HYBRID. Keep this expectation capability- and minimum-version-based so
+    # future database versions fail closed if their native data regresses.
+    parsed_version = common.parse_support_matrix_version(version)
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    native_dsv4_w4a8_expected = (
+        parsed_version is not None
+        and parsed_version >= _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION
+        and sm_version is not None
+        and 100 <= sm_version < 110
+    )
     if (
         backend == common.BackendName.vllm.value
         and "DeepSeek-V4" in model
-        and not (version == "0.24.0" and system in _DSV4_VLLM_024_NATIVE_W4A8_SYSTEMS)
+        and not native_dsv4_w4a8_expected
         and (
             "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
             or "deepseek-v4 mhc module data not loaded" in normalized
@@ -965,7 +977,12 @@ class SupportMatrix:
                 if _is_known_hw_incompatible_gap(system=system, error_message=raw_error):
                     return STATUS_HW_INCOMPATIBLE, raw_error, "", False
                 framework_gap = _is_known_framework_incompatible_gap(
-                    model=model, system=system, backend=backend, version=version, error_message=raw_error
+                    model=model,
+                    system=system,
+                    system_spec=system_spec,
+                    backend=backend,
+                    version=version,
+                    error_message=raw_error,
                 )
                 if framework_gap:
                     # Some known framework gaps (for example Kimi INT4_WO on TRT-LLM)

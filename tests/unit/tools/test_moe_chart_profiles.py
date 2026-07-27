@@ -72,3 +72,41 @@ def test_filters_topology_and_ranks_by_target_token_coverage():
     )
 
     assert profiles == [best, second]
+
+
+def test_filters_profiles_before_preferred_and_max_profile_selection():
+    preferred = MoeChartProfile(topk=4, num_experts=128, hidden_size=2880, inter_size=2880)
+    fallback = MoeChartProfile(topk=6, num_experts=256, hidden_size=4096, inter_size=2048)
+    data = {}
+    _add_profile(data, preferred, tp=4, ep=1)
+    _add_profile(data, fallback, tp=4, ep=1)
+
+    profiles = select_moe_chart_profiles(
+        data,
+        workload_distribution="balanced",
+        moe_tp_size=4,
+        moe_ep_size=1,
+        target_tokens=(1, 16, 32),
+        preferred=preferred,
+        max_profiles=1,
+        predicate=lambda profile: (profile.inter_size // 4) % 64 == 0,
+    )
+
+    assert profiles == [fallback]
+
+
+def test_non_positive_max_profiles_returns_no_profiles():
+    profile = MoeChartProfile(topk=6, num_experts=256, hidden_size=4096, inter_size=2048)
+    data = {}
+    _add_profile(data, profile)
+
+    profiles = select_moe_chart_profiles(
+        data,
+        workload_distribution="balanced",
+        moe_tp_size=1,
+        moe_ep_size=4,
+        target_tokens=(1, 16, 32),
+        max_profiles=0,
+    )
+
+    assert profiles == []

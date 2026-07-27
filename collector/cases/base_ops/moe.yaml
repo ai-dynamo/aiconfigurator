@@ -156,14 +156,14 @@ common_case_values:
       - openai/gpt-oss-120b
     - name: w4a8_mxfp4_mxfp8
       min_sm: 100
-      # SGLang 0.5.14 has no SM120 mxfp8-activation MXFP4 path: the
+      # SGLang 0.5.14 has no SM110+ mxfp8-activation MXFP4 path: the
       # flashinfer_mxfp4 method accepts only SM90 (cutlass) or SM100
-      # (trtllm-gen) (mxfp4.py:344-360 at image source 49e384ce), and SM120
-      # serving instead routes GPT-OSS/DSV4 MXFP4 checkpoints to Marlin
+      # (trtllm-gen) (mxfp4.py:344-360 at image source 49e384ce), while SM120
+      # serving routes GPT-OSS/DSV4 MXFP4 checkpoints to Marlin
       # (server_args.py:3876-3887, 3786-3791), whose weight-only bf16
       # activation is the distinct w4a16_mxfp4 identity. SM103 keeps the
       # SM100 trtllm-gen entry above.
-      max_sm_exclusive: 120
+      max_sm_exclusive: 110
       allowed_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
