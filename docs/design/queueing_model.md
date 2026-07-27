@@ -296,6 +296,18 @@ Silent (each with a designated detector):
    equal-weight mixture over a deterministic set of initial-arrival
    staggers (no RNG; each component is a valid limit cycle); the gate
    compares single phases with matched initial conditions.
+   Measured instance of the boundary (h20e_sxm, trtllm 1.3.0rc20 native
+   disagg 2P1D, Qwen3-32B tp1, isl4096/osl256): at the saturation knee
+   (C=8 ≈ 2 prefill workers × knee) every stagger phase and any
+   kappa/turnaround locks the zero-wait pipeline attractor (X→capacity,
+   TTFT≈solo), while the real deployment's service-time jitter selects a
+   queued attractor (X 0.814 vs 1.006 predicted; TTFT quantized at
+   integer multiples of the solo prefill — measured 3.6s mean vs 2.0
+   predicted). Below the knee (C≤6: within 3-9%) and beyond it (C≥2×knee:
+   within 2-4%) the recursion is accurate; the knee itself is
+   jitter-selected and out of deterministic scope. Do not compensate by
+   fitting eps or kappa — that is phase compensation, same rejection as
+   item 16(c).
 16. **Closed-loop steady TTFT is ill-conditioned at saturation — measured
    resolution of items 13/14.** Validated against live vLLM 0.24.0 on
    b300_sxm (Qwen3-32B bf16 TP4, dummy weights, isl4096/osl256, closed

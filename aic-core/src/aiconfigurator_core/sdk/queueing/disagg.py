@@ -60,7 +60,17 @@ class DisaggSpec:
     egress_bytes_per_s: float = 0.0  # per prefill-worker NIC
     ingress_bytes_per_s: float = 0.0  # per decode-worker NIC
     bw_efficiency: float = 0.8
-    prefill_inflight_cap: Optional[int] = None  # kappa; None = engine-batched
+    # kappa: per-pass prefill batch cap on each prefill worker.
+    # None = engine-batched (queued prompts share one pass up to the token
+    # budget); 1 = solo-serial prefills. Measured mapping (h20e 2P1D,
+    # trtllm 1.3.0rc20): TRT-LLM native disaggregated serving runs ctx
+    # prefills solo-serial behind a static round-robin router — i.e.
+    # kappa=1 (low-load TTFT within ~3%). At the saturation knee (rho -> 1)
+    # the deterministic recursion locks the zero-wait pipeline attractor
+    # for ANY kappa/phase while jitter drives real deployments into a
+    # queued attractor — see design doc failure mode 15; the saturated
+    # regime is unaffected.
+    prefill_inflight_cap: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.num_prefill_workers < 1 or self.num_decode_workers < 1:
