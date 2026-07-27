@@ -1440,6 +1440,36 @@ class TestMLAModuleQueryKeys:
         )
         assert module._gemm_quant_mode == common.GEMMQuantMode.bfloat16
 
+    def test_kimik25_context_module_uses_same_keys(self):
+        # coderabbit: the context_mla_block key changed too — cover it.
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = models.get_model("nvidia/Kimi-K2.5-NVFP4", model_config, backend_name="vllm")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_mla_block":
+                assert op._primary._num_heads == 64
+                assert op._primary._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+                return
+        raise AssertionError("context_mla_block not found")
+
+    def test_v31_nvfp4_mixed_exclusion_keys_on_o_proj(self):
+        # DeepSeek-V3.1-NVFP4 excludes q/kv but keeps o_proj NVFP4: per-GEMM
+        # dtypes split, and the single module perf key follows o_proj (largest
+        # projection by bytes), NOT a blanket BF16.
+        module = self._generation_mla_module(
+            "nvidia/DeepSeek-V3.1-NVFP4", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+        )
+        assert module._gemm_quant_mode == common.GEMMQuantMode.nvfp4
+
     def test_deepseek_v3_keeps_global_gemm_key_and_heads(self):
         # Official DeepSeek FP8 checkpoints quantize attention too (empty ignore
         # list): the module key must stay on the configured global mode.
@@ -1494,12 +1524,69 @@ class TestDSV32NVFP4AttentionExclusion:
         )
         return models.get_model(hf_id, model_config, backend_name="vllm")
 
-    def test_dsv32_nvfp4_gets_bf16_dsa_gemm_mode(self):
+    def test_dsv32_nvfp4_records_per_projection_exclusions(self):
+        # V3.2-NVFP4 excludes q/kv/indexer but KEEPS o_proj quantized.
         model = self._build("nvidia/DeepSeek-V3.2-NVFP4")
-        assert model.extra_params.get("dsa_gemm_quant_mode") == common.GEMMQuantMode.bfloat16
+        assert model.extra_params.get("dsa_attn_quant_exclusions") == frozenset({"q", "kv", "indexer"})
+
+    def test_dsv32_nvfp4_dsa_weights_are_mixed_dtype(self):
+        # Per-layer per-rank at tp1: q(48.76M)+kv(20.90M)+indexer(13.04M) in
+        # BF16 + o(117.44M) in NVFP4 = 231.5e6 B/layer x 61 = 13.15 GiB.
+        model = self._build("nvidia/DeepSeek-V3.2-NVFP4")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_attention":
+                assert op.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
+                return
+        raise AssertionError("context_attention not found")
 
     def test_dsv32_official_keeps_global_mode(self):
         # deepseek-ai/DeepSeek-V3.2 quantizes attention (empty ignore list):
-        # no bf16 override may be injected.
+        # nothing excluded, weights follow the configured global mode.
         model = self._build("deepseek-ai/DeepSeek-V3.2")
-        assert "dsa_gemm_quant_mode" not in model.extra_params
+        assert model.extra_params.get("dsa_attn_quant_exclusions") == frozenset()
+
+
+class TestAttentionProjectionExclusions:
+    """Per-projection exclusion parsing (V3.1/V3.2 exclude q/kv but not o_proj)."""
+
+    @staticmethod
+    def _excl(patterns):
+        from aiconfigurator.sdk.models.helpers import attention_projection_exclusions
+
+        return attention_projection_exclusions({"quantization_config": {"ignore": patterns}})
+
+    def test_whole_block_glob_covers_all_groups(self):
+        assert self._excl(["model.layers.3.self_attn*"]) == frozenset({"q", "kv", "o", "indexer"})
+
+    def test_projection_named_patterns_split_groups(self):
+        got = self._excl(
+            [
+                "model.layers.0.self_attn.q_a_proj",
+                "model.layers.0.self_attn.kv_b_proj",
+                "model.layers.0.self_attn.indexer*",
+            ]
+        )
+        assert got == frozenset({"q", "kv", "indexer"})
+
+    def test_o_proj_only(self):
+        assert self._excl(["model.layers.0.self_attn.o_proj"]) == frozenset({"o"})
+
+    def test_empty(self):
+        assert self._excl([]) == frozenset()
+
+
+class TestBundledModelConfigsOffline:
+    """Bundled configs must load without network (P2: DefaultHFModels registration)."""
+
+    def test_dsv32_nvfp4_loads_from_bundle(self, monkeypatch):
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        cfg = sdk_utils.get_model_config_from_model_path("nvidia/DeepSeek-V3.2-NVFP4")
+        raw = cfg["raw_config"]
+        assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
+        sdk_utils._load_model_config_from_model_path.cache_clear()

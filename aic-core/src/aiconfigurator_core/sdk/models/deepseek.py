@@ -8,7 +8,7 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import attention_modules_excluded_from_quant, mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions, mtp_scale_factor
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,11 @@ class DeepSeekModel(BaseModel):
         )
         extra_params = model_info["extra_params"]
         family = model_info["model_family"]
-        # Per-checkpoint fact: NVFP4/INT4 releases keep attention projections in
-        # BF16 (quantization ignore/exclude lists), DeepSeek native FP8 quantizes
-        # them. Drives the MLA-module perf-row selection below.
-        attn_quant_ignored = attention_modules_excluded_from_quant(model_info.get("raw_config") or {})
+        # Per-checkpoint, per-projection fact: Kimi-K2.5/R1 NVFP4 exclude the
+        # whole self_attn block from quantization; DeepSeek-V3.1-NVFP4 excludes
+        # only q/kv projections and keeps o_proj NVFP4; native FP8 checkpoints
+        # exclude nothing. Drives per-GEMM dtypes and the MLA-module perf key.
+        attn_exclusions = attention_projection_exclusions(model_info.get("raw_config") or {})
 
         if family == "KIMIK25":
             # Kimi K2.5 reuses the DeepSeek architecture, but skips the WideEP
@@ -61,7 +62,7 @@ class DeepSeekModel(BaseModel):
                 *base_args,
                 extra_params,
                 backend_name=backend_name,
-                attention_quant_ignored=attn_quant_ignored,
+                attention_quant_exclusions=attn_exclusions,
             )
 
         # DEEPSEEK family — three-way dispatch on WideEP.
@@ -88,7 +89,7 @@ class DeepSeekModel(BaseModel):
             *base_args,
             extra_params,
             backend_name=backend_name,
-            attention_quant_ignored=attn_quant_ignored,
+            attention_quant_exclusions=attn_exclusions,
         )
 
     def __init__(
@@ -98,7 +99,7 @@ class DeepSeekModel(BaseModel):
         moe_inter_size: int,
         *args,
         backend_name: str = "",
-        attention_quant_ignored: bool = False,
+        attention_quant_exclusions: frozenset = frozenset(),
     ) -> None:
         super().__init__(*args)
         # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
@@ -142,16 +143,34 @@ class DeepSeekModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
-        # Attention projections follow the checkpoint's per-layer dtype, not the
-        # global gemm mode: NVFP4/INT4 DeepSeek/Kimi releases exclude every
-        # self_attn* from quantization, so serving loads and executes them in
-        # BF16 (vLLM ReplicatedLinear/ColumnParallelLinear pick up the
-        # unquantized tensors). This drives both the fallback GEMM perf rows
-        # and their get_weights() byte width.
-        attn_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if attention_quant_ignored else gemm_quant_mode
+        # Attention projections follow the checkpoint's PER-PROJECTION dtype,
+        # not the global gemm mode: serving loads excluded projections in BF16
+        # (vLLM ReplicatedLinear/ColumnParallelLinear pick up the unquantized
+        # tensors) while non-excluded ones stay quantized — V3.1-NVFP4 keeps
+        # o_proj NVFP4 with BF16 q/kv. Drives per-GEMM perf rows and
+        # get_weights() byte widths.
+        excl = attention_quant_exclusions
+
+        def _attn_mode(group: str) -> common.GEMMQuantMode:
+            return common.GEMMQuantMode.bfloat16 if group in excl else gemm_quant_mode
+
+        attn_q_gemm_quant_mode = _attn_mode("q")
+        attn_kv_gemm_quant_mode = _attn_mode("kv")
+        attn_o_gemm_quant_mode = _attn_mode("o")
+        # downscale GEMM fuses q_a + kv_a: BF16 only when both groups are excluded.
+        attn_downscale_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if {"q", "kv"} <= excl else gemm_quant_mode
+        # Module perf rows are keyed by ONE gemm_type; when the checkpoint
+        # mixes dtypes across projections no row matches exactly, so key on
+        # o_proj's dtype — the largest projection by bytes and FLOPs (heads x
+        # v_head_dim x hidden ~ 58% of block weights at 64 heads).
+        attn_modes = {attn_q_gemm_quant_mode, attn_kv_gemm_quant_mode, attn_o_gemm_quant_mode}
+        attn_gemm_quant_mode = attn_modes.pop() if len(attn_modes) == 1 else attn_o_gemm_quant_mode
+        # Absorbed kv_b BMMs inherit the kv projection dtype.
         mla_bmm_quant_mode = (
-            common.GEMMQuantMode.fp8
-            if attn_gemm_quant_mode != common.GEMMQuantMode.bfloat16
+            common.GEMMQuantMode.bfloat16
+            if attn_kv_gemm_quant_mode == common.GEMMQuantMode.bfloat16
+            else common.GEMMQuantMode.fp8
+            if gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
 
@@ -206,7 +225,12 @@ class DeepSeekModel(BaseModel):
                     ),
                     fallback=[
                         ops.GEMM(
-                            "context_downscale_gemm", self._num_layers, 2112, h, attn_gemm_quant_mode, seq_split=cp
+                            "context_downscale_gemm",
+                            self._num_layers,
+                            2112,
+                            h,
+                            attn_downscale_gemm_quant_mode,
+                            seq_split=cp,
                         ),
                         ops.GEMM(
                             "context_q_b_proj_gemm",
@@ -214,7 +238,7 @@ class DeepSeekModel(BaseModel):
                             # heads x (qk_nope 128 + qk_rope 64); DSV3's 128 heads gave the old 24576 literal
                             self._num_heads * 192 // tp_size,
                             1536,
-                            attn_gemm_quant_mode,
+                            attn_q_gemm_quant_mode,
                             seq_split=cp,
                         ),
                         ops.GEMM(
@@ -223,7 +247,7 @@ class DeepSeekModel(BaseModel):
                             # heads x (qk_nope 128 + v_head_dim 128)
                             self._num_heads * 256 // tp_size,
                             512,
-                            attn_gemm_quant_mode,
+                            attn_kv_gemm_quant_mode,
                             seq_split=cp,
                         ),
                         ops.ContextAttention(
@@ -250,7 +274,7 @@ class DeepSeekModel(BaseModel):
                             h,
                             # o_proj input: heads x v_head_dim 128
                             self._num_heads * 128 // tp_size,
-                            attn_gemm_quant_mode,
+                            attn_o_gemm_quant_mode,
                             seq_split=cp,
                         ),
                     ],
@@ -417,14 +441,14 @@ class DeepSeekModel(BaseModel):
                             self._num_layers * self._mtp_scale_factor,
                             2112,
                             h,
-                            attn_gemm_quant_mode,
+                            attn_downscale_gemm_quant_mode,
                         ),
                         ops.GEMM(
                             "generation_q_b_proj_gemm",
                             self._num_layers * self._mtp_scale_factor,
                             self._num_heads * 192 // tp_size,
                             1536,
-                            attn_gemm_quant_mode,
+                            attn_q_gemm_quant_mode,
                         ),
                         *(
                             # KIMI K2.5 on vLLM: same reasoning as ContextAttention above —
@@ -472,7 +496,7 @@ class DeepSeekModel(BaseModel):
                             # o_proj input is heads x v_head_dim 128 (the old h//tp
                             # literal was wrong even for DSV3: 7168 vs 16384)
                             self._num_heads * 128 // tp_size,
-                            attn_gemm_quant_mode,
+                            attn_o_gemm_quant_mode,
                         ),
                     ],
                 ),
