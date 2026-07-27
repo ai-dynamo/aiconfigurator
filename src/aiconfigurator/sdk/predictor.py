@@ -78,6 +78,7 @@ class Predictor(Protocol):
         role: DisaggRole,
         latency_correction: float = 1.0,
         stride: int = 32,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """Predict perf for one phase of a disagg worker (prefill-only or decode-only)."""
         ...
@@ -132,6 +133,7 @@ class AnalyticPredictor:
         role: DisaggRole,
         latency_correction: float = 1.0,
         stride: int = 32,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         mode = self._DISAGG_ROLE_TO_MODE[role]
         return backend.run_static(
@@ -141,6 +143,7 @@ class AnalyticPredictor:
             mode,
             stride,
             latency_correction,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
         )
 
 

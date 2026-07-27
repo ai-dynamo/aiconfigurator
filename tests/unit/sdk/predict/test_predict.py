@@ -40,7 +40,9 @@ def test_predict_disagg_worker_prefill_calls_run_static_ctx():
     )
 
     assert result == "sentinel-summary"
-    backend.run_static.assert_called_once_with(model, database, rt, "static_ctx", 32, 1.0)
+    backend.run_static.assert_called_once_with(
+        model, database, rt, "static_ctx", 32, 1.0, free_gpu_memory_fraction=None
+    )
     backend.run_agg.assert_not_called()
 
 
@@ -55,7 +57,9 @@ def test_predict_disagg_worker_decode_calls_run_static_gen():
         role="decode",
     )
 
-    backend.run_static.assert_called_once_with(model, database, rt, "static_gen", 32, 1.0)
+    backend.run_static.assert_called_once_with(
+        model, database, rt, "static_gen", 32, 1.0, free_gpu_memory_fraction=None
+    )
 
 
 def test_predict_disagg_worker_passes_latency_correction_and_stride():
@@ -71,7 +75,9 @@ def test_predict_disagg_worker_passes_latency_correction_and_stride():
         stride=64,
     )
 
-    backend.run_static.assert_called_once_with(model, database, rt, "static_ctx", 64, 1.25)
+    backend.run_static.assert_called_once_with(
+        model, database, rt, "static_ctx", 64, 1.25, free_gpu_memory_fraction=None
+    )
 
 
 def test_predict_disagg_worker_rejects_unknown_role():

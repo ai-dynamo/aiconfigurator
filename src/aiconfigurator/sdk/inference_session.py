@@ -1615,7 +1615,7 @@ class AFDInferenceSession:
         if phase not in ("prefill", "decode", "both"):
             raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
         if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction()
+            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction(self._database.version)
 
         a_model, f_model = self._build_models()
 

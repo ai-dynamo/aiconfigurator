@@ -18,8 +18,16 @@ logger = logging.getLogger(__name__)
 # device and selects decode batch sizes whose KV cache cannot be allocated in
 # a real deployment (see ai-dynamo/aiconfigurator#1396: predicted decode
 # bs=96/rank vs 29/rank actually admitted on B200 for Kimi-K2.5-NVFP4).
-# Value mirrors the framework default (CacheConfig.gpu_memory_utilization,
-# vllm/config/cache.py:66 @0.22.0, unchanged @0.24.0).
+# Values mirror the framework default (CacheConfig.gpu_memory_utilization,
+# vllm/config/cache.py: 0.9 @v0.14.0/v0.19.0; 0.92 @v0.22.0, unchanged
+# @v0.24.0/v0.25.x). Keyed by minor-version prefix; unknown versions fall
+# through to the newest known default.
+VLLM_GPU_MEMORY_UTILIZATION_BY_VERSION: dict[str, float] = {
+    "0.14": 0.9,
+    "0.19": 0.9,
+    "0.22": 0.92,
+    "0.24": 0.92,
+}
 VLLM_DEFAULT_GPU_MEMORY_UTILIZATION: float = 0.92
 # Small safety margin for KV block/page granularity and memory-profiler
 # variance between vLLM releases.
@@ -56,7 +64,11 @@ class VLLMBackend(BaseBackend):
         super().__init__()
         self.name = common.BackendName.vllm
 
-    def get_default_free_gpu_memory_fraction(self) -> float | None:
+    def get_default_free_gpu_memory_fraction(self, backend_version: str | None = None) -> float | None:
+        if backend_version:
+            for prefix, value in VLLM_GPU_MEMORY_UTILIZATION_BY_VERSION.items():
+                if str(backend_version).startswith(prefix):
+                    return value
         return VLLM_DEFAULT_GPU_MEMORY_UTILIZATION
 
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:

@@ -88,14 +88,42 @@ def test_sglang_backend_derives_capacity_tiered_fraction():
     assert backend.memory_fraction_of_free() is False
     assert backend.get_default_free_gpu_memory_fraction() == SGLANG_FALLBACK_MEM_FRACTION_STATIC
 
-    # b200_sxm (180 GiB): >160 GB tier, chunked_prefill 16384 ->
-    # reserved 512 + 24576 MB -> (184320 - 25088) / 184320 = 0.864
+    # b200_sxm (180 GiB), tp1: >160 GB tier, chunked_prefill 16384, graph max_bs 512
+    # -> reserved 512 + 24576 + 128 (tp*pp/8 GiB) + 1024 (graph) = 26240
+    # -> (184320 - 26240) / 184320 = 0.858
     b200_capacity = 193273528320
-    assert derive_sglang_mem_fraction_static(b200_capacity) == pytest.approx(0.864, abs=0.001)
+    assert derive_sglang_mem_fraction_static(b200_capacity) == pytest.approx(0.858, abs=0.001)
     kwargs = backend._static_oom_check_kwargs(b200_capacity)
-    assert kwargs["free_gpu_memory_fraction"] == pytest.approx(0.864, abs=0.001)
+    assert kwargs["free_gpu_memory_fraction"] == pytest.approx(0.858, abs=0.001)
     assert kwargs["fraction_of_free"] is False
 
-    # h100_sxm (80 GiB): 60-160 GB tier, chunked_prefill 8192 ->
-    # reserved max(512 + 12288, 10240) = 12800 -> (81920 - 12800) / 81920 = 0.844
-    assert derive_sglang_mem_fraction_static(80 * (1 << 30)) == pytest.approx(0.844, abs=0.001)
+    # DP attention adds max_bs*dp*3 (+ *1.5 above 300): DP=8 -> +18432 MB
+    # -> reserved 44672 -> 0.758 (matches the framework-resolved ~0.76).
+    assert derive_sglang_mem_fraction_static(b200_capacity, dp_size=8) == pytest.approx(0.758, abs=0.001)
+
+    # h100_sxm (80 GiB), tp1: 60-160 GB tier, chunked_prefill 8192, max_bs 256
+    # -> reserved max(512 + 12288 + 128 + 512, 10240) = 13440 -> 0.836
+    assert derive_sglang_mem_fraction_static(80 * (1 << 30)) == pytest.approx(0.836, abs=0.001)
+
+    # explicit user fraction always wins
+    kwargs = backend._static_oom_check_kwargs(b200_capacity, free_gpu_memory_fraction=0.8)
+    assert kwargs["free_gpu_memory_fraction"] == 0.8
+
+
+def test_vllm_default_fraction_is_version_dependent():
+    """vLLM's gpu_memory_utilization default changed 0.90 -> 0.92 at 0.22
+    (vllm/config/cache.py @v0.14.0/v0.19.0 vs @v0.22.0)."""
+    backend = VLLMBackend()
+    assert backend.get_default_free_gpu_memory_fraction("0.19.0") == pytest.approx(0.90)
+    assert backend.get_default_free_gpu_memory_fraction("0.22.0") == pytest.approx(0.92)
+    assert backend.get_default_free_gpu_memory_fraction("0.24.0") == pytest.approx(0.92)
+    assert backend.get_default_free_gpu_memory_fraction(None) == pytest.approx(0.92)
+
+
+def test_explicit_fraction_overrides_backend_default():
+    """A user-configured Task/estimate fraction wins over the backend default."""
+    backend = VLLMBackend()
+    kwargs = backend._static_oom_check_kwargs(180 * (1 << 30), free_gpu_memory_fraction=0.8)
+    assert kwargs["free_gpu_memory_fraction"] == 0.8
+    kwargs = backend._static_oom_check_kwargs(180 * (1 << 30), backend_version="0.19.0")
+    assert kwargs["free_gpu_memory_fraction"] == pytest.approx(0.90)

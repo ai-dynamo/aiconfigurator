@@ -1507,6 +1507,7 @@ class Task:
             "decode_model_config": self.build_model_config(role="decode"),
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
+            "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,

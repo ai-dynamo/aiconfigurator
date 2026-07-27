@@ -54,6 +54,7 @@ def predict_disagg_worker(
     stride: int = 32,
     predictor: Predictor | None = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> InferenceSummary:
     """Predict perf for one phase of a disaggregated worker.
 
@@ -83,6 +84,7 @@ def predict_disagg_worker(
         extended without touching every caller.
     """
     summary = (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
         model=model,
         backend=backend,
         database=database,
