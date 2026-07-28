@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from collector.framework_manifest import get_collector_runtime, require_collector_runtime
+from collector.framework_manifest import get_collector_runtime, require_collector_runtime, resolve_op_runtime
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
@@ -38,10 +38,18 @@ def test_manifest_exposes_current_framework_versions_and_images():
 
 
 def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
-    expected = f'__compat__ = "vllm=={get_collector_runtime("vllm").version}"'
     assert all(not entry.versions for entry in VLLM_REGISTRY)
 
-    for module in sorted({entry.module for entry in VLLM_REGISTRY}):
+    # Each module pins the runtime that actually collects it: the manifest
+    # default, or its family override (e.g. kda runs only on the vllm kimi-k3
+    # preview image, frameworks.vllm.families.kda).
+    module_versions: dict[str, set[str]] = {}
+    for entry in VLLM_REGISTRY:
+        module_versions.setdefault(entry.module, set()).add(resolve_op_runtime("vllm", entry.op).version)
+
+    for module, versions in sorted(module_versions.items()):
+        assert len(versions) == 1, (module, versions)
+        expected = f'__compat__ = "vllm=={next(iter(versions))}"'
         source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
         declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
         assert declarations == [expected], module
@@ -146,7 +154,11 @@ WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}
 @pytest.mark.parametrize(
     ("installed_version", "requested_ops", "workload", "version"),
     [
-        ("0.5.14+cu130", set(), "default", "0.5.14"),
+        # "all ops" is no longer resolvable in one container for sglang — the
+        # kda family pins the kimi-k3 branch runtime (0.5.16), so the default
+        # expectation is asserted on an explicit default-family op instead.
+        ("0.5.14+cu130", {"gemm"}, "default", "0.5.14"),
+        ("0.5.16", {"kda"}, "default", "0.5.16"),
         ("0.5.10", {"wideep_moe"}, "wideep", "0.5.10"),
     ],
 )
@@ -163,6 +175,9 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
         ("0.5.14.post1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14", {"wideep_moe"}, r"WideEP collector requires exactly 0\.5\.10"),
         ("0.5.14", {"gemm", "wideep_moe"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
+        # kda runs only on the kimi-k3 branch runtime (families.kda pin):
+        # mixing it with a default-family op must fail closed.
+        ("0.5.14", {"gemm", "kda"}, r"multiple runtime versions"),
     ],
 )
 def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, requested_ops, match):
