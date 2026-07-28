@@ -12,6 +12,7 @@ import pytest
 
 from aiconfigurator.cli import CLIResult, cli_exp, cli_generate
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
 
@@ -586,7 +587,7 @@ class TestCLIRecommendUnit:
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(NoFeasibleConfigError):
             api.cli_recommend(
                 model_path="Qwen/Qwen3-32B",
                 system="h200_sxm",
@@ -622,7 +623,7 @@ class TestCLIRecommendUnit:
         monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(NoFeasibleConfigError):
             api.cli_recommend(
                 model_path="Qwen/Qwen3-32B",
                 system="h200_sxm",

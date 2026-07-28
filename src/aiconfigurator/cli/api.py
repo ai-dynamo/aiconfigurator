@@ -27,7 +27,7 @@ from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
-from aiconfigurator.sdk.errors import ExperimentOutcome, is_gpu_retriable
+from aiconfigurator.sdk.errors import ExperimentOutcome, NoFeasibleConfigError, is_gpu_retriable
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -304,7 +304,7 @@ def cli_default(
 
     result = _execute_and_wrap_result(tasks, mode="default", top_n=top_n, strict_sla=strict_sla)
     if not result.best_configs:
-        raise SystemExit(1)
+        raise NoFeasibleConfigError("No feasible configurations found for the given parameters.")
 
     if save_dir:
         # Create a mock args object for save_results compatibility
@@ -537,7 +537,7 @@ def cli_recommend(
         )
 
     if not result.best_configs:
-        raise SystemExit(1)
+        raise NoFeasibleConfigError("No feasible GPU configuration found for the given load target.")
 
     if save_dir:
 
@@ -664,7 +664,7 @@ def cli_exp(
 
     result = _execute_and_wrap_result(tasks, mode="exp", top_n=top_n)
     if not result.best_configs:
-        raise SystemExit(1)
+        raise NoFeasibleConfigError("No feasible configurations found for the given experiments.")
 
     if save_dir:
         # Create a mock args object for save_results compatibility

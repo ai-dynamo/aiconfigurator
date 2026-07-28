@@ -2589,6 +2589,7 @@ def _validate_fpm_sweep_tasks(args, tasks: dict[str, Task]) -> None:
 def _run_recommend(args) -> None:
     """Run recommend mode: find minimum GPUs for a load target."""
     from aiconfigurator.cli.api import cli_recommend
+    from aiconfigurator.sdk.errors import NoResultsError
 
     logger.info(
         "Finding minimum GPUs for %s on %s (backend=%s)",
@@ -2596,37 +2597,41 @@ def _run_recommend(args) -> None:
         args.system,
         args.backend,
     )
-    cli_recommend(
-        model_path=args.model_path,
-        system=args.system,
-        target_request_rate=getattr(args, "target_request_rate", None),
-        target_concurrency=getattr(args, "target_concurrency", None),
-        decode_system=args.decode_system,
-        backend=args.backend,
-        backend_version=args.backend_version,
-        database_mode=args.database_mode,
-        transfer_policy=args.transfer_policy,
-        isl=args.isl,
-        osl=args.osl,
-        image_height=args.image_height,
-        image_width=args.image_width,
-        num_images=args.num_images,
-        ttft=args.ttft,
-        tpot=args.tpot,
-        request_latency=args.request_latency,
-        prefix=args.prefix,
-        nextn=args.nextn,
-        nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
-        strict_sla=getattr(args, "strict_sla", False),
-        enable_chunked_prefill=args.enable_chunked_prefill,
-        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
-        max_seq_len=args.max_seq_len,
-        enable_wideep=getattr(args, "enable_wideep", False),
-        moe_backend=getattr(args, "moe_backend", None),
-        top_n=args.top_n,
-        save_dir=args.save_dir,
-        engine_step_backend=args.engine_step_backend,
-    )
+    try:
+        cli_recommend(
+            model_path=args.model_path,
+            system=args.system,
+            target_request_rate=getattr(args, "target_request_rate", None),
+            target_concurrency=getattr(args, "target_concurrency", None),
+            decode_system=args.decode_system,
+            backend=args.backend,
+            backend_version=args.backend_version,
+            database_mode=args.database_mode,
+            transfer_policy=args.transfer_policy,
+            isl=args.isl,
+            osl=args.osl,
+            image_height=args.image_height,
+            image_width=args.image_width,
+            num_images=args.num_images,
+            ttft=args.ttft,
+            tpot=args.tpot,
+            request_latency=args.request_latency,
+            prefix=args.prefix,
+            nextn=args.nextn,
+            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            strict_sla=getattr(args, "strict_sla", False),
+            enable_chunked_prefill=args.enable_chunked_prefill,
+            free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+            max_seq_len=args.max_seq_len,
+            enable_wideep=getattr(args, "enable_wideep", False),
+            moe_backend=getattr(args, "moe_backend", None),
+            top_n=args.top_n,
+            save_dir=args.save_dir,
+            engine_step_backend=args.engine_step_backend,
+        )
+    except NoResultsError as exc:
+        logger.debug("Recommend mode traceback", exc_info=True)
+        raise SystemExit(1) from exc
 
 
 def _validate_default_mode_inputs(args) -> None:
