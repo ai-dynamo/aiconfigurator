@@ -128,8 +128,10 @@ jobs:
         if: matrix.build_method == 'native-macos'
         shell: bash
         run: |
-          python -m venv "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
+          python -m pip install --quiet uv
+          uv venv --python 3.12 "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
           echo "${RUNNER_TEMP}/aiconfigurator-wheel-venv/bin" >> "${GITHUB_PATH}"
+          echo "VIRTUAL_ENV=${RUNNER_TEMP}/aiconfigurator-wheel-venv" >> "${GITHUB_ENV}"
 
       - name: Select Rust toolchain for macOS wheel
         if: matrix.build_method == 'native-macos'
@@ -142,7 +144,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
-          python -m pip install --quiet 'build>=1,<2' 'maturin>=1.12,<2' 'delocate>=0.13,<1'
+          uv pip install --quiet 'build>=1,<2' 'maturin>=1.12,<2' 'delocate>=0.13,<1'
           mkdir -p wheelhouse repaired-wheelhouse
           (cd aic-core && maturin build --release --out ../wheelhouse)
           python -m build --wheel --outdir wheelhouse
@@ -165,7 +167,7 @@ jobs:
         if: matrix.build_method == 'native-macos'
         shell: bash
         run: |
-          python -m pip install --quiet \
+          uv pip install --quiet \
             wheelhouse/aiconfigurator_core-*.whl \
             wheelhouse/aiconfigurator-*.whl
           python tools/verify_installed_package_layers.py \
