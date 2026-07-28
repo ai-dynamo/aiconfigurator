@@ -326,17 +326,12 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
     # Resolve the device name inside the worker (rank 0) so the parent never
     # creates a CUDA context that would persist across the per-shape spawns.
     device_name = None
-    # DeepEP LL kernels come from deep_ep (independent of the sglang runtime), so
-    # the recorded sglang version is a dataset bucket label. Allow an explicit
-    # override (DEEPEP_LL_VERSION) and otherwise fall back to the installed pkg.
-    version = os.environ.get("DEEPEP_LL_VERSION")
-    if not version:
-        try:
-            from importlib.metadata import version as get_version
+    try:
+        from collector.wideep.sglang import dataset_version_label
+    except ModuleNotFoundError:  # running with collector/ on sys.path
+        from wideep.sglang import dataset_version_label
 
-            version = get_version("sglang")
-        except Exception:
-            version = "unknown"
+    version = dataset_version_label("DEEPEP_LL_VERSION")
 
     output_path = os.path.join(os.getcwd(), str(perf_filename))
 
