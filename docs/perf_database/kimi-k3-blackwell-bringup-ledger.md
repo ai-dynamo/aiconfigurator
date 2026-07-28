@@ -1,9 +1,12 @@
 # Kimi-K3 Blackwell bring-up ledger
 
 Campaign ledger for bringing Kimi-K3 (`KimiK3ForConditionalGeneration`) perf
-data from the SM90 baseline (8x H20-3e, PR #1435) onto Blackwell. Read this
-before collecting on any SM100/SM103 node; it records what is verified, what
-each platform's serving dispatch actually runs, and what remains.
+data onto Blackwell. The collectors were first debugged on Hopper (SM90)
+silicon; per the PR owner's scope decision (2026-07-28) the PR packages
+**Blackwell data only** — no Hopper system or Hopper perf data ships with it.
+Read this before collecting on any SM100/SM103 node; it records what is
+verified, what each platform's serving dispatch actually runs, and what
+remains.
 
 Status legend: `done` = collected, quality-gated, packaged under
 `aic-core/src/aiconfigurator_core/systems/data/`; `open` = not started.
@@ -12,14 +15,19 @@ Status legend: `done` = collected, quality-gated, packaged under
 
 | lane | system | backend/version | status | rows | notes |
 |---|---|---|---|---|---|
-| kda | h20_3e (SM90) | sglang 0.5.16 (kimi-k3 branch) | done | 744 | Triton kernels all phases; see coverage-hole note below |
-| kda | h20_3e (SM90) | vllm 0.1.dev19262 (kimi-k3 preview) | done | 1203 | FlashKDA prefill + fused_kda_decode |
-| moe (K3 shape, w4a16_mxfp4) | h20_3e (SM90) | sglang 0.5.14 | done | 488 | marlin lane; every moe_ep_size > 1 cell crashes (upstream candidate) |
-| kda | b200_sxm (SM100) | sglang 0.5.16 | **done (2026-07-28)** | 987 | Triton context/generation + fused CuTeDSL DSPARK verify |
-| kda | b200_sxm (SM100) | vllm 0.1.dev19262 | **done (2026-07-28)** | 1203 | collector unmodified; dispatch probes verified on SM100 |
-| moe (K3 shape) | b200_sxm (SM100) | sglang | open | — | Blackwell lane is `flashinfer_mxfp4` (trtllm-gen SiTU), NOT marlin — see pre-work |
+| kda | b200_sxm (SM100) | sglang 0.5.16 (kimi-k3 branch) | **done (2026-07-28)** | 987 | Triton context/generation + fused CuTeDSL DSPARK verify |
+| kda | b200_sxm (SM100) | vllm 0.1.dev19262 (kimi-k3 preview) | **done (2026-07-28)** | 1203 | collector unmodified; dispatch probes verified on SM100 |
+| moe (K3 shape) | b200_sxm (SM100) | sglang 0.5.14 | open (probe done) | — | Blackwell lane is `flashinfer_mxfp4` / `sglang_flashinfer_trtllm_moe`; smoke passes **including moe_ep_size > 1** (the Hopper marlin EP crash does not transfer); full 3078-case run is ~3h on one B200 |
 | kda + moe | b300_sxm / gb200 / gb300 (SM100/103) | both | open | — | expect kda collectors to work as on B200; SM103 still in `unverified_sms` |
 | kda | rtx_pro_6000 (SM120) | both | open | — | FlashKDA claims SM120 support (vllm); sglang CuTe paths are SM100-only → Triton verify |
+
+Hopper (SM90) collection history: the collectors were brought up on Hopper
+silicon first (sglang kda 744 rows / vllm kda 1203 rows / K3-shape moe 488
+rows on the marlin lane). That packaged data was removed from this PR on
+2026-07-28 (Blackwell-first scope); it remains retrievable from the branch
+history if a Hopper system is added later, but note the sglang context
+coverage hole below — a Hopper RECOLLECTION with the fixed int32 guard is the
+right way to bring Hopper back, not a restore.
 
 ## B200 (SM100) campaign record — 2026-07-28
 
@@ -29,8 +37,8 @@ Status legend: `done` = collected, quality-gated, packaged under
 - sglang: `lmsysorg/sglang@sha256:4b8a7542...` (kimi-k3 branch build, reports
   **0.5.16**; torch 2.11.0+cu129).
 - vllm: `vllm/vllm-openai@sha256:e90e2603...` (kimi-k3 preview, reports
-  **0.1.dev19262+gb6bbf29dd.d20260727** — same digest as the manifest pin and
-  the H20 campaign; torch 2.13.0+cu130).
+  **0.1.dev19262+gb6bbf29dd.d20260727** — same digest as the manifest pin;
+  torch 2.13.0+cu130).
 - Both `kda` registry entries had SM100 removed from `unverified_sms` after
   the runs below (SM 80/89/103/120 remain unverified).
 
@@ -70,10 +78,11 @@ engages (44 generation rows), `fused_recurrent_kda` chain verify.
 | kda_perf | vllm 0.1.dev19262 | 1203 | context 428+428 (conv_qkv3 + flashkda_fwd), generation 44+44+43, verify 108+108 |
 
 Quality gates on both: 0 non-finite/zero/negative latencies, 0 duplicate
-keys, device name `NVIDIA B200` on every row. Cross-platform sanity: over
-shared (kernel, phase, shape, batch, seq) cells, H20/B200 latency ratio is
-median 1.47x (sglang) / 1.49x (vllm) — consistent with the ~2x HBM bandwidth
-step for memory-bound kernels; FlashKDA prefill gains up to ~2.7x.
+keys, device name `NVIDIA B200` on every row. Cross-platform sanity against
+the Hopper bring-up measurements: over shared (kernel, phase, shape, batch,
+seq) cells the Hopper/B200 latency ratio is median 1.47x (sglang) / 1.49x
+(vllm) — consistent with the ~2x HBM bandwidth step for memory-bound
+kernels; FlashKDA prefill gains up to ~2.7x.
 
 ### Failure groups (all classified, none hidden)
 
@@ -86,7 +95,7 @@ step for memory-bound kernels; FlashKDA prefill gains up to ~2.7x.
   in `collector/sglang/collect_kda.py`; unverified against kernel source; not
   yet filed upstream.
 - **vllm packed decode (batch=1024, 96 heads)**: same single-cell failure as
-  the H20 campaign (identical signature both platforms).
+  the Hopper campaign (identical signature both platforms).
 
 ### Collector fixes that came out of the campaign
 
@@ -96,11 +105,10 @@ step for memory-bound kernels; FlashKDA prefill gains up to ~2.7x.
    `total_tokens * proj_size`. Cells in `[2**31, 3*2**31)` reached the Triton
    kernel and died with `cudaErrorIllegalAddress`, and because the IMA
    poisons the CUDA context, each context case aborted at its first such
-   cell. **The shipped h20_3e sglang dataset has this coverage hole**: the
-   96-head shard stops at (batch=2, seq=16384) and never measured batch>=4 at
-   any seq — 176 valid cells per kernel lost. B200 collected them (396 vs 220
-   cells/kernel). An H20 recollection with the fixed guard would close the
-   hole; until then interpolation extrapolates there.
+   cell. The Hopper bring-up dataset was collected under the loose guard and
+   silently lost the 96-head shard above (batch=2, seq=16384) — any future
+   Hopper collection must use the fixed guard (B200 collected 396 vs 220
+   cells/kernel).
 2. **SM100 verify dispatch** in the sglang collector (above).
 
 ### Consumer-side change (Python + Rust, kept in lockstep)
@@ -111,10 +119,10 @@ fused-verify datasets: when a dataset has no Triton verify rows but has
 the fused table and the conv verify op folds to 0 (its cost is inside the
 fused row). The fused kernel's SOL byte model equals conv + recurrence (unit
 tests assert this on both sides: `test_kda_fused_verify_routing.py`,
-`kda_fused_verify_sol_is_conv_plus_recurrence`). h20_3e-style Triton datasets
-and vllm's physical verify kernels are untouched. End-to-end on packaged
-b200_sxm tables: sglang verify recurrence 0.0640 ms silicon + conv 0.0;
-vllm 0.0504 + 0.0065 ms silicon.
+`kda_fused_verify_sol_is_conv_plus_recurrence`). Triton-verify (Hopper-style)
+datasets and vllm's physical verify kernels are untouched. End-to-end on
+packaged b200_sxm tables: sglang verify recurrence 0.0640 ms silicon + conv
+0.0; vllm 0.0504 + 0.0065 ms silicon.
 
 ## Open pre-work for the remaining lanes
 
@@ -122,27 +130,31 @@ vllm 0.0504 + 0.0065 ms silicon.
    dispatches K3 routed experts on SM100/103 to `flashinfer_mxfp4`
    (trtllm-gen SiTU) — declared in
    `collector/cases/models/KimiK3ForConditionalGeneration_cases.yaml`
-   (`w4a16_mxfp4: {90: marlin, 100: flashinfer_mxfp4, ...}`) but never
-   collected: the sglang moe collector's flashinfer_mxfp4 path is unexercised
-   on K3 shapes (3584/3072, 896 experts, top-16, SiTU). The B300 launch-gap
-   analysis in PR #1435 attributes most of the 178-213 vs 423 tok/s/user
-   HYBRID error to this missing lane. Also re-test the `moe_ep_size > 1`
-   marlin crash on Blackwell images before assuming it transfers.
+   (`w4a16_mxfp4: {90: marlin, 100: flashinfer_mxfp4, ...}`). B200 probe
+   (2026-07-28, sglang 0.5.14, 1x B200): smoke and the first ~1.2k of 3078
+   planned cases pass on `sglang_flashinfer_trtllm_moe`, **including
+   moe_ep_size > 1** — the Hopper marlin EP crash does not transfer. The full
+   run needs ~3h of GPU time; resume with
+   `--checkpoint-dir collector_checkpoints/sglang/moe --resume`. When
+   packaging, MERGE the K3 rows into the existing
+   `systems/data/b200_sxm/moe/sglang/0.5.14/moe_perf.parquet` (139k rows for
+   other models; no K3-shape overlap) — never overwrite.
 2. **W4A8 quant identity rows**: if a W4A8 K3 checkpoint artifact ships for
    Blackwell, it needs its own `model_case_values` moe row + allowed_modes —
    do NOT merge it into the w4a16_mxfp4 row (quant-distinct artifacts are
    separate rows).
 3. **SM103 (B300/GB300)**: kda registry entries still carry 103 in
-   `unverified_sms`. Expect the B200 collectors to work unchanged (CuTe MTP
-   probe checks capability major == 10, which matches SM103); verify
-   `torch.cuda.get_device_capability()[0] == 10` semantics on the actual
-   node, run smoke, then lift the marker.
+   `unverified_sms`. Expect the B200 collectors to work unchanged (the CuTe
+   MTP probe checks capability major == 10, which matches SM103); verify on
+   the actual node, run smoke, then lift the marker.
 4. **sglang `kda_fused_decode` decode kernel** (TODO in the collector):
    attempt-and-verify fused decode, compiled for the TP8 12-head shard; not
    collected on any SM yet, so decode rows stay slightly pessimistic where it
    engages. Needs a `covered()`-mirroring dispatch like the verify one.
-5. **H20 sglang context recollection** with the fixed int32 guard (closes the
-   coverage hole documented above).
+5. **Hopper system (if ever re-added)**: recollect sglang kda context with
+   the fixed int32 guard rather than restoring the old dataset (coverage hole
+   above), and re-run the moe marlin lane to reconfirm the EP>1 crash before
+   filing upstream.
 6. **SM120 (RTX Pro 6000)**: vllm FlashKDA claims SM120; sglang CuTe paths
    are SM100-only so verify falls back to the Triton pair there — the
    existing collector should be serving-truth without changes, but the probe

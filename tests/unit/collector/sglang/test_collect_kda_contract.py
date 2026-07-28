@@ -27,8 +27,9 @@ def test_kda_context_raises_on_conv_int32_offset_overflow():
     # (causal_conv1d_triton.py:373-379). KDA runs the conv per Q/K/V block,
     # but each block is a strided VIEW over the full 3-block mixed_qkv buffer,
     # so the offsets span total_tokens * conv_channels elements — proven on
-    # silicon: cells in [2**31, 3*2**31) IMA'd on both H20/SM90 and B200/SM100
-    # under the older per-block (proj_size) bound. The guard must RAISE inside
+    # silicon: cells in [2**31, 3*2**31) IMA'd on both Hopper/SM90 and
+    # B200/SM100 under the older per-block (proj_size) bound. The guard must
+    # RAISE inside
     # the sweep loop so the cell lands in the classified failure log instead
     # of corrupting the CUDA context.
     source = SOURCE_PATH.read_text(encoding="utf-8")

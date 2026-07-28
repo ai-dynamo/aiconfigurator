@@ -8,7 +8,7 @@ SM100 sglang serves DSPARK target-verify through the fused CuTeDSL kernel
 conv update and the chain-verify recurrence — so b200_sxm-style datasets carry
 no Triton verify rows. ``KDAKernel._query_kda_table`` must route the
 recurrence op onto the fused table and fold the conv op to zero, while
-Triton-verify datasets (h20_3e-style) and the vLLM physical kernels stay
+Triton-verify datasets (Hopper-style) and the vLLM physical kernels stay
 untouched. The Rust twin lives in ``operators/mamba.rs::KdaOp::query``.
 """
 

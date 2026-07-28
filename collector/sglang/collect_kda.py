@@ -189,7 +189,7 @@ def run_kda_context_benchmark(
                 # pointer arithmetic spans total_tokens * conv_channels elements.
                 # Silicon evidence: cells with total_tokens * conv_channels in
                 # [2**31, 3*2**31) crash with cudaErrorIllegalAddress on both
-                # SM90 (H20, 2026-07 campaign coverage boundary) and SM100
+                # Hopper SM90 (2026-07 campaign coverage boundary) and SM100
                 # (B200, 2026-07-28), while every cell under this bound passes.
                 if total_tokens * conv_channels >= 2**31:
                     raise ValueError(
