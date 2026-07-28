@@ -65,6 +65,7 @@ jobs:
             runner: prod-aiconfigurator-default-amd64-v1
             fork_runner: ubuntu-24.04
             build_method: docker
+            python_architecture: x64
             platform: linux/amd64
             wheel_base: quay.io/pypa/manylinux_2_28_x86_64
             upload_upper: true
@@ -72,16 +73,30 @@ jobs:
             runner: prod-aiconfigurator-default-arm64-v1
             fork_runner: ubuntu-24.04-arm
             build_method: docker
+            python_architecture: arm64
             platform: linux/arm64
             wheel_base: quay.io/pypa/manylinux_2_28_aarch64
             upload_upper: false
           - platform_name: macosx_arm64
-            runner: macos-14
+            runner: prod-aiconfigurator-default-macos-arm64-v1
             fork_runner: macos-14
             build_method: native-macos
+            python_architecture: arm64
             upload_upper: false
 
     steps:
+      - name: Verify macOS runner prerequisites
+        if: matrix.build_method == 'native-macos'
+        shell: bash
+        run: |
+          test "$(uname -m)" = "arm64"
+          sw_vers
+          xcode-select --print-path
+          git lfs version
+          rustup --version
+          test -d /Users/runner/hostedtoolcache
+          test -w /Users/runner/hostedtoolcache
+
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -107,6 +122,14 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.python_architecture }}
+
+      - name: Create isolated macOS Python environment
+        if: matrix.build_method == 'native-macos'
+        shell: bash
+        run: |
+          python -m venv "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
+          echo "${RUNNER_TEMP}/aiconfigurator-wheel-venv/bin" >> "${GITHUB_PATH}"
 
       - name: Select Rust toolchain for macOS wheel
         if: matrix.build_method == 'native-macos'
@@ -128,7 +151,8 @@ jobs:
           mv repaired-wheelhouse/*.whl wheelhouse/
           python tools/verify_release_wheels.py wheelhouse
 
-      - name: Smoke-test native extension
+      - name: Smoke-test Linux native extension
+        if: matrix.build_method == 'docker'
         shell: bash
         run: |
           python -m pip install --quiet --no-deps \
@@ -136,6 +160,17 @@ jobs:
             wheelhouse/aiconfigurator-*.whl
           python -c \
             'import aiconfigurator_core; assert aiconfigurator_core._build_smoke() == 1'
+
+      - name: Verify installed macOS wheel set
+        if: matrix.build_method == 'native-macos'
+        shell: bash
+        run: |
+          python -m pip install --quiet \
+            wheelhouse/aiconfigurator_core-*.whl \
+            wheelhouse/aiconfigurator-*.whl
+          python tools/verify_installed_package_layers.py \
+            --expect full \
+            --exercise-engine
 
       - name: Report disabled Artifactory staging
         if: >-
