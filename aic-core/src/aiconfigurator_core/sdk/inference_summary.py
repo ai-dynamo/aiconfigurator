@@ -5,6 +5,7 @@ import logging
 
 import pandas as pd
 
+from aiconfigurator_core.sdk.common import ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,9 @@ class InferenceSummary:
         self._generation_power_avg = 0.0
         self._e2e_power_avg = 0.0
 
-        # summary dataframe
+        # summary dataframe (built lazily from _deferred_row when available)
         self._summary_df = None
+        self._deferred_row: tuple[list, list] | None = None  # (data, columns)
 
         # cached result dict for efficient batch operations
         self._result_dict = None
@@ -440,10 +442,23 @@ class InferenceSummary:
         """
         self._summary_df = summary_df
 
+    def set_deferred_row(self, data: list, columns: list) -> None:
+        """Store raw row data for lazy DataFrame construction."""
+        self._deferred_row = (data, columns)
+
     def get_summary_df(self) -> pd.DataFrame:
+        """Get summary dataframe, building it lazily on first access.
+
+        run_agg and run_static defer DataFrame construction so the sweep
+        hot path avoids the overhead. Callers that need the DataFrame
+        (disagg concat, CLI display, save) trigger construction here.
         """
-        Get summary dataframe.
-        """
+        if self._summary_df is None:
+            if self._deferred_row is not None:
+                data, columns = self._deferred_row
+                self._summary_df = pd.DataFrame(data, columns=columns).round(3)
+            elif self._result_dict is not None:
+                self._summary_df = pd.DataFrame([self._result_dict], columns=ColumnsAgg).round(3)
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
@@ -519,10 +534,17 @@ class InferenceSummary:
     def get_result_dict(self) -> dict | None:
         """
         Get the result as a dict. Returns cached dict if available,
-        otherwise extracts from the first row of the summary DataFrame.
+        otherwise extracts from the deferred row or summary DataFrame.
         """
         if self._result_dict is not None:
             return self._result_dict
+
+        # Fallback: build from deferred row (run_static lazy path)
+        if self._deferred_row is not None:
+            data, columns = self._deferred_row
+            if data and columns:
+                self._result_dict = dict(zip(columns, data[0], strict=False))
+                return self._result_dict
 
         # Fallback: create from DataFrame if not cached
         if self._summary_df is not None and len(self._summary_df) > 0:
