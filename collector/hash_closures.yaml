@@ -59,6 +59,9 @@ collector.sglang.collect_dsv4_megamoe:
 collector.sglang.collect_gdn:
   - collector/cases/base_ops/gdn.yaml
   - __model_cases__
+collector.sglang.collect_kda:
+  - collector/cases/base_ops/kda.yaml
+  - __model_cases__
 collector.sglang.collect_gemm:
   - collector/cases/base_ops/gemm.yaml
   - __model_cases__

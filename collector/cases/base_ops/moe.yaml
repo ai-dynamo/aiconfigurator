@@ -155,6 +155,9 @@ common_case_values:
       - deepseek-ai/DeepSeek-V4-Pro
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
+      # Kimi-K3 ships MXFP4 routed experts (compressed-tensors, group 32);
+      # Hopper serves them via the W4A16 lane (kimi-k3 branch cookbook §2).
+      - moonshotai/Kimi-K3
     - name: w4a8_mxfp4_mxfp8
       min_sm: 100
       # SGLang 0.5.14 has no SM120 mxfp8-activation MXFP4 path: the

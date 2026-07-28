@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NVIDIA H20-3e (HGX, 141GB HBM3e). Hopper sm90 with high memory bandwidth and
+# modest tensor-core compute (memory-bound-friendly).
+
+data_dir: data/h20_3e # relative to systems_dir
+gpu:
+  mem_bw: 4800000000000 # 4.8TB/s HBM3e
+  mem_bw_empirical_scaling_factor: 0.8
+  mem_empirical_constant_latency: 0.000003
+  mem_capacity: 150754820096 # 143771 MiB
+  bfloat16_tc_flops: 148000000000000 # 148TFLOPS dense
+  int8_tc_flops: 296000000000000
+  fp8_tc_flops: 296000000000000
+  power: 500  # Watt
+  sm_version: 90
+
+node:
+  num_gpus_per_node: 8
+  inter_node_bw: 50000000000  # Byte/s per GPU, single direction
+  intra_node_bw: 450000000000  # NVLink 900GB/s bidirectional
+  pcie_bw: 64000000000
+  p2p_latency: 0.00001
+
+misc:
+  nccl_mem:
+    1: 0
+    2: 358612992
+    4: 411041792
+    8: 411041792
+  other_mem: 3758096384
+  nccl_version: '2.26.2'

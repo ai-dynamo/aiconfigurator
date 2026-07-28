@@ -230,6 +230,42 @@ class Qwen35Config:
 
 
 @dataclass(frozen=True)
+class KimiK3Config:
+    """Config for Kimi-K3 hybrid KDA + MLA LatentMoE model.
+
+    layer_types: per-layer tuple of "linear_attention" (KDA) or "full_attention" (MLA),
+                 derived from config.json linear_attn_config.kda_layers (1-based).
+    kda_*: KDA layer geometry (Kimi-K3: 96 heads, head_dim 128, conv kernel 4;
+           q/k/v/gate projections are all num_heads*head_dim wide — full-rank gate).
+    MLA fields mirror the DeepSeek latent-attention geometry; mla_use_nope means the
+    rope slice is projected/cached but positionless (kernel shape unchanged), and
+    mla_use_output_gate adds one extra hidden->num_heads*v_head_dim gate GEMM.
+    LatentMoE: routed experts run in a routed_expert_hidden_size-wide latent space
+    (7168 -> 3584 down proj, experts at 3584/3072, 3584 -> 7168 up proj); the
+    num_shared_experts shared experts run in the full hidden space.
+    attn_res_block_size: AttnRes cross-layer residual block size (elementwise only).
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "linear_attention" (KDA) or "full_attention" (MLA)
+    kda_num_heads: int
+    kda_head_dim: int
+    kda_conv_kernel: int
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    topk: int = 0
+    num_experts: int = 0
+    moe_inter_size: int = 0
+    routed_expert_hidden_size: int = 0  # LatentMoE latent width (0 = experts in full hidden space)
+    num_shared_experts: int = 0
+    first_k_dense_replace: int = 0
+    dense_inter_size: int = 0
+    attn_res_block_size: int = 0
+
+
+@dataclass(frozen=True)
 class DeepSeekV4Config:
     """Config fields unique to DeepSeek-V4 compressed attention + mHC models."""
 
@@ -485,6 +521,8 @@ DefaultHFModels = {
     "nvidia/DeepSeek-V3.1-NVFP4",
     # Kimi K2.5 Models
     "moonshotai/Kimi-K2.5",
+    # Kimi K3
+    "moonshotai/Kimi-K3",
     "nvidia/Kimi-K2.5-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
@@ -581,6 +619,7 @@ ModelFamily = {
     "DEEPSEEKV32",
     "DEEPSEEKV4",
     "KIMIK25",
+    "KIMIK3",
     "NEMOTRONNAS",
     "NEMOTRONH",
     "HYBRIDMOE",
@@ -603,6 +642,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
     "DeepseekV4ForCausalLM": "DEEPSEEKV4",
     "KimiK25ForConditionalGeneration": "KIMIK25",
+    "KimiK3ForConditionalGeneration": "KIMIK3",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
@@ -624,6 +664,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "KimiK3ForConditionalGeneration": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
@@ -1003,6 +1044,7 @@ class PerfDataFilename(Enum):
     scale_matrix = "scale_matrix_perf.parquet"
     mamba2 = "mamba2_perf.parquet"
     gdn = "gdn_perf.parquet"
+    kda = "kda_perf.parquet"
     # Module-level attention profiling (complete self_attn forward)
     mla_context_module = "mla_context_module_perf.parquet"
     mla_generation_module = "mla_generation_module_perf.parquet"

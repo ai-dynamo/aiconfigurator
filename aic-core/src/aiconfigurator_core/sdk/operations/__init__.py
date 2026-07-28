@@ -37,7 +37,7 @@ from aiconfigurator_core.sdk.operations.dsv4 import (
 from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.operations.embedding import Embedding
 from aiconfigurator_core.sdk.operations.gemm import GEMM
-from aiconfigurator_core.sdk.operations.mamba import GDNKernel, Mamba2, Mamba2Kernel
+from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2, Mamba2Kernel
 from aiconfigurator_core.sdk.operations.mla import (
     ContextMLA,
     GenerationMLA,
@@ -76,6 +76,7 @@ __all__ = [
     "EncoderAttention",
     "FallbackOp",
     "GDNKernel",
+    "KDAKernel",
     "GenerationAttention",
     "GenerationDSAModule",
     "GenerationDeepSeekV4AttentionModule",

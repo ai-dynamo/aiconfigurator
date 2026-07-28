@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: KimiK3ForConditionalGeneration
+model_path: moonshotai/Kimi-K3
+include_base: true
+base_ops:
+  - gemm
+description: >
+  Kimi-K3 hybrid KDA/MLA LatentMoE model-centric collection plan.
+  Text backbone (KimiLinearConfig): hidden 7168, 93 layers = 69 KDA linear
+  attention + 24 MLA full attention, layer 0 dense MLP; LatentMoE routes
+  896 experts (top-16, SiTU activation) in a 3584-wide latent space with
+  moe_intermediate_size 3072; MXFP4 routed-expert weights. The DSPARK draft
+  model (RadixArk/Kimi-K3-DSpark) is a 5-layer dense GQA transformer whose
+  attention shape is declared here because it serves inside the K3 engine.
+
+model_case_values:
+  # DSPARK draft model attention (RadixArk/Kimi-K3-DSpark): 64 query heads,
+  # 16 KV heads, head_dim 64, full attention. Target MLA layers are covered
+  # by the mla rows below; KDA layers by the kda rows.
+  attention:
+    - id: kimi_k3_dspark_draft_attention
+      model_path: moonshotai/Kimi-K3
+      num_attention_heads: 64
+      num_key_value_heads: 16
+      head_dim: 64
+      window_size: 0
+      sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha}
+      tensor_parallel_sizes: [1, 2, 4, 8]
+  moe:
+    # LatentMoE routed experts run in the 3584 latent space (not model
+    # hidden 7168): gate/up 3584->3072, down 3072->3584, SiTU activation.
+    - model_path: moonshotai/Kimi-K3
+      hidden_size: 3584
+      inter_size: 3072
+      topk: 16
+      num_experts: 896
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.0
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        # kimi-k3 branch dispatch: Blackwell -> flashinfer_mxfp4
+        # (trtllm-gen SiTU), SM90 -> marlin W4A16 (cookbook §2 MoE runner).
+        w4a16_mxfp4: {90: marlin, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [w4a16_mxfp4]
+        trtllm:
+          allowed_modes: [w4a16_mxfp4]
+        vllm:
+          allowed_modes: [w4a16_mxfp4]
+  mla:
+    # K3 MLA: 96 heads, NoPE (rope slice projected/cached but positionless),
+    # plus an output gate handled as a standard GEMM. Kernel-shape-wise it is
+    # the DeepSeek MLA geometry, so the historical 128/64-head tables apply;
+    # declare the native 96-head profile for exact hits.
+    - model_path: moonshotai/Kimi-K3
+      num_heads: 96
+      q_lora_rank: 1536
+      kv_lora_rank: 512
+      qk_nope_head_dim: 128
+      qk_rope_head_dim: 64
+      v_head_dim: 128
+  kda:
+    # KDA structural tuple per attention-TP shard: 96 heads at TP1 shard to
+    # 48/24/12 local heads at TP2/4/8. Each row is one physical kernel shape
+    # (the persisted key is (d_model, num_k_heads, head_k_dim, num_v_heads,
+    # head_v_dim, d_conv)); num_k_heads == num_v_heads for KDA.
+    - model_path: moonshotai/Kimi-K3
+      d_model: 7168
+      d_conv: 4
+      num_k_heads: 96
+      head_k_dim: 128
+      num_v_heads: 96
+      head_v_dim: 128
+    - model_path: moonshotai/Kimi-K3
+      d_model: 7168
+      d_conv: 4
+      num_k_heads: 48
+      head_k_dim: 128
+      num_v_heads: 48
+      head_v_dim: 128
+    - model_path: moonshotai/Kimi-K3
+      d_model: 7168
+      d_conv: 4
+      num_k_heads: 24
+      head_k_dim: 128
+      num_v_heads: 24
+      head_v_dim: 128
+    - model_path: moonshotai/Kimi-K3
+      d_model: 7168
+      d_conv: 4
+      num_k_heads: 12
+      head_k_dim: 128
+      num_v_heads: 12
+      head_v_dim: 128
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  sglang:
+    attention_context:
+      cases: all
+    attention_generation:
+      cases: all
+    mla_context:
+      cases: all
+    mla_generation:
+      cases: all
+    mla_bmm_gen_pre:
+      cases: all
+    mla_bmm_gen_post:
+      cases: all
+    kda:
+      cases: all

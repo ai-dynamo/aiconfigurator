@@ -17,7 +17,14 @@ frameworks:
       images:
         default: "lmsysorg/sglang:v0.5.14@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
         cu130: "lmsysorg/sglang:v0.5.14-cu130@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
-    # families: {}   # explicit per-family overrides go here (spec §4)
+    families:
+      # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch
+      # (https://github.com/sgl-project/sglang/tree/kimi-k3), whose build
+      # reports 0.5.16. Pin the branch image for the kda family only.
+      kda:
+        version: "0.5.16"
+        images:
+          default: "lmsysorg/sglang@sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b"
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:

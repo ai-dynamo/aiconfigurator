@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import ast
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+SOURCE_PATH = Path(__file__).resolve().parents[4] / "collector" / "sglang" / "collect_kda.py"
+
+
+def test_kda_context_does_not_silently_drop_fixed_capacity_shapes():
+    tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_kda_context_benchmark"
+    )
+    referenced_names = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
+
+    assert "MAX_KDA_CONTEXT_TOKENS" not in referenced_names
+    assert "skipped_points" not in referenced_names
+
+
+def test_kda_context_raises_on_conv_int32_offset_overflow():
+    # Same verified framework kernel limit as GDN: the Triton causal_conv1d
+    # forward computes token-major offsets in int32
+    # (causal_conv1d_triton.py:373-379). KDA runs the conv per Q/K/V block, so
+    # the per-call channel width is proj_size. The guard must RAISE inside the
+    # sweep loop so the cell lands in the classified failure log instead of
+    # corrupting the CUDA context.
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    assert "total_tokens * proj_size >= 2**31" in source
+    assert "int32 token-offset overflow" in source
+    assert "causal_conv1d_triton.py:373-379" in source
+
+
+def test_kda_case_phases_cover_context_generation_verify():
+    # The registry getter must emit all three phases for every declared shape;
+    # verify rows carry the draft-token width in the seq_len slot.
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    for phase in ("context", "generation", "verify"):
+        assert f'"{phase}"' in source

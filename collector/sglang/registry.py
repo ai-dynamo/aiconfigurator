@@ -294,6 +294,16 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GDN,
     ),
     OpEntry(
+        op="kda",
+        module="collector.sglang.collect_kda",
+        get_func="get_kda_test_cases",
+        run_func="run_kda_torch",
+        perf_filename=PerfFile.KDA,
+        # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch; debugged
+        # on SM90 (H20) only so far.
+        unverified_sms=(80, 89, 100, 103, 120),
+    ),
+    OpEntry(
         op="mhc_module",
         module="collector.sglang.collect_mhc_module",
         get_func="get_mhc_module_test_cases",
