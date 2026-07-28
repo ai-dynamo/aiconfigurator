@@ -1,0 +1,8 @@
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.1.dev19262
+tables:
+  kda_perf:
+    status: complete
