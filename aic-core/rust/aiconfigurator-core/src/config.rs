@@ -29,7 +29,8 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   indices after `DsaGeneration` shifted). The MSA insertion and #1405
 //   each claimed version 3 on their own branch, so their merge needed a
 //   fresh number.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 4;
+// - 5: `Kda` op variant appended (Kimi-K3).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 5;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

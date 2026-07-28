@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! State-space layer perf tables: Mamba2 and Gated Delta Network (GDN).
+//! State-space layer perf tables: Mamba2, Gated Delta Network (GDN) and
+//! Kimi Delta Attention (KDA).
 //!
-//! Used by hybrid models such as Nemotron-H. Both CSVs share a similar
-//! shape: a `phase` discriminator (`context` / `generation`), a model-name
-//! key, and several layer-specific dimension columns.
+//! Used by hybrid models such as Nemotron-H, Qwen3.5 and Kimi-K3. The files
+//! share a similar shape: a `phase` discriminator (`context` /
+//! `generation`, plus `verify` for KDA), a model-name key, and several
+//! layer-specific dimension columns.
 //!
 //! Resolution mirrors Python v2 (`operations/mamba.py` + the perf_interp
 //! engine): after shape-key selection, context queries are a 2-axis Grid
@@ -33,9 +35,11 @@ pub struct StateSpaceTable {
     /// default (`StateSpaceTable::new`).
     mamba2_sources: Vec<PerfSource>,
     gdn_sources: Vec<PerfSource>,
+    kda_sources: Vec<PerfSource>,
     vllm_024_gdn_aliases: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
+    kda: OnceLock<Result<KdaGrids, AicError>>,
 }
 
 /// Per shape-key engine table. Context keys hold a 2-level `[batch][seq]`
@@ -47,6 +51,10 @@ struct Mamba2Grids {
 
 struct GdnGrids {
     by_keys: BTreeMap<GdnKey, Node>,
+}
+
+struct KdaGrids {
+    by_keys: BTreeMap<KdaKey, Node>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,6 +90,22 @@ struct GdnKey {
     // See `Mamba2Key`: shape is the key, `model_name` is metadata.
 }
 
+/// Same structural key as [`GdnKey`] — KDA shares the GDN shape tuple but is
+/// a distinct kernel family collected into `kda_perf.parquet`. Its `phase`
+/// also spans "verify" (2-axis `[batch][draft_tokens]` leaves).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct KdaKey {
+    kernel_source: String,
+    phase: String,
+    d_model: u32,
+    d_conv: u32,
+    num_k_heads: u32,
+    head_k_dim: u32,
+    num_v_heads: u32,
+    head_v_dim: u32,
+    // See `Mamba2Key`: shape is the key, `model_name` is metadata.
+}
+
 impl StateSpaceTable {
     /// Construct an empty table for the given data directory. No I/O. Each
     /// perf file is sourced solely from `data_root/<basename>` with no
@@ -102,13 +126,16 @@ impl StateSpaceTable {
         let mamba2_sources =
             resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
         let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
+        let kda_sources = resolve_op_sources(perf_db_sources, "kda_perf.parquet", &data_root);
         Self {
             data_root,
             mamba2_sources,
             gdn_sources,
+            kda_sources,
             vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
+            kda: OnceLock::new(),
         }
     }
 
@@ -290,6 +317,66 @@ impl StateSpaceTable {
         engine_query(node, phase, batch_size, seq_len, sol)
     }
 
+    /// KDA (Kimi Delta Attention) latency for a layer instance. Same engine
+    /// resolution as GDN, plus a "verify" phase that — like context — is a
+    /// 2-axis `(batch, seq_len)` Grid RAW query (the caller passes
+    /// `seq_len = draft_tokens` and the verify-normalized batch; see
+    /// `operators/mamba.rs::KdaOp::effective_coords`). Generation is the
+    /// 1-axis `(batch,)` curve. Unlike GDN there is NO physical
+    /// kernel-source alias map — only the same-`d_model` nearest-shard
+    /// fallback (collector rows are per-TP shard).
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_kda(
+        &self,
+        kernel_source: &str,
+        phase: &str,
+        batch_size: u32,
+        seq_len: u32,
+        d_model: u32,
+        d_conv: u32,
+        num_k_heads: u32,
+        head_k_dim: u32,
+        num_v_heads: u32,
+        head_v_dim: u32,
+        sol: &dyn Fn(f64, f64) -> f64,
+    ) -> Result<f64, AicError> {
+        let grids = self.load_kda()?;
+        let key = KdaKey {
+            kernel_source: kernel_source.to_string(),
+            phase: phase.to_string(),
+            d_model,
+            d_conv,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+        };
+        // Mirror Python `_query_kda_table`: on exact-shape miss, fall back to
+        // any same-d_model entry within the SAME kernel source and phase,
+        // breaking ties by minimum `|num_v_heads - query.num_v_heads|`.
+        // Surface as `PerfDatabase` if no d_model match exists so the
+        // operator's SOL fallback fires.
+        let node = match grids.by_keys.get(&key) {
+            Some(node) => node,
+            None => {
+                let nearest = grids
+                    .by_keys
+                    .iter()
+                    .filter(|(k, _)| {
+                        k.kernel_source == key.kernel_source
+                            && k.phase == key.phase
+                            && k.d_model == key.d_model
+                    })
+                    .min_by_key(|(k, _)| (k.num_v_heads as i64 - key.num_v_heads as i64).abs());
+                match nearest {
+                    Some((_, node)) => node,
+                    None => return Err(missing("KDA", &self.data_root, format!("{key:?}"))),
+                }
+            }
+        };
+        engine_query(node, phase, batch_size, seq_len, sol)
+    }
+
     fn load_mamba2(&self) -> Result<&Mamba2Grids, AicError> {
         let cell = self
             .mamba2
@@ -303,13 +390,21 @@ impl StateSpaceTable {
             .get_or_init(|| load_gdn_parquet(&self.gdn_sources));
         cell.as_ref().map_err(clone_err)
     }
+
+    fn load_kda(&self) -> Result<&KdaGrids, AicError> {
+        let cell = self
+            .kda
+            .get_or_init(|| load_kda_parquet(&self.kda_sources));
+        cell.as_ref().map_err(clone_err)
+    }
 }
 
 /// One perf_interp engine query per phase, mirroring Python v2's
 /// `_query_mamba2_table` / `_query_gdn_table`:
 ///
-/// - context: `axes=("batch", "seq_len")`, Grid RAW, coords `(b, s)` — the
-///   same axis order as the Python record.
+/// - context (and KDA's verify, which shares the 2-axis layout with
+///   `seq_len = draft_tokens`): `axes=("batch", "seq_len")`, Grid RAW,
+///   coords `(b, s)` — the same axis order as the Python record.
 /// - generation: `axes=("batch",)`, Grid RAW over the per-batch curve. The
 ///   query's `seq_len` is forwarded to `sol` only (Python passes the op's
 ///   `seq_len=None` there; generation SOL formulas ignore it either way).
@@ -330,7 +425,7 @@ fn engine_query(
         // as a PerfDatabase error so the operator's SOL branch fires.
         if seq_len == 0 {
             return Err(AicError::PerfDatabase(
-                "state-space context query needs seq_len > 0".to_string(),
+                "state-space context/verify query needs seq_len > 0".to_string(),
             ));
         }
         let sol2 = move |c: &[f64]| sol(c[0], c[1]);
@@ -501,6 +596,75 @@ fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
         )));
     }
     Ok(GdnGrids { by_keys })
+}
+
+/// Load the KDA table from an ordered, priority-sorted source list. Same
+/// first-wins-across-sources + missing-file-skip semantics as
+/// [`load_gdn_parquet`], and the same column layout as `gdn_perf.parquet`.
+/// Unlike GDN there is NO kernel-source normalization on load (Python
+/// `load_kda_data` keeps the recorded name; SOL-side aliasing lives in the
+/// operator's byte model only). "context" AND "verify" rows nest
+/// `[batch][seq]` (`seq_len` carries the per-request draft-token count for
+/// verify rows); "generation" rows nest `[batch]` only.
+fn load_kda_parquet(sources: &[PerfSource]) -> Result<KdaGrids, AicError> {
+    let mut by_keys: BTreeMap<KdaKey, Node> = BTreeMap::new();
+    let mut any_source = false;
+    for source in sources {
+        let path = source.path();
+        if !path.exists() {
+            continue;
+        }
+        any_source = true;
+        let reader = PerfReader::open(path)?;
+        let kernel_source_col = reader.col("kernel_source")?;
+        let phase_col = reader.col("phase")?;
+        let batch_size_col = reader.col("batch_size")?;
+        let seq_len_col = reader.col("seq_len")?;
+        let d_model_col = reader.col("d_model")?;
+        let d_conv_col = reader.col("d_conv")?;
+        let num_k_heads_col = reader.col("num_k_heads")?;
+        let head_k_dim_col = reader.col("head_k_dim")?;
+        let num_v_heads_col = reader.col("num_v_heads")?;
+        let head_v_dim_col = reader.col("head_v_dim")?;
+        let latency_col = reader.col("latency")?;
+        let ks_col = reader.col_optional("kernel_source");
+        for row in reader.rows()? {
+            let row = row?;
+            if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
+                continue;
+            }
+            let phase = row.str_owned(phase_col)?;
+            let key = KdaKey {
+                kernel_source: row.str_owned(kernel_source_col)?,
+                phase: phase.clone(),
+                d_model: row.u32(d_model_col)?,
+                d_conv: row.u32(d_conv_col)?,
+                num_k_heads: row.u32(num_k_heads_col)?,
+                head_k_dim: row.u32(head_k_dim_col)?,
+                num_v_heads: row.u32(num_v_heads_col)?,
+                head_v_dim: row.u32(head_v_dim_col)?,
+            };
+            // First-wins parity with Python `load_kda_data`, extended across
+            // shared-layer sources (earlier source wins): context AND verify
+            // leaves at `[batch][seq]`, generation leaves at `[batch]`.
+            let node = by_keys.entry(key).or_insert_with(Node::branch);
+            let batch = row.u32(batch_size_col)?;
+            let latency = row.f64(latency_col)?;
+            if phase == "context" || phase == "verify" {
+                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], latency);
+            } else {
+                insert_first_wins(node, &[batch], latency);
+            }
+        }
+    }
+    if !any_source || by_keys.is_empty() {
+        return Err(AicError::PerfDatabase(format!(
+            "no KDA rows loaded from {} source(s) (first: {})",
+            sources.len(),
+            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+        )));
+    }
+    Ok(KdaGrids { by_keys })
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
@@ -699,6 +863,84 @@ mod tests {
             query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
             5.0
         );
+    }
+
+    /// In-memory KDA table over one fixed model shape (d_model=4096, heads
+    /// 16/128, v-dim 128). Verify rows land at `[batch=1][seq=4]` (seq is the
+    /// draft-token count), generation rows at `[batch=1]`.
+    fn in_memory_kda_table(rows: &[(&str, &str, u32, f64)]) -> StateSpaceTable {
+        let mut by_keys: BTreeMap<KdaKey, Node> = BTreeMap::new();
+        for &(kernel_source, phase, num_v_heads, latency) in rows {
+            let key = KdaKey {
+                kernel_source: kernel_source.to_string(),
+                phase: phase.to_string(),
+                d_model: 4096,
+                d_conv: 4,
+                num_k_heads: 16,
+                head_k_dim: 128,
+                num_v_heads,
+                head_v_dim: 128,
+            };
+            let node = by_keys.entry(key).or_insert_with(Node::branch);
+            if phase == "generation" {
+                insert_first_wins(node, &[1], latency);
+            } else {
+                insert_first_wins(node, &[1, 4], latency);
+            }
+        }
+        let table = StateSpaceTable::new(PathBuf::from("test-data"), "sglang", "0.5.14");
+        assert!(table.kda.set(Ok(KdaGrids { by_keys })).is_ok());
+        table
+    }
+
+    fn query_kda_test_shape(
+        table: &StateSpaceTable,
+        kernel_source: &str,
+        phase: &str,
+        num_v_heads: u32,
+    ) -> Result<f64, AicError> {
+        table.query_kda(
+            kernel_source, phase, 1, 4, 4096, 4, 16, 128, num_v_heads, 128, &dummy_sol,
+        )
+    }
+
+    #[test]
+    fn kda_verify_is_a_two_axis_grid_and_generation_one_axis() {
+        let table = in_memory_kda_table(&[
+            ("fused_sigmoid_gating_delta_rule_update", "verify", 16, 2.5),
+            ("fused_recurrent_kda_packed_decode", "generation", 16, 1.5),
+        ]);
+        // Verify resolves at [batch=1][seq=draft_tokens=4].
+        assert_eq!(
+            query_kda_test_shape(&table, "fused_sigmoid_gating_delta_rule_update", "verify", 16)
+                .unwrap(),
+            2.5
+        );
+        // Generation resolves on the 1-axis batch curve (seq feeds SOL only).
+        assert_eq!(
+            query_kda_test_shape(&table, "fused_recurrent_kda_packed_decode", "generation", 16)
+                .unwrap(),
+            1.5
+        );
+    }
+
+    #[test]
+    fn kda_nearest_shard_fallback_has_no_alias_sources() {
+        // Same logical source, other num_v_heads shards: nearest wins.
+        let table = in_memory_kda_table(&[
+            ("chunk_kda", "context", 8, 4.0),
+            ("chunk_kda", "context", 32, 5.0),
+        ]);
+        assert_eq!(
+            query_kda_test_shape(&table, "chunk_kda", "context", 24).unwrap(),
+            5.0
+        );
+        // Unlike GDN, a physical vLLM kernel name is NOT aliased at lookup:
+        // querying the logical name against physical-only rows must miss
+        // (the SOL byte model in the operator handles those names instead).
+        let table =
+            in_memory_kda_table(&[("chunk_kda_with_fused_gate", "context", 16, 2.0)]);
+        assert!(query_kda_test_shape(&table, "chunk_kda", "context", 16).is_err());
     }
 
     #[test]

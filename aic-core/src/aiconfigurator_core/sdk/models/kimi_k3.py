@@ -80,6 +80,17 @@ class KimiK3Model(BaseModel):
         )
         assert cfg.num_experts >= self.config.moe_ep_size
 
+        # Context parallelism over KDA linear attention is a sequential-state
+        # problem the serving frameworks themselves do not support for Kimi-K3
+        # (and DCP is not modeled either) — fail loudly instead of silently
+        # mispricing.
+        if self.config.cp_size > 1:
+            raise NotImplementedError(
+                "Kimi-K3 modeling does not support context parallelism (cp_size > 1): "
+                "KDA recurrent state is sequential and the serving frameworks do not "
+                "shard it; DCP (decode context parallel) is likewise not modeled."
+            )
+
         self._build_context_ops()
         self._build_generation_ops()
 
