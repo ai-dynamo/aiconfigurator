@@ -347,7 +347,7 @@ print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ### Recommend mode (deployment sizing)
 This mode finds the minimum number of GPUs needed to meet a performance target. It is designed as a procurement sizing tool — the output is unconstrained, suitable for driving purchasing decisions.
 
-Instead of specifying a GPU count (like `default` mode), you specify a throughput target (request rate or concurrency) along with SLA constraints, and the system calculates the minimum GPUs required.
+Instead of specifying a GPU count (like `default` mode), you specify exactly one load target (request rate or concurrency) along with SLA constraints, and the system calculates the minimum GPUs required.
 
 The recommender searches both tensor-parallel and pipeline-parallel configurations to find the most efficient layout. For models too large to fit on a single node, it automatically escalates to multi-node configurations.
 
@@ -366,8 +366,8 @@ aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --bac
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path or local path containing `config.json`
 - `--system`: System name (GPU type)
-- One of:
-  - `--target-request-rate`: Target system throughput in req/s
+- Exactly one of the following (mutually exclusive):
+  - `--target-request-rate`: Target system request rate in req/s
   - `--target-concurrency`: Target number of concurrent users
 
 **Optional arguments:**
@@ -375,7 +375,9 @@ aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --bac
 - `--ttft`, `--tpot`: SLA targets in ms (default: 2000ms, 30ms)
 - `--request-latency`: End-to-end request latency target in ms
 - `--isl`, `--osl`: Input/output sequence lengths (default: 4000, 1000)
-- All other arguments match `default` mode (quantization, prefix caching, nextn, etc.)
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers`
+- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`
+- All other arguments match `default` mode (quantization, prefix caching, etc.)
 
 The output includes `total_gpus_needed` and `replicas_needed` columns, showing both agg and disagg configurations ranked by fewest GPUs first.
 

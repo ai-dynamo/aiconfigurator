@@ -412,7 +412,10 @@ class InferenceSummary:
             self._generation_latency_dict
         )
 
-        assert self._summary_df is not None, "summary df is not set"
+        # run_static defers DataFrame construction; materialize before use so
+        # this works regardless of whether get_summary_df() was called first.
+        summary_df = self.get_summary_df()
+        assert summary_df is not None, "summary df is not set"
 
         # summary string for display
         perf_info = "Performance Summary:\n"
@@ -423,8 +426,7 @@ class InferenceSummary:
         if generation_latency != 0:
             perf_info += f"generation latency:{generation_latency:>19.5f} ms\n"
             perf_info += (
-                f"throughput {self._summary_df.loc[0, 'tokens/s']:.2f} tokens/s, tpot "
-                f"{self._summary_df.loc[0, 'tpot']:.3f} ms\n"
+                f"throughput {summary_df.loc[0, 'tokens/s']:.2f} tokens/s, tpot {summary_df.loc[0, 'tpot']:.3f} ms\n"
             )
         encoder_info = "Encoder breakdown:\n" + encoder_latency_string if encoder_latency != 0 else ""
         context_info = "Context breakdown:\n" + context_latency_string

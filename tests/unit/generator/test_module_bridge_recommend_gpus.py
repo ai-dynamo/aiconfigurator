@@ -29,7 +29,7 @@ def _task(*, total_gpus: int, serving_mode: str = "agg") -> SimpleNamespace:
         prefix=0,
         is_moe=False,
         nextn=0,
-        nextn_accept_rates=[],
+        nextn_accepted=None,
         serving_mode=serving_mode,
         total_gpus=total_gpus,
         system_name="h200_sxm",
@@ -67,3 +67,40 @@ class TestRecommendGPUCount:
         row = _result_row(total_gpus_needed=0, tp=8, pp=1, dp=1)
         cfg = task_config_to_generator_config(task, row)
         assert cfg["WorkerConfig"]["agg_workers"] == 1  # 8 // 8 = 1
+
+
+def _disagg_result_row(**kwargs) -> pd.Series:
+    base = {
+        "(p)tp": 4,
+        "(p)pp": 1,
+        "(p)dp": 1,
+        "(p)workers": 1,
+        "(p)bs": 8,
+        "(d)tp": 2,
+        "(d)pp": 1,
+        "(d)dp": 1,
+        "(d)workers": 2,
+        "(d)bs": 64,
+    }
+    base.update(kwargs)
+    return pd.Series(base)
+
+
+@pytest.mark.unit
+class TestRecommendGPUCountDisagg:
+    """Disagg replica scaling must also come from total_gpus_needed, not the budget."""
+
+    def test_uses_total_gpus_needed_over_task_budget(self):
+        # gpus_per_replica = 1 prefill worker * (4*1*1) + 2 decode workers * (2*1*1) = 8
+        task = _task(total_gpus=64, serving_mode="disagg")
+        row = _disagg_result_row(total_gpus_needed=24)
+        cfg = task_config_to_generator_config(task, row)
+        assert cfg["WorkerConfig"]["prefill_workers"] == 3  # 24 // 8 replicas * 1
+        assert cfg["WorkerConfig"]["decode_workers"] == 6  # 24 // 8 replicas * 2
+
+    def test_falls_back_to_task_total_gpus_without_column(self):
+        task = _task(total_gpus=16, serving_mode="disagg")
+        row = _disagg_result_row()
+        cfg = task_config_to_generator_config(task, row)
+        assert cfg["WorkerConfig"]["prefill_workers"] == 2  # 16 // 8 replicas * 1
+        assert cfg["WorkerConfig"]["decode_workers"] == 4  # 16 // 8 replicas * 2

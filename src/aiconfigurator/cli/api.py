@@ -388,8 +388,8 @@ def cli_recommend(
     tpot: float = 30.0,
     request_latency: float | None = None,
     prefix: int = 0,
-    nextn: int = 0,
-    nextn_accept_rates: list[float] | None = None,
+    nextn: int | str = 0,
+    nextn_accepted: float | None = None,
     strict_sla: bool = False,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
@@ -435,8 +435,11 @@ def cli_recommend(
         tpot: Time per output token SLA target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
         prefix: Prefix cache length.
-        nextn: Number of draft tokens for MTP speculative decoding.
-        nextn_accept_rates: Acceptance rates for MTP draft tokens.
+        nextn: MTP draft length, or 'auto' to use the checkpoint's
+            num_nextn_predict_layers. Default is 0 (disabled).
+        nextn_accepted: Average accepted draft tokens per decode step
+            (0 <= nextn_accepted <= nextn). Required when the draft depth
+            resolves to > 0.
         strict_sla: When True, filter to SLA-compliant configs only.
         enable_chunked_prefill: Enable chunked prefill for finer context sweep.
         free_gpu_memory_fraction: Fraction of free GPU memory for KV cache.
@@ -476,6 +479,12 @@ def cli_recommend(
     spec = load_system_spec(system)
     gpus_per_node = spec["node"]["num_gpus_per_node"]
 
+    # Fail fast on inconsistent MTP inputs (same early check as cli_default).
+    # nextn="auto" resolves the draft depth from the checkpoint first.
+    if nextn == "auto":
+        nextn = _resolve_nextn_auto(model_path)
+    nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
+
     base_tasks = build_default_tasks(
         model_path=model_path,
         total_gpus=gpus_per_node,
@@ -495,7 +504,7 @@ def cli_recommend(
         request_latency=request_latency,
         prefix=prefix,
         nextn=nextn,
-        nextn_accept_rates=nextn_accept_rates,
+        nextn_accepted=nextn_accepted,
         enable_chunked_prefill=enable_chunked_prefill,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,

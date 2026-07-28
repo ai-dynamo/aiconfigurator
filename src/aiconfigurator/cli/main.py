@@ -576,15 +576,21 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
         "--nextn",
-        type=int,
+        type=_parse_nextn,
         default=0,
-        help="Number of draft tokens for MTP speculative decoding. Default: 0 (disabled).",
+        help="MTP (Multi-Token Prediction) draft length, or 'auto' to use the checkpoint's "
+        "num_nextn_predict_layers (absent/0 keeps MTP disabled). When the depth is > 0, enables "
+        "speculative decoding in the configuration search and requires --nextn-accepted. "
+        "Default: 0 (disabled); MTP is never enabled implicitly when the flag is omitted.",
     )
     parser.add_argument(
-        "--nextn-accept-rates",
-        type=str,
-        default="0.85,0.3,0,0,0",
-        help="Comma-separated acceptance rates for MTP draft tokens (5 values). Default: '0.85,0.3,0,0,0'.",
+        "--nextn-accepted",
+        type=float,
+        default=None,
+        help="Average accepted draft tokens per decode step (0 <= nextn_accepted <= nextn). "
+        "Required when --nextn resolves to > 0; there is no built-in acceptance "
+        "assumption — use a measured value from your deployment (e.g. the engine's "
+        "reported average acceptance length minus 1).",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -1868,9 +1874,11 @@ def _execute_tasks(
                 if db_mode == common.DatabaseMode.SILICON.name
                 else ""
             )
+            # Load-target runs (recommend / auto-recommend) manage the GPU budget
+            # internally, so --total-gpus advice would point at an ignored flag.
             gpu_hint = (
                 "(2) the model does not fit — try a quantized model; "
-                if mode == "recommend"
+                if target_request_rate is not None or target_concurrency is not None
                 else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
             )
             msg = (
@@ -2618,7 +2626,7 @@ def _run_recommend(args) -> None:
             request_latency=args.request_latency,
             prefix=args.prefix,
             nextn=args.nextn,
-            nextn_accept_rates=[float(x) for x in args.nextn_accept_rates.split(",")],
+            nextn_accepted=args.nextn_accepted,
             strict_sla=getattr(args, "strict_sla", False),
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
@@ -2708,6 +2716,7 @@ def main(args):
             raise SystemExit("recommend mode requires --model-path")
         if not getattr(args, "system", None):
             raise SystemExit("recommend mode requires --system")
+        _resolve_and_validate_nextn(args)
         _run_recommend(args)
         return
 
@@ -2723,6 +2732,11 @@ def main(args):
         if getattr(args, "total_gpus", None) is None and has_load_target:
             _run_recommend(args)
             return
+        if has_load_target:
+            logger.warning(
+                "--target-request-rate/--target-concurrency are ignored in default mode when "
+                "--total-gpus is set. Omit --total-gpus to find the minimum GPUs for the load target."
+            )
 
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}

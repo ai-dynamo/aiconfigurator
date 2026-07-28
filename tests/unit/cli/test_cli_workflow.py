@@ -71,6 +71,31 @@ class TestCLILogLevelResolution:
 class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
+    @patch("aiconfigurator.cli.main._run_recommend")
+    def test_cli_recommend_resolves_nextn_before_dispatch(self, mock_run_recommend, cli_parser, monkeypatch):
+        monkeypatch.setattr("aiconfigurator.cli.main.resolve_nextn_auto", lambda _model_path: 2)
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+
+        cli_main(args)
+
+        assert args.nextn == 2
+        assert args.nextn_accepted == 0.7
+        mock_run_recommend.assert_called_once_with(args)
+
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
@@ -303,10 +328,10 @@ class TestCLIIntegration:
         )
 
         with caplog.at_level(logging.WARNING):
-            chosen_exp, best_configs, _, _, _, outcomes = _execute_tasks(
-                {"agg": mock_task_config}, mode="default", strict_sla=True
-            )
+            result = _execute_tasks({"agg": mock_task_config}, mode="default", strict_sla=True)
 
+        assert len(result) == 6
+        chosen_exp, best_configs, _, _, _, outcomes = result
         assert chosen_exp == "none"
         assert not best_configs
         assert "agg" in outcomes
