@@ -111,13 +111,12 @@ def _dsv4_resolve_head_key(quant_data, num_heads):
 def _dsv4_resolve_head_axes(quant_data, native_heads, num_heads):
     """Two-level head resolution for the DSV4 module tables.
 
-    The files' ``num_heads`` column is the model's NATIVE head count (constant
-    per artifact across its tp sweep: V4-Flash 64, V4-Pro 128), so the loaders
-    key rows as ``[native][local]`` with ``local = num_heads // tp_size``
-    derived at load.  Resolve the outer level with the model's native head
-    count (identity: separates Pro from Flash rows), then the rank-local head
-    count within it (the physical per-rank shape).  Nearest-match fallback at
-    each level keeps universal-sweep data resolving for unseen shards.
+    The loaders key rows as ``[native][local]`` (per-row identity resolved by
+    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
+    semantics).  Resolve the outer level with the model's native head count
+    (identity: separates Pro from Flash rows), then the rank-local head count
+    within it (the physical per-rank shape).  Nearest-match fallback at each
+    level keeps universal-sweep data resolving for unseen shards.
     Returns ``(native_key, local_key)`` or ``None``.
     """
     native_key = _dsv4_resolve_head_key(quant_data, native_heads)
@@ -1915,25 +1914,30 @@ def _dsv4_row_head_axes(rows):
       ``native // tp`` — varying with tp (64/32/16/8 across tp 1/2/4/8), the
       semantics the SCHEME A docstrings described.
 
-    Both must key the same way, so sniff the semantics per model from the data
-    itself: within one model, ``num_heads`` constant while ``tp_size`` varies
-    means NATIVE; ``num_heads * tp_size`` constant means LOCAL.  A model seen
-    at a single tp is ambiguous unless tp == 1 (native == local); assume LOCAL
+    Both must key the same way, so sniff the semantics per (model, version)
+    from the data itself: within one group, ``num_heads`` constant while
+    ``tp_size`` varies means NATIVE; ``num_heads * tp_size`` constant means
+    LOCAL.  Grouping includes the ``version`` column because the shared layer
+    concatenates sibling-version files into one row stream — a re-collected
+    (local-writing) primary pooled with a stale (native-writing) sibling of
+    the same model must not poison each other's verdicts.  A group seen at a
+    single tp is ambiguous unless tp == 1 (native == local); assume LOCAL
     there (what every current collector writes) with a debug note.
 
-    Returns ``{(model, num_heads, tp_size): (native, local)}``.
+    Returns ``{(model, version, num_heads, tp_size): (native, local)}``.
     """
-    observed: dict[str, set[tuple[int, int]]] = {}
+    observed: dict[tuple[str, str], set[tuple[int, int]]] = {}
     for row in rows:
         try:
             heads = int(row["num_heads"])
             tp = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
-        observed.setdefault(str(row.get("model", "")), set()).add((heads, tp))
+        group = (str(row.get("model", "")), str(row.get("version", "")))
+        observed.setdefault(group, set()).add((heads, tp))
 
-    axes: dict[tuple[str, int, int], tuple[int, int]] = {}
-    for model, pairs in observed.items():
+    axes: dict[tuple[str, str, int, int], tuple[int, int]] = {}
+    for (model, version), pairs in observed.items():
         tps = {tp for _, tp in pairs}
         heads_constant = len({h for h, _ in pairs}) == 1
         product_constant = len({h * tp for h, tp in pairs}) == 1
@@ -1946,14 +1950,15 @@ def _dsv4_row_head_axes(rows):
         else:
             semantics = "local"
             logger.debug(
-                f"DSV4 module rows for model={model!r} have ambiguous num_heads semantics "
-                f"(pairs={sorted(pairs)}); assuming rank-LOCAL (current collector convention)."
+                f"DSV4 module rows for model={model!r} version={version!r} have ambiguous "
+                f"num_heads semantics (pairs={sorted(pairs)}); assuming rank-LOCAL "
+                f"(current collector convention)."
             )
         for heads, tp in pairs:
             if semantics == "native":
-                axes[(model, heads, tp)] = (heads, max(1, heads // tp))
+                axes[(model, version, heads, tp)] = (heads, max(1, heads // tp))
             else:
-                axes[(model, heads, tp)] = (heads * tp, heads)
+                axes[(model, version, heads, tp)] = (heads * tp, heads)
     return axes
 
 
@@ -2006,7 +2011,9 @@ def load_context_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_native, num_heads_local = head_axes[(str(row.get("model", "")), heads_col, tp_size)]
+        num_heads_native, num_heads_local = head_axes[
+            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
+        ]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -2069,7 +2076,9 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_native, num_heads_local = head_axes[(str(row.get("model", "")), heads_col, tp_size)]
+        num_heads_native, num_heads_local = head_axes[
+            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
+        ]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 

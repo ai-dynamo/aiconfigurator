@@ -69,16 +69,15 @@ impl AttnKind {
 
 // native -> local -> step -> isl -> batch -> latency
 //
-// Head identity (mirrors Python `load_*_dsv4_kind_module_data`): the CSV
-// `num_heads` column is the model's NATIVE head count — constant per artifact
-// across its tp sweep (V4-Flash 64, V4-Pro 128 in the 0.5.10 data). The
-// native value is the row's model identity (separates Pro rows from Flash
-// rows) and the rank-LOCAL head count `num_heads / tp_size` is the physical
-// per-rank shape; both are key axes. The old single-level layout collapsed
-// both the model identity and the tp shard into one bucket, leaving an
-// arbitrary row-order winner across rows whose latencies differ 30-50%.
-// Queries resolve the model's native count first, then its rank-local count
-// within the bucket (see `resolve_head_key`, applied per level).
+// Head identity (mirrors Python `load_*_dsv4_kind_module_data`): the native
+// value is the row's model identity (separates Pro rows from Flash rows) and
+// the rank-LOCAL head count is the physical per-rank shape; both are key
+// axes, resolved per row by `dsv4_head_axes` across both historical
+// `num_heads` column semantics (see its doc). The old single-level layout
+// collapsed both the model identity and the tp shard into one bucket,
+// leaving an arbitrary row-order winner across rows whose latencies differ
+// 30-50%. Queries resolve the model's native count first, then its
+// rank-local count within the bucket (see `resolve_head_key`, per level).
 type ByBatch = BTreeMap<u32, f64>;
 type ByIsl = BTreeMap<u32, ByBatch>;
 type ByStep = BTreeMap<u32, ByIsl>;
@@ -1223,12 +1222,19 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// - vllm 0.24.0 files (post-#1131 collectors) write rank-LOCAL heads
 ///   (varying with tp; `num_heads * tp_size` constant).
 ///
-/// Sniffed per model from the data itself; a model seen only at tp == 1 is
-/// unambiguous (native == local), any other single-tp case assumes LOCAL
-/// (the current collector convention).
-fn dsv4_head_axes(observed: &BTreeMap<String, BTreeSet<(u32, u32)>>) -> BTreeMap<(String, u32, u32), (u32, u32)> {
+/// Sniffed per (model, version) from the data itself — grouping includes the
+/// version column because the shared layer concatenates sibling-version files
+/// into one row stream, and a re-collected (local-writing) primary pooled
+/// with a stale (native-writing) sibling of the same model must not poison
+/// each other's verdicts. A group seen only at tp == 1 is unambiguous
+/// (native == local); any other single-tp case assumes LOCAL (the current
+/// collector convention).
+#[allow(clippy::type_complexity)]
+fn dsv4_head_axes(
+    observed: &BTreeMap<(String, String), BTreeSet<(u32, u32)>>,
+) -> BTreeMap<(String, String, u32, u32), (u32, u32)> {
     let mut axes = BTreeMap::new();
-    for (model, pairs) in observed {
+    for ((model, version), pairs) in observed {
         let tps: BTreeSet<u32> = pairs.iter().map(|&(_, tp)| tp).collect();
         let heads_constant = pairs.iter().map(|&(h, _)| h).collect::<BTreeSet<_>>().len() == 1;
         let product_constant = pairs.iter().map(|&(h, tp)| h * tp).collect::<BTreeSet<_>>().len() == 1;
@@ -1243,7 +1249,7 @@ fn dsv4_head_axes(observed: &BTreeMap<String, BTreeSet<(u32, u32)>>) -> BTreeMap
             } else {
                 (heads * tp, heads)
             };
-            axes.insert((model.clone(), heads, tp), identity);
+            axes.insert((model.clone(), version.clone(), heads, tp), identity);
         }
     }
     axes
@@ -1255,6 +1261,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
     struct RawRow {
         key: ModuleKey,
         model: String,
+        version: String,
         heads: u32,
         tp: u32,
         step: u32,
@@ -1263,7 +1270,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         latency: f64,
     }
     let mut raw_rows: Vec<RawRow> = Vec::new();
-    let mut observed: BTreeMap<String, BTreeSet<(u32, u32)>> = BTreeMap::new();
+    let mut observed: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -1276,6 +1283,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let gemm_type_col = reader.col("gemm_type")?;
         let model_col = reader.col_optional("model");
+        let version_col = reader.col_optional("version");
         let num_heads_col = reader.col("num_heads")?;
         let tp_size_col = reader.col("tp_size")?;
         let batch_size_col = reader.col("batch_size")?;
@@ -1307,12 +1315,17 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
                 Some(col) => row.str_owned(col)?,
                 None => String::new(),
             };
+            let version = match version_col {
+                Some(col) => row.str_owned(col)?,
+                None => String::new(),
+            };
             let heads = row.u32(num_heads_col)?;
             let tp = row.u32(tp_size_col)?.max(1);
-            observed.entry(model.clone()).or_default().insert((heads, tp));
+            observed.entry((model.clone(), version.clone())).or_default().insert((heads, tp));
             raw_rows.push(RawRow {
                 key,
                 model,
+                version,
                 heads,
                 tp,
                 step: row.u32(step_col)?,
@@ -1336,7 +1349,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
     let axes = dsv4_head_axes(&observed);
     let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
     for row in raw_rows {
-        let (native_heads, local_heads) = axes[&(row.model, row.heads, row.tp)];
+        let (native_heads, local_heads) = axes[&(row.model, row.version, row.heads, row.tp)];
         by_keys
             .entry(row.key)
             .or_default()

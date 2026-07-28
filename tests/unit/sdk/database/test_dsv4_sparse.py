@@ -86,10 +86,11 @@ def _gen_row(
     lat: float = 0.1,
     model: str = _FLASH_MODEL,
     num_heads: int | None = None,
+    version: str = "test",
 ) -> str:
     heads = _native_heads_for_model(model) if num_heads is None else num_heads
     return (
-        f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_generation_module,"
+        f"SGLang,{version},NVIDIA H20-3e,dsv4_{attn_kind}_generation_module,"
         f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
         f"bfloat16,fp8_e4m3,{gemm},{heads},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
@@ -747,3 +748,28 @@ def test_load_dsv4_kind_module_data_mixed_semantics_per_model(tmp_path):
     assert q[_PRO_NATIVE_HEADS][16][128][1][1024]["latency"] == pytest.approx(0.3)  # Pro tp8 -> local 16
     assert q[_FLASH_NATIVE_HEADS][32][128][1][1024]["latency"] == pytest.approx(0.4)  # Flash tp2
     assert q[_FLASH_NATIVE_HEADS][8][128][1][1024]["latency"] == pytest.approx(0.2)  # Flash tp8
+
+
+def test_load_dsv4_kind_module_data_sniffs_semantics_per_version(tmp_path):
+    """Semantics are sniffed per (model, version): the shared layer pools
+    sibling-version files into one row stream, so a stale native-writing
+    version and a re-collected local-writing version of the SAME model must
+    each resolve their own convention instead of poisoning the union."""
+    rows = [
+        # old version: native semantics (heads constant across tp).
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=2, lat=0.5, version="0.5.10"),
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=8, lat=0.3, version="0.5.10"),
+        # new version: local semantics (heads = 64 // tp).
+        _gen_row(attn_kind="hca", cr=128, bs=2, isl=1, step=1023, tp=2, lat=0.4, num_heads=32, version="0.5.16"),
+        _gen_row(attn_kind="hca", cr=128, bs=2, isl=1, step=1023, tp=8, lat=0.2, num_heads=8, version="0.5.16"),
+    ]
+    path = _write_csv(tmp_path / "hca_gen_versions.txt", _CTX_HEADER, rows)
+    data = load_generation_dsv4_kind_module_data(path)
+    q = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
+    # Both versions land in the Flash native-64 bucket with per-tp locals.
+    assert set(q.keys()) == {_FLASH_NATIVE_HEADS}
+    locals_ = q[_FLASH_NATIVE_HEADS]
+    assert locals_[32][128][1][1024]["latency"] == pytest.approx(0.5)  # old, tp2 -> local 32
+    assert locals_[8][128][1][1024]["latency"] == pytest.approx(0.3)  # old, tp8 -> local 8
+    assert locals_[32][128][2][1024]["latency"] == pytest.approx(0.4)  # new, tp2
+    assert locals_[8][128][2][1024]["latency"] == pytest.approx(0.2)  # new, tp8
