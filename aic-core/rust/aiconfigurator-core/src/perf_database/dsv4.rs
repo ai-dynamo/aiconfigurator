@@ -1429,8 +1429,11 @@ mod tests {
         // genuine rank-local sweep (num_heads * tp constant) and single-tp
         // rows pass.
         let observed = |pairs: &[(u32, u32)]| {
-            let mut m: BTreeMap<String, BTreeSet<(u32, u32)>> = BTreeMap::new();
-            m.insert("deepseek-ai/DeepSeek-V4-Pro".to_string(), pairs.iter().copied().collect());
+            let mut m: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
+            m.insert(
+                ("deepseek-ai/DeepSeek-V4-Pro".to_string(), "0.5.10".to_string()),
+                pairs.iter().copied().collect(),
+            );
             m
         };
         // Stale: native 128 constant across tp 1/2/4/8.

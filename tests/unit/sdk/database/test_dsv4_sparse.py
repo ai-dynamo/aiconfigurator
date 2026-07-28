@@ -774,7 +774,7 @@ def test_load_dsv4_kind_module_data_stale_guard_is_per_version(tmp_path):
         _gen_row(attn_kind="hca", cr=128, bs=2, isl=1, step=1023, tp=8, lat=0.2, num_heads=8, version="0.5.16"),
     ]
     path = _write_csv(tmp_path / "hca_gen_versions.txt", _CTX_HEADER, rows)
-    with pytest.raises(ValueError, match="version='0.5.10'"):
+    with pytest.raises(ValueError, match=r"version='0\.5\.10'"):
         load_generation_dsv4_kind_module_data(path)
 
     # Two well-formed versions of the same model pool cleanly.

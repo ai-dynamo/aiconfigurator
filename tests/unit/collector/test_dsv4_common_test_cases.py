@@ -30,14 +30,36 @@ def test_dsv4_context_structural_manifest_owns_model_position_admission():
     assert manifest == ((0, (16, 8, 1)), (8, (8, 1)))
 
 
-def test_dsv4_no_filter_uses_one_canonical_model(monkeypatch):
+def test_dsv4_no_filter_expands_flash_and_pro_modules_calib_stays_canonical(monkeypatch):
+    """Full/raw plans expand BOTH default artifacts for module/sparse ops —
+    their tables key model geometry ([native][local] / native heads) since
+    #1423/#1431 — while topk calib stays pinned to the single canonical model
+    because its persisted keys carry no geometry (#1429 follow-up)."""
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
     module_cases = common_test_cases.get_dsv4_csa_context_test_cases()
     assert module_cases
-    assert {case[6] for case in module_cases} == {_FLASH_FP8}
-    assert common_test_cases.get_dsv4_paged_mqa_logits_test_cases() == [[_FLASH_FP8, "paged_mqa_logits"]]
+    assert {case[6] for case in module_cases} == {_FLASH_FP8, _PRO_FP8}
+    assert common_test_cases.get_dsv4_paged_mqa_logits_test_cases() == [
+        [_FLASH_FP8, "paged_mqa_logits"],
+        [_PRO_FP8, "paged_mqa_logits"],
+    ]
+    assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_FLASH_FP8, "topk"]]
+
+
+def test_dsv4_targeted_noncanonical_model_drops_calib_with_logged_reason(monkeypatch, capsys):
+    """A targeted run for a non-canonical model schedules its module cases but
+    zero calib cases, and the drop is logged — the calib table can hold only
+    the canonical model's rows."""
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+
+    assert common_test_cases.get_dsv4_csa_context_test_cases()
+    assert common_test_cases.get_dsv4_topk_calib_test_cases() == []
+    assert "calib keys carry no model geometry" in capsys.readouterr().out
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _FLASH_FP8)
     assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_FLASH_FP8, "topk"]]
 
 
