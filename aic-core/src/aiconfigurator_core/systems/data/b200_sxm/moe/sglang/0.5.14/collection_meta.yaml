@@ -8,4 +8,7 @@ runtime:
   version: 0.5.14
 tables:
   moe_perf:
+    # 2026-07-28: appended 3078 Kimi-K3 w4a16_mxfp4 rows (3584/3072, 896x16,
+    # sglang_flashinfer_trtllm_moe, TP 1-32 x EP 1-128 x 3 distributions)
+    # collected on 1x B200; zero failures, keys disjoint from prior rows.
     status: complete

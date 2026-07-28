@@ -17,7 +17,7 @@ Status legend: `done` = collected, quality-gated, packaged under
 |---|---|---|---|---|---|
 | kda | b200_sxm (SM100) | sglang 0.5.16 (kimi-k3 branch) | **done (2026-07-28)** | 987 | Triton context/generation + fused CuTeDSL DSPARK verify |
 | kda | b200_sxm (SM100) | vllm 0.1.dev19262 (kimi-k3 preview) | **done (2026-07-28)** | 1203 | collector unmodified; dispatch probes verified on SM100 |
-| moe (K3 shape) | b200_sxm (SM100) | sglang 0.5.14 | open (probe done) | — | Blackwell lane is `flashinfer_mxfp4` / `sglang_flashinfer_trtllm_moe`; smoke passes **including moe_ep_size > 1** (the Hopper marlin EP crash does not transfer); full 3078-case run is ~3h on one B200 |
+| moe (K3 shape) | b200_sxm (SM100) | sglang 0.5.14 | **done (2026-07-28)** | 3078 | `sglang_flashinfer_trtllm_moe` (flashinfer_mxfp4 lane), w4a16_mxfp4, TP 1-32 x EP 1-128 x 3 distributions, **zero failures** — the Hopper marlin EP>1 crash does not transfer; rows merged into the existing 139k-row 0.5.14 table (142,243 total) |
 | kda + moe | b300_sxm / gb200 / gb300 (SM100/103) | both | open | — | expect kda collectors to work as on B200; SM103 still in `unverified_sms` |
 | kda | rtx_pro_6000 (SM120) | both | open | — | FlashKDA claims SM120 support (vllm); sglang CuTe paths are SM100-only → Triton verify |
 
@@ -126,19 +126,18 @@ packaged b200_sxm tables: sglang verify recurrence 0.0640 ms silicon + conv
 
 ## Open pre-work for the remaining lanes
 
-1. **K3 MoE Blackwell lane (largest accuracy lever).** The kimi-k3 branch
-   dispatches K3 routed experts on SM100/103 to `flashinfer_mxfp4`
-   (trtllm-gen SiTU) — declared in
-   `collector/cases/models/KimiK3ForConditionalGeneration_cases.yaml`
-   (`w4a16_mxfp4: {90: marlin, 100: flashinfer_mxfp4, ...}`). B200 probe
-   (2026-07-28, sglang 0.5.14, 1x B200): smoke and the first ~1.2k of 3078
-   planned cases pass on `sglang_flashinfer_trtllm_moe`, **including
-   moe_ep_size > 1** — the Hopper marlin EP crash does not transfer. The full
-   run needs ~3h of GPU time; resume with
-   `--checkpoint-dir collector_checkpoints/sglang/moe --resume`. When
-   packaging, MERGE the K3 rows into the existing
-   `systems/data/b200_sxm/moe/sglang/0.5.14/moe_perf.parquet` (139k rows for
-   other models; no K3-shape overlap) — never overwrite.
+(The sglang K3 MoE Blackwell lane — previously the largest accuracy lever —
+completed 2026-07-28 with zero failures; see the campaign table. Any future
+K3 rows for another artifact/quant MERGE into the shared 0.5.14 table; never
+overwrite.)
+
+1. **K3 MoE on the vllm backend**: unblocked at the case-population level
+   (kimi_linear grouped-topk mapping + the num_expert_group field spelling in
+   `collector/vllm/collect_moe.py`), but not collected. Two open questions
+   before running it: whether the moe family should route to the kimi-k3
+   preview image instead of stock 0.24 (K3 serves only on the branch), and
+   whether the runtime's FusedMoE supports the SiTU activation K3 declares —
+   probe before burning a full grid.
 2. **W4A8 quant identity rows**: if a W4A8 K3 checkpoint artifact ships for
    Blackwell, it needs its own `model_case_values` moe row + allowed_modes —
    do NOT merge it into the w4a16_mxfp4 row (quant-distinct artifacts are
