@@ -1215,8 +1215,55 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// key `[kv][gemm]` (the fmha level of `ModuleKey` stays the empty sentinel,
 /// and duplicate rows that differed only in `mla_dtype` collapse last-wins —
 /// exactly what Python's direct-assign loader does).
+/// Resolve each (model, num_heads, tp_size) tuple to its (native, local) head
+/// identity across BOTH historical `num_heads` column semantics — mirrors
+/// Python `_dsv4_row_head_axes`:
+/// - sglang 0.5.10 files (pre-#1131 collectors) write NATIVE heads (constant
+///   per artifact across the tp sweep);
+/// - vllm 0.24.0 files (post-#1131 collectors) write rank-LOCAL heads
+///   (varying with tp; `num_heads * tp_size` constant).
+///
+/// Sniffed per model from the data itself; a model seen only at tp == 1 is
+/// unambiguous (native == local), any other single-tp case assumes LOCAL
+/// (the current collector convention).
+fn dsv4_head_axes(observed: &BTreeMap<String, BTreeSet<(u32, u32)>>) -> BTreeMap<(String, u32, u32), (u32, u32)> {
+    let mut axes = BTreeMap::new();
+    for (model, pairs) in observed {
+        let tps: BTreeSet<u32> = pairs.iter().map(|&(_, tp)| tp).collect();
+        let heads_constant = pairs.iter().map(|&(h, _)| h).collect::<BTreeSet<_>>().len() == 1;
+        let product_constant = pairs.iter().map(|&(h, tp)| h * tp).collect::<BTreeSet<_>>().len() == 1;
+        let native_semantics = if tps.len() > 1 {
+            heads_constant && !product_constant
+        } else {
+            tps.contains(&1) // tp=1: native == local, either reading works
+        };
+        for &(heads, tp) in pairs {
+            let identity = if native_semantics {
+                (heads, (heads / tp).max(1))
+            } else {
+                (heads * tp, heads)
+            };
+            axes.insert((model.clone(), heads, tp), identity);
+        }
+    }
+    axes
+}
+
 fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<ModuleGrids, AicError> {
-    let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
+    // Pass 1: parse every row (source order preserved for first-wins) and
+    // record the (model, num_heads, tp) pairs the head-semantics sniffer needs.
+    struct RawRow {
+        key: ModuleKey,
+        model: String,
+        heads: u32,
+        tp: u32,
+        step: u32,
+        isl: u32,
+        batch: u32,
+        latency: f64,
+    }
+    let mut raw_rows: Vec<RawRow> = Vec::new();
+    let mut observed: BTreeMap<String, BTreeSet<(u32, u32)>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -1228,6 +1275,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         let mla_dtype_col = if key_on_fmha { Some(reader.col("mla_dtype")?) } else { None };
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let gemm_type_col = reader.col("gemm_type")?;
+        let model_col = reader.col_optional("model");
         let num_heads_col = reader.col("num_heads")?;
         let tp_size_col = reader.col("tp_size")?;
         let batch_size_col = reader.col("batch_size")?;
@@ -1255,34 +1303,53 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
                 kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
-            // (native, local) head identity + first-wins parity with Python
-            // `load_*_dsv4_kind_module_data` (skip-on-key-conflict;
-            // shared-layer contract, design §6.1). CSV `num_heads` is the
-            // model's NATIVE head count; local = native / tp_size.
-            let native_heads = row.u32(num_heads_col)?;
-            let tp_size = row.u32(tp_size_col)?.max(1);
-            let local_heads = (native_heads / tp_size).max(1);
-            by_keys
-                .entry(key)
-                .or_default()
-                .entry(native_heads)
-                .or_default()
-                .entry(local_heads)
-                .or_default()
-                .entry(row.u32(step_col)?)
-                .or_default()
-                .entry(row.u32(isl_col)?)
-                .or_default()
-                .entry(row.u32(batch_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+            let model = match model_col {
+                Some(col) => row.str_owned(col)?,
+                None => String::new(),
+            };
+            let heads = row.u32(num_heads_col)?;
+            let tp = row.u32(tp_size_col)?.max(1);
+            observed.entry(model.clone()).or_default().insert((heads, tp));
+            raw_rows.push(RawRow {
+                key,
+                model,
+                heads,
+                tp,
+                step: row.u32(step_col)?,
+                isl: row.u32(isl_col)?,
+                batch: row.u32(batch_size_col)?,
+                latency: row.f64(latency_col)?,
+            });
         }
     }
-    if !any_source || by_keys.is_empty() {
+    if !any_source || raw_rows.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no DSV4 module rows loaded from {} source(s) (first: {})",
             sources.len(),
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
+    }
+
+    // Pass 2: (native, local) head identity per row + first-wins parity with
+    // Python `load_*_dsv4_kind_module_data` (skip-on-key-conflict;
+    // shared-layer contract, design §6.1).
+    let axes = dsv4_head_axes(&observed);
+    let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
+    for row in raw_rows {
+        let (native_heads, local_heads) = axes[&(row.model, row.heads, row.tp)];
+        by_keys
+            .entry(row.key)
+            .or_default()
+            .entry(native_heads)
+            .or_default()
+            .entry(local_heads)
+            .or_default()
+            .entry(row.step)
+            .or_default()
+            .entry(row.isl)
+            .or_default()
+            .entry(row.batch)
+            .or_insert(row.latency);
     }
     Ok(ModuleGrids { by_keys })
 }

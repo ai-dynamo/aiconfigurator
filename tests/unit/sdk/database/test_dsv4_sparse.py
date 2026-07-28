@@ -85,11 +85,13 @@ def _gen_row(
     gemm: str = "fp8_block",
     lat: float = 0.1,
     model: str = _FLASH_MODEL,
+    num_heads: int | None = None,
 ) -> str:
+    heads = _native_heads_for_model(model) if num_heads is None else num_heads
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_generation_module,"
         f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
-        f"bfloat16,fp8_e4m3,{gemm},{_native_heads_for_model(model)},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
+        f"bfloat16,fp8_e4m3,{gemm},{heads},{bs},{isl},{tp},{step},{cr},{lat:.4f}"
     )
 
 
@@ -700,3 +702,48 @@ def test_topk_512_io_formula_scales_linearly_with_past_kv():
     delta_8k = M * 8192 / (mem_bw * 0.1) * 1000.0
     delta_16k = M * 16384 / (mem_bw * 0.1) * 1000.0
     assert delta_16k == pytest.approx(2 * delta_8k, rel=1e-9)
+
+
+def test_load_dsv4_kind_module_data_sniffs_local_head_semantics(tmp_path):
+    """The vllm 0.24.0 files (post-#1131 collectors) write rank-LOCAL heads —
+    ``num_heads`` varies with tp while ``num_heads * tp_size`` is constant.
+    The loader must sniff that per model and land rows in the same
+    [native][local] buckets a native-writing file (sglang 0.5.10) produces.
+    """
+    # Flash native=64 written as LOCAL heads: 64/32/16/8 across tp 1/2/4/8.
+    rows = [
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0, model=_FLASH_MODEL, num_heads=64),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0, model=_FLASH_MODEL, num_heads=32),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=4, lat=11.5, model=_FLASH_MODEL, num_heads=16),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, lat=10.5, model=_FLASH_MODEL, num_heads=8),
+    ]
+    path = _write_csv(tmp_path / "csa_ctx_local.txt", _CTX_HEADER, rows)
+    data = load_context_dsv4_kind_module_data(path)
+    quant = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
+    # one native bucket (Flash=64) with the tp sweep as local keys — identical
+    # to what the native-writing file layout produces.
+    assert set(quant.keys()) == {_FLASH_NATIVE_HEADS}
+    locals_ = quant[_FLASH_NATIVE_HEADS]
+    assert set(locals_.keys()) == {64, 32, 16, 8}
+    assert locals_[8][4][0][8192][1]["latency"] == pytest.approx(10.5)
+    assert locals_[64][4][0][8192][1]["latency"] == pytest.approx(18.0)
+
+
+def test_load_dsv4_kind_module_data_mixed_semantics_per_model(tmp_path):
+    """Semantics are sniffed PER MODEL: a native-writing artifact and a
+    local-writing artifact in one row stream must both bucket correctly."""
+    rows = [
+        # Pro written native-style (constant 128 across tp).
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=2, lat=0.5, model=_PRO_MODEL),
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=8, lat=0.3, model=_PRO_MODEL),
+        # Flash written local-style (64/tp).
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=2, lat=0.4, model=_FLASH_MODEL, num_heads=32),
+        _gen_row(attn_kind="hca", cr=128, bs=1, isl=1, step=1023, tp=8, lat=0.2, model=_FLASH_MODEL, num_heads=8),
+    ]
+    path = _write_csv(tmp_path / "hca_gen_mixed.txt", _CTX_HEADER, rows)
+    data = load_generation_dsv4_kind_module_data(path)
+    q = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
+    assert q[_PRO_NATIVE_HEADS][64][128][1][1024]["latency"] == pytest.approx(0.5)  # Pro tp2 -> local 64
+    assert q[_PRO_NATIVE_HEADS][16][128][1][1024]["latency"] == pytest.approx(0.3)  # Pro tp8 -> local 16
+    assert q[_FLASH_NATIVE_HEADS][32][128][1][1024]["latency"] == pytest.approx(0.4)  # Flash tp2
+    assert q[_FLASH_NATIVE_HEADS][8][128][1][1024]["latency"] == pytest.approx(0.2)  # Flash tp8

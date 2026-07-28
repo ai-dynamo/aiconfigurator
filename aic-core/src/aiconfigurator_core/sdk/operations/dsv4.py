@@ -1902,6 +1902,61 @@ def _get_dsv4_topk_calib(database):
 _MISSING = object()
 
 
+def _dsv4_row_head_axes(rows):
+    """Resolve each row's (native, local) head identity across BOTH historical
+    ``num_heads`` column semantics.
+
+    Shipped DSV4 module files disagree on what ``num_heads`` means:
+
+    - sglang 0.5.10 files (collected before #1131 changed the collector) write
+      the model's NATIVE head count — constant per artifact across its tp
+      sweep (V4-Flash 64, V4-Pro 128).
+    - vllm 0.24.0 files (post-#1131 collectors) write the rank-LOCAL count
+      ``native // tp`` — varying with tp (64/32/16/8 across tp 1/2/4/8), the
+      semantics the SCHEME A docstrings described.
+
+    Both must key the same way, so sniff the semantics per model from the data
+    itself: within one model, ``num_heads`` constant while ``tp_size`` varies
+    means NATIVE; ``num_heads * tp_size`` constant means LOCAL.  A model seen
+    at a single tp is ambiguous unless tp == 1 (native == local); assume LOCAL
+    there (what every current collector writes) with a debug note.
+
+    Returns ``{(model, num_heads, tp_size): (native, local)}``.
+    """
+    observed: dict[str, set[tuple[int, int]]] = {}
+    for row in rows:
+        try:
+            heads = int(row["num_heads"])
+            tp = max(1, int(row.get("tp_size", 1) or 1))
+        except (TypeError, ValueError, KeyError):
+            continue
+        observed.setdefault(str(row.get("model", "")), set()).add((heads, tp))
+
+    axes: dict[tuple[str, int, int], tuple[int, int]] = {}
+    for model, pairs in observed.items():
+        tps = {tp for _, tp in pairs}
+        heads_constant = len({h for h, _ in pairs}) == 1
+        product_constant = len({h * tp for h, tp in pairs}) == 1
+        if len(tps) > 1 and heads_constant and not product_constant:
+            semantics = "native"
+        elif len(tps) > 1 and product_constant and not heads_constant:
+            semantics = "local"
+        elif tps == {1}:
+            semantics = "native"  # tp=1: native == local, either reading works
+        else:
+            semantics = "local"
+            logger.debug(
+                f"DSV4 module rows for model={model!r} have ambiguous num_heads semantics "
+                f"(pairs={sorted(pairs)}); assuming rank-LOCAL (current collector convention)."
+            )
+        for heads, tp in pairs:
+            if semantics == "native":
+                axes[(model, heads, tp)] = (heads, max(1, heads // tp))
+            else:
+                axes[(model, heads, tp)] = (heads * tp, heads)
+    return axes
+
+
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
@@ -1909,11 +1964,10 @@ def load_context_dsv4_kind_module_data(file_path: str):
         data[fmha_quant][kv_quant][gemm_quant][num_heads_native][num_heads_local]
             [compress_ratio][prefix][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    The files' ``num_heads`` column is the model's NATIVE head count — constant
-    per artifact across its tp sweep (V4-Flash 64, V4-Pro 128 in the 0.5.10
-    data) — NOT the rank-local count the old SCHEME A docstring claimed.  The
-    native value is the row's model identity (separates Pro rows from Flash
-    rows), and the rank-LOCAL head count ``num_heads // tp_size`` is the
+    The head identity is (native, rank-local), resolved per row by
+    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
+    semantics (see its docstring).  The native value is the row's model
+    identity (separates Pro rows from Flash rows) and the local count is the
     physical per-rank shape; both are key dimensions.  Collapsing either axis
     merged rows whose latencies differ 30-50% (different model shapes / tp
     shards) into one coordinate, leaving an arbitrary row-order winner.
@@ -1926,6 +1980,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
+    head_axes = _dsv4_row_head_axes(rows)
 
     # 8-level nesting: fmha → kv → gemm → native → local → cr → prefix → s → b
     def _make_nested(depth: int):
@@ -1945,13 +2000,13 @@ def load_context_dsv4_kind_module_data(file_path: str):
             prefix = int(float(row.get("step", 0) or 0))
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
-            num_heads_native = int(row["num_heads"])
+            heads_col = int(row["num_heads"])
             tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_local = max(1, num_heads_native // tp_size)
+        num_heads_native, num_heads_local = head_axes[(str(row.get("model", "")), heads_col, tp_size)]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -1980,7 +2035,8 @@ def load_generation_dsv4_kind_module_data(file_path: str):
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  Dict shape (same (native, local) head
-    identity as ``load_context_dsv4_kind_module_data``):
+    identity as ``load_context_dsv4_kind_module_data``, resolved per row by
+    ``_dsv4_row_head_axes``):
         data[kv_quant][gemm_quant][num_heads_native][num_heads_local]
             [compress_ratio][b][s_total]
     """
@@ -1988,6 +2044,7 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
+    head_axes = _dsv4_row_head_axes(rows)
 
     # 6-level nesting: kv → gemm → native → local → cr → b → s_total
     def _make_nested(depth: int):
@@ -2006,13 +2063,13 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             s_total = int(row["isl"]) + int(row["step"])
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
-            num_heads_native = int(row["num_heads"])
+            heads_col = int(row["num_heads"])
             tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_local = max(1, num_heads_native // tp_size)
+        num_heads_native, num_heads_local = head_axes[(str(row.get("model", "")), heads_col, tp_size)]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
