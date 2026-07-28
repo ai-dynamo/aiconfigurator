@@ -641,6 +641,9 @@ class Task:
     enable_epd: bool = False
     encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
     encoder_batch_candidates: list[int] | None = None  # None -> default schedule
+    # Encode-pool size bound per rate-matched cell (None -> 32, mirroring
+    # max_prefill_workers/max_decode_workers).
+    max_encoder_workers: int | None = None
     encoder_latency_correction: float = 1.0
     # Hetero encoder: encode workers on their own system (GPU type);
     # backend/version follow the P/agg side.  None inherits the P/agg system.
@@ -2069,6 +2072,7 @@ class Task:
             self.encoder_tp_candidates
             or self.encoder_batch_candidates
             or self.encoder_system_name
+            or self.max_encoder_workers is not None
             or self.encoder_latency_correction != 1.0
         )
         if encoder_knobs_set and not self.enable_epd:
@@ -2078,6 +2082,8 @@ class Task:
                 values = getattr(self, name)
                 if values and any(not isinstance(v, int) or v <= 0 for v in values):
                     raise ValueError(f"{name} must be a list of positive ints, got {values!r}.")
+            if self.max_encoder_workers is not None and self.max_encoder_workers <= 0:
+                raise ValueError(f"max_encoder_workers must be > 0, got {self.max_encoder_workers!r}.")
             if self.encoder_latency_correction <= 0:
                 raise ValueError(f"encoder_latency_correction must be > 0, got {self.encoder_latency_correction!r}.")
         if self.serving_mode == "agg":
@@ -2488,6 +2494,7 @@ class Task:
             "enable_epd": self.enable_epd,
             "encoder_tp_list": self.encoder_tp_candidates,
             "encoder_batch_list": self.encoder_batch_candidates,
+            "max_encoder_workers": self.max_encoder_workers,
             "encoder_latency_correction": self.encoder_latency_correction,
             "encoder_database": encoder_database,
             # Per-cell (per-replica) budget for the E+agg rate matching; a
@@ -2539,6 +2546,7 @@ class Task:
             "enable_epd": self.enable_epd,
             "encoder_tp_list": self.encoder_tp_candidates,
             "encoder_batch_list": self.encoder_batch_candidates,
+            "max_encoder_workers": self.max_encoder_workers,
             "encoder_latency_correction": self.encoder_latency_correction,
             "encoder_database": encoder_database,
         }
@@ -2727,6 +2735,51 @@ class Task:
     # Single-point evaluation (subsumes cli_estimate)
     # =====================================================================
 
+    def _validate_single_point_epd_args(self, api_name: str, encoder_tp: int | None) -> None:
+        if self.enable_epd and encoder_tp is None:
+            raise ValueError(f"{api_name} with enable_epd requires encoder_tp for the encode worker.")
+        if encoder_tp is not None and not self.enable_epd:
+            raise ValueError("encoder_tp requires enable_epd=True.")
+
+    def _overlay_single_point_encoder(
+        self,
+        row: dict,
+        *,
+        runtime_config,
+        database,
+        backend_name: str,
+        backend_version: str | None,
+        encoder_tp: int,
+        encoder_batch_size: int,
+        encoder_num_workers: int,
+        prefill_power: float,
+        decode_power: float,
+    ) -> dict:
+        """Overlay one fixed encode worker onto a single-point row.
+
+        Reuses the sweep's candidate path (singleton lists) so the VRAM gate
+        and workload validation apply; single-point rows carry raw ttft, so
+        the encode stage joins uncorrected (overlay's default ttft_scale)."""
+        from aiconfigurator.sdk.sweep import _get_encoder_worker_candidates, _overlay_encoder_stage
+
+        encoder_database = self._load_encoder_database(backend_name, backend_version) or database
+        enc_worker = _get_encoder_worker_candidates(
+            model_path=self.primary_model_path,
+            tp_list=[encoder_tp],
+            b_list=[encoder_batch_size],
+            runtime_config=runtime_config,
+            database=encoder_database,
+            backend_name=backend_name,
+            latency_correction=self.encoder_latency_correction,
+        )[0]
+        return _overlay_encoder_stage(
+            row,
+            enc_worker,
+            encoder_num_workers,
+            prefill_power=prefill_power,
+            decode_power=decode_power,
+        )
+
     def run_single_agg(
         self,
         *,
@@ -2737,8 +2790,17 @@ class Task:
         moe_ep: int = 1,
         batch_size: int,
         ctx_tokens: int | None = None,
+        encoder_tp: int | None = None,
+        encoder_batch_size: int = 1,
+        encoder_num_workers: int = 1,
     ) -> dict:
         """Evaluate one fixed agg config point and return its row dict.
+
+        With ``enable_epd`` the point is one E+agg cell: a language-only agg
+        worker plus ``encoder_num_workers`` encode workers of ``encoder_tp``
+        x ``encoder_batch_size`` (required with enable_epd).  The encode
+        latency joins TTFT raw, matching this row's uncorrected convention;
+        the row then carries ``common.ColumnsAggEpd``.
 
         Subsumes the per-point use case that ``cli/api.cli_estimate``
         handles today (40 separate kwargs, custom model/backend wiring).
@@ -2762,6 +2824,7 @@ class Task:
                 :meth:`run_single_disagg` instead.
             RuntimeError: on OOM at this config point.
         """
+        self._validate_single_point_epd_args("run_single_agg", encoder_tp)
         if self.serving_mode != "agg":
             raise ValueError(
                 f"run_single_agg requires serving_mode='agg', got {self.serving_mode!r}; "
@@ -2772,6 +2835,8 @@ class Task:
         from aiconfigurator.sdk.predict import predict_agg_worker
 
         model_config = self.build_model_config(role="agg", parallel=(tp, pp, dp, moe_tp, moe_ep, 1))
+        if self.enable_epd:
+            model_config.language_only = True
         model_config.tp_size = tp
         model_config.pp_size = pp
         model_config.attention_dp_size = dp if self._is_moe else 1
@@ -2808,7 +2873,21 @@ class Task:
         result = summary.get_result_dict()
         if result is None:
             raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
-        return result
+        if not self.enable_epd:
+            return result
+        result["(a)workers"] = 1
+        return self._overlay_single_point_encoder(
+            result,
+            runtime_config=runtime_config,
+            database=database,
+            backend_name=self.backend_name,
+            backend_version=self.backend_version,
+            encoder_tp=encoder_tp,
+            encoder_batch_size=encoder_batch_size,
+            encoder_num_workers=encoder_num_workers,
+            prefill_power=result.get("power_w", 0.0),
+            decode_power=result.get("power_w", 0.0),
+        )
 
     def run_single_disagg(
         self,
@@ -2827,12 +2906,18 @@ class Task:
         decode_moe_ep: int = 1,
         decode_batch_size: int,
         decode_num_workers: int = 1,
+        encoder_tp: int | None = None,
+        encoder_batch_size: int = 1,
+        encoder_num_workers: int = 1,
     ) -> dict:
         """Evaluate one fixed disagg config point and return its row dict.
 
         Subsumes the disagg per-point use case from ``cli_estimate``.
         Reads workload + model_path + quant from the Task; per-role
-        parallelism, batch_size, and num_workers come from args.
+        parallelism, batch_size, and num_workers come from args.  With
+        ``enable_epd`` the prefill worker is language-only and the encode
+        stage (``encoder_tp`` x ``encoder_batch_size``, required with
+        enable_epd) overlays the rate-matched pair.
 
         Returns:
             Row dict in ``common.ColumnsDisagg`` schema (one rate-matched
@@ -2842,6 +2927,7 @@ class Task:
             ValueError: if called on an agg Task.
             RuntimeError: on OOM in either phase.
         """
+        self._validate_single_point_epd_args("run_single_disagg", encoder_tp)
         if self.serving_mode != "disagg":
             raise ValueError(
                 f"run_single_disagg requires serving_mode='disagg', got {self.serving_mode!r}; "
@@ -2856,6 +2942,8 @@ class Task:
         p_mc = self.build_model_config(
             role="prefill", parallel=(prefill_tp, prefill_pp, prefill_dp, prefill_moe_tp, prefill_moe_ep, 1)
         )
+        if self.enable_epd:
+            p_mc.language_only = True
         p_mc.tp_size = prefill_tp
         p_mc.pp_size = prefill_pp
         p_mc.attention_dp_size = prefill_dp if self._is_moe else 1
@@ -2923,7 +3011,21 @@ class Task:
         # --- Rate-match the pair ---
         p_dict = p_summary.get_summary_df().iloc[0].to_dict()
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
-        return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+        row = _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+        if not self.enable_epd:
+            return row
+        return self._overlay_single_point_encoder(
+            row,
+            runtime_config=p_rt,
+            database=p_db,
+            backend_name=self.prefill_backend_name,
+            backend_version=self.prefill_backend_version,
+            encoder_tp=encoder_tp,
+            encoder_batch_size=encoder_batch_size,
+            encoder_num_workers=encoder_num_workers,
+            prefill_power=p_dict.get("power_w", 0.0),
+            decode_power=d_dict.get("power_w", 0.0),
+        )
 
     def _run_afd_single_point(self, database):
         """Run a single pinned-topology AFD estimate via AFDInferenceSession."""

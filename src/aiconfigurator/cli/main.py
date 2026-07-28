@@ -439,6 +439,12 @@ def _add_default_mode_arguments(parser):
         "Defaults to the prefill/agg side's system.",
     )
     parser.add_argument(
+        "--encoder-latency-correction",
+        type=float,
+        default=1.0,
+        help="Latency correction scale for EPD encode workers (requires --enable-epd). Default: 1.0.",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -1469,6 +1475,7 @@ def build_default_tasks(
     enable_epd: bool = False,
     encoder_tp: list[int] | None = None,
     encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1696,6 +1703,7 @@ def build_default_tasks(
             enable_epd=enable_epd,
             encoder_tp_candidates=encoder_tp,
             encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
@@ -1715,6 +1723,7 @@ def build_default_tasks(
             enable_epd=enable_epd,
             encoder_tp_candidates=encoder_tp,
             encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
@@ -2894,6 +2903,7 @@ def main(args):
             enable_epd=args.enable_epd,
             encoder_tp=args.encoder_tp,
             encoder_system=args.encoder_system,
+            encoder_latency_correction=args.encoder_latency_correction,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

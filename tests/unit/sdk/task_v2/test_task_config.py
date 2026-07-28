@@ -38,6 +38,16 @@ def test_enable_epd_pins_encoder_dp_off():
     assert Task(enable_epd=True).enable_encoder_dp is False
 
 
+def test_run_single_epd_arg_validation():
+    task = Task(enable_epd=True)
+    with pytest.raises(ValueError, match="requires encoder_tp"):
+        task.run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="requires encoder_tp"):
+        task.run_single_disagg(prefill_tp=1, decode_tp=1, decode_batch_size=1)
+    with pytest.raises(ValueError, match="requires enable_epd"):
+        Task().run_single_agg(tp=1, batch_size=1, encoder_tp=2)
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",
