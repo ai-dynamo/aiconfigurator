@@ -404,26 +404,23 @@ class TestCLIRecommendUnit:
     def test_calls_build_default_tasks_with_gpus_per_node(self, monkeypatch):
         import aiconfigurator.cli.api as api
 
-        captured_kwargs = {}
-
-        def fake_build_default_tasks(**kwargs):
-            captured_kwargs.update(kwargs)
-            return {}
-
         def fake_execute(tasks, mode, **kwargs):
             return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
 
-        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
         monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
 
-        api.cli_recommend(
-            model_path="Qwen/Qwen3-32B",
-            system="h200_sxm",
-            target_request_rate=10.0,
-        )
+        # Autospec keeps this fast while enforcing cli_recommend's keyword
+        # contract against the real build_default_tasks signature.
+        with patch.object(api, "build_default_tasks", autospec=True, return_value={}) as mock_build:
+            api.cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+                target_request_rate=10.0,
+            )
 
-        assert captured_kwargs["total_gpus"] == 8
-        assert captured_kwargs["model_path"] == "Qwen/Qwen3-32B"
+        kwargs = mock_build.call_args.kwargs
+        assert kwargs["total_gpus"] == 8
+        assert kwargs["model_path"] == "Qwen/Qwen3-32B"
 
     def test_forwards_load_match_params(self, monkeypatch):
         import aiconfigurator.cli.api as api

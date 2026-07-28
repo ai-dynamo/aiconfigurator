@@ -511,6 +511,73 @@ class TestCLIArgumentParsing:
         )
         assert not hasattr(args, "total_gpus")
 
+    def test_recommend_nextn_auto_resolves_and_validates(self, cli_parser, monkeypatch):
+        import aiconfigurator.cli.main as cli_main
+
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+        monkeypatch.setattr(cli_main, "resolve_nextn_auto", lambda _model_path: 2)
+
+        cli_main._resolve_and_validate_nextn(args)
+
+        assert args.nextn == 2
+        assert args.nextn_accepted == 0.7
+
+    def test_recommend_nextn_requires_explicit_acceptance(self, cli_parser):
+        from aiconfigurator.cli.main import _resolve_and_validate_nextn
+
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--nextn",
+                "2",
+            ]
+        )
+
+        with pytest.raises(SystemExit, match="nextn_accepted"):
+            _resolve_and_validate_nextn(args)
+
+    @pytest.mark.parametrize("accepted", ["-0.1", "2.1", "nan", "inf", "-inf"])
+    def test_recommend_nextn_rejects_out_of_range_or_non_finite_acceptance(self, cli_parser, accepted):
+        from aiconfigurator.cli.main import _resolve_and_validate_nextn
+
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--nextn",
+                "2",
+                f"--nextn-accepted={accepted}",
+            ]
+        )
+
+        with pytest.raises(SystemExit, match="nextn_accepted"):
+            _resolve_and_validate_nextn(args)
+
     @pytest.mark.parametrize(
         ("flag", "value"),
         [
