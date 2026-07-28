@@ -138,6 +138,16 @@ REGISTRY: list[OpEntry] = [
         run_func="run_gdn_torch",
         perf_filename=PerfFile.GDN,
     ),
+    OpEntry(
+        op="kda",
+        module="collector.vllm.collect_kda",
+        get_func="get_kda_test_cases",
+        run_func="run_kda_torch",
+        perf_filename=PerfFile.KDA,
+        # Kimi-K3 KDA kernels exist only on the vLLM kimi-k3 branch preview
+        # image; debugged on SM90 (H20) only so far.
+        unverified_sms=(80, 89, 100, 103, 120),
+    ),
 ]
 
 REGISTRY_XPU: list[OpEntry] = [

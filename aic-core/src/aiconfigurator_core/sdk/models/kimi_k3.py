@@ -48,6 +48,7 @@ class KimiK3Model(BaseModel):
     @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
         return cls(
+            backend_name,
             model_info["model_path"],
             model_info["model_family"],
             model_info["architecture"],
@@ -63,8 +64,9 @@ class KimiK3Model(BaseModel):
             model_info["extra_params"],
         )
 
-    def __init__(self, *args) -> None:
+    def __init__(self, backend_name: str, *args) -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
         cfg: common.KimiK3Config = self.extra_params
         assert isinstance(cfg, common.KimiK3Config), "KimiK3Model requires KimiK3Config extra_params"
 
@@ -159,7 +161,9 @@ class KimiK3Model(BaseModel):
                     ops.KDAKernel(
                         "context_kda_scan",
                         c,
-                        "chunk_kda",
+                        # vLLM's SM90+ prefill default is the FlashKDA CUDA
+                        # kernel; sglang runs the Triton chunk kernel.
+                        "flashkda_fwd" if self._backend_name == "vllm" else "chunk_kda",
                         "context",
                         h,
                         nk_local,
@@ -184,7 +188,20 @@ class KimiK3Model(BaseModel):
                     ops.GEMM("context_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
                     ops.GEMM("context_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
                     ops.GEMM("context_mla_kv_b_gemm", c, mla["kv_b_out"] // tp, cfg.kv_lora_rank, gemm_q),
-                    ops.ContextMLA(
+                    # vLLM models MLA as standard attention with v_head_dim
+                    # (K2.5/DeepSeek vLLM convention); sglang uses the granular
+                    # MLA tables.
+                    ops.ContextAttention(
+                        "context_attention",
+                        c,
+                        self._num_heads // tp,
+                        self._num_kv_heads // tp,
+                        kvcache_q,
+                        fmha_q,
+                        head_size=cfg.v_head_dim,
+                    )
+                    if self._backend_name == "vllm"
+                    else ops.ContextMLA(
                         "context_attention",
                         c,
                         self._num_heads // tp,
@@ -201,9 +218,7 @@ class KimiK3Model(BaseModel):
 
         # --- AttnRes (elementwise only): two aggregation points per layer ---
         if cfg.attn_res_block_size > 0:
-            self.context_ops.append(
-                ops.ElementWise("context_attn_res", 2 * self._num_layers, 4 * h, 2 * h, 0.8)
-            )
+            self.context_ops.append(ops.ElementWise("context_attn_res", 2 * self._num_layers, 4 * h, 2 * h, 0.8))
 
         # --- FFN: dense layer(s) + LatentMoE layers ---
         self.context_ops.extend(self._ffn_ops("context", context=True))
@@ -238,6 +253,8 @@ class KimiK3Model(BaseModel):
         p_local = nk_local * hk
 
         spec = self._nextn > 0
+        is_vllm = self._backend_name == "vllm"
+        verify_kernel = "fused_recurrent_kda" if is_vllm else "fused_sigmoid_gating_delta_rule_update"
         draft_tokens = self._nextn + 1 if spec else 0
         # Backend queries generation ops at batch * (nextn + 1); ops that run
         # once per step per request (not per verify token) scale down by this.
@@ -269,7 +286,7 @@ class KimiK3Model(BaseModel):
                     ops.KDAKernel(
                         "generation_kda_verify",
                         c,
-                        "fused_sigmoid_gating_delta_rule_update",
+                        verify_kernel,
                         "verify",
                         h,
                         nk_local,
@@ -281,32 +298,51 @@ class KimiK3Model(BaseModel):
                     ),
                 ]
                 if spec
-                else [
-                    ops.KDAKernel(
-                        "generation_kda_conv1d",
-                        c,
-                        "causal_conv1d_update",
-                        "generation",
-                        h,
-                        nk_local,
-                        hk,
-                        nk_local,
-                        hk,
-                        cfg.kda_conv_kernel,
-                    ),
-                    ops.KDAKernel(
-                        "generation_kda_recurrent",
-                        c,
-                        "fused_recurrent_kda_packed_decode",
-                        "generation",
-                        h,
-                        nk_local,
-                        hk,
-                        nk_local,
-                        hk,
-                        cfg.kda_conv_kernel,
-                    ),
-                ]
+                else (
+                    [
+                        # vLLM NOSPEC decode: one fused CUDA kernel covering the
+                        # conv update, recurrence and gated RMSNorm.
+                        ops.KDAKernel(
+                            "generation_kda_fused_decode",
+                            c,
+                            "fused_kda_decode",
+                            "generation",
+                            h,
+                            nk_local,
+                            hk,
+                            nk_local,
+                            hk,
+                            cfg.kda_conv_kernel,
+                        ),
+                    ]
+                    if is_vllm
+                    else [
+                        ops.KDAKernel(
+                            "generation_kda_conv1d",
+                            c,
+                            "causal_conv1d_update",
+                            "generation",
+                            h,
+                            nk_local,
+                            hk,
+                            nk_local,
+                            hk,
+                            cfg.kda_conv_kernel,
+                        ),
+                        ops.KDAKernel(
+                            "generation_kda_recurrent",
+                            c,
+                            "fused_recurrent_kda_packed_decode",
+                            "generation",
+                            h,
+                            nk_local,
+                            hk,
+                            nk_local,
+                            hk,
+                            cfg.kda_conv_kernel,
+                        ),
+                    ]
+                )
             )
             self.generation_ops.extend(
                 [
@@ -315,7 +351,13 @@ class KimiK3Model(BaseModel):
                     ops.GEMM("generation_kda_bfa_gemm", c, 232, h, gemm_q),
                     ops.GEMM("generation_kda_fb_gemm", c, p_local, 128, gemm_q),
                     *kda_kernels,
-                    ops.ElementWise("generation_kda_onorm", c, 2 * p_local, p_local, 0.8),
+                    # on vLLM NOSPEC the gated RMSNorm is fused into
+                    # fused_kda_decode; keep it for all other paths.
+                    *(
+                        []
+                        if (is_vllm and not spec)
+                        else [ops.ElementWise("generation_kda_onorm", c, 2 * p_local, p_local, 0.8)]
+                    ),
                     ops.GEMM("generation_kda_o_gemm", c, h, p_local, gemm_q, low_precision_input=True),
                     ops.CustomAllReduce("generation_kda_ar", c, h, tp),
                 ]
@@ -334,25 +376,40 @@ class KimiK3Model(BaseModel):
                     # local heads. The bmm is per-head batched, so query the
                     # next power-of-two slice and scale the count by the head
                     # ratio.
-                    ops.MLABmm(
-                        "generation_bmm_pre",
-                        c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
-                        self._bmm_heads_pow2(tp),
-                        mla_bmm_q,
-                        if_pre=True,
-                    ),
-                    ops.GenerationMLA(
-                        "generation_attention",
-                        c,
-                        self._num_heads // tp,
-                        kvcache_q,
-                    ),
-                    ops.MLABmm(
-                        "generation_bmm_post",
-                        c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
-                        self._bmm_heads_pow2(tp),
-                        mla_bmm_q,
-                        if_pre=False,
+                    *(
+                        [
+                            ops.GenerationAttention(
+                                "generation_attention",
+                                c,
+                                self._num_heads // tp,
+                                self._num_kv_heads // tp,
+                                kvcache_q,
+                                head_size=cfg.v_head_dim,
+                            )
+                        ]
+                        if self._backend_name == "vllm"
+                        else [
+                            ops.MLABmm(
+                                "generation_bmm_pre",
+                                c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
+                                self._bmm_heads_pow2(tp),
+                                mla_bmm_q,
+                                if_pre=True,
+                            ),
+                            ops.GenerationMLA(
+                                "generation_attention",
+                                c,
+                                self._num_heads // tp,
+                                kvcache_q,
+                            ),
+                            ops.MLABmm(
+                                "generation_bmm_post",
+                                c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
+                                self._bmm_heads_pow2(tp),
+                                mla_bmm_q,
+                                if_pre=False,
+                            ),
+                        ]
                     ),
                     ops.GEMM("generation_mla_gate_gemm", c, mla["o_in"] // tp, h, gemm_q),
                     ops.ElementWise("generation_mla_gate_mul", c, 2 * mla["o_in"] // tp, mla["o_in"] // tp, 0.8),
@@ -362,9 +419,7 @@ class KimiK3Model(BaseModel):
             )
 
         if cfg.attn_res_block_size > 0:
-            self.generation_ops.append(
-                ops.ElementWise("generation_attn_res", 2 * self._num_layers, 4 * h, 2 * h, 0.8)
-            )
+            self.generation_ops.append(ops.ElementWise("generation_attn_res", 2 * self._num_layers, 4 * h, 2 * h, 0.8))
 
         self.generation_ops.extend(self._ffn_ops("generation", context=False))
 
@@ -480,9 +535,7 @@ class KimiK3Model(BaseModel):
                     # router in hidden space
                     ops.GEMM(f"{prefix}_router_gemm", num_moe, cfg.num_experts, h, common.GEMMQuantMode.bfloat16),
                     # replicated hidden -> latent down projection (bf16, unsharded)
-                    ops.GEMM(
-                        f"{prefix}_latent_down_gemm", num_moe, latent, h, common.GEMMQuantMode.bfloat16
-                    ),
+                    ops.GEMM(f"{prefix}_latent_down_gemm", num_moe, latent, h, common.GEMMQuantMode.bfloat16),
                     ops.ElementWise(f"{prefix}_latent_norm", num_moe, 2 * latent, 2 * latent, 0.8),
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
@@ -523,9 +576,7 @@ class KimiK3Model(BaseModel):
                         quant_mode=moe_q,
                     ),
                     # replicated latent -> hidden up projection (bf16, unsharded)
-                    ops.GEMM(
-                        f"{prefix}_latent_up_gemm", num_moe, h, latent, common.GEMMQuantMode.bfloat16
-                    ),
+                    ops.GEMM(f"{prefix}_latent_up_gemm", num_moe, h, latent, common.GEMMQuantMode.bfloat16),
                 ]
             )
             # shared experts in full hidden space (bf16, TP sharded)

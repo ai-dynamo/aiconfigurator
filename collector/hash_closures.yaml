@@ -135,6 +135,9 @@ collector.vllm.collect_computescale:
   - collector/cases/base_ops/compute_scale.yaml
   - collector/cases/base_ops/gemm.yaml
   - __model_cases__
+collector.vllm.collect_kda:
+  - collector/cases/base_ops/kda.yaml
+  - __model_cases__
 collector.vllm.collect_dsv4_attn:
   - __model_cases__
 collector.vllm.collect_gdn:

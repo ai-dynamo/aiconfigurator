@@ -641,15 +641,26 @@ class KDAKernel(GDNKernel):
 
         def get_sol(b: int = batch_size, s: int | None = seq_len) -> float:
             x = (b * s) if phase in ("context", "verify") and s else b
-            if kernel_source == "causal_conv1d_fn_qkv3":
+            if kernel_source in ("chunk_kda_with_fused_gate", "flashkda_fwd"):
+                # vLLM prefill cores: same chunked-scan byte model as chunk_kda.
+                kernel_source_local = "chunk_kda"
+            elif kernel_source == "fused_kda_decode":
+                # vLLM fused decode = conv update + recurrence + gated norm.
+                kernel_source_local = "fused_recurrent_kda_packed_decode"
+            elif kernel_source == "fused_recurrent_kda":
+                # vLLM chain-verify kernel: same traffic as the sglang verify op.
+                kernel_source_local = "fused_sigmoid_gating_delta_rule_update"
+            else:
+                kernel_source_local = kernel_source
+            if kernel_source_local == "causal_conv1d_fn_qkv3":
                 # Three sequential convs, each over proj_size channels.
                 read_bytes = 3 * (x * proj_size * (d_conv + 1) * 2)
                 write_bytes = 3 * (x * proj_size * 2)
-            elif kernel_source == "causal_conv1d_update":
+            elif kernel_source_local == "causal_conv1d_update":
                 conv_channels = 3 * proj_size
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
-            elif kernel_source == "chunk_kda":
+            elif kernel_source_local == "chunk_kda":
                 # Chunked delta-rule scan; per-chunk states h [B, NT, H, K, V]
                 # round-trip through global memory (fp32 state).
                 chunk_size = 64
@@ -658,10 +669,10 @@ class KDAKernel(GDNKernel):
                 # q/k/v plus the per-K gate g are all x * proj_size wide.
                 read_bytes = x * 4 * proj_size * 2 + state_bytes * b + h_chunks_bytes
                 write_bytes = x * proj_size * 2 + state_bytes * b + h_chunks_bytes
-            elif kernel_source == "fused_recurrent_kda_packed_decode":
+            elif kernel_source_local == "fused_recurrent_kda_packed_decode":
                 read_bytes = x * (3 * proj_size + proj_size) * 2 + state_bytes * b
                 write_bytes = x * proj_size * 2 + state_bytes * b
-            elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
+            elif kernel_source_local == "fused_sigmoid_gating_delta_rule_update":
                 # Verify: reads committed state once per request, writes one
                 # intermediate fp32 state per draft token.
                 read_bytes = x * 4 * proj_size * 2 + state_bytes * b
