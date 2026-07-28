@@ -573,12 +573,14 @@ impl SiteIndex {
             } else {
                 // The gate is waived for a query site beyond the collected
                 // frontier in the scale-up direction (big-vocab LM heads at
-                // low tp): the ungated nearest (near-frontier) sites anchor
-                // the transfer below and SOL(query) carries the growth.
-                // Interior holes and scale-down queries keep the miss.
+                // low tp): anchors are the coverage-eligible sites that still
+                // pass the gate on the non-overflow axes, and SOL(query)
+                // carries the growth. Interior holes, scale-down / mixed
+                // queries, and sparse-stub multi-axis overflow keep the miss.
                 let q_site: Vec<f64> = site_axes.iter().map(|&p| coords[p]).collect();
-                if !self.beyond_frontier_scale_up(&q_site) {
-                    return Err(miss(cfg, coords, "no site within max_site_distance"));
+                match self.frontier_waiver_anchors(&ranked, &q_site, &q_log, *gate) {
+                    Some(admissible) => ranked = admissible,
+                    None => return Err(miss(cfg, coords, "no site within max_site_distance")),
                 }
             }
         }
@@ -620,30 +622,75 @@ impl SiteIndex {
         Ok(sol_q / (u_acc / wsum))
     }
 
-    /// True iff the query site exceeds the collected frontier in the scale-up
-    /// direction ONLY: strictly above the collected maximum on at least one
-    /// site axis, and not below the collected minimum on any axis. Everything
-    /// else — dominated interior holes, incomparable notches inside the
-    /// bounding box, scale-down / mixed-direction queries — keeps the
-    /// distance-gate miss: util genuinely doesn't transfer downward, but at
-    /// the top of the collected range boundary efficiency is the best signal
-    /// we have (the same reasoning as the unbounded m-curve / grid hold).
-    fn beyond_frontier_scale_up(&self, q_site: &[f64]) -> bool {
-        let mut above_some_max = false;
-        for (a, &q) in q_site.iter().enumerate() {
+    /// Anchor set for a scale-up frontier query, or None (gate miss stands).
+    ///
+    /// The distance gate is waived ONLY for the intended frontier overflow,
+    /// and everything is computed over `candidates` (the coverage-eligible
+    /// `(full distance, site index)` buffer from `resolve`) so admissibility
+    /// and the anchors actually used cannot diverge:
+    ///
+    /// - exactly ONE site axis overflows (strictly above the candidates'
+    ///   maximum). Simultaneous multi-axis overflow means the table is a
+    ///   sparse stub for this shape (e.g. an fp8_block table collected at
+    ///   n,k<=128 queried with a real logits GEMM) — holding a launch-bound
+    ///   stub's util across many octaves fabricates arbitrarily wrong
+    ///   latencies, so it stays a miss;
+    /// - no axis sits below the candidates' minimum (scale-down never
+    ///   transfers);
+    /// - the NON-overflow axes still pass the gate (residual log2 distance),
+    ///   so anchors are genuine frontier neighbours of the query and the
+    ///   transfer is scale-up along the overflow axis only.
+    ///
+    /// On the overflow axis every anchor is below the query by construction;
+    /// the caller's inverse-distance weighting then favours the largest
+    /// collected sites, and SOL(query) carries the growth (the same trust as
+    /// the m curve axis and the grid out-of-range hold).
+    fn frontier_waiver_anchors(
+        &self,
+        candidates: &[(f64, usize)],
+        q_site: &[f64],
+        q_log: &[f64],
+        gate: f64,
+    ) -> Option<Vec<(f64, usize)>> {
+        let axes = q_site.len();
+        let mut overflow: Vec<usize> = Vec::new();
+        for a in 0..axes {
             let (mut lo, mut hi) = (u32::MAX, 0u32);
-            for (key, _) in &self.site_logs {
+            for &(_, i) in candidates {
+                let key = &self.site_logs[i].0;
                 lo = lo.min(key[a]);
                 hi = hi.max(key[a]);
             }
-            if q < lo as f64 {
-                return false;
+            if q_site[a] < lo as f64 {
+                return None;
             }
-            if q > hi as f64 {
-                above_some_max = true;
+            if q_site[a] > hi as f64 {
+                overflow.push(a);
             }
         }
-        above_some_max
+        if overflow.len() != 1 {
+            return None;
+        }
+        let resid_dist = |i: usize| -> f64 {
+            (0..axes)
+                .filter(|a| !overflow.contains(a))
+                .map(|a| {
+                    let d = self.site_logs[i].1[a] - q_log[a];
+                    d * d
+                })
+                .sum::<f64>()
+                .sqrt()
+        };
+        let admissible: Vec<(f64, usize)> = candidates
+            .iter()
+            .copied()
+            .filter(|&(_, i)| resid_dist(i) <= gate)
+            .collect();
+        if admissible.is_empty() {
+            None
+        } else {
+            Some(admissible)
+        }
     }
 
     /// Evaluate one site's curve at coordinate `q`.
@@ -1032,6 +1079,42 @@ mod tests {
         }
         let cfg = gemm_cfg(&gemm_lat);
         assert!(query(&cfg, &t, &[32.0, 4096.0, 4096.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_sparse_stub_multi_axis_overflow_still_misses() {
+        // Real-table regression (PR #1419 review): an fp8_block-like stub
+        // collected only at n,k in 32..128 queried with a real logits GEMM
+        // (m=1, n=151936, k=5120) — BOTH site axes past the collected
+        // maximum. Simultaneous multi-axis overflow must stay a miss.
+        let mut t = Node::branch();
+        for m in [1u32, 2, 4] {
+            for n in [32u32, 64, 128] {
+                for k in [32u32, 64, 128] {
+                    t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+                }
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[1.0, 151936.0, 5120.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_waiver_admissibility_computed_over_coverage_candidates() {
+        // PR #1419 review: site (1, 1) covers only m<=2, site (64, 64) covers
+        // m=16..64. Query (m=32, n=1024, k=1) used to pass a GLOBAL frontier
+        // check while the only coverage-eligible anchor (64, 64) required a
+        // k=64 -> k=1 scale-DOWN transfer. Admissibility over the coverage
+        // candidates puts k=1 below the minimum -> miss.
+        let mut t = Node::branch();
+        for m in [1u32, 2] {
+            t.insert(&[m, 1, 1], gemm_lat(&[m as f64, 1.0, 1.0]));
+        }
+        for m in [16u32, 32, 64] {
+            t.insert(&[m, 64, 64], gemm_lat(&[m as f64, 64.0, 64.0]));
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 1024.0, 1.0]).is_err());
     }
 
     #[test]

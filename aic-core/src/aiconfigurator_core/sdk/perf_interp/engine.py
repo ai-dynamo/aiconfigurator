@@ -8,8 +8,8 @@ Executes the four-step resolution declared in :mod:`config`:
     2. resolve in the data  -> Grid: nested bracket+blend (value_transform space)
                                ScatteredSites: site curve eval; unknown site ->
                                nearest-site transfer in util space (the distance
-                               gate is waived for a site beyond the scale-up
-                               frontier)
+                               gate is waived along a single overflowing axis
+                               for a site beyond the scale-up frontier)
     3. beyond the range     -> hold the boundary util (k_tail median anchor),
                                latency = SOL(query) / util
     4. nothing to anchor on -> raise InterpolationDataNotAvailableError
@@ -254,19 +254,41 @@ def _eval_curve(cfg: OpInterpConfig, curve: list, q, n_axes, curve_pos, site_pos
     return lat, power
 
 
-def _beyond_frontier_scale_up(site_keys: list, site_key: tuple) -> bool:
-    """True iff the query site exceeds the collected frontier in the scale-up
-    direction ONLY: strictly above the collected maximum on at least one site
-    axis, and not below the collected minimum on any axis. Everything else —
-    dominated interior holes, incomparable notches inside the bounding box,
-    scale-down / mixed-direction queries — keeps the distance-gate miss: util
-    genuinely doesn't transfer downward, but at the top of the collected range
-    boundary efficiency is the best signal we have (the same reasoning as the
-    unbounded m-curve / Grid out-of-range hold)."""
+def _frontier_waiver_anchors(site_keys, candidates, site_key, q_log, site_logs, max_site_distance):
+    """Anchor indices for a scale-up frontier query, or None (gate miss stands).
+
+    The distance gate is waived ONLY for the intended frontier overflow, and
+    everything is computed over ``candidates`` (the coverage-eligible sites) so
+    admissibility and the anchors actually used cannot diverge:
+
+    - exactly ONE site axis overflows (strictly above the candidates' maximum).
+      Simultaneous multi-axis overflow means the table is a sparse stub for
+      this shape (e.g. an fp8_block table collected at n,k<=128 queried with a
+      real logits GEMM) — holding a launch-bound stub's util across many
+      octaves fabricates arbitrarily wrong latencies, so it stays a miss;
+    - no axis sits below the candidates' minimum (scale-down never transfers);
+    - the NON-overflow axes still pass the 2-octave gate (residual log2
+      distance), so anchors are genuine frontier neighbours of the query and
+      the transfer is scale-up along the overflow axis only.
+
+    On the overflow axis every anchor is below the query by construction; the
+    caller's inverse-distance weighting then favours the largest collected
+    sites, and SOL(query) carries the growth (the same trust as the m curve
+    axis and the Grid out-of-range hold)."""
     axes = range(len(site_key))
-    if any(site_key[a] < min(s[a] for s in site_keys) for a in axes):
-        return False
-    return any(site_key[a] > max(s[a] for s in site_keys) for a in axes)
+    cand_keys = [site_keys[i] for i in candidates]
+    overflow = [a for a in axes if site_key[a] > max(k[a] for k in cand_keys)]
+    if len(overflow) != 1:
+        return None
+    if any(site_key[a] < min(k[a] for k in cand_keys) for a in axes):
+        return None
+    resid = [a for a in axes if a not in overflow]
+
+    def resid_dist(i: int) -> float:
+        return math.sqrt(sum((site_logs[i][a] - q_log[a]) ** 2 for a in resid))
+
+    admissible = [i for i in candidates if resid_dist(i) <= max_site_distance]
+    return admissible or None
 
 
 def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
@@ -295,14 +317,17 @@ def _resolve_scattered(cfg: OpInterpConfig, data: dict, coords):
     ranked = sorted(candidates, key=dist)
     if res.max_site_distance is not None:
         gated = [i for i in ranked if dist(i) <= res.max_site_distance]
-        if gated:
-            ranked = gated
-        elif not _beyond_frontier_scale_up(site_keys, site_key):
-            raise _miss(cfg, coords, "no site within max_site_distance")
-        # else: beyond the scale-up frontier the gate is waived — the ungated
-        # nearest (near-frontier) sites anchor the transfer below, and
-        # SOL(query) carries the growth (frontier-holdout LOO: median vs IDW
-        # anchoring measured equivalent, so the ordinary transfer path serves).
+        if not gated:
+            # Beyond the scale-up frontier the gate is waived for the overflow
+            # axis only: anchors are the coverage-eligible sites that still
+            # pass the gate on the remaining axes, and SOL(query) carries the
+            # growth (frontier-holdout LOO: median vs IDW anchoring measured
+            # equivalent, so the ordinary transfer below serves).
+            gated = _frontier_waiver_anchors(site_keys, candidates, site_key, q_log, site_logs, res.max_site_distance)
+            if gated is None:
+                raise _miss(cfg, coords, "no site within max_site_distance")
+            gated.sort(key=dist)
+        ranked = gated
 
     wsum = u_acc = p_acc = 0.0
     for i in ranked[: res.nn_sites]:

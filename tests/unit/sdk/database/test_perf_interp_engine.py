@@ -133,6 +133,38 @@ def test_incomparable_notch_inside_bounding_box_still_misses():
         perf_interp.query(_gemm_cfg(), data, 32, 4096, 4096)
 
 
+def test_sparse_stub_multi_axis_overflow_still_misses():
+    # Real-table regression (PR #1419 review): rtx_pro_6000_server's fp8_block
+    # gemm table only collects n,k in 32..128; Qwen3-32B's logits GEMM
+    # (m=1, n=151936, k=5120) sits ~12 octaves away with BOTH site axes past
+    # the collected maximum. Holding a launch-bound stub's util across that
+    # gap fabricated 24,506 ms against a 0.543 ms truth — simultaneous
+    # multi-axis overflow must stay a structured miss.
+    data = {}
+    for m in (1, 2, 4):
+        for n in (32, 64, 128):
+            for k in (32, 64, 128):
+                data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 1, 151936, 5120)
+
+
+def test_waiver_admissibility_computed_over_coverage_candidates():
+    # PR #1419 review: with site (1, 1) covering only m<=2 and site (64, 64)
+    # covering m=16..64, the query (m=32, n=1024, k=1) used to pass a GLOBAL
+    # frontier check (n above the global max, k at the global min) while the
+    # only coverage-eligible anchor (64, 64) required a k=64 -> k=1 scale-DOWN
+    # transfer. Admissibility must be computed over the coverage-eligible
+    # candidates, where k=1 sits below the minimum -> miss.
+    data = {}
+    for m in (1, 2):
+        data.setdefault(m, {}).setdefault(1, {})[1] = {"latency": _gemm_lat(m, 1, 1), "energy": 0.0}
+    for m in (16, 32, 64):
+        data.setdefault(m, {}).setdefault(64, {})[64] = {"latency": _gemm_lat(m, 64, 64), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 1024, 1)
+
+
 def test_coverage_filter_prefers_sites_that_span_the_query_m():
     # Site A (2048, 2048) only has tiny m (decode-like sweep, m <= 4) with a
     # BAD tail util; site B (2000, 2000) covers large m with util == 1. A naive
