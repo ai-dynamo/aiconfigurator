@@ -762,11 +762,15 @@ def _get_encoder_worker_candidates(
         )
     rows: list[dict] = []
     saw_oom = False
-    # Same OOM gate as the P/D candidates (set_memory_and_check_oom).
+    # Same OOM gate as the P/D candidates (set_memory_and_check_oom), charging
+    # the same framework overhead as _get_memory_usage (nccl_mem + other_mem).
     mem_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
+    misc_spec = database.system_spec["misc"]
+    other_mem = misc_spec["other_mem"] * (1.0 + backend.OTHERS_OVERHEAD_FRAC)
     # The dominance filter below relies on ascending batch order.
     b_schedule = sorted(set(b_list or _DEFAULT_ENCODER_BATCH_SCHEDULE))
     for etp in sorted(set(tp_list or _DEFAULT_ENCODER_TP_LIST)):
+        overhead_gib = (misc_spec["nccl_mem"][min(etp, 8)] + other_mem) / (1 << 30)
         try:
             encoder_ops = build_encoder_ops(enc_cfg, etp, enable_encoder_dp=False)
         except ValueError as e:
@@ -784,7 +788,7 @@ def _get_encoder_worker_candidates(
             latency, power_w, memory = backend.run_encoder_static(
                 model, database, runtime_config, b, latency_correction_scale=latency_correction
             )
-            if memory.get("total", 0.0) >= mem_capacity_gib:
+            if memory.get("total", 0.0) + overhead_gib >= mem_capacity_gib:
                 # Memory grows with batch: larger batches also OOM.
                 saw_oom = True
                 break
