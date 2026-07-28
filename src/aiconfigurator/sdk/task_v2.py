@@ -875,11 +875,31 @@ class Task:
         database = self._try_load_role_database(role)
         if database is None:
             return []
+        ctx_op = self._attention_op_keys(role)[0]
+        if ctx_op == "context_mla" and self._attention_quant_identity_mixed(role):
+            # Mixed-projection checkpoints (e.g. V3.1-NVFP4: BF16 q/kv + NVFP4
+            # o_proj) bypass the profiled MLA-module row — no single-gemm_type
+            # module identity matches — so fmha availability must be judged on
+            # the granular table alone: a module-only fp8 slice cannot serve
+            # these models' queries.
+            ctx_op = "context_mla_granular"
         return context_fmha_supported_modes(
             database,
-            self._attention_op_keys(role)[0],
+            ctx_op,
             self._role_attr(role, "kvcache_quant_mode"),
         )
+
+    def _attention_quant_identity_mixed(self, role: str) -> bool:
+        """Whether the checkpoint's attention projections diverge in dtype
+        (some excluded from quantization, some not) under this role's gemm
+        mode — the condition that makes DeepSeek-family models bypass the
+        profiled MLA-module row (see DeepSeekModel.__init__)."""
+        from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions
+
+        if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.bfloat16:
+            return False  # everything runs BF16 -> uniform identity
+        excl = attention_projection_exclusions(self._raw_config) & {"q", "kv", "o"}
+        return bool(excl) and excl != {"q", "kv", "o"}
 
     def _resolve_search_space(self) -> None:
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
