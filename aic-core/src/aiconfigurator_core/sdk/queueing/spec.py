@@ -115,7 +115,17 @@ class WorkloadSpec:
     # big-then-small pairs emit first token small-first while client dispatch
     # order is 0% inverted). Measure it like turnaround_ms, don't fit it:
     # predictions are ordering-sensitive but magnitude-insensitive (any c > 0
-    # yields the same same-instant ordering; +-2x shifts TTFT < 1%).
+    # yields the same same-instant ordering; +-2x shifts TTFT < 1%) — EXCEPT
+    # for prefix-dominated workloads, where TTFT ~ the overhead itself. The
+    # slope is mildly SUPERLINEAR in isl: 3.6 us/tok measured at <=23k
+    # (flip-point differential) vs 6.4/7.5 us/tok at 50k/100k (fully-cached
+    # solo TTFT floor, cc-traces replay) — measure c at the isl scale that
+    # dominates the trace. Placement verified by a queued-probe experiment:
+    # a fully-cached 105k request arriving during a prefill backlog gains
+    # ZERO post-queue delay (its first token co-schedules with the backlog's
+    # last-chunk leftover), so the whole overhead is pre-queue and absorbed
+    # by queue wait exactly as this arrival-plane term assumes — none of it
+    # is in-service block-match/KV-attach cost.
     ingest_us_per_token: float = 0.0
 
     def __post_init__(self):
