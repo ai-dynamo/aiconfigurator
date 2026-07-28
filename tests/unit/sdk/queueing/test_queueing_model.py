@@ -625,6 +625,25 @@ class TestDisaggTandem:
                 EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec(),
             )
 
+    def test_open_loop_exact_trace_replay(self):
+        """arrival_trace evaluates a verbatim (arrival, isl, prefix, osl)
+        sequence — pairing and ordering preserved. Deterministic, and the
+        ordering is load-bearing: front-loading the heavy requests must not
+        produce the same TTFT distribution as back-loading them."""
+        from aiconfigurator.sdk.queueing import evaluate_open_loop
+
+        eng = EngineSpec(max_num_batched_tokens=4096, enable_chunked_prefill=True)
+        heavy = [(0.0, 4096, 0, 8)] * 6
+        light = [(0.0, 256, 0, 8)] * 6
+        mk = lambda seq: [(i * 10.0, a, b, c) for i, (_, a, b, c) in enumerate(seq)]
+        wl = WorkloadSpec(isl=2176, osl=8, request_rate=5.0)
+        r1 = evaluate_open_loop(wl, eng, TIMING, arrival_trace=mk(heavy + light), warmup_requests=0)
+        r2 = evaluate_open_loop(wl, eng, TIMING, arrival_trace=mk(light + heavy), warmup_requests=0)
+        again = evaluate_open_loop(wl, eng, TIMING, arrival_trace=mk(heavy + light), warmup_requests=0)
+        assert r1.ttft_steady.mean == again.ttft_steady.mean  # deterministic
+        # light-first lets the small requests finish before the heavy queue forms
+        assert r2.ttft_steady.quantile(0.5) < r1.ttft_steady.quantile(0.5)
+
     def test_open_loop_rate_tracking_and_queueing(self):
         """Open loop: throughput tracks the arrival rate below capacity;
         TTFT at low utilization is ~one solo prefill, and it strictly grows

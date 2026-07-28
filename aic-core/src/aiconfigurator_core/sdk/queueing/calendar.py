@@ -490,6 +490,7 @@ def evaluate_open_loop(
     backend: str = "vllm",
     warmup_requests: int = 128,
     window_requests: int = 512,
+    arrival_trace=None,
 ) -> QueueingReport:
     """Run the pass-calendar recursion for an OPEN-loop workload.
 
@@ -516,6 +517,13 @@ def evaluate_open_loop(
     """
     if wl.request_rate is None:
         raise ValueError("evaluate_open_loop requires an open-loop workload (request_rate)")
+    # arrival_trace: exact-replay mode — a sequence of (arrival_ms, isl,
+    # prefix, osl) evaluated verbatim (no quantile streams, no rotation).
+    # This preserves the trace's arrival<->shape PAIRING and ordering, which
+    # the deterministic streams cannot represent (they reproduce marginals,
+    # not joint temporal structure — e.g. a multi-turn follow-up landing
+    # right after its parent, prefix-hot and tiny, in the same burst).
+    # warmup_requests/window_requests still split the sequence.
     from math import gcd, log
 
     from .spec import _shape_stream
@@ -556,22 +564,37 @@ def evaluate_open_loop(
     while gcd(stride, k) != 1:
         stride += 1
 
-    total = warmup_requests + window_requests
-    pending: list[_Slot] = []
-    t_arr = 0.0
-    for n in range(total):
-        t_arr += strata[(n * stride) % k] * scale
-        isl_i, px_i, osl_i = _next_shape()
-        pending.append(
+    if arrival_trace is not None:
+        total = len(arrival_trace)
+        warmup_requests = min(warmup_requests, max(0, total - 1))
+        pending = [
             _Slot(
-                remaining_prefill=max(1, isl_i - px_i),
-                isl=isl_i,
-                osl=osl_i,
-                prefix=px_i,
-                arrival_ms=t_arr,
-                eligible_ms=t_arr + wl.turnaround_ms,
+                remaining_prefill=max(1, int(isl_i) - int(px_i)),
+                isl=int(isl_i),
+                osl=max(1, int(osl_i)),
+                prefix=int(px_i),
+                arrival_ms=float(t_i),
+                eligible_ms=float(t_i) + wl.turnaround_ms,
             )
-        )
+            for (t_i, isl_i, px_i, osl_i) in arrival_trace
+        ]
+    else:
+        total = warmup_requests + window_requests
+        pending = []
+        t_arr = 0.0
+        for n in range(total):
+            t_arr += strata[(n * stride) % k] * scale
+            isl_i, px_i, osl_i = _next_shape()
+            pending.append(
+                _Slot(
+                    remaining_prefill=max(1, isl_i - px_i),
+                    isl=isl_i,
+                    osl=osl_i,
+                    prefix=px_i,
+                    arrival_ms=t_arr,
+                    eligible_ms=t_arr + wl.turnaround_ms,
+                )
+            )
 
     slots: list[_Slot] = []
     waiting: list[_Slot] = []  # visible to the scheduler, above the admission cap
