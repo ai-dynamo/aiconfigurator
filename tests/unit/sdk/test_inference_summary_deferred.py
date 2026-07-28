@@ -22,7 +22,6 @@ pytestmark = pytest.mark.unit
 def _deferred_static_summary() -> InferenceSummary:
     """Mimic run_static(): deferred row set, no set_summary_df call."""
     summary = InferenceSummary(RuntimeConfig(isl=4000, osl=1000))
-    row = [[0] * len(common.ColumnsStatic)]
     data = dict.fromkeys(common.ColumnsStatic, 0)
     data.update({"model": "m", "tokens/s": 100.0, "tpot": 10.0})
     row = [[data[c] for c in common.ColumnsStatic]]

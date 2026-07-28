@@ -80,7 +80,7 @@ class TestDefaultPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+        chosen, best_configs, _, _, best_latencies, _ = _execute_tasks(
             tasks,
             mode="default",
             top_n=3,
@@ -105,7 +105,7 @@ class TestDefaultPicking:
             ttft=request_latency,
             request_latency=request_latency,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+        chosen, best_configs, _, _, best_latencies, _ = _execute_tasks(
             tasks,
             mode="default",
             top_n=3,
@@ -131,7 +131,7 @@ class TestLoadMatchPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+        chosen, best_configs, _, _, best_latencies, _ = _execute_tasks(
             tasks,
             mode="default",
             top_n=3,
@@ -160,7 +160,7 @@ class TestLoadMatchPicking:
             ttft=2000,
             tpot=50,
         )
-        chosen, best_configs, _, _, best_latencies = _execute_tasks(
+        chosen, best_configs, _, _, best_latencies, _ = _execute_tasks(
             tasks,
             mode="default",
             top_n=3,
