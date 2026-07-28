@@ -32,6 +32,27 @@ class _StaticOp:
         return _LatencyResult(self._latency_ms, self._energy_wms)
 
 
+class _EnergyAccessTrapResult:
+    def __init__(self, latency_ms: float) -> None:
+        self._latency_ms = latency_ms
+
+    def __float__(self) -> float:
+        return self._latency_ms
+
+    @property
+    def energy(self) -> float:
+        raise AssertionError("latency-only execution must not access energy")
+
+
+class _EnergyAccessTrapOp:
+    def __init__(self, name: str, latency_ms: float = 1.0) -> None:
+        self._name = name
+        self._latency_ms = latency_ms
+
+    def query(self, *args, **kwargs) -> _EnergyAccessTrapResult:
+        return _EnergyAccessTrapResult(self._latency_ms)
+
+
 class _TestBackend(BaseBackend):
     def find_best_agg_result_under_constraints(self, model, database, runtime_config, **kwargs):
         raise NotImplementedError
@@ -260,3 +281,46 @@ def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
 
     ctx_phase.assert_not_called()
     gen_phase.assert_not_called()
+
+
+def test_run_static_latency_only_does_not_access_energy_in_python_fallback(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """Latency-only Python execution must skip encoder, context, and generation energy."""
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    monkeypatch.setattr(base_backend_module, "should_use_rust_engine_step", lambda *args, **kwargs: False)
+    model.encoder_ops = [_EnergyAccessTrapOp("encoder_attention")]
+    model.context_ops = [_EnergyAccessTrapOp("context_attention")]
+    model.generation_ops = [_EnergyAccessTrapOp("generation_attention")]
+    model.encoder_config = common.VisionEncoderConfig(
+        depth=1,
+        hidden_size=64,
+        num_heads=1,
+        intermediate_size=128,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=64,
+    )
+
+    latency = backend.run_static_latency_only(
+        model,
+        database,
+        RuntimeConfig(
+            batch_size=1,
+            beam_width=1,
+            isl=8,
+            osl=5,
+            image_height=32,
+            image_width=32,
+            num_images_per_request=1,
+        ),
+        mode="static",
+        stride=2,
+    )
+
+    assert latency == pytest.approx(6.0)
