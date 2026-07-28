@@ -936,7 +936,11 @@ class BaseBackend:
         osl: int,
         prefix: int,
     ) -> tuple[float, float, dict, dict]:
-        """Compatibility wrapper around :meth:`run_mixed`."""
+        """Compatibility wrapper around :meth:`run_mixed`.
+
+        ``isl`` must be the text-only isl; :meth:`run_mixed` derives the visual
+        context tokens from ``runtime_config``'s image fields.
+        """
         mixed_runtime_config = copy.copy(runtime_config)
         mixed_runtime_config.isl = isl
         mixed_runtime_config.osl = osl
@@ -959,7 +963,14 @@ class BaseBackend:
         runtime_config: RuntimeConfig,
         step: MixedStepInput,
     ) -> StepEstimate:
-        """Estimate one scheduled mixed prefill/decode forward pass."""
+        """Estimate one scheduled mixed prefill/decode forward pass.
+
+        ``runtime_config.isl`` is the text-only isl; the visual context tokens
+        implied by the config's image fields are added here, exactly as
+        ``run_static`` / ``run_agg`` do, so direct callers (e.g.
+        ``InferenceSession.run_mixed``) get the effective sequence length
+        without pre-adjusting the config.
+        """
         isl = int(runtime_config.isl or 0)
         osl = int(runtime_config.osl or 0)
         prefix = int(runtime_config.prefix or 0)
@@ -969,6 +980,9 @@ class BaseBackend:
             raise ValueError("runtime_config.osl must be positive for a mixed step")
         if prefix < 0:
             raise ValueError("runtime_config.prefix must be non-negative")
+        # The internal pass configs below carry no image fields, so the visual
+        # contribution is applied exactly once.
+        isl += self._visual_context_tokens(model, runtime_config)
 
         decode_query_tokens = step.num_decode_requests * (model._nextn + 1)
         if should_use_rust_engine_step(runtime_config, database):
@@ -1231,7 +1245,12 @@ class BaseBackend:
         engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config, database) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
-        decode_tokens_per_iteration = float(kwargs.pop("decode_tokens_per_iteration", 1.0))
+        # None (or an omitted kwarg) means the caller did not model speculative
+        # progress here; the summary then stays eligible for the upper-layer
+        # post-hoc projection (SpeculativeDecodingProfile.project_summary).
+        _explicit_progress = kwargs.pop("decode_tokens_per_iteration", None)
+        speculative_scheduling = _explicit_progress is not None
+        decode_tokens_per_iteration = float(_explicit_progress) if speculative_scheduling else 1.0
         max_decode_progress = float(model._nextn + 1)
         if (
             not math.isfinite(decode_tokens_per_iteration)
@@ -1256,7 +1275,10 @@ class BaseBackend:
         cache_key = (
             self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
             visual_cache_key,
-            decode_tokens_per_iteration,
+            # Explicit progress and an omitted kwarg schedule identically at
+            # 1.0 but record different scheduling metadata, so they must not
+            # share a cache entry.
+            decode_tokens_per_iteration if speculative_scheduling else None,
         )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
@@ -1304,15 +1326,13 @@ class BaseBackend:
         per_ops_data: dict[str, dict] = {}
         per_ops_source: dict[str, dict] = {}
 
-        # run_mixed derives isl from runtime_config, which holds the text-only
-        # isl; pass the image-augmented effective isl so the mixed step sees the
-        # same sequence length as the genonly step below (multimodal parity).
-        mixed_runtime_config = copy.copy(runtime_config)
-        mixed_runtime_config.isl = isl
+        # run_mixed derives the image-augmented effective isl from the config's
+        # own image fields, so the raw runtime_config is passed unchanged (no
+        # pre-adjustment here, or the visual tokens would be counted twice).
         mix_step_estimate = self.run_mixed(
             model,
             database,
-            mixed_runtime_config,
+            runtime_config,
             MixedStepInput(
                 context_tokens=num_mix_ctx_tokens,
                 num_decode_requests=num_mix_gen_tokens,
@@ -1510,12 +1530,17 @@ class BaseBackend:
             "mix_step_energy_wms": float(mix_step_energy_wms),
             "genonly_step_energy_wms": float(genonly_step_energy_wms),
             "mix_efficiency": float(mix_efficiency),
-            "decode_tokens_per_iteration": decode_tokens_per_iteration,
             "decode_iterations": decode_iterations,
             "mix_context_tokens": float(num_mix_ctx_tokens),
             "mix_decode_requests": float(num_mix_gen_tokens),
             "mix_decode_query_tokens": float(mix_step_estimate.num_decode_query_tokens),
         }
+        if speculative_scheduling:
+            # Recorded only when the caller explicitly supplied the progress:
+            # its presence tells SpeculativeDecodingProfile.project_summary
+            # that the scheduler already modeled it, so the post-hoc scalar
+            # projection must not be applied on top.
+            per_ops_data["scheduling"]["decode_tokens_per_iteration"] = decode_tokens_per_iteration
         if encoder_latency_dict:
             per_ops_data["encoder"] = dict(encoder_latency_dict)
             per_ops_source["encoder"] = dict(encoder_source_dict)

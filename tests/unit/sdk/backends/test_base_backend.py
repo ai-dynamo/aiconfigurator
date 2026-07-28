@@ -334,11 +334,54 @@ def test_run_agg_applies_speculative_progress_in_scheduler(
     scheduling = summary.get_step_estimates()["scheduling"]
 
     assert seen_steps[0].num_decode_requests == 1
+    assert scheduling["decode_tokens_per_iteration"] == 2.0
     assert scheduling["decode_iterations"] == 3.0
     assert scheduling["num_mix_steps"] == 2.0
     assert scheduling["num_genonly_steps"] == 1.0
     assert row["tpot"] == pytest.approx(4.167)
     assert row["tokens/s"] == pytest.approx(320.0)
+
+
+def test_run_agg_records_progress_only_when_explicitly_supplied(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """An omitted decode_tokens_per_iteration must leave no scheduler-progress
+    marker on the summary: its presence is what tells the upper-layer
+    projection to stand down, so recording the 1.0 default would silently
+    disable the legacy post-hoc projection flow."""
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=10.0, energy_wms=100.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        ctx_tokens=8,
+    )
+    assert "decode_tokens_per_iteration" not in summary.get_step_estimates()["scheduling"]
+
+    explicit = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        ctx_tokens=8,
+        decode_tokens_per_iteration=1.0,
+    )
+    assert explicit.get_step_estimates()["scheduling"]["decode_tokens_per_iteration"] == 1.0
+    # The two calls schedule identically but carry different projection
+    # eligibility; they must not have shared a cache entry.
+    assert explicit is not summary
 
 
 @pytest.mark.parametrize("progress", [0.0, 3.0, float("inf"), float("nan")])
@@ -360,16 +403,8 @@ def test_run_agg_rejects_invalid_speculative_progress(
         )
 
 
-def test_run_agg_passes_effective_multimodal_isl_to_run_mixed(
-    monkeypatch,
-    backend: BaseBackend,
-    model,
-    database,
-) -> None:
-    """Regression: run_mixed derives isl from runtime_config, which holds the
-    text-only isl. run_agg must hand it the image-augmented effective isl so
-    the mixed step and the genonly step see the same sequence length."""
-    model.encoder_config = common.VisionEncoderConfig(
+def _vision_encoder_config() -> common.VisionEncoderConfig:
+    return common.VisionEncoderConfig(
         depth=1,
         hidden_size=8,
         num_heads=1,
@@ -380,10 +415,73 @@ def test_run_agg_passes_effective_multimodal_isl_to_run_mixed(
         out_hidden_size=8,
     )
 
-    mixed_isl: list[int] = []
+
+def test_run_mixed_derives_effective_multimodal_isl_for_direct_calls(
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """Regression: a direct run_mixed call with a plain (text-only isl) config
+    must query attention at the image-augmented effective isl, exactly as
+    run_static / run_agg model it. Text isl=8 plus 16 visual tokens gives
+    effective isl 24: context attention runs as (batch=ceil(24/24)=1, s=24)
+    and decode attention at kv length 24 + osl//2, not the text-only shapes
+    (batch=3, s=8) / s=11."""
+    model.encoder_config = _vision_encoder_config()
+
+    ctx_attn_calls: list[dict] = []
+    gen_attn_calls: list[dict] = []
+
+    class _RecordingCtxAttn(_StaticOp):
+        def query(self, *args, **kwargs) -> _LatencyResult:
+            ctx_attn_calls.append(kwargs)
+            return super().query(*args, **kwargs)
+
+    class _RecordingGenAttn(_StaticOp):
+        def query(self, *args, **kwargs) -> _LatencyResult:
+            gen_attn_calls.append(kwargs)
+            return super().query(*args, **kwargs)
+
+    model.context_ops = [
+        _RecordingCtxAttn("context_attention", latency_ms=11.0, energy_wms=110.0),
+        _StaticOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
+    ]
+    model.generation_ops = [
+        _RecordingGenAttn("generation_attention", latency_ms=2.0, energy_wms=20.0),
+    ]
+
+    backend.run_mixed(
+        model,
+        database,
+        RuntimeConfig(isl=8, osl=6, num_images_per_request=1, num_image_tokens=16),
+        MixedStepInput(context_tokens=24, num_decode_requests=1),
+    )
+
+    # Pass 2 (context attention): batch = ceil(ctx_tokens / effective_isl).
+    pass2 = ctx_attn_calls[-1]
+    assert pass2["batch_size"] == 1
+    assert pass2["s"] == 24
+    # Pass 3 (decode attention): kv length = effective_isl + osl // 2 (+1 for
+    # the first decode step inside the static generation phase).
+    pass3 = gen_attn_calls[-1]
+    assert pass3["s"] == 24 + 6 // 2 + 1
+
+
+def test_run_agg_does_not_double_count_visual_tokens_in_run_mixed(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """run_mixed owns the visual-token adjustment, so run_agg must hand it the
+    unmodified runtime_config (a pre-adjusted copy would count images twice),
+    while the genonly step keeps receiving run_agg's effective isl."""
+    model.encoder_config = _vision_encoder_config()
+
+    mixed_configs: list[RuntimeConfig] = []
 
     def _run_mixed(model_arg, database_arg, runtime_config_arg, step):
-        mixed_isl.append(runtime_config_arg.isl)
+        mixed_configs.append(runtime_config_arg)
         return StepEstimate(latency_ms=1.0, energy_wms=1.0)
 
     genonly_isl: list[int] = []
@@ -405,9 +503,8 @@ def test_run_agg_passes_effective_multimodal_isl_to_run_mixed(
     )
     backend.run_agg(model, database, runtime_config, ctx_tokens=8)
 
-    assert mixed_isl == [8 + 16]
+    assert mixed_configs[0] is runtime_config
     assert genonly_isl == [8 + 16]
-    assert runtime_config.isl == 8  # the caller's config must stay untouched
 
 
 def test_mixed_step_requires_context_tokens() -> None:

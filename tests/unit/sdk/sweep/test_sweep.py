@@ -163,11 +163,13 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         assert point_rt.batch_size == 1
 
 
-def test_sweep_agg_dedup_key_follows_speculative_decode_iterations(monkeypatch):
-    """The gen_tokens dedup key must mirror run_agg's scheduling boundary.
-    run_agg caps with decode_iterations = 1 + (osl - 1) / progress, so with an
-    active speculative profile the swept point set must differ from the
-    non-speculative one, while an inactive profile must be a no-op."""
+def test_sweep_agg_disables_gen_dedup_for_speculative_schedules(monkeypatch):
+    """The capped-gen dedup key assumes the non-speculative schedule; under
+    fractional decode iterations it merges batches whose real backend
+    schedules differ (e.g. vLLM runs b - ceil(ctx/isl) decode requests, which
+    distinguishes b=5 from the batch its capped key collides with). With an
+    active profile every guard-passing point must therefore be evaluated,
+    while an inactive profile must reproduce the legacy point set exactly."""
     from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 
     def _run(profile):
@@ -203,17 +205,15 @@ def test_sweep_agg_dedup_key_follows_speculative_decode_iterations(monkeypatch):
     speculative = _run(SpeculativeDecodingProfile(1.0))  # progress = 2.0
 
     assert inactive == baseline
-    assert speculative != baseline
-    # Hand-checked boundary point at isl=ctx_tokens=1024. Baseline
-    # (decode_iterations = osl = 4): b=4 gives balance_score = 4/4 = 1, not
-    # > 1, so the point is evaluated. Speculative (decode_iterations =
-    # 1 + 3/2 = 2.5): b=3 gives balance 1.2 -> capped gen 3//1.2 = 2, and
-    # b=4 gives balance 1.6 -> capped gen 4//1.6 = 2, a duplicate of b=3's
-    # group, so b=4 must be skipped.
-    assert (4, 1024) in baseline
-    assert (3, 1024) in speculative
-    assert (4, 1024) not in speculative
-    # Points are swept once each; dedup must never re-evaluate a point.
+    # No dedup under speculation: the baseline's evaluated points are a strict
+    # subset (dedup only ever removes points, and at osl=4 it removes some).
+    assert set(baseline) < set(speculative)
+    # Hand-checked point the legacy key drops: at isl=ctx_tokens=1024, b=6
+    # gives balance 6/4 = 1.5 -> capped gen 6//1.5 = 4, colliding with b=5's
+    # group (5//1.25 = 4), so the baseline dedups it away; with speculation
+    # active it must be evaluated.
+    assert (6, 1024) not in baseline
+    assert (6, 1024) in speculative
     assert len(speculative) == len(set(speculative))
 
 

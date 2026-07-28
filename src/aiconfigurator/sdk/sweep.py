@@ -289,13 +289,13 @@ def _sweep_one_parallel_agg(
     b_list = [b for b in _DEFAULT_AGG_BATCH_SCHEDULE if b <= max_batch_size]
     ctx_tokens_list = _agg_ctx_tokens_list(isl, ctx_stride, enable_chunked_prefill)
 
-    # Mirror run_agg's scheduling boundary: with speculative decoding the
-    # decode phase spans decode_iterations = 1 + (osl - 1) / progress engine
-    # iterations, not osl. The dedup key below must group points the same way
-    # run_agg caps them, or distinct points get skipped as "equivalent".
-    # Without a profile progress is 1.0 and decode_iterations == osl (legacy).
+    # The capped-gen dedup below assumes the non-speculative schedule
+    # (decode_iterations == osl). With speculative progress the boundary is
+    # fractional and backend schedulers (e.g. vLLM's b - ceil(ctx/isl) decode
+    # requests) still distinguish batches this generic key would merge, so the
+    # heuristic is disabled and every guard-passing point is evaluated.
     _progress = speculative_profile.tokens_per_iteration if speculative_profile else 1.0
-    decode_iterations = 1.0 + max(osl - 1, 0) / _progress
+    dedup_gen_slices = _progress == 1.0
 
     results_dict_list: list[dict] = []
     results_per_ops_source: list[dict | None] = []
@@ -312,12 +312,13 @@ def _sweep_one_parallel_agg(
                 break
 
             # Skip equivalent gen_tokens slices to avoid recomputing the same point.
-            balance_score = isl * b / ctx_tokens / decode_iterations
-            if balance_score > 1:
-                gen_tokens = b // balance_score
-                if gen_tokens > 1 and gen_tokens in capped_b:
-                    continue
-                capped_b.append(gen_tokens)
+            if dedup_gen_slices:
+                balance_score = isl * b / ctx_tokens / osl
+                if balance_score > 1:
+                    gen_tokens = b // balance_score
+                    if gen_tokens > 1 and gen_tokens in capped_b:
+                        continue
+                    capped_b.append(gen_tokens)
 
             # Deep-copy the full runtime_config (mirrors the disagg path below) so
             # every field is preserved per batch point. Explicit field-by-field
