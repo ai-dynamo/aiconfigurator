@@ -61,6 +61,11 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     use_grouped_topk = model_type in {
         "deepseek_v3",
         "kimi_k2",
+        # Kimi-K3 (kimi_linear): config declares use_grouped_topk=true with
+        # one expert group (num_expert_group=1, topk_group=1, noaux_tc), and
+        # the kimi-k3 branch model honors the flag directly
+        # (models/kimi_k3/nvidia/model.py:411-413 @ 0.1.dev19262).
+        "kimi_linear",
         "mimo_v2_flash",
         "glm_moe_dsa",
         "nemotron_h",
@@ -111,11 +116,19 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         activation = f"{activation}_no_mul"
 
     if use_grouped_topk:
-        missing_fields = [field for field in ("n_group", "topk_group") if model_config.get(field) is None]
+        # DeepSeek-family configs spell the group count `n_group`; Kimi-K3
+        # (kimi_linear) spells it `num_expert_group`, which is the attribute
+        # the branch model reads (models/kimi_k3/nvidia/model.py:412).
+        raw_n_group = model_config.get("n_group", model_config.get("num_expert_group"))
+        missing_fields = [
+            field
+            for field, value in (("n_group", raw_n_group), ("topk_group", model_config.get("topk_group")))
+            if value is None
+        ]
         if missing_fields:
             raise ValueError(f"vLLM grouped-topk model {model_name!r} is missing {', '.join(missing_fields)}")
         try:
-            num_expert_group = int(model_config["n_group"])
+            num_expert_group = int(raw_n_group)
             topk_group = int(model_config["topk_group"])
         except (TypeError, ValueError) as error:
             raise ValueError(f"vLLM grouped-topk model {model_name!r} requires integer group fields") from error
