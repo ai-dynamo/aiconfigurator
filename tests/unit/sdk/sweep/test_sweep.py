@@ -651,6 +651,19 @@ def test_sweep_disagg_epd_encoder_pool_sizing_under_replica_budget(monkeypatch):
     assert row["num_total_gpus"] == 4
     assert row["seq/s"] == pytest.approx(10.0)
 
+    # max_encoder_workers=1 pins the pool: without it this encoder (capacity
+    # 5.4/worker) would size to e=2 for seq/s 10; capped, the cell is E-bound.
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 6.0, "num_total_gpus": 1, "tp": 1, "bs": 4, "memory": 1.0}
+        ],
+    )
+    row = sweep_disagg(**kwargs, prefill_num_worker_list=[1], decode_num_worker_list=[1], max_encoder_workers=1).iloc[0]
+    assert (row["(p)workers"], row["(d)workers"], row["(e)workers"]) == (1, 1, 1)
+    assert row["seq/s"] == pytest.approx(5.4)
+
 
 def test_encoder_worker_candidates_gated_by_gpu_memory(monkeypatch):
     """_get_encoder_worker_candidates drops (tp, batch) points that exceed the

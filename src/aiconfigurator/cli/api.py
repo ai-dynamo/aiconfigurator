@@ -171,6 +171,7 @@ def cli_default(
     enable_epd: bool = False,
     encoder_tp: list[int] | None = None,
     encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -235,6 +236,8 @@ def cli_default(
         encoder_tp: EPD encode-worker TP sizes to sweep (default [1, 2, 4, 8]).
         encoder_system: System (GPU type) for the encode workers; defaults to
             the prefill/agg side's system.
+        encoder_latency_correction: Latency correction scale for the encode
+            workers.  Default 1.0.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -304,6 +307,7 @@ def cli_default(
         enable_epd=enable_epd,
         encoder_tp=encoder_tp,
         encoder_system=encoder_system,
+        encoder_latency_correction=encoder_latency_correction,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,

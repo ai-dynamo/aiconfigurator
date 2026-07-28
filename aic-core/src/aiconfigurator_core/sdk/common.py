@@ -734,6 +734,18 @@ ColumnsAgg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+# E+agg (enable_epd) rows: ColumnsAgg plus the rate-matched cell columns
+# ((a)workers agg workers paired with an (e)* encode pool).
+ColumnsAggEpd = ColumnsAgg + [
+    "(a)workers",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)bs",
+    "(e)parallel",
+    "(e)memory",
+]
+
 """
 Columns for disaggregated inference summary dataframe
 """

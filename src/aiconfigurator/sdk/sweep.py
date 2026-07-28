@@ -401,6 +401,7 @@ def sweep_agg(
     enable_epd: bool = False,
     encoder_tp_list: list[int] | None = None,
     encoder_batch_list: list[int] | None = None,
+    max_encoder_workers: int | None = None,
     encoder_latency_correction: float = 1.0,
     encoder_database: PerfDatabase | None = None,
     num_gpu_list: list[int] | None = None,
@@ -423,7 +424,8 @@ def sweep_agg(
     ``enable_epd`` switches VL agg into E+agg: the vision encoder runs on
     dedicated encode workers while the agg workers become language-only, and
     each row is a rate-matched cell of ``(a)workers`` agg plus ``(e)workers``
-    encode workers with the encode batch latency added to TTFT.
+    encode workers with the encode batch latency added to TTFT — rows then
+    carry ``common.ColumnsAggEpd`` instead of ``common.ColumnsAgg``.
     ``num_gpu_list`` is the allowed per-cell GPU counts (as in
     ``sweep_disagg``); it is unused outside EPD.
 
@@ -559,6 +561,7 @@ def sweep_agg(
                         ttft_target=point_rt.ttft,
                         num_gpu_set=epd_num_gpu_set,
                         top_k=top_k,
+                        max_encoder_workers=max_encoder_workers,
                     )
                 if len(point_df) == 0:
                     continue
@@ -869,6 +872,7 @@ def _rate_match_agg_epd(
     ttft_target: float,
     num_gpu_set: set[int] | None = None,
     top_k: int = 0,
+    max_encoder_workers: int | None = None,
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
@@ -880,9 +884,11 @@ def _rate_match_agg_epd(
     throughput = min of the two pools, applied by the overlay); cells whose
     GPU total is not in ``num_gpu_set`` are skipped before the
     throughput-per-GPU argmax, and ties keep the smaller cell.  Returned
-    rows are per-cell, so the downstream replicas logic scales whole cells.
+    rows are per-cell (``common.ColumnsAggEpd`` plus passthrough columns),
+    so the downstream replicas logic scales whole cells.
     """
     records = agg_df.sort_values(by="seq/s", ascending=False).to_dict("records")
+    e_workers_bound = max_encoder_workers or _MAX_ENCODE_WORKERS
     rows: list[dict] = []
     for enc_worker in encoder_records:
         encoder_capacity = float(enc_worker["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
@@ -897,7 +903,7 @@ def _rate_match_agg_epd(
             best: tuple[tuple[float, int], int, int] | None = None
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
                 agg_rate = rate_one * a_num
-                for e_num in range(1, _MAX_ENCODE_WORKERS + 1):
+                for e_num in range(1, e_workers_bound + 1):
                     num_gpu = gpus_one * a_num + enc_worker["num_total_gpus"] * e_num
                     if num_gpu_set and num_gpu not in num_gpu_set:
                         continue
@@ -929,9 +935,8 @@ def _rate_match_agg_epd(
             paired += 1
             if top_k and paired >= top_k:
                 break
-    if not rows:
-        return pd.DataFrame(columns=list(agg_df.columns))
-    return pd.DataFrame(rows)
+    columns = common.ColumnsAggEpd + [c for c in agg_df.columns if c not in common.ColumnsAggEpd]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _find_best_disagg_under_constraint(
@@ -1101,6 +1106,7 @@ def sweep_disagg(
     enable_epd: bool = False,
     encoder_tp_list: list[int] | None = None,
     encoder_batch_list: list[int] | None = None,
+    max_encoder_workers: int | None = None,
     encoder_latency_correction: float = 1.0,
     encoder_database: PerfDatabase | None = None,
     predictor: Any = None,
@@ -1153,6 +1159,7 @@ def sweep_disagg(
     )
     p_num_workers = prefill_num_worker_list or []
     d_num_workers = decode_num_worker_list or []
+    e_workers_bound = max_encoder_workers or _MAX_ENCODE_WORKERS
     if not p_num_workers or not d_num_workers:
         raise ValueError(
             "sweep_disagg requires non-empty prefill_num_worker_list and decode_num_worker_list. "
@@ -1175,11 +1182,12 @@ def sweep_disagg(
     # so the caller's batch intent round-trips.
     try:
         enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-        vision_tokens = BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
     except Exception:
         logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
-        vision_tokens = 0
-    prefill_effective_isl = runtime_config.isl + vision_tokens
+        enc_cfg = None
+    prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
+        enc_cfg, runtime_config
+    )
     if prefill_max_num_tokens < prefill_effective_isl:
         logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective ISL")
         prefill_max_num_tokens = prefill_effective_isl
@@ -1311,7 +1319,7 @@ def sweep_disagg(
                     # Full sweep like the P/D worker lists: sizes past the
                     # first non-binding one are throughput-dominated, but can
                     # be the only counts that land in num_gpu_set.
-                    e_num_candidates = range(1, _MAX_ENCODE_WORKERS + 1)
+                    e_num_candidates = range(1, e_workers_bound + 1)
                 else:
                     e_num_candidates = (0,)
                 for e_num in e_num_candidates:
