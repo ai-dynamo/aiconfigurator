@@ -507,9 +507,8 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
-    # Vision encoder data parallelism (ModelConfig default).  Pinned off under
-    # enable_epd by _normalize_epd_encoder_dp: EPD encode workers model the
-    # engines' encoder-instance default (weight-sharded ViT).
+    # Vision encoder data parallelism (ModelConfig default); pinned off under
+    # enable_epd by _normalize_epd_encoder_dp.
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
     tpot: float = 50.0
@@ -636,21 +635,15 @@ class Task:
     autoscale_ttft_correction_factor: float = 1.8
 
     # ====== 8.6 EPD: encoder disaggregation (VL models) ======
-    # enable_epd runs the vision encoder on dedicated encode workers, swept
-    # over tp x batch.  serving_mode='disagg' gives E+P+D; serving_mode='agg'
-    # gives E+agg (encoder disaggregated, prefill+decode aggregated).  The
-    # P/agg workers become language-only (vision tokens stay in context, no
-    # ViT hosted); TTFT adds the encode batch latency; the encode pool joins
-    # the worker rate matching.  Default (False) keeps the encoder inline
-    # (colocated) in both serving modes.
+    # enable_epd runs the vision encoder on dedicated encode workers:
+    # disagg -> E+P+D, agg -> E+agg.  P/agg workers become language-only and
+    # the encode pool joins the rate matching.
     enable_epd: bool = False
     encoder_tp_candidates: list[int] | None = None  # None -> [1, 2, 4, 8]
     encoder_batch_candidates: list[int] | None = None  # None -> default schedule
     encoder_latency_correction: float = 1.0
-    # Encode workers may run on a different system (GPU type) than the
-    # P/agg side (hetero encoder, mirroring prefill_/decode_system_name);
-    # backend and version follow the prefill/agg side.  None inherits the
-    # P/agg system too.
+    # Hetero encoder: encode workers on their own system (GPU type);
+    # backend/version follow the P/agg side.  None inherits the P/agg system.
     encoder_system_name: str | None = None
 
     # ====== 8.5 Predictor strategy ======
@@ -872,15 +865,9 @@ class Task:
             self.moe_backend = "deepep_moe"
 
     def _normalize_epd_encoder_dp(self) -> None:
-        """enable_epd pins the colocated encoder-DP knob off.
-
-        EPD encode workers model the engines' encoder-instance default
-        parallelism -- a weight-sharded ViT over the worker's tp (vLLM
-        ``mm_encoder_tp_mode="weights"``, SGLang ``mm_enable_dp_encoder=False``,
-        both independent of their disaggregation flags) -- and the
-        language-only P/agg workers host no ViT, so the colocated DP layout
-        has nothing to act on.  Pinning the field keeps the task state and
-        any rendered engine args consistent with what the sweep modeled."""
+        """enable_epd pins the colocated encoder-DP knob off: EPD encode
+        workers model the engines' encoder-instance default (weight-sharded
+        ViT), and language-only P/agg workers host no ViT to shard."""
         if self.enable_epd:
             self.enable_encoder_dp = False
 
@@ -1591,8 +1578,7 @@ class Task:
             if getattr(self, name) is None:
                 setattr(self, name, values)
 
-        # E+agg cells are replicas: resolve the same per-replica GPU budget
-        # defaults as disagg replicas (same fields, same code).
+        # E+agg cells are replicas: same per-replica budget defaults as disagg.
         if self.enable_epd:
             self._resolve_replica_budget()
 
@@ -1939,16 +1925,17 @@ class Task:
         return rt
 
     def _prefill_effective_isl(self) -> int:
-        """Text ISL + per-request vision context tokens (plain ISL for
-        text-only workloads or when the model config cannot be resolved).
+        """Text ISL + vision context tokens (must match sweep_disagg's
+        effective-ISL computation so the batch intent in
+        ``prefill_max_num_tokens`` round-trips)."""
+        from aiconfigurator.sdk.backends.base_backend import BaseBackend
 
-        Delegates to :func:`sweep.vl_effective_isl` -- the same implementation
-        sweep_disagg divides its token budget by, so the batch intent encoded
-        in ``prefill_max_num_tokens`` round-trips exactly.
-        """
-        from aiconfigurator.sdk.sweep import vl_effective_isl
-
-        return vl_effective_isl(self.primary_model_path, self.build_runtime_config())
+        runtime_config = self.build_runtime_config()
+        try:
+            enc_cfg = get_model_config_from_model_path(self.primary_model_path).get("extra_params")
+        except Exception:
+            return runtime_config.isl
+        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
 
     def build_model_config(
         self,
@@ -2077,9 +2064,7 @@ class Task:
             raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
-        # EPD is switched on explicitly and only by enable_epd (both serving
-        # modes); every other encoder_* field is a pure search-space /
-        # placement / calibration knob and must not act as an implicit switch.
+        # encoder_* fields are pure knobs; only enable_epd switches EPD on.
         encoder_knobs_set = (
             self.encoder_tp_candidates
             or self.encoder_batch_candidates
@@ -2088,6 +2073,13 @@ class Task:
         )
         if encoder_knobs_set and not self.enable_epd:
             raise ValueError("encoder_* settings require enable_epd=True.")
+        if self.enable_epd:
+            for name in ("encoder_tp_candidates", "encoder_batch_candidates"):
+                values = getattr(self, name)
+                if values and any(not isinstance(v, int) or v <= 0 for v in values):
+                    raise ValueError(f"{name} must be a list of positive ints, got {values!r}.")
+            if self.encoder_latency_correction <= 0:
+                raise ValueError(f"encoder_latency_correction must be > 0, got {self.encoder_latency_correction!r}.")
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":
@@ -2722,7 +2714,14 @@ class Task:
         P/agg-side database."""
         if not (self.enable_epd and self.encoder_system_name):
             return None
-        return self._load_database(self.encoder_system_name, default_backend, default_version)
+        database = self._load_database(self.encoder_system_name, default_backend, default_version)
+        if database is None:
+            raise ValueError(
+                f"encoder_system_name={self.encoder_system_name!r}: no perf database for "
+                f"backend={default_backend!r} version={default_version!r} (encoder follows "
+                "the P/agg-side backend/version)."
+            )
+        return database
 
     # =====================================================================
     # Single-point evaluation (subsumes cli_estimate)
