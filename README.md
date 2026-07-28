@@ -64,13 +64,13 @@ owner first when crossing this package boundary:
 
 ```bash
 python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
-python3 -m pip install 'aiconfigurator==0.10.0'
+python3 -m pip install 'aiconfigurator==0.11.0'
 ```
 
 If a normal upgrade was already attempted, repair the core payload with:
 
 ```bash
-python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.11.0'
 ```
 
 ### Build and Install from Source
