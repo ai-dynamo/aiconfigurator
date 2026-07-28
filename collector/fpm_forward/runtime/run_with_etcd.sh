@@ -4,8 +4,27 @@
 set -Eeuo pipefail
 
 workdir=/tmp/fpm-bench
-node_rank="${LWS_WORKER_INDEX:-0}"
-leader_address="${LWS_LEADER_ADDRESS:-127.0.0.1}"
+node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-}}}"
+leader_address="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-}}"
+if [[ -z "${leader_address}" \
+  && -n "${GROVE_PCLQ_NAME:-}" \
+  && -n "${GROVE_HEADLESS_SERVICE:-}" ]]; then
+  leader_address="${GROVE_PCLQ_NAME}-0.${GROVE_HEADLESS_SERVICE}"
+fi
+if [[ -z "${node_rank}" \
+  && -z "${leader_address}" \
+  && -z "${GROVE_PCLQ_NAME:-}" \
+  && -z "${GROVE_HEADLESS_SERVICE:-}" ]]; then
+  node_rank=0
+  leader_address=127.0.0.1
+elif [[ -z "${node_rank}" || -z "${leader_address}" ]]; then
+  echo "FPM runtime requires complete rank and leader discovery from FPM_NODE_*, LWS, or Grove" >&2
+  exit 2
+fi
+if ! [[ "${node_rank}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid FPM node rank: ${node_rank}" >&2
+  exit 2
+fi
 etcd_endpoint="http://${leader_address}:2379"
 etcd_pid=""
 

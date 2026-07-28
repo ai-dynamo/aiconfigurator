@@ -817,6 +817,27 @@ def test_formal_prefill_render_preserves_the_complete_collector_axis():
     assert "PYTHONPATH" not in env_names
 
 
+def test_cell_generator_overrides_preserve_explicit_scheduler_and_merge_resource_labels():
+    cell = _cell()
+    base = {
+        "K8sConfig": {
+            "fpm_resource_labels": {"kai.scheduler/queue": "team-a"},
+            "worker_extra_pod_spec": {"schedulerName": "kai-scheduler"},
+        }
+    }
+
+    overrides = _cell_generator_overrides(_plan(cell), cell, base)
+    k8s = overrides["K8sConfig"]
+
+    assert k8s["worker_extra_pod_spec"]["schedulerName"] == "kai-scheduler"
+    assert k8s["fpm_resource_labels"] == {
+        "kai.scheduler/queue": "team-a",
+        "aiconfigurator.nvidia.com/owned-by": "fpm-forward-collector",
+        "aiconfigurator.nvidia.com/plan": "plan-sha",
+        "aiconfigurator.nvidia.com/cell": cell.cell_id,
+    }
+
+
 def test_decode_render_keeps_dynamo_runtime_limits_and_capture_axis():
     cell = _cell(phase="decode")
     args = _cell_generator_overrides(_plan(cell), cell, {})["params"]["agg"]["extra_cli_args"]

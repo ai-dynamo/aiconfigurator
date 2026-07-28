@@ -45,6 +45,10 @@ def test_fpm_generator_config_accepts_only_deployment_fields(tmp_path):
   k8s_model_path_in_pvc: glm
   fpm_shared_memory_size: 200Gi
   fpm_orchestrator: grove
+  fpm_resource_labels:
+    kai.scheduler/queue: team-a
+  worker_extra_pod_spec:
+    schedulerName: kai-scheduler
 """
     )
 
@@ -54,6 +58,8 @@ def test_fpm_generator_config_accepts_only_deployment_fields(tmp_path):
 
     assert resolved["K8sConfig"]["k8s_image"] == "example/vllm-runtime:test"
     assert resolved["K8sConfig"]["fpm_orchestrator"] == "grove"
+    assert resolved["K8sConfig"]["fpm_resource_labels"] == {"kai.scheduler/queue": "team-a"}
+    assert resolved["K8sConfig"]["worker_extra_pod_spec"]["schedulerName"] == "kai-scheduler"
     assert resolved["generator_dynamo_version"] == "1.2.0"
 
 

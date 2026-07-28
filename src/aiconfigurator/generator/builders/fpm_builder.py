@@ -818,8 +818,6 @@ def _lower_worker_to_resource(
         raise ValueError("FPM multi-node resource names must be at most 50 characters")
     pod_labels = copy.deepcopy(metadata["labels"])
     if orchestrator == "grove":
-        pod_labels.setdefault("kai.scheduler/queue", "dynamo")
-        pod_spec.setdefault("schedulerName", "kai-scheduler")
         return {
             "apiVersion": "grove.io/v1alpha1",
             "kind": "PodCliqueSet",

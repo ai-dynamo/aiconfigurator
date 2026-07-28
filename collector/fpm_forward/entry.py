@@ -32,6 +32,7 @@ _DEPLOYMENT_K8S_FIELDS = frozenset(
         "k8s_hf_home",
         "worker_extra_pod_spec",
         "fpm_shared_memory_size",
+        "fpm_resource_labels",
         "fpm_orchestrator",
     }
 )

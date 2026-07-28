@@ -1143,13 +1143,13 @@ def test_fpm_multinode_gb200_grove_emits_compute_domain_and_keepalive_podcliques
     assert clique["name"] == "worker"
     assert clique["labels"]["app.kubernetes.io/name"] == "glm52-fpm-agg"
     assert clique["labels"]["app.kubernetes.io/component"] == "fpm-resource"
-    assert clique["labels"]["kai.scheduler/queue"] == "dynamo"
+    assert "kai.scheduler/queue" not in clique["labels"]
     assert clique["spec"]["roleName"] == "worker"
     assert clique["spec"]["replicas"] == 2
     assert clique["spec"]["minAvailable"] == 2
 
     pod_spec = clique["spec"]["podSpec"]
-    assert pod_spec["schedulerName"] == "kai-scheduler"
+    assert "schedulerName" not in pod_spec
     assert pod_spec["nodeSelector"]["nvidia.com/gpu.product"] == "NVIDIA-GB200"
     assert pod_spec["resourceClaims"] == [
         {
@@ -1163,6 +1163,38 @@ def test_fpm_multinode_gb200_grove_emits_compute_domain_and_keepalive_podcliques
     assert container["resources"]["claims"] == [{"name": "compute-domain-channel"}]
     assert container["command"] == ["/bin/bash", "-lc"]
     assert container["args"] == ["exec sleep infinity"]
+
+
+@pytest.mark.parametrize(
+    ("scheduler_name", "queue_label", "queue_name"),
+    [
+        ("kai-scheduler", "kai.scheduler/queue", "dynamo"),
+        ("custom-scheduler", "scheduler.example.com/queue", "fpm"),
+    ],
+)
+def test_fpm_grove_preserves_explicit_scheduler_and_queue_label(
+    scheduler_name,
+    queue_label,
+    queue_name,
+):
+    params = _params()
+    params["K8sConfig"].update(
+        {
+            "fpm_orchestrator": "grove",
+            "fpm_resource_labels": {queue_label: queue_name},
+            "worker_extra_pod_spec": {"schedulerName": scheduler_name},
+        }
+    )
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
+
+    workload = _k8s_document(_render(params), "PodCliqueSet")
+    clique = workload["spec"]["template"]["cliques"][0]
+
+    assert workload["metadata"]["labels"][queue_label] == queue_name
+    assert clique["labels"][queue_label] == queue_name
+    assert clique["spec"]["podSpec"]["schedulerName"] == scheduler_name
 
 
 def test_fpm_rejects_unknown_orchestrator():

@@ -561,7 +561,7 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 By default, we output the top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. The generated files depend on your `--deployment-target`:
 - **Dynamo** (default): `k8s_deploy.yaml` for Kubernetes deployment, plus engine configs (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) and run scripts (`node_0_run.sh`)
 - **llm-d**: `llm-d-values.yaml` for Helm deployment with the llm-d-modelservice chart
-- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod or LeaderWorkerSet) and `run.sh` (the complete rank-aware vLLM launch)
+- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod, LeaderWorkerSet, or Grove PodCliqueSet) and `run.sh` (the complete rank-aware vLLM launch)
 
 For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for Dynamo deployments or the [README llm-d section](../README.md#deploying-to-llm-d-platform) for llm-d deployments.
 
@@ -601,7 +601,11 @@ K8sConfig:
   fpm_resource_labels:
     fpm.nvidia.com/run-id: glm52-example
     fpm.nvidia.com/stage: probe
+    # Optional; set only when the target cluster uses KAI Scheduler.
+    kai.scheduler/queue: dynamo
   worker_extra_pod_spec:
+    # Optional; Grove does not select a scheduler by default.
+    schedulerName: kai-scheduler
     mainContainer:
       resources:
         requests:
@@ -616,7 +620,7 @@ K8sConfig:
 
 `Workers.agg.extra_cli_args` must be a `list[str]`, and the final command must include `--benchmark-mode` with one of `agg`, `prefill`, or `decode`. This runtime option selects the FPM collection phase; it does not change the required single aggregated-worker deployment topology. `K8sConfig.extra_env` accepts concrete `{name, value}` entries only; `valueFrom`, `envFrom`, and Secret-derived values are not supported. The normal rule, mapping, and versioned-template pipeline still builds the base command before the extra arguments are appended. If both `--benchmark-output-path` and `DYN_FPM_BENCHMARK_OUTPUT_PATH` are supplied, they must be identical. If neither is supplied, the generator adds `/results/benchmark.json` to both the command and environment.
 
-`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
+`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Grove does not inject a scheduler or queue: clusters that use KAI Scheduler can set `worker_extra_pod_spec.schedulerName` and the `kai.scheduler/queue` resource label explicitly, while other clusters can supply their own scheduler settings through the same generic fields. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
 
 The generated artifact directory contains only:
 
@@ -628,7 +632,7 @@ artifacts/
 
 For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it contains a keepalive `LeaderWorkerSet` by default or a `PodCliqueSet` when `K8sConfig.fpm_orchestrator` is `grove`. Its size and per-node GPU limit come from the resolved topology. GB200/MNNVL output also includes its `ComputeDomain` in the same YAML file. All forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment exports and the complete resolved `python3 -m dynamo.vllm ...` command.
 
-`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove and its configured scheduler. The Collector exposes the same choice as `--fpm-orchestrator`.
+`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove. The Collector exposes the same choice as `--fpm-orchestrator`.
 
 For one node, apply the Pod, wait for it to become ready, and stream the script into it:
 

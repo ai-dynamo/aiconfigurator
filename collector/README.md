@@ -119,9 +119,11 @@ intersected with hardware capability floors and minus the hang denylist.
 backend-registry `OpEntry`. It must be selected alone and requires a resolved
 model, `--gpu`, and `--fpm-max-gpus`. It derives a latency-blind prefill/decode
 design from the model's AIC attention cases, asks Generator for a keepalive
-Pod/LeaderWorkerSet plus `run.sh`, stages its Scheduler adapter, and publishes
-the formal table only after every frozen cell passes. Start with `--plan-only`
-or a one-cell `--smoke --limit 1` run.
+Pod, LeaderWorkerSet, or Grove PodCliqueSet plus `run.sh`, stages its Scheduler
+adapter, and publishes the formal table only after every frozen cell passes.
+For multinode runs, select the installed controller with
+`--fpm-orchestrator lws|grove`. Start with `--plan-only` or a one-cell
+`--smoke --limit 1` run.
 
 Model identity is resolved from a local checkpoint/config, the packaged AIC
 config cache, or Hugging Face. A real model architecture that is not registered
