@@ -38,9 +38,10 @@ agg_full:
   ttft: 1000.0
   tpot: 40.0
   enable_wideep: false
-  # Speculative decoding (MTP)
+  # Speculative decoding (MTP): opt-in only; nextn_accepted is required
+  # when nextn > 0 and must lie in [0, nextn].
   nextn: 1
-  nextn_accept_rates: [0.85, 0, 0, 0, 0]
+  nextn_accepted: 0.85
   # Quantization of each component (default: inferred from HF config)
   gemm_quant_mode: fp8_block           # fp8 | fp8_block | bfloat16
   moe_quant_mode: fp8_block            # fp8 | fp8_block | w4afp8 | bfloat16
@@ -63,8 +64,9 @@ disagg_full:
   osl: 1000
   ttft: 1000.0
   tpot: 40.0
+  # MTP is opt-in; nextn_accepted required when nextn > 0, in [0, nextn].
   nextn: 1
-  nextn_accept_rates: [0.85, 0, 0, 0, 0]
+  nextn_accepted: 0.85
 
   # --- Prefill worker ---
   prefill_model_path: deepseek-ai/DeepSeek-V3

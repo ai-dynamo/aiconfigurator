@@ -68,6 +68,15 @@ Join the community on [Discord](https://discord.gg/mRJ2KNzwYE) to get help, shar
 
   - Make sure all tests pass.
 
+  - Reviewers are auto-requested from the team that owns the areas your
+    PR touches (see the generated `CODEOWNERS`). To preview them:
+    `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`.
+    If the `codeowners` check fails because your PR adds a directory no
+    area claims, add a one-line claim in `.github/codeowners/areas.yaml`,
+    regenerate, and commit both files (see `.github/codeowners/README.md`
+    or the `aic-codeowners` skill). Never edit `CODEOWNERS` directly - it
+    is generated.
+
 
 - Make sure that you can contribute your work to open source (no
   license and/or patent conflict is introduced by your code).

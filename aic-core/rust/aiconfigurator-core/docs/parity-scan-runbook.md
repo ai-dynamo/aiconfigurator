@@ -34,8 +34,8 @@ These feed a coverage/alignment showcase doc back in the main repo.
 |---|---|---|
 | RAM | 48 GB | **64–128 GB** |
 | vCPU | 8 | 16–32 |
-| Disk | 30 GB (repo + perf DB via git-lfs + Rust target) | 50 GB |
-| Network | git-lfs pull + first-time HF config fetches | — |
+| Disk | 30 GB (repo + checked-in perf DB + Rust target) | 50 GB |
+| Network | repo clone + first-time HF config fetches | — |
 
 No GPU needed — this is a pure CPU perf-model scan.
 
@@ -43,11 +43,10 @@ No GPU needed — this is a pure CPU perf-model scan.
 
 ```bash
 # 3.1 Toolchains
-#   - Python 3.10+ (3.12 recommended), uv, git-lfs, and a Rust toolchain.
+#   - Python 3.10+ (3.12 recommended), uv, and a Rust toolchain.
 curl -LsSf https://astral.sh/uv/install.sh | sh          # uv (if absent)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y  # cargo/rustc
 source "$HOME/.cargo/env"
-git lfs install
 
 # 3.2 Clone + pin the commit you want to certify.
 git clone https://github.com/ai-dynamo/aiconfigurator.git
@@ -56,8 +55,8 @@ cd aiconfigurator
 # (Use the main HEAD at scan time, or the exact sha under test.)
 git rev-parse HEAD
 
-# 3.3 Perf databases (REQUIRED — the scan is meaningless without them).
-git lfs pull
+# 3.3 Current perf databases are checked-in Parquet files and need no
+#     additional fetch. Run `git lfs pull` only for legacy compatibility data.
 
 # 3.4 Install (maturin build-backend compiles the Rust core during install,
 #     ~30–60s cold; needs cargo on PATH).
@@ -263,7 +262,7 @@ worker/recycle settings used.
 
 ## 9. Gotchas checklist
 
-- [ ] `git lfs pull` actually fetched the perf DBs (not LFS pointer stubs).
+- [ ] Current checked-in Parquet perf DBs are present; legacy-only scans also ran `git lfs pull`.
 - [ ] `import aiconfigurator_core` succeeds (Rust core built).
 - [ ] `--max-tasks-per-child 0` on both phases (a finite value DEADLOCKS — §4.0).
 - [ ] Library thread caps exported (`OMP_NUM_THREADS=1` etc.) before each phase.

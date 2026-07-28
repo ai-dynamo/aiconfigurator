@@ -40,7 +40,7 @@ Let's get started.
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI, generator, webapp, and Spica.
+The upper `aiconfigurator` wheel contains the CLI and generator.
 It depends on the exact matching `aiconfigurator-core` wheel, which independently
 owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
@@ -76,22 +76,22 @@ python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
 ### Build and Install from Source
 
 ```bash
-# 1. Install Git LFS
-apt-get install git-lfs  # (Linux)
-brew install git-lfs   # (macOS)
-
-# 2. Clone the repo
+# 1. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
-git lfs pull
 
-# 3. Create and activate a virtual environment
+# 2. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install the standalone core, then the upper package
+# 3. Install the standalone core, then the upper package
 pip3 install ./aic-core
 pip3 install .
 ```
+
+Current performance profiles are checked-in Parquet files, so normal builds
+and usage do not require Git LFS. Install Git LFS and run `git lfs pull` only
+when working with retained legacy `*.txt` perf assets or their compatibility
+tests.
 
 ### Build with Docker
 
@@ -107,31 +107,25 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 
 ```bash
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
-aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --thorough-sweep
-aiconfigurator cli default --thorough-config spica_smart_sweep.yaml
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
-- **Experimental:** Spica thorough mode is an early preview. Its CLI, config schema, search behavior, and generated artifacts may change in future releases, and sweeps can take substantially longer than the legacy estimator.
-- Use `default --thorough-sweep` to run Spica's replay-backed thorough sweeper. Without `--thorough-config`, AIC converts the normal default CLI inputs into a legacy-compatible Spica `SmartSearchConfig` that keeps routing round-robin and planner scaling disabled.
-- Install the optional `spica` extra when using thorough mode from a packaged wheel, for example `pip install 'aiconfigurator[spica]'`.
-- See the [Spica guide](docs/spica/README.md) for its design, examples, and development workflow.
-- Use `default --thorough-config spica_smart_sweep.yaml` to pass a native Spica `SmartSearchConfig` YAML that owns the search space, workload, goal, and sweep controls.
-- A native config's `goal` owns ranking and SLA semantics; CLI `--ttft` / `--tpot` defaults are not applied. Scalar targets and custom Pareto objectives are reported in their own units and directions.
-- For replay-backed Spica sweeps, put `workload.trace_path` and `workload.trace_format` in the `--thorough-config` YAML. Today Spica supports `trace_format: mooncake`; example trace: [Dynamo's Mooncake trace fixture](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl).
-- In Spica thorough mode, `--save-dir DIR` writes sweep result artifacts and generated Dynamo configs: `spica_candidates.yaml`, `spica_candidates.csv`, `pareto.csv`, `pareto_frontier.png`, per-mode `pareto.csv` / `best_config_topn.csv`, and per-rank `topN` deployment artifacts.
-- Spica candidates using router, planner, or KVBM features currently require `--deployment-target dynamo-j2` for faithful deployment artifacts; other targets fail closed instead of silently dropping those features. KVBM artifact activation is supported for vLLM and TensorRT-LLM, not SGLang.
+- The experimental Spica smart sweeper now lives in Dynamo's standalone
+  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+  From a matching Dynamo checkout, install it with `python -m pip install ./aisimulate`, then use
+  `python -m aisimulate.spica` for Spica searches. Runnable configurations and tools live under
+  `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
-- Use `--deployment-target` to specify the deployment platform: `dynamo-j2` (default, Jinja2 templates), `dynamo-python` (Dynamo Python config modifiers), or `llm-d` (llm-d Helm values). Backends vllm and sglang support llm-d; trtllm is Dynamo-only.
+- Use `--deployment-target` to specify the artifact platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. FPM V1 supports one aggregated vLLM worker group and emits exactly two artifacts: a reusable keepalive Pod or LeaderWorkerSet, and `run.sh`; see the [Generator overview](docs/generator_overview.md#fpm-v1-target).
 - Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
-- Use `--save-dir DIR` to generate deployment configuration files (Dynamo K8s manifests or llm-d Helm values, depending on `--deployment-target`).
+- Use `--save-dir DIR` to generate deployment artifacts for the selected target (Dynamo manifests, llm-d values/overlays, or an FPM resource workload + script).
 - Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
 - Use `--systems-paths` to override where system YAMLs and data are loaded from (comma-separated; `default` maps to the built-in systems path). First match wins for identical system/backend/version.
 - Use `-h` for more options and customization.
@@ -326,47 +320,8 @@ You can customize llm-d-specific settings using generator overrides:
 
 Please refer to the [Deployment Guide](docs/dynamo_deployment_guide.md) for details about deployment and reproduction especially about the benchmark methodology.
 
-To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool writes the search results to disk. The legacy estimator also generates configuration files for your chosen deployment target.
-The folder structure varies based on mode and `--deployment-target`:
-
-**For Spica thorough mode** (`default --thorough-sweep` or `default --thorough-config spica_smart_sweep.yaml`; trace replay is configured in the Spica YAML):
-
-```text
-results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_trace_mooncake_tiny_ttft2000_tpot30_904495
-├── agg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── agg_config.yaml
-│       ├── bench_run.sh
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── disagg
-│   ├── best_config_topn.csv
-│   ├── exp_config.yaml
-│   ├── pareto.csv
-│   └── top1
-│       ├── bench_run.sh
-│       ├── decode_config.yaml
-│       ├── generator_config.yaml
-│       ├── k8s_bench.yaml
-│       ├── k8s_deploy.yaml
-│       ├── prefill_config.yaml
-│       ├── run_0.sh
-│       ├── sflow.yaml
-│       └── spica_candidate.yaml
-├── pareto.csv
-├── pareto_frontier.png
-├── spica_candidates.csv
-└── spica_candidates.yaml
-```
-
-Spica candidate knobs that map to Dynamo runtime fields are copied into `generator_config.yaml` and the generated engine/K8s/SFlow artifacts. This includes the resolved backend version, engine batching and context limits, router weights, planner objective/SLA and GPU limits, KVBM host-offload controls, prefix caching, attention-DP, and NextN. Active router/planner/KVBM candidates currently require `--deployment-target dynamo-j2`; unsupported targets fail closed rather than producing a deployment that differs from the evaluated candidate. KV-router admission-control pins are also rejected until Dynamo replay can score them.
+To simplify the deployment and reproduction, in the `aiconfigurator` CLI, if you specify `--save-dir`, the tool generates configuration files for your chosen deployment target.
+The folder structure varies based on `--deployment-target`:
 
 **For Dynamo deployments** (`--deployment-target dynamo-j2` or `dynamo-python`):
 

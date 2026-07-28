@@ -12,7 +12,21 @@ from email import message_from_bytes
 from email.message import Message
 from pathlib import Path
 
-PAYLOAD_SUFFIXES = {".css", ".csv", ".j2", ".js", ".json", ".md", ".parquet", ".py", ".rule", ".txt", ".yaml"}
+PAYLOAD_SUFFIXES = {
+    ".css",
+    ".csv",
+    ".j2",
+    ".js",
+    ".json",
+    ".md",
+    ".parquet",
+    ".py",
+    ".pyi",
+    ".rule",
+    ".txt",
+    ".typed",
+    ".yaml",
+}
 
 
 def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
@@ -27,6 +41,11 @@ def _wheel_files(wheel: Path) -> tuple[set[str], Message]:
 
 def _payload_files(names: set[str]) -> set[str]:
     return {name for name in names if ".dist-info/" not in name and not name.endswith("/")}
+
+
+def _spica_entries(names: set[str]) -> list[str]:
+    """Return every stale Spica archive member, regardless of type or suffix."""
+    return sorted(name for name in names if name.startswith("spica/"))
 
 
 def _one_wheel(dist_dir: Path, pattern: str) -> Path:
@@ -51,7 +70,6 @@ def _source_payloads() -> tuple[set[str], set[str]]:
     core: set[str] = set()
 
     _add_source_tree(upper, upper_source / "aiconfigurator", "aiconfigurator")
-    _add_source_tree(upper, upper_source / "spica", "spica")
     _add_source_tree(core, core_source / "aiconfigurator_core", "aiconfigurator_core")
     return upper, core
 
@@ -74,7 +92,6 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
         "aiconfigurator/sdk/_compat.py",
         "aiconfigurator/sdk/engine.py",
         "aiconfigurator/sdk/task_v2.py",
-        "spica/config.py",
     }
     missing = sorted(required - payload)
     if missing:
@@ -87,6 +104,23 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     misplaced = sorted(name for name in payload if name.startswith("aiconfigurator_core/"))
     if misplaced:
         raise RuntimeError(f"{wheel.name}: upper wheel must not own core payload: {misplaced}")
+
+    # Scan every archive member, not only recognized source payload suffixes: a
+    # stale Spica binary, data file, or directory entry must also fail the boundary.
+    removed = _spica_entries(names)
+    if removed:
+        raise RuntimeError(f"{wheel.name}: removed Spica payload is still present: {removed}")
+
+    if "spica" in metadata.get_all("Provides-Extra", []):
+        raise RuntimeError(f"{wheel.name}: removed Spica extra is still present in metadata")
+
+    with zipfile.ZipFile(wheel) as archive:
+        entry_point_paths = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
+        if len(entry_point_paths) != 1:
+            raise RuntimeError(f"{wheel.name}: expected one entry_points.txt, found {entry_point_paths}")
+        entry_points = archive.read(entry_point_paths[0]).decode()
+    if re.search(r"(?m)^spica\s*=", entry_points):
+        raise RuntimeError(f"{wheel.name}: removed Spica console script is still present")
 
     version = metadata.get("Version")
     if not version:
@@ -103,7 +137,9 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     payload = _payload_files(names)
     required = {
         "aiconfigurator_core/__init__.py",
+        "aiconfigurator_core/_aiconfigurator_core.pyi",
         "aiconfigurator_core/model_configs/meta-llama--Meta-Llama-3.1-8B_config.json",
+        "aiconfigurator_core/py.typed",
         "aiconfigurator_core/sdk/__init__.py",
         "aiconfigurator_core/sdk/common.py",
         "aiconfigurator_core/sdk/engine.py",

@@ -6,10 +6,10 @@
 //! The compiled-engine path is the only supported entry point: Python's
 //! `compile_engine` walks the model once and emits an [`engine::spec::EngineSpec`]
 //! (op lists + [`EngineConfig`] identity); the Rust [`engine::Engine`] executes
-//! it without re-entering Python. [`build_aic_engine`] is the Rust → Python →
-//! Rust embedded build entry point for callers in other crates (the Dynamo
-//! Mocker, `tests/embedded_round_trip.rs`); [`AicEngine`] is the PyO3 hot-path
-//! pyclass.
+//! it without re-entering Python. [`AicEngineBuilder`] is the preferred Rust →
+//! Python → Rust embedded build entry point; [`build_aic_engine`] remains a
+//! flat source-compatibility adapter for existing callers such as the Dynamo
+//! Mocker. [`AicEngine`] is the PyO3 hot-path pyclass.
 
 use std::path::PathBuf;
 
@@ -52,11 +52,11 @@ pub use memory::{
     MemoryBreakdown,
 };
 // PyO3 bindings. `AicEngine` is the Python -> Rust hot-path pyclass;
-// `build_aic_engine` is the Rust -> Python -> Rust embedded build entry point
-// for callers in OTHER crates (the Dynamo Mocker,
-// `tests/embedded_round_trip.rs`). They must be `pub`-re-exported here because
-// the `py` module itself is private.
-pub use py::{build_aic_engine, AicEngine};
+// `AicEngineBuilder` is the preferred Rust -> Python -> Rust entry point;
+// `build_aic_engine` is the flat compatibility adapter retained for existing
+// callers. They must be `pub`-re-exported here because the `py` module itself
+// is private.
+pub use py::{build_aic_engine, AicEngine, AicEngineBuilder};
 // Public wire/identity config types live in `config`. Re-exported at the crate
 // root so existing `crate::EngineConfig` / `crate::BackendKind` / ... paths
 // resolve unchanged across the crate and for external consumers.

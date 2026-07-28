@@ -8,7 +8,7 @@ Op classes migrated from ``_legacy.py``:
 - ``MoE`` (ISSUE-12) — Mixture-of-Experts compute op. Owns:
     * ``_moe_data`` — regular MoE table
     * ``_moe_low_latency_data`` — TRT-LLM low-latency NVFP4 kernel table
-      (loaded from the same CSV as the regular MoE table; ``load_moe_data``
+      (loaded from the same perf table as the regular MoE data; ``load_moe_data``
       is the only loader that returns a tuple of two tables)
     * ``_wideep_context_moe_data`` — SGLang WideEP context MoE table
     * ``_wideep_generation_moe_data`` — SGLang WideEP generation MoE table
@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -206,12 +206,13 @@ class MoE(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
 
             # Regular MoE table — ``load_moe_data`` returns ``(default, low_latency)``
             # because rows tagged ``kernel_source="moe_torch_flow_min_latency"``
             # are routed into a separate accumulator.
-            moe_primary = os.path.join(data_dir, PerfDataFilename.moe.value)
+            moe_primary = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.moe.value
+            )
             moe_sources = database._build_op_sources(PerfDataFilename.moe, moe_primary, system_data_root)
             moe_result = load_moe_data(moe_sources)
             if isinstance(moe_result, tuple):
@@ -223,7 +224,9 @@ class MoE(Operation):
 
             # WideEP MoE tables — SGLang-only.
             if database.backend == "sglang":
-                ctx_primary = os.path.join(data_dir, PerfDataFilename.wideep_context_moe.value)
+                ctx_primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_moe.value
+                )
                 ctx_sources = database._build_op_sources(
                     PerfDataFilename.wideep_context_moe, ctx_primary, system_data_root
                 )
@@ -233,7 +236,12 @@ class MoE(Operation):
                     ctx_primary,
                 )
 
-                gen_primary = os.path.join(data_dir, PerfDataFilename.wideep_generation_moe.value)
+                gen_primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.wideep_generation_moe.value,
+                )
                 gen_sources = database._build_op_sources(
                     PerfDataFilename.wideep_generation_moe, gen_primary, system_data_root
                 )
@@ -929,9 +937,13 @@ class MoEDispatch(Operation):
         if key not in cls._normal_data_cache:
             if database.backend == "sglang":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
 
-                normal_primary = os.path.join(data_dir, PerfDataFilename.wideep_deepep_normal.value)
+                normal_primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.wideep_deepep_normal.value,
+                )
                 normal_sources = database._build_op_sources(
                     PerfDataFilename.wideep_deepep_normal, normal_primary, system_data_root
                 )
@@ -941,7 +953,9 @@ class MoEDispatch(Operation):
                     normal_primary,
                 )
 
-                ll_primary = os.path.join(data_dir, PerfDataFilename.wideep_deepep_ll.value)
+                ll_primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_deepep_ll.value
+                )
                 ll_sources = database._build_op_sources(PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root)
                 cls._ll_data_cache[key] = LoadedOpData(
                     load_wideep_deepep_ll_data(ll_sources),
@@ -1492,8 +1506,9 @@ class TrtLLMWideEPMoE(Operation):
         if key not in cls._data_cache:
             if database.backend == "trtllm":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary = os.path.join(data_dir, PerfDataFilename.wideep_moe_compute.value)
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_moe_compute.value
+                )
                 sources = database._build_op_sources(PerfDataFilename.wideep_moe_compute, primary, system_data_root)
                 cls._data_cache[key] = LoadedOpData(
                     load_wideep_moe_compute_data(sources),
@@ -1935,8 +1950,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
         if key not in cls._data_cache:
             if database.backend == "trtllm":
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                data_dir = os.path.join(system_data_root, database.backend, database.version)
-                primary = os.path.join(data_dir, PerfDataFilename.trtllm_alltoall.value)
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.trtllm_alltoall.value
+                )
                 sources = database._build_op_sources(PerfDataFilename.trtllm_alltoall, primary, system_data_root)
                 cls._data_cache[key] = LoadedOpData(
                     load_trtllm_alltoall_data(sources),
@@ -2272,6 +2288,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 moe_ep_size,
                 quant_mode,
                 node_num,
+                kernel_source,
             )
 
         return database._query_silicon_or_hybrid(
@@ -2367,7 +2384,7 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
 
 # ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
 
 
@@ -2500,7 +2517,7 @@ def load_moe_data(moe_file):
 
 def load_wideep_context_moe_data(wideep_context_moe_file):
     """
-    Load the SGLang wideep context MoE data from wideep_context_moe_perf.txt
+    Load the SGLang WideEP context MoE data from wideep_context_moe_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2530,7 +2547,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         logger.debug("Legacy database format detected (wideep_context_moe) - power will default to 0.0")
 
     for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        # Parse the perf-table row schema with num_tokens instead of batch_size and input_len
         quant_mode = row["moe_dtype"]
         num_tokens = int(row["num_tokens"])
         hidden_size = int(row["hidden_size"])
@@ -2568,7 +2585,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
 
 def load_wideep_generation_moe_data(wideep_generation_moe_file):
     """
-    Load the SGLang wideep generation MoE data from wideep_generation_moe_perf.txt
+    Load the SGLang WideEP generation MoE data from wideep_generation_moe_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2598,7 +2615,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         logger.debug("Legacy database format detected (wideep_generation_moe) - power will default to 0.0")
 
     for row in rows:
-        # Parse the CSV format with num_tokens instead of batch_size and input_len
+        # Parse the perf-table row schema with num_tokens instead of batch_size and input_len
         quant_mode = row["moe_dtype"]
         num_tokens = int(row["num_tokens"])
         hidden_size = int(row["hidden_size"])
@@ -2636,7 +2653,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
 
 def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
     """
-    Load the SGLang wideep deepep LL operation data from wideep_deepep_ll_perf.txt
+    Load the SGLang WideEP DeepEP LL data from wideep_deepep_ll_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2690,7 +2707,7 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
 
 def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
     """
-    Load the SGLang wideep deepep normal operation data from wideep_deepep_normal_perf.txt
+    Load the SGLang WideEP DeepEP normal data from wideep_deepep_normal_perf.parquet
     with power support (backward compatible).
 
     Returns:
@@ -2748,7 +2765,7 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
 
 def load_wideep_moe_compute_data(wideep_moe_compute_file):
     """
-    Load the TensorRT-LLM wideep MoE compute data from wideep_moe_compute_perf.txt.
+    Load the TensorRT-LLM WideEP MoE compute data from wideep_moe_perf.parquet.
     This data represents pure computation time (excluding All2All communication).
 
     Returns:
@@ -2834,7 +2851,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
 
 def load_trtllm_alltoall_data(trtllm_alltoall_file):
     """
-    Load TensorRT-LLM AlltoAll communication perf data from trtllm_alltoall_perf.txt.
+    Load TensorRT-LLM AlltoAll data from trtllm_alltoall_perf.parquet.
     Covers both WideEP (NVLinkTwoSided) and CutlassFusedMoE (NVLinkOneSided) paths.
 
     Returns:

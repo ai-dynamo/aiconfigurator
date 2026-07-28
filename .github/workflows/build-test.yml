@@ -30,6 +30,44 @@ jobs:
           cargo-deny --version || cargo install cargo-deny@0.19.0
           cargo-deny --all-features check --show-stats licenses bans
 
+  core-public-api-contract:
+    name: aic-core public API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          lfs: true
+          fetch-depth: 0
+      - name: Git LFS Pull
+        run: git lfs pull
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.12'
+      - name: Test crate without Python embedding
+        run: cargo test --workspace --no-default-features
+      - name: Install the local wheel and upper compatibility package
+        run: |
+          python -m pip install uv
+          uv sync --extra dev
+      - name: Test Python package contracts
+        run: |
+          uv run pytest -q \
+            tests/cross_package/test_core_public_api.py \
+            tests/cross_package/test_core_version_contract.py \
+            tests/cross_package/test_import_contract.py
+      - name: Test crate with Python embedding
+        env:
+          AIC_REQUIRE_EMBEDDED_ROUND_TRIP: '1'
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.12/site-packages:${{ github.workspace }}/src
+        run: cargo test --workspace --all-features
+
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
@@ -95,7 +133,9 @@ jobs:
           echo "Running pytest paths: ${test_paths[*]}"
 
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
-          docker run --name aic aiconfigurator:test \
+          # Fail-closed loader provenance checks (Collector V3 design §7.4); the
+          # committed data tree is fully sidecar-covered post-PR3, so this must stay green.
+          docker run --name aic -e AIC_STRICT_PROVENANCE=1 aiconfigurator:test \
             pytest \
             "${test_paths[@]}" \
             -m "unit or build" \
@@ -107,99 +147,6 @@ jobs:
         run: |
             docker cp aic:/workspace/test_report.md ./test_report.md
 
-  spica-thorough-e2e:
-    name: Build and Test (Spica thorough e2e)
-    # Manual-only. This job builds a PINNED Dynamo (`aic-forward-pass`) against
-    # aiconfigurator-core, so it passes only when Dynamo's pinned mocker matches
-    # aic-core's current Rust API. Branches that evolve aic-core (e.g. new
-    # EngineConfig/ParallelMapping fields for context parallelism) break the
-    # pinned mocker's struct literals until Dynamo is updated and its pin bumped
-    # -- an expected failure the aiconfigurator PR cannot self-fix. Running it on
-    # every PR showed a confusing red check for that expected skew, so it is
-    # gated to manual `workflow_dispatch` runs. Trigger it from the Actions tab
-    # ("Run workflow") when validating the Dynamo replay path.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          persist-credentials: false
-          lfs: true
-          fetch-depth: 0
-      - name: Git LFS Pull
-        run: git lfs pull
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: '3.12'
-      - name: Install AIC and Spica test dependencies
-        run: |
-          python -m pip install uv
-          uv sync --extra dev --extra spica
-          uv pip install --python .venv/bin/python maturin
-      - name: Install Dynamo build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
-      - name: Checkout pinned Dynamo replay source
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          repository: ai-dynamo/dynamo
-          ref: cb7dc1a3a74018b7824ab7ef9d0191b80946758b
-          path: dynamo-src
-          persist-credentials: false
-          lfs: false
-      - name: Build Dynamo replay bindings with AIC perf model
-        working-directory: dynamo-src/lib/bindings/python
-        env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
-        run: |
-          VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
-            "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop \
-            --uv --release --features aic-forward-pass,mocker-kvbm-offload
-      - name: Install Dynamo replay and planner dependencies
-        # maturin installs ai-dynamo-runtime only; the planner modules exposed
-        # through PYTHONPATH below also need Dynamo's root + planner dependencies.
-        run: |
-          uv pip install --python .venv/bin/python \
-            --editable ./dynamo-src \
-            --requirement ./dynamo-src/container/deps/requirements.planner.txt
-      - name: Run Spica test suite
-        env:
-          PYTHONPATH: ${{ github.workspace }}/dynamo-src/components/src:${{ github.workspace }}/dynamo-src/lib/bindings/python/src
-        run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" \
-            tests/spica -vv --tb=short --maxfail=1 --timeout=600
-      - name: Run real Spica thorough sweeps
-        env:
-          AIC_RUN_SPICA_THOROUGH_E2E: 'true'
-          AIC_SPICA_THOROUGH_E2E_ARTIFACT_DIR: ${{ runner.temp }}/spica-thorough-e2e-results
-          PYTHONPATH: ${{ github.workspace }}/dynamo-src/components/src:${{ github.workspace }}/dynamo-src/lib/bindings/python/src
-        run: |
-          set +e
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" \
-            tests/e2e/cli/test_cli_default_thorough_sweep_real.py -vv
-          test_status=$?
-          set -e
-          for log_name in stdout.txt stderr.txt native_stdout.txt native_stderr.txt; do
-            log_path="${AIC_SPICA_THOROUGH_E2E_ARTIFACT_DIR}/${log_name}"
-            if [ -s "${log_path}" ]; then
-              echo "::group::${log_name}"
-              cat "${log_path}"
-              echo "::endgroup::"
-            fi
-          done
-          exit "${test_status}"
-      - name: Upload Spica thorough sweep results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: spica-thorough-e2e-results
-          path: ${{ runner.temp }}/spica-thorough-e2e-results
-          if-no-files-found: warn
-          retention-days: 30
 
   rust-engine-step-parity:
     name: Rust/Python engine-step parity
@@ -213,8 +160,8 @@ jobs:
           lfs: true
           fetch-depth: 0
       - name: Git LFS Pull
-        # The parity suite reads the collected perf parquet tables under
-        # aic-core/src/aiconfigurator_core/systems/data (stored via Git LFS).
+        # Current perf parquet tables are checked in directly; materialize any
+        # legacy LFS assets retained for compatibility coverage.
         run: git lfs pull
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -234,6 +181,16 @@ jobs:
           cd aic-core
           VIRTUAL_ENV="${GITHUB_WORKSPACE}/.venv" \
             "${GITHUB_WORKSPACE}/.venv/bin/maturin" develop --release
+      - name: Run Rust unit tests (cargo test)
+        # The crate's own oracle/unit tests were previously NOT in any gate,
+        # which let "match Python" pins go stale silently (e.g. the b200
+        # mem_bw test survived a YAML correction unnoticed). The py:: binding
+        # tests self-initialize the interpreter (prepare_freethreaded_python),
+        # so plain `cargo test --lib` covers them; PYO3_PYTHON pins the venv
+        # interpreter for linking.
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cargo test --release --lib
       - name: Run Rust/Python engine-step parity suite
         run: |
           "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \

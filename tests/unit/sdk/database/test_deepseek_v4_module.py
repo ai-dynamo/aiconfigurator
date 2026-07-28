@@ -636,7 +636,6 @@ def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
         moe_tp_size=1,
         moe_ep_size=1,
         nextn=1,
-        nextn_accept_rates=[0.85, 0.3, 0.0, 0.0, 0.0],
         overwrite_num_layers=2,
     )
     model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="trtllm")
