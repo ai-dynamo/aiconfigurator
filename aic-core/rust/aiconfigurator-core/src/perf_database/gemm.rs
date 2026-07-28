@@ -110,12 +110,18 @@ impl GemmTable {
     /// k_tail=3 util-hold beyond the sweep); unknown shape -> log2-IDW util
     /// transfer from <=4 covering neighbour sites within 2.0 octaves.
     pub fn query(&self, quant: GemmQuantMode, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
-        let grids = self.load_gemm()?;
         // `fp8_static` is a behavioral mode that reuses `fp8` perf tables,
         // mirroring Python `GEMM._normalize_for_lookup`. The
         // compute_scale / scale_matrix tables apply the same
         // normalization in their respective query methods.
         let lookup_quant = normalize_fp8_static_quant(quant);
+        // Resolve flops BEFORE any perf-data lookup: Python resolves at
+        // `_query_gemm_table` entry in every mode, so a missing dtype entry
+        // must classify as MissingSystemFlops on both engines — not as a
+        // data miss when the quant's table also happens to be uncollected.
+        let spec = &self.system_spec;
+        let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        let grids = self.load_gemm()?;
         let quant_name = lookup_quant.name();
         let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
             AicError::PerfDatabase(format!(
@@ -124,8 +130,6 @@ impl GemmTable {
                 grids.by_quant.keys().collect::<Vec<_>>(),
             ))
         })?;
-        let spec = &self.system_spec;
-        let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
         let sol = move |c: &[f64]| {
             gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
         };
@@ -821,6 +825,14 @@ mod tests {
             Err(AicError::MissingSystemFlops(msg)) => assert!(msg.contains("memory-only")),
             other => panic!("expected MissingSystemFlops, got {other:?}"),
         }
+
+        // Non-finite entries (e.g. YAML `.inf`) are placeholders/typos: +inf
+        // would zero sol_math and silently collapse SOL onto the memory roof.
+        spec.gpu.fp4_tc_flops = Some(f64::INFINITY);
+        assert!(matches!(
+            quant_tc_flops(&spec, Q::Nvfp4.mapping()),
+            Err(AicError::MissingSystemFlops(_))
+        ));
 
         // b300 breaks the fixed 4x ratio: the YAML entry must win.
         spec.gpu.fp4_tc_flops = Some(1.4e16);

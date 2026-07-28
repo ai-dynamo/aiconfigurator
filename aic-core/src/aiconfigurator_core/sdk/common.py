@@ -3,6 +3,7 @@
 
 import csv
 import json
+import math
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -1150,9 +1151,11 @@ def get_quant_tc_flops(system_spec: dict, quant_mode) -> float:
     # be a placeholder or a typo, and letting it through turns every SOL into
     # inf and load-time clamps into silent data corruption.
     value = system_spec["gpu"].get(key)
-    # `not value > 0` (rather than `value <= 0`) also rejects NaN, matching
-    # the Rust resolver's `filter(|v| *v > 0.0)`.
-    if value is None or not value > 0:
+    # Require a positive FINITE value: `not value > 0` alone rejects NaN but
+    # admits +inf (PyYAML parses `.inf`), which silently zeroes sol_math and
+    # collapses compute-bound SOL onto the memory roof. Matches the Rust
+    # resolver's `is_finite() && > 0.0` filter.
+    if value is None or not (value > 0 and math.isfinite(value)):
         raise MissingSystemFlopsError(
             f"quant mode '{quant_mode.value.name}' needs '{key}', which this system's YAML "
             f"does not define (or defines as a non-positive placeholder): either the platform "

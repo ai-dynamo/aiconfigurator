@@ -1343,13 +1343,16 @@ class TestRustTypedErrorsAcrossFfi:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # NVFP4 GEMM tables are not collected on h200/vllm/0.19.0: under
-        # SILICON, Rust hits `AicError::PerfDatabase` ("GEMM perf data missing
-        # for quant 'nvfp4'") at the query point — which must cross the FFI as
-        # the SAME sdk class Python raises, recognized by the cause-chain
-        # walker (the miss-classification the sweep/support-matrix rely on).
+        # MiMo-V2-Flash has head_dim=192 while b200/vllm/0.19.0 collected only
+        # {128, 256}: under SILICON, Rust hits `AicError::PerfDatabase` at the
+        # attention query point — which must cross the FFI as the SAME sdk
+        # class Python raises, recognized by the cause-chain walker (the
+        # miss-classification the sweep/support-matrix rely on). (The previous
+        # vehicle, NVFP4 GEMM on h200, now classifies as the strict
+        # MissingSystemFlopsError before any data lookup — h200 has no
+        # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="nvidia/MiniMax-M2.5-NVFP4", system_name="h200_sxm")
+        case = EngineStepParityCase(model_path="XiaomiMiMo/MiMo-V2-Flash")
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)
         assert perf_database.has_perf_data_not_available_cause(excinfo.value)

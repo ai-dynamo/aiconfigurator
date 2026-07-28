@@ -10,7 +10,7 @@ gpu:
   float32_tc_flops: 12280000000000 # 12.28TFLOPS
   bfloat16_tc_flops: 98304000000000 # 98.3TFLOPS
   int8_tc_flops: 197000000000000 # 197TOPS
-  fp8_tc_flops: 98304000000000 # same rate as bf16, NOT int8's 2x: collected vllm gemm data (0.12.0/0.20.0, 7581 shapes each) tops out at ~97.5 TFLOPS for fp8 = 99% of the bf16 peak, indicating fp8 runs on the bf16 pipeline (no native fp8 MMA)
+  fp8_tc_flops: 98304000000000 # B60 has no native FP8 matrix compute: vLLM's FP8 GEMM runs W8A16 on the BF16 pipeline, so FP8 executes at the BF16 rate (collected data ceiling ~99% of BF16 peak)
   power: 200 # Watt (Total Board Power)
 
 node:

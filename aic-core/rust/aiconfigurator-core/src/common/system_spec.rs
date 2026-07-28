@@ -83,7 +83,7 @@ pub(crate) fn quant_tc_flops(spec: &SystemSpec, mapping: QuantMapping) -> Result
         ComputeDtype::Fp8 => spec.gpu.fp8_tc_flops,
         ComputeDtype::Fp4 => spec.gpu.fp4_tc_flops,
     };
-    value.filter(|v| *v > 0.0).ok_or_else(|| {
+    value.filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
         AicError::MissingSystemFlops(format!(
             "quant mode '{}' needs '{}', which this system's YAML does not define (or defines \
              as a non-positive placeholder): either the platform does not support {:?} compute \
