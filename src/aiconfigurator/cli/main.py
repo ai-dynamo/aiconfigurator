@@ -1868,9 +1868,11 @@ def _execute_tasks(
                 if db_mode == common.DatabaseMode.SILICON.name
                 else ""
             )
+            # Load-target runs (recommend / auto-recommend) manage the GPU budget
+            # internally, so --total-gpus advice would point at an ignored flag.
             gpu_hint = (
                 "(2) the model does not fit — try a quantized model; "
-                if mode == "recommend"
+                if target_request_rate is not None or target_concurrency is not None
                 else "(2) the model does not fit — try a larger --total-gpus value or a quantized model; "
             )
             msg = (
@@ -2723,6 +2725,11 @@ def main(args):
         if getattr(args, "total_gpus", None) is None and has_load_target:
             _run_recommend(args)
             return
+        if has_load_target:
+            logger.warning(
+                "--target-request-rate/--target-concurrency are ignored in default mode when "
+                "--total-gpus is set. Omit --total-gpus to find the minimum GPUs for the load target."
+            )
 
         # Warn when SLA/workload parameters are implicitly defaulted
         _default_params = {"isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 30.0}

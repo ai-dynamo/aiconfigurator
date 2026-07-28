@@ -366,7 +366,7 @@ aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --bac
 **Required arguments:**
 - `--model-path` (alias `--model`): HuggingFace model path or local path containing `config.json`
 - `--system`: System name (GPU type)
-- One of:
+- Exactly one of the following (mutually exclusive):
   - `--target-request-rate`: Target system throughput in req/s
   - `--target-concurrency`: Target number of concurrent users
 

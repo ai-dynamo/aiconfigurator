@@ -121,7 +121,7 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
   `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
-- Use `recommend` to find the minimum GPU count and optimal deployment configuration needed to meet a performance target. This mode is designed as a procurement sizing tool -- specify a throughput target (`--target-request-rate` or `--target-concurrency`) along with SLA constraints, and the system calculates the minimum GPUs required. You can also omit `--total-gpus` in default mode with a load target for the same behavior.
+- Use `recommend` to find the minimum GPU count and optimal deployment configuration needed to meet a performance target. This mode is designed as a procurement sizing tool -- specify exactly one load target (`--target-request-rate` or `--target-concurrency` — mutually exclusive) along with SLA constraints, and the system calculates the minimum GPUs required. You can also omit `--total-gpus` in default mode with a load target for the same behavior.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
