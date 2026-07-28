@@ -33,7 +33,6 @@ from __future__ import annotations
 import dataclasses
 import functools
 import logging
-import math
 from typing import Any
 
 import numpy as np
@@ -61,8 +60,7 @@ logger = logging.getLogger(__name__)
 # (locked in via parity test; do not change without updating picking.py too).
 _RATE_MATCH_PREFILL_DEGRADATION = 0.9
 _RATE_MATCH_DECODE_DEGRADATION = 0.92
-# EPD: the encode pool suffers the same pipeline-bubble class of loss as
-# prefill (imperfect batch packing under bursty arrivals).
+# EPD: the encode pool takes the same class of loss as prefill.
 _RATE_MATCH_ENCODER_DEGRADATION = 0.9
 
 # TTFT pre-correction for queueing under concurrency, sourced from
@@ -74,24 +72,21 @@ _DECODE_FILTER_RATIO_MIN = 0.0
 _DECODE_FILTER_RATIO_MAX = 1.0
 _MAX_DECODE_WORKERS_PER_CATEGORY = 16
 _MAX_PREFILL_WORKERS = 32
+# EPD encode-pool size sweep bound, mirroring the P/D worker-list bounds.
+_MAX_ENCODE_WORKERS = 32
 
 # Default decode batch-size schedule for disagg worker enumeration.
 _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
     list(range(1, 16, 1)) + list(range(16, 32, 2)) + list(range(32, 128, 4)) + list(range(128, 512, 8)) + [512]
 )
 
-# Default EPD encode-worker search space.  TP mirrors a real encode
-# instance's --tp-size choices.  The batch schedule models cross-request
-# batching by the encode instance's greedy scheduler and is capped at
-# SGLang's default (SGLANG_ENCODER_MAX_BATCH_SIZE = 8) -- larger batches
-# do not exist in the deployed system, so sweeping them would credit the
-# encode pool with unreachable throughput.
+# Default EPD encode-worker search space; the batch schedule is capped at
+# SGLang's default (SGLANG_ENCODER_MAX_BATCH_SIZE = 8).
 _DEFAULT_ENCODER_TP_LIST: list[int] = [1, 2, 4, 8]
 _DEFAULT_ENCODER_BATCH_SCHEDULE: list[int] = [1, 2, 4, 8]
 
-# E+agg: agg-worker replicas explored per rate-matched cell.  Mirrors the
-# disagg worker lists (range(1, 33)); the cell only exists to express the
-# integer agg:encode worker ratio.
+# E+agg: agg-worker replicas explored per rate-matched cell (mirrors the
+# disagg worker lists, range(1, 33)).
 _MAX_AGG_WORKERS_EPD = 32
 
 # Default batch-size schedule used by sweep_agg.  Mirrors the schedule in
@@ -106,24 +101,6 @@ _DEFAULT_AGG_BATCH_SCHEDULE: list[int] = (
     + list(range(512, 1024, 256))
     + [1024]
 )
-
-
-def vl_effective_isl(model_path: str, runtime_config: config.RuntimeConfig) -> int:
-    """Per-request effective ISL: text ISL plus vision context tokens.
-
-    Single source of truth for the VL token accounting shared by ``Task``
-    (which builds token budgets as ``batch x effective_isl``) and
-    ``sweep_disagg`` (which divides the budget by the same value to recover
-    the batch range) -- deriving it in two places would silently break that
-    round trip.  Falls back to the plain text ISL when the model config
-    cannot be resolved or the model / workload has no vision input.
-    """
-    try:
-        enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-    except Exception:
-        logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-        return runtime_config.isl
-    return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +207,7 @@ def _rate_match_dict(
         "(d)backend": d.get("backend", ""),
         "(d)version": d.get("version", ""),
         "(d)system": d.get("system", ""),
-        # Encoder is colocated with prefill for VL; text-only models leave these
-        # visibility fields at zero/empty.  EPD overlays them via
+        # Colocated-encoder visibility fields; EPD overwrites them via
         # _overlay_encoder_stage.
         "(e)workers": 0,
         "(e)tp": 0,
@@ -445,18 +421,11 @@ def sweep_agg(
     proxy.
 
     ``enable_epd`` switches VL agg into E+agg: the vision encoder runs on
-    dedicated encode workers (same candidate space as EPD disagg,
-    ``encoder_tp_list x encoder_batch_list``) while prefill+decode stay
-    aggregated.  The agg worker becomes language-only (vision tokens stay in
-    context, no ViT hosted); each row is then a rate-matched cell of
-    ``(a)workers`` agg workers plus ``(e)workers`` encode workers, with the
-    encode batch latency added to TTFT.  ``num_gpu_list`` is the allowed
-    per-cell (per-replica) GPU counts for those cells, exactly as in
-    ``sweep_disagg``; it is unused outside EPD (a plain agg row is a single
-    worker whose GPU count is already gated by the parallel candidates).
-    Default (``enable_epd=False``) keeps the encoder inline (colocated): its
-    latency is part of the agg worker's TTFT and its weights part of the
-    worker's memory.
+    dedicated encode workers while the agg workers become language-only, and
+    each row is a rate-matched cell of ``(a)workers`` agg plus ``(e)workers``
+    encode workers with the encode batch latency added to TTFT.
+    ``num_gpu_list`` is the allowed per-cell GPU counts (as in
+    ``sweep_disagg``); it is unused outside EPD.
 
     Args:
         model_path: HuggingFace model path or local path.
@@ -492,10 +461,8 @@ def sweep_agg(
 
     encoder_candidates: list[dict] | None = None
     if enable_epd:
-        # E+agg: enumerate the encode-worker pool once (independent of the
-        # agg parallel choice), then sweep language-only agg workers.  The
-        # encode pool may live on its own system / GPU type (hetero
-        # encoder, ``encoder_database``); it defaults to the agg side.
+        # E+agg: enumerate the encode pool once; hetero encoder may use its
+        # own database (defaults to the agg side).
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
             tp_list=encoder_tp_list,
@@ -507,8 +474,7 @@ def sweep_agg(
         )
         model_config = copy.deepcopy(model_config)
         model_config.language_only = True
-    # Per-cell (per-replica) GPU budget for the E+agg rate matching, same
-    # semantics as sweep_disagg's num_gpu_list.
+    # Per-cell GPU budget for the E+agg rate matching (sweep_disagg semantics).
     epd_num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
 
     for parallel_config in parallel_config_list:
@@ -571,9 +537,8 @@ def sweep_agg(
                     backend=backend,
                     database=database,
                     runtime_config=point_rt,
-                    # EPD defers the top_k cut to the encoder pairing: cutting
-                    # the language-only rows here would let high-throughput
-                    # rows without encode headroom shadow the pairable ones.
+                    # EPD defers the top_k cut to the encoder pairing (a cut
+                    # here could shadow the only pairable rows).
                     top_k=0 if encoder_candidates is not None else top_k,
                     max_batch_size=max_batch_size,
                     ctx_stride=ctx_stride,
@@ -586,9 +551,8 @@ def sweep_agg(
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
                 if encoder_candidates is not None and len(point_df) > 0:
-                    # E+agg: the per-point ttft filter above ran on the
-                    # language-only ttft (a superset — adding the encode
-                    # latency only tightens it); pair exactly here.
+                    # The per-point ttft filter ran on the language-only ttft;
+                    # pair exactly here.
                     point_df = _rate_match_agg_epd(
                         point_df,
                         encoder_candidates,
@@ -768,25 +732,15 @@ def _get_encoder_worker_candidates(
 ) -> list[dict]:
     """Enumerate (tp, batch) encode-worker candidates for EPD.
 
-    An encode (E) worker runs only the vision encoder (ViT + projector) with
-    its own tensor parallelism, mirroring an encoder-only instance that loads
-    no LLM weights (e.g. SGLang ``--encoder-only``).  The worker model is
-    built directly from the encoder config: constructing the full LLM here
-    would waste work and, worse, let LLM-side parallelism rules (KV-head
-    divisibility, MoE width identities) reject a tp the ViT itself supports.
-    The ViT is weight-sharded over the worker's tp (encoder DP off): that is
-    the encoder-instance default of both engines (vLLM
-    ``mm_encoder_tp_mode="weights"``, SGLang ``mm_enable_dp_encoder=False``,
-    each independent of the disaggregation flags) -- the DP layout's benefit
-    (replicas over a colocated worker's LLM-sized tp group) is expressed in
-    EPD by sweeping multiple small-tp encode workers instead.
-    ``tp_list`` / ``b_list`` fall back to :data:`_DEFAULT_ENCODER_TP_LIST` /
-    :data:`_DEFAULT_ENCODER_BATCH_SCHEDULE` when None.
-    A worker encodes one batch of ``b`` requests (each with
-    ``num_images_per_request`` images) in ``encoder_latency`` ms, so its
-    throughput is ``b / encoder_latency``.  Per tp, batch points that do not
-    improve throughput over a smaller batch are dominated (same rate at
-    worse latency) and dropped.
+    An encode (E) worker runs only the vision encoder (ViT + projector),
+    mirroring an encoder-only instance that loads no LLM weights (e.g.
+    SGLang ``--encoder-only``), so only ViT-side rules constrain its tp.
+    The ViT is weight-sharded over the worker's tp (encoder DP off, the
+    engines' encoder-instance default); the DP layout's benefit is expressed
+    by sweeping multiple small-tp workers instead.  A worker encodes one
+    batch of ``b`` requests in ``encoder_latency`` ms (throughput
+    ``b / encoder_latency``); batch points that do not improve throughput
+    or exceed the encoder system's GPU memory are dropped.
 
     Returns row dicts with keys
     ``encoder_latency / seq/s / num_total_gpus / tp / bs / memory``.
@@ -794,8 +748,7 @@ def _get_encoder_worker_candidates(
     backend = get_backend(backend_name)
     enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
     if not isinstance(enc_cfg, common.VisionEncoderConfig):
-        # Config error, not a typing mistake: "no VisionEncoderConfig" means
-        # the model is not a VL model, so EPD cannot apply to it.
+        # Not a VL model -> EPD cannot apply (config error, not a type bug).
         raise ValueError(  # noqa: TRY004
             f"EPD (encoder disaggregation) requested but model {model_path!r} has no vision encoder."
         )
@@ -805,6 +758,9 @@ def _get_encoder_worker_candidates(
             "set image_height/image_width (or num_image_tokens) and num_images_per_request."
         )
     rows: list[dict] = []
+    saw_oom = False
+    # Same OOM gate as the P/D candidates (set_memory_and_check_oom).
+    mem_capacity_gib = database.system_spec["gpu"]["mem_capacity"] / (1 << 30)
     # The dominance filter below relies on ascending batch order.
     b_schedule = sorted(set(b_list or _DEFAULT_ENCODER_BATCH_SCHEDULE))
     for etp in sorted(set(tp_list or _DEFAULT_ENCODER_TP_LIST)):
@@ -817,8 +773,7 @@ def _get_encoder_worker_candidates(
         model = EncoderOnlyModel(
             encoder_ops=encoder_ops,
             encoder_config=enc_cfg,
-            # The ModelConfig slice the encoder phase reads; enable_encoder_dp
-            # stays off so the image batch is not ceil-sharded across ranks.
+            # The ModelConfig slice the encoder phase reads (DP off).
             config=config.ModelConfig(tp_size=etp, enable_encoder_dp=False),
         )
         best_seq_s = 0.0
@@ -826,6 +781,10 @@ def _get_encoder_worker_candidates(
             latency, power_w, memory = backend.run_encoder_static(
                 model, database, runtime_config, b, latency_correction_scale=latency_correction
             )
+            if memory.get("total", 0.0) >= mem_capacity_gib:
+                # Memory grows with batch: larger batches also OOM.
+                saw_oom = True
+                break
             seq_s = b * 1000.0 / latency
             if seq_s <= best_seq_s:
                 continue
@@ -842,6 +801,10 @@ def _get_encoder_worker_candidates(
                 }
             )
     if not rows:
+        if saw_oom:
+            raise InsufficientMemoryError(
+                "EPD encoder: the encode worker does not fit in GPU memory for any (tp, batch)."
+            )
         raise NoFeasibleConfigError("EPD encoder: no encode-worker candidate for any encoder tp.")
     return rows
 
@@ -856,22 +819,13 @@ def _overlay_encoder_stage(
 ) -> dict:
     """Overlay the encode stage onto a rate-matched P/D or agg row (EPD).
 
-    Encode -> prefill is sequential per request (prefill starts only after
-    the full image embedding arrives), so the encode batch latency adds to
-    TTFT and request latency.  ``ttft_scale`` keeps the queueing correction
-    symmetric with the non-EPD baseline: the disagg path passes the
-    autoscale TTFT correction factor (its inline-encoder prefill ttft is
-    corrected wholesale, so the disaggregated encode stage must be too),
-    while the agg path keeps 1.0 (run_agg adds the inline encoder outside
-    its queueing factor).  The ``encoder_latency`` column stays the raw
-    stage latency, like the inline rows.  Three-pool rate matching: when
-    the encode pool's degraded capacity is below the row throughput (the
-    matcher may pick an encode-bound cell), ``seq/s`` is capped at that
-    capacity and the rate-derived columns rescale with it; per-request
-    latency columns are unaffected (the batch latency does not depend on
-    the pool size).  ``power_w`` is re-weighted over the three-phase
-    timeline (encode + prefill + decode); the prefill phase reuses the
-    colocated worker's average power as an approximation.
+    Encode -> prefill is sequential per request, so the encode batch latency
+    adds to TTFT and request latency.  ``ttft_scale`` mirrors each baseline:
+    disagg corrects the encode stage like its prefill ttft (x1.8), agg adds
+    it raw (run_agg adds the inline encoder outside its queueing factor).
+    When the degraded encode pool capacity is below the row throughput,
+    ``seq/s`` is capped and the rate-derived columns rescale with it;
+    ``power_w`` is re-weighted over the encode + prefill + decode timeline.
     """
     row = dict(disagg_dict)
     encoder_latency = encoder_worker["encoder_latency"]
@@ -918,33 +872,23 @@ def _rate_match_agg_epd(
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
-    The agg counterpart of the disagg encoder rate matching + ``_overlay_encoder_stage``:
-    for each encode-worker choice, pair the agg rows whose encode latency
+    For each encode-worker choice, pair the agg rows whose encode latency
     still fits the TTFT budget -- best throughput first, up to ``top_k``
-    rows per choice (0 = uncapped), mirroring the per-choice
-    ``_prefill_records`` re-filter in the disagg path.  The caller hands
-    over the full SLA-feasible row set: a top_k cut on the language-only
-    rows *before* this pairing would let high-throughput rows without
-    encode headroom shadow the (possibly only) pairable rows.  For each
-    pairing, sweep cells of ``a`` agg workers + ``e`` encode workers
-    -- ``e`` up to the first count that no longer binds (larger pools are
-    dominated), smaller counts making the encode pool the rate-matched
-    bottleneck (cell throughput = min of the two pools, applied by the
-    overlay).  ``num_gpu_set`` is the per-replica GPU budget, exactly as in
-    the disagg matching: cells whose total GPU count is not allowed are
-    skipped *before* the argmax, so a feasible small cell is never shadowed
-    by an infeasible better-amortized large one.  Among feasible cells the
-    throughput-per-GPU argmax wins; ties keep the smaller cell.  The
-    returned rows are per-cell — ``(a)workers`` agg workers — so the
-    downstream replicas logic scales whole cells.
+    rows per choice (0 = uncapped); the caller hands over the full
+    SLA-feasible row set so a pre-cut cannot shadow the pairable rows.
+    Each pairing sweeps cells of ``a`` agg + ``e`` encode workers (cell
+    throughput = min of the two pools, applied by the overlay); cells whose
+    GPU total is not in ``num_gpu_set`` are skipped before the
+    throughput-per-GPU argmax, and ties keep the smaller cell.  Returned
+    rows are per-cell, so the downstream replicas logic scales whole cells.
     """
     records = agg_df.sort_values(by="seq/s", ascending=False).to_dict("records")
     rows: list[dict] = []
-    for enc in encoder_records:
-        encoder_capacity = float(enc["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
+    for enc_worker in encoder_records:
+        encoder_capacity = float(enc_worker["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
         paired = 0
         for r in records:
-            if enc["encoder_latency"] + r["ttft"] >= ttft_target:
+            if enc_worker["encoder_latency"] + r["ttft"] >= ttft_target:
                 continue
             rate_one = float(r["seq/s"])
             gpus_one = int(r["num_total_gpus"])
@@ -953,8 +897,8 @@ def _rate_match_agg_epd(
             best: tuple[tuple[float, int], int, int] | None = None
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
                 agg_rate = rate_one * a_num
-                for e_num in range(1, max(1, math.ceil(agg_rate / encoder_capacity)) + 1):
-                    num_gpu = gpus_one * a_num + enc["num_total_gpus"] * e_num
+                for e_num in range(1, _MAX_ENCODE_WORKERS + 1):
+                    num_gpu = gpus_one * a_num + enc_worker["num_total_gpus"] * e_num
                     if num_gpu_set and num_gpu not in num_gpu_set:
                         continue
                     cell_rate = min(agg_rate, encoder_capacity * e_num)
@@ -971,15 +915,12 @@ def _rate_match_agg_epd(
             cell["request_rate"] = cell["seq/s"]
             cell["concurrency"] = r["concurrency"] * a_num
             cell["num_total_gpus"] = gpus_one * a_num
-            # cell rate columns are the uncapped agg-side capacity; the
-            # overlay applies the min() with the encode pool and recomputes
-            # the per-GPU metrics with the encode GPUs included.  The agg
-            # worker covers both the prefill and decode phases of the power
-            # timeline.
+            # Cell rate columns are the uncapped agg-side capacity; the
+            # overlay applies the min() with the encode pool.
             rows.append(
                 _overlay_encoder_stage(
                     cell,
-                    enc,
+                    enc_worker,
                     e_num,
                     prefill_power=r.get("power_w", 0.0),
                     decode_power=r.get("power_w", 0.0),
@@ -1024,9 +965,7 @@ def _find_best_disagg_under_constraint(
 
     When ``encoder_records`` is given (EPD), each encode-worker choice spends
     its batch latency out of the TTFT budget before the prefill filter and
-    joins the worker rate matching as the third pool (``match_workers``
-    encoder arguments); the per-decode-parallel best is picked across encode
-    choices as well.
+    joins the worker rate matching as the third pool.
     """
 
     p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
@@ -1042,20 +981,19 @@ def _find_best_disagg_under_constraint(
             .to_dict("records")
         )
 
-    # EPD: encode -> prefill is sequential per request, so each encode choice
-    # consumes its latency from the TTFT budget -- under the same queueing
-    # correction as the prefill stage (the inline PD baseline corrects its
-    # whole E+P ttft, so correcting only P here would systematically favor
-    # EPD by the uncorrected encode share).  Plain PD is the single
-    # no-encoder choice with the full budget.
+    # Each encode choice spends its corrected (x1.8) latency out of the TTFT
+    # budget -- same correction as prefill, mirroring the inline PD baseline
+    # whose whole E+P ttft is corrected.  [None] = plain PD, full budget.
     encoder_choices: list[dict | None] = [None]
     if encoder_records:
         encoder_choices = [
             e for e in encoder_records if e["encoder_latency"] * autoscale_ttft_correction_factor < ttft_target
         ]
     p_records_per_choice = [
-        _prefill_records(ttft_target - (enc["encoder_latency"] * autoscale_ttft_correction_factor if enc else 0.0))
-        for enc in encoder_choices
+        _prefill_records(
+            ttft_target - (enc_worker["encoder_latency"] * autoscale_ttft_correction_factor if enc_worker else 0.0)
+        )
+        for enc_worker in encoder_choices
     ]
     if not any(p_records_per_choice):
         logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)
@@ -1079,7 +1017,7 @@ def _find_best_disagg_under_constraint(
         )
         decode_records = group_sorted.to_dict("records")
         category_results: list[dict] = []
-        for enc, p_records in zip(encoder_choices, p_records_per_choice, strict=True):
+        for enc_worker, p_records in zip(encoder_choices, p_records_per_choice, strict=True):
             for d_worker in decode_records:
                 d_throughput = float(d_worker["seq/s"])
                 d_gpus = d_worker["num_total_gpus"]
@@ -1095,8 +1033,8 @@ def _find_best_disagg_under_constraint(
                         decode_gpus=d_gpus,
                         prefill_deg=prefill_degradation,
                         decode_deg=decode_degradation,
-                        encoder_throughput=float(enc["seq/s"]) if enc else 0.0,
-                        encoder_gpus=enc["num_total_gpus"] if enc else 0,
+                        encoder_throughput=float(enc_worker["seq/s"]) if enc_worker else 0.0,
+                        encoder_gpus=enc_worker["num_total_gpus"] if enc_worker else 0,
                     )
                     if p_num == -1 or d_num == -1:
                         continue
@@ -1108,10 +1046,10 @@ def _find_best_disagg_under_constraint(
                         prefill_degradation=prefill_degradation,
                         decode_degradation=decode_degradation,
                     )
-                    if enc is not None:
+                    if enc_worker is not None:
                         disagg_dict = _overlay_encoder_stage(
                             disagg_dict,
-                            enc,
+                            enc_worker,
                             e_num,
                             prefill_power=p_worker.get("power_w", 0.0),
                             decode_power=d_worker.get("power_w", 0.0),
@@ -1179,13 +1117,9 @@ def sweep_disagg(
     hetero-disagg (prefill and decode on different systems).
 
     ``enable_epd`` switches VL disagg into EPD: the vision encoder runs on
-    dedicated encode workers, enumerated over
-    ``encoder_tp_list x encoder_batch_list`` (defaults
-    :data:`_DEFAULT_ENCODER_TP_LIST` / :data:`_DEFAULT_ENCODER_BATCH_SCHEDULE`)
-    on the prefill database/backend.  Prefill workers become language-only
-    (vision tokens stay in context, no ViT hosted), TTFT gains the encode
-    batch latency, and the encode pool joins the worker rate matching
-    (``(e)*`` columns in the output).
+    dedicated encode workers, prefill workers become language-only, TTFT
+    gains the encode batch latency, and the encode pool joins the worker
+    rate matching (``(e)*`` columns in the output).
 
     Returns:
         DataFrame (possibly empty) with schema ``common.ColumnsDisagg``.
@@ -1236,11 +1170,16 @@ def sweep_disagg(
     else:
         decode_batch_range = [b for b in _DEFAULT_DECODE_BATCH_SCHEDULE if b <= decode_max_num_tokens]
 
-    # Vision tokens occupy the prefill context, so the per-request cost that
-    # divides the token budget is the effective ISL (mirrors the legacy
-    # DisaggInferenceSession and the agg sweep above).  Task builds the
-    # budget with the same helper, so the caller's batch intent round-trips.
-    prefill_effective_isl = vl_effective_isl(model_path, runtime_config)
+    # The token budget divides by the effective ISL (text + vision context
+    # tokens); Task._prefill_effective_isl builds the budget the same way,
+    # so the caller's batch intent round-trips.
+    try:
+        enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        vision_tokens = BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+    except Exception:
+        logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
+        vision_tokens = 0
+    prefill_effective_isl = runtime_config.isl + vision_tokens
     if prefill_max_num_tokens < prefill_effective_isl:
         logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective ISL")
         prefill_max_num_tokens = prefill_effective_isl
@@ -1249,8 +1188,7 @@ def sweep_disagg(
 
     encoder_candidates: list[dict] | None = None
     if enable_epd:
-        # The encode pool may live on its own system / GPU type (hetero
-        # encoder, ``encoder_database``); it defaults to the prefill side.
+        # Hetero encoder: encoder_database defaults to the prefill side.
         encoder_candidates = _get_encoder_worker_candidates(
             model_path=model_path,
             tp_list=encoder_tp_list,
@@ -1260,8 +1198,7 @@ def sweep_disagg(
             backend_name=prefill_backend_name,
             latency_correction=encoder_latency_correction,
         )
-        # EPD prefill workers are language-only (e.g. SGLang --language-only):
-        # vision tokens stay in their context, but they never host the ViT.
+        # EPD prefill workers are language-only (vision tokens stay in context).
         prefill_model_config = copy.deepcopy(prefill_model_config)
         prefill_model_config.language_only = True
 
@@ -1336,13 +1273,10 @@ def sweep_disagg(
         tpot_values = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
         constraint_pairs = [(runtime_config.ttft, tpot) for tpot in tpot_values]
 
-    # Worker-count rate matching depends only on per-worker throughput/GPUs and the
-    # (constant) worker-count lists + GPU budget -- NOT on the (ttft, tpot) target.
-    # Define it once here so the cache is shared across every constraint pair.
-    # Nesting it inside _find_best_disagg_under_constraint rebuilt the cache per pair
-    # and recomputed identical matches (the dominant cost of the disagg sweep).
-    # Unbounded cache: the key space is the (p, d[, e]) candidate cross-product,
-    # which can exceed a default lru size but stays small in memory.
+    # Worker-count matching is independent of the (ttft, tpot) target, so the
+    # cache is defined once here and shared across constraint pairs (the
+    # matching is the dominant cost of the disagg sweep).  Unbounded: the
+    # (p, d[, e]) key cross-product can exceed a default lru size.
     @functools.cache
     def _match_workers(
         prefill_throughput: float,
@@ -1356,13 +1290,9 @@ def sweep_disagg(
     ) -> tuple[int, int, int]:
         """Pick (p_num, d_num, e_num) maximizing throughput per GPU.
 
-        The encode pool is the optional third rate-matched pool (EPD),
-        fully symmetric with P and D: its size is swept like theirs and the
-        achieved throughput is the min of the three degraded pool
-        capacities -- the encode pool may itself be the bottleneck, running
-        at its degradation headroom exactly like a binding P or D pool.
-        ``encoder_throughput = 0`` (plain PD) drops the encoder terms
-        entirely and returns ``e_num = 0``.
+        The encode pool is the optional third rate-matched pool (EPD): the
+        achieved throughput is the min of the degraded pool capacities.
+        ``encoder_throughput = 0`` (plain PD) returns ``e_num = 0``.
         """
         prefill_opt, decode_opt, encoder_opt = -1, -1, -1
         throughput_per_gpu_max = 0.0
@@ -1378,12 +1308,10 @@ def sweep_disagg(
                 d_corrected = decode_throughput * d_num * decode_deg
                 pd_required = min(p_corrected, d_corrected)
                 if encoder_capacity > 0:
-                    # Sweep the encode pool up to the first size that no
-                    # longer binds; larger pools are dominated (same
-                    # throughput, more GPUs).  Smaller sizes trade capped
-                    # throughput for GPUs -- and under a per-replica GPU
-                    # budget they are sometimes the only feasible cells.
-                    e_num_candidates = range(1, max(1, math.ceil(pd_required / encoder_capacity)) + 1)
+                    # Full sweep like the P/D worker lists: sizes past the
+                    # first non-binding one are throughput-dominated, but can
+                    # be the only counts that land in num_gpu_set.
+                    e_num_candidates = range(1, _MAX_ENCODE_WORKERS + 1)
                 else:
                     e_num_candidates = (0,)
                 for e_num in e_num_candidates:

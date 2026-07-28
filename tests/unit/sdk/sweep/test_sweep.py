@@ -544,15 +544,13 @@ def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
     assert (row["(e)tp"], row["(e)bs"]) == (2, 4)
 
 
-def test_sweep_disagg_epd_encoder_can_bottleneck_under_replica_budget(monkeypatch):
-    """Three-pool rate matching under a per-replica GPU budget.
+def test_sweep_disagg_epd_encoder_pool_sizing_under_replica_budget(monkeypatch):
+    """E-pool sizing under a per-replica GPU budget: bottleneck and padding.
 
-    p/d workers of 10 seq/s x 1 GPU each; encode worker 10 seq/s x 1 GPU
-    (degraded capacity 9).  Sizing the encode pool to never bottleneck needs
-    2 encode workers, but that cell (1p+1d+2e = 4 GPUs) is outside
-    num_gpu_list=[3]; the only feasible cell is 1p1d1e with the encode pool
-    as the rate-matched bottleneck: seq/s = 9 (min of the three pools), not
-    the P/D-matched 10.  A ceil-only sizing would emit nothing here.
+    Small pools trade capped throughput for GPUs (num_gpu_list=[3] forces
+    1p1d1e with the encode pool binding at 9 seq/s); over-provisioned pools
+    can be the only counts landing on the grid (num_gpu_list=[4] pads a
+    never-binding encoder to e=2, throughput uncapped).
     """
     import pandas as pd
 
@@ -611,7 +609,7 @@ def test_sweep_disagg_epd_encoder_can_bottleneck_under_replica_budget(monkeypatc
         ],
     )
 
-    row = sweep_disagg(
+    kwargs = dict(
         model_path="m",
         runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
         prefill_database=MagicMock(),
@@ -624,20 +622,79 @@ def test_sweep_disagg_epd_encoder_can_bottleneck_under_replica_budget(monkeypatc
         decode_model_config=config.ModelConfig(),
         decode_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
         decode_latency_correction=1.0,
-        prefill_num_worker_list=[1, 2],
-        decode_num_worker_list=[1, 2],
-        num_gpu_list=[3],
         rate_matching_prefill_degradation=1.0,
         rate_matching_decode_degradation=1.0,
         enable_epd=True,
         encoder_tp_list=[1],
-    ).iloc[0]
+    )
+    row = sweep_disagg(**kwargs, prefill_num_worker_list=[1, 2], decode_num_worker_list=[1, 2], num_gpu_list=[3]).iloc[
+        0
+    ]
 
     assert (row["(p)workers"], row["(d)workers"], row["(e)workers"]) == (1, 1, 1)
     assert row["num_total_gpus"] == 3
     # Encode pool binds: 10 * 1 * 0.9 = 9 < min(p, d) = 10.
     assert row["seq/s"] == pytest.approx(9.0)
     assert row["tokens/s/gpu"] == pytest.approx(900.0 / 3, abs=1e-3)
+
+    # Padding: a fast encode worker never binds at e=1, but only e=2 lands on
+    # the [4] grid.
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 100.0, "num_total_gpus": 1, "tp": 1, "bs": 4, "memory": 1.0}
+        ],
+    )
+    row = sweep_disagg(**kwargs, prefill_num_worker_list=[1], decode_num_worker_list=[1], num_gpu_list=[4]).iloc[0]
+    assert (row["(p)workers"], row["(d)workers"], row["(e)workers"]) == (1, 1, 2)
+    assert row["num_total_gpus"] == 4
+    assert row["seq/s"] == pytest.approx(10.0)
+
+
+def test_encoder_worker_candidates_gated_by_gpu_memory(monkeypatch):
+    """_get_encoder_worker_candidates drops (tp, batch) points that exceed the
+    encoder system's GPU memory."""
+    from aiconfigurator.sdk import common
+
+    enc_cfg = common.VisionEncoderConfig(
+        depth=2,
+        hidden_size=64,
+        num_heads=4,
+        intermediate_size=128,
+        patch_size=16,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        out_hidden_size=64,
+        projector_dims=((64, 64),),
+        projector_n_instances=1,
+        partial_rotary_factor=0.0,
+    )
+    monkeypatch.setattr(sweep, "get_model_config_from_model_path", lambda _path: {"extra_params": enc_cfg})
+    backend = MagicMock()
+    memory_by_batch = {1: 10.0, 2: 15.0, 4: 25.0}
+    backend.run_encoder_static.side_effect = lambda model, database, rc, b, latency_correction_scale=1.0: (
+        50.0,
+        100.0,
+        {"total": memory_by_batch[b]},
+    )
+    monkeypatch.setattr(sweep, "get_backend", lambda _name: backend)
+
+    database = MagicMock()
+    database.system_spec = {"gpu": {"mem_capacity": 20 * (1 << 30)}}
+    rows = sweep._get_encoder_worker_candidates(
+        model_path="m",
+        tp_list=[1],
+        b_list=None,
+        runtime_config=config.RuntimeConfig(
+            isl=1000, osl=100, ttft=200.0, tpot=10.0, image_height=256, image_width=256, num_images_per_request=1
+        ),
+        database=database,
+        backend_name="sglang",
+        latency_correction=1.0,
+    )
+    # batch 4 hits the 20 GiB gate and stops the schedule; 1 and 2 survive.
+    assert [r["bs"] for r in rows] == [1, 2]
 
 
 def test_sweep_agg_epd_respects_replica_budget(monkeypatch):
