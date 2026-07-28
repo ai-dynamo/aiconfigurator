@@ -595,6 +595,8 @@ Workers:
       - --dump-config-to
       - "/results/resolved-config-node{node_rank}.json"
 K8sConfig:
+  # Optional; the multinode default is lws.
+  fpm_orchestrator: grove
   fpm_shared_memory_size: 200Gi
   fpm_resource_labels:
     fpm.nvidia.com/run-id: glm52-example
@@ -624,9 +626,9 @@ artifacts/
 └── run.sh
 ```
 
-For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it is a keepalive `LeaderWorkerSet` whose size and per-node GPU limit come from the resolved topology. Both forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment exports and the complete resolved `python3 -m dynamo.vllm ...` command.
+For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it contains a keepalive `LeaderWorkerSet` by default or a `PodCliqueSet` when `K8sConfig.fpm_orchestrator` is `grove`. Its size and per-node GPU limit come from the resolved topology. GB200/MNNVL output also includes its `ComputeDomain` in the same YAML file. All forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment exports and the complete resolved `python3 -m dynamo.vllm ...` command.
 
-`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits an LWS and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. The target cluster must have the LeaderWorkerSet API and controller installed before applying a multinode artifact.
+`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove and its configured scheduler. The Collector exposes the same choice as `--fpm-orchestrator`.
 
 For one node, apply the Pod, wait for it to become ready, and stream the script into it:
 
@@ -636,7 +638,7 @@ kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
 kubectl exec -i <pod> -- bash -s < artifacts/run.sh
 ```
 
-For multiple nodes, the collector stages inputs first and then starts the same `run.sh` concurrently on every LWS Pod. The script requires the controller-injected `LWS_WORKER_INDEX` and `LWS_LEADER_ADDRESS` values to add the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
+For multiple nodes, the collector stages inputs first and then starts the same `run.sh` concurrently on every workload Pod. The script uses the controller-injected LWS or Grove discovery values to add the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
 
 With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v2 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. A terminal invalid result stops the script. The Collector still owns staging the case manifest, Scheduler adapter, preflight, optional pinned runtime overlay, and wrapper on every Pod, plus strict plan/workload/repeat validation, result download/aggregation/evidence, exit coordination, and cleanup.
 

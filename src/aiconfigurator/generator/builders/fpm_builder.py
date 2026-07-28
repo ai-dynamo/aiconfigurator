@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build the artifacts used for FPM collection.
 
-The FPM resource Pod or LeaderWorkerSet deliberately does not launch an engine.
-It reserves the same infrastructure as the normal vLLM worker and stays alive
-while a collector streams the generated ``run.sh`` into it.
+The FPM resource Pod, LeaderWorkerSet, or PodCliqueSet deliberately does not
+launch an engine. It reserves the same infrastructure as the normal vLLM
+worker and stays alive while a collector streams the generated ``run.sh`` into
+it.
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ from typing import Any
 
 from aiconfigurator.fpm_contract import FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION
 
-from .dgd_model import DGD, DGDService, MainContainer, _dump_k8s_yaml
+from .dgd_model import DGD, ComputeDomainDoc, DGDService, MainContainer, _dump_k8s_yaml
 from .k8s_builder import build_dgd
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MISSING = object()
 _NODE_RANK_SENTINEL = "__FPM_NODE_RANK__"
 _FPM_BENCHMARK_MODES = ("agg", "prefill", "decode")
+_FPM_ORCHESTRATORS = frozenset({"lws", "grove"})
 _FPM_OWNED_ORCHESTRATION_FLAGS = frozenset(
     {
         "--nnodes",
@@ -48,9 +50,9 @@ def build_fpm_artifacts(
     """Return a reusable resource workload and a complete FPM engine script.
 
     The existing DGD builder remains the source of truth for infrastructure.
-    This function lowers its one aggregated worker to a Pod (single node) or a
-    LeaderWorkerSet (multiple nodes), while moving every concrete environment
-    variable and the engine command into ``run.sh``.
+    This function lowers its one aggregated worker to a Pod (single node) or
+    the selected multi-node orchestrator, while moving every concrete
+    environment variable and the engine command into ``run.sh``.
     """
     if backend != "vllm":
         raise ValueError("FPM V1 supports only the vllm backend")
@@ -67,7 +69,7 @@ def build_fpm_artifacts(
 
     extra_cli_args = _extract_extra_cli_args(param_values)
     _reject_owned_orchestration_args(extra_cli_args)
-    worker = _build_worker(context, backend, resolved_facts)
+    worker, compute_domain = _build_worker(context, backend, resolved_facts)
     main_container = _require_main_container(worker)
 
     command = list(main_container.command or [])
@@ -88,6 +90,8 @@ def build_fpm_artifacts(
     _ensure_dump_config_path(args, topology["node_count"])
     benchmark_output_path = _ensure_benchmark_output_path(args, env)
     wait_timeout_seconds = _benchmark_wait_timeout_seconds(args)
+    orchestrator = _fpm_orchestrator(context)
+    preserve_compute_domain = topology["node_count"] > 1 and _requires_mnnvl_compute_domain(resolved_facts)
     run_script = _render_run_script(
         command + args,
         env,
@@ -102,11 +106,20 @@ def build_fpm_artifacts(
         worker,
         main_container,
         topology,
+        orchestrator=orchestrator,
+        compute_domain=compute_domain,
+        preserve_compute_domain=preserve_compute_domain,
         efa_resource_name=_efa_resource_name(resolved_facts),
+    )
+    resource_documents = _resource_documents(
+        workload,
+        compute_domain,
+        topology,
+        preserve_compute_domain=preserve_compute_domain,
     )
 
     return {
-        "k8s_deploy.yaml": _dump_k8s_yaml(workload),
+        "k8s_deploy.yaml": "---\n".join(_dump_k8s_yaml(document) for document in resource_documents),
         "run.sh": run_script,
     }
 
@@ -171,11 +184,18 @@ def _ensure_dump_config_path(args: list[str], node_count: int) -> None:
     args[index] = f"{flag}={value}" if joined else value
 
 
-def _build_worker(context: dict[str, Any], backend: str, resolved_facts: Any) -> DGDService:
+def _build_worker(
+    context: dict[str, Any],
+    backend: str,
+    resolved_facts: Any,
+) -> tuple[DGDService, ComputeDomainDoc | None]:
     docs = build_dgd(context, backend, resolved_facts=resolved_facts)
     dgd_docs = [doc for doc in docs if isinstance(doc, DGD)]
     if len(dgd_docs) != 1:
         raise ValueError("FPM V1 requires exactly one DynamoGraphDeployment document")
+    compute_domains = [doc for doc in docs if isinstance(doc, ComputeDomainDoc)]
+    if len(compute_domains) > 1:
+        raise ValueError("FPM V1 supports at most one ComputeDomain document")
 
     workers = [(name, service) for name, service in dgd_docs[0].services.items() if service.component_type == "worker"]
     if len(workers) != 1 or workers[0][0] != "VllmWorker":
@@ -184,7 +204,33 @@ def _build_worker(context: dict[str, Any], backend: str, resolved_facts: Any) ->
     worker = workers[0][1]
     if worker.replicas != 1:
         raise ValueError("FPM V1 requires worker replicas=1")
-    return worker
+    return worker, compute_domains[0] if compute_domains else None
+
+
+def _requires_mnnvl_compute_domain(resolved_facts: Any) -> bool:
+    hardware = getattr(resolved_facts, "hardware", None)
+    if not isinstance(hardware, dict):
+        return False
+    nccl_env = hardware.get("nccl_env") or {}
+    if not isinstance(nccl_env, dict):
+        return False
+    return str(nccl_env.get("NCCL_MNNVL_ENABLE", "")).strip() == "1"
+
+
+def _fpm_orchestrator(context: dict[str, Any]) -> str:
+    k8s = context.get("K8sConfig") or {}
+    if not isinstance(k8s, dict):
+        raise TypeError("K8sConfig must be a mapping")
+    orchestrator = k8s.get("fpm_orchestrator", "lws")
+    # Older request/template versions materialize absent optional values as an
+    # empty string. Treat that representation exactly like the historical
+    # default so existing frozen requests continue to render LWS artifacts.
+    if orchestrator in (None, ""):
+        orchestrator = "lws"
+    if not isinstance(orchestrator, str) or orchestrator not in _FPM_ORCHESTRATORS:
+        allowed = ", ".join(sorted(_FPM_ORCHESTRATORS))
+        raise ValueError(f"K8sConfig.fpm_orchestrator must be one of: {allowed}")
+    return orchestrator
 
 
 def _positive_cli_int(args: list[str], flag: str, *, default: int = 1) -> int:
@@ -431,11 +477,18 @@ def _render_run_script(
             f"data_parallel_size={topology['data_parallel_size']}",
             f"local_data_parallel_size={topology['local_data_parallel_size']}",
             "if (( node_count > 1 )); then",
-            '  node_rank="${LWS_WORKER_INDEX:?LWS_WORKER_INDEX is required for multinode FPM}"',
-            '  master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"',
+            '  node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-}}}"',
+            '  master_addr="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-}}"',
+            '  if [[ -z "$master_addr" && -n "${GROVE_PCLQ_NAME:-}" && -n "${GROVE_HEADLESS_SERVICE:-}" ]]; then',
+            '    master_addr="${GROVE_PCLQ_NAME}-0.${GROVE_HEADLESS_SERVICE}"',
+            "  fi",
+            '  if [[ -z "$node_rank" || -z "$master_addr" ]]; then',
+            '    echo "Multinode FPM requires rank and leader discovery from FPM_NODE_*, LWS, or Grove" >&2',
+            "    exit 2",
+            "  fi",
             "else",
-            '  node_rank="${LWS_WORKER_INDEX:-0}"',
-            '  master_addr="${LWS_LEADER_ADDRESS:-127.0.0.1}"',
+            '  node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-0}}}"',
+            '  master_addr="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-127.0.0.1}}"',
             "fi",
             'if ! [[ "$node_rank" =~ ^[0-9]+$ ]] || (( node_rank >= node_count )); then',
             '  echo "Invalid FPM node rank: $node_rank (node_count=$node_count)" >&2',
@@ -730,17 +783,26 @@ def _lower_worker_to_resource(
     main_container: MainContainer,
     topology: dict[str, int],
     *,
+    orchestrator: str,
+    compute_domain: ComputeDomainDoc | None,
+    preserve_compute_domain: bool,
     efa_resource_name: str | None,
 ) -> dict[str, Any]:
     k8s = context.get("K8sConfig") or {}
     if not isinstance(k8s, dict):
         raise TypeError("K8sConfig must be a mapping")
+    compute_domain_channel = compute_domain.channel_name if compute_domain is not None else None
+    if compute_domain_channel is not None and (
+        not isinstance(compute_domain_channel, str) or not compute_domain_channel
+    ):
+        raise ValueError("FPM ComputeDomain requires a non-empty resource claim template name")
     pod_spec = _lower_worker_pod_spec(
         worker,
         main_container,
         topology["gpus_per_node"],
         shared_memory_size=k8s.get("fpm_shared_memory_size"),
-        compute_domain_name=(f"{context.get('name')}-compute-domain-channel" if topology["node_count"] > 1 else None),
+        compute_domain_name=compute_domain_channel,
+        preserve_compute_domain=preserve_compute_domain,
         efa_resource_name=efa_resource_name,
     )
     metadata = _resource_metadata(context)
@@ -753,8 +815,36 @@ def _lower_worker_to_resource(
         }
 
     if len(metadata["name"]) > 50:
-        raise ValueError("FPM LeaderWorkerSet names must be at most 50 characters")
+        raise ValueError("FPM multi-node resource names must be at most 50 characters")
     pod_labels = copy.deepcopy(metadata["labels"])
+    if orchestrator == "grove":
+        pod_labels.setdefault("kai.scheduler/queue", "dynamo")
+        pod_spec.setdefault("schedulerName", "kai-scheduler")
+        return {
+            "apiVersion": "grove.io/v1alpha1",
+            "kind": "PodCliqueSet",
+            "metadata": metadata,
+            "spec": {
+                "replicas": 1,
+                "template": {
+                    "cliqueStartupType": "CliqueStartupTypeAnyOrder",
+                    "headlessServiceConfig": {"publishNotReadyAddresses": True},
+                    "cliques": [
+                        {
+                            "name": "worker",
+                            "labels": pod_labels,
+                            "spec": {
+                                "roleName": "worker",
+                                "replicas": topology["node_count"],
+                                "minAvailable": topology["node_count"],
+                                "podSpec": pod_spec,
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+
     pod_template = {
         "metadata": {"labels": pod_labels},
         "spec": pod_spec,
@@ -775,6 +865,22 @@ def _lower_worker_to_resource(
             },
         },
     }
+
+
+def _resource_documents(
+    workload: dict[str, Any],
+    compute_domain: ComputeDomainDoc | None,
+    topology: dict[str, int],
+    *,
+    preserve_compute_domain: bool,
+) -> list[dict[str, Any]]:
+    if not preserve_compute_domain:
+        return [workload]
+    if topology["node_count"] <= 1:
+        raise ValueError("FPM single-node workload must not require a ComputeDomain document")
+    if compute_domain is None:
+        raise ValueError("FPM multinode workload requires a ComputeDomain document")
+    return [compute_domain.to_dict(), workload]
 
 
 def _resource_metadata(context: dict[str, Any]) -> dict[str, Any]:
@@ -809,8 +915,8 @@ def _resource_metadata(context: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _drop_compute_domain_claims(pod_spec: dict[str, Any], expected_template_name: str | None) -> None:
-    claims = pod_spec.pop("resourceClaims", None) or []
+def _validate_compute_domain_claims(pod_spec: dict[str, Any], expected_template_name: str | None) -> None:
+    claims = pod_spec.get("resourceClaims") or []
     if not isinstance(claims, list):
         raise TypeError("Pod resourceClaims must be a list")
     expected = (
@@ -834,6 +940,7 @@ def _lower_worker_pod_spec(
     *,
     shared_memory_size: Any = None,
     compute_domain_name: str | None = None,
+    preserve_compute_domain: bool = False,
     efa_resource_name: str | None = None,
 ) -> dict[str, Any]:
     extra_pod_spec = worker.extra_pod_spec
@@ -842,7 +949,9 @@ def _lower_worker_pod_spec(
 
     pod_spec = extra_pod_spec.to_dict()
     pod_spec.pop("mainContainer", None)
-    _drop_compute_domain_claims(pod_spec, compute_domain_name)
+    _validate_compute_domain_claims(pod_spec, compute_domain_name)
+    if not preserve_compute_domain:
+        pod_spec.pop("resourceClaims", None)
 
     container = main_container.to_dict()
     if container.get("envFrom"):
@@ -907,6 +1016,7 @@ def _lower_worker_pod_spec(
                     worker.resources,
                     gpu_limit=gpus_per_node,
                     allow_compute_domain_claim=compute_domain_name is not None,
+                    preserve_compute_domain_claim=preserve_compute_domain,
                     efa_resource_name=efa_resource_name,
                 ),
                 resource_override,
@@ -929,6 +1039,7 @@ def _lower_resources(
     *,
     gpu_limit: int,
     allow_compute_domain_claim: bool,
+    preserve_compute_domain_claim: bool,
     efa_resource_name: str | None,
 ) -> dict[str, Any]:
     if not isinstance(resources, dict):
@@ -941,6 +1052,8 @@ def _lower_resources(
         raise ValueError("FPM does not support user-provided resource claims")
 
     lowered: dict[str, Any] = {}
+    if claims and preserve_compute_domain_claim:
+        lowered["claims"] = copy.deepcopy(claims)
     for section_name in ("limits", "requests"):
         section = resources.get(section_name)
         if section is None:

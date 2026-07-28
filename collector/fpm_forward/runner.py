@@ -49,6 +49,8 @@ _FPM_VLLM_RUNTIME_ARGS = (
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"
+_FPM_WORKLOAD_KINDS = frozenset({"Pod", "LeaderWorkerSet", "PodCliqueSet"})
+_FPM_AUXILIARY_KINDS = frozenset({"ComputeDomain"})
 
 
 def _utc_now() -> str:
@@ -110,6 +112,49 @@ def _kubectl_command() -> list[str]:
     raise RuntimeError("neither kubectl nor tsh is available")
 
 
+def _manifest_documents(manifest: Path) -> list[dict[str, Any]]:
+    documents = list(yaml.safe_load_all(manifest.read_text()))
+    if not documents or any(not isinstance(document, dict) for document in documents):
+        raise TypeError("generated k8s_deploy.yaml must contain only YAML mappings")
+    unsupported = {
+        str(document.get("kind"))
+        for document in documents
+        if document.get("kind") not in _FPM_WORKLOAD_KINDS | _FPM_AUXILIARY_KINDS
+    }
+    if unsupported:
+        raise ValueError(f"unsupported generated FPM resource kinds: {sorted(unsupported)}")
+    return documents
+
+
+def _workload_document(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    workloads = [document for document in documents if document.get("kind") in _FPM_WORKLOAD_KINDS]
+    if len(workloads) != 1:
+        raise ValueError("generated k8s_deploy.yaml must contain exactly one Pod, LeaderWorkerSet, or PodCliqueSet")
+    workload = workloads[0]
+    compute_domains = [document for document in documents if document.get("kind") == "ComputeDomain"]
+    if len(compute_domains) > 1:
+        raise ValueError("generated k8s_deploy.yaml supports at most one ComputeDomain")
+    if compute_domains and workload.get("kind") not in {"LeaderWorkerSet", "PodCliqueSet"}:
+        raise ValueError("generated ComputeDomain requires a multi-node workload")
+    workload_namespace = str((workload.get("metadata") or {}).get("namespace") or "default")
+    for document in documents:
+        namespace = str((document.get("metadata") or {}).get("namespace") or "default")
+        if namespace != workload_namespace:
+            raise ValueError("all generated FPM resources must use the workload namespace")
+    return workload
+
+
+def _resource_identity(document: dict[str, Any]) -> tuple[str, str, str]:
+    metadata = document.get("metadata")
+    if not isinstance(metadata, dict):
+        raise TypeError("generated FPM resources require metadata mappings")
+    kind = document.get("kind")
+    name = metadata.get("name")
+    if not isinstance(kind, str) or not kind or not isinstance(name, str) or not name:
+        raise ValueError("generated FPM resources require non-empty kind and metadata.name")
+    return kind, name, str(metadata.get("namespace") or "default")
+
+
 def _run_command(
     args: list[str],
     *,
@@ -127,21 +172,30 @@ def _run_command(
 
 
 class KubernetesCellRunner:
-    """Own one generated Pod/LWS from apply through verified deletion."""
+    """Own one generated Pod/LWS/PCS and auxiliary resources through deletion."""
 
     def __init__(self, manifest: Path, cell_dir: Path) -> None:
         self.manifest = manifest
         self.cell_dir = cell_dir
-        workload = yaml.safe_load(manifest.read_text())
-        if not isinstance(workload, dict):
-            raise TypeError("generated k8s_deploy.yaml must be one YAML mapping")
+        documents = _manifest_documents(manifest)
+        workload = _workload_document(documents)
         metadata = workload.get("metadata") or {}
         self.name = str(metadata["name"])
         self.namespace = str(metadata.get("namespace") or "default")
         self.kind = str(workload["kind"])
         self.expected_labels = dict(metadata.get("labels") or {})
-        self.selector = f"app.kubernetes.io/name={self.name}"
+        selector_label = "app.kubernetes.io/part-of" if self.kind == "PodCliqueSet" else "app.kubernetes.io/name"
+        self.selector = f"{selector_label}={self.name}"
+        self.resources = [_resource_identity(document) for document in documents]
+        if len(set(self.resources)) != len(self.resources):
+            raise ValueError("generated k8s_deploy.yaml contains duplicate resources")
         self.kubectl = _kubectl_command()
+
+    def _owned_resources(self) -> list[tuple[str, str, str]]:
+        resources = getattr(self, "resources", None)
+        if resources is not None:
+            return resources
+        return [(self.kind, self.name, self.namespace)]
 
     def _kubectl(self, *args: str, check: bool = True, timeout: int | None = None):
         return _run_command([*self.kubectl, *args], check=check, timeout=timeout)
@@ -184,8 +238,6 @@ class KubernetesCellRunner:
             "--validate=false",
             "-f",
             str(self.manifest),
-            "-o",
-            "json",
             check=False,
             timeout=120,
         )
@@ -194,24 +246,42 @@ class KubernetesCellRunner:
             raise RuntimeError(
                 f"kubectl apply failed for {self.kind}/{self.name}: apply_exit={applied.returncode}, output={detail!r}"
             )
-        try:
-            payload = json.loads(applied.stdout)
-        except json.JSONDecodeError as error:
-            detail = (applied.stderr or applied.stdout).strip()
-            raise RuntimeError(
-                f"kubectl apply returned no verifiable object for {self.kind}/{self.name}: output={detail!r}"
-            ) from error
-        metadata = payload.get("metadata") if isinstance(payload, dict) else None
-        labels = metadata.get("labels") if isinstance(metadata, dict) else None
-        if (
-            not isinstance(payload, dict)
-            or payload.get("kind") != self.kind
-            or not isinstance(metadata, dict)
-            or metadata.get("name") != self.name
-            or not isinstance(labels, dict)
-            or any(labels.get(key) != value for key, value in self.expected_labels.items())
-        ):
-            raise RuntimeError(f"kubectl apply returned the wrong object for {self.kind}/{self.name}: {payload!r}")
+        for kind, name, namespace in self._owned_resources():
+            observed = self._kubectl(
+                "get",
+                f"{kind}/{name}",
+                "-n",
+                namespace,
+                "-o",
+                "json",
+                check=False,
+                timeout=60,
+            )
+            try:
+                payload = json.loads(observed.stdout)
+            except json.JSONDecodeError as error:
+                detail = (observed.stderr or observed.stdout).strip()
+                raise RuntimeError(
+                    f"kubectl apply returned no verifiable object for {kind}/{name}: output={detail!r}"
+                ) from error
+            metadata = payload.get("metadata") if isinstance(payload, dict) else None
+            labels = metadata.get("labels") if isinstance(metadata, dict) else None
+            verify_labels = kind == self.kind and name == self.name
+            if (
+                observed.returncode != 0
+                or not isinstance(payload, dict)
+                or payload.get("kind") != kind
+                or not isinstance(metadata, dict)
+                or metadata.get("name") != name
+                or (
+                    verify_labels
+                    and (
+                        not isinstance(labels, dict)
+                        or any(labels.get(key) != value for key, value in self.expected_labels.items())
+                    )
+                )
+            ):
+                raise RuntimeError(f"kubectl apply returned the wrong object for {kind}/{name}: {payload!r}")
 
     def pods(self, *, include_terminating: bool = True) -> list[str]:
         result = self._kubectl(
@@ -599,38 +669,37 @@ class KubernetesCellRunner:
             check=False,
             timeout=240,
         )
-        observed = self._kubectl(
-            "get",
-            f"{self.kind}/{self.name}",
-            "-n",
-            self.namespace,
-            "-o",
-            "json",
-            check=False,
-            timeout=60,
-        )
-        detail = (observed.stderr or observed.stdout).strip()
-        if observed.returncode == 0:
-            try:
-                payload = json.loads(observed.stdout)
-            except json.JSONDecodeError as error:
-                if "notfound" not in detail.replace(" ", "").lower():
-                    raise RuntimeError(
-                        f"could not verify deletion of {self.kind}/{self.name}: "
-                        f"delete_exit={deleted.returncode}, output={detail!r}"
-                    ) from error
-            else:
-                metadata = payload.get("metadata") if isinstance(payload, dict) else None
-                if isinstance(metadata, dict) and metadata.get("name") == self.name:
-                    raise RuntimeError(f"owned FPM resource remains after cleanup: {self.kind}/{self.name}")
-                raise RuntimeError(
-                    f"kubectl returned an unexpected deletion probe for {self.kind}/{self.name}: {payload!r}"
-                )
-        elif "notfound" not in detail.replace(" ", "").lower():
-            raise RuntimeError(
-                f"could not verify deletion of {self.kind}/{self.name}: "
-                f"delete_exit={deleted.returncode}, get_exit={observed.returncode}, output={detail!r}"
+        for kind, name, namespace in self._owned_resources():
+            observed = self._kubectl(
+                "get",
+                f"{kind}/{name}",
+                "-n",
+                namespace,
+                "-o",
+                "json",
+                check=False,
+                timeout=60,
             )
+            detail = (observed.stderr or observed.stdout).strip()
+            if observed.returncode == 0:
+                try:
+                    payload = json.loads(observed.stdout)
+                except json.JSONDecodeError as error:
+                    if "notfound" not in detail.replace(" ", "").lower():
+                        raise RuntimeError(
+                            f"could not verify deletion of {kind}/{name}: "
+                            f"delete_exit={deleted.returncode}, output={detail!r}"
+                        ) from error
+                else:
+                    metadata = payload.get("metadata") if isinstance(payload, dict) else None
+                    if isinstance(metadata, dict) and metadata.get("name") == name:
+                        raise RuntimeError(f"owned FPM resource remains after cleanup: {kind}/{name}")
+                    raise RuntimeError(f"kubectl returned an unexpected deletion probe for {kind}/{name}: {payload!r}")
+            elif "notfound" not in detail.replace(" ", "").lower():
+                raise RuntimeError(
+                    f"could not verify deletion of {kind}/{name}: "
+                    f"delete_exit={deleted.returncode}, get_exit={observed.returncode}, output={detail!r}"
+                )
         # Foreground cascading keeps the parent alive until its dependants are
         # deleted.  An eventually-consistent list may still expose Pod objects
         # that already carry deletionTimestamp; those no longer represent a
@@ -869,11 +938,33 @@ def _render_cell(
 
 
 def _expected_nodes(manifest: Path) -> int:
-    payload = yaml.safe_load(manifest.read_text())
+    payload = _workload_document(_manifest_documents(manifest))
     if payload["kind"] == "Pod":
         return 1
     if payload["kind"] == "LeaderWorkerSet":
         return int(payload["spec"]["leaderWorkerTemplate"]["size"])
+    if payload["kind"] == "PodCliqueSet":
+        spec = payload.get("spec") or {}
+        if not isinstance(spec, dict):
+            raise ValueError("FPM PodCliqueSet spec must be a mapping")
+        replicas = spec.get("replicas")
+        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas != 1:
+            raise ValueError("FPM PodCliqueSet spec.replicas must be 1")
+        template = spec.get("template") or {}
+        if not isinstance(template, dict):
+            raise ValueError("FPM PodCliqueSet spec.template must be a mapping")
+        cliques = template.get("cliques") or []
+        if not isinstance(cliques, list) or not cliques:
+            raise ValueError("FPM PodCliqueSet requires at least one clique")
+        total = 0
+        for clique in cliques:
+            if not isinstance(clique, dict) or not isinstance(clique.get("spec"), dict):
+                raise TypeError("FPM PodCliqueSet cliques must be mappings with spec")
+            clique_replicas = clique["spec"].get("replicas")
+            if not isinstance(clique_replicas, int) or isinstance(clique_replicas, bool) or clique_replicas < 1:
+                raise ValueError("FPM PodCliqueSet clique replicas must be positive integers")
+            total += clique_replicas
+        return total
     raise ValueError(f"unsupported generated FPM workload kind: {payload.get('kind')}")
 
 

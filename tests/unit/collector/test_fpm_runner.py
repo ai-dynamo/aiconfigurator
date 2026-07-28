@@ -40,6 +40,82 @@ def _runner(tmp_path) -> KubernetesCellRunner:
     return runner
 
 
+def _multinode_manifest(path: Path) -> Path:
+    path.write_text(
+        """\
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: cell-compute-domain
+  namespace: test
+spec:
+  channel:
+    resourceClaimTemplate:
+      name: cell-compute-domain-channel
+  numNodes: 0
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: cell
+  namespace: test
+  labels:
+    app.kubernetes.io/name: cell
+spec:
+  leaderWorkerTemplate:
+    size: 2
+"""
+    )
+    return path
+
+
+def _podcliqueset_manifest(
+    path: Path,
+    *,
+    spec: dict | None = None,
+    include_compute_domain: bool = False,
+) -> Path:
+    workload = {
+        "apiVersion": "grove.io/v1alpha1",
+        "kind": "PodCliqueSet",
+        "metadata": {
+            "name": "cell",
+            "namespace": "test",
+            "labels": {"app.kubernetes.io/name": "cell"},
+        },
+        "spec": spec
+        or {
+            "replicas": 1,
+            "template": {
+                "cliques": [
+                    {"name": "leader", "spec": {"replicas": 1}},
+                    {"name": "worker", "spec": {"replicas": 3}},
+                ]
+            },
+        },
+    }
+    documents = [workload]
+    if include_compute_domain:
+        documents.insert(
+            0,
+            {
+                "apiVersion": "resource.nvidia.com/v1beta1",
+                "kind": "ComputeDomain",
+                "metadata": {"name": "cell-compute-domain", "namespace": "test"},
+                "spec": {
+                    "channel": {
+                        "resourceClaimTemplate": {
+                            "name": "cell-compute-domain-channel",
+                        }
+                    },
+                    "numNodes": 0,
+                },
+            },
+        )
+    path.write_text("\n---\n".join(json.dumps(document) for document in documents) + "\n")
+    return path
+
+
 def _write_provenance(path: Path, *, cell_id: str, plan_sha256: str = "plan-sha", attempt_id: str = "attempt"):
     path.write_text(
         json.dumps(
@@ -177,8 +253,197 @@ def test_apply_skips_client_validation_and_verifies_created_object(tmp_path):
     runner.apply()
 
     assert calls[0][:2] == ("apply", "--validate=false")
-    assert len(calls) == 1
-    assert calls[0][-2:] == ("-o", "json")
+    assert len(calls) == 2
+    assert calls[1][:2] == ("get", "Pod/pod-0")
+
+
+def test_multidoc_manifest_tracks_compute_domain_and_workload(monkeypatch, tmp_path):
+    manifest = _multinode_manifest(tmp_path / "k8s_deploy.yaml")
+    monkeypatch.setattr(fpm_runner, "_kubectl_command", lambda: ["kubectl"])
+
+    runner = KubernetesCellRunner(manifest, tmp_path)
+
+    assert runner.kind == "LeaderWorkerSet"
+    assert runner.name == "cell"
+    assert runner.namespace == "test"
+    assert runner.resources == [
+        ("ComputeDomain", "cell-compute-domain", "test"),
+        ("LeaderWorkerSet", "cell", "test"),
+    ]
+    assert fpm_runner._expected_nodes(manifest) == 2
+
+
+def test_podcliqueset_manifest_tracks_resource_and_uses_grove_pod_selector(monkeypatch, tmp_path):
+    manifest = _podcliqueset_manifest(tmp_path / "k8s_deploy.yaml")
+    monkeypatch.setattr(fpm_runner, "_kubectl_command", lambda: ["kubectl"])
+
+    documents = fpm_runner._manifest_documents(manifest)
+    runner = KubernetesCellRunner(manifest, tmp_path)
+
+    assert [document["kind"] for document in documents] == ["PodCliqueSet"]
+    assert runner.kind == "PodCliqueSet"
+    assert runner.name == "cell"
+    assert runner.namespace == "test"
+    assert runner.selector == "app.kubernetes.io/part-of=cell"
+    assert runner.resources == [("PodCliqueSet", "cell", "test")]
+
+
+def test_multidoc_manifest_tracks_compute_domain_and_podcliqueset(monkeypatch, tmp_path):
+    manifest = _podcliqueset_manifest(
+        tmp_path / "k8s_deploy.yaml",
+        include_compute_domain=True,
+    )
+    monkeypatch.setattr(fpm_runner, "_kubectl_command", lambda: ["kubectl"])
+
+    runner = KubernetesCellRunner(manifest, tmp_path)
+
+    assert runner.kind == "PodCliqueSet"
+    assert runner.resources == [
+        ("ComputeDomain", "cell-compute-domain", "test"),
+        ("PodCliqueSet", "cell", "test"),
+    ]
+    assert fpm_runner._expected_nodes(manifest) == 4
+
+
+def test_expected_nodes_sums_podcliqueset_clique_replicas(tmp_path):
+    manifest = _podcliqueset_manifest(
+        tmp_path / "k8s_deploy.yaml",
+        spec={
+            "replicas": 1,
+            "template": {
+                "cliques": [
+                    {"name": "leader", "spec": {"replicas": 1}},
+                    {"name": "worker-a", "spec": {"replicas": 2}},
+                    {"name": "worker-b", "spec": {"replicas": 4}},
+                ]
+            },
+        },
+    )
+
+    assert fpm_runner._expected_nodes(manifest) == 7
+
+
+@pytest.mark.parametrize(
+    "replicas",
+    [None, 0, 2, True],
+    ids=["missing", "zero", "multiple", "boolean"],
+)
+def test_expected_nodes_rejects_podcliqueset_replicas_other_than_one(tmp_path, replicas):
+    spec = {
+        "template": {
+            "cliques": [
+                {"name": "leader", "spec": {"replicas": 1}},
+            ]
+        }
+    }
+    if replicas is not None:
+        spec["replicas"] = replicas
+    manifest = _podcliqueset_manifest(tmp_path / "k8s_deploy.yaml", spec=spec)
+
+    with pytest.raises(ValueError, match=r"PodCliqueSet spec\.replicas must be 1"):
+        fpm_runner._expected_nodes(manifest)
+
+
+@pytest.mark.parametrize(
+    "cliques",
+    [[], {}, "leader"],
+    ids=["empty", "mapping", "string"],
+)
+def test_expected_nodes_rejects_empty_or_non_list_podcliqueset_cliques(tmp_path, cliques):
+    manifest = _podcliqueset_manifest(
+        tmp_path / "k8s_deploy.yaml",
+        spec={"replicas": 1, "template": {"cliques": cliques}},
+    )
+
+    with pytest.raises(ValueError, match="requires at least one clique"):
+        fpm_runner._expected_nodes(manifest)
+
+
+@pytest.mark.parametrize(
+    ("clique", "error_type"),
+    [
+        (None, TypeError),
+        ({}, TypeError),
+        ({"name": "worker", "spec": {}}, ValueError),
+        ({"name": "worker", "spec": {"replicas": 0}}, ValueError),
+        ({"name": "worker", "spec": {"replicas": -1}}, ValueError),
+        ({"name": "worker", "spec": {"replicas": True}}, ValueError),
+        ({"name": "worker", "spec": {"replicas": "2"}}, ValueError),
+        ("worker", TypeError),
+    ],
+    ids=[
+        "null",
+        "missing-spec",
+        "missing-replicas",
+        "zero",
+        "negative",
+        "boolean",
+        "string-replicas",
+        "non-mapping",
+    ],
+)
+def test_expected_nodes_rejects_invalid_podcliqueset_clique(tmp_path, clique, error_type):
+    manifest = _podcliqueset_manifest(
+        tmp_path / "k8s_deploy.yaml",
+        spec={"replicas": 1, "template": {"cliques": [clique]}},
+    )
+
+    with pytest.raises(
+        error_type,
+        match=r"(cliques must be mappings with spec|clique replicas must be positive integers)",
+    ):
+        fpm_runner._expected_nodes(manifest)
+
+
+def test_apply_multidoc_manifest_verifies_every_resource(monkeypatch, tmp_path):
+    manifest = _multinode_manifest(tmp_path / "k8s_deploy.yaml")
+    monkeypatch.setattr(fpm_runner, "_kubectl_command", lambda: ["kubectl"])
+    runner = KubernetesCellRunner(manifest, tmp_path)
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="resources configured\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {
+                        "apiVersion": "resource.nvidia.com/v1beta1",
+                        "kind": "ComputeDomain",
+                        "metadata": {"name": "cell-compute-domain", "namespace": "test"},
+                    }
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {
+                        "apiVersion": "leaderworkerset.x-k8s.io/v1",
+                        "kind": "LeaderWorkerSet",
+                        "metadata": {
+                            "name": "cell",
+                            "namespace": "test",
+                            "labels": {"app.kubernetes.io/name": "cell"},
+                        },
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+    )
+    calls = []
+
+    def kubectl(*args, **kwargs):
+        calls.append(args)
+        return next(responses)
+
+    runner._kubectl = kubectl
+    runner.apply()
+
+    assert calls[0][:2] == ("apply", "--validate=false")
+    assert calls[1][:2] == ("get", "ComputeDomain/cell-compute-domain")
+    assert calls[2][:2] == ("get", "LeaderWorkerSet/cell")
 
 
 def test_apply_rejects_masked_failure_without_created_object(tmp_path):
@@ -269,6 +534,41 @@ def test_cleanup_verifies_workload_and_pods_are_deleted(tmp_path):
     runner.cleanup()
 
     assert "--cascade=foreground" in calls[0]
+
+
+def test_cleanup_verifies_every_multidoc_resource_is_deleted(monkeypatch, tmp_path):
+    manifest = _multinode_manifest(tmp_path / "k8s_deploy.yaml")
+    monkeypatch.setattr(fpm_runner, "_kubectl_command", lambda: ["kubectl"])
+    runner = KubernetesCellRunner(manifest, tmp_path)
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, stdout="resources deleted\n", stderr=""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='Error from server (NotFound): computedomains "cell-compute-domain" not found',
+            ),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr='Error from server (NotFound): leaderworkersets "cell" not found',
+            ),
+        ]
+    )
+    calls = []
+
+    def kubectl(*args, **kwargs):
+        calls.append(args)
+        return next(responses)
+
+    runner._kubectl = kubectl
+    runner.pods = lambda **_kwargs: []
+    runner.cleanup()
+
+    assert calls[1][:2] == ("get", "ComputeDomain/cell-compute-domain")
+    assert calls[2][:2] == ("get", "LeaderWorkerSet/cell")
 
 
 def test_cleanup_ignores_pods_already_terminating_after_foreground_delete(tmp_path):

@@ -467,6 +467,12 @@ def add_fpm_generator_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--namespace", default=None)
     group.add_argument("--model-cache", default=None, metavar="NAME[:MOUNT[:SUBPATH]]")
     group.add_argument("--transport", choices=["nvlink", "ib", "efa"], default=None)
+    group.add_argument(
+        "--fpm-orchestrator",
+        choices=["lws", "grove"],
+        default=None,
+        help="Multi-node FPM resource orchestrator; defaults to lws.",
+    )
     group.add_argument("--image-pull-secret", dest="image_pull_secret", default=None)
 
 

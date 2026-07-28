@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from collector.fpm_forward.config import reject_fpm_arguments_without_fpm
+from collector.fpm_forward.config import add_fpm_generator_arguments, reject_fpm_arguments_without_fpm
 from collector.fpm_forward.entry import _load_generator_overrides, resolve_inputs, run_resolved
 
 pytestmark = pytest.mark.unit
@@ -27,6 +27,7 @@ def _generator_args(**overrides):
         "generated_config_version": None,
         "namespace": None,
         "transport": None,
+        "fpm_orchestrator": None,
         "image_pull_secret": None,
         "model_cache": None,
     }
@@ -43,6 +44,7 @@ def test_fpm_generator_config_accepts_only_deployment_fields(tmp_path):
   k8s_pvc_mount_path: /models
   k8s_model_path_in_pvc: glm
   fpm_shared_memory_size: 200Gi
+  fpm_orchestrator: grove
 """
     )
 
@@ -51,7 +53,29 @@ def test_fpm_generator_config_accepts_only_deployment_fields(tmp_path):
     )
 
     assert resolved["K8sConfig"]["k8s_image"] == "example/vllm-runtime:test"
+    assert resolved["K8sConfig"]["fpm_orchestrator"] == "grove"
     assert resolved["generator_dynamo_version"] == "1.2.0"
+
+
+def test_fpm_orchestrator_cli_flows_to_generator_k8s_config():
+    parser = argparse.ArgumentParser()
+    add_fpm_generator_arguments(parser)
+
+    args = parser.parse_args(["--fpm-orchestrator", "grove"])
+    resolved = _load_generator_overrides(args)
+
+    assert resolved == {"K8sConfig": {"fpm_orchestrator": "grove"}}
+
+
+def test_fpm_orchestrator_cli_rejects_unknown_value(capsys):
+    parser = argparse.ArgumentParser()
+    add_fpm_generator_arguments(parser)
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["--fpm-orchestrator", "unknown"])
+
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_fpm_generator_config_rejects_collector_owned_engine_fields(tmp_path):

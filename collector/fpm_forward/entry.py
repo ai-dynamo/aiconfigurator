@@ -32,6 +32,7 @@ _DEPLOYMENT_K8S_FIELDS = frozenset(
         "k8s_hf_home",
         "worker_extra_pod_spec",
         "fpm_shared_memory_size",
+        "fpm_orchestrator",
     }
 )
 
@@ -100,6 +101,8 @@ def _load_generator_overrides(args: argparse.Namespace) -> dict[str, Any]:
         k8s["k8s_namespace"] = args.namespace
     if args.transport:
         k8s["transport"] = args.transport
+    if getattr(args, "fpm_orchestrator", None):
+        k8s["fpm_orchestrator"] = args.fpm_orchestrator
     if args.image_pull_secret:
         k8s["k8s_image_pull_secret"] = args.image_pull_secret
     if args.model_cache:
