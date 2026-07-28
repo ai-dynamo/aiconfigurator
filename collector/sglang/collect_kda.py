@@ -20,11 +20,20 @@ Generation (decode) phase (kda_backend.forward_decode:393-553):
     - fused_recurrent_kda_packed_decode: packed KDA recurrence (T=1)
 
 Verify (speculative target-verify) phase (kda_backend._forward_target_verify):
-    - causal_conv1d_update over batch*draft_tokens rows (approximates the
-      windowed verify conv; the serving path adds per-draft-token conv-window
-      checkpointing bookkeeping on top of the same kernel)
-    - fused_sigmoid_gating_delta_rule_update (is_kda=True, chain verify,
-      disable_state_update + intermediate state caching)
+    SM-dispatched like serving (_can_run_dspark_cutedsl_mtp,
+    kda_backend.py:858-938 @ kimi-k3 branch):
+    - SM100 + cutlass + draft width 2..8 + 128-dim symmetric bf16 heads:
+      "fused_kda_decode_mtp_dspark" — the CuTeDSL fused conv+chain-verify
+      recurrence kernel (one row covers the whole verify step). Serving folds
+      gated RMSNorm into the kernel only on the TP8 12-head shard
+      (_prepare_fused_decode is compiled for seg = 12*128,
+      models/kimi_k3.py:1522-1560); the collector mirrors that per-shard.
+    - otherwise, the Triton pair the serving fallback runs:
+      - causal_conv1d_update over batch*draft_tokens rows (approximates the
+        windowed verify conv; the serving path adds per-draft-token conv-window
+        checkpointing bookkeeping on top of the same kernel)
+      - fused_sigmoid_gating_delta_rule_update (is_kda=True, chain verify,
+        disable_state_update + intermediate state caching)
 
 TODO(kda-fused-decode): serving additionally has a fully-fused decode kernel
 (sglang.kernels.ops.attention.kda_fused_decode) engaged via attempt-and-verify
@@ -174,13 +183,20 @@ def run_kda_context_benchmark(
             q = k = v = recurrent_state = seq_lens_cpu = state_indices = None
             try:
                 # Same int32 token-offset overflow class as the GDN conv kernel
-                # (causal_conv1d_triton.py:373-379): per-call channel width here
-                # is proj_size (the conv runs per Q/K/V block).
-                if total_tokens * proj_size >= 2**31:
+                # (causal_conv1d_triton.py:373-379). Although the conv runs per
+                # Q/K/V block (proj_size channels), each block is a strided view
+                # over the full 3-block mixed_qkv buffer, so the kernel's int32
+                # pointer arithmetic spans total_tokens * conv_channels elements.
+                # Silicon evidence: cells with total_tokens * conv_channels in
+                # [2**31, 3*2**31) crash with cudaErrorIllegalAddress on both
+                # SM90 (H20, 2026-07 campaign coverage boundary) and SM100
+                # (B200, 2026-07-28), while every cell under this bound passes.
+                if total_tokens * conv_channels >= 2**31:
                     raise ValueError(
                         "SGLang causal_conv1d Triton kernel int32 token-offset overflow: "
-                        f"total_tokens={total_tokens} * proj_size={proj_size} >= 2**31 "
-                        "(causal_conv1d_triton.py:373-379)"
+                        f"total_tokens={total_tokens} * conv_channels={conv_channels} >= 2**31 "
+                        "(causal_conv1d_triton.py:373-379; per-block views stride "
+                        "across the whole 3-block buffer)"
                     )
                 num_warmups = 3
                 num_runs = 10
@@ -458,6 +474,31 @@ def run_kda_generation_benchmark(
         raise RuntimeError(f"SGLang KDA generation collection failed strict completeness: {summary}")
 
 
+def _resolve_verify_kernel(head_k_dim: int, head_v_dim: int, draft_tokens: int):
+    """Mirror serving's DSPARK verify dispatch on this device
+    (kda_backend._can_run_dspark_cutedsl_mtp, kda_backend.py:858-938 @ kimi-k3
+    branch): the fused CuTeDSL kernel engages on SM100 with cutlass importable,
+    a fixed dense chain-verify width of 2..8 tokens per request and the K3
+    128-dim symmetric bf16 head geometry; everything else runs the Triton pair.
+
+    Returns the fused kernel callable, or None for the Triton fallback pair.
+    """
+    if torch.cuda.get_device_capability()[0] != 10:
+        return None
+    if not (2 <= draft_tokens <= 8 and head_k_dim == 128 and head_v_dim == 128):
+        return None
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("cutlass") is None:
+            return None
+    except ModuleNotFoundError:
+        return None
+    from sglang.kernels.ops.kimi_k3.kda_decode_mtp import fused_kda_decode_mtp_dspark
+
+    return fused_kda_decode_mtp_dspark
+
+
 def run_kda_verify_benchmark(
     d_model: int,
     d_conv: int,
@@ -546,6 +587,97 @@ def run_kda_verify_benchmark(
                     "head_v_dim": head_v_dim,
                     "model_name": model_name,
                 }
+
+                fused_verify_kernel = _resolve_verify_kernel(head_k_dim, head_v_dim, draft_tokens)
+                if fused_verify_kernel is not None:
+                    proj = proj_size
+                    x_q_r, x_k_r, x_v_r = (
+                        blk.reshape(1, total_tokens, num_v_heads, head_v_dim)
+                        for blk in mixed_qkv.split([proj] * 3, dim=-1)
+                    )
+                    # Serving conv weights are fp32 (checked by
+                    # _can_run_dspark_cutedsl_mtp); split per Q/K/V block.
+                    conv_weight_f32 = torch.randn(conv_channels, d_conv, dtype=torch.float32, device=device)
+                    w_q, w_k, w_v = conv_weight_f32.split([proj] * 3, dim=0)
+                    # Committed conv windows per slot, [slots, proj, d_conv-1]
+                    # (the pool's transposed per-block view, kda_backend.py:1004-1013).
+                    cs_q, cs_k, cs_v = (c.transpose(-1, -2) for c in conv_pool.split([proj] * 3, dim=-1))
+                    # Per-draft-token scratch: state snapshots + conv windows
+                    # (MambaPool.SpeculativeState layouts, mirrored from the
+                    # branch's own kernel test).
+                    ic_q = torch.zeros(batch_size, draft_tokens, proj, d_conv - 1, dtype=dtype, device=device)
+                    ic_k = torch.zeros_like(ic_q)
+                    ic_v = torch.zeros_like(ic_q)
+                    # intermediate_states allocated above is [B, draft, HV, V, K] fp32.
+                    # Serving folds gated RMSNorm into the kernel only where the
+                    # fused-decode static args exist — the TP8 12-head shard
+                    # (_prepare_fused_decode seg = 12*128, models/kimi_k3.py:1522-1560).
+                    onorm_kwargs = {}
+                    if num_v_heads == 12:
+                        onorm_kwargs = {
+                            "onorm_gate": torch.randn(
+                                1, total_tokens, num_v_heads, head_v_dim, dtype=dtype, device=device
+                            ),
+                            "onorm_weight": torch.randn(head_v_dim, dtype=torch.float32, device=device),
+                            "onorm_eps": 1e-6,
+                        }
+
+                    # FIXME(kernel-limit): fused_kda_decode_mtp_dspark hit
+                    # cudaErrorIllegalAddress at (batch=256, draft_tokens=8,
+                    # 96 heads) on B200/SM100 (2026-07-28) while every smaller
+                    # cell passed; suspected per-SM resource growth in the
+                    # persistent CuTe kernel (its block-size cap is documented
+                    # as shared-memory-bound, kda_backend.py:879-880).
+                    # Unverified against the kernel source; the cell fails
+                    # into the classified log meanwhile.
+                    def run_fused_verify():
+                        fused_verify_kernel(
+                            x_q=x_q_r,
+                            x_k=x_k_r,
+                            x_v=x_v_r,
+                            w_q=w_q,
+                            w_k=w_k,
+                            w_v=w_v,
+                            cs_q=cs_q,
+                            cs_k=cs_k,
+                            cs_v=cs_v,
+                            g=a,
+                            beta=b,
+                            A_log=a_log,
+                            dt_bias=dt_bias,
+                            recurrent_state=recurrent_state,
+                            intermediate_ssm=intermediate_states,
+                            intermediate_state_indices=state_indices,
+                            intermediate_conv_q=ic_q,
+                            intermediate_conv_k=ic_k,
+                            intermediate_conv_v=ic_v,
+                            ssm_state_indices=state_indices,
+                            cu_seqlens=cu_seqlens,
+                            lower_bound=KDA_LOWER_BOUND,
+                            scale=head_k_dim**-0.5,
+                            **onorm_kwargs,
+                        )
+
+                    with benchmark_with_power(
+                        device=device,
+                        kernel_func=run_fused_verify,
+                        num_warmups=num_warmups,
+                        num_runs=num_runs,
+                        repeat_n=1,
+                    ) as results:
+                        if not log_perf(
+                            item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                            framework="SGLang",
+                            version=sglang_version,
+                            device_name=torch.cuda.get_device_name(device),
+                            op_name="kda",
+                            kernel_source="fused_kda_decode_mtp_dspark",
+                            perf_filename=perf_filename,
+                            power_stats=results["power_stats"],
+                        ):
+                            raise RuntimeError(f"failed to persist SGLang KDA verify row to {perf_filename}")
+                    successful_points += 1
+                    continue
 
                 def run_conv1d_update_verify():
                     causal_conv1d_update(
