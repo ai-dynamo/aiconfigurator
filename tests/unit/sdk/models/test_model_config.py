@@ -1461,14 +1461,29 @@ class TestMLAModuleQueryKeys:
                 return
         raise AssertionError("context_mla_block not found")
 
-    def test_v31_nvfp4_mixed_exclusion_keys_on_o_proj(self):
-        # DeepSeek-V3.1-NVFP4 excludes q/kv but keeps o_proj NVFP4: per-GEMM
-        # dtypes split, and the single module perf key follows o_proj (largest
-        # projection by bytes), NOT a blanket BF16.
-        module = self._generation_mla_module(
-            "nvidia/DeepSeek-V3.1-NVFP4", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+    def test_v31_nvfp4_mixed_exclusion_bypasses_module_row(self):
+        # DeepSeek-V3.1-NVFP4 excludes q/kv but keeps o_proj NVFP4: no
+        # single-gemm_type module row matches that identity, so the model must
+        # emit the granular per-projection ops directly (an all-NVFP4 module
+        # profile measures kernels the checkpoint never runs). The granular
+        # GEMMs carry the split dtypes.
+        model_config = config.ModelConfig(
+            tp_size=4,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=4,
+            moe_ep_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         )
-        assert module._gemm_quant_mode == common.GEMMQuantMode.nvfp4
+        model = models.get_model("nvidia/DeepSeek-V3.1-NVFP4", model_config, backend_name="vllm")
+        names = {getattr(op, "_name", "") for op in model.generation_ops}
+        assert "generation_mla_block" not in names  # no module-profile primary
+        by_name = {getattr(op, "_name", ""): op for op in model.generation_ops}
+        assert by_name["generation_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
 
     def test_deepseek_v3_keeps_global_gemm_key_and_heads(self):
         # Official DeepSeek FP8 checkpoints quantize attention too (empty ignore
@@ -1590,3 +1605,38 @@ class TestBundledModelConfigsOffline:
         raw = cfg["raw_config"]
         assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
         sdk_utils._load_model_config_from_model_path.cache_clear()
+
+
+class TestWideEPAttentionExclusions:
+    """TRT-LLM WideEP must inherit the checkpoint's per-projection attention
+    dtypes (reviewer finding: exclusions were not threaded, so q/kv projection
+    perf rows and weights used global NVFP4 — ~5.7 GiB/rank undercount)."""
+
+    @staticmethod
+    def _wideep_ops(hf_id: str):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            enable_wideep=True,
+        )
+        model = models.get_model(hf_id, model_config, backend_name="trtllm")
+        return {getattr(op, "_name", ""): op for op in model.context_ops + model.generation_ops}
+
+    def test_v31_nvfp4_wideep_projection_dtypes_split(self):
+        by_name = self._wideep_ops("nvidia/DeepSeek-V3.1-NVFP4")
+        # q/kv excluded from quantization -> BF16 rows and byte widths.
+        assert by_name["context_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["context_kv_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["generation_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        # o_proj stays NVFP4 on V3.1.
+        assert by_name["context_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
+        assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
+        # fused q_a+kv_a downscale: BF16 iff both groups excluded.
+        assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
