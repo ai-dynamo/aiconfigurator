@@ -2514,7 +2514,12 @@ def _run_estimate_mode(args):
     encoder_latency = float(result.raw.get("encoder_latency", 0.0) or 0.0)
     if encoder_latency > 0.0:
         print(f"  Encoder lat.:     {encoder_latency:.3f} ms")
-    print(f"  Power (per GPU):  {result.power_w:.1f} W")
+    if result.power_w is None:
+        coverage = result.power_coverage
+        coverage_note = f" ({coverage:.1%} coverage)" if coverage is not None else ""
+        print(f"  Power (per GPU):  unavailable{coverage_note}")
+    else:
+        print(f"  Power (per GPU):  {result.power_w:.1f} W")
     print("-" * 60)
     print(f"  tokens/s:         {result.tokens_per_second:,.2f}")
     print(f"  tokens/s/gpu:     {result.tokens_per_second_per_gpu:,.2f}")

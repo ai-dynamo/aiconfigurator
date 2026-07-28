@@ -254,6 +254,8 @@ class BaseBackend:
         database: PerfDatabase,
         runtime_config: RuntimeConfig,
         batch_size: int,
+        *,
+        include_energy: bool = True,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
         # Run the encoder phase (Currently VL models only).
         encoder_latency_dict = defaultdict(float)
@@ -302,7 +304,8 @@ class BaseBackend:
                 model_name=getattr(model, "model_name", ""),
             )
             encoder_latency_dict[op._name] += float(result)
-            encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+            if include_energy:
+                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
             encoder_source_dict[op._name] = getattr(result, "source", "silicon")
 
         return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
@@ -315,6 +318,8 @@ class BaseBackend:
         batch_size: int,
         isl: int,
         prefix: int,
+        *,
+        include_energy: bool = True,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
         context_latency_dict = defaultdict(float)
         context_energy_wms_dict = defaultdict(float)
@@ -338,7 +343,8 @@ class BaseBackend:
                 seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
             )
             context_latency_dict[op._name] += float(result)
-            context_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+            if include_energy:
+                context_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
             new_src = getattr(result, "source", "silicon")
             existing = context_source_dict.get(op._name)
             if existing is None or existing == new_src:
@@ -358,6 +364,8 @@ class BaseBackend:
         isl: int,
         osl: int,
         stride: int,
+        *,
+        include_energy: bool = True,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
         generation_latency_dict = defaultdict(float)
         generation_energy_wms_dict = defaultdict(float)
@@ -379,7 +387,8 @@ class BaseBackend:
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 )
                 latency_dict[op._name] += float(result)
-                energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
+                if include_energy:
+                    energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
                 new_src = getattr(result, "source", "silicon")
                 existing = generation_source_dict.get(op._name)
                 if existing is None or existing == new_src:
@@ -390,7 +399,8 @@ class BaseBackend:
             repeat_count = min(stride, osl - 1 - i)
             for op in latency_dict:
                 generation_latency_dict[op] += latency_dict[op] * repeat_count
-                generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count
+                if include_energy:
+                    generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count
 
         return generation_latency_dict, generation_energy_wms_dict, generation_source_dict
 
@@ -406,6 +416,7 @@ class BaseBackend:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         img_ctx_tokens: int = 0,
+        include_energy: bool = True,
     ) -> tuple[
         dict[str, float],
         dict[str, float],
@@ -445,8 +456,29 @@ class BaseBackend:
                     stride,
                     latency_correction_scale,
                 )
-                context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
-                generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
+                if include_energy:
+                    # Rust engine tracks only latency; run the Python phase runners
+                    # for energy so power_w is populated when power overlay parquets
+                    # are present.  Sum each phase's energy into a single value stored
+                    # under the matching Rust synthetic key so that
+                    # has_sufficient_power_data() can pair energy with latency by name.
+                    ctx_energy_total = 0.0
+                    gen_energy_total = 0.0
+                    if mode in ("static_ctx", "static"):
+                        _, ctx_e, _ = self._run_context_phase(
+                            model, database, runtime_config, batch_size, isl_eff, prefix
+                        )
+                        ctx_energy_total = sum(ctx_e.values()) * latency_correction_scale
+                    if mode in ("static_gen", "static"):
+                        _, gen_e, _ = self._run_generation_phase(
+                            model, database, runtime_config, batch_size, beam_width, isl_eff, osl, stride
+                        )
+                        gen_energy_total = sum(gen_e.values()) * latency_correction_scale
+                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, ctx_energy_total)
+                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, gen_energy_total)
+                else:
+                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
                 return (
                     context_latency_dict,
                     context_energy_wms_dict,
@@ -467,18 +499,46 @@ class BaseBackend:
 
         if mode == "static_ctx":
             context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model, database, runtime_config, batch_size, isl_eff, prefix
+                model,
+                database,
+                runtime_config,
+                batch_size,
+                isl_eff,
+                prefix,
+                include_energy=include_energy,
             )
         elif mode == "static_gen":
             generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model, database, runtime_config, batch_size, beam_width, isl_eff, osl, stride
+                model,
+                database,
+                runtime_config,
+                batch_size,
+                beam_width,
+                isl_eff,
+                osl,
+                stride,
+                include_energy=include_energy,
             )
         else:
             context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model, database, runtime_config, batch_size, isl_eff, prefix
+                model,
+                database,
+                runtime_config,
+                batch_size,
+                isl_eff,
+                prefix,
+                include_energy=include_energy,
             )
             generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model, database, runtime_config, batch_size, beam_width, isl_eff, osl, stride
+                model,
+                database,
+                runtime_config,
+                batch_size,
+                beam_width,
+                isl_eff,
+                osl,
+                stride,
+                include_energy=include_energy,
             )
 
         if latency_correction_scale != 1.0:
@@ -518,13 +578,16 @@ class BaseBackend:
             encoder_latency = 0.0
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         else:
-            encoder_latency_dict, encoder_energy_wms_dict, _, img_ctx_tokens = self._run_encoder_phase(
-                model, database, runtime_config, runtime_config.batch_size
+            encoder_latency_dict, _, _, img_ctx_tokens = self._run_encoder_phase(
+                model,
+                database,
+                runtime_config,
+                runtime_config.batch_size,
+                include_energy=False,
             )
             if latency_correction_scale != 1.0:
                 for op in encoder_latency_dict:
                     encoder_latency_dict[op] *= latency_correction_scale
-                    encoder_energy_wms_dict[op] *= latency_correction_scale
             encoder_latency = sum(encoder_latency_dict.values())
 
         (
@@ -542,6 +605,7 @@ class BaseBackend:
             stride,
             latency_correction_scale,
             img_ctx_tokens=img_ctx_tokens,
+            include_energy=False,
         )
         return encoder_latency + sum(context_latency_dict.values()) + sum(generation_latency_dict.values())
 

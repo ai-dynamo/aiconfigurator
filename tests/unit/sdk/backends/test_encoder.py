@@ -338,7 +338,15 @@ class TestInferenceSummaryEncoderFields:
         summary.set_encoder_energy_wms_dict({"encoder_qkv_gemm": 50.0})
         summary.set_context_latency_dict({"context_attention": 5.0})
         summary.set_context_energy_wms_dict({"context_attention": 25.0})
+        assert summary.get_power_data_coverage() == 1.0
         assert summary.has_sufficient_power_data(threshold=0.9)
+
+    def test_power_data_coverage_is_latency_weighted(self, summary):
+        summary.set_context_latency_dict({"covered": 89.0, "uncovered": 11.0})
+        summary.set_context_energy_wms_dict({"covered": 100.0})
+
+        assert summary.get_power_data_coverage() == pytest.approx(0.89)
+        assert not summary.has_sufficient_power_data(threshold=0.9)
 
 
 class TestVarlenAttentionMultiImage:

@@ -314,6 +314,30 @@ class InferenceSummary:
         """Get end-to-end average power (watts)."""
         return self._e2e_power_avg
 
+    def get_power_data_coverage(self) -> float:
+        """Return latency-weighted power-data coverage as a ratio in ``[0, 1]``.
+
+        An operation is covered when it has positive recorded energy. Weighting
+        by operation latency prevents numerous tiny covered operations from
+        masking an uncovered operation that dominates end-to-end execution.
+        """
+        latency_groups = (
+            (self._encoder_latency_dict, self._encoder_energy_wms_dict),
+            (self._context_latency_dict, self._context_energy_wms_dict),
+            (self._generation_latency_dict, self._generation_energy_wms_dict),
+        )
+        total_latency = sum(sum(latencies.values()) for latencies, _energies in latency_groups)
+        if total_latency <= 0:
+            return 0.0
+
+        latency_with_energy = sum(
+            latency
+            for latencies, energies in latency_groups
+            for op_name, latency in latencies.items()
+            if energies.get(op_name, 0.0) > 0
+        )
+        return min(max(latency_with_energy / total_latency, 0.0), 1.0)
+
     def has_sufficient_power_data(self, threshold: float = 0.9) -> bool:
         """
         Check if power data coverage is sufficient for reliable power estimation.
@@ -324,33 +348,7 @@ class InferenceSummary:
         Returns:
             bool: True if latency with non-zero energy >= threshold * total latency
         """
-        # Calculate total latency
-        total_latency = (
-            sum(self._encoder_latency_dict.values())
-            + sum(self._context_latency_dict.values())
-            + sum(self._generation_latency_dict.values())
-        )
-
-        if total_latency == 0:
-            return False
-
-        # Calculate latency from operations with non-zero energy
-        latency_with_energy = 0.0
-        for op_name, latency in self._encoder_latency_dict.items():
-            if self._encoder_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        for op_name, latency in self._context_latency_dict.items():
-            if self._context_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        for op_name, latency in self._generation_latency_dict.items():
-            if self._generation_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        # Check if coverage meets threshold
-        coverage_ratio = latency_with_energy / total_latency
-        return coverage_ratio >= threshold
+        return self.get_power_data_coverage() >= threshold
 
     def check_oom(self) -> bool:
         """

@@ -41,6 +41,7 @@ from aiconfigurator.sdk.task_v2 import Task
 # (Migrated from the legacy V1 task module; same values as Task's field defaults.)
 DEFAULT_PREFILL_LATENCY_CORRECTION_SCALE = 1.1
 DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
+POWER_DATA_COVERAGE_THRESHOLD = 0.9
 
 
 def cli_support(
@@ -709,8 +710,8 @@ class EstimateResult:
     tpot: float
     """Time per output token (ms)."""
 
-    power_w: float
-    """End-to-end weighted average power per GPU (watts)."""
+    power_w: float | None
+    """End-to-end weighted average power per GPU, or ``None`` when coverage is insufficient."""
 
     isl: int
     """Input sequence length used."""
@@ -835,6 +836,17 @@ class EstimateResult:
             return 0.0
         return self.raw.get("memory", 0.0)
 
+    @property
+    def power_coverage(self) -> float | None:
+        """Latency-weighted fraction of operations backed by power data."""
+        coverage = self.raw.get("power_coverage")
+        return float(coverage) if coverage is not None else None
+
+    @property
+    def power_is_available(self) -> bool:
+        """Whether ``power_w`` passed the minimum data-coverage gate."""
+        return self.power_w is not None
+
     def get(self) -> dict:
         """
         Return all metrics as a dict matching the CSV column schema.
@@ -852,11 +864,27 @@ class EstimateResult:
         return result
 
     def __repr__(self) -> str:
+        power = f"{self.power_w:.1f}W" if self.power_w is not None else "unavailable"
         return (
             f"EstimateResult(mode={self.mode!r}, ttft={self.ttft:.3f}ms, tpot={self.tpot:.3f}ms, "
-            f"power={self.power_w:.1f}W, model={self.model_path}, "
+            f"power={power}, model={self.model_path}, "
             f"system={self.system_name}, backend={self.backend_name})"
         )
+
+
+def _apply_power_coverage_gate(summary, result_dict: dict) -> dict:
+    """Hide modeled power when measured-energy coverage is incomplete.
+
+    Latency, throughput, and memory remain valid and are returned unchanged.
+    The raw result records the exact coverage ratio so callers can explain why
+    power is unavailable without treating the whole estimate as failed.
+    """
+    gated = dict(result_dict)
+    coverage = summary.get_power_data_coverage()
+    gated["power_coverage"] = coverage
+    if coverage < POWER_DATA_COVERAGE_THRESHOLD:
+        gated["power_w"] = None
+    return gated
 
 
 def _resolve_moe_parallelism(
@@ -1487,6 +1515,7 @@ def _run_agg_estimate(
     result_dict = summary.get_result_dict()
     if result_dict is None:
         raise RuntimeError("Estimation produced no results. The configuration may be invalid.")
+    result_dict = _apply_power_coverage_gate(summary, result_dict)
 
     kv_warning = None
     if summary.check_kv_cache_oom():
@@ -1634,11 +1663,12 @@ def _run_static_estimate(
     result_dict = summary.get_result_dict()
     if result_dict is None:
         raise RuntimeError("Static estimation produced no results. The configuration may be invalid.")
+    result_dict = _apply_power_coverage_gate(summary, result_dict)
 
     return EstimateResult(
         ttft=float(result_dict.get("ttft", 0.0) or 0.0),
         tpot=float(result_dict.get("tpot", 0.0) or 0.0),
-        power_w=float(result_dict.get("power_w", 0.0) or 0.0),
+        power_w=result_dict.get("power_w"),
         isl=isl,
         osl=osl,
         batch_size=batch_size,
@@ -1816,6 +1846,7 @@ def _run_disagg_estimate(
     result_dict = summary.get_result_dict()
     if result_dict is None:
         raise RuntimeError("Disagg estimation produced no results. The configuration may be invalid.")
+    result_dict = _apply_power_coverage_gate(summary, result_dict)
 
     return EstimateResult(
         ttft=result_dict["ttft"],
@@ -1880,7 +1911,21 @@ def _combine_afd_static_estimate_results(
     tokens_s = seq_s * afd_result.osl
     decode_time = tpot * max(afd_result.osl - 1, 0)
     request_latency = ttft + decode_time
-    power_w = (prefill_power * ttft + decode_power * decode_time) / request_latency if request_latency > 0.0 else 0.0
+    prefill_coverage = static_result.power_coverage if afd_phase == "decode" else afd_result.power_coverage
+    decode_coverage = afd_result.power_coverage if afd_phase == "decode" else static_result.power_coverage
+    if request_latency > 0.0 and prefill_coverage is not None and decode_coverage is not None:
+        power_coverage = (prefill_coverage * ttft + decode_coverage * decode_time) / request_latency
+    else:
+        power_coverage = 0.0
+    if (
+        request_latency > 0.0
+        and prefill_power is not None
+        and decode_power is not None
+        and power_coverage >= POWER_DATA_COVERAGE_THRESHOLD
+    ):
+        power_w = (prefill_power * ttft + decode_power * decode_time) / request_latency
+    else:
+        power_w = None
 
     result_dict = dict(afd_raw)
     result_dict.update(
@@ -1895,7 +1940,8 @@ def _combine_afd_static_estimate_results(
             "concurrency": concurrency,
             "num_total_gpus": total_gpus,
             "memory": round(max(afd_result.memory, static_result.memory), 2),
-            "power_w": round(power_w, 3),
+            "power_w": round(power_w, 3) if power_w is not None else None,
+            "power_coverage": power_coverage,
             "(p)impl": prefill_impl,
             "(d)impl": decode_impl,
         }
@@ -2104,6 +2150,7 @@ def _run_afd_estimate(
     if afd_phase == "both":
         result_dict.setdefault("(p)impl", "afd")
         result_dict.setdefault("(d)impl", "afd")
+    result_dict = _apply_power_coverage_gate(summary, result_dict)
 
     return EstimateResult(
         ttft=result_dict.get("ttft", 0.0),
