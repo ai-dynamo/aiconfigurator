@@ -35,9 +35,8 @@ class _LoadedTable(dict):
 
 
 class _StubDatabase:
-    system_spec = {"gpu": {"mem_bw": 8000}}
-
     def __init__(self, kda_data):
+        self.system_spec = {"gpu": {"mem_bw": 8000}}
         self._kda_data = _LoadedTable(kda_data)
 
     @staticmethod
@@ -48,7 +47,7 @@ class _StubDatabase:
 def _verify_grid(latency):
     # Exact grid hits at (batch, draft) so interpolation is the identity.
     entry = {"latency": latency, "power": 0.0, "energy": 0.0}
-    return {MODEL_KEY: {b: {d: entry for d in (2, 4, 8)} for b in (1, 4, 16, 64)}}
+    return {MODEL_KEY: {b: dict.fromkeys((2, 4, 8), entry) for b in (1, 4, 16, 64)}}
 
 
 def _query(db, kernel_source):
