@@ -137,8 +137,33 @@ jobs:
           python -c \
             'import aiconfigurator_core; assert aiconfigurator_core._build_smoke() == 1'
 
+      - name: Report disabled Artifactory staging
+        if: >-
+          matrix.upload_upper &&
+          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true' &&
+          (
+            (
+              github.event_name == 'pull_request' &&
+              github.event.pull_request.head.repo.full_name == github.repository
+            ) ||
+            (
+              github.event_name == 'push' &&
+              (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+            )
+          )
+        shell: bash
+        run: |
+          echo "::notice title=Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true after issues #1432 and #1433 are complete."
+          {
+            echo "### Artifactory staging"
+            echo
+            echo '- Status: skipped because `PLATFORM_WHEEL_STAGING_ENABLED` is not `true`.'
+            echo '- Follow-up: [#1432](https://github.com/ai-dynamo/aiconfigurator/issues/1432) and [#1433](https://github.com/ai-dynamo/aiconfigurator/issues/1433).'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Stage pull-request wheels in Artifactory
         if: >-
+          vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -152,6 +177,7 @@ jobs:
 
       - name: Stage post-merge wheels in Artifactory
         if: >-
+          vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
           github.event_name == 'push' &&
           (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
         env:
@@ -168,6 +194,7 @@ jobs:
     needs: build
     if: >-
       success() &&
+      vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: prod-aiconfigurator-default-amd64-v1
@@ -207,6 +234,7 @@ jobs:
     needs: build
     if: >-
       success() &&
+      vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: prod-aiconfigurator-default-amd64-v1
