@@ -671,9 +671,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         kda_layer_ids = set(linear_attn_cfg.get("kda_layers") or [])
         if not kda_layer_ids:
             raise ValueError("Kimi-K3 config must define linear_attn_config.kda_layers")
-        layer_types = tuple(
-            "linear_attention" if (i + 1) in kda_layer_ids else "full_attention" for i in range(layers)
-        )
+        layer_types = tuple("linear_attention" if (i + 1) in kda_layer_ids else "full_attention" for i in range(layers))
         extra_params = KimiK3Config(
             layer_types=layer_types,
             kda_num_heads=linear_attn_cfg["num_heads"],
