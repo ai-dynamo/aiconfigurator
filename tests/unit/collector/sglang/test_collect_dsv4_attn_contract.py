@@ -39,6 +39,33 @@ def test_dsv4_worker_fails_closed_when_phase_has_no_valid_shapes():
         )
 
 
+def test_dsv4_persisted_num_heads_is_rank_local_with_geometry_guard():
+    """Persisted ``num_heads`` follows the unified #1429 convention: rank-local
+    heads derived from the config-native count (never from module attributes,
+    which flip between native and rank-local across sglang versions). A module
+    head count matching neither reading fails the case instead of mislabeling
+    the row."""
+    tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_resolve_local_heads"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE_PATH), "exec"), namespace)
+    resolve = namespace["_resolve_local_heads"]
+
+    # Flash native=64: rank-local persists 64/tp whether the module reports
+    # native (0.5.14 behavior) or rank-local heads.
+    assert resolve(native_heads=64, module_heads=64, tp_size=8) == 8
+    assert resolve(native_heads=64, module_heads=8, tp_size=8) == 8
+    # Pro native=128 without a module attribute still derives from config.
+    assert resolve(native_heads=128, module_heads=None, tp_size=4) == 32
+    # Geometry surprises fail the case (observe, don't guess).
+    with pytest.raises(RuntimeError, match=r"head geometry mismatch"):
+        resolve(native_heads=64, module_heads=16, tp_size=8)
+    with pytest.raises(RuntimeError, match=r"head geometry mismatch"):
+        resolve(native_heads=64, module_heads=63, tp_size=1)
+
+
 def test_dsv4_generation_enters_sglang_model_capture_mode():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(SOURCE_PATH))
