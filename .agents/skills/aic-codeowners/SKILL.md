@@ -63,8 +63,10 @@ The coverage report lists globs that no longer match any file.
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team; any one team's approval satisfies the gate), or
 adjust `classify` rules - then regenerate as in Flow 2. Changes to the
-policy itself route to aiconfigurator-infra + maintainers (the `CODEOWNERS`
-and `.github/` shared lines).
+taxonomy and tooling under `.github/` route to aiconfigurator-infra +
+maintainers. Two explicit exceptions route only to DevOps: the generated root
+`CODEOWNERS` artifact and every `deny.toml`, enforced by the final-tier
+file-type rule.
 
 ## Flow 4: Grant an External Contributor Area-Scoped Ownership
 

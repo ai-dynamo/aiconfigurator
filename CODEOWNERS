@@ -6,6 +6,7 @@
 #   python .github/codeowners/who_owns.py --codeowners CODEOWNERS <path> ...  # owners of specific paths
 #
 # Area index (base owner per subsystem; the catch-all owns everything else):
+#   devops      @ai-dynamo/devops
 #   docs        @ai-dynamo/maintainers-aiconfigurator
 #   generators  @ai-dynamo/aiconfigurator-generators
 #   infra       @ai-dynamo/aiconfigurator-infra
@@ -17,6 +18,7 @@
 #   @ai-dynamo/aiconfigurator-infra
 #   @ai-dynamo/aiconfigurator-runtime
 #   @ai-dynamo/contributors-aiconfigurator
+#   @ai-dynamo/devops
 #   @ai-dynamo/maintainers-aiconfigurator
 
 *                                 @ai-dynamo/contributors-aiconfigurator
@@ -82,7 +84,6 @@
 /collector/                       @ai-dynamo/aiconfigurator-runtime @ai-dynamo/maintainers-aiconfigurator
 /pytest.ini                       @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /SECURITY.md                      @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
-/**/deny.toml                     @ai-dynamo/devops
 /.dockerignore                    @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /.gitattributes                   @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
 /DEVELOPMENT.md                   @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
@@ -96,3 +97,6 @@
 /src/aiconfigurator/cli/          @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
 /src/aiconfigurator/generator/    @ai-dynamo/aiconfigurator-generators @ai-dynamo/maintainers-aiconfigurator
 /docs/dynamo_deployment_guide.md  @ai-dynamo/aiconfigurator-runtime @ai-dynamo/aiconfigurator-infra @ai-dynamo/maintainers-aiconfigurator
+
+# --- File-type ownership: unanchored patterns (wins via last-match at any depth) ---
+deny.toml                         @ai-dynamo/devops

@@ -54,6 +54,9 @@ areas:
       - CODE_OF_CONDUCT.md
       - CONTRIBUTING.md
       - LICENSE
+  - label: devops
+    github_team: "@ai-dynamo/devops"
+    path_globs: []
 
 shared:
   # Preserve the existing policy: maintainers co-own every runtime,
@@ -67,9 +70,6 @@ shared:
     owners: [generators, docs]
   - glob: aic-core/
     owners: [runtime, docs]
-  # Cargo license policy changes require DevOps review.
-  - glob: "**/deny.toml"
-    owners: ["@ai-dynamo/devops"]
   - glob: collector/
     owners: [runtime, docs]
   - glob: tools/
@@ -122,10 +122,13 @@ shared:
     owners: [runtime, infra, docs]
   # Ownership policy changes require DevOps review.
   - glob: CODEOWNERS
-    owners: ["@ai-dynamo/devops"]
+    owners: [devops]
 
 classify:
   keyword_rules:
     - match: generator
       area: generators
-  filetype_rules: []
+  # Cargo license policy changes require DevOps review at any depth.
+  filetype_rules:
+    - pattern: deny.toml
+      coowner: devops
