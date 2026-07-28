@@ -23,13 +23,15 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
-from aiconfigurator.sdk.config_builders import resolve_nextn_auto, validate_nextn
+from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     UnsupportedWideepConfigError,
     is_expected_cli_error,
 )
 from aiconfigurator.sdk.models import check_is_moe
+from aiconfigurator.sdk.operations.base import resolve_op_data_path
+from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
@@ -189,7 +191,7 @@ def _resolve_and_validate_nextn(args) -> None:
                 "MTP stays disabled."
             )
         try:
-            validate_nextn(resolved, args.nextn_accepted)
+            resolved, args.nextn_accepted = normalize_speculative_decoding(resolved, args.nextn_accepted)
         except ValueError as exc:
             raise SystemExit(
                 f"--nextn auto resolved to nextn={resolved} from the checkpoint's num_nextn_predict_layers: {exc}"
@@ -197,7 +199,7 @@ def _resolve_and_validate_nextn(args) -> None:
         args.nextn = resolved
         return
     try:
-        validate_nextn(args.nextn, args.nextn_accepted)
+        args.nextn, args.nextn_accepted = normalize_speculative_decoding(args.nextn, args.nextn_accepted)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -320,6 +322,12 @@ def _add_default_mode_arguments(parser):
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
     parser.add_argument(
+        "--disable-encoder-dp",
+        action="store_true",
+        help="Model the vision encoder as TP-sharded instead of the default data-parallel "
+        "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -373,9 +381,9 @@ def _add_default_mode_arguments(parser):
         type=float,
         default=None,
         help="Average accepted draft tokens per decode step (0 <= nextn_accepted <= nextn). "
-        "Required when --nextn > 0; there is no built-in acceptance assumption — "
-        "use a measured value from your deployment (e.g. the engine's reported "
-        "average acceptance length minus 1).",
+        "Required when --nextn resolves to > 0; there is no built-in acceptance "
+        "assumption — use a measured value from your deployment (e.g. the engine's "
+        "reported average acceptance length minus 1).",
     )
     parser.add_argument(
         "--enable-chunked-prefill",
@@ -538,6 +546,12 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
+        "--disable-encoder-dp",
+        action="store_true",
+        help="Model the vision encoder as TP-sharded instead of the default data-parallel "
+        "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
     )
     parser.add_argument(
         "--batch-size",
@@ -871,15 +885,16 @@ def _add_estimate_mode_arguments(parser):
         help="(common) MTP draft length (compute cost side), or 'auto' to use the checkpoint's "
         "num_nextn_predict_layers. Default: 0 (disabled); MTP is never enabled implicitly. "
         "Applied to agg, disagg, and all static modes. Requires --nextn-accepted when the "
-        "depth is > 0.",
+        "resolved depth is > 0.",
     )
     parser.add_argument(
         "--nextn-accepted",
         type=float,
         default=None,
         help="(common) Average accepted draft tokens per decode step "
-        "(0 <= nextn_accepted <= nextn). Required when --nextn > 0; there is no "
-        "built-in acceptance assumption — use a measured value from your deployment.",
+        "(0 <= nextn_accepted <= nextn). Required when --nextn resolves to > 0; "
+        "there is no built-in acceptance assumption — use a measured value from "
+        "your deployment.",
     )
     parser.add_argument(
         "--stride",
@@ -1034,7 +1049,9 @@ def configure_parser(parser):
     _add_support_mode_arguments(support_parser)
 
 
-def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str) -> str | None:
+def _get_system_data_root(system_name: str) -> str | None:
+    """Resolve a system's perf-data root (the dir holding either
+    <family>/<backend>/<version> or legacy <backend>/<version> subtrees)."""
     for systems_root in perf_database.get_systems_paths():
         system_yaml = os.path.join(systems_root, f"{system_name}.yaml")
         if not os.path.isfile(system_yaml):
@@ -1044,8 +1061,17 @@ def _get_backend_data_path(system_name: str, backend_name: str, backend_version:
         data_dir = system_spec.get("data_dir")
         if not data_dir:
             return None
-        return os.path.join(systems_root, data_dir, backend_name, backend_version)
+        return os.path.join(systems_root, data_dir)
     return None
+
+
+def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str, op_filename: str) -> str | None:
+    """Resolve one perf-data file's on-disk path for (system, backend, version),
+    across both the family-first and legacy tree layouts (see resolve_op_data_path)."""
+    system_data_root = _get_system_data_root(system_name)
+    if system_data_root is None:
+        return None
+    return resolve_op_data_path(system_data_root, backend_name, backend_version, op_filename)
 
 
 _SGLANG_DEEPEP_REQUIRED_FILES = (
@@ -1083,19 +1109,15 @@ def _sglang_deepep_perf_data_skip_reason(
             missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
             continue
 
-        data_path = _get_backend_data_path(system_to_check, common.BackendName.sglang.value, resolved_version)
-        if data_path is None:
-            missing_paths.extend(
-                f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
-                for filename in _SGLANG_DEEPEP_REQUIRED_FILES
+        for filename in _SGLANG_DEEPEP_REQUIRED_FILES:
+            resolved_path = _get_backend_data_path(
+                system_to_check, common.BackendName.sglang.value, resolved_version, filename
             )
-            continue
-
-        missing_paths.extend(
-            os.path.join(data_path, filename)
-            for filename in _SGLANG_DEEPEP_REQUIRED_FILES
-            if not os.path.isfile(os.path.join(data_path, filename))
-        )
+            if resolved_path is None or not os.path.isfile(resolved_path):
+                missing_paths.append(
+                    resolved_path
+                    or f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
+                )
 
     if missing_versions:
         return "no database version available for " + ", ".join(missing_versions)
@@ -1143,16 +1165,24 @@ def _ensure_backend_version_available(
         backend_name,
         backend_version,
     )
-    data_path = _get_backend_data_path(system_name, backend_name, backend_version)
-    if data_path:
-        logger.error("Searched: %s", data_path)
+    system_data_root = _get_system_data_root(system_name)
+    if system_data_root:
+        logger.error(
+            "Searched: %s (backend=%s, version=%s; both family-first <family>/<backend>/<version> "
+            "and legacy <backend>/<version> layouts)",
+            system_data_root,
+            backend_name,
+            backend_version,
+        )
     logger.error("Configured systems paths: %s", systems_paths_display)
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
             "Fix: switch --backend-version to one of the available versions, "
             "remove --backend-version to use latest, "
-            "or add a declared version directory with %s when this version intentionally reuses shared-layer data.",
+            "or add a declared version directory with %s (legacy: %s) when this version "
+            "intentionally reuses shared-layer data.",
+            perf_database.REUSE_YAML_MARKER,
             perf_database.SHARED_LAYER_REUSE_MARKER,
         )
     else:
@@ -1183,6 +1213,7 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1350,11 +1381,13 @@ def build_default_tasks(
         global_kwargs["image_height"] = image_height
         global_kwargs["image_width"] = image_width
         global_kwargs["num_images_per_request"] = num_images
+    if not enable_encoder_dp:
+        global_kwargs["enable_encoder_dp"] = False
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set moe_backend for SGLang wideep to preserve existing UI parity.
+        # Auto-set the DeepEP MoE runner for SGLang WideEP unless explicitly overridden.
         return moe_backend or ("deepep_moe" if enable_wideep else None)
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
@@ -2052,6 +2085,7 @@ def _run_estimate_mode(args):
         image_height=args.image_height,
         image_width=args.image_width,
         num_images=args.num_images,
+        enable_encoder_dp=not args.disable_encoder_dp,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
         tp_size=args.tp_size,
@@ -2131,6 +2165,7 @@ def _run_estimate_mode(args):
     print(f"  OSL:              {result.osl}")
     if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
         print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
+        print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
     # mode (agg / disagg / afd / static*), so surface them in the summary box
@@ -2399,6 +2434,7 @@ def main(args):
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            enable_encoder_dp=not args.disable_encoder_dp,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

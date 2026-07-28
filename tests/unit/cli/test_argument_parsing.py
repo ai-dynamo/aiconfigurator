@@ -282,6 +282,47 @@ class TestCLIArgumentParsing:
         )
         assert args.nextn == "auto"
 
+    def test_nextn_requires_explicit_acceptance(self, cli_parser):
+        from aiconfigurator.cli.main import _resolve_and_validate_nextn
+
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "2",
+            ]
+        )
+
+        with pytest.raises(SystemExit, match="nextn_accepted"):
+            _resolve_and_validate_nextn(args)
+
+    def test_nextn_auto_requires_explicit_acceptance_when_resolved_positive(self, cli_parser, monkeypatch):
+        import aiconfigurator.cli.main as cli_main
+
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--nextn",
+                "auto",
+            ]
+        )
+        monkeypatch.setattr(cli_main, "resolve_nextn_auto", lambda _model_path: 2)
+
+        with pytest.raises(SystemExit, match=r"resolved to nextn=2.*nextn_accepted"):
+            cli_main._resolve_and_validate_nextn(args)
+
     @pytest.mark.parametrize("bad_value", ["-1", "1.5", "always", ""])
     def test_nextn_rejects_non_auto_junk(self, cli_parser, bad_value):
         """--nextn takes a non-negative integer or the literal 'auto'."""
@@ -382,3 +423,15 @@ class TestCLIArgumentParsing:
         action = next(action for action in default_parser._actions if action.dest == "database_mode")
         expected_choices = [mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL]
         assert sorted(action.choices) == sorted(expected_choices)
+
+    def test_disable_encoder_dp_flag(self, cli_parser):
+        """--disable-encoder-dp exists on default and estimate modes, default off (encoder DP on)."""
+        common_args = ["--model-path", "Qwen/Qwen3-VL-32B-Instruct", "--system", "h200_sxm"]
+        args = cli_parser.parse_args(["default", "--total-gpus", "8", *common_args])
+        assert args.disable_encoder_dp is False
+        args = cli_parser.parse_args(["default", "--total-gpus", "8", *common_args, "--disable-encoder-dp"])
+        assert args.disable_encoder_dp is True
+        args = cli_parser.parse_args(["estimate", *common_args])
+        assert args.disable_encoder_dp is False
+        args = cli_parser.parse_args(["estimate", *common_args, "--disable-encoder-dp"])
+        assert args.disable_encoder_dp is True

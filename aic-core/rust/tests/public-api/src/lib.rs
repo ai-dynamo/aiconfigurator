@@ -4,7 +4,7 @@
 //! Compile-time contract tests from an external crate's point of view.
 
 use aiconfigurator_core::{
-    AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
+    build_aic_engine, AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
     ForwardPassPerfOptions, KvCacheEstimateRequest,
 };
 
@@ -21,7 +21,7 @@ pub fn configured_builder() -> AicEngineBuilder {
         .kvcache_quant_mode("bfloat16")
         .fmha_quant_mode("bfloat16")
         .comm_quant_mode("bfloat16")
-        .speculative_decoding(0, None)
+        .speculative_decoding(0)
         .kv_block_size(16)
         .systems_path("/tmp/systems")
 }
@@ -31,6 +31,31 @@ pub fn configured_builder() -> AicEngineBuilder {
 /// Python and needs installed model/system data.
 pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
     builder.build()
+}
+
+/// Keep the flat compatibility adapter source-compatible through 0.10. The
+/// function is compiled but not called because it embeds Python and needs
+/// installed model/system data.
+pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
+    build_aic_engine(
+        "Qwen/Qwen3-32B",
+        "h200_sxm",
+        "vllm",
+        Some("0.10.2"),
+        2,
+        1,
+        1,
+        None,
+        None,
+        Some("bfloat16"),
+        Some("bfloat16"),
+        Some("bfloat16"),
+        Some("bfloat16"),
+        Some("bfloat16"),
+        0,
+        Some(16),
+        Some("/tmp/systems"),
+    )
 }
 
 /// Compile the forward-pass model's public constructor and telemetry type.
@@ -54,7 +79,7 @@ mod tests {
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
         assert_eq!(ENGINE_CONFIG_SCHEMA_VERSION, 1);
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 2);
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 4);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

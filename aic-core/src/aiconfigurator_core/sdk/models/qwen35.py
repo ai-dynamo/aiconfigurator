@@ -46,7 +46,7 @@ class Qwen35Model(BaseModel):
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
 
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         if cfg.num_experts > 0:
             assert (

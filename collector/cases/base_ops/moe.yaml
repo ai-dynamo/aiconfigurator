@@ -133,6 +133,7 @@ common_case_values:
       allowed_model_paths:
       - nvidia/DeepSeek-V3.1-NVFP4
       - nvidia/GLM-5-NVFP4
+      - nvidia/GLM-5.1-NVFP4
       - nvidia/GLM-5.2-NVFP4
       - nvidia/Kimi-K2.5-NVFP4
       - nvidia/MiniMax-M2.5-NVFP4

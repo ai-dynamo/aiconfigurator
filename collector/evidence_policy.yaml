@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Evidence policy (AIC-1219): policy-as-code for Collector V3's evidence
+# requirements (design §9: docs/perf_database/collector-v3-op-centric-design.md).
+# Consumed by tools/perf_database/evidence_check.py, the AIC-1214 CI gate, and
+# the out-of-repo support-matrix healer — all three resolve identical
+# requirements from identical (changed_ops manifest, this policy) inputs.
+#
+# Changes to this file are POLICY changes — what silicon evidence a pin,
+# collector-code, or case-plan change requires before it may land — and
+# require human review, not just code review.
+
+schema_version: 1
+
+thresholds:
+  # parquet_diff median latency delta (%) beyond which a collector-code
+  # change (same pin) escalates from before/after diff evidence to full
+  # recollection (design §9 row 2).
+  parquet_diff_median_pct: 5
+
+# SM-generation membership for the fleet (design AIC-1219 review fix): which
+# systems (aic-core/src/aiconfigurator_core/systems/*.yaml) belong to which
+# generation. Used to scope pin_version/collector_code evidence requirements
+# to the SM generations a changed entry's `systems` actually touch, instead
+# of demanding evidence from every generation regardless of relevance (e.g.
+# Hopper spot benchmarks for a Blackwell-only nvfp4 family, which
+# capabilities.yaml makes impossible to satisfy).
+#
+# Generation membership and the `evidence_systems` representatives below are
+# authored policy decisions, not derived facts: SM103 Ultra (gb300/b300_sxm)
+# is folded into `blackwell` alongside SM100 rather than split out — revisit
+# if Ultra-specific kernels diverge enough to need their own spot evidence.
+system_generations:
+  ampere: [a100_pcie, a100_sxm, a30]
+  ada: [l4, l40s]
+  hopper: [h100_pcie, h100_sxm, h200_sxm]
+  blackwell: [b200_sxm, b300_sxm, gb200, gb300]
+  blackwell_workstation: [rtx_pro_6000_server]
+  xpu: [b60]
+
+evidence_systems:
+  # One designated representative system per SM generation: used for
+  # declared-reuse spot benchmarks (pin_version's reuse alternative) and
+  # before/after parquet_diff (collector_code). Authored, adjustable as the
+  # fleet's representative systems change; each value must be a member of its
+  # generation in `system_generations` above.
+  ampere: a100_sxm
+  ada: l40s
+  hopper: h200_sxm
+  blackwell: b200_sxm
+  blackwell_workstation: rtx_pro_6000_server
+  xpu: b60
+
+rules:
+  # Pin version change (design §9 row 1): fresh silicon for the family's
+  # tables on every system the manifest lists, OR a reuse.yaml declaration
+  # backed by kernel-identity evidence (#1345 facts showing unchanged
+  # kernels) plus a before/after spot benchmark on one evidence system per
+  # SM generation.
+  pin_version:
+    requirement: recollect_or_declared_reuse
+
+  # Collector code change, same pin (design §9 row 2): before/after
+  # parquet_diff on affected tables from each evidence system; a median
+  # latency delta beyond thresholds.parquet_diff_median_pct escalates to
+  # full recollection.
+  collector_code:
+    requirement: before_after_diff
+
+  # Case plan change (design §9 row 3): additive — collect the new cases
+  # only. Removals prune with the diff visible; no fresh silicon required.
+  case_plan:
+    requirement: collect_new_cases_only
+
+# A pin/collector/case-plan change without the evidence above may proceed
+# only via an entry in this file (approver + expiry, design §9
+# "Exceptions"). The file's absence means no exceptions are in effect.
+exceptions_file: evidence_exceptions.yaml

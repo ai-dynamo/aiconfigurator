@@ -19,8 +19,9 @@ class Qwen3VLModel(LLAMAModel):
     LLAMAModel context/generation ops. The vision encoder (vision_config)
     runs before the LLM prefill phase and is represented as encoder_ops.
 
-    ViT ops run in bfloat16 regardless of LLM quantization. TP is applied
-    to the ViT heads and FFN in the same way as the LLM backbone.
+    ViT ops run in bfloat16 regardless of LLM quantization. Encoder
+    parallelism follows ModelConfig.enable_encoder_dp: DP replicas over the
+    tp_size ranks by default, legacy TP sharding otherwise.
     """
 
     @classmethod
@@ -48,7 +49,7 @@ class Qwen3VLModel(LLAMAModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
+        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))
 
 
 @register_model("QWEN3VL_MOE")
@@ -87,4 +88,4 @@ class Qwen3VLMoEModel(MOEModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size))
+        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))

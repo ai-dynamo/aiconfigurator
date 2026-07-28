@@ -53,13 +53,18 @@ Taking MoE for TensorRT-LLM as an example, the current collector lives in `colle
 
 #### 3.1 Adding New Test Cases
 
-If the MoE operation you want is not covered by the current inherited [database](../src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt), you need to add the test case in the relevant YAML case file and collect your own data.
+If the MoE operation you want is not covered by the current inherited
+[database](../aic-core/src/aiconfigurator_core/systems/data/h200_sxm/moe/trtllm/1.3.0rc10/moe_perf.parquet),
+you need to add the test case in the relevant YAML case file and collect your
+own data.
 
 For example, if you want to cover a new model with `num_experts=1024, topk=16`, you should extend the model's `*_cases.yaml` under `collector/cases/models/` or the shared MoE cases under `collector/cases/base_ops/` when the case is common across models.
 
 #### 3.2 Update Database
 
-Use the newly generated `moe_perf.txt` to replace the inherited database's `moe_perf.txt` file and rebuild & reinstall aiconfigurator.
+Finalize the collector's `moe_perf.txt` staging output as
+`moe_perf.parquet`, place it in the canonical `moe` family directory, and
+rebuild and reinstall aiconfigurator.
 
 
 ## Adding a New Model
@@ -91,7 +96,9 @@ You need to follow several steps:
 
 1. Define a new MoE operation test case in the relevant collector YAML case file and follow the collector [README](../collector/README.md) to collect the MoE data points for your model.
 
-2. Update the inherited database such as `src/aiconfigurator/systems/data/h200_sxm/trtllm/1.0.0rc3/moe_perf.txt` with the `moe_perf.txt` file you get in step 1.
+2. Finalize the collected staging file as parquet and update the inherited
+   database, for example
+   `aic-core/src/aiconfigurator_core/systems/data/h200_sxm/moe/trtllm/1.3.0rc10/moe_perf.parquet`.
 
 3. Ensure the architecture mapping exists in **ARCHITECTURE_TO_MODEL_FAMILY** (see **Situation 1**).
 
@@ -107,7 +114,10 @@ Steps required:
 2. **Define a new method `query_conv`** in `perf_database.py`
 3. **Declare the op's interpolation config** in [`sdk/perf_interp/config.py`](../src/aiconfigurator/sdk/perf_interp/config.py). Raw perf tables are resolved through the shared `perf_interp.query` engine, and each op family declares its table shape once as an `OpInterpConfig` record: name the axes in the table's nesting order, pick the resolver (`ScatteredSites` for scattered-shapes-plus-swept-axis tables like GEMM, `Grid` for near-regular grids like attention), and provide the op's analytic `sol_fn` (its speed-of-light roofline — required; it anchors out-of-range extrapolation). Add a factory next to `gemm_config` / `context_grid_config`, register it in `OP_CONFIG_FACTORIES`, and call `perf_interp.query(config, table, *coords)` from `query_conv`.
 4. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
-5. **Collect data for conv** and add the data file to systems in `src/aiconfigurator/systems/`
+5. **Collect data for conv**, register its family in
+   `collector/op_backend_catalog.yaml`, and add the finalized parquet file
+   under
+   `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`
 6. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
 7. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
 update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
@@ -153,7 +163,7 @@ flowchart TD
     j --> |YES|K([Some common cases in which you will need to collect new data])
     K --> L[/• You haved defined new operations<br/> • <i><b>MoE</b></i> with different <i><b>num_experts</b></i> or <i><b>topk</b></i> from existing ones<br/>• New <i><b>attention</b></i> variant, such as <b><i>attention</b></i> with <b><i>head_size</b></i> other than 64 or 128/]
     L --> M[Add new test cases to the relevant collector files under aiconfigurator/collector/]
-    M --> N[Collect data using <i><b>collect.py</b></i> and generate <i><b>XX_XX_perf.txt</b></i> data files]
+    M --> N[Collect staging data with <i><b>collect.py</b></i>, then finalize <i><b>XX_XX_perf.parquet</b></i>]
     N --> Z
     j --> |NO|Z[<i><b>Good news, you are now all set</b></i>]
 ```

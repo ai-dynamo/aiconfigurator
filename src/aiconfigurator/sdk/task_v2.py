@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.config_builders import validate_nextn
 from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
@@ -49,6 +48,10 @@ from aiconfigurator.sdk.perf_database import (
     is_blackwell_system,
     is_hopper_system,
     load_system_spec,
+)
+from aiconfigurator.sdk.speculative import (
+    SpeculativeDecodingProfile,
+    normalize_speculative_decoding,
 )
 from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
 
@@ -329,6 +332,8 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
+    # Vision encoder data parallelism (ModelConfig default).
+    enable_encoder_dp: bool = True
     ttft: float = 1000.0
     tpot: float = 50.0
     # When True (default), sweep TPOT over the legacy grid to build the full Pareto
@@ -562,7 +567,7 @@ class Task:
         # nextn="auto" is the one exception: its depth comes from the checkpoint,
         # so it is resolved and validated in _resolve_model_identity.
         if self.nextn != "auto":
-            validate_nextn(self.nextn, self.nextn_accepted)
+            self.nextn, self.nextn_accepted = normalize_speculative_decoding(self.nextn, self.nextn_accepted)
         self._validate_deepseek_v4_hardware()
         self._resolve_model_identity()
         if self.nextn == "auto":
@@ -676,7 +681,7 @@ class Task:
             resolved = int(hf_nextn or 0)
             if resolved > 0:
                 try:
-                    validate_nextn(resolved, self.nextn_accepted)
+                    resolved, self.nextn_accepted = normalize_speculative_decoding(resolved, self.nextn_accepted)
                 except ValueError as exc:
                     raise ValueError(
                         f"nextn='auto' resolved to nextn={resolved} from the checkpoint's "
@@ -1117,7 +1122,7 @@ class Task:
             fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
             nextn=self.nextn,
-            nextn_accepted=self.nextn_accepted,
+            enable_encoder_dp=self.enable_encoder_dp,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
             # moe_backend / attention_backend / wideep_num_slots are shared across roles
@@ -1130,6 +1135,10 @@ class Task:
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
         )
+
+    def build_speculative_profile(self) -> SpeculativeDecodingProfile:
+        """Build the upper-layer expected-progress assumption for prediction."""
+        return SpeculativeDecodingProfile.from_inputs(self.nextn, self.nextn_accepted)
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:
         """Yield (tp, pp, dp, moe_tp, moe_ep, cp) tuples for the role.
@@ -1336,6 +1345,13 @@ class Task:
                 return  # DB doesn't record support for this op; skip
             name = mode.name if hasattr(mode, "name") else str(mode)
             if name in modes:
+                return
+            # Modes that normalize to a different table name for perf queries
+            # (nvfp4_wo -> bfloat16, w4a16_mxfp4_cutlass -> w4a16_mxfp4) are
+            # accepted when the target table mode is supported.
+            validation_aliases = {"nvfp4_wo": "bfloat16", "w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            alias = validation_aliases.get(name)
+            if alias and alias in modes:
                 return
             if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
                 return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
@@ -1558,6 +1574,7 @@ class Task:
             return sweep_agg(
                 **self.sweep_agg_kwargs(database=database),
                 predictor=self.predictor,
+                speculative_profile=self.build_speculative_profile(),
             )
         if self.serving_mode == "disagg":
             prefill_database = self._load_database(
@@ -1570,6 +1587,7 @@ class Task:
                 **self.sweep_disagg_kwargs(prefill_database=prefill_database, decode_database=decode_database),
                 autoscale=autoscale,
                 predictor=self.predictor,
+                speculative_profile=self.build_speculative_profile(),
             )
         raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
 
@@ -1646,6 +1664,7 @@ class Task:
             runtime_config=runtime_config,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
             **backend_kwargs,
         )
         if summary.check_oom():
@@ -1722,6 +1741,7 @@ class Task:
             role="prefill",
             latency_correction=self.prefill_latency_correction,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
         )
         if p_summary.check_oom():
             raise RuntimeError(
@@ -1750,6 +1770,7 @@ class Task:
             role="decode",
             latency_correction=self.decode_latency_correction,
             predictor=self.predictor,
+            speculative_profile=self.build_speculative_profile(),
         )
         if d_summary.check_oom():
             raise RuntimeError(

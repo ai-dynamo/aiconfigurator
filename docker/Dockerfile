@@ -124,6 +124,13 @@ RUN uv pip install --find-links /wheelhouse /wheelhouse/aiconfigurator-*.whl && 
 
 FROM runtime AS test
 
+# The perf-database tool tests shell out to git (changed_ops revision diffing,
+# migrate_* execute paths use git mv/rm/add). Test stage only — the shipped
+# runtime image stays git-free.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
 # Runtime already installed both payload-owning wheels. Add the upper wheel's
 # development extras before copying the test sources.
 COPY --from=build /workspace/dist /wheelhouse

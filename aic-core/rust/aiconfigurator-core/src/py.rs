@@ -14,7 +14,9 @@
 //!   releases the GIL around the Rust compute via [`Python::allow_threads`],
 //!   so the Rust compute runs without holding the GIL.
 //! * **Rust → Python → Rust (embedded path).** [`AicEngineBuilder`] is the
-//!   Rust entry point. It crosses into Python once to run
+//!   preferred Rust entry point. The flat [`build_aic_engine`] function remains
+//!   as a source-compatibility adapter for callers such as the Dynamo Mocker.
+//!   Both cross into Python once to run
 //!   `aiconfigurator_core.sdk.engine.compile_engine`, then build an [`Engine`]
 //!   from the returned bincode bytes. After that the `predict_*` hot path is
 //!   pure Rust with no GIL.
@@ -22,14 +24,15 @@
 //! Two error conversions live inline here (NOT in `common/error.rs`, which must
 //! stay free of the pyo3 dependency):
 //! * `AicError → PyErr` (`aic_to_py`) for the `#[pymethods]` boundary.
-//! * `PyErr → AicError` (inline in [`compile_engine_from_request`]) for the
-//!   embedded path.
+//! * `PyErr → AicError` (inline in [`build_aic_engine`]) for the embedded path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
@@ -44,10 +47,70 @@ fn _build_smoke() -> u32 {
     ENGINE_CONFIG_SCHEMA_VERSION
 }
 
+/// Cached handles to the canonical SDK exception classes
+/// (`aiconfigurator.sdk.errors`). Filled lazily on first use so importing the
+/// extension never imports the sdk (the sdk imports aiconfigurator_core — an
+/// eager import here would be a cycle), and left empty in pure-Rust contexts
+/// where the sdk is not installed (fallback to `PyValueError`).
+static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+
+/// Resolve (and memoize) one sdk error class; `None` when the sdk is not
+/// importable, so the caller falls back to `PyValueError`.
+fn sdk_error_type(
+    py: Python<'_>,
+    cell: &'static GILOnceCell<Py<PyType>>,
+    name: &str,
+) -> Option<Py<PyType>> {
+    cell.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        Ok(py
+            .import("aiconfigurator.sdk.errors")?
+            .getattr(name)?
+            .downcast_into::<PyType>()?
+            .unbind())
+    })
+    .ok()
+    .map(|ty| ty.clone_ref(py))
+}
+
 /// Convert a crate error into a Python exception at the `#[pymethods]` boundary.
 /// Inline (not a `From` impl in `error.rs`) so the error module stays pyo3-free.
+///
+/// Typed mapping so Python-side classifiers keep working across the FFI:
+/// * missing-perf-data errors (`AicError::PerfDatabase` / `Io` — the
+///   `is_missing_perf_data` set) raise the canonical
+///   `aiconfigurator.sdk.errors.PerfDataNotAvailableError`, so
+///   `perf_database.has_perf_data_not_available_cause` recognizes rust-path
+///   data misses;
+/// * `AicError::EmpiricalNotImplemented` raises
+///   `aiconfigurator.sdk.errors.EmpiricalNotImplementedError` (the typed
+///   HYBRID/EMPIRICAL coverage miss);
+/// * everything else stays `PyValueError`.
+///
+/// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
+/// (cargo test without the sdk on `sys.path`) the conversion degrades to
+/// `PyValueError` with the same message.
 fn aic_to_py(e: AicError) -> PyErr {
-    PyValueError::new_err(e.to_string())
+    let sdk_class: Option<(&'static GILOnceCell<Py<PyType>>, &str)> = if e.is_missing_perf_data() {
+        Some((&PERF_DATA_NOT_AVAILABLE_ERROR, "PerfDataNotAvailableError"))
+    } else if matches!(e, AicError::EmpiricalNotImplemented(_)) {
+        Some((&EMPIRICAL_NOT_IMPLEMENTED_ERROR, "EmpiricalNotImplementedError"))
+    } else {
+        None
+    };
+    let message = e.to_string();
+    if let Some((cell, name)) = sdk_class {
+        // `with_gil` is re-entrant, so this is safe whether the caller holds
+        // the GIL (from_spec) or just re-acquired it (post-allow_threads).
+        let typed = Python::with_gil(|py| {
+            sdk_error_type(py, cell, name)
+                .map(|ty| PyErr::from_type(ty.into_bound(py), message.clone()))
+        });
+        if let Some(err) = typed {
+            return err;
+        }
+    }
+    PyValueError::new_err(message)
 }
 
 /// Map the `mode` string (Python's `_run_static_breakdown` convention) to the
@@ -112,7 +175,7 @@ pub struct AicEngine {
 
 impl AicEngine {
     /// Internal constructor shared by [`AicEngine::from_spec`] and
-    /// [`AicEngineBuilder::build`].
+    /// [`build_aic_engine`].
     fn new(engine: Engine) -> Self {
         AicEngine {
             inner: Arc::new(engine),
@@ -204,11 +267,28 @@ impl AicEngine {
             gen_seq_imbalance_correction_scale,
         };
         let mode = parse_mode(mode)?;
+        // Per-call provenance scope (see `last_provenance`).
+        self.inner.reset_provenance();
         // Rust compute runs with the GIL released.
         let result: StaticResult = py
             .allow_threads(|| self.inner.run_static(&rt, mode, stride))
             .map_err(aic_to_py)?;
         Ok((result.context_ms, result.generation_ms, result.total_ms))
+    }
+
+    /// Empirical provenance tier fired during the most recent compute call on
+    /// this handle (max-rank across ops, Python `worst_provenance` semantics),
+    /// or `None` when the call was answered purely from silicon tables.
+    ///
+    /// Every compute method (`run_static`, `predict_*_latency`,
+    /// `mixed_step_latency`, `decode_step_latency`) resets the accumulator on
+    /// entry, so this is per-call state — the Python bridge reads it right
+    /// after each call and forwards non-silicon tiers into
+    /// `util_empirical.note_provenance` (support-matrix HYBRID labelling).
+    /// Not meaningful under concurrent calls on one handle (the sweep drives
+    /// each handle sequentially).
+    fn last_provenance(&self) -> Option<&'static str> {
+        self.inner.last_provenance()
     }
 
     /// Mocker H1: prefill-step latency in ms. Thin shim over `run_static` with
@@ -222,6 +302,7 @@ impl AicEngine {
         isl: u32,
         prefix: u32,
     ) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| self.inner.predict_prefill_latency(bs, isl, prefix))
             .map_err(aic_to_py)
     }
@@ -231,15 +312,20 @@ impl AicEngine {
     /// `s = isl + 1`). Returns the total ms (== generation_ms in this mode).
     #[pyo3(signature = (bs, isl, osl=2))]
     fn predict_decode_latency(&self, py: Python<'_>, bs: u32, isl: u32, osl: u32) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| self.inner.predict_decode_latency(bs, isl, osl))
             .map_err(aic_to_py)
     }
 
     /// One mixed (chunked-prefill + decode) engine-step latency in ms. Binds
     /// [`Engine::mixed_step_latency`]; the Python agg orchestration
-    /// (`base_backend._get_mix_step_latency`) calls this per mix step. Mirrors
-    /// the live FPM bridge `estimate_mixed_step_latency_with_rust`.
-    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0))]
+    /// (`base_backend._get_mix_step_latency`) calls this per mix step. The
+    /// imbalance-correction scales default to 1.0 and mirror the
+    /// `RuntimeConfig` fields Python threads into the three passes.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
     fn mixed_step_latency(
         &self,
         py: Python<'_>,
@@ -248,10 +334,20 @@ impl AicEngine {
         isl: u32,
         osl: u32,
         prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
+        self.inner.reset_provenance();
         py.allow_threads(|| {
-            self.inner
-                .mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
+            self.inner.mixed_step_latency(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -259,17 +355,21 @@ impl AicEngine {
     /// One generation-only engine-step latency in ms. Binds
     /// [`Engine::decode_step_latency`]; the Python agg orchestration
     /// (`base_backend._get_genonly_step_latency`) calls this per genonly step.
-    /// Mirrors the live FPM bridge `estimate_decode_step_latency_with_rust`.
-    #[pyo3(signature = (gen_tokens, isl, osl))]
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
     fn decode_step_latency(
         &self,
         py: Python<'_>,
         gen_tokens: u32,
         isl: u32,
         osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<f64> {
-        py.allow_threads(|| self.inner.decode_step_latency(gen_tokens, isl, osl))
-            .map_err(aic_to_py)
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_latency(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
     }
 }
 
@@ -277,9 +377,8 @@ impl AicEngine {
 /// op-transfer). Python's `compile_engine` builds the `EngineSpec` as a JSON
 /// string (externally-tagged `Op` variants + `EngineConfig`) — JSON is the
 /// debuggable wire and the only format Python can produce — and calls this to
-/// get the bincode bytes that `AicEngine.from_spec` /
-/// [`AicEngineBuilder::build`] consume. `serde_json` round-trips
-/// `EngineConfig`'s `#[serde(flatten)]`
+/// get the bincode bytes that `AicEngine.from_spec` / `build_aic_engine`
+/// consume. `serde_json` round-trips `EngineConfig`'s `#[serde(flatten)]`
 /// cleanly (only bincode rejected it; that is exactly why `to_bincode`
 /// re-encodes `engine` as JSON inside the bincode payload).
 #[pyfunction]
@@ -291,10 +390,9 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
 
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
-/// The public builder and the crate-internal `EngineConfig` path both normalize
-/// into this representation before the one-time Python compile. Keeping this
-/// type private lets the public builder evolve without creating a second public
-/// config API.
+/// The builder and the flat compatibility function both normalize into this
+/// representation before the one-time Python compile. Keeping this type private
+/// lets the public builder evolve without creating a second public config API.
 #[derive(Clone, Debug)]
 struct EngineBuildRequest {
     model_path: String,
@@ -312,7 +410,6 @@ struct EngineBuildRequest {
     fmha_quant_mode: Option<String>,
     comm_quant_mode: Option<String>,
     nextn: u32,
-    nextn_accepted: Option<f64>,
     kv_block_size: Option<u32>,
     systems_path: Option<String>,
 }
@@ -321,7 +418,9 @@ struct EngineBuildRequest {
 ///
 /// Only the model, system, and backend are required. Parallelism defaults to
 /// one, speculative decoding defaults to disabled, and all other options defer
-/// to Python's `compile_engine` defaults.
+/// to Python's `compile_engine` defaults. New callers should use this builder.
+/// [`build_aic_engine`] remains available as a source-compatibility adapter for
+/// existing callers through 0.10 and is planned for removal in version 0.11.0.
 #[derive(Clone, Debug)]
 pub struct AicEngineBuilder {
     request: EngineBuildRequest,
@@ -351,7 +450,6 @@ impl AicEngineBuilder {
                 fmha_quant_mode: None,
                 comm_quant_mode: None,
                 nextn: 0,
-                nextn_accepted: None,
                 kv_block_size: None,
                 systems_path: None,
             },
@@ -420,9 +518,8 @@ impl AicEngineBuilder {
     }
 
     /// Configure speculative decoding.
-    pub fn speculative_decoding(mut self, nextn: u32, nextn_accepted: Option<f64>) -> Self {
+    pub fn speculative_decoding(mut self, nextn: u32) -> Self {
         self.request.nextn = nextn;
-        self.request.nextn_accepted = nextn_accepted;
         self
     }
 
@@ -440,7 +537,7 @@ impl AicEngineBuilder {
 
     /// Compile the Python engine specification once and return a Rust handle.
     pub fn build(self) -> Result<AicEngine, AicError> {
-        build_engine_from_request(self.request)
+        build_aic_engine_impl(self.request)
     }
 }
 
@@ -469,7 +566,7 @@ mod builder_tests {
             .pp_size(2)
             .attention_dp_size(4)
             .moe_parallelism(Some(1), Some(8))
-            .speculative_decoding(2, Some(0.8))
+            .speculative_decoding(2)
             .kv_block_size(16)
             .systems_path("/tmp/systems");
         assert_eq!(builder.request.backend, "sglang");
@@ -480,7 +577,7 @@ mod builder_tests {
             (builder.request.moe_tp_size, builder.request.moe_ep_size),
             (Some(1), Some(8))
         );
-        assert_eq!(builder.request.nextn_accepted, Some(0.8));
+        assert_eq!(builder.request.nextn, 2);
         assert_eq!(builder.request.kv_block_size, Some(16));
         assert_eq!(
             builder.request.systems_path.as_deref(),
@@ -489,8 +586,75 @@ mod builder_tests {
     }
 }
 
+/// Compatibility Rust → Python → Rust embedded build entry point.
+///
+/// A plain `pub` Rust fn (NOT a `#[pyfunction]`): Rust callers (e.g. the Dynamo
+/// Mocker) call it with flat scalars. It crosses into Python exactly once to
+/// run `aiconfigurator_core.sdk.engine.compile_engine`, which walks the model's
+/// op lists and returns bincoded [`crate::engine::spec::EngineSpec`] bytes. It
+/// then builds the [`Engine`] from those bytes (via
+/// [`Engine::from_spec_bytes`], which does `from_bincode` +
+/// `PerfDatabase::load` + `Engine::build`). The call shape is
+/// `with_gil → import → call_method1("compile_engine", ...) →
+/// extract::<Vec<u8>>() → build`.
+///
+/// The flat arg list matches the `compile_engine` signature. `systems_path` is
+/// the Rust-side perf-DB root (it is also forwarded to `compile_engine` so the
+/// two stay aligned).
+///
+/// The full Rust → Python → Rust round-trip is validated end-to-end by
+/// `tests/embedded_round_trip.rs`.
+///
+/// # Compatibility
+///
+/// This flat function remains source-compatible through the 0.10 release for
+/// existing consumers. New code should use [`AicEngineBuilder`]. The flat
+/// function is planned for removal in version 0.11.0.
+// `pub` and re-exported from `lib.rs` for embedded callers (the Dynamo Mocker,
+// `tests/embedded_round_trip.rs`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_aic_engine(
+    model_path: &str,
+    system: &str,
+    backend: &str,
+    backend_version: Option<&str>,
+    tp_size: u32,
+    pp_size: u32,
+    attention_dp_size: u32,
+    moe_tp_size: Option<u32>,
+    moe_ep_size: Option<u32>,
+    gemm_quant_mode: Option<&str>,
+    moe_quant_mode: Option<&str>,
+    kvcache_quant_mode: Option<&str>,
+    fmha_quant_mode: Option<&str>,
+    comm_quant_mode: Option<&str>,
+    nextn: u32,
+    kv_block_size: Option<u32>,
+    systems_path: Option<&str>,
+) -> Result<AicEngine, AicError> {
+    build_aic_engine_impl(EngineBuildRequest {
+        model_path: model_path.to_owned(),
+        system: system.to_owned(),
+        backend: backend.to_owned(),
+        backend_version: backend_version.map(str::to_owned),
+        tp_size,
+        pp_size,
+        attention_dp_size,
+        moe_tp_size,
+        moe_ep_size,
+        gemm_quant_mode: gemm_quant_mode.map(str::to_owned),
+        moe_quant_mode: moe_quant_mode.map(str::to_owned),
+        kvcache_quant_mode: kvcache_quant_mode.map(str::to_owned),
+        fmha_quant_mode: fmha_quant_mode.map(str::to_owned),
+        comm_quant_mode: comm_quant_mode.map(str::to_owned),
+        nextn,
+        kv_block_size,
+        systems_path: systems_path.map(str::to_owned),
+    })
+}
+
 /// Construct the public handle from the one canonical build request.
-fn build_engine_from_request(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
+fn build_aic_engine_impl(request: EngineBuildRequest) -> Result<AicEngine, AicError> {
     let engine = compile_engine_from_request(request)?;
     Ok(AicEngine::new(engine))
 }
@@ -499,8 +663,8 @@ fn build_engine_from_request(request: EngineBuildRequest) -> Result<AicEngine, A
 /// `compile_engine` from one normalized request, then build an [`Engine`] from
 /// the returned bincode bytes (`from_bincode` + `PerfDatabase::load` +
 /// `Engine::build`).
-/// The public builder and [`compile_engine_to_engine`] both use this function,
-/// so Python argument names and defaults cannot drift.
+/// The builder, compatibility wrapper, and [`compile_engine_to_engine`] all use
+/// this function, so Python argument names and defaults cannot drift.
 fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, AicError> {
     let systems_root = resolve_systems_root(request.systems_path.as_deref())
         .map_err(|e| AicError::DataRoot(format!("resolve systems path: {e}")))?;
@@ -525,7 +689,6 @@ fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, Ai
         kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
         kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
         kwargs.set_item("nextn", request.nextn)?;
-        kwargs.set_item("nextn_accepted", request.nextn_accepted)?;
         kwargs.set_item("kv_block_size", request.kv_block_size)?;
         kwargs.set_item("systems_path", systems_root_str)?;
         engine_mod
@@ -570,8 +733,6 @@ pub(crate) fn compile_engine_to_engine(
         .as_ref()
         .and_then(|s| s.nextn)
         .unwrap_or(0);
-    let nextn_accepted = config.speculative.as_ref().and_then(|s| s.nextn_accepted);
-
     compile_engine_from_request(EngineBuildRequest {
         model_path: config.model_name.clone(),
         system: config.system_name.clone(),
@@ -592,7 +753,6 @@ pub(crate) fn compile_engine_to_engine(
         // Comm quant is not carried on EngineConfig; let Python default it.
         comm_quant_mode: None,
         nextn,
-        nextn_accepted,
         kv_block_size: config.kv_block_size,
         systems_path: systems_path.map(str::to_owned),
     })
@@ -789,6 +949,9 @@ impl PyForwardPassPerfModel {
 /// names from this inner module. This is distinct from `[lib] name` in
 /// `Cargo.toml`, which stays `aiconfigurator_core` and drives the ctypes dylib
 /// filename.
+///
+/// Note `build_aic_engine` is intentionally NOT added here: it is a Rust-only
+/// entry point for embedded callers, not part of the Python surface.
 #[pymodule]
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
@@ -813,6 +976,14 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator_core/systems")
     }
 
+    /// `cargo test` runs without an embedding host, so the interpreter must
+    /// be initialized before any `Python::with_gil` (pyo3's
+    /// `auto-initialize` feature is intentionally off for the extension
+    /// build). Idempotent.
+    fn py_init() {
+        pyo3::prepare_freethreaded_python();
+    }
+
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
     /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
@@ -827,6 +998,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::Gemm(GemmOp {
@@ -862,6 +1034,7 @@ mod tests {
                 name: "rmsnorm".into(),
                 scale_factor: 1.0,
                 bytes_per_token: 8192.0,
+                scale_num_tokens: 1,
                 seq_split: 1,
             }),
             Op::GenerationAttention(GenerationAttentionOp {
@@ -901,6 +1074,8 @@ mod tests {
             },
             speculative: None,
             perf_db_sources: Default::default(),
+            database_mode: Default::default(),
+            transfer_policy: None,
             extra: BTreeMap::new(),
         }
     }
@@ -918,6 +1093,7 @@ mod tests {
     /// `Engine` built from the same bytes via `from_spec_bytes`.
     #[test]
     fn aic_engine_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
 
@@ -994,6 +1170,7 @@ mod tests {
     /// unknown mode must raise (not silently default).
     #[test]
     fn mode_strings_map_correctly() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
@@ -1020,17 +1197,19 @@ mod tests {
     /// the raw `Engine` numbers unchanged.
     #[test]
     fn per_step_bindings_match_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
 
-        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0).unwrap();
-        let mixed = Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0)).unwrap();
+        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let mixed =
+            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)).unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
 
-        let raw_decode = raw.decode_step_latency(4, 1024, 8).unwrap();
-        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8)).unwrap();
+        let raw_decode = raw.decode_step_latency(4, 1024, 8, 1.0).unwrap();
+        let decode = Python::with_gil(|py| aic.decode_step_latency(py, 4, 1024, 8, 1.0)).unwrap();
         assert!((decode - raw_decode).abs() < 1e-12);
     }
 
@@ -1052,6 +1231,7 @@ mod tests {
     /// exercises end-to-end.
     #[test]
     fn inherent_predict_matches_raw_engine() {
+        py_init();
         let bytes = fixture_spec_bytes();
         let root = systems_root();
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
@@ -1066,5 +1246,87 @@ mod tests {
         let aic_decode = aic.decode_latency_ms(4, 1024, 2).unwrap();
         assert!((aic_decode - raw_decode).abs() < 1e-12);
         assert!(aic_decode > 0.0 && aic_decode.is_finite());
+    }
+
+    /// `aic_to_py` must raise the canonical sdk exception classes for the
+    /// typed variants when the sdk is importable, and degrade to `ValueError`
+    /// when it is not (pure-Rust test contexts). Everything else stays
+    /// `ValueError` unconditionally.
+    #[test]
+    fn aic_to_py_maps_typed_errors_to_sdk_classes() {
+        py_init();
+        Python::with_gil(|py| {
+            let sdk_available = py.import("aiconfigurator.sdk.errors").is_ok();
+
+            let check = |err: AicError, sdk_name: &str| {
+                let pyerr = aic_to_py(err);
+                let type_name = pyerr.get_type(py).name().unwrap().to_string();
+                if sdk_available {
+                    assert_eq!(type_name, sdk_name);
+                } else {
+                    assert_eq!(type_name, "ValueError");
+                }
+            };
+            check(
+                AicError::PerfDatabase("missing table".to_string()),
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::Io {
+                    path: PathBuf::from("/nope"),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+                },
+                "PerfDataNotAvailableError",
+            );
+            check(
+                AicError::EmpiricalNotImplemented("no basis".to_string()),
+                "EmpiricalNotImplementedError",
+            );
+
+            // Non-typed variants stay ValueError regardless of the sdk.
+            let other = aic_to_py(AicError::InvalidEngineConfig("bad".to_string()));
+            assert_eq!(other.get_type(py).name().unwrap().to_string(), "ValueError");
+
+            // The message survives the mapping.
+            let msg_err = aic_to_py(AicError::PerfDatabase("missing table xyz".to_string()));
+            assert!(msg_err.value(py).to_string().contains("missing table xyz"));
+        });
+    }
+
+    /// Compute bindings reset the provenance accumulator on entry, and
+    /// `last_provenance` reads it back (None == pure silicon). The silicon
+    /// fixture fires no empirical path, so a pre-seeded tier must be cleared
+    /// by the next compute call.
+    #[test]
+    fn compute_bindings_reset_provenance_per_call() {
+        use crate::operators::util_empirical::ProvenanceTier;
+
+        py_init();
+        let bytes = fixture_spec_bytes();
+        let root = systems_root();
+        let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
+
+        assert_eq!(aic.last_provenance(), None);
+        aic.inner.database().note_provenance(ProvenanceTier::XOp);
+        assert_eq!(aic.last_provenance(), Some("xop"));
+
+        // Positional order: (bs, beam, isl, osl, prefix, seq_corr, gen_seq_corr, mode, stride).
+        Python::with_gil(|py| {
+            aic.run_static(py, 1, 1, 1024, 8, 0, 1.0, 1.0, "static", 32)
+                .unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner.database().note_provenance(ProvenanceTier::Empirical);
+        Python::with_gil(|py| {
+            aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
+
+        aic.inner.database().note_provenance(ProvenanceTier::XShape);
+        Python::with_gil(|py| {
+            aic.decode_step_latency(py, 4, 1024, 8, 1.0).unwrap();
+        });
+        assert_eq!(aic.last_provenance(), None);
     }
 }

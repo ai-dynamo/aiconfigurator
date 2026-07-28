@@ -27,8 +27,13 @@ from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
-from aiconfigurator.sdk.config_builders import validate_nextn as _validate_nextn
 from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
+from aiconfigurator.sdk.speculative import (
+    SpeculativeDecodingProfile,
+)
+from aiconfigurator.sdk.speculative import (
+    normalize_speculative_decoding as _normalize_nextn,
+)
 from aiconfigurator.sdk.task_v2 import Task
 
 # Default per-phase latency-correction scales for single-point disagg estimates.
@@ -147,6 +152,7 @@ def cli_default(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -181,6 +187,9 @@ def cli_default(
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
         osl: Output sequence length. Default is 1000.
+        enable_encoder_dp: Model the vision encoder data-parallel (default True;
+            vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
+            False models the legacy TP-sharded encoder.
         ttft: Time to first token target in ms. Default is 2000.
         tpot: Time per output token target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
@@ -250,7 +259,7 @@ def cli_default(
     # nextn="auto" resolves the draft depth from the checkpoint first.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-    _validate_nextn(nextn, nextn_accepted)
+    nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     # Reuse build_default_tasks from main.py
     tasks = build_default_tasks(
@@ -267,6 +276,7 @@ def cli_default(
         image_height=image_height,
         image_width=image_width,
         num_images=num_images,
+        enable_encoder_dp=enable_encoder_dp,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -627,6 +637,7 @@ def cli_estimate(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    enable_encoder_dp: bool = True,
     batch_size: int = 128,
     ctx_tokens: int | None = None,
     tp_size: int = 1,
@@ -703,6 +714,9 @@ def cli_estimate(
         image_height: Image height in pixels for VL models. Default 0 disables encoder modeling.
         image_width: Image width in pixels for VL models. Default 0 disables encoder modeling.
         num_images: Number of images per request for VL models. Default 1.
+        enable_encoder_dp: Model the vision encoder data-parallel (default True;
+            vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
+            False models the legacy TP-sharded encoder.
         batch_size: Batch size (max concurrent requests, used for agg mode). Default is 128.
         ctx_tokens: Context tokens budget for IFB scheduling (agg mode only).
             Default is None, which uses ``isl`` as the budget.
@@ -811,7 +825,7 @@ def cli_estimate(
     # estimate path (agg/disagg/static/afd) sees a plain int.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
-    _validate_nextn(nextn, nextn_accepted)
+    nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     active_systems_paths = None
     if systems_paths is not None:
@@ -879,6 +893,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
             tp_size=tp_size,
@@ -912,6 +927,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else isl,
             tp_size=tp_size,
@@ -964,6 +980,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             # Prefill config (fall back to shared args)
             prefill_tp_size=prefill_tp_size if prefill_tp_size is not None else tp_size,
             prefill_pp_size=prefill_pp_size if prefill_pp_size is not None else pp_size,
@@ -1075,6 +1092,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
             tp_size=tp_size,
@@ -1123,6 +1141,7 @@ def _run_agg_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     batch_size,
     ctx_tokens,
     tp_size,
@@ -1165,8 +1184,9 @@ def _run_agg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
-    _apply_nextn(model_config, nextn, nextn_accepted)
+    _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
     # before building the model (mirrors the sweep/task_v2 path).
     resolve_context_fmha_by_data(
@@ -1194,6 +1214,7 @@ def _run_agg_estimate(
         max_seq_len=max_seq_len,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
+    summary = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted).project_summary(summary, role="agg")
 
     if summary.check_oom():
         raise RuntimeError(
@@ -1251,6 +1272,7 @@ def _run_static_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     batch_size,
     prefix,
     tp_size,
@@ -1299,8 +1321,9 @@ def _run_static_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
-    _apply_nextn(model_config, nextn, nextn_accepted)
+    _apply_nextn(model_config, nextn)
     # static / static_ctx run context attention; static_gen is generation-only
     # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
     resolve_context_fmha_by_data(
@@ -1331,6 +1354,12 @@ def _run_static_estimate(
         runtime_config=runtime_config,
         mode=static_mode,
         stride=stride,
+    )
+    projection_role = (
+        "prefill" if static_mode == "static_ctx" else ("decode" if static_mode == "static_gen" else "static")
+    )
+    summary = SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted).project_summary(
+        summary, role=projection_role
     )
 
     static_warning = None
@@ -1381,6 +1410,7 @@ def _run_disagg_estimate(
     image_height,
     image_width,
     num_images,
+    enable_encoder_dp,
     prefill_tp_size,
     prefill_pp_size,
     prefill_attention_dp_size,
@@ -1440,6 +1470,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     decode_model_config = _build_model_config(
         decode_tp_size,
@@ -1452,11 +1483,12 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        enable_encoder_dp=enable_encoder_dp,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
-    _apply_nextn(prefill_model_config, nextn, nextn_accepted)
-    _apply_nextn(decode_model_config, nextn, nextn_accepted)
+    _apply_nextn(prefill_model_config, nextn)
+    _apply_nextn(decode_model_config, nextn)
     # Prefill runs context attention → resolve fmha against the perf data. Decode
     # is generation-only and keeps fp8, so it needs no adjustment.
     resolve_context_fmha_by_data(
@@ -1505,6 +1537,7 @@ def _run_disagg_estimate(
         decode_model_config=decode_model_config,
         decode_batch_size=decode_batch_size,
         decode_num_worker=decode_num_workers,
+        speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
     )
 
     if summary.check_oom():
@@ -1745,8 +1778,8 @@ def _run_afd_estimate(
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
     # MTP transfer amplification once the serving semantics are finalized.
-    _apply_nextn(a_model_config, nextn, nextn_accepted)
-    _apply_nextn(f_model_config, nextn, nextn_accepted)
+    _apply_nextn(a_model_config, nextn)
+    _apply_nextn(f_model_config, nextn)
     # The A-worker runs context attention whenever the phase covers prefill
     # ("prefill" or "both"); resolve fmha against the perf data then. The
     # F-worker is FFN/MoE only and never touches FMHA. The decode-phase static
@@ -1792,6 +1825,7 @@ def _run_afd_estimate(
         phase=afd_phase,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
     )
 
     if summary.check_oom():

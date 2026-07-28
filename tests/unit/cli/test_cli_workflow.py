@@ -18,6 +18,7 @@ import pytest
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
+    _sglang_deepep_perf_data_skip_reason,
     _validate_fpm_sweep_tasks,
     build_default_tasks,
     build_experiment_tasks,
@@ -552,7 +553,10 @@ class TestBuildDefaultTaskConfigs:
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
         caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
 
-        with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
+        with patch(
+            "aiconfigurator.cli.main._get_backend_data_path",
+            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
+        ):
             result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
                 total_gpus=8,
@@ -581,7 +585,10 @@ class TestBuildDefaultTaskConfigs:
         for filename in ("wideep_deepep_normal_perf.parquet", "wideep_deepep_ll_perf.parquet"):
             (tmp_path / filename).write_text("header\n", encoding="utf-8")
 
-        with patch("aiconfigurator.cli.main._get_backend_data_path", return_value=str(tmp_path)):
+        with patch(
+            "aiconfigurator.cli.main._get_backend_data_path",
+            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
+        ):
             result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
                 total_gpus=8,
@@ -592,6 +599,43 @@ class TestBuildDefaultTaskConfigs:
 
         assert set(result) == {"agg", "agg_deepep", "disagg", "disagg_deepep"}
         assert mock_task_config.call_count == 4
+
+
+class TestSglangDeepepPerfDataSkipReason:
+    """`_sglang_deepep_perf_data_skip_reason` must find DeepEP perf files under the
+    family-first layout (e.g. comm/sglang/<version>/), not just the legacy
+    sglang/<version>/ shape."""
+
+    def _write_system_yaml(self, systems_root, system_name, data_dir):
+        (systems_root / f"{system_name}.yaml").write_text(f"data_dir: {data_dir}\n", encoding="utf-8")
+
+    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
+    def test_none_when_both_files_exist_under_family_dir(self, mock_systems_paths, tmp_path):
+        systems_root = tmp_path
+        mock_systems_paths.return_value = [str(systems_root)]
+        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
+
+        version_dir = systems_root / "data" / "fake_sys" / "comm" / "sglang" / "0.5.6.post2"
+        version_dir.mkdir(parents=True)
+        (version_dir / "wideep_deepep_normal_perf.parquet").write_bytes(b"stub")
+        (version_dir / "wideep_deepep_ll_perf.parquet").write_bytes(b"stub")
+
+        reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
+
+        assert reason is None
+
+    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
+    def test_names_missing_files_when_absent(self, mock_systems_paths, tmp_path):
+        systems_root = tmp_path
+        mock_systems_paths.return_value = [str(systems_root)]
+        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
+        (systems_root / "data" / "fake_sys").mkdir(parents=True)
+
+        reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
+
+        assert reason is not None
+        assert "wideep_deepep_normal_perf.parquet" in reason
+        assert "wideep_deepep_ll_perf.parquet" in reason
 
 
 class TestBuildExperimentTaskConfigs:

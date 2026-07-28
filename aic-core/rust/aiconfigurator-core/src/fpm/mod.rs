@@ -10,7 +10,7 @@
 //!
 //! Constructing a native model crosses into Python exactly once to compile the
 //! model into an [`crate::engine::spec::EngineSpec`] (mirroring
-//! [`crate::AicEngineBuilder`]); after that the hot path
+//! [`crate::build_aic_engine`]); after that the hot path
 //! (`estimate_forward_pass_time_ms` / `tune_with_fpms`) is pure Rust over the
 //! `Engine` with no Python re-entry.
 //!

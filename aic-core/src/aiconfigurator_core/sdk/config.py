@@ -23,6 +23,9 @@ class ModelConfig:
     moe_tp_size: int = None
     moe_ep_size: int = None
     attention_dp_size: int = 1
+    # Vision encoder data parallelism: the ViT is replicated unsharded on every rank of
+    # the TP group, images are sharded across the tp_size ranks
+    enable_encoder_dp: bool = True
     cp_size: int = 1  # context parallelism: splits sequence tokens (not heads); folds into attn_width = tp*cp*dp
     # CP variant ("none" / "allgather" / "ulysses" / "ring"). Set by get_model
     # from backend_name when cp_size > 1; default "none". Dense models branch on
@@ -30,11 +33,9 @@ class ModelConfig:
     cp_style: str = "none"
     workload_distribution: str = "power_law"
     # quantization options
-    # MTP speculative decoding: nextn = draft length (compute cost side),
-    # nextn_accepted = average accepted draft tokens per step (generation benefit
-    # side, 0 <= nextn_accepted <= nextn). nextn_accepted is required when nextn > 0.
+    # MTP speculative decoding: draft length (compute/verification cost only).
+    # Accepted-token progress belongs to the upper prediction/simulation layer.
     nextn: int = 0
-    nextn_accepted: float = None
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20

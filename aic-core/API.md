@@ -50,12 +50,55 @@ extension contract:
 The wheel includes `py.typed` and a stub for that native extension. The SDK
 Python modules carry their own annotations.
 
+## Choosing a forward-pass API
+
+For adaptive forward-pass modeling, use
+`RustForwardPassPerfModel.best_available(...)` from Python or
+`ForwardPassPerfModel::best_available(...)` from Rust. This path uses the
+native AIC estimate when the native estimator can be built, learns online
+correction factors from FPM observations, and falls back to regression for
+eligible native build or data-availability failures. These include unsupported
+models and missing or unreadable model, system, or performance data. Check
+`diagnostics()` to determine whether the active source is `aic`,
+`aic_with_correction`, or `fallback_regression`, and to inspect any fallback
+warning.
+
+Use `from_native(...)` instead when native AIC support is required and an
+unsupported configuration or native data failure should surface rather than
+fall back.
+
+`AicEngineBuilder` serves a different purpose: it constructs the strict native
+Rust engine for direct public prefill and decode latency calls. It does not
+provide regression fallback or online correction, so it is not a replacement
+for `best_available(...)`.
+
+```python
+from aiconfigurator_core.sdk import RustForwardPassPerfModel
+
+# Engine-config and per-rank FPM dictionary setup is omitted here.
+model = RustForwardPassPerfModel.best_available(config)
+diagnostics = model.diagnostics()
+print(diagnostics["source"])
+if diagnostics["last_warning"] is not None:
+    print(diagnostics["last_warning"])
+
+estimate_ms = model.estimate_forward_pass_time_ms(metrics_by_rank)
+if estimate_ms is None:
+    # Regression fallback starts without observations for each workload kind.
+    # Supply observed FPM iterations with positive wall_time until the configured
+    # min_observations threshold is reached, then retry the estimate.
+    model.tune_with_fpms(observed_iterations)  # Observed-iteration setup omitted.
+    estimate_ms = model.estimate_forward_pass_time_ms(metrics_by_rank)
+```
+
 ## Stable Rust facade
 
-Embedded consumers construct engines with `AicEngineBuilder`. It normalizes
-configuration into one private build request and enters Python once to compile
-an engine specification. Calls on the returned `AicEngine` are pure Rust and do
-not re-enter Python.
+New embedded consumers should construct engines with `AicEngineBuilder`. The
+flat `build_aic_engine(...)` function is a source-compatibility adapter for
+existing callers: it remains supported through the 0.10 release and is planned
+for removal in version 0.11.0. Both paths normalize into the same private build
+request and enter Python once to compile an engine specification. Calls on the
+returned `AicEngine` are pure Rust and do not re-enter Python.
 
 Standalone binaries must enable the crate's `embed-python` feature; applications
 hosted by an initialized Python interpreter do not. In either case, the matching
@@ -64,7 +107,8 @@ hosted by an initialized Python interpreter do not. In either case, the matching
 
 The supported root-level Rust surface is grouped as follows:
 
-- compiled engine: `AicEngineBuilder`, `AicEngine`, `AicError`;
+- compiled engine: `AicEngineBuilder` (preferred), `build_aic_engine`
+  (0.10 compatibility adapter), `AicEngine`, `AicError`;
 - forward-pass estimation: `ForwardPassPerfModel`,
   `ForwardPassPerfOptions`, diagnostics/readiness/source types, and the
   `ForwardPassMetrics` telemetry types;

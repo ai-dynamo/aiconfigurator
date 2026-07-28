@@ -40,7 +40,7 @@ Let's get started.
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI, generator, and webapp.
+The upper `aiconfigurator` wheel contains the CLI and generator.
 It depends on the exact matching `aiconfigurator-core` wheel, which independently
 owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
@@ -76,22 +76,22 @@ python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
 ### Build and Install from Source
 
 ```bash
-# 1. Install Git LFS
-apt-get install git-lfs  # (Linux)
-brew install git-lfs   # (macOS)
-
-# 2. Clone the repo
+# 1. Clone the repo
 git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
-git lfs pull
 
-# 3. Create and activate a virtual environment
+# 2. Create and activate a virtual environment
 python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
 
-# 4. Install the standalone core, then the upper package
+# 3. Install the standalone core, then the upper package
 pip3 install ./aic-core
 pip3 install .
 ```
+
+Current performance profiles are checked-in Parquet files, so normal builds
+and usage do not require Git LFS. Install Git LFS and run `git lfs pull` only
+when working with retained legacy `*.txt` perf assets or their compatibility
+tests.
 
 ### Build with Docker
 
@@ -113,7 +113,11 @@ aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
 - We have four modes: `default`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
-- The experimental Spica smart sweeper now lives in the [Dynamo Profiler](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica). Use Dynamo's `python -m dynamo.profiler.spica` interface for Spica searches.
+- The experimental Spica smart sweeper now lives in Dynamo's standalone
+  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+  From a matching Dynamo checkout, install it with `python -m pip install ./aisimulate`, then use
+  `python -m aisimulate.spica` for Spica searches. Runnable configurations and tools live under
+  `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
@@ -172,19 +176,6 @@ print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
-
-### Web App
-
-AIConfigurator includes an interactive Gradio web interface for exploring
-configurations visually:
-
-```bash
-pip install 'aiconfigurator[webapp]'   # or pip install -e '.[webapp]' for dev
-python -m aiconfigurator.webapp.main
-```
-
-The app binds to `0.0.0.0:7860` by default (all interfaces). Use `--server-name 127.0.0.1` for local-only access.
-Refer to the [Web App User Guide](docs/webapp_user_guide.md) for flags and tab descriptions.
 
 An example here,
 ```bash
