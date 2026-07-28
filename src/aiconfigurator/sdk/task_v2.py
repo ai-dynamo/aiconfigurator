@@ -2735,11 +2735,22 @@ class Task:
     # Single-point evaluation (subsumes cli_estimate)
     # =====================================================================
 
-    def _validate_single_point_epd_args(self, api_name: str, encoder_tp: int | None) -> None:
-        if self.enable_epd and encoder_tp is None:
+    def _validate_single_point_epd_args(
+        self, api_name: str, encoder_tp: int | None, encoder_batch_size: int, encoder_num_workers: int
+    ) -> None:
+        if not self.enable_epd:
+            if encoder_tp is not None or encoder_batch_size != 1 or encoder_num_workers != 1:
+                raise ValueError("encoder_* arguments require enable_epd=True.")
+            return
+        if encoder_tp is None:
             raise ValueError(f"{api_name} with enable_epd requires encoder_tp for the encode worker.")
-        if encoder_tp is not None and not self.enable_epd:
-            raise ValueError("encoder_tp requires enable_epd=True.")
+        for name, value in (
+            ("encoder_tp", encoder_tp),
+            ("encoder_batch_size", encoder_batch_size),
+            ("encoder_num_workers", encoder_num_workers),
+        ):
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive int, got {value!r}.")
 
     def _overlay_single_point_encoder(
         self,
@@ -2824,7 +2835,7 @@ class Task:
                 :meth:`run_single_disagg` instead.
             RuntimeError: on OOM at this config point.
         """
-        self._validate_single_point_epd_args("run_single_agg", encoder_tp)
+        self._validate_single_point_epd_args("run_single_agg", encoder_tp, encoder_batch_size, encoder_num_workers)
         if self.serving_mode != "agg":
             raise ValueError(
                 f"run_single_agg requires serving_mode='agg', got {self.serving_mode!r}; "
@@ -2927,7 +2938,7 @@ class Task:
             ValueError: if called on an agg Task.
             RuntimeError: on OOM in either phase.
         """
-        self._validate_single_point_epd_args("run_single_disagg", encoder_tp)
+        self._validate_single_point_epd_args("run_single_disagg", encoder_tp, encoder_batch_size, encoder_num_workers)
         if self.serving_mode != "disagg":
             raise ValueError(
                 f"run_single_disagg requires serving_mode='disagg', got {self.serving_mode!r}; "
