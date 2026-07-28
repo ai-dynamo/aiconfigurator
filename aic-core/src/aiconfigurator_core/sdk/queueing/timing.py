@@ -92,6 +92,17 @@ class DatabaseTimingModel:
         Args mirror the runner: ctx_tokens = prefill compute tokens this
         pass, gen_tokens = decode rows this pass, (isl, osl, prefix) = the
         workload shape the runner uses for attention sizing.
+
+        Regime validity (measured, h20e trtllm 1.3.0rc20, Mooncake-style
+        long-context continuous-prefill load): the fused discount
+        (``_mix_step_efficiency``) OVER-discounts when chunk sizes approach
+        the full token budget pass after pass — swapping this hook for the
+        plain prefill+decode sum moved system TPOT from -46% to -24% and
+        ITL/TTFT p99 to within 4%/0.4% of the live engine. Per-pass pricing
+        bias does not stay additive in closed loops: it shifts the in-flight
+        equilibrium (measured N 19 vs 30) and amplifies. Treat the discount
+        as validated only in the short-chunk mixed regime it mirrors from
+        run_agg; long-chunk regimes need timing-layer re-derivation.
         """
         ctx_tokens = ctx_tokens if ctx_tokens < self._GRAIN else self._q(ctx_tokens)
         key = ("mix", ctx_tokens, gen_tokens, isl, osl, prefix)
