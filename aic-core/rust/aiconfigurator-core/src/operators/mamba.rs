@@ -235,8 +235,30 @@ impl KdaOp {
         // Verify batching is normalized ONCE here — both the table lookup and
         // the SOL fallback see the adjusted `(batch, seq)` coordinates.
         let (batch_size, seq_len) = self.effective_coords(batch_size, seq_len);
+        // SM100 sglang datasets verify DSPARK speculation through the fused
+        // CuTeDSL kernel (`fused_kda_decode_mtp_dspark`) — one row covering
+        // BOTH the conv update and the chain-verify recurrence, with no
+        // Triton verify rows collected. Route the recurrence op onto the
+        // fused table and fold the conv op to zero (its cost is inside the
+        // fused row). Python twin: `KDAKernel._query_kda_table`.
+        let mut kernel_source = self.kernel_source.as_str();
+        if self.phase == "verify"
+            && matches!(
+                kernel_source,
+                "fused_sigmoid_gating_delta_rule_update" | "causal_conv1d_update"
+            )
+            && !db.state_space.kda_has_verify_rows(kernel_source)
+            && db.state_space.kda_has_verify_rows("fused_kda_decode_mtp_dspark")
+        {
+            if kernel_source == "causal_conv1d_update" {
+                return Ok(PerformanceResult::new(0.0, Source::Silicon)
+                    .clamp_non_negative()
+                    .scaled(self.scale_factor));
+            }
+            kernel_source = "fused_kda_decode_mtp_dspark";
+        }
         match db.state_space.query_kda(
-            &self.kernel_source,
+            kernel_source,
             &self.phase,
             batch_size,
             seq_len,
@@ -246,13 +268,14 @@ impl KdaOp {
             self.head_k_dim,
             self.num_v_heads,
             self.head_v_dim,
-            &|b, s| self.sol_latency_ms(db, b, s),
+            &|b, s| self.sol_latency_ms_with(db, kernel_source, b, s),
         ) {
             Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
                 .clamp_non_negative()
                 .scaled(self.scale_factor)),
             Err(AicError::PerfDatabase(_)) => {
-                let latency = self.sol_latency_ms(db, batch_size as f64, seq_len as f64);
+                let latency =
+                    self.sol_latency_ms_with(db, kernel_source, batch_size as f64, seq_len as f64);
                 Ok(PerformanceResult::new(latency, Source::Sol)
                     .clamp_non_negative()
                     .scaled(self.scale_factor))
@@ -293,13 +316,30 @@ impl KdaOp {
     /// coordinates because the perf_interp engine evaluates SOL at
     /// blended/snapped anchor points.
     fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: f64, seq_len: f64) -> f64 {
+        self.sol_latency_ms_with(db, &self.kernel_source, batch_size, seq_len)
+    }
+
+    /// `sol_latency_ms` with an explicit kernel source, so the fused-verify
+    /// reroute in `query` prices SOL anchors with the routed kernel's byte
+    /// model (Python's `get_sol` closure reads the rebound `kernel_source`).
+    fn sol_latency_ms_with(
+        &self,
+        db: &PerfDatabase,
+        kernel_source: &str,
+        batch_size: f64,
+        seq_len: f64,
+    ) -> f64 {
         let mem_bw = db.system_spec.gpu.mem_bw.max(1.0);
-        self.sol_total_bytes(batch_size, seq_len) / mem_bw * 1000.0
+        self.sol_total_bytes_with(kernel_source, batch_size, seq_len) / mem_bw * 1000.0
     }
 
     /// Memory-bound byte model (read + write). Pure so the formulas are unit
     /// testable without a `PerfDatabase`.
     fn sol_total_bytes(&self, batch_size: f64, seq_len: f64) -> f64 {
+        self.sol_total_bytes_with(&self.kernel_source, batch_size, seq_len)
+    }
+
+    fn sol_total_bytes_with(&self, kernel_source: &str, batch_size: f64, seq_len: f64) -> f64 {
         let b = batch_size;
         let s = seq_len;
         let x = if (self.phase == "context" || self.phase == "verify") && s > 0.0 {
@@ -316,7 +356,7 @@ impl KdaOp {
         // SOL-only aliasing of the vLLM physical kernels onto the canonical
         // byte models (Python `_query_kda_table`; the TABLE lookup keeps the
         // physical name — no alias map on load, unlike GDN).
-        let kernel = match self.kernel_source.as_str() {
+        let kernel = match kernel_source {
             // vLLM prefill cores: same chunked-scan byte model as chunk_kda.
             "chunk_kda_with_fused_gate" | "flashkda_fwd" => "chunk_kda",
             // vLLM fused decode = conv update + recurrence + gated norm.
@@ -360,6 +400,17 @@ impl KdaOp {
                 x * 4.0 * proj_size * 2.0 + state_bytes * b,
                 x * proj_size * 2.0 + state_bytes * x,
             ),
+            // SM100 sglang fused CuTeDSL DSPARK verify: conv update +
+            // chain-verify recurrence in one kernel (sum of the two
+            // constituent byte models above).
+            "fused_kda_decode_mtp_dspark" => {
+                let conv_channels = 3.0 * proj_size;
+                (
+                    x * conv_channels * (d_conv + 1.0) * 2.0
+                        + (x * 4.0 * proj_size * 2.0 + state_bytes * b),
+                    x * conv_channels * 2.0 + (x * proj_size * 2.0 + state_bytes * x),
+                )
+            }
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };
         read_bytes + write_bytes
@@ -401,6 +452,22 @@ mod tests {
         // Generation drops the runtime seq (Python passes seq_len=None).
         let gen = kda_op("fused_recurrent_kda_packed_decode", "generation", 0);
         assert_eq!(gen.effective_coords(8, 4096), (8, 0));
+    }
+
+    #[test]
+    fn kda_fused_verify_sol_is_conv_plus_recurrence() {
+        // The SM100 fused CuTeDSL DSPARK verify kernel covers the conv update
+        // AND the chain-verify recurrence; its byte model must equal the sum
+        // of the two constituent models (Python `get_sol` parity).
+        let fused = kda_op("fused_kda_decode_mtp_dspark", "verify", 4);
+        let conv = kda_op("causal_conv1d_update", "verify", 4);
+        let recurrence = kda_op("fused_sigmoid_gating_delta_rule_update", "verify", 4);
+        for (b, s) in [(1.0, 2.0), (4.0, 4.0), (64.0, 8.0)] {
+            assert_eq!(
+                fused.sol_total_bytes(b, s),
+                conv.sol_total_bytes(b, s) + recurrence.sol_total_bytes(b, s)
+            );
+        }
     }
 
     #[test]

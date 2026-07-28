@@ -397,6 +397,21 @@ impl StateSpaceTable {
             .get_or_init(|| load_kda_parquet(&self.kda_sources));
         cell.as_ref().map_err(clone_err)
     }
+
+    /// Whether the loaded KDA table holds any verify-phase rows for
+    /// `kernel_source`, across every model key. Mirrors the Python
+    /// `_has_verify_rows` probe in `KDAKernel._query_kda_table` (detects
+    /// fused-CuTeDSL SM100 verify datasets); `false` when the KDA table
+    /// itself is absent.
+    pub fn kda_has_verify_rows(&self, kernel_source: &str) -> bool {
+        match self.load_kda() {
+            Ok(grids) => grids
+                .by_keys
+                .keys()
+                .any(|k| k.kernel_source == kernel_source && k.phase == "verify"),
+            Err(_) => false,
+        }
+    }
 }
 
 /// One perf_interp engine query per phase, mirroring Python v2's

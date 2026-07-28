@@ -636,6 +636,30 @@ class KDAKernel(GDNKernel):
         if not getattr(kda_data, "loaded", False):
             kda_data = {}
 
+        # SM100 sglang serving runs DSPARK target-verify through the fused
+        # CuTeDSL kernel (fused_kda_decode_mtp_dspark) — one row per verify
+        # step covering BOTH the conv update and the chain-verify recurrence
+        # (the collector dispatch mirrors kda_backend._can_run_dspark_cutedsl_mtp
+        # @ kimi-k3 branch). Datasets collected there carry no Triton verify
+        # rows, so route the recurrence op onto the fused table and fold the
+        # conv op to zero (its cost is inside the fused row).
+        if phase == "verify" and kda_data:
+
+            def _has_verify_rows(source: str) -> bool:
+                try:
+                    return bool(kda_data[source]["verify"])
+                except KeyError:
+                    return False
+
+            if (
+                kernel_source in ("fused_sigmoid_gating_delta_rule_update", "causal_conv1d_update")
+                and not _has_verify_rows(kernel_source)
+                and _has_verify_rows("fused_kda_decode_mtp_dspark")
+            ):
+                if kernel_source == "causal_conv1d_update":
+                    return PerformanceResult(0.0, energy=0.0, source="silicon")
+                kernel_source = "fused_kda_decode_mtp_dspark"
+
         proj_size = num_v_heads * head_v_dim
         state_bytes = num_v_heads * head_k_dim * head_v_dim * 4  # fp32 delta-rule state
 
@@ -677,6 +701,13 @@ class KDAKernel(GDNKernel):
                 # intermediate fp32 state per draft token.
                 read_bytes = x * 4 * proj_size * 2 + state_bytes * b
                 write_bytes = x * proj_size * 2 + state_bytes * x
+            elif kernel_source_local == "fused_kda_decode_mtp_dspark":
+                # SM100 sglang fused CuTeDSL DSPARK verify: conv update +
+                # chain-verify recurrence in one kernel (sum of the two
+                # constituent byte models above).
+                conv_channels = 3 * proj_size
+                read_bytes = x * conv_channels * (d_conv + 1) * 2 + (x * 4 * proj_size * 2 + state_bytes * b)
+                write_bytes = x * conv_channels * 2 + (x * proj_size * 2 + state_bytes * x)
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
