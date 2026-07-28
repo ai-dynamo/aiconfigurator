@@ -64,9 +64,9 @@ def _ctx_row(
     model: str = _FLASH_MODEL,
     num_heads: int | None = None,
 ) -> str:
-    # SCHEME A: the collector writes the rank-LOCAL head count (native // tp);
-    # callers may override it to simulate different shardings on one model.
-    heads = _native_heads_for_model(model) // tp if num_heads is None else num_heads
+    # The collector writes the model's NATIVE head count (constant across the
+    # tp sweep); callers may override it to simulate another artifact.
+    heads = _native_heads_for_model(model) if num_heads is None else num_heads
     return (
         f"SGLang,test,NVIDIA H20-3e,dsv4_{attn_kind}_context_module,"
         f"compressed_flashmla,{model},DeepseekV4ForCausalLM,"
@@ -160,38 +160,31 @@ def test_load_dsv4_sparse_kernel_data_missing_returns_none(tmp_path):
 # ───────────────────────────────────────────────────────────────────────
 
 
-def test_load_context_dsv4_kind_module_data_keys_by_local_head(tmp_path):
-    """SCHEME A: TP is folded into the rank-LOCAL ``num_heads`` (native // tp),
-    so the loader keys the head axis by local head count — there is NO separate
-    tp_size key. Axis order after the head is [cr][prefix][s][b]."""
+def test_load_context_dsv4_kind_module_data_keys_by_native_and_local_head(tmp_path):
+    """The files' ``num_heads`` column is the model's NATIVE head count
+    (constant across its tp sweep); the loader derives the rank-LOCAL count
+    ``native // tp_size`` and keys the head identity as [native][local].
+    Axis order after the heads is [cr][prefix][s][b]."""
     # Pro native=128 sharded at tp=1/2/4/8 -> local heads 128/64/32/16.
     rows = [
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0, model=_PRO_MODEL, num_heads=128),
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0, model=_PRO_MODEL, num_heads=64),
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=4, lat=11.5, model=_PRO_MODEL, num_heads=32),
-        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, lat=10.5, model=_PRO_MODEL, num_heads=16),
-        _ctx_row(
-            attn_kind="csa",
-            cr=4,
-            bs=1,
-            isl=8192,
-            tp=8,
-            step=128,
-            lat=12.5,
-            model=_PRO_MODEL,
-            num_heads=16,
-        ),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=1, lat=18.0, model=_PRO_MODEL),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0, model=_PRO_MODEL),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=4, lat=11.5, model=_PRO_MODEL),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, lat=10.5, model=_PRO_MODEL),
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=8, step=128, lat=12.5, model=_PRO_MODEL),
     ]
     path = _write_csv(tmp_path / "csa_ctx.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
     quant = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    # head axis keyed by local head count {128, 64, 32, 16} (no tp_size axis)
-    assert set(quant.keys()) == {128, 64, 32, 16}
-    # axis order after the head is [cr][prefix][s][b]
-    assert quant[16][4][0][8192][1]["latency"] == pytest.approx(10.5)
-    assert quant[16][4][128][8192][1]["latency"] == pytest.approx(12.5)
+    # one native bucket (Pro=128) with the tp sweep as local keys
+    assert set(quant.keys()) == {_PRO_NATIVE_HEADS}
+    locals_ = quant[_PRO_NATIVE_HEADS]
+    assert set(locals_.keys()) == {128, 64, 32, 16}
+    # axis order after the heads is [cr][prefix][s][b]
+    assert locals_[16][4][0][8192][1]["latency"] == pytest.approx(10.5)
+    assert locals_[16][4][128][8192][1]["latency"] == pytest.approx(12.5)
     # more local heads (less sharded) is slower
-    assert quant[128][4][0][8192][1]["latency"] > quant[16][4][0][8192][1]["latency"]
+    assert locals_[128][4][0][8192][1]["latency"] > locals_[16][4][0][8192][1]["latency"]
 
 
 def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
@@ -207,8 +200,9 @@ def test_load_generation_dsv4_kind_module_data_b_before_s(tmp_path):
     ]
     path = _write_csv(tmp_path / "csa_gen.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_kind_module_data(path)
-    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][_FLASH_NATIVE_HEADS][4]
-    # SCHEME A axis order after [head][cr] is [b][s_total] (no tp axis); b first
+    # tp=1 rows -> local == native; axis order [native][local][cr][b][s_total]
+    sub = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block][_FLASH_NATIVE_HEADS][_FLASH_NATIVE_HEADS][4]
+    # axis order after [native][local][cr] is [b][s_total]; b first
     s_total_short = 1 + 1023  # isl + step
     s_total_long = 1 + 8191
     assert sub[1][s_total_short]["latency"] == pytest.approx(0.1)
@@ -224,9 +218,9 @@ def test_load_context_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path
     path = _write_csv(tmp_path / "csa_ctx_models.txt", _CTX_HEADER, rows)
     data = load_context_dsv4_kind_module_data(path)
     data = data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    # SCHEME A: [local_head][cr][prefix][s][b]; tp=1 rows -> local head == native, prefix=0
-    assert data[_FLASH_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(18.0)
-    assert data[_PRO_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(23.0)
+    # [native][local][cr][prefix][s][b]; tp=1 rows -> local == native, prefix=0
+    assert data[_FLASH_NATIVE_HEADS][_FLASH_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(18.0)
+    assert data[_PRO_NATIVE_HEADS][_PRO_NATIVE_HEADS][4][0][8192][1]["latency"] == pytest.approx(23.0)
 
 
 def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_path):
@@ -237,9 +231,9 @@ def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_p
     path = _write_csv(tmp_path / "hca_gen_models.txt", _CTX_HEADER, rows)
     data = load_generation_dsv4_kind_module_data(path)
     data = data[common.KVCacheQuantMode.fp8][common.GEMMQuantMode.fp8_block]
-    # SCHEME A: [local_head][cr][b][s_total]; tp=1 -> local head == native, no tp axis
-    assert data[_FLASH_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.2)
-    assert data[_PRO_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.6)
+    # [native][local][cr][b][s_total]; tp=1 -> local == native
+    assert data[_FLASH_NATIVE_HEADS][_FLASH_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.2)
+    assert data[_PRO_NATIVE_HEADS][_PRO_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.6)
 
 
 # ───────────────────────────────────────────────────────────────────────
