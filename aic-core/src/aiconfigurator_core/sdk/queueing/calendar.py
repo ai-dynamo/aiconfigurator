@@ -98,6 +98,7 @@ class FusedCalendar(BaseCalendar):
         batch_count = 0
         batch_total_isl = 0
         batch_total_prefix = 0
+        mid_chunk_pass = False
 
         for s in slots:
             if s.remaining_prefill > 0:
@@ -114,6 +115,10 @@ class FusedCalendar(BaseCalendar):
                 batch_count += 1
                 batch_total_isl += computed_before + chunk
                 batch_total_prefix += computed_before
+                if computed_before > s.prefix or s.remaining_prefill > 0:
+                    # this pass carries a mid-prompt chunk (resumed, or will
+                    # resume next pass) — outside the mixed hook's regime
+                    mid_chunk_pass = True
                 if s.remaining_prefill == 0:
                     prefill_completers.append(s)
             elif s.generated < s.osl:
@@ -123,11 +128,26 @@ class FusedCalendar(BaseCalendar):
                 decode_emitters.append(s)
 
         emitters = prefill_completers + decode_emitters
-        # a genuinely mixed pass prefers the fused mixed-pass timing hook
+        # A genuinely mixed pass prefers the fused mixed-pass timing hook
         # (one combined batch — shared non-attention cost paid once); the
-        # prefill+decode sum is the fallback for timing models without it
+        # prefill+decode sum is the fallback for timing models without it.
+        # STRUCTURAL VALIDITY: the hook delegates to run_agg's t_mix, whose
+        # shape heuristic (prefix * floor(ctx_tokens / isl)) prices chunk
+        # attention against the workload-average shape — exact only when
+        # every prompt completes in a single pass. A mid-prompt chunk has
+        # per-pass attention state (past grows chunk by chunk: an 8k chunk
+        # at 16k past costs ~1.45x a fresh one on h20e/trtllm) that the
+        # hook's signature cannot express — it prices the chunk as fresh
+        # context, which under heavy-tail continuous prefill compounded to
+        # TPOT -38% / in-flight N 7.8-vs-15 (Mooncake replay). The sum path
+        # prices each chunk at its true past (computed_before), so any pass
+        # carrying a resumed or budget-clipped chunk uses the sum. In the
+        # single-pass regime (whole prompt <= remaining budget) the two
+        # agree within measurement (fixed-8192: hook off moved TTFT p99
+        # +0.4%; isl-4096 mix/sum = 0.97) and the hook keeps its validated
+        # role.
         mixed = getattr(timing, "mixed_pass_ms", None)
-        if mixed is not None and batch_count > 0 and decode_emitters:
+        if mixed is not None and batch_count > 0 and decode_emitters and not mid_chunk_pass:
             chunk_tokens = batch_total_isl - batch_total_prefix
             mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
             mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
@@ -208,7 +228,10 @@ class AlternatingCalendar(BaseCalendar):
 
     def _prefill_batch(self, prefilling, wl, eng, mixed_decode_tokens=0):
         """Consume the per-iteration extend budget over `prefilling` slots in
-        admission order; return (batch_count, mean_isl, mean_prefix, completers)."""
+        admission order; return (batch_count, mean_isl, mean_prefix,
+        completers, mid_chunk) — mid_chunk mirrors FusedCalendar.step's
+        structural predicate (a resumed or budget-clipped chunk in this
+        pass)."""
         input_cap = eng.max_prefill_tokens or eng.max_num_batched_tokens
         chunk_cap = eng.chunked_prefill_size or input_cap
         budget = min(chunk_cap, input_cap) - mixed_decode_tokens
@@ -216,6 +239,7 @@ class AlternatingCalendar(BaseCalendar):
         batch_count = 0
         batch_total_isl = 0
         batch_total_prefix = 0
+        mid_chunk = False
         for s in prefilling:
             if budget <= 0:
                 break
@@ -226,11 +250,13 @@ class AlternatingCalendar(BaseCalendar):
             batch_count += 1
             batch_total_isl += computed_before + chunk
             batch_total_prefix += computed_before
+            if computed_before > s.prefix or s.remaining_prefill > 0:
+                mid_chunk = True
             if s.remaining_prefill == 0:
                 completers.append(s)
         mean_isl = batch_total_isl // batch_count if batch_count else 0
         mean_prefix = batch_total_prefix // batch_count if batch_count else 0
-        return batch_count, mean_isl, mean_prefix, completers
+        return batch_count, mean_isl, mean_prefix, completers, mid_chunk
 
     def _mixed_step(self, slots, wl, eng, timing):
         # snapshot decode-ready BEFORE consuming prefill: a slot completing
@@ -240,16 +266,20 @@ class AlternatingCalendar(BaseCalendar):
         batch_count = 0
         mean_isl = mean_prefix = 0
         completers: list[_Slot] = []
+        mid_chunk = False
         if prefilling:
             # mixed decode rows debit the extend budget (PrefillAdder's
             # num_mixed_decode_tokens)
-            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(
+            batch_count, mean_isl, mean_prefix, completers, mid_chunk = self._prefill_batch(
                 prefilling, wl, eng, mixed_decode_tokens=len(decode_emitters)
             )
         emitters = completers + decode_emitters
 
+        # same structural validity rule as FusedCalendar.step: the mixed
+        # hook prices chunks as fresh context, so mid-prompt chunks fall
+        # back to the per-pass-state sum
         mixed = getattr(timing, "mixed_pass_ms", None)
-        if mixed is not None and batch_count > 0 and decode_emitters:
+        if mixed is not None and batch_count > 0 and decode_emitters and not mid_chunk:
             chunk_tokens = batch_count * max(0, mean_isl - mean_prefix)
             mean_dec_isl = sum(s.isl for s in decode_emitters) // len(decode_emitters)
             mean_dec_osl = sum(s.osl for s in decode_emitters) // len(decode_emitters)
@@ -268,7 +298,7 @@ class AlternatingCalendar(BaseCalendar):
     def _alternating_step(self, slots, wl, eng, timing):
         prefilling = [s for s in slots if s.remaining_prefill > 0]
         if prefilling:
-            batch_count, mean_isl, mean_prefix, completers = self._prefill_batch(prefilling, wl, eng)
+            batch_count, mean_isl, mean_prefix, completers, _ = self._prefill_batch(prefilling, wl, eng)
             return timing.prefill_ms(batch_count, mean_isl, mean_prefix), completers
 
         emitters = [s for s in slots if s.generated < s.osl]
@@ -564,6 +594,7 @@ def evaluate_open_loop(
     while gcd(stride, k) != 1:
         stride += 1
 
+    trace_order: list = []
     if arrival_trace is not None:
         total = len(arrival_trace)
         warmup_requests = min(warmup_requests, max(0, total - 1))
@@ -574,10 +605,13 @@ def evaluate_open_loop(
                 osl=max(1, int(osl_i)),
                 prefix=int(px_i),
                 arrival_ms=float(t_i),
-                eligible_ms=float(t_i) + wl.turnaround_ms,
+                eligible_ms=float(t_i)
+                + wl.turnaround_ms
+                + int(isl_i) * wl.ingest_us_per_token / 1000.0,
             )
             for (t_i, isl_i, px_i, osl_i) in arrival_trace
         ]
+        trace_order = list(pending)
     else:
         total = warmup_requests + window_requests
         pending = []
@@ -592,9 +626,18 @@ def evaluate_open_loop(
                     osl=osl_i,
                     prefix=px_i,
                     arrival_ms=t_arr,
-                    eligible_ms=t_arr + wl.turnaround_ms,
+                    eligible_ms=t_arr
+                    + wl.turnaround_ms
+                    + isl_i * wl.ingest_us_per_token / 1000.0,
                 )
             )
+
+    # Arrival-plane mapping (see WorkloadSpec.ingest_us_per_token): the
+    # scheduler's FCFS queue orders by *scheduler* arrival, and the size-
+    # dependent ingest slope reorders near-simultaneous dispatches shortest-
+    # first. Stable sort: exact ties keep dispatch order.
+    if wl.ingest_us_per_token > 0:
+        pending.sort(key=lambda s: s.eligible_ms)
 
     slots: list[_Slot] = []
     waiting: list[_Slot] = []  # visible to the scheduler, above the admission cap
@@ -682,6 +725,20 @@ def evaluate_open_loop(
     window_ms = now - (steady_start_ms if steady_start_ms is not None else 0.0)
     throughput = steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
 
+    per_request = None
+    if trace_order:
+        per_request = [
+            dict(
+                arrival_ms=s.arrival_ms,
+                isl=s.isl,
+                prefix=s.prefix,
+                osl=s.osl,
+                ttft_ms=(s.first_token_ms - s.arrival_ms) if s.first_token_ms >= 0 else None,
+                e2e_ms=(s.last_token_ms - s.arrival_ms) if s.last_token_ms >= 0 else None,
+            )
+            for s in trace_order
+        ]
+
     return QueueingReport(
         ttft_steady=ttft_steady,
         ttft_transient=ttft_transient,
@@ -694,4 +751,5 @@ def evaluate_open_loop(
         mode="agg",
         num_requests=wl.num_requests,
         workload_fidelity=workload_fidelity(wl),
+        per_request=per_request,
     )

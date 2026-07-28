@@ -100,6 +100,23 @@ class WorkloadSpec:
     # prefill latency; it is the same physical overhead the legacy additive
     # dispatch term approximates).
     turnaround_ms: float = 0.0
+    # Size-dependent slope of the same turnaround path (turnaround_ms is the
+    # fixed part): client serialize -> HTTP transfer -> frontend tokenize all
+    # scale with prompt length, so a request dispatched at t becomes visible
+    # to the scheduler at t + turnaround_ms + isl * ingest_us_per_token/1000.
+    # This is an ARRIVAL-PLANE mapping, not a service cost: trace timestamps
+    # record client dispatch, but the engine's FCFS queue orders by scheduler
+    # arrival — for near-simultaneous dispatches (e.g. Mooncake's 3s-bucketed
+    # batch arrivals) the size slope reorders the burst shortest-first, which
+    # dominates burst TTFT (measured h20e/trtllm 1.3.0rc20: a 23k-token and a
+    # 1k-token prompt dispatched together ALWAYS serve small-first — order
+    # flips only once the small lags by 60-100 ms, i.e. ~3.6 us/token; same
+    # inversion visible in a real Mooncake replay: 96% of same-bucket
+    # big-then-small pairs emit first token small-first while client dispatch
+    # order is 0% inverted). Measure it like turnaround_ms, don't fit it:
+    # predictions are ordering-sensitive but magnitude-insensitive (any c > 0
+    # yields the same same-instant ordering; +-2x shifts TTFT < 1%).
+    ingest_us_per_token: float = 0.0
 
     def __post_init__(self):
         if (self.concurrency is None) == (self.request_rate is None):
@@ -116,6 +133,8 @@ class WorkloadSpec:
             raise ValueError("num_requests must be >= 1")
         if self.turnaround_ms < 0:
             raise ValueError("turnaround_ms must be >= 0")
+        if self.ingest_us_per_token < 0:
+            raise ValueError("ingest_us_per_token must be >= 0")
         for name in ("isl_quantiles", "osl_quantiles"):
             qs = getattr(self, name)
             if qs is None:
@@ -352,6 +371,12 @@ class QueueingReport:
     # downstream consumers can gate on prediction quality without
     # re-deriving what the workload description contained
     workload_fidelity: str = "W0(closed-loop, fixed-shape)"
+    # trace-replay diagnostics (evaluate_open_loop arrival_trace mode only):
+    # one dict per request in trace order — arrival_ms, isl, prefix, osl,
+    # ttft_ms, e2e_ms. None outside trace mode; not part of the summary
+    # contract, intended for per-request diffing against reference
+    # simulators/live replays.
+    per_request: Optional[list] = None
 
     @property
     def ttft_mean_n(self) -> float:

@@ -94,15 +94,23 @@ class DatabaseTimingModel:
         workload shape the runner uses for attention sizing.
 
         Regime validity (measured, h20e trtllm 1.3.0rc20, Mooncake-style
-        long-context continuous-prefill load): the fused discount
-        (``_mix_step_efficiency``) OVER-discounts when chunk sizes approach
-        the full token budget pass after pass — swapping this hook for the
-        plain prefill+decode sum moved system TPOT from -46% to -24% and
-        ITL/TTFT p99 to within 4%/0.4% of the live engine. Per-pass pricing
-        bias does not stay additive in closed loops: it shifts the in-flight
-        equilibrium (measured N 19 vs 30) and amplifies. Treat the discount
-        as validated only in the short-chunk mixed regime it mirrors from
-        run_agg; long-chunk regimes need timing-layer re-derivation.
+        long-context continuous-prefill load): the miss is NOT the fused
+        discount (``_mix_step_efficiency`` is 1.0 for trtllm) but the shape
+        heuristic inside ``_get_mix_step_latency`` — attention for the
+        chunk is priced via ``prefix * floor(ctx_tokens / isl)``, i.e.
+        against the workload-average shape with no per-pass prefill
+        progress. A mid-prompt chunk resumes at a growing past (an 8k chunk
+        at 16k past costs ~1.45x a fresh one here), which the hook prices as
+        fresh context; under heavy-tail continuous prefill the per-pass
+        optimism shifted the in-flight equilibrium (N 7.8 vs 15 measured)
+        and compounded to TPOT -38%. The calendars therefore call this hook
+        only for passes whose every chunk is a whole prompt (the run_agg
+        regime, where ``floor(ctx_tokens/isl) = 1`` makes the heuristic
+        exact — fixed-8192: hook off moved TTFT p99 just +0.4%); passes
+        carrying a resumed or budget-clipped chunk price as
+        prefill_ms(computed_before as prefix) + decode_ms, which carries
+        the per-pass state. With that split plus the arrival-plane ingest
+        slope the Mooncake replay lands at TTFT p50 -11% / TPOT -6%.
         """
         ctx_tokens = ctx_tokens if ctx_tokens < self._GRAIN else self._q(ctx_tokens)
         key = ("mix", ctx_tokens, gen_tokens, isl, osl, prefix)

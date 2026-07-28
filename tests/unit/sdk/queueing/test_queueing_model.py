@@ -861,3 +861,58 @@ class TestMultimodalRefine:
         reports = refine_mod.refine_rows(df, [0], model=object(), database=_Db(), backend=_Backend())
         assert reports == {}
         assert df.at[0, "queueing_tier"] == "screening"
+
+
+class TestArrivalPlaneAndChunkPricing:
+    """ingest_us_per_token (client-dispatch -> scheduler-arrival mapping) and
+    the mixed-hook structural validity split (whole-prompt vs mid-prompt
+    chunks). Provenance: h20e trtllm 1.3.0rc20 probes — a 23k and a 1k prompt
+    dispatched together always serve small-first (flip at 60-100 ms lag), and
+    a queued small IS co-scheduled into the head's last-chunk leftover."""
+
+    def _trace_rep(self, ingest, cap=1):
+        from aiconfigurator.sdk.queueing import evaluate_open_loop
+
+        # big dispatched first, small at the same instant
+        trace = [(0.0, 4000, 0, 4), (0.0, 500, 0, 4)]
+        wl = WorkloadSpec(isl=2048, osl=4, request_rate=1.0, ingest_us_per_token=ingest)
+        eng = EngineSpec(max_num_batched_tokens=4096, max_num_seqs=cap, enable_chunked_prefill=True)
+        return evaluate_open_loop(
+            wl, eng, SyntheticTiming(), backend="vllm", warmup_requests=0, arrival_trace=trace
+        )
+
+    def test_same_instant_burst_keeps_dispatch_order_without_ingest(self):
+        rep = self._trace_rep(ingest=0.0)
+        big, small = rep.per_request
+        assert (big["isl"], small["isl"]) == (4000, 500)  # trace order preserved
+        assert small["ttft_ms"] > big["ttft_ms"]  # FCFS by dispatch: small waits out big
+
+    def test_ingest_slope_reorders_same_instant_burst_shortest_first(self):
+        rep = self._trace_rep(ingest=3.6)
+        big, small = rep.per_request
+        assert (big["isl"], small["isl"]) == (4000, 500)  # output stays trace-ordered
+        assert small["ttft_ms"] < big["ttft_ms"]  # scheduler arrival: small ingests first
+
+    def test_negative_ingest_rejected(self):
+        with pytest.raises(ValueError):
+            WorkloadSpec(isl=128, osl=8, concurrency=1, ingest_us_per_token=-1.0)
+
+    def test_mixed_hook_only_prices_whole_prompt_passes(self):
+        class RecordingHook(SyntheticTiming):
+            def __init__(self):
+                self.mixed_calls = []
+
+            def mixed_pass_ms(self, ctx_tokens, gen_tokens, isl, osl, prefix):
+                self.mixed_calls.append(ctx_tokens)
+                return 0.5 * (self.prefill_ms(1, ctx_tokens, 0) + self.decode_ms(gen_tokens, isl))
+
+        eng = EngineSpec(max_num_batched_tokens=4096, max_num_seqs=8, enable_chunked_prefill=True)
+        # whole-prompt regime: isl fits the budget -> hook stays active
+        whole = RecordingHook()
+        evaluate_closed_loop(WorkloadSpec(isl=2048, osl=32, concurrency=8), eng, whole, backend="vllm")
+        assert whole.mixed_calls, "single-pass prompts must keep pricing via the hook"
+        # chunked regime: every prompt spans passes -> per-pass past state
+        # exists, so mixed passes must fall back to the prefill+decode sum
+        chunked = RecordingHook()
+        evaluate_closed_loop(WorkloadSpec(isl=6000, osl=32, concurrency=8), eng, chunked, backend="vllm")
+        assert not chunked.mixed_calls, "mid-prompt chunks are outside the hook's regime"
