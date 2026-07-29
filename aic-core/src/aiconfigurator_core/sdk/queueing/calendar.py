@@ -563,13 +563,15 @@ def evaluate_open_loop(
     beyond the deployment's capacity — no steady state exists).
 
     Known limits (measured, h20e trtllm tp4, lambda sweep 0.5-0.95x capacity):
-    (a) the low-discrepancy rotation ANTI-CLUSTERS by construction — it
-    reproduces the mean rate exactly and first-order variability, but lacks
-    Poisson burst clustering, so measured TTFT tails (p99) run ~2x heavier
-    than predicted at low utilization while p50 lands within ~5%; (b) near
-    capacity the 1/(1-rho) amplification turns any timing-layer service-rate
-    bias into a large TTFT/TPOT error — treat rho >~ 0.8 predictions as
-    optimistic bounds until the perf-DB decode bias is fixed.
+    (a) synthetic exponential arrivals use a correlation-free per-period
+    deterministic shuffle (see the W1 branch below) — Poisson-like to a
+    count dispersion of 0.96; the residual sub-Poisson tail (finite-period
+    truncation of bursts rarer than 1/k) leaves p99 mildly optimistic at
+    high utilization (M/D/1 calibration: within 8% at rho <= 0.7, -18% at
+    rho 0.83); (b) near capacity the 1/(1-rho) amplification turns any
+    timing-layer service-rate bias into a large TTFT/TPOT error — treat
+    rho >~ 0.8 predictions as optimistic bounds until the perf-DB decode
+    bias is fixed.
     """
     if wl.request_rate is None:
         raise ValueError("evaluate_open_loop requires an open-loop workload (request_rate)")
@@ -610,15 +612,49 @@ def evaluate_open_loop(
     # (W3, raw trace inter-arrivals — zeros express batched arrivals) when
     # provided, else exponential (Poisson-like)
     if wl.arrival_quantiles:
+        # W3 empirical path: golden-stride rotation (validated arm — the
+        # Mooncake stream-mode results were produced with this ordering)
         strata = list(wl.arrival_quantiles)
+        k = len(strata)
+        stride = max(1, round(k * 0.6180339887))
+        while gcd(stride, k) != 1:
+            stride += 1
+        _arrival_index = lambda n: (n * stride) % k  # noqa: E731
     else:
-        k_exp = 64
-        strata = [-log(1.0 - (i + 0.5) / k_exp) for i in range(k_exp)]
-    k = len(strata)
+        # W1 exponential path: Poisson inter-arrivals are i.i.d. — serial
+        # correlation ZERO. A low-discrepancy rotation is NEGATIVELY
+        # correlated by construction (anti-clusters: windowed count
+        # dispersion 0.25 vs Poisson's 1.0), which starved queueing tails
+        # ~2x at low utilization; blocky orders overshoot (positive
+        # correlation). The correlation-free deterministic order is a
+        # PER-PERIOD COUNTER-SEEDED SHUFFLE: period p uses the fixed
+        # permutation Random(p*2654435761 + 97003) — a pure function of the
+        # period index, bit-for-bit reproducible, no runtime randomness
+        # (the zero-RNG rule bans nondeterminism, not pseudorandomness).
+        # Each period consumes the full stratum multiset, so every k
+        # arrivals reproduce the exact mean. k = 256 keeps the
+        # without-replacement correlation (~ -1/k) small while a 512-request
+        # default window still spans 2 periods (windowed rate stays exact).
+        # M/D/1 calibration vs true Poisson: count dispersion 0.96, queue
+        # p99 within 8% at rho <= 0.7, -18% at rho 0.83 (was -80%); the
+        # residual sub-Poisson tail is the finite-period truncation of
+        # burst runs rarer than 1/k.
+        import random as _random
+
+        k = 256
+        strata = [-log(1.0 - (i + 0.5) / k) for i in range(k)]
+        _period_perms: dict = {}
+
+        def _arrival_index(n):
+            p, r = divmod(n, k)
+            perm = _period_perms.get(p)
+            if perm is None:
+                perm = list(range(k))
+                _random.Random(p * 2654435761 + 97003).shuffle(perm)
+                _period_perms[p] = perm
+            return perm[r]
+
     scale = (1000.0 / wl.request_rate) / (sum(strata) / k)
-    stride = max(1, round(k * 0.6180339887))
-    while gcd(stride, k) != 1:
-        stride += 1
 
     trace_order: list = []
     if arrival_trace is not None:
@@ -643,7 +679,7 @@ def evaluate_open_loop(
         pending = []
         t_arr = 0.0
         for n in range(total):
-            t_arr += strata[(n * stride) % k] * scale
+            t_arr += strata[_arrival_index(n)] * scale
             isl_i, px_i, osl_i = _next_shape()
             pending.append(
                 _Slot(
