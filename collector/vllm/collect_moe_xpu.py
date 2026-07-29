@@ -37,7 +37,7 @@ from collector.helper import (
 
 if torch.xpu.is_available():
     try:
-        from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+        from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
     except Exception as e:
         print(f"Please refer to vllm_xpu_kernels for MoE on XPU, \n{e}")
 
@@ -160,61 +160,49 @@ def run_moe_torch(
         w1, w2, w13_scales, w2_scales, w13_bias, w2_bias, local_num_experts, padded_hidden = create_mxfp4_weights_xpu(
             num_experts, hidden_size, inter_size, moe_tp_size, moe_ep_size, device
         )
+        w1 = w1.view(torch.float4_e2m1fn_x2).contiguous()
+        w2 = w2.view(torch.float4_e2m1fn_x2).contiguous()
     else:
         padded_hidden = hidden_size
         w13_scales = w2_scales = None
         w13_bias = w2_bias = None
 
-        # Create weight tensors in xpu_fused_moe layout.
-        # The expected layout depends on the vllm_xpu_kernels version:
-        #   vllm-xpu >=0.20: [E, K, N] — inter_size = w13.shape[-1] // 2
-        #   vllm-xpu <0.20:  [E, N, K] — inter_size = w13.shape[-2] // 2
-        # Detect by inspecting how xpu_fused_moe derives inter_size.
-        import inspect as inspect_src
-
-        try:
-            moe_src = inspect_src.getsource(xpu_fused_moe)
-            use_kn_layout = "inter_size = list(w13.shape)[-1]" in moe_src
-        except (OSError, TypeError) as exc:
-            print(f"inspect.getsource(xpu_fused_moe) failed, defaulting to [E,N,K] layout: {exc}")
-            use_kn_layout = False
-
-        if use_kn_layout:
-            # [E, K, N] layout (vllm-xpu >=0.20)
-            w1 = torch.randn(
-                local_num_experts,
-                hidden_size,
-                2 * local_inter_size,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            w2 = torch.randn(
-                local_num_experts,
-                local_inter_size,
-                hidden_size,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-        else:
-            # [E, N, K] layout (vllm-xpu <0.20)
-            w1 = torch.randn(
-                local_num_experts,
-                2 * local_inter_size,
-                hidden_size,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            w2 = torch.randn(
-                local_num_experts,
-                hidden_size,
-                local_inter_size,
-                dtype=torch.bfloat16,
-                device=device,
-            )
+        # XpuFusedMoe follows the tested vllm-xpu-kernels contract: BF16/FP8
+        # weights are stored as [E, K, N] contiguous at apply time.
+        w1 = torch.randn(
+            local_num_experts,
+            2 * local_inter_size,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        w2 = torch.randn(
+            local_num_experts,
+            hidden_size,
+            local_inter_size,
+            dtype=torch.bfloat16,
+            device=device,
+        )
 
         if is_fp8:
             w1, w13_scales = quantize_fp8_per_expert(w1)
             w2, w2_scales = quantize_fp8_per_expert(w2)
+        w1 = w1.transpose(-1, -2).contiguous()
+        w2 = w2.transpose(-1, -2).contiguous()
+
+    fused_moe_impl = XpuFusedMoe(
+        w13=w1,
+        w13_scales=w13_scales,
+        w13_bias=w13_bias,
+        w2=w2,
+        w2_scales=w2_scales,
+        w2_bias=w2_bias,
+        n_experts_per_token=topk,
+        activation=activation_name,
+        num_experts=local_num_experts,
+        ep_rank=0,
+        ep_size=moe_ep_size,
+    )
 
     # Performance testing for each token count
     for num_tokens_idx, num_tokens in enumerate(num_tokens_lists):
@@ -251,11 +239,13 @@ def run_moe_torch(
                 topk_ids_list.append(ids)
 
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
+            output_list = [torch.empty((tw.shape[0], padded_hidden), dtype=hidden_states.dtype, device=device) for tw in topk_weights_list]
 
         elif distributed == "balanced":
             actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
             topk_weights, topk_ids = torch.topk(actual_logits, topk, dim=-1)
             topk_weights = F.softmax(topk_weights, dim=-1).float()
+            output = torch.empty_like(hidden_states)
 
         else:
             raise ValueError(f"Unsupported distributed mode: {distributed}")
@@ -270,75 +260,19 @@ def run_moe_torch(
             if distributed == "power_law":
                 for i, (tw, ti) in enumerate(zip(topk_weights_list, topk_ids_list, strict=True)):
                     local_num_tokens = tw.shape[0]
-                    if use_mxfp4:
-                        _ = xpu_fused_moe(
-                            hidden_states=hidden_states[:local_num_tokens],
-                            w13=w1,
-                            w13_scales=w13_scales,
-                            w13_bias=w13_bias,
-                            w2=w2,
-                            w2_scales=w2_scales,
-                            w2_bias=w2_bias,
-                            topk_weights=tw,
-                            topk_ids=ti,
-                            n_experts_per_token=topk,
-                            activation=activation_name,
-                            num_experts=local_num_experts,
-                            ep_size=moe_ep_size,
-                            is_mxfp4=True,
-                        )
-                    else:
-                        _ = xpu_fused_moe(
-                            hidden_states=hidden_states[:local_num_tokens],
-                            w13=w1,
-                            w13_scales=w13_scales,
-                            w13_bias=None,
-                            w2=w2,
-                            w2_scales=w2_scales,
-                            w2_bias=None,
-                            topk_weights=tw,
-                            topk_ids=ti,
-                            n_experts_per_token=topk,
-                            activation=activation_name,
-                            num_experts=local_num_experts,
-                            ep_size=moe_ep_size,
-                            is_fp8=is_fp8,
-                        )
+                    fused_moe_impl.apply(
+                        output=output_list[i],
+                        hidden_states=hidden_states[:local_num_tokens],
+                        topk_weights=tw,
+                        topk_ids=ti,
+                    )
             else:
-                if use_mxfp4:
-                    _ = xpu_fused_moe(
-                        hidden_states=hidden_states,
-                        w13=w1,
-                        w13_scales=w13_scales,
-                        w13_bias=w13_bias,
-                        w2=w2,
-                        w2_scales=w2_scales,
-                        w2_bias=w2_bias,
-                        topk_weights=topk_weights,
-                        topk_ids=topk_ids,
-                        n_experts_per_token=topk,
-                        activation=activation_name,
-                        num_experts=local_num_experts,
-                        ep_size=moe_ep_size,
-                        is_mxfp4=True,
-                    )
-                else:
-                    _ = xpu_fused_moe(
-                        hidden_states=hidden_states,
-                        w13=w1,
-                        w13_scales=w13_scales,
-                        w13_bias=None,
-                        w2=w2,
-                        w2_scales=w2_scales,
-                        w2_bias=None,
-                        topk_weights=topk_weights,
-                        topk_ids=topk_ids,
-                        n_experts_per_token=topk,
-                        activation=activation_name,
-                        num_experts=local_num_experts,
-                        ep_size=moe_ep_size,
-                        is_fp8=is_fp8,
-                    )
+                fused_moe_impl.apply(
+                    output=output,
+                    hidden_states=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                )
 
         def run_iterations():
             # Use benchmark_with_power context manager
