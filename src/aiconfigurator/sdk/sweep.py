@@ -413,6 +413,14 @@ def _point_model_config(model_config, parallel_config) -> config.ModelConfig:
     return copy.deepcopy(model_config)
 
 
+def _language_only_config(model_config):
+    """Language-only variant of a template OR per-point builder (both forms
+    ``_point_model_config`` accepts)."""
+    if callable(model_config):
+        return lambda parallel: dataclasses.replace(model_config(parallel), language_only=True)
+    return dataclasses.replace(model_config, language_only=True)
+
+
 def sweep_agg(
     *,
     model_path: str,
@@ -506,8 +514,7 @@ def sweep_agg(
             backend_name=backend_name,
             latency_correction=encoder_latency_correction,
         )
-        model_config = copy.deepcopy(model_config)
-        model_config.language_only = True
+        model_config = _language_only_config(model_config)
     # Per-cell GPU budget for the E+agg rate matching (sweep_disagg semantics).
     epd_num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
 
@@ -1303,8 +1310,7 @@ def sweep_disagg(
             latency_correction=encoder_latency_correction,
         )
         # EPD prefill workers are language-only (vision tokens stay in context).
-        prefill_model_config = copy.deepcopy(prefill_model_config)
-        prefill_model_config.language_only = True
+        prefill_model_config = _language_only_config(prefill_model_config)
 
     prefill_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,

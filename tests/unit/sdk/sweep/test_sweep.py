@@ -440,6 +440,43 @@ def test_sweep_disagg_epd_composes_encoder_stage(monkeypatch):
     assert epd_row["request_latency"] == pytest.approx(108.0 + 8.0 * 99 + 90.0)
 
 
+def test_sweep_agg_epd_language_only_pin_survives_config_builder(monkeypatch):
+    """Task hands sweep_* a per-point ModelConfig builder, not an instance;
+    the EPD language-only pin must apply to what the builder produces."""
+    captured: dict = {}
+
+    def _fake_get_model(*, model_path, model_config, backend_name):
+        captured["language_only"] = model_config.language_only
+        return MagicMock()
+
+    monkeypatch.setattr(sweep, "get_model", _fake_get_model)
+    monkeypatch.setattr(sweep, "get_backend", lambda name: MagicMock())
+    monkeypatch.setattr(
+        sweep,
+        "_sweep_one_parallel_agg",
+        lambda **_kwargs: (pd.DataFrame(), True, True, 0),
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_get_encoder_worker_candidates",
+        lambda **_kwargs: [
+            {"encoder_latency": 50.0, "seq/s": 80.0, "num_total_gpus": 2, "tp": 2, "bs": 4, "memory": 1.5}
+        ],
+    )
+    with pytest.raises(NoFeasibleConfigError):
+        sweep.sweep_agg(
+            model_path="m",
+            runtime_config=config.RuntimeConfig(isl=1000, osl=100, ttft=200.0, tpot=10.0),
+            database=MagicMock(),
+            backend_name="sglang",
+            model_config=lambda parallel: config.ModelConfig(),
+            parallel_config_list=[(4, 1, 1, 1, 1, 1)],
+            enable_epd=True,
+            encoder_tp_list=[2],
+        )
+    assert captured["language_only"] is True
+
+
 def test_sweep_agg_epd_composes_encoder_stage(monkeypatch):
     """E+agg end-to-end semantics on synthetic candidates.
 
