@@ -4,28 +4,14 @@
 name: Build platform wheels
 
 on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-    paths:
-      - ".github/workflows/build-platform-wheels.yml"
-      - "docker/Dockerfile"
-      - "LICENSE"
-      - "pyproject.toml"
-      - "README.md"
-      - "aic-core/**"
-      - "src/**"
-      - "tools/build_legacy_monolith_fixture.py"
-      - "tools/stage_wheels_in_artifactory.sh"
-      - "tools/verify_installed_package_layers.py"
-      - "tools/verify_release_wheels.py"
   push:
     branches:
       - main
       - "release/*"
+      # copy-pr-bot is the approval boundary for privileged pull-request builds.
+      - "pull-request/*"
     paths:
+      - ".github/actions/build-platform-wheel/**"
       - ".github/workflows/build-platform-wheels.yml"
       - "docker/Dockerfile"
       - "LICENSE"
@@ -37,11 +23,10 @@ on:
       - "tools/stage_wheels_in_artifactory.sh"
       - "tools/verify_installed_package_layers.py"
       - "tools/verify_release_wheels.py"
-  workflow_dispatch:
 
 concurrency:
   group: platform-wheels-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
 
 permissions:
   contents: read
@@ -49,13 +34,7 @@ permissions:
 jobs:
   build:
     name: Build wheels (${{ matrix.platform_name }})
-    runs-on: >-
-      ${{
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name != github.repository &&
-        matrix.fork_runner ||
-        matrix.runner
-      }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -63,7 +42,6 @@ jobs:
         include:
           - platform_name: manylinux_2_28_x86_64
             runner: prod-aiconfigurator-default-amd64-v1
-            fork_runner: ubuntu-24.04
             build_method: docker
             python_architecture: x64
             platform: linux/amd64
@@ -71,7 +49,6 @@ jobs:
             upload_upper: true
           - platform_name: manylinux_2_28_aarch64
             runner: prod-aiconfigurator-default-arm64-v1
-            fork_runner: ubuntu-24.04-arm
             build_method: docker
             python_architecture: arm64
             platform: linux/arm64
@@ -79,9 +56,10 @@ jobs:
             upload_upper: false
           - platform_name: macosx_arm64
             runner: prod-aiconfigurator-default-macos-arm64-v1
-            fork_runner: macos-14
             build_method: native-macos
             python_architecture: arm64
+            platform: ""
+            wheel_base: ""
             upload_upper: false
 
     steps:
@@ -103,116 +81,64 @@ jobs:
           persist-credentials: false
           lfs: true
 
-      - name: Set up Docker Buildx
-        if: matrix.build_method == 'docker'
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - name: Build Linux wheel
-        if: matrix.build_method == 'docker'
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+      - name: Build and verify wheel set
+        uses: ./.github/actions/build-platform-wheel
         with:
-          context: .
-          file: docker/Dockerfile
-          platforms: ${{ matrix.platform }}
-          target: wheel-out
-          build-args: WHEEL_BUILD_BASE=${{ matrix.wheel_base }}
-          outputs: type=local,dest=./wheelhouse
+          build_method: ${{ matrix.build_method }}
+          python_architecture: ${{ matrix.python_architecture }}
+          platform: ${{ matrix.platform }}
+          wheel_base: ${{ matrix.wheel_base }}
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: "3.12"
-          architecture: ${{ matrix.python_architecture }}
-
-      - name: Set up uv
-        if: matrix.build_method == 'native-macos'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          version: "0.12.0"
-
-      - name: Create isolated macOS Python environment
-        if: matrix.build_method == 'native-macos'
-        shell: bash
-        run: |
-          uv venv --python 3.12 "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
-          echo "${RUNNER_TEMP}/aiconfigurator-wheel-venv/bin" >> "${GITHUB_PATH}"
-          echo "VIRTUAL_ENV=${RUNNER_TEMP}/aiconfigurator-wheel-venv" >> "${GITHUB_ENV}"
-
-      - name: Select Rust toolchain for macOS wheel
-        if: matrix.build_method == 'native-macos'
-        run: |
-          rustup toolchain install 1.96.0 --profile minimal
-          rustup default 1.96.0
-
-      - name: Build and verify macOS wheel
-        if: matrix.build_method == 'native-macos'
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: |
-          uv pip install --quiet 'build>=1,<2' 'maturin>=1.12,<2' 'delocate>=0.13,<1'
-          mkdir -p wheelhouse repaired-wheelhouse
-          (cd aic-core && maturin build --release --out ../wheelhouse)
-          python -m build --wheel --outdir wheelhouse
-          delocate-wheel --wheel-dir repaired-wheelhouse --verbose wheelhouse/aiconfigurator_core-*.whl
-          rm wheelhouse/aiconfigurator_core-*.whl
-          mv repaired-wheelhouse/*.whl wheelhouse/
-          python tools/verify_release_wheels.py wheelhouse
-
-      - name: Smoke-test Linux native extension
-        if: matrix.build_method == 'docker'
-        shell: bash
-        run: |
-          python -m pip install --quiet --no-deps \
-            wheelhouse/aiconfigurator_core-*.whl \
-            wheelhouse/aiconfigurator-*.whl
-          python -c \
-            'import aiconfigurator_core; assert aiconfigurator_core._build_smoke() == 1'
-
-      - name: Verify installed macOS wheel set
-        if: matrix.build_method == 'native-macos'
-        shell: bash
-        run: |
-          uv pip install --quiet \
-            wheelhouse/aiconfigurator_core-*.whl \
-            wheelhouse/aiconfigurator-*.whl
-          python tools/verify_installed_package_layers.py \
-            --expect full \
-            --exercise-engine
-
-      - name: Report disabled Artifactory staging
+      - name: Report disabled copied-PR Artifactory staging
         if: >-
           matrix.upload_upper &&
-          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true' &&
-          (
-            (
-              github.event_name == 'pull_request' &&
-              github.event.pull_request.head.repo.full_name == github.repository
-            ) ||
-            (
-              github.event_name == 'push' &&
-              (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
-            )
-          )
+          startsWith(github.ref, 'refs/heads/pull-request/') &&
+          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true'
         shell: bash
         run: |
-          echo "::notice title=Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true after issues #1432 and #1433 are complete."
+          echo "::notice title=Copied-PR Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true when staging is ready."
           {
-            echo "### Artifactory staging"
+            echo "### Copied pull-request Artifactory staging"
             echo
             echo '- Status: skipped because `PLATFORM_WHEEL_STAGING_ENABLED` is not `true`.'
-            echo '- Follow-up: [#1432](https://github.com/ai-dynamo/aiconfigurator/issues/1432) and [#1433](https://github.com/ai-dynamo/aiconfigurator/issues/1433).'
+            echo '- Follow-up: [#1432](https://github.com/ai-dynamo/aiconfigurator/issues/1432).'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Stage pull-request wheels in Artifactory
+      - name: Report disabled post-merge Artifactory staging
+        if: >-
+          matrix.upload_upper &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) &&
+          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Post-merge Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true when post-merge publication is ready."
+          {
+            echo "### Post-merge Artifactory staging"
+            echo
+            echo '- Status: skipped because `PLATFORM_WHEEL_STAGING_ENABLED` is not `true`.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Resolve copied pull-request staging path
+        id: pr-staging
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        shell: bash
+        run: |
+          pr_number="${GITHUB_REF_NAME#pull-request/}"
+          if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected a copy-pr-bot branch named pull-request/<number>, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          echo "subpath=PR/${pr_number}/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage copied pull-request wheels in Artifactory
         if: >-
           vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          startsWith(github.ref, 'refs/heads/pull-request/')
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
-          ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+          ARTIFACTORY_SUBPATH: ${{ steps.pr-staging.outputs.subpath }}
           UPLOAD_UPPER: ${{ matrix.upload_upper }}
         shell: bash
         run: bash tools/stage_wheels_in_artifactory.sh
@@ -220,7 +146,6 @@ jobs:
       - name: Stage post-merge wheels in Artifactory
         if: >-
           vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
-          github.event_name == 'push' &&
           (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
@@ -232,13 +157,12 @@ jobs:
         run: bash tools/stage_wheels_in_artifactory.sh
 
   finalize-pr:
-    name: Finalize pull-request wheel set
+    name: Finalize copied pull-request wheel set
     needs: build
     if: >-
       success() &&
       vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      startsWith(github.ref, 'refs/heads/pull-request/')
     runs-on: prod-aiconfigurator-default-amd64-v1
     permissions:
       contents: read
@@ -248,10 +172,15 @@ jobs:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
-          ARTIFACTORY_SUBPATH: PR/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
+          pr_number="${GITHUB_REF_NAME#pull-request/}"
+          if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected a copy-pr-bot branch named pull-request/<number>, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          ARTIFACTORY_SUBPATH="PR/${pr_number}/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
           : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
           : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
           : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
@@ -277,7 +206,6 @@ jobs:
     if: >-
       success() &&
       vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
-      github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: prod-aiconfigurator-default-amd64-v1
     permissions:
