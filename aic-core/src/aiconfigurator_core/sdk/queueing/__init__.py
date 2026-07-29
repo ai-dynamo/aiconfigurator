@@ -28,6 +28,14 @@ from .closed_form import (
 from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
 from .spec import stratified_quantiles, workload_fidelity, Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 from .timing import DatabaseTimingModel
+from .trace import (
+    TraceRecord,
+    TraceWorkload,
+    load_cc_sessions_jsonl,
+    load_mooncake_jsonl,
+    prefix_hits,
+    workload_from_trace,
+)
 
 __all__ = [
     "CALENDARS",
