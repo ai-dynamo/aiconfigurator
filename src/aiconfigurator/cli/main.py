@@ -832,6 +832,30 @@ def _add_estimate_mode_arguments(parser):
         "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
     )
     parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD single point: overlay a fixed encode-worker pool on the agg/disagg point; "
+        "the LM side becomes language-only. Supports --estimate-mode agg/disagg.",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        default=None,
+        help="EPD encode-worker TP (required with --enable-epd).",
+    )
+    parser.add_argument(
+        "--encoder-batch-size",
+        type=int,
+        default=1,
+        help="EPD encode-worker batch size. Default: 1.",
+    )
+    parser.add_argument(
+        "--encoder-num-workers",
+        type=int,
+        default=1,
+        help="EPD encode workers in the pool. Default: 1.",
+    )
+    parser.add_argument(
         "--batch-size",
         "--bs",
         dest="batch_size",
@@ -2436,6 +2460,104 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
 
 
+def _run_estimate_epd(args, estimate_mode: str) -> None:
+    """EPD single-point estimate via Task.run_single_* (dedicated encode pool)."""
+    from aiconfigurator.sdk.task_v2 import Task
+
+    if estimate_mode not in ("agg", "disagg"):
+        raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    workload = dict(
+        enable_epd=True,
+        backend_version=args.backend_version,
+        database_mode=args.database_mode,
+        isl=args.isl,
+        osl=args.osl,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images_per_request=args.num_images,
+        gemm_quant_mode=args.gemm_quant_mode,
+        moe_quant_mode=args.moe_quant_mode,
+        kvcache_quant_mode=args.kvcache_quant_mode,
+        fmha_quant_mode=args.fmha_quant_mode,
+        comm_quant_mode=args.comm_quant_mode,
+        nextn=args.nextn,
+        nextn_accepted=args.nextn_accepted,
+    )
+    encoder_kwargs = dict(
+        encoder_tp=args.encoder_tp,
+        encoder_batch_size=args.encoder_batch_size,
+        encoder_num_workers=args.encoder_num_workers,
+    )
+    if estimate_mode == "agg":
+        task = Task.from_cli(
+            serving_mode="agg",
+            model_path=args.model_path,
+            system_name=args.system,
+            backend_name=args.backend,
+            **workload,
+        )
+        row = task.run_single_agg(
+            tp=args.tp_size,
+            pp=args.pp_size,
+            dp=args.attention_dp_size,
+            moe_tp=args.moe_tp_size,
+            moe_ep=args.moe_ep_size,
+            batch_size=args.batch_size,
+            ctx_tokens=args.ctx_tokens,
+            **encoder_kwargs,
+        )
+    else:
+        task = Task.from_cli(
+            serving_mode="disagg",
+            prefill_model_path=args.model_path,
+            decode_model_path=args.model_path,
+            prefill_system_name=args.system,
+            decode_system_name=args.decode_system or args.system,
+            prefill_backend_name=args.backend,
+            decode_backend_name=args.backend,
+            **workload,
+        )
+        row = task.run_single_disagg(
+            prefill_tp=args.prefill_tp_size,
+            prefill_pp=args.prefill_pp_size or 1,
+            prefill_dp=args.prefill_attention_dp_size or 1,
+            prefill_moe_tp=args.prefill_moe_tp_size or 1,
+            prefill_moe_ep=args.prefill_moe_ep_size or 1,
+            prefill_batch_size=args.prefill_batch_size,
+            prefill_num_workers=args.prefill_num_workers,
+            decode_tp=args.decode_tp_size,
+            decode_pp=args.decode_pp_size or 1,
+            decode_dp=args.decode_attention_dp_size or 1,
+            decode_moe_tp=args.decode_moe_tp_size or 1,
+            decode_moe_ep=args.decode_moe_ep_size or 1,
+            decode_batch_size=args.decode_batch_size,
+            decode_num_workers=args.decode_num_workers,
+            **encoder_kwargs,
+        )
+    logger.info("EPD %s single-point estimate:", estimate_mode)
+    keys = (
+        "ttft",
+        "tpot",
+        "encoder_latency",
+        "request_latency",
+        "seq/s",
+        "tokens/s/gpu",
+        "num_total_gpus",
+        "(a)workers",
+        "(p)workers",
+        "(d)workers",
+        "(e)workers",
+        "(e)tp",
+        "(e)bs",
+        "(e)memory",
+        "power_w",
+    )
+    for key in keys:
+        if key in row:
+            value = row[key]
+            logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -2453,6 +2575,10 @@ def _run_estimate_mode(args):
     )
 
     _resolve_and_validate_nextn(args)
+
+    if args.enable_epd:
+        _run_estimate_epd(args, estimate_mode)
+        return
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.

@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import logging
+import math
 from typing import Any
 
 import numpy as np
@@ -816,6 +817,29 @@ def _get_encoder_worker_candidates(
     return rows
 
 
+def _epd_e_num_candidates(
+    lm_required: float,
+    lm_gpus: int,
+    encoder_capacity: float,
+    encoder_gpus: int,
+    num_gpu_set: set[int],
+    bound: int,
+):
+    """Encode-pool sizes that can contribute a cell — exactly what a flat
+    ``1..bound`` sweep would keep: under a per-replica budget only
+    grid-landing counts pass the membership filter (derived here); without
+    one, counts past the first non-binding size can never win the per-GPU
+    argmax.  Ascending order keeps the flat sweep's tie behavior."""
+    if num_gpu_set:
+        counts = (
+            (total - lm_gpus) // encoder_gpus
+            for total in num_gpu_set
+            if total > lm_gpus and (total - lm_gpus) % encoder_gpus == 0
+        )
+        return sorted(e for e in counts if e <= bound)
+    return range(1, min(math.ceil(lm_required / encoder_capacity), bound) + 1)
+
+
 def _overlay_encoder_stage(
     disagg_dict: dict,
     encoder_worker: dict,
@@ -907,7 +931,14 @@ def _rate_match_agg_epd(
             best: tuple[tuple[float, int], int, int] | None = None
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
                 agg_rate = rate_one * a_num
-                for e_num in range(1, e_workers_bound + 1):
+                for e_num in _epd_e_num_candidates(
+                    agg_rate,
+                    gpus_one * a_num,
+                    encoder_capacity,
+                    enc_worker["num_total_gpus"],
+                    num_gpu_set or set(),
+                    e_workers_bound,
+                ):
                     num_gpu = gpus_one * a_num + enc_worker["num_total_gpus"] * e_num
                     if num_gpu_set and num_gpu not in num_gpu_set:
                         continue
@@ -1320,10 +1351,14 @@ def sweep_disagg(
                 d_corrected = decode_throughput * d_num * decode_deg
                 pd_required = min(p_corrected, d_corrected)
                 if encoder_capacity > 0:
-                    # Full sweep like the P/D worker lists: sizes past the
-                    # first non-binding one are throughput-dominated, but can
-                    # be the only counts that land in num_gpu_set.
-                    e_num_candidates = range(1, e_workers_bound + 1)
+                    e_num_candidates = _epd_e_num_candidates(
+                        pd_required,
+                        prefill_gpus * p_num + decode_gpus * d_num,
+                        encoder_capacity,
+                        encoder_gpus,
+                        num_gpu_set,
+                        e_workers_bound,
+                    )
                 else:
                     e_num_candidates = (0,)
                 for e_num in e_num_candidates:
