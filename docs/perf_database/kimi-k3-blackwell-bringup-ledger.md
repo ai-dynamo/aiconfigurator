@@ -207,11 +207,27 @@ overwrite.)
    attempt-and-verify fused decode, compiled for the TP8 12-head shard; not
    collected on any SM yet, so decode rows stay slightly pessimistic where it
    engages. Needs a `covered()`-mirroring dispatch like the verify one.
-6. **Hopper system (if ever re-added)**: recollect sglang kda context with
+6. **Module-level KDA collection (direction).** The kda collector is
+   kernel-level by construction (it followed the GDN hybrid-linear precedent:
+   novel state kernels in kda_perf, projections via the shared gemm table,
+   norms via mem_op — collect_kda.py docstring). The B300 audit showed the
+   exact failure mode the DSV4 attention-module design doc predicted for
+   kernel-level collection of complex modules ("the isolated kernel workload
+   diverges from the real module workload"): serving fuses across the op
+   boundaries (kda_fused_decode folds conv+recurrence+onorm; k3_ar_fusion
+   folds norm/residual into the AR), so the sum-of-kernels drifts from the
+   layer truth at small batch. The end state is a
+   `dsv4_*_module`-style collector: build the layer through the framework's
+   own constructor (RadixLinearAttention + kda_backend), measure
+   forward_extend/decode/target_verify per phase — dispatch fidelity by
+   construction, nothing replicated. Interim mitigations already landed:
+   covered()-driven fused-decode dispatch, fused-verify probe with source
+   citations, per-key consumer routing.
+7. **Hopper system (if ever re-added)**: recollect sglang kda context with
    the fixed int32 guard rather than restoring the old dataset (coverage hole
    above), and re-run the moe marlin lane to reconfirm the EP>1 crash before
    filing upstream.
-7. **SM120 (RTX Pro 6000)**: vllm FlashKDA claims SM120; sglang CuTe paths
+8. **SM120 (RTX Pro 6000)**: vllm FlashKDA claims SM120; sglang CuTe paths
    are SM100-only so verify falls back to the Triton pair there — the
    existing collector should be serving-truth without changes, but the probe
    ordering must be re-checked before lifting 120 from `unverified_sms`.
