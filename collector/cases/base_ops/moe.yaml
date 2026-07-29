@@ -173,6 +173,10 @@ common_case_values:
       - deepseek-ai/DeepSeek-V4-Pro
       - openai/gpt-oss-20b
       - openai/gpt-oss-120b
+      # Kimi-K3 on Blackwell: the branch's Mxfp4MoEMethod default precision
+      # runs mxfp8 activations (trtllm-gen), distinct from the Hopper marlin
+      # W4A16 lane (mxfp4.py:1311-1330 @ kimi-k3 branch).
+      - moonshotai/Kimi-K3
   moe_trtllm:
     quantization_modes:
     - name: bfloat16

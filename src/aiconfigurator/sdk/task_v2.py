@@ -42,6 +42,7 @@ from aiconfigurator.sdk.models import (
     check_is_moe,
     get_model_family,
     resolve_dsv4_moe_arch_mode,
+    resolve_kimi_k3_moe_arch_mode,
 )
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
@@ -776,6 +777,12 @@ class Task:
                         self._role_attr(role, "backend_name"),
                         self.moe_backend,
                     )
+                    if arch_mode is None:
+                        arch_mode = resolve_kimi_k3_moe_arch_mode(
+                            self._role_attr(role, "model_path"),
+                            self._role_attr(role, "system_name"),
+                            self._role_attr(role, "backend_name"),
+                        )
                     if arch_mode is not None:
                         from_hf = arch_mode
                 fallback = _QUANT_FALLBACKS[key]

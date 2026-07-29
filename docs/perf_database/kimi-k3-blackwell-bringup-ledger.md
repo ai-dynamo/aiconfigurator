@@ -18,7 +18,8 @@ Status legend: `done` = collected, quality-gated, packaged under
 | kda | b200_sxm (SM100) | sglang 0.5.16 (kimi-k3 branch) | **done (2026-07-28)** | 987 | Triton context/generation + fused CuTeDSL DSPARK verify |
 | kda | b200_sxm (SM100) | vllm 0.1.dev19262 (kimi-k3 preview) | **done (2026-07-28)** | 1203 | collector unmodified; dispatch probes verified on SM100 |
 | moe (K3 shape) | b200_sxm (SM100) | sglang 0.5.14 | **done (2026-07-28)** | 3078 | `sglang_flashinfer_trtllm_moe` (flashinfer_mxfp4 lane), w4a16_mxfp4, TP 1-32 x EP 1-128 x 3 distributions, **zero failures** — the Hopper marlin EP>1 crash does not transfer; rows merged into the existing 139k-row 0.5.14 table (142,243 total) |
-| kda + moe | b300_sxm / gb200 / gb300 (SM100/103) | both | open | — | expect kda collectors to work as on B200; SM103 still in `unverified_sms` |
+| moe (K3 shape, **w4a8_mxfp4_mxfp8**) | b300_sxm (SM103) | sglang 0.5.14 | **done (2026-07-29)** | 3078 | the Blackwell serving-truth precision lane: mxfp8 activations (`Mxfp4MoEMethod` default, mxfp4.py:1311-1330 @ kimi-k3 branch); merged into the shared b300 0.5.14 table (251,441 total). Same-shape delta vs the bf16-activation w4a16 lane at 8 tokens: 89.8 vs 102.5 µs/layer (~12%) — small-batch MoE is weight-bytes-bound, so the E2E dummy-vs-model MoE gap is dominated by the dummy routing collapse artifact, not precision. SDK: `resolve_kimi_k3_moe_arch_mode` routes K3+sglang+Blackwell onto this label; Hopper keeps W4A16 marlin |
+| kda | b300_sxm / gb200 / gb300 (SM100/103) | both | open | — | expect kda collectors to work as on B200; SM103 still in `unverified_sms` |
 | kda | rtx_pro_6000 (SM120) | both | open | — | FlashKDA claims SM120 support (vllm); sglang CuTe paths are SM100-only → Triton verify |
 
 Hopper (SM90) collection history: the collectors were brought up on Hopper

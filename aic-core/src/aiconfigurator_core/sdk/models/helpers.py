@@ -409,6 +409,33 @@ def resolve_dsv4_moe_arch_mode(
     return None
 
 
+def resolve_kimi_k3_moe_arch_mode(
+    model_path: str,
+    system_name: str | None,
+    backend_name: str | None,
+) -> common.MoEQuantMode | None:
+    """Arch-specific MoE quant mode for Kimi-K3's MXFP4 routed experts on sglang.
+
+    The kimi-k3 branch's ``Mxfp4MoEMethod`` default precision quantizes
+    activations to mxfp8 on Blackwell (``per_token_group_quant`` /
+    ``mxfp8_quantize`` -> ``trtllm_fp4_block_scale_moe``, mxfp4.py:1311-1330 @
+    kimi-k3 branch), so the perf DB files those rows under
+    ``w4a8_mxfp4_mxfp8``. Hopper serves the same checkpoint through the
+    bf16-activation marlin W4A16 lane — the checkpoint's plain
+    ``w4a16_mxfp4`` label is already correct there, so this returns None and
+    the HF auto-inference stands.
+    """
+    if backend_name != "sglang":
+        return None
+    if model_path != "moonshotai/Kimi-K3":
+        return None
+    from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+    if is_blackwell_system(system_name):
+        return common.MoEQuantMode.w4a8_mxfp4_mxfp8
+    return None
+
+
 def resolve_dsv4_moe_arch(
     model_config: config.ModelConfig,
     model_path: str,
@@ -427,6 +454,8 @@ def resolve_dsv4_moe_arch(
     if model_config.moe_quant_mode is not None:
         return
     mode = resolve_dsv4_moe_arch_mode(model_path, system_name, backend_name, moe_backend)
+    if mode is None:
+        mode = resolve_kimi_k3_moe_arch_mode(model_path, system_name, backend_name)
     if mode is not None:
         model_config.moe_quant_mode = mode
 
