@@ -333,7 +333,7 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
     dist.destroy_process_group()
 
 
-def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *, device=None, limit=None):
+def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *, device=None, limit=None, cases=None):
     """Run the single-node, full-node DeepEP normal-mode sweep.
 
     Spawns one process per visible GPU (the full node), sweeps MoE shapes x SM
@@ -349,19 +349,22 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
     if num_gpus < 1:
         raise RuntimeError("DeepEP normal collection requires at least one visible CUDA device")
 
-    cases = get_deepep_normal_test_cases()
-    # Optional single-shape selection (DEEPEP_NORMAL_SHAPE_INDEX) so a SLURM job
-    # array can run one shape per fresh node. A hard CUDA fault leaves node-level
-    # NVSHMEM/IBGDA state dirty and cascades into later shapes on the same node;
-    # isolating one shape per node sidesteps that entirely.
-    shape_index = os.environ.get("DEEPEP_NORMAL_SHAPE_INDEX")
-    if shape_index is not None and shape_index != "":
-        idx = int(shape_index)
-        if idx < 0 or idx >= len(cases):
-            raise RuntimeError(f"DEEPEP_NORMAL_SHAPE_INDEX={idx} out of range (0..{len(cases) - 1})")
-        cases = [cases[idx]]
-    elif limit is not None:
-        cases = cases[:limit]
+    if cases is None:
+        cases = get_deepep_normal_test_cases()
+        # Optional single-shape selection (DEEPEP_NORMAL_SHAPE_INDEX) so a SLURM job
+        # array can run one shape per fresh node. A hard CUDA fault leaves node-level
+        # NVSHMEM/IBGDA state dirty and cascades into later shapes on the same node;
+        # isolating one shape per node sidesteps that entirely.
+        shape_index = os.environ.get("DEEPEP_NORMAL_SHAPE_INDEX")
+        if shape_index is not None and shape_index != "":
+            idx = int(shape_index)
+            if idx < 0 or idx >= len(cases):
+                raise RuntimeError(f"DEEPEP_NORMAL_SHAPE_INDEX={idx} out of range (0..{len(cases) - 1})")
+            cases = [cases[idx]]
+        elif limit is not None:
+            cases = cases[:limit]
+    else:
+        cases = list(cases)
     if not cases:
         raise RuntimeError("No MoE shapes resolved for DeepEP normal collection")
 
@@ -436,6 +439,7 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
         print(f"[deepep_normal] collection complete: {output_path}", flush=True)
     else:
         raise RuntimeError(f"DeepEP normal collection produced no output at {output_path}")
+    return {"succeeded": succeeded, "failed": failed}
 
 
 if __name__ == "__main__":

@@ -292,7 +292,7 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
     dist.destroy_process_group()
 
 
-def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=None, limit=None):
+def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=None, limit=None, cases=None):
     """Run the single-node, full-node DeepEP LL sweep.
 
     Spawns one process per visible GPU (the full node), sweeps MoE shapes x
@@ -307,19 +307,22 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
     if num_gpus < 1:
         raise RuntimeError("DeepEP LL collection requires at least one visible CUDA device")
 
-    cases = get_deepep_ll_test_cases()
-    # Optional single-shape selection (DEEPEP_LL_SHAPE_INDEX) so a SLURM job array
-    # can run one shape per fresh node. A hard CUDA fault leaves node-level
-    # NVSHMEM/IBGDA state dirty and cascades into later shapes on the same node;
-    # isolating one shape per node sidesteps that entirely.
-    shape_index = os.environ.get("DEEPEP_LL_SHAPE_INDEX")
-    if shape_index is not None and shape_index != "":
-        idx = int(shape_index)
-        if idx < 0 or idx >= len(cases):
-            raise RuntimeError(f"DEEPEP_LL_SHAPE_INDEX={idx} out of range (0..{len(cases) - 1})")
-        cases = [cases[idx]]
-    elif limit is not None:
-        cases = cases[:limit]
+    if cases is None:
+        cases = get_deepep_ll_test_cases()
+        # Optional single-shape selection (DEEPEP_LL_SHAPE_INDEX) so a SLURM job array
+        # can run one shape per fresh node. A hard CUDA fault leaves node-level
+        # NVSHMEM/IBGDA state dirty and cascades into later shapes on the same node;
+        # isolating one shape per node sidesteps that entirely.
+        shape_index = os.environ.get("DEEPEP_LL_SHAPE_INDEX")
+        if shape_index is not None and shape_index != "":
+            idx = int(shape_index)
+            if idx < 0 or idx >= len(cases):
+                raise RuntimeError(f"DEEPEP_LL_SHAPE_INDEX={idx} out of range (0..{len(cases) - 1})")
+            cases = [cases[idx]]
+        elif limit is not None:
+            cases = cases[:limit]
+    else:
+        cases = list(cases)
     if not cases:
         raise RuntimeError("No MoE shapes resolved for DeepEP LL collection")
 
@@ -381,3 +384,4 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
         print(f"[deepep_ll] collection complete: {output_path}", flush=True)
     else:
         raise RuntimeError(f"DeepEP LL collection produced no output at {output_path}")
+    return {"succeeded": succeeded, "failed": failed}

@@ -100,6 +100,43 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # Failures of one (model, dtype) group within an op before the summary flags
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
+SGLANG_FULLNODE_OPS = {
+    "deepep_ll": "DEEPEP_LL_SHAPE_INDEX",
+    "deepep_normal": "DEEPEP_NORMAL_SHAPE_INDEX",
+}
+
+
+@contextlib.contextmanager
+def _collector_model_path(model_path: str | None):
+    previous = os.environ.get("COLLECTOR_MODEL_PATH")
+    if model_path:
+        os.environ["COLLECTOR_MODEL_PATH"] = model_path
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        else:
+            os.environ["COLLECTOR_MODEL_PATH"] = previous
+
+
+def _get_test_cases_for_model(get_func, model_path: str | None):
+    if not model_path:
+        return get_func()
+    with _collector_model_path(model_path):
+        sig = signature(get_func)
+        params = sig.parameters
+        if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
+            return get_func(model_path=model_path)
+        return get_func()
+
+
+def _requested_ops(ops: list[str] | None, case_plan=None) -> set[str]:
+    if ops is not None:
+        return set(ops)
+    if case_plan is not None:
+        return set(case_plan.ops)
+    return set()
 
 
 def _require_torch():
@@ -132,7 +169,7 @@ def _registry_with_requested_wideep(registry: list, backend: str, ops: list[str]
     if not wideep_registry:
         return registry
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     requested_wideep_ops = requested_ops & {entry.op for entry in wideep_registry}
     if not requested_wideep_ops:
         return registry
@@ -959,29 +996,6 @@ def collect_ops(
     if runtime_version:
         from collector.version_resolver import _check_compat as check_compat
 
-    @contextlib.contextmanager
-    def _collector_model_path(model_path: str | None):
-        previous = os.environ.get("COLLECTOR_MODEL_PATH")
-        if model_path:
-            os.environ["COLLECTOR_MODEL_PATH"] = model_path
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("COLLECTOR_MODEL_PATH", None)
-            else:
-                os.environ["COLLECTOR_MODEL_PATH"] = previous
-
-    def _get_test_cases(get_func, model_path: str | None):
-        if not model_path:
-            return get_func()
-        with _collector_model_path(model_path):
-            sig = signature(get_func)
-            params = sig.parameters
-            if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
-                return get_func(model_path=model_path)
-            return get_func()
-
     all_errors = []
 
     for collection in collections:
@@ -1038,7 +1052,7 @@ def collect_ops(
             def get_func_with_limit(get_func=get_func, op=collection["type"]):
                 from collector.capabilities import filter_cases
 
-                cases = _get_test_cases(get_func, model_path)
+                cases = _get_test_cases_for_model(get_func, model_path)
                 cases, _dropped = filter_cases(cases, op=op, sm_version=sm_version)
                 if case_filters:
                     before_count = len(cases)
@@ -1081,6 +1095,187 @@ def collect_ops(
     return all_errors
 
 
+def _fullnode_resume_errors(
+    module_name: str, resume_tracker: ResumeCheckpoint, resume_options: dict | None
+) -> list[dict]:
+    if not (resume_options and resume_options.get("resume")):
+        return []
+    unresolved = resume_tracker.unresolved_failed_count()
+    if not unresolved:
+        return []
+    logger.warning(
+        f"{module_name}: checkpoint holds {unresolved} unresolved failed tasks "
+        "(skipped on resume; rerun with --resume-retry-failed to retry)"
+    )
+    return [
+        {
+            "module": module_name,
+            "task_id": "resume_unresolved",
+            "error_type": "UnresolvedFailures",
+            "error_message": f"checkpoint holds {unresolved} unresolved failed tasks",
+            "classification": "unresolved_from_checkpoint",
+            "timestamp": datetime.now().isoformat(),
+        }
+    ]
+
+
+def _select_fullnode_cases(op: str, cases: list, limit: int | None) -> list:
+    shape_index_env = SGLANG_FULLNODE_OPS[op]
+    shape_index = os.environ.get(shape_index_env)
+    if shape_index is not None and shape_index != "":
+        idx = int(shape_index)
+        if idx < 0 or idx >= len(cases):
+            raise RuntimeError(f"{shape_index_env}={idx} out of range (0..{len(cases) - 1})")
+        return [cases[idx]]
+    if limit is not None:
+        return cases[:limit]
+    return cases
+
+
+def _collect_sglang_fullnode_op(
+    collection: dict,
+    *,
+    runtime_version: str,
+    limit: int | None,
+    shuffle: bool,
+    shuffle_seed: int,
+    backend: str,
+    resume_options: dict | None,
+    model_path: str | None,
+    case_plan,
+    sm_version: int | None,
+    case_filters: list[str] | None,
+) -> list[dict]:
+    """Run a SGLang full-node op once while writing normal V3 checkpoint evidence."""
+    from collector.capabilities import filter_cases
+    from collector.version_resolver import _check_compat
+
+    op = collection["type"]
+    full_name = f"{collection['name']}.{op}"
+    if case_plan is not None and not case_plan.has_op(op):
+        logger.info(f"Skipping {full_name} — not in collector v2 case plan")
+        return []
+
+    module_name = collection["module"]
+    get_module = __import__(module_name, fromlist=[collection["get_func"]])
+    run_module = __import__(module_name, fromlist=[collection["run_func"]])
+
+    declared = getattr(get_module, "__compat__", None)
+    if declared:
+        try:
+            if not _check_compat(declared, runtime_version):
+                raise RuntimeError(
+                    f"module {module_name} declares __compat__={declared!r}, runtime is v{runtime_version}"
+                )
+        except ValueError as e:
+            raise RuntimeError(f"invalid __compat__ {declared!r}: {e}") from e
+
+    get_func = getattr(get_module, collection["get_func"])
+    run_func = getattr(run_module, collection["run_func"])
+    run_func_name = collection["run_func"]
+
+    cases = _get_test_cases_for_model(get_func, model_path)
+    cases, _dropped = filter_cases(cases, op=op, sm_version=sm_version)
+    if case_filters:
+        before_count = len(cases)
+        cases = [case for case in cases if any(fragment in str(case) for fragment in case_filters)]
+        logger.info(f"{op}: --case-filter kept {len(cases)}/{before_count} cases")
+    if shuffle:
+        rng = random.Random(shuffle_seed)
+        rng.shuffle(cases)
+    cases = _select_fullnode_cases(op, cases, limit)
+    if not cases:
+        return [
+            {
+                "module": full_name,
+                "error_type": "ModuleCollectionFailure",
+                "error_message": f"No test cases resolved for full-node op {op}",
+                "classification": "unexpected",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ]
+
+    raw_task_infos = [
+        {
+            "id": create_test_case_id(case, run_func_name, full_name),
+            "params": case,
+            "index": i,
+        }
+        for i, case in enumerate(cases)
+    ]
+
+    checkpoint_dir = (
+        resume_options.get("checkpoint_dir", ".collector_checkpoint") if resume_options else ".collector_checkpoint"
+    )
+    resume_tracker = ResumeCheckpoint(
+        backend=backend,
+        module_name=full_name,
+        run_func_name=run_func_name,
+        checkpoint_dir=checkpoint_dir,
+        framework_version=runtime_version,
+        sm_version=sm_version,
+    )
+    if resume_options and resume_options.get("resume"):
+        resume_tracker.load_existing()
+        task_infos = resume_tracker.filter_done(raw_task_infos, retry_failed=resume_options.get("retry_failed", False))
+    else:
+        task_infos = raw_task_infos
+
+    if not task_infos:
+        logger.info(f"{full_name}: no full-node tasks to run")
+        return _fullnode_resume_errors(full_name, resume_tracker, resume_options)
+
+    logger.info(f"Running {full_name} full-node collection (bypassing per-GPU worker pool)")
+    errors: list[dict] = []
+    task_by_id = {task_info["id"]: task_info["params"] for task_info in task_infos}
+    id_by_case = {str(task_info["params"]): task_info["id"] for task_info in task_infos}
+    try:
+        result = run_func(
+            perf_filename=collection["perf_filename"],
+            limit=None,
+            cases=[task_info["params"] for task_info in task_infos],
+        )
+        failed_cases = result.get("failed", []) if isinstance(result, dict) else []
+        failed_ids = {id_by_case[str(case)] for case in failed_cases if str(case) in id_by_case}
+        for task_id in task_by_id:
+            if task_id in failed_ids:
+                resume_tracker.mark_failed(task_id)
+            else:
+                resume_tracker.mark_passed(task_id)
+        for task_id in sorted(failed_ids):
+            errors.append(
+                {
+                    "module": full_name,
+                    "task_id": task_id,
+                    "task_params": str(task_by_id[task_id]),
+                    "error_type": "FullNodeCaseFailure",
+                    "error_message": "full-node runner reported failed case",
+                    "classification": "unexpected",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+    except Exception as e:
+        logger.exception(f"{full_name} full-node collection failed")
+        for task_id in task_by_id:
+            resume_tracker.mark_failed(task_id)
+        errors.append(
+            {
+                "module": full_name,
+                "task_id": "fullnode_collection",
+                "error_type": "FullNodeCollectionFailure",
+                "error_message": str(e),
+                "classification": "unexpected",
+                "traceback": traceback.format_exc(),
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+    finally:
+        resume_tracker.flush(force=True)
+
+    errors.extend(_fullnode_resume_errors(full_name, resume_tracker, resume_options))
+    return errors
+
+
 def collect_sglang(
     num_processes: int,
     ops: list[str] | None = None,
@@ -1115,33 +1310,25 @@ def collect_sglang(
 
     from collector.framework_manifest import require_collector_runtime
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
     runtime = require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
 
-    # DeepEP LL and normal are single collective NCCL/DeepEP jobs that must own
-    # every GPU at once, so they cannot go through the per-GPU worker pool in
-    # collect_ops. Intercept them here and run each directly; collect.py's
-    # finalize step then converts the produced wideep_deepep_*_perf.txt files to
-    # parquet. These ops only run when explicitly requested (never as part of a
-    # collect-all with ops=None).
-    fullnode_ops = ("deepep_ll", "deepep_normal")
-    run_deepep_ll = bool(ops) and "deepep_ll" in ops
-    run_deepep_normal = bool(ops) and "deepep_normal" in ops
-    run_any_fullnode = run_deepep_ll or run_deepep_normal
-    ops_for_pool = [op for op in ops if op not in fullnode_ops] if run_any_fullnode else ops
-
     all_errors = []
-    collections = []
-    if ops_for_pool or not run_any_fullnode:
-        registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops_for_pool, case_plan)
-        collections = build_collections(registry, "sglang", version, ops_for_pool, logger=logger)
+    registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
+    ops_filter = ops if ops is not None else (case_plan.ops if case_plan is not None else None)
+    collections = build_collections(registry, "sglang", version, ops_filter, logger=logger)
+    requested_fullnode_ops = requested_ops & set(SGLANG_FULLNODE_OPS)
+    fullnode_collections = [collection for collection in collections if collection["type"] in requested_fullnode_ops]
+    pool_collections = [collection for collection in collections if collection["type"] not in SGLANG_FULLNODE_OPS]
+
+    if pool_collections:
         all_errors = collect_ops(
             num_processes,
-            collections,
+            pool_collections,
             version,
             limit=limit,
             shuffle=shuffle,
@@ -1153,41 +1340,22 @@ def collect_sglang(
             case_filters=case_filters,
         )
 
-    if run_deepep_ll:
-        from collector.registry_types import PerfFile
-        from collector.wideep.sglang.collect_deepep_ll import run_deepep_ll_fullnode
-
-        logger.info("Running DeepEP LL full-node collection (bypassing per-GPU worker pool)")
-        try:
-            run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, limit=limit)
-        except Exception as e:
-            logger.exception("DeepEP LL collection failed")
-            all_errors.append(
-                {
-                    "module": "collector.wideep.sglang.collect_deepep_ll.deepep_ll",
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
+    for collection in fullnode_collections:
+        all_errors.extend(
+            _collect_sglang_fullnode_op(
+                collection,
+                runtime_version=version,
+                limit=limit,
+                shuffle=shuffle,
+                shuffle_seed=42,
+                backend="sglang",
+                resume_options=resume_options,
+                model_path=model_path,
+                case_plan=case_plan,
+                sm_version=sm_version,
+                case_filters=case_filters,
             )
-
-    if run_deepep_normal:
-        from collector.registry_types import PerfFile
-        from collector.wideep.sglang.collect_deepep_normal import run_deepep_normal_fullnode
-
-        logger.info("Running DeepEP normal full-node collection (bypassing per-GPU worker pool)")
-        try:
-            run_deepep_normal_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_NORMAL, limit=limit)
-        except Exception as e:
-            logger.exception("DeepEP normal collection failed")
-            all_errors.append(
-                {
-                    "module": "collector.wideep.sglang.collect_deepep_normal.deepep_normal",
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-            )
+        )
 
     generate_collection_summary(all_errors, "sglang", version)
     provenance_ctx = {
