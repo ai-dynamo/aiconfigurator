@@ -11,6 +11,7 @@ on:
       - synchronize
     paths:
       - ".github/actions/build-platform-wheel/**"
+      - ".github/workflows/build-platform-wheels-copied-pr.yml"
       - ".github/workflows/build-platform-wheels.yml"
       - ".github/workflows/validate-platform-wheels.yml"
       - "docker/Dockerfile"

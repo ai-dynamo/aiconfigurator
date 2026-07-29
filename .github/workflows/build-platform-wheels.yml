@@ -8,21 +8,7 @@ on:
     branches:
       - main
       - "release/*"
-      # copy-pr-bot is the approval boundary for privileged pull-request builds.
-      - "pull-request/*"
-    paths:
-      - ".github/actions/build-platform-wheel/**"
-      - ".github/workflows/build-platform-wheels.yml"
-      - "docker/Dockerfile"
-      - "LICENSE"
-      - "pyproject.toml"
-      - "README.md"
-      - "aic-core/**"
-      - "src/**"
-      - "tools/build_legacy_monolith_fixture.py"
-      - "tools/stage_wheels_in_artifactory.sh"
-      - "tools/verify_installed_package_layers.py"
-      - "tools/verify_release_wheels.py"
+  workflow_call:
 
 concurrency:
   group: platform-wheels-${{ github.ref }}
