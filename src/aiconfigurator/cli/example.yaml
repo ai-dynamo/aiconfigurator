@@ -192,3 +192,32 @@ disagg_full:
   # modeling queueing-under-concurrency in the deployed system.
   # Used by both the constraint-mode search and ``pick_autoscale``.
   autoscale_ttft_correction_factor: 1.8
+
+
+# ============================================================
+# Vision-language + EPD (encoder disaggregation)
+# ============================================================
+# enable_epd serves the vision encoder from a dedicated encode-worker
+# pool (agg -> E+agg, disagg -> E+P+D) instead of colocated.  Keys are
+# Task field names (encoder_tp_candidates), not CLI flags (--encoder-tp).
+vl_epd_agg:
+  serving_mode: agg
+  model_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+  system_name: h100_sxm
+  backend_name: vllm
+  total_gpus: 8
+  isl: 2000
+  osl: 200
+  ttft: 300.0
+  tpot: 20.0
+  image_height: 768
+  image_width: 768
+  num_images_per_request: 8
+  enable_epd: true
+
+  # Optional encoder knobs (all require enable_epd):
+  # encoder_tp_candidates: [1, 2, 4, 8]
+  # encoder_batch_candidates: [1, 2, 4, 8]
+  # max_encoder_workers: 32
+  # encoder_latency_correction: 1.0
+  # encoder_system_name: h200_sxm   # hetero encode pool
