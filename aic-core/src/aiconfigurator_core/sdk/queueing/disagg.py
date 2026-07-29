@@ -272,6 +272,236 @@ class _Pool:
         return max(self.busy_until[widx], min(arrivals))
 
 
+def _reject_kv_pressure(prefill_eng: EngineSpec, decode_eng: EngineSpec) -> None:
+    """KV-pressure honesty (same contract as the agg calendars): the tandem
+    models no KV admission gate and no hold-until-transfer accounting, so
+    accepting these inputs would silently return optimistic numbers."""
+    for stage, eng in (("prefill", prefill_eng), ("decode", decode_eng)):
+        if eng.kv_capacity_tokens or eng.guaranteed_no_evict:
+            raise ValueError(
+                f"the disagg tandem models no KV-pressure admission semantics ({stage} "
+                "engine sets kv_capacity_tokens/guaranteed_no_evict): unset them, or "
+                "size the deployment so KV never binds"
+            )
+
+
+@dataclass
+class _TandemStats:
+    """Raw accounting of one tandem run (report assembly is the caller's)."""
+
+    ttft_transient: Distribution
+    ttft_steady: Distribution
+    itl: Distribution
+    tpot: Distribution
+    e2e: Distribution
+    xfer_durations: list
+    prefill_waits: list
+    completions: int
+    steady_completions: int
+    steady_start_ms: Optional[float]
+    end_ms: float
+
+    @property
+    def throughput_rps(self) -> float:
+        window_ms = self.end_ms - (self.steady_start_ms if self.steady_start_ms is not None else 0.0)
+        return self.steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
+
+
+def _run_tandem(
+    prefill: _Pool,
+    decode: _Pool,
+    fabric: Optional[_TransferFabric],
+    prefill_eng: EngineSpec,
+    decode_eng: EngineSpec,
+    prefill_timing: TimingModel,
+    decode_timing: TimingModel,
+    spec: DisaggSpec,
+    pending: list,
+    target: int,
+    warmup_reqs: int,
+    max_iters: int,
+    on_complete=None,
+    transient_prewarmup: bool = False,
+    max_backlog: Optional[int] = None,
+    stall_msg: str = "",
+) -> _TandemStats:
+    """The tandem event loop — the ONE copy of the pass/handoff semantics
+    every disagg entry point drives (closed loop, open loop, trace replay,
+    session lanes). ``pending`` holds not-yet-visible arrivals as
+    ``(eligible_ms, seq, req)`` tuples sorted by (eligible, seq);
+    ``on_complete(req, end_ms)`` runs after a request's accounting and may
+    push follow-up work (a closed-loop replacement straight into the
+    prefill pool, or a session lane's next turn insorted into ``pending``).
+    ``transient_prewarmup`` buckets pre-warmup non-burst TTFTs as transient
+    (the open-loop/sessions convention; the closed loop drops them).
+    ``max_backlog`` arms the arrived-but-unstarted divergence guard (open
+    loop only — endogenous arrivals self-throttle and pass None)."""
+    completions = 0
+    steady_start_ms = None
+    now = 0.0
+
+    ttft_transient = Distribution()
+    ttft_steady = Distribution()
+    itl = Distribution()
+    tpot = Distribution()
+    e2e = Distribution()
+    xfer_durations: list[float] = []
+    prefill_waits: list[float] = []
+    steady_completions = 0
+
+    def run_prefill_pass(widx: int, start_ms: float) -> float:
+        """One static prefill pass: queued prompts (up to kappa) share the
+        token budget; completers emit their FIRST token at pass end."""
+        nonlocal completions, steady_start_ms, steady_completions
+        q = prefill.queues[widx]
+        budget = prefill_eng.max_num_batched_tokens
+        arrived = [r for r in q if r.pool_arrival_ms <= start_ms]
+        cap = spec.prefill_inflight_cap or len(arrived)
+        batch_count = 0
+        batch_isl = 0
+        batch_prefix = 0
+        finished: list[_Req] = []
+        for r in arrived[:cap]:
+            if budget <= 0:
+                break
+            if r.prefill_start_ms < 0:
+                r.prefill_start_ms = start_ms
+            chunk = min(r.remaining_prefill, budget)
+            computed_before = r.prefix + (max(1, r.isl - r.prefix) - r.remaining_prefill)
+            r.remaining_prefill -= chunk
+            budget -= chunk
+            batch_count += 1
+            batch_isl += computed_before + chunk
+            batch_prefix += computed_before
+            if r.remaining_prefill == 0:
+                finished.append(r)
+        if batch_count == 0:
+            return start_ms
+        end = start_ms + prefill_timing.prefill_ms(batch_count, batch_isl // batch_count, batch_prefix // batch_count)
+        for r in finished:
+            q.remove(r)
+            # the prefill worker emits the first (TTFT) token off the final
+            # chunk's logits — user-visible from this stage
+            r.generated = 1
+            r.first_token_ms = end
+            r.last_token_ms = end
+            ttft_ms = end - r.arrival_ms
+            if r.is_initial_burst:
+                ttft_transient.add(ttft_ms)
+            elif completions >= warmup_reqs:
+                ttft_steady.add(ttft_ms)
+                prefill_waits.append(r.prefill_start_ms - r.arrival_ms)
+            elif transient_prewarmup:
+                # open loop/sessions: pre-warmup TTFTs are transient (same
+                # bucketing as calendar.evaluate_open_loop)
+                ttft_transient.add(ttft_ms)
+            if r.generated >= r.osl:
+                _complete(r, end)  # osl == 1 finishes on the prefill worker
+            elif fabric is None:
+                decode.dispatch(r, end)
+            else:
+                dst = decode.next_worker()
+                r.xfer_submit_ms = end
+                fabric.submit(widx, dst, r.isl * spec.kv_bytes_per_token, end, (dst, r))
+        return end
+
+    def run_decode_pass(widx: int, start_ms: float) -> float:
+        """One decode iteration: the running set (capped at max_num_seqs)
+        emits one token each; no prefill compute on decode workers."""
+        q = decode.queues[widx]
+        emitters = [r for r in q if r.generated < r.osl and r.pool_arrival_ms <= start_ms][: decode_eng.max_num_seqs]
+        if not emitters:
+            return start_ms
+        ctx = sum(r.isl + r.generated for r in emitters) // len(emitters)
+        end = start_ms + decode_timing.decode_ms(len(emitters), ctx)
+        for r in emitters:
+            r.generated += 1
+            r.gaps.append(end - r.last_token_ms)  # gap 1 carries the handoff
+            r.last_token_ms = end
+            if r.generated >= r.osl:
+                q.remove(r)
+                _complete(r, end)
+        return end
+
+    def _complete(r: _Req, end_ms: float) -> None:
+        nonlocal completions, steady_start_ms, steady_completions
+        completions += 1
+        if completions == warmup_reqs:
+            steady_start_ms = end_ms
+        if completions > warmup_reqs and not r.is_initial_burst:
+            steady_completions += 1
+            for g in r.gaps:
+                itl.add(g)
+            if r.gaps:
+                tpot.add(sum(r.gaps) / len(r.gaps))
+            e2e.add(end_ms - r.arrival_ms)
+        if on_complete is not None:
+            on_complete(r, end_ms)
+
+    def _any_req(_r: _Req) -> bool:
+        return True
+
+    def _decoding(r: _Req) -> bool:
+        return r.generated < r.osl
+
+    for _ in range(max_iters):
+        if completions >= target:
+            break
+        t_pf = min((prefill.next_start(i, _any_req) for i in range(len(prefill.queues))), default=math.inf)
+        t_dc = min((decode.next_start(i, _decoding) for i in range(len(decode.queues))), default=math.inf)
+        t_tr = fabric.next_completion_ms() if fabric and fabric.has_flows() else None
+        t_arr = pending[0][0] if pending else math.inf
+        now = min(t_pf, t_dc, t_arr, t_tr if t_tr is not None else math.inf)
+        if now == math.inf:
+            raise RuntimeError(f"disagg tandem recursion stalled ({stall_msg}) — invalid configuration")
+
+        while pending and pending[0][0] <= now:
+            _, _, r = pending.pop(0)
+            prefill.dispatch(r, r.eligible_ms)
+        if max_backlog is not None and (backlog := _prefill_backlog(prefill, now)) > max_backlog:
+            raise RuntimeError(
+                f"disagg prefill backlog diverged ({stall_msg}, backlog={backlog}) — "
+                "request_rate is at or beyond this deployment's prefill capacity; "
+                "no steady state exists"
+            )
+
+        if fabric is not None:
+            for t_done, (dst, r) in fabric.pop_completed(now):
+                r.xfer_ms = t_done - r.xfer_submit_ms
+                xfer_durations.append(r.xfer_ms)
+                decode.dispatch(r, t_done, widx=dst)
+
+        for i in range(len(prefill.queues)):
+            if prefill.next_start(i, _any_req) <= now:
+                prefill.busy_until[i] = run_prefill_pass(i, now)
+        for i in range(len(decode.queues)):
+            if decode.next_start(i, _decoding) <= now:
+                decode.busy_until[i] = run_decode_pass(i, now)
+    else:
+        raise RuntimeError("disagg tandem recursion did not converge within max_iters")
+
+    return _TandemStats(
+        ttft_transient=ttft_transient,
+        ttft_steady=ttft_steady,
+        itl=itl,
+        tpot=tpot,
+        e2e=e2e,
+        xfer_durations=xfer_durations,
+        prefill_waits=prefill_waits,
+        completions=completions,
+        steady_completions=steady_completions,
+        steady_start_ms=steady_start_ms,
+        end_ms=now,
+    )
+
+
+def _prefill_backlog(prefill: _Pool, now_ms: float) -> int:
+    """Arrived-but-unstarted requests across the prefill pool."""
+    return sum(
+        1 for q in prefill.queues for r in q if r.prefill_start_ms < 0 and r.pool_arrival_ms <= now_ms
+    )
+
+
 def evaluate_disagg(
     wl: WorkloadSpec,
     prefill_eng: EngineSpec,
@@ -323,16 +553,7 @@ def evaluate_disagg(
         raise ValueError("arrival_trace requires an open-loop workload (request_rate)")
     if not closed_loop and initial_stagger_ms:
         raise ValueError("initial_stagger_ms shapes the closed-loop initial burst only")
-    # KV-pressure honesty (same contract as the agg calendars): the tandem
-    # models no KV admission gate and no hold-until-transfer accounting, so
-    # accepting these inputs would silently return optimistic numbers.
-    for stage, eng in (("prefill", prefill_eng), ("decode", decode_eng)):
-        if eng.kv_capacity_tokens or eng.guaranteed_no_evict:
-            raise ValueError(
-                f"the disagg tandem models no KV-pressure admission semantics ({stage} "
-                "engine sets kv_capacity_tokens/guaranteed_no_evict): unset them, or "
-                "size the deployment so KV never binds"
-            )
+    _reject_kv_pressure(prefill_eng, decode_eng)
     prefill = _Pool(spec.num_prefill_workers)
     decode = _Pool(spec.num_decode_workers)
     fabric = _TransferFabric(spec) if (spec.kv_bytes_per_token > 0 and spec.egress_bytes_per_s > 0) else None
@@ -392,177 +613,52 @@ def evaluate_disagg(
         if wl.ingest_us_per_token > 0:
             pending.sort(key=lambda r: r.eligible_ms)
 
-    completions = 0
-    steady_start_ms = None
-    now = 0.0
-    released = 0  # open loop: pending[:released] handed to the router
-    started = 0  # requests whose prefill has begun (divergence guard)
-    # backlog bound before declaring divergence: mirrors the agg open loop's
-    # max(4*cap, total/2) with the tandem's admission analog (kappa or the
-    # engine seq cap, per prefill worker)
-    backlog_cap = spec.num_prefill_workers * (spec.prefill_inflight_cap or prefill_eng.max_num_seqs)
-    max_backlog = max(4 * backlog_cap, target // 2)
+    if closed_loop:
 
-    ttft_transient = Distribution()
-    ttft_steady = Distribution()
-    itl = Distribution()
-    tpot = Distribution()
-    e2e = Distribution()
-    xfer_durations: list[float] = []
-    prefill_waits: list[float] = []
-    steady_completions = 0
-
-    def run_prefill_pass(widx: int, start_ms: float) -> float:
-        """One static prefill pass: queued prompts (up to kappa) share the
-        token budget; completers emit their FIRST token at pass end."""
-        nonlocal completions, steady_start_ms, steady_completions, started
-        q = prefill.queues[widx]
-        budget = prefill_eng.max_num_batched_tokens
-        arrived = [r for r in q if r.pool_arrival_ms <= start_ms]
-        cap = spec.prefill_inflight_cap or len(arrived)
-        batch_count = 0
-        batch_isl = 0
-        batch_prefix = 0
-        finished: list[_Req] = []
-        for r in arrived[:cap]:
-            if budget <= 0:
-                break
-            if r.prefill_start_ms < 0:
-                r.prefill_start_ms = start_ms
-                started += 1
-            chunk = min(r.remaining_prefill, budget)
-            computed_before = r.prefix + (max(1, r.isl - r.prefix) - r.remaining_prefill)
-            r.remaining_prefill -= chunk
-            budget -= chunk
-            batch_count += 1
-            batch_isl += computed_before + chunk
-            batch_prefix += computed_before
-            if r.remaining_prefill == 0:
-                finished.append(r)
-        if batch_count == 0:
-            return start_ms
-        end = start_ms + prefill_timing.prefill_ms(batch_count, batch_isl // batch_count, batch_prefix // batch_count)
-        for r in finished:
-            q.remove(r)
-            # the prefill worker emits the first (TTFT) token off the final
-            # chunk's logits — user-visible from this stage
-            r.generated = 1
-            r.first_token_ms = end
-            r.last_token_ms = end
-            ttft_ms = end - r.arrival_ms
-            if r.is_initial_burst:
-                ttft_transient.add(ttft_ms)
-            elif completions >= warmup_reqs:
-                ttft_steady.add(ttft_ms)
-                prefill_waits.append(r.prefill_start_ms - r.arrival_ms)
-            elif not closed_loop:
-                # open loop: pre-warmup TTFTs are transient (same bucketing
-                # as calendar.evaluate_open_loop)
-                ttft_transient.add(ttft_ms)
-            if r.generated >= r.osl:
-                _complete(r, end)  # osl == 1 finishes on the prefill worker
-            elif fabric is None:
-                decode.dispatch(r, end)
-            else:
-                dst = decode.next_worker()
-                r.xfer_submit_ms = end
-                fabric.submit(widx, dst, r.isl * spec.kv_bytes_per_token, end, (dst, r))
-        return end
-
-    def run_decode_pass(widx: int, start_ms: float) -> float:
-        """One decode iteration: the running set (capped at max_num_seqs)
-        emits one token each; no prefill compute on decode workers."""
-        q = decode.queues[widx]
-        emitters = [r for r in q if r.generated < r.osl and r.pool_arrival_ms <= start_ms][: decode_eng.max_num_seqs]
-        if not emitters:
-            return start_ms
-        ctx = sum(r.isl + r.generated for r in emitters) // len(emitters)
-        end = start_ms + decode_timing.decode_ms(len(emitters), ctx)
-        for r in emitters:
-            r.generated += 1
-            r.gaps.append(end - r.last_token_ms)  # gap 1 carries the handoff
-            r.last_token_ms = end
-            if r.generated >= r.osl:
-                q.remove(r)
-                _complete(r, end)
-        return end
-
-    def _complete(r: _Req, end_ms: float) -> None:
-        nonlocal completions, steady_start_ms, steady_completions
-        completions += 1
-        if completions == warmup_reqs:
-            steady_start_ms = end_ms
-        if completions > warmup_reqs and not r.is_initial_burst:
-            steady_completions += 1
-            for g in r.gaps:
-                itl.add(g)
-            if r.gaps:
-                tpot.add(sum(r.gaps) / len(r.gaps))
-            e2e.add(end_ms - r.arrival_ms)
-        # closed loop: the client dispatches the replacement at the completion
-        # instant (arrival_ms=end_ms, the TTFT origin); the prefill pool sees
-        # it only after the frontend turnaround — same visibility-delay
-        # semantics as the agg calendar. At turnaround 0 the replacement lands
-        # exactly on the completion/worker-free knife edge, which at high
-        # utilization locks the zero-wait pipeline attractor real deployments
-        # never hold (validated: h20e 2P1D kappa=1 at the saturation knee).
-        if closed_loop:
+        def on_complete(r: _Req, end_ms: float) -> None:
+            # the client dispatches the replacement at the completion
+            # instant (arrival_ms=end_ms, the TTFT origin); the prefill pool
+            # sees it only after the frontend turnaround — same
+            # visibility-delay semantics as the agg calendar. At turnaround 0
+            # the replacement lands exactly on the completion/worker-free
+            # knife edge, which at high utilization locks the zero-wait
+            # pipeline attractor real deployments never hold (validated:
+            # h20e 2P1D kappa=1 at the saturation knee).
             prefill.dispatch(_new_req(end_ms), end_ms + wl.turnaround_ms)
 
-    def _any_req(_r: _Req) -> bool:
-        return True
-
-    def _decoding(r: _Req) -> bool:
-        return r.generated < r.osl
-
-    if closed_loop:
         max_iters = 200 * (warmup_generations + window_generations) * max(1, max_osl)
+        max_backlog = None
     else:
+        on_complete = None
         # pure stall backstop (every iteration performs at least one discrete
         # event: an arrival release, a fabric completion, or a pass)
         max_iters = 400 * (target + 1) * max(1, max_osl)
-    for _ in range(max_iters):
-        if completions >= target:
-            break
-        t_pf = min((prefill.next_start(i, _any_req) for i in range(len(prefill.queues))), default=math.inf)
-        t_dc = min((decode.next_start(i, _decoding) for i in range(len(decode.queues))), default=math.inf)
-        t_tr = fabric.next_completion_ms() if fabric and fabric.has_flows() else None
-        t_arr = pending[released].eligible_ms if released < len(pending) else math.inf
-        now = min(t_pf, t_dc, t_arr, t_tr if t_tr is not None else math.inf)
-        if now == math.inf:
-            raise RuntimeError(
-                f"disagg tandem recursion stalled ({spec.num_prefill_workers}P"
-                f"{spec.num_decode_workers}D) — invalid configuration"
-            )
+        # backlog bound before declaring divergence: mirrors the agg open
+        # loop's max(4*cap, total/2) with the tandem's admission analog
+        # (kappa or the engine seq cap, per prefill worker)
+        backlog_cap = spec.num_prefill_workers * (spec.prefill_inflight_cap or prefill_eng.max_num_seqs)
+        max_backlog = max(4 * backlog_cap, target // 2)
 
-        while released < len(pending) and pending[released].eligible_ms <= now:
-            r = pending[released]
-            prefill.dispatch(r, r.eligible_ms)
-            released += 1
-        if not closed_loop and released - started > max_backlog:
-            raise RuntimeError(
-                f"disagg prefill backlog diverged ({spec.num_prefill_workers}P"
-                f"{spec.num_decode_workers}D, rate={wl.request_rate}/s) — request_rate "
-                "is at or beyond this deployment's prefill capacity; no steady state exists"
-            )
-
-        if fabric is not None:
-            for t_done, (dst, r) in fabric.pop_completed(now):
-                r.xfer_ms = t_done - r.xfer_submit_ms
-                xfer_durations.append(r.xfer_ms)
-                decode.dispatch(r, t_done, widx=dst)
-
-        for i in range(len(prefill.queues)):
-            if prefill.next_start(i, _any_req) <= now:
-                prefill.busy_until[i] = run_prefill_pass(i, now)
-        for i in range(len(decode.queues)):
-            if decode.next_start(i, _decoding) <= now:
-                decode.busy_until[i] = run_decode_pass(i, now)
-    else:
-        raise RuntimeError("disagg tandem recursion did not converge within max_iters")
-
-    window_ms = now - (steady_start_ms if steady_start_ms is not None else 0.0)
-    throughput = steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
+    stats = _run_tandem(
+        prefill,
+        decode,
+        fabric,
+        prefill_eng,
+        decode_eng,
+        prefill_timing,
+        decode_timing,
+        spec,
+        # (eligible, seq) tuples: seq is the dispatch index, so the sorted
+        # order reproduces the stable ingest sort (ties keep dispatch order)
+        [(r.eligible_ms, i, r) for i, r in enumerate(pending)],
+        target,
+        warmup_reqs,
+        max_iters,
+        on_complete=on_complete,
+        transient_prewarmup=not closed_loop,
+        max_backlog=max_backlog,
+        stall_msg=f"{spec.num_prefill_workers}P{spec.num_decode_workers}D, rate={wl.request_rate}/s",
+    )
 
     per_request = None
     if trace_order:
@@ -580,18 +676,18 @@ def evaluate_disagg(
         ]
 
     return QueueingReport(
-        ttft_steady=ttft_steady,
-        ttft_transient=ttft_transient,
-        itl=itl,
-        tpot=tpot,
-        e2e=e2e,
-        throughput_rps=throughput,
-        output_tokens_per_s=throughput * mean_osl,
+        ttft_steady=stats.ttft_steady,
+        ttft_transient=stats.ttft_transient,
+        itl=stats.itl,
+        tpot=stats.tpot,
+        e2e=stats.e2e,
+        throughput_rps=stats.throughput_rps,
+        output_tokens_per_s=stats.throughput_rps * mean_osl,
         backend=backend,
         mode="disagg",
         num_requests=wl.num_requests,
-        kv_transfer_ms=(sum(xfer_durations) / len(xfer_durations)) if xfer_durations else 0.0,
-        prefill_queue_ms=(sum(prefill_waits) / len(prefill_waits)) if prefill_waits else 0.0,
+        kv_transfer_ms=(sum(stats.xfer_durations) / len(stats.xfer_durations)) if stats.xfer_durations else 0.0,
+        prefill_queue_ms=(sum(stats.prefill_waits) / len(stats.prefill_waits)) if stats.prefill_waits else 0.0,
         workload_fidelity=workload_fidelity(wl),
         per_request=per_request,
     )

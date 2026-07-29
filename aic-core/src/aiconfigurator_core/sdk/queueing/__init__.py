@@ -16,6 +16,9 @@ One model, several entry points along the workload-fidelity contract
     evaluate_sessions                     W4 session lanes (endogenous
                                           arrivals: turn k+1 dispatches at
                                           completion_k + think gap)
+    evaluate_sessions_disagg              W4 session lanes over the disagg
+                                          tandem (same lane semantics,
+                                          tandem serving flow)
     evaluate_disagg                       W0-W3 prefill/decode tandem
                                           (closed or open loop, exact
                                           arrival_trace replay; KV handoff
@@ -37,7 +40,7 @@ from .closed_form import (
     static_degenerate_columns,
 )
 from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
-from .sessions import SessionTurn, evaluate_sessions
+from .sessions import SessionTurn, evaluate_sessions, evaluate_sessions_disagg
 from .spec import (
     Distribution,
     EngineSpec,
@@ -75,6 +78,7 @@ __all__ = [
     "evaluate_disagg_mixed",
     "evaluate_open_loop",
     "evaluate_sessions",
+    "evaluate_sessions_disagg",
     "load_cc_sessions_jsonl",
     "load_mooncake_jsonl",
     "operating_point_columns",

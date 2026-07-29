@@ -32,6 +32,7 @@ from bisect import insort
 from dataclasses import dataclass
 
 from .calendar import CALENDARS, _Slot
+from .disagg import DisaggSpec, _Pool, _reject_kv_pressure, _Req, _run_tandem, _TransferFabric
 from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 
 
@@ -227,6 +228,137 @@ def evaluate_sessions(
         backend=backend,
         mode="agg",
         num_requests=total,
+        workload_fidelity=f"W4(session-loop, lanes={len(sessions)}, turns={total})",
+        per_request=per_request,
+    )
+
+
+def evaluate_sessions_disagg(
+    sessions: list,
+    prefill_eng: EngineSpec,
+    decode_eng: EngineSpec,
+    prefill_timing: TimingModel,
+    decode_timing: TimingModel,
+    spec: DisaggSpec,
+    backend: str = "vllm",
+    session_start_ms: list | None = None,
+    stagger_ms: float = 0.0,
+    turnaround_ms: float = 0.0,
+    ingest_us_per_token: float = 0.0,
+    warmup_requests: int = 0,
+) -> QueueingReport:
+    """Session lanes over the disagg tandem (W4 x disagg).
+
+    Same lane semantics as ``evaluate_sessions`` — turn k+1 dispatches at
+    completion_k + think gap, mapped to scheduler arrival through the usual
+    plane (turnaround + isl x ingest slope) — driven through the tandem's
+    event loop (``disagg._run_tandem``: static-RR prefill router, per-request
+    KV handoff on the max-min-fair fabric, first token prefill-side). The
+    lane approximations of the agg evaluator carry over unchanged (one
+    outstanding request per lane; per-turn prefixes are inputs).
+
+    ``per_request`` entries carry ``session``/``turn``, the EMERGENT
+    ``arrival_ms``, and ``xfer_ms`` (the turn's KV-handoff duration).
+    """
+    if not sessions or not any(sessions):
+        raise ValueError("sessions is empty")
+    if session_start_ms is not None and len(session_start_ms) != len(sessions):
+        raise ValueError("session_start_ms must match sessions length")
+    _reject_kv_pressure(prefill_eng, decode_eng)
+
+    all_turns = [t for lane in sessions for t in lane]
+    total = len(all_turns)
+    mean_osl = max(1, sum(t.osl for t in all_turns) // total)
+    max_osl = max(1, max(t.osl for t in all_turns))
+
+    prefill = _Pool(spec.num_prefill_workers)
+    decode = _Pool(spec.num_decode_workers)
+    fabric = _TransferFabric(spec) if (spec.kv_bytes_per_token > 0 and spec.egress_bytes_per_s > 0) else None
+
+    lane_of: dict = {}
+    results: dict = {}
+    pending: list = []  # (eligible_ms, seq, req) — _run_tandem's arrival feed
+
+    def _enqueue_turn(lane_idx: int, turn_idx: int, dispatch_ms: float) -> None:
+        t = sessions[lane_idx][turn_idx]
+        prefix = min(t.prefix, max(0, t.isl - 1))
+        r = _Req(
+            arrival_ms=dispatch_ms,
+            remaining_prefill=max(1, t.isl - prefix),
+            isl=t.isl,
+            prefix=prefix,
+            osl=max(1, t.osl),
+            eligible_ms=dispatch_ms + turnaround_ms + t.isl * ingest_us_per_token / 1000.0,
+        )
+        lane_of[id(r)] = (lane_idx, turn_idx)
+        insort(pending, (r.eligible_ms, len(lane_of), r), key=lambda x: (x[0], x[1]))
+
+    for i, lane in enumerate(sessions):
+        if not lane:
+            continue
+        start = session_start_ms[i] if session_start_ms is not None else i * stagger_ms
+        _enqueue_turn(i, 0, start + lane[0].think_ms)
+
+    def on_complete(r: _Req, end_ms: float) -> None:
+        li, ti = lane_of[id(r)]
+        results[(li, ti)] = r
+        if ti + 1 < len(sessions[li]):
+            _enqueue_turn(li, ti + 1, end_ms + sessions[li][ti + 1].think_ms)
+
+    stats = _run_tandem(
+        prefill,
+        decode,
+        fabric,
+        prefill_eng,
+        decode_eng,
+        prefill_timing,
+        decode_timing,
+        spec,
+        pending,
+        total,
+        warmup_requests,
+        400 * (total + 1) * max(1, max_osl),
+        on_complete=on_complete,
+        transient_prewarmup=True,
+        # endogenous arrivals self-throttle (one outstanding per lane), so
+        # the open-loop divergence guard stays unarmed
+        max_backlog=None,
+        stall_msg=f"{spec.num_prefill_workers}P{spec.num_decode_workers}D sessions",
+    )
+
+    per_request = []
+    for li, lane in enumerate(sessions):
+        for ti in range(len(lane)):
+            r = results.get((li, ti))
+            if r is None:
+                continue
+            per_request.append(
+                dict(
+                    session=li,
+                    turn=ti,
+                    arrival_ms=r.arrival_ms,
+                    isl=r.isl,
+                    prefix=r.prefix,
+                    osl=r.osl,
+                    ttft_ms=(r.first_token_ms - r.arrival_ms) if r.first_token_ms >= 0 else None,
+                    e2e_ms=(r.last_token_ms - r.arrival_ms) if r.last_token_ms >= 0 else None,
+                    xfer_ms=r.xfer_ms if r.xfer_submit_ms >= 0 else None,
+                )
+            )
+
+    return QueueingReport(
+        ttft_steady=stats.ttft_steady,
+        ttft_transient=stats.ttft_transient,
+        itl=stats.itl,
+        tpot=stats.tpot,
+        e2e=stats.e2e,
+        throughput_rps=stats.throughput_rps,
+        output_tokens_per_s=stats.throughput_rps * mean_osl,
+        backend=backend,
+        mode="disagg",
+        num_requests=total,
+        kv_transfer_ms=(sum(stats.xfer_durations) / len(stats.xfer_durations)) if stats.xfer_durations else 0.0,
+        prefill_queue_ms=(sum(stats.prefill_waits) / len(stats.prefill_waits)) if stats.prefill_waits else 0.0,
         workload_fidelity=f"W4(session-loop, lanes={len(sessions)}, turns={total})",
         per_request=per_request,
     )

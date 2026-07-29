@@ -117,7 +117,10 @@ workload inputs reach both evaluators; its open-loop router is static
 round-robin at the scheduler-visibility instant (the TRT-LLM native
 disagg mapping), and the KV handoff is priced per request
 (`isl × kv_bytes_per_token` — full context: cached prefix saves prefill
-compute, not transfer bytes). W4 session lanes remain agg-only.
+compute, not transfer bytes). W4 session lanes run over the tandem too
+(`evaluate_sessions_disagg` — same lane semantics, driven through the one
+tandem event loop `disagg._run_tandem` that every disagg entry point
+shares).
 
 ## 4. New summary columns (additive; legacy `ttft`/`tpot` untouched)
 
