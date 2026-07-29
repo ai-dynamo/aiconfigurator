@@ -475,8 +475,7 @@ def sweep_agg(
             backend_name=backend_name,
             latency_correction=encoder_latency_correction,
         )
-        model_config = copy.deepcopy(model_config)
-        model_config.language_only = True
+        model_config = dataclasses.replace(model_config, language_only=True)
     # Per-cell GPU budget for the E+agg rate matching (sweep_disagg semantics).
     epd_num_gpu_set: set[int] = set(num_gpu_list) if num_gpu_list else set()
 
@@ -1242,8 +1241,7 @@ def sweep_disagg(
             latency_correction=encoder_latency_correction,
         )
         # EPD prefill workers are language-only (vision tokens stay in context).
-        prefill_model_config = copy.deepcopy(prefill_model_config)
-        prefill_model_config.language_only = True
+        prefill_model_config = dataclasses.replace(prefill_model_config, language_only=True)
 
     prefill_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
