@@ -131,30 +131,50 @@ completed 2026-07-28 with zero failures; see the campaign table. Any future
 K3 rows for another artifact/quant MERGE into the shared 0.5.14 table; never
 overwrite.)
 
-1. **K3 MoE on the vllm backend**: unblocked at the case-population level
+1. **K3 MegaMoE module lane (sglang, the launch serving path).** Probe
+   evidence (2026-07-28, kimi-k3 branch image): K3 MoE serves through the
+   patched DeepGEMM mega kernel when `get_moe_a2a_backend().is_megamoe()` —
+   "MegaMoE SiTU sentinel" at models/kimi_k3.py:132, fused a2a+GEMM over the
+   EP symmetric buffer (deep_gemm exposes `bf16/fp8/fp8_fp4_mega_moe`,
+   `mega_moe_pre_dispatch`, symm-buffer APIs, plus `_sm90` variants). This is
+   the same DeepGEMM implementation the vllm branch calls
+   (`moe_backend == "deep_gemm_mega_moe"`); TRT-LLM's `wideep_moe` (cutlass +
+   real A2A) is a DIFFERENT implementation and not a proxy. Collection plan:
+   extend the `collect_dsv4_megamoe.py` pattern (module boundary = symm
+   buffer lookup -> pre-dispatch -> mega kernel; gate/topk outside) to the K3
+   shape (latent 3584, inter 3072, 896x16, SiTU sentinel), mirroring exactly
+   which deep_gemm entry point and dtype the branch's `_use_mega_moe` path
+   invokes. HARDWARE: the collector is cross-rank
+   (`ep_size == WORLD_SIZE`), so EP8 needs an 8-GPU Blackwell node — cannot
+   run on 1x B200. Perspective from the GB300 DSV4 megamoe table: at 8
+   global tokens the module (incl. cross-rank transfer) costs ~0.10-0.11
+   ms/layer — the same magnitude as the collected flashinfer_mxfp4 lane — so
+   this lane matters for serving-truth fidelity and higher concurrency, not
+   as a big bs1 latency win.
+2. **K3 MoE on the vllm backend**: unblocked at the case-population level
    (kimi_linear grouped-topk mapping + the num_expert_group field spelling in
    `collector/vllm/collect_moe.py`), but not collected. Two open questions
    before running it: whether the moe family should route to the kimi-k3
    preview image instead of stock 0.24 (K3 serves only on the branch), and
    whether the runtime's FusedMoE supports the SiTU activation K3 declares —
    probe before burning a full grid.
-2. **W4A8 quant identity rows**: if a W4A8 K3 checkpoint artifact ships for
+3. **W4A8 quant identity rows**: if a W4A8 K3 checkpoint artifact ships for
    Blackwell, it needs its own `model_case_values` moe row + allowed_modes —
    do NOT merge it into the w4a16_mxfp4 row (quant-distinct artifacts are
    separate rows).
-3. **SM103 (B300/GB300)**: kda registry entries still carry 103 in
+4. **SM103 (B300/GB300)**: kda registry entries still carry 103 in
    `unverified_sms`. Expect the B200 collectors to work unchanged (the CuTe
    MTP probe checks capability major == 10, which matches SM103); verify on
    the actual node, run smoke, then lift the marker.
-4. **sglang `kda_fused_decode` decode kernel** (TODO in the collector):
+5. **sglang `kda_fused_decode` decode kernel** (TODO in the collector):
    attempt-and-verify fused decode, compiled for the TP8 12-head shard; not
    collected on any SM yet, so decode rows stay slightly pessimistic where it
    engages. Needs a `covered()`-mirroring dispatch like the verify one.
-5. **Hopper system (if ever re-added)**: recollect sglang kda context with
+6. **Hopper system (if ever re-added)**: recollect sglang kda context with
    the fixed int32 guard rather than restoring the old dataset (coverage hole
    above), and re-run the moe marlin lane to reconfirm the EP>1 crash before
    filing upstream.
-6. **SM120 (RTX Pro 6000)**: vllm FlashKDA claims SM120; sglang CuTe paths
+7. **SM120 (RTX Pro 6000)**: vllm FlashKDA claims SM120; sglang CuTe paths
    are SM100-only so verify falls back to the Triton pair there — the
    existing collector should be serving-truth without changes, but the probe
    ordering must be re-checked before lifting 120 from `unverified_sms`.
