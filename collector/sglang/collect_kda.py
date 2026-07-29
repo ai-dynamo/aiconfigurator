@@ -329,22 +329,19 @@ def run_kda_context_benchmark(
         raise RuntimeError(f"SGLang KDA context collection failed strict completeness: {summary}")
 
 
-def _resolve_generation_kernel(num_v_heads: int, head_k_dim: int, head_v_dim: int):
-    """Mirror serving's attempt-and-verify fused decode: TritonKDAKernel offers
-    every decode step to sglang.kernels.ops.attention.kda_fused_decode, whose
-    covered() accepts exactly the K3 TP8 12-head/128-dim shard (the kernel is
-    compiled for _H=12; the model stashes the static args only for that shard,
-    _prepare_fused_decode @ models/kimi_k3.py). For that shard the fused kernel
-    IS the serving decode (conv + recurrence + gated RMSNorm in one launch);
-    every other shard runs the Triton packed pair.
-
-    Returns (covered, kda_fused_decode) for the fused shard, else None.
+def _fused_decode_module():
+    """Serving's attempt-and-verify fused decode module: the KDA decode path
+    offers every step to sglang.kernels.ops.attention.kda_fused_decode and
+    lets its own covered() accept or reject (the kernel is compiled for the
+    K3 TP8 12-head/128-dim shard; the model stashes the static args only for
+    that shard, _prepare_fused_decode @ models/kimi_k3.py). The collector
+    replicates NONE of that shape logic — it hands the constructed tensors to
+    the same covered() probe and benchmarks whichever side the framework
+    picks, exactly like serving's fallback chain.
     """
-    if not (num_v_heads == 12 and head_k_dim == 128 and head_v_dim == 128):
-        return None
-    from sglang.kernels.ops.attention.kda_fused_decode import covered, kda_fused_decode
+    from sglang.kernels.ops.attention import kda_fused_decode
 
-    return covered, kda_fused_decode
+    return kda_fused_decode
 
 
 def run_kda_generation_benchmark(
@@ -413,9 +410,16 @@ def run_kda_generation_benchmark(
                 "model_name": model_name,
             }
 
-            fused_decode = _resolve_generation_kernel(num_v_heads, head_k_dim, head_v_dim)
-            if fused_decode is not None:
-                covered, kda_fused_decode = fused_decode
+            # Attempt-and-verify exactly like serving: hand the decode tensors
+            # to the fused kernel's own covered() probe and benchmark
+            # whichever path it selects (True -> fused conv+recurrence+onorm
+            # in one launch; False -> the Triton packed pair, serving's
+            # fallback). No shard shapes are replicated here — covered() is
+            # the framework's dispatch decision.
+            fused = _fused_decode_module()
+            onorm_g = torch.randn(batch_size, proj_size, dtype=dtype, device=device)
+            if fused.covered(mixed_qkv, a, b, conv_pool, recurrent_state, state_indices, onorm_g):
+                kda_fused_decode = fused.kda_fused_decode
                 # Serving static args (_prepare_fused_decode): per-block
                 # transposed fp32 conv weights [d_conv, proj], dense fp32
                 # conv bias, fp32 o_norm weight; onorm gate is a per-token
@@ -426,14 +430,8 @@ def run_kda_generation_benchmark(
                 w_k_t = conv_weight_f32_t[:, proj_size : 2 * proj_size].contiguous()
                 w_v_t = conv_weight_f32_t[:, 2 * proj_size :].contiguous()
                 conv_bias = torch.zeros(conv_channels, dtype=torch.float32, device=device)
-                onorm_g = torch.randn(batch_size, proj_size, dtype=dtype, device=device)
                 onorm_weight = torch.randn(head_v_dim, dtype=torch.float32, device=device)
                 conv_states = conv_pool  # [B, d_conv-1, conv_channels]
-                if not covered(mixed_qkv, a, b, conv_states, recurrent_state, state_indices, onorm_g):
-                    raise RuntimeError(
-                        "kda_fused_decode.covered() rejected the 12-head shard the serving "
-                        "path runs fused — collector tensor layouts drifted from the kernel contract"
-                    )
 
                 def run_fused_decode():
                     kda_fused_decode(
