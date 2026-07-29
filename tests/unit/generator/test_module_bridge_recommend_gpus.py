@@ -104,3 +104,10 @@ class TestRecommendGPUCountDisagg:
         cfg = task_config_to_generator_config(task, row)
         assert cfg["WorkerConfig"]["prefill_workers"] == 2  # 16 // 8 replicas * 1
         assert cfg["WorkerConfig"]["decode_workers"] == 4  # 16 // 8 replicas * 2
+
+    def test_zero_total_gpus_needed_falls_back(self):
+        task = _task(total_gpus=16, serving_mode="disagg")
+        row = _disagg_result_row(total_gpus_needed=0)
+        cfg = task_config_to_generator_config(task, row)
+        assert cfg["WorkerConfig"]["prefill_workers"] == 2  # 16 // 8 replicas * 1
+        assert cfg["WorkerConfig"]["decode_workers"] == 4  # 16 // 8 replicas * 2

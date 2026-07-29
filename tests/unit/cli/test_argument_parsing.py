@@ -604,3 +604,32 @@ class TestCLIArgumentParsing:
                     value,
                 ]
             )
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--target-request-rate", "0"),
+            ("--target-request-rate", "-1"),
+            ("--target-request-rate", "nan"),
+            ("--target-request-rate", "inf"),
+            ("--target-concurrency", "0"),
+            ("--target-concurrency", "-1"),
+            ("--target-concurrency", "nan"),
+            ("--target-concurrency", "inf"),
+        ],
+    )
+    def test_default_mode_rejects_non_positive_target(self, cli_parser, flag, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--system",
+                    "h200_sxm",
+                    "--total-gpus",
+                    "8",
+                    flag,
+                    value,
+                ]
+            )

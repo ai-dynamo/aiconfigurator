@@ -2738,9 +2738,9 @@ def main(args):
             _run_recommend(args)
             return
         if has_load_target:
-            logger.warning(
-                "--target-request-rate/--target-concurrency are ignored in default mode when "
-                "--total-gpus is set. Omit --total-gpus to find the minimum GPUs for the load target."
+            raise SystemExit(
+                "--target-request-rate/--target-concurrency cannot be combined with --total-gpus. "
+                "Omit --total-gpus to find the minimum GPUs for the load target."
             )
 
         # Warn when SLA/workload parameters are implicitly defaulted
