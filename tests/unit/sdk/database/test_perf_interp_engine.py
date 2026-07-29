@@ -87,9 +87,82 @@ def test_unknown_site_transfers_util_from_neighbours():
 
 
 def test_far_site_is_a_structured_miss():
-    # (16384, 512) is ~2.6 octaves from every collected shape -> miss, not a guess.
+    # (16384, 512) is ~2.6 octaves from every collected shape -> miss, not a
+    # guess. (Also the mixed-direction case: n is scale-up beyond the frontier
+    # but k is BELOW every collected k, so the frontier fallback must not fire.)
     with pytest.raises(InterpolationDataNotAvailableError):
         perf_interp.query(_gemm_cfg(), _gemm_table(), 1000, 16384, 512)
+
+
+def test_scale_up_beyond_frontier_holds_util():
+    # Gemma-4-26B-A4B tp1 LM head (issue #1415): (n=262144, k=2816) is ~2.005
+    # octaves from the nearest collected site (n caps at 65536 in every GPU
+    # database) — past the distance gate — but lies beyond the frontier in the
+    # scale-up direction, so the engine holds the frontier util instead of
+    # missing. util==1 fixture -> the hold is exact.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((65536, 2560), (65536, 3072), (4096, 2816)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    lat = _lat(perf_interp.query(_gemm_cfg(), data, 32, 262144, 2816))
+    assert lat == pytest.approx(_gemm_lat(32, 262144, 2816), rel=1e-6)
+
+
+def test_interior_hole_beyond_gate_still_misses():
+    # (8192, 8192) is dominated by the collected (65536, 65536) corner but >2
+    # octaves from every site — a sparse interior hole, not a frontier query.
+    # The gate must still refuse to guess.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((256, 256), (65536, 65536)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 8192, 8192)
+
+
+def test_incomparable_notch_inside_bounding_box_still_misses():
+    # (4096, 4096) sits in the notch between (256, 65536) and (65536, 256): no
+    # site dominates it, yet it exceeds the collected maximum on NO axis — an
+    # interior hole in the Pareto staircase, not a scale-up frontier query.
+    # The waiver must not fire; the distance gate stands.
+    data = {}
+    for m in (16, 32, 64):
+        for n, k in ((256, 65536), (65536, 256)):
+            data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 4096, 4096)
+
+
+def test_sparse_stub_multi_axis_overflow_still_misses():
+    # Real-table regression (PR #1419 review): rtx_pro_6000_server's fp8_block
+    # gemm table only collects n,k in 32..128; Qwen3-32B's logits GEMM
+    # (m=1, n=151936, k=5120) sits ~12 octaves away with BOTH site axes past
+    # the collected maximum. Holding a launch-bound stub's util across that
+    # gap fabricated 24,506 ms against a 0.543 ms truth — simultaneous
+    # multi-axis overflow must stay a structured miss.
+    data = {}
+    for m in (1, 2, 4):
+        for n in (32, 64, 128):
+            for k in (32, 64, 128):
+                data.setdefault(m, {}).setdefault(n, {})[k] = {"latency": _gemm_lat(m, n, k), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 1, 151936, 5120)
+
+
+def test_waiver_admissibility_computed_over_coverage_candidates():
+    # PR #1419 review: with site (1, 1) covering only m<=2 and site (64, 64)
+    # covering m=16..64, the query (m=32, n=1024, k=1) used to pass a GLOBAL
+    # frontier check (n above the global max, k at the global min) while the
+    # only coverage-eligible anchor (64, 64) required a k=64 -> k=1 scale-DOWN
+    # transfer. Admissibility must be computed over the coverage-eligible
+    # candidates, where k=1 sits below the minimum -> miss.
+    data = {}
+    for m in (1, 2):
+        data.setdefault(m, {}).setdefault(1, {})[1] = {"latency": _gemm_lat(m, 1, 1), "energy": 0.0}
+    for m in (16, 32, 64):
+        data.setdefault(m, {}).setdefault(64, {})[64] = {"latency": _gemm_lat(m, 64, 64), "energy": 0.0}
+    with pytest.raises(InterpolationDataNotAvailableError):
+        perf_interp.query(_gemm_cfg(), data, 32, 1024, 1)
 
 
 def test_coverage_filter_prefers_sites_that_span_the_query_m():
