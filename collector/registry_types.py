@@ -69,6 +69,11 @@ class PerfFile(str, Enum):
     GLM5_TOPK_MODULE = "glm5_topk_module_perf.txt"
     GLM5_DSA_ATTN_MODULE = "glm5_dsa_attn_module_perf.txt"
     DSV4_MEGAMOE_MODULE = "dsv4_megamoe_module_perf.txt"
+    # Linear-attention (KDA/GDN) whole-layer module rows — experimental
+    # producer, no SDK consumer yet (design:
+    # docs/perf_database/linear-attention-module-design.md). Standalone
+    # collector like DSV4_MEGAMOE_MODULE; not part of default model plans.
+    LINEAR_ATTN_MODULE = "linear_attn_module_perf.txt"
     NCCL = "nccl_perf.txt"
     CUSTOM_ALLREDUCE = "custom_allreduce_perf.txt"
     TRTLLM_ALLTOALL = "trtllm_alltoall_perf.txt"
