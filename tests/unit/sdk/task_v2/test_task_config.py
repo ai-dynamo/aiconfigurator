@@ -1453,6 +1453,7 @@ def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
     import pandas as pd
 
     s.get_summary_df.return_value = pd.DataFrame([result_dict or {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}])
+    s.get_power_data_coverage.return_value = 1.0
     return s
 
 

@@ -2427,8 +2427,18 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
 
 
+_ESTIMATE_QUANT_ENUMS = {
+    "gemm_quant_mode": common.GEMMQuantMode,
+    "moe_quant_mode": common.MoEQuantMode,
+    "kvcache_quant_mode": common.KVCacheQuantMode,
+    "fmha_quant_mode": common.FMHAQuantMode,
+    "comm_quant_mode": common.CommQuantMode,
+}
+
+
 def _run_estimate_epd(args, estimate_mode: str) -> None:
     """EPD single-point estimate via Task.run_single_* (dedicated encode pool)."""
+    from aiconfigurator.cli.api import POWER_DATA_COVERAGE_THRESHOLD
     from aiconfigurator.sdk.task_v2 import Task
 
     if estimate_mode not in ("agg", "disagg"):
@@ -2437,18 +2447,22 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         enable_epd=True,
         backend_version=args.backend_version,
         database_mode=args.database_mode,
+        transfer_policy=args.transfer_policy,
         isl=args.isl,
         osl=args.osl,
+        prefix=args.prefix,
         image_height=args.image_height,
         image_width=args.image_width,
         num_images_per_request=args.num_images,
-        gemm_quant_mode=args.gemm_quant_mode,
-        moe_quant_mode=args.moe_quant_mode,
-        kvcache_quant_mode=args.kvcache_quant_mode,
-        fmha_quant_mode=args.fmha_quant_mode,
-        comm_quant_mode=args.comm_quant_mode,
+        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        max_seq_len=args.max_seq_len,
+        engine_step_backend=args.engine_step_backend,
+        forward_model=args.forward_model,
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
+    )
+    workload.update(
+        {name: enum[getattr(args, name)] for name, enum in _ESTIMATE_QUANT_ENUMS.items() if getattr(args, name)}
     )
     encoder_kwargs = dict(
         encoder_tp=args.encoder_tp,
@@ -2474,6 +2488,14 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             **encoder_kwargs,
         )
     else:
+        # Required disagg params and shared-arg fallbacks mirror cli_estimate.
+        for name in ("prefill_batch_size", "prefill_num_workers", "decode_batch_size", "decode_num_workers"):
+            if getattr(args, name) is None:
+                raise SystemExit(f"{name} is required for disagg mode.")
+
+        def _role(value, shared):
+            return value if value is not None else shared
+
         task = Task.from_cli(
             serving_mode="disagg",
             prefill_model_path=args.model_path,
@@ -2485,18 +2507,18 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             **workload,
         )
         row = task.run_single_disagg(
-            prefill_tp=args.prefill_tp_size,
-            prefill_pp=args.prefill_pp_size or 1,
-            prefill_dp=args.prefill_attention_dp_size or 1,
-            prefill_moe_tp=args.prefill_moe_tp_size or 1,
-            prefill_moe_ep=args.prefill_moe_ep_size or 1,
+            prefill_tp=_role(args.prefill_tp_size, args.tp_size),
+            prefill_pp=_role(args.prefill_pp_size, args.pp_size),
+            prefill_dp=_role(args.prefill_attention_dp_size, args.attention_dp_size),
+            prefill_moe_tp=_role(args.prefill_moe_tp_size, args.moe_tp_size),
+            prefill_moe_ep=_role(args.prefill_moe_ep_size, args.moe_ep_size),
             prefill_batch_size=args.prefill_batch_size,
             prefill_num_workers=args.prefill_num_workers,
-            decode_tp=args.decode_tp_size,
-            decode_pp=args.decode_pp_size or 1,
-            decode_dp=args.decode_attention_dp_size or 1,
-            decode_moe_tp=args.decode_moe_tp_size or 1,
-            decode_moe_ep=args.decode_moe_ep_size or 1,
+            decode_tp=_role(args.decode_tp_size, args.tp_size),
+            decode_pp=_role(args.decode_pp_size, args.pp_size),
+            decode_dp=_role(args.decode_attention_dp_size, args.attention_dp_size),
+            decode_moe_tp=_role(args.decode_moe_tp_size, args.moe_tp_size),
+            decode_moe_ep=_role(args.decode_moe_ep_size, args.moe_ep_size),
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
             **encoder_kwargs,
@@ -2520,9 +2542,13 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         "power_w",
     )
     for key in keys:
-        if key in row:
-            value = row[key]
-            logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
+        if key not in row:
+            continue
+        value = row[key]
+        if key == "power_w" and row.get("power_coverage", 1.0) < POWER_DATA_COVERAGE_THRESHOLD:
+            logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row["power_coverage"] * 100)
+            continue
+        logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
 
 
 def _run_estimate_mode(args):
@@ -2981,6 +3007,11 @@ def main(args):
             or getattr(args, "target_concurrency", None) is not None
         )
         if getattr(args, "total_gpus", None) is None and has_load_target:
+            if args.enable_epd or args.encoder_tp or args.encoder_system or args.encoder_latency_correction != 1.0:
+                raise SystemExit(
+                    "--enable-epd/encoder_* flags are not supported by the auto-recommend routing "
+                    "(load target without --total-gpus); pass --total-gpus to run the EPD sweep."
+                )
             _run_recommend(args)
             return
         if has_load_target:

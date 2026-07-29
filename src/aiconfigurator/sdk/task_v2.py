@@ -2884,6 +2884,7 @@ class Task:
         result = summary.get_result_dict()
         if result is None:
             raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
+        result["power_coverage"] = summary.get_power_data_coverage()
         if not self.enable_epd:
             return result
         result["(a)workers"] = 1
@@ -3023,6 +3024,7 @@ class Task:
         p_dict = p_summary.get_summary_df().iloc[0].to_dict()
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
         row = _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+        row["power_coverage"] = min(p_summary.get_power_data_coverage(), d_summary.get_power_data_coverage())
         if not self.enable_epd:
             return row
         return self._overlay_single_point_encoder(
