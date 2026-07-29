@@ -276,6 +276,20 @@ sides, same-phase initial conditions. Four gated families (1P1D, fan-in
 p50/p99 essentially exact (mostly 0.0%; itl_mean <= 2.6%), including the
 fan-in transfer spike in `itl_p99` reproduced to 0.0%.
 
+Open-loop disagg families added 2026-07-30 (DE fixed-shape 1P1D, DF
+variable-shape fan-in 2P1D): both sides consume the same verbatim
+(arrival, isl, osl) tuples — DES trace mode vs the evaluator's
+`arrival_trace` — so the gate also pins the exact-replay path with a
+PER-REQUEST TTFT join (both families: median and p90 |ΔTTFT| = 0.0%).
+Adding DF immediately caught a real defect the closed-loop families'
+phase-locked cycles had hidden: tandem passes are computed with future
+end timestamps in worker-index order, and submitting KV flows directly
+at computation time advanced the fluid fabric clock out of time order,
+clamping earlier flows from other workers (small transfers inflated to
+tens of ms; DF `itl_p99` +15.7%). Handoffs now queue in a time-ordered
+outbox and join the fabric through the event loop (`disagg._run_tandem`),
+restoring monotone submits.
+
 The oracle and its gate live in `tools/queueing_oracle/` (stdlib-only DES
 of vLLM v1 iteration-level scheduling + the 9-family gate), and the gate
 runs in CI as a marked test (`tests/unit/sdk/queueing/test_oracle_gate.py`,

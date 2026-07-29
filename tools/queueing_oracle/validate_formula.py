@@ -270,6 +270,89 @@ EVALUATOR_TOLERANCES["itl_mean"] = 15.0
 EVALUATOR_TOLERANCES["itl_p99"] = 15.0
 
 
+def check_open_loop_disagg_family(n_prefill, n_decode, rate_rps, n, shapes, kv_bytes, bw, tolerances):
+    """Open-loop disagg: same verbatim tuples through the DES (trace mode)
+    and the evaluator (arrival_trace); gate on distribution stats over ALL
+    requests plus a per-request TTFT join (the exact-replay contract)."""
+    import random as _r
+
+    from vllm_sim import DisaggSimulator, EngineArgs, TransferSpec
+
+    from aiconfigurator.sdk.queueing import DisaggSpec, EngineSpec, WorkloadSpec, evaluate_disagg
+
+    rng = _r.Random(12345)
+    tuples = []
+    t = 0.0
+    for i in range(n):
+        t += rng.expovariate(rate_rps) * 1000.0
+        isl, osl = shapes[i % len(shapes)]
+        tuples.append((t, isl, osl))
+
+    reqs = wl_gen.from_tuples(tuples, block_size=64)
+    DisaggSimulator(
+        n_prefill,
+        n_decode,
+        EngineArgs(worker_type="prefill"),
+        EngineArgs(worker_type="decode"),
+        DES_PERF,
+        concurrency=None,
+        transfer=TransferSpec(kv_bytes, bw, bw, bw_efficiency=0.8),
+    ).run(reqs)
+    des_ttft = [r.token_times[0] - r.dispatch_ms for r in reqs]
+    des_itl = sorted(g for r in reqs for g in (b - a for a, b in zip(r.token_times, r.token_times[1:], strict=False)))
+    des = {
+        "ttft_all_mean": mean(des_ttft),
+        "ttft_all_p50": pct(sorted(des_ttft), 0.5),
+        "ttft_all_p99": pct(sorted(des_ttft), 0.99),
+        "itl_p50": pct(des_itl, 0.5),
+        "itl_p99": pct(des_itl, 0.99),
+        "itl_mean": mean(des_itl),
+    }
+
+    class _Timing:
+        def prefill_ms(self, b, mean_isl, mean_prefix):
+            return max(0.0, f_prefill(b, max(0, mean_isl - mean_prefix), mean_prefix))
+
+        def decode_ms(self, b, ctx):
+            return max(1.0, f_decode(b, ctx))
+
+    mean_isl = sum(s[0] for s in shapes) // len(shapes)
+    mean_osl = sum(s[1] for s in shapes) // len(shapes)
+    wl = WorkloadSpec(isl=mean_isl, osl=mean_osl, request_rate=rate_rps)
+    spec = DisaggSpec(n_prefill, n_decode, kv_bytes_per_token=kv_bytes, egress_bytes_per_s=bw, ingress_bytes_per_s=bw)
+    rep = evaluate_disagg(
+        wl,
+        EngineSpec(),
+        EngineSpec(),
+        _Timing(),
+        _Timing(),
+        spec,
+        arrival_trace=[(t, isl, 0, osl) for (t, isl, osl) in tuples],
+        warmup_requests=0,
+    )
+    ev_ttft = [p["ttft_ms"] for p in rep.per_request]
+    ev = {
+        "ttft_all_mean": rep.ttft_steady.mean,
+        "ttft_all_p50": rep.ttft_steady.p50,
+        "ttft_all_p99": rep.ttft_steady.p99,
+        "itl_p50": rep.itl.p50,
+        "itl_p99": rep.itl.p99,
+        "itl_mean": rep.itl.mean,
+    }
+    tol = dict.fromkeys(des, 10.0)
+    tol.update({k: v for k, v in tolerances.items() if k in des})
+    failures = compare("  (stats)", des, ev, tolerances=tol)
+
+    # per-request exact-replay join: identical arrivals and shapes, so the
+    # TTFT of each individual request must track its DES counterpart
+    rel = sorted(abs(e - d) / max(d, 1e-9) for d, e in zip(des_ttft, ev_ttft, strict=True))
+    med, p90 = pct(rel, 0.5) * 100.0, pct(rel, 0.9) * 100.0
+    print(f"  per-request |dTTFT| median {med:.1f}% p90 {p90:.1f}%")
+    if med > 5.0 or p90 > 20.0:
+        failures = list(failures) + [f"per-request join med {med:.1f}% p90 {p90:.1f}%"]
+    return failures
+
+
 def main():
     cases = [
         ("A isl4096 osl256 C32 B8192", dict(isl=4096, osl=256, c=32, budget=8192), ()),
@@ -346,6 +429,34 @@ def main():
         failures = compare(f"{name} [tandem evaluator, GATED]", des, ev, tolerances=disagg_tol)
         if failures:
             all_failures.append((f"{name} [tandem]", failures))
+
+    # open-loop disagg families: BOTH sides consume the same verbatim
+    # (arrival_ms, isl, osl) tuples (DES trace mode vs evaluator
+    # arrival_trace), so residuals isolate scheduling semantics — and the
+    # per-request join gates the exact-replay path, not just the marginals.
+    for name, kw in [
+        (
+            "DE open-loop 1P1D fixed isl2048",
+            dict(n_prefill=1, n_decode=1, rate_rps=8.0, n=160, shapes=[(2048, 64)], kv_bytes=100_000, bw=50e9),
+        ),
+        (
+            "DF open-loop fan-in 2P1D variable",
+            dict(
+                n_prefill=2,
+                n_decode=1,
+                rate_rps=12.0,
+                n=200,
+                shapes=[(512, 32), (1024, 64), (2048, 96), (4096, 128)],
+                kv_bytes=100_000,
+                bw=50e9,
+            ),
+        ),
+    ]:
+        failures = check_open_loop_disagg_family(**kw, tolerances=disagg_tol)
+        if failures:
+            all_failures.append((f"{name} [tandem open-loop]", failures))
+        else:
+            print(f"{name} [tandem open-loop, GATED]: within tolerance")
 
     print(
         "\n"

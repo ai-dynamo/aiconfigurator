@@ -57,6 +57,7 @@ families of the validation gate compare the two with identical timing.
 from __future__ import annotations
 
 import math
+from bisect import insort
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -348,6 +349,18 @@ def _run_tandem(
     xfer_durations: list[float] = []
     prefill_waits: list[float] = []
     steady_completions = 0
+    # KV-handoff outbox: passes are computed with FUTURE end timestamps in
+    # worker-index order, so direct fabric.submit calls would reach the
+    # fluid clock out of time order (worker 0's late pass end advances the
+    # fabric past worker 1's earlier one, clamping its flow start — small
+    # transfers then appear to take tens of ms). Flows queue here and join
+    # the fabric through the event loop, in stamp order.
+    xfer_outbox: list = []
+    outbox_seq = [0]
+
+    def submit_xfer(end_ms: float, src: int, dst: int, num_bytes: float, req: _Req) -> None:
+        insort(xfer_outbox, (end_ms, outbox_seq[0], src, dst, num_bytes, req), key=lambda x: (x[0], x[1]))
+        outbox_seq[0] += 1
 
     def run_prefill_pass(widx: int, start_ms: float) -> float:
         """One static prefill pass: queued prompts (up to kappa) share the
@@ -402,7 +415,7 @@ def _run_tandem(
             else:
                 dst = decode.next_worker()
                 r.xfer_submit_ms = end
-                fabric.submit(widx, dst, r.isl * spec.kv_bytes_per_token, end, (dst, r))
+                submit_xfer(end, widx, dst, r.isl * spec.kv_bytes_per_token, r)
         return end
 
     def run_decode_pass(widx: int, start_ms: float) -> float:
@@ -451,7 +464,8 @@ def _run_tandem(
         t_dc = min((decode.next_start(i, _decoding) for i in range(len(decode.queues))), default=math.inf)
         t_tr = fabric.next_completion_ms() if fabric and fabric.has_flows() else None
         t_arr = pending[0][0] if pending else math.inf
-        now = min(t_pf, t_dc, t_arr, t_tr if t_tr is not None else math.inf)
+        t_ob = xfer_outbox[0][0] if xfer_outbox else math.inf
+        now = min(t_pf, t_dc, t_arr, t_ob, t_tr if t_tr is not None else math.inf)
         if now == math.inf:
             raise RuntimeError(f"disagg tandem recursion stalled ({stall_msg}) — invalid configuration")
 
@@ -466,6 +480,9 @@ def _run_tandem(
             )
 
         if fabric is not None:
+            while xfer_outbox and xfer_outbox[0][0] <= now:
+                t_s, _, src, dst, num_bytes, r = xfer_outbox.pop(0)
+                fabric.submit(src, dst, num_bytes, t_s, (dst, r))
             for t_done, (dst, r) in fabric.pop_completed(now):
                 r.xfer_ms = t_done - r.xfer_submit_ms
                 xfer_durations.append(r.xfer_ms)

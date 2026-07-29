@@ -45,6 +45,19 @@ def synthetic(
     return reqs
 
 
+def from_tuples(tuples, block_size: int) -> list[Request]:
+    """Heterogeneous open-loop requests from (arrival_ms, isl, osl) tuples —
+    unique block hashes (no prefix sharing), verbatim arrival times. The
+    open-loop disagg gate families feed the SAME tuples to this and to the
+    evaluator's ``arrival_trace``, so residuals isolate scheduling."""
+    reqs = []
+    for rid, (t, isl, osl) in enumerate(tuples):
+        n_full = int(isl) // block_size
+        hashes = tuple(("r", rid, i) for i in range(n_full))
+        reqs.append(Request(rid=rid, isl=int(isl), osl=max(1, int(osl)), prompt_hashes=hashes, arrival_ms=float(t)))
+    return reqs
+
+
 def load_mooncake_trace(
     path: str,
     engine_block_size: int,

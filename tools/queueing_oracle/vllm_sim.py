@@ -782,7 +782,11 @@ class DisaggSimulator:
     ``transfer=None`` disables transfer modeling (zero-delay handoff).
 
     Dispatch is round-robin per pool (a degenerate kv_router: no affinity
-    or queue-depth admission). Closed-loop concurrency only."""
+    or queue-depth admission). Modes (mirroring ``Simulator``):
+      - concurrency=N: closed loop with an in-flight cap (next request
+        dispatched when one completes)
+      - concurrency=None: open loop — requests dispatched at their own
+        ``arrival_ms`` (trace mode)."""
 
     def __init__(
         self,
@@ -791,7 +795,7 @@ class DisaggSimulator:
         prefill_args: EngineArgs,
         decode_args: EngineArgs,
         perf_model=None,
-        concurrency: int = 32,
+        concurrency: Optional[int] = 32,
         transfer: Optional[TransferSpec] = None,
     ):
         self.pools = {
@@ -843,10 +847,15 @@ class DisaggSimulator:
 
     def run(self, requests: list[Request]) -> list[Request]:
         backlog = sorted(requests, key=lambda r: r.arrival_ms)
-        for _ in range(min(self.concurrency, len(backlog))):
-            req = backlog.pop(0)
-            req.dispatch_ms = 0.0
-            self._dispatch("prefill", req)
+        if self.concurrency is None:
+            for r in backlog:
+                self._push(r.arrival_ms, "arrival", r)
+            backlog = []
+        else:
+            for _ in range(min(self.concurrency, len(backlog))):
+                req = backlog.pop(0)
+                req.dispatch_ms = 0.0
+                self._dispatch("prefill", req)
 
         completed = 0
         total = len(requests)
@@ -859,6 +868,9 @@ class DisaggSimulator:
                 _, _, kind, payload = heapq.heappop(self._events)
                 if kind == "xfer_tick":
                     pass  # wake-up only; completions are drained below
+                elif kind == "arrival":
+                    payload.dispatch_ms = self.now
+                    self._dispatch("prefill", payload)
                 elif kind == "pass_done":
                     stage, wid, emissions = payload
                     self.busy[stage][wid] = False
