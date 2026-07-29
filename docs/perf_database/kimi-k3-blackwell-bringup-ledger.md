@@ -126,6 +126,27 @@ datasets and vllm's physical verify kernels are untouched. End-to-end on
 packaged b200_sxm tables: sglang verify recurrence 0.0640 ms silicon + conv
 0.0; vllm 0.0504 + 0.0065 ms silicon.
 
+### E2E validation on 8x B300 (dummy weights, TP8, 2026-07-29)
+
+- bs1 decode step 11.56 ms; bs8 step 11.67 ms (latency-bound — 8 tokens/step
+  nearly free); 5 accepted tokens/step => ~428 tok/s/user, bracketing the 423
+  launch number.
+- **Dummy-weight caveat**: random gate weights collapse routing to ~16
+  distinct experts. With forced-uniform routing (AIC_RANDOM_ROUTING patch,
+  ~119 distinct experts at 8 tokens x topk16) the bs8 step is **16.8 ms** —
+  implied MoE ~8.0 ms/step, which matches the collected w4a8 lane (89.8
+  us/layer x 92 = 8.26 ms) within 3%. The MoE model is validated; the
+  earlier "3x MoE gap" was entirely the collapse artifact. Real power-law
+  routing lands between the two bounds (297-428 tok/s/user at 5 tokens/step),
+  consistent with the 423 blog number.
+- Per-op nsys alignment (--cuda-graph-trace=node): projection GEMMs model
+  +26% pessimistic; AR model -34% optimistic (serving uses the branch's
+  k3_ar_fusion symm kernels with norm/residual folded in — an uncollected
+  branch-only lane); fused KDA decode now collected (above); the remaining
+  known double-count is kda_onorm (~0.2 ms/step empirical) for the 12-head
+  shard where the fused kernel folds it — pending the op-graph fusion-boundary
+  discussion.
+
 ## Open pre-work for the remaining lanes
 
 (The sglang K3 MoE Blackwell lane — previously the largest accuracy lever —
