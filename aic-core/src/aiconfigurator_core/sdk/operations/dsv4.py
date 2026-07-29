@@ -85,14 +85,13 @@ def _deep_merge_dsv4_dicts(dest, src):
 
 
 def _dsv4_resolve_head_key(quant_data, num_heads):
-    """SCHEME A head-key resolution.
+    """Nearest-match key resolution over one integer head axis.
 
-    The head axis is the rank-local head count (``native // tp``).  Prefer an
-    exact match on the value the model passes.  The b300 module data is a
-    universal sweep collected with a single local-head value; if the model's
-    local head count is not an exact bench point, fall back to the single
-    available head key so the universal data still resolves.  Returns the head
-    key to index ``quant_data`` with, or ``None`` if no head data is loaded.
+    Prefer an exact match on the requested value; with a single collected key
+    fall back to it (universal-sweep data still resolves); with multiple keys
+    but no exact match pick the nearest <= request, else the smallest
+    available.  Returns the key to index ``quant_data`` with, or ``None`` if
+    no head data is loaded.
     """
     if not isinstance(quant_data, dict) or not quant_data:
         return None
@@ -107,6 +106,26 @@ def _dsv4_resolve_head_key(quant_data, num_heads):
         le = [k for k in head_keys if k <= num_heads]
         return max(le) if le else min(head_keys)
     return None
+
+
+def _dsv4_resolve_head_axes(quant_data, native_heads, num_heads):
+    """Two-level head resolution for the DSV4 module tables.
+
+    The loaders key rows as ``[native][local]`` (per-row identity resolved by
+    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
+    semantics).  Resolve the outer level with the model's native head count
+    (identity: separates Pro from Flash rows), then the rank-local head count
+    within it (the physical per-rank shape).  Nearest-match fallback at each
+    level keeps universal-sweep data resolving for unseen shards.
+    Returns ``(native_key, local_key)`` or ``None``.
+    """
+    native_key = _dsv4_resolve_head_key(quant_data, native_heads)
+    if native_key is None:
+        return None
+    local_key = _dsv4_resolve_head_key(quant_data[native_key], num_heads)
+    if local_key is None:
+        return None
+    return native_key, local_key
 
 
 def _deepseek_v4_attention_sol(
@@ -837,11 +856,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     kvcache_quant_mode,
                     gemm_quant_mode,
                 )
-                head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
-                if head_axis is None:
+                head_axes = _dsv4_resolve_head_axes(quant_data, native_heads, num_heads)
+                if head_axes is None:
                     raise PerfDataNotAvailableError("No context DeepSeek-V4 attention head slice is available.")
+                native_axis, head_axis = head_axes
                 return util_empirical.require_data_slice(
                     quant_data,
+                    native_axis,
                     head_axis,
                     compress_ratio,
                 )  # {prefix: {s: {b: leaf}}}
@@ -882,6 +903,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     fmha_quant_mode.name,
                     kvcache_quant_mode.name,
                     gemm_quant_mode.name,
+                    native_heads,
                     num_heads,
                     compress_ratio,
                     depth,
@@ -909,25 +931,26 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 context attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
+            # Head identity: (native, rank-local) — see _dsv4_resolve_head_axes.
             quant_data = util_empirical.require_data_slice(
                 data,
                 fmha_quant_mode,
                 kvcache_quant_mode,
                 gemm_quant_mode,
             )
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
-            if head_axis is None:
+            head_axes = _dsv4_resolve_head_axes(quant_data, native_heads, num_heads)
+            if head_axes is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
-                    f"loaded head keys={list(quant_data.keys())}."
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
+                    f"num_heads={num_heads}, loaded native keys={list(quant_data.keys())}."
                 )
-            cr_dict = quant_data[head_axis].get(compress_ratio)
+            native_axis, head_axis = head_axes
+            cr_dict = quant_data[native_axis][head_axis].get(compress_ratio)
             if cr_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 context attention silicon data for num_heads={num_heads}, "
-                    f"compress_ratio={compress_ratio}, loaded cr keys="
-                    f"{list(quant_data[head_axis].keys())}."
+                    f"No DeepSeek-V4 context attention silicon data for native_heads={native_heads}, "
+                    f"num_heads={num_heads}, compress_ratio={compress_ratio}, loaded cr keys="
+                    f"{list(quant_data[native_axis][head_axis].keys())}."
                 )
 
             # SCHEME A: cr_dict is prefix-resolved -> {prefix: {s: {b: leaf}}}.
@@ -1291,11 +1314,13 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                 if not data:
                     raise PerfDataNotAvailableError("No generation DeepSeek-V4 attention data is loaded.")
                 quant_data = util_empirical.require_data_slice(data, kvcache_quant_mode, gemm_quant_mode)
-                head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
-                if head_axis is None:
+                head_axes = _dsv4_resolve_head_axes(quant_data, native_heads, num_heads)
+                if head_axes is None:
                     raise PerfDataNotAvailableError("No generation DeepSeek-V4 attention head slice is available.")
+                native_axis, head_axis = head_axes
                 return util_empirical.require_data_slice(
                     quant_data,
+                    native_axis,
                     head_axis,
                     compress_ratio,
                 )  # {b: {s_total: leaf}}
@@ -1308,6 +1333,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     database.version,
                     kvcache_quant_mode.name,
                     gemm_quant_mode.name,
+                    native_heads,
                     num_heads,
                     compress_ratio,
                 ),
@@ -1334,21 +1360,23 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     f"DeepSeek-V4 generation attention module data not loaded for system='{database.system}', "
                     f"backend='{database.backend}', version='{database.version}'."
                 )
-            # SCHEME A: head axis is the rank-local head count the model passes.
+            # Head identity: (native, rank-local) — see _dsv4_resolve_head_axes.
             quant_data = util_empirical.require_data_slice(data, kvcache_quant_mode, gemm_quant_mode)
-            head_axis = _dsv4_resolve_head_key(quant_data, num_heads)
-            if head_axis is None:
+            head_axes = _dsv4_resolve_head_axes(quant_data, native_heads, num_heads)
+            if head_axes is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
-                    f"loaded head keys={list(quant_data.keys())}."
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"num_heads={num_heads}, loaded native keys={list(quant_data.keys())}."
                 )
-            deepseek_v4_dict = quant_data[head_axis].get(compress_ratio)
+            native_axis, head_axis = head_axes
+            deepseek_v4_dict = quant_data[native_axis][head_axis].get(compress_ratio)
             if deepseek_v4_dict is None:
                 raise PerfDataNotAvailableError(
-                    f"No DeepSeek-V4 generation attention silicon data for num_heads={num_heads}, "
-                    f"compress_ratio={compress_ratio}, loaded cr keys={list(quant_data[head_axis].keys())}."
+                    f"No DeepSeek-V4 generation attention silicon data for native_heads={native_heads}, "
+                    f"num_heads={num_heads}, compress_ratio={compress_ratio}, "
+                    f"loaded cr keys={list(quant_data[native_axis][head_axis].keys())}."
                 )
-            # SCHEME A generation dict is {b: {s_total: leaf}} after head/cr
+            # Generation dict is {b: {s_total: leaf}} after native/local/cr
             # slicing -> 2-axis RAW grid (decode ~linear in s_total); beyond the
             # collected range is util-hold via the decode SOL.
             config = perf_interp.OpInterpConfig(
@@ -1696,11 +1724,16 @@ def load_mhc_module_data(mhc_file: str):
         power = float(row.get("power", 0.0)) if has_power else 0.0
         energy = power * latency
 
-        mhc_data[op][hc_mult][hidden_size][num_tokens] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            mhc_data[op][hc_mult][hidden_size][num_tokens]
+            logger.debug(f"value conflict in mhc module data: {op} {hc_mult} {hidden_size} {num_tokens}")
+        except KeyError:
+            mhc_data[op][hc_mult][hidden_size][num_tokens] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mhc_data
 
@@ -1868,16 +1901,81 @@ def _get_dsv4_topk_calib(database):
 _MISSING = object()
 
 
+def _dsv4_row_head_axes(rows):
+    """Resolve each row's (native, local) head identity across BOTH historical
+    ``num_heads`` column semantics.
+
+    Shipped DSV4 module files disagree on what ``num_heads`` means:
+
+    - sglang 0.5.10 files (collected before #1131 changed the collector) write
+      the model's NATIVE head count — constant per artifact across its tp
+      sweep (V4-Flash 64, V4-Pro 128).
+    - vllm 0.24.0 files (post-#1131 collectors) write the rank-LOCAL count
+      ``native // tp`` — varying with tp (64/32/16/8 across tp 1/2/4/8), the
+      semantics the SCHEME A docstrings described.
+
+    Both must key the same way, so sniff the semantics per (model, version)
+    from the data itself: within one group, ``num_heads`` constant while
+    ``tp_size`` varies means NATIVE; ``num_heads * tp_size`` constant means
+    LOCAL.  Grouping includes the ``version`` column because the shared layer
+    concatenates sibling-version files into one row stream — a re-collected
+    (local-writing) primary pooled with a stale (native-writing) sibling of
+    the same model must not poison each other's verdicts.  A group seen at a
+    single tp is ambiguous unless tp == 1 (native == local); assume LOCAL
+    there (what every current collector writes) with a debug note.
+
+    Returns ``{(model, version, num_heads, tp_size): (native, local)}``.
+    """
+    observed: dict[tuple[str, str], set[tuple[int, int]]] = {}
+    for row in rows:
+        try:
+            heads = int(row["num_heads"])
+            tp = max(1, int(row.get("tp_size", 1) or 1))
+        except (TypeError, ValueError, KeyError):
+            continue
+        group = (str(row.get("model", "")), str(row.get("version", "")))
+        observed.setdefault(group, set()).add((heads, tp))
+
+    axes: dict[tuple[str, str, int, int], tuple[int, int]] = {}
+    for (model, version), pairs in observed.items():
+        tps = {tp for _, tp in pairs}
+        heads_constant = len({h for h, _ in pairs}) == 1
+        product_constant = len({h * tp for h, tp in pairs}) == 1
+        if len(tps) > 1 and heads_constant and not product_constant:
+            semantics = "native"
+        elif len(tps) > 1 and product_constant and not heads_constant:
+            semantics = "local"
+        elif tps == {1}:
+            semantics = "native"  # tp=1: native == local, either reading works
+        else:
+            semantics = "local"
+            logger.debug(
+                f"DSV4 module rows for model={model!r} version={version!r} have ambiguous "
+                f"num_heads semantics (pairs={sorted(pairs)}); assuming rank-LOCAL "
+                f"(current collector convention)."
+            )
+        for heads, tp in pairs:
+            if semantics == "native":
+                axes[(model, version, heads, tp)] = (heads, max(1, heads // tp))
+            else:
+                axes[(model, version, heads, tp)] = (heads * tp, heads)
+    return axes
+
+
 def load_context_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 context CSV (single attn_kind / compress_ratio).
 
-    SCHEME A.  Returns a 7-level prefix-resolved nested dict:
-        data[fmha_quant][kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [prefix][s][b] = {"latency": ms, "power": W, "energy": J}
+    Returns an 8-level prefix-resolved nested dict:
+        data[fmha_quant][kv_quant][gemm_quant][num_heads_native][num_heads_local]
+            [compress_ratio][prefix][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    The head axis is the rank-LOCAL head count = ``int(row["num_heads"])``
-    (the collector writes ``local_attention_heads = native // tp``).  There is
-    NO separate ``tp_size`` key and NO reconstructed native-head key.
+    The head identity is (native, rank-local), resolved per row by
+    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
+    semantics (see its docstring).  The native value is the row's model
+    identity (separates Pro rows from Flash rows) and the local count is the
+    physical per-rank shape; both are key dimensions.  Collapsing either axis
+    merged rows whose latencies differ 30-50% (different model shapes / tp
+    shards) into one coordinate, leaving an arbitrary row-order winner.
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
@@ -1887,14 +1985,15 @@ def load_context_dsv4_kind_module_data(file_path: str):
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
+    head_axes = _dsv4_row_head_axes(rows)
 
-    # 7-level nesting: fmha → kv → gemm → num_heads_local → cr → prefix → s → b
+    # 8-level nesting: fmha → kv → gemm → native → local → cr → prefix → s → b
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(7)
+    data = _make_nested(8)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1906,12 +2005,15 @@ def load_context_dsv4_kind_module_data(file_path: str):
             prefix = int(float(row.get("step", 0) or 0))
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
+            heads_col = int(row["num_heads"])
+            tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV.
-        num_heads_local = int(row["num_heads"])
+        num_heads_native, num_heads_local = head_axes[
+            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
+        ]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -1919,11 +2021,19 @@ def load_context_dsv4_kind_module_data(file_path: str):
         # NOTE: the topK DELTA correction (degenerate -> representative) is
         # applied ONCE at query time for compress_ratio==4 (CSA). Do NOT
         # subtract it here, or the CSA module latency would be double-corrected.
-        data[fmha_mode][kv_dtype][gemm_mode][num_heads_local][cr][prefix][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            data[fmha_mode][kv_dtype][gemm_mode][num_heads_native][num_heads_local][cr][prefix][s][b]
+            logger.debug(
+                f"value conflict in context dsv4 module data: {fmha_mode} {kv_dtype} {gemm_mode} "
+                f"{num_heads_native} {num_heads_local} {cr} {prefix} {s} {b}"
+            )
+        except KeyError:
+            data[fmha_mode][kv_dtype][gemm_mode][num_heads_native][num_heads_local][cr][prefix][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": power * latency,
+            }
     return data
 
 
@@ -1931,22 +2041,25 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     """Load ONE DeepSeek-V4 generation CSV.
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
-    is q_len=1 with past_kv = step).  SCHEME A dict shape:
-        data[kv_quant][gemm_quant][num_heads_local][compress_ratio]
-            [b][s_total]
+    is q_len=1 with past_kv = step).  Dict shape (same (native, local) head
+    identity as ``load_context_dsv4_kind_module_data``, resolved per row by
+    ``_dsv4_row_head_axes``):
+        data[kv_quant][gemm_quant][num_heads_native][num_heads_local]
+            [compress_ratio][b][s_total]
     """
     rows = _read_filtered_rows(file_path)
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
+    head_axes = _dsv4_row_head_axes(rows)
 
-    # SCHEME A: 5-level nesting kv → gemm → num_heads_local → cr → b → s_total
+    # 6-level nesting: kv → gemm → native → local → cr → b → s_total
     def _make_nested(depth: int):
         if depth == 0:
             return defaultdict()
         return defaultdict(lambda d=depth: _make_nested(d - 1))
 
-    data = _make_nested(5)
+    data = _make_nested(6)
     has_power = bool(rows) and "power" in rows[0]
 
     for row in rows:
@@ -1957,22 +2070,31 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             s_total = int(row["isl"]) + int(row["step"])
             cr = int(row["compress_ratio"])
             latency = float(row["latency"])
+            heads_col = int(row["num_heads"])
+            tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        # SCHEME A: head key is the rank-local head count straight from the CSV;
-        # no tp_size key, no native reconstruction.  Generation convention puts
-        # ``b`` before ``s_total`` (matches the (head, b, s) lookup order).
-        num_heads_local = int(row["num_heads"])
+        num_heads_native, num_heads_local = head_axes[
+            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
+        ]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 
-        data[kv_dtype][gemm_mode][num_heads_local][cr][b][s_total] = {
-            "latency": latency,
-            "power": power,
-            "energy": power * latency,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            data[kv_dtype][gemm_mode][num_heads_native][num_heads_local][cr][b][s_total]
+            logger.debug(
+                f"value conflict in generation dsv4 module data: {kv_dtype} {gemm_mode} "
+                f"{num_heads_native} {num_heads_local} {cr} {b} {s_total}"
+            )
+        except KeyError:
+            data[kv_dtype][gemm_mode][num_heads_native][num_heads_local][cr][b][s_total] = {
+                "latency": latency,
+                "power": power,
+                "energy": power * latency,
+            }
     return data
 
 
@@ -2171,6 +2293,10 @@ def load_dsv4_sparse_op_data(file_or_sources, key_columns):
         node = root
         for k in keys[:-1]:
             node = node.setdefault(k, {})
+        if keys[-1] in node:
+            # Check for conflict: first source wins (shared-layer contract).
+            logger.debug(f"value conflict in dsv4 sparse-op data: {keys}")
+            continue
         node[keys[-1]] = {"latency": latency}
     return root or None
 

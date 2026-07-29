@@ -1868,3 +1868,27 @@ def test_to_yaml_round_trips_through_from_yaml():
     assert t2.model_path == t1.model_path
     assert t2.gemm_quant_mode == t1.gemm_quant_mode
     assert t2.agg_tp_candidates == t1.agg_tp_candidates
+
+
+def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
+    """V3.1-NVFP4 (BF16 q/kv + NVFP4 o_proj) bypasses the profiled MLA-module
+    row, so fmha availability must be judged on the GRANULAR context-mla table:
+    b200/trtllm has an fp8 fmha slice only in the module table, and keeping the
+    checkpoint-inferred fp8 would make every context query miss (reviewer
+    regression: the b200/trtllm support-matrix entry failed end-to-end)."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="nvidia/DeepSeek-V3.1-NVFP4",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            isl=128,
+            osl=64,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)

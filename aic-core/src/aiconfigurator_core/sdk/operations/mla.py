@@ -1914,11 +1914,19 @@ def load_context_mla_module_data(mla_module_file: str):
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
 
-        mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract,
+            # _read_filtered_rows orders primary before sibling fallbacks).
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b]
+            logger.debug(
+                f"value conflict in context mla module data: {fmha_mode} {kv_dtype} {gemm_mode} {num_heads} {s} {b}"
+            )
+        except KeyError:
+            mla_data[fmha_mode][kv_dtype][gemm_mode][num_heads][s][b] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data
 
@@ -1959,10 +1967,16 @@ def load_generation_mla_module_data(mla_module_file: str):
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
 
-        mla_data[kv_dtype][gemm_mode][num_heads][b][s] = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-        }
+        try:
+            # Check for conflict: first source wins (shared-layer contract,
+            # _read_filtered_rows orders primary before sibling fallbacks).
+            mla_data[kv_dtype][gemm_mode][num_heads][b][s]
+            logger.debug(f"value conflict in generation mla module data: {kv_dtype} {gemm_mode} {num_heads} {b} {s}")
+        except KeyError:
+            mla_data[kv_dtype][gemm_mode][num_heads][b][s] = {
+                "latency": latency,
+                "power": power,
+                "energy": energy,
+            }
 
     return mla_data

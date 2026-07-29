@@ -25,7 +25,7 @@ jobs:
   update-manifest:
     name: Regenerate op_kernel_source_manifest.yaml
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
@@ -46,14 +46,33 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install audit script dependencies
-        run: pip install "tqdm>=4.0.0"
+      - name: Install check script dependencies
+        run: pip install "tqdm>=4.0.0" pandas pyarrow numpy pyyaml
 
       - name: Regenerate manifest
         run: |
-          python3 tools/perf_database/audit_kernel_source.py \
+          python3 tools/perf_database/check_kernel_source.py \
             --data-root aic-core/src/aiconfigurator_core/systems/data \
             --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml
+
+      # Daily archive of the perf-data sanity report (informational;
+      # LFS is already pulled for the manifest step above).
+      - name: Perf data sanity full sweep
+        continue-on-error: true
+        run: |
+          python3 tools/perf_database/check_cross_backend.py \
+            --out-md cross-backend-consistency.md \
+            --out-json cross-backend-consistency.json
+
+      - name: Upload consistency report artifact
+        if: hashFiles('cross-backend-consistency.md') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: cross-backend-consistency
+          path: |
+            cross-backend-consistency.md
+            cross-backend-consistency.json
+          retention-days: 30
 
       - name: Detect drift
         id: drift

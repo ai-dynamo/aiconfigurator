@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Audit cross-framework shareability of perf-database perf tables.
+Report cross-framework shareability of perf-database perf tables.
 
 For every (system, op_file, kernel_source) triple, compute:
   - which (framework, version) pairs contributed rows
@@ -15,7 +15,7 @@ Tier classification:
   - `shared_fallback`  : kernel_source == "default" (framework-implicit,
                          low-fidelity placeholder)
 
-Rows whose kernel_source is blank/`<unknown>` are skipped during audit (and
+Rows whose kernel_source is blank/`<unknown>` are skipped during the scan (and
 logged) — they have no name to key inheritance on, and the current corpus has
 zero such rows.
 
@@ -26,11 +26,11 @@ time, so a composed metric is comparable with a single-column one.
 
 The script emits three artifacts:
   - JSON of per-group raw stats
-  - Markdown audit table
+  - Markdown report table
   - YAML manifest consumed by the SDK loader
 
 Usage:
-    python3 tools/perf_database/audit_kernel_source.py \\
+    python3 tools/perf_database/check_kernel_source.py \\
         --data-root aic-core/src/aiconfigurator_core/systems/data \\
         --out-json $TMPDIR/op-kernel-sources.json \\
         --out-md   docs/perf_database/op-kernel-sources.md \\
@@ -67,7 +67,7 @@ _META_COLUMNS = {"framework", "version", "device", "op_name", "kernel_source"}
 #
 # Most tables carry a single latency-like column. A few carry the metric split
 # across component columns and are only meaningful when summed — the SDK does
-# exactly that when it loads them, so the audit must match or it would compare
+# exactly that when it loads them, so the scan must match or it would compare
 # a fragment of the latency against another table's whole.
 #
 # Each entry is the tuple of columns to sum; the first entry whose columns are
@@ -286,8 +286,8 @@ def _iter_data_files(data_root: Path, op_files: frozenset[str] | None = None) ->
 
 
 @dataclass
-class _FileAuditResult:
-    """Per-file output of `_audit_one_file`. Records are flat so the merge
+class _FileScanResult:
+    """Per-file output of `_scan_one_file`. Records are flat so the merge
     step is just a loop over `record_row` calls — same as the serial path."""
 
     # (system, op_file, kernel_source, framework, version, shape_key, latency)
@@ -312,10 +312,10 @@ def _read_perf_rows(path: Path) -> tuple[list[str], list[dict]]:
         return reader.fieldnames or [], list(reader)
 
 
-def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _FileAuditResult:
+def _scan_one_file(system: str, backend: str, version: str, path: Path) -> _FileScanResult:
     """Parse one perf data file and emit the records it contributes. Pure-ish: only the
     `logger.warning` for missing latency columns escapes."""
-    out = _FileAuditResult()
+    out = _FileScanResult()
     header, rows = _read_perf_rows(path)
     latency_cols = _resolve_latency_columns(header)
     if latency_cols is None:
@@ -328,7 +328,7 @@ def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _Fil
         row_version = row.get("version") or version
         raw_ks = row.get("kernel_source")
         kernel_source = (raw_ks or "").strip()
-        if not kernel_source:
+        if not kernel_source or kernel_source == "<unknown>":
             out.rows_unnamed_kernel_source += 1
             if len(out.unnamed_examples) < 5:
                 out.unnamed_examples.append((str(path), repr(raw_ks)))
@@ -343,13 +343,13 @@ def _audit_one_file(system: str, backend: str, version: str, path: Path) -> _Fil
     return out
 
 
-_AUDIT_THREADS = 4
+_SCAN_THREADS = 4
 
 
-def audit(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple[str, str, str], GroupStats]:
+def scan(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple[str, str, str], GroupStats]:
     """Walk the data tree and accumulate per-group stats.
 
-    Files are parsed in a `_AUDIT_THREADS`-wide thread pool; the merge into
+    Files are parsed in a `_SCAN_THREADS`-wide thread pool; the merge into
     `groups` runs serially on the main thread, which is cheap enough not to
     need locks. The merge walks `futures` in submission order rather than
     completion order: `GroupStats.record_row` is last-write-wins per
@@ -371,11 +371,11 @@ def audit(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple
     file_list = list(_iter_data_files(data_root, op_files))
     total_files = len(file_list)
 
-    with ThreadPoolExecutor(max_workers=_AUDIT_THREADS) as pool:
-        futures = [pool.submit(_audit_one_file, *args) for args in file_list]
+    with ThreadPoolExecutor(max_workers=_SCAN_THREADS) as pool:
+        futures = [pool.submit(_scan_one_file, *args) for args in file_list]
         pbar = tqdm(
             futures,
-            desc=f"audit {data_root}",
+            desc=f"scan {data_root}",
             unit="file",
             total=total_files,
         )
@@ -397,7 +397,7 @@ def audit(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple
             pbar.set_postfix(rows=rows_scanned, groups=len(groups))
 
     logger.info(
-        "audit: %d files, %d rows, %d skipped, %d groups",
+        "scan: %d files, %d rows, %d skipped, %d groups",
         total_files,
         rows_scanned,
         rows_skipped,
@@ -430,7 +430,7 @@ def render_markdown(summaries: list[dict]) -> str:
         tier_counts[s["tier"]] += 1
         tier_rows[s["tier"]] += s["total_raw_rows"]
 
-    lines: list[str] = ["# Shareability audit\n"]
+    lines: list[str] = ["# Shareability report\n"]
     lines.append(
         "Classifies every `(system, op_file, kernel_source)` triple in the perf database into one of two tiers:\n"
     )
@@ -440,7 +440,7 @@ def render_markdown(summaries: list[dict]) -> str:
         "- **`shared_fallback`** — `kernel_source = default`. Framework-implicit, low-fidelity. "
         "Inherited alongside `shared` rows in HYBRID mode (HYBRID already accepts coarser fallbacks).\n"
         "\n"
-        "Rows with a blank/`<unknown>` kernel_source are skipped during audit (the current corpus has none).\n"
+        "Rows with a blank/`<unknown>` kernel_source are skipped during the scan (the current corpus has none).\n"
     )
 
     lines.append("## Headline numbers\n")
@@ -577,12 +577,12 @@ def render_manifest(summaries: list[dict]) -> str:
         "#   fallbacks, so they are not gated separately.",
         "#",
         "# How to regenerate:",
-        "#   Generated by tools/perf_database/audit_kernel_source.py from the data tree —",
+        "#   Generated by tools/perf_database/check_kernel_source.py from the data tree —",
         "#   do not hand-edit. Re-run whenever a perf table under",
         "#   aic-core/src/aiconfigurator_core/systems/data/",
         "#   is added, removed, or has its kernel_source values changed:",
         "#",
-        "#     python3 tools/perf_database/audit_kernel_source.py \\",
+        "#     python3 tools/perf_database/check_kernel_source.py \\",
         "#         --data-root aic-core/src/aiconfigurator_core/systems/data \\",
         "#         --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
         "#",
@@ -621,7 +621,7 @@ def main() -> None:
         help="Root of the systems/data tree.",
     )
     parser.add_argument("--out-json", type=Path, default=None, help="Write per-group summaries as JSON.")
-    parser.add_argument("--out-md", type=Path, default=None, help="Write a Markdown audit table.")
+    parser.add_argument("--out-md", type=Path, default=None, help="Write a Markdown report table.")
     parser.add_argument(
         "--out-manifest",
         type=Path,
@@ -651,7 +651,7 @@ def main() -> None:
             args.out_manifest,
             len(op_files),
         )
-    groups = audit(args.data_root, op_files)
+    groups = scan(args.data_root, op_files)
     summaries = [g.summary() for g in groups.values()]
 
     if args.out_json:

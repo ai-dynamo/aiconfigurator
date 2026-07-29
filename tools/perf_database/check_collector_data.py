@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail-closed CI audit of the collected perf-database tree (Collector V3 §8).
+"""Fail-closed CI check of the collected perf-database tree (Collector V3 §8).
 
 The primary enforcement surface of the whole Collector V3 design: run on every
 PR touching `data/`, `collector/`, or the manifest (sibling of
-`audit_kernel_source.py`). Exits non-zero on ANY failure and prints every
+`check_kernel_source.py`). Exits non-zero on ANY failure and prints every
 failure it finds — never stops at the first one.
 
 Six rules, each named after the design section it enforces:
@@ -25,7 +25,7 @@ Six rules, each named after the design section it enforces:
   backend field, so its donor is always resolved under the same
   `<family>/<backend>/` subtree it lives in. `from_version` may be newer or
   older than the declaring dir's own version — that asymmetry is exactly what
-  a declaration is for (§6.3); this audit does not re-derive direction.
+  a declaration is for (§6.3); this check does not re-derive direction.
 - **R3 comm exclusion** (design §6.5 rule 5): no `reuse.yaml` may exist
   anywhere under a `comm` family dir (NCCL/oneCCL curves are topology-bound).
 - **R4 family placement** (design §2, catalog-driven): every parquet table's
@@ -44,13 +44,13 @@ parsers `aiconfigurator_core.sdk.perf_database._parse_reuse_yaml` /
 `_load_collection_meta_yaml` (via the `aiconfigurator.sdk` compatibility
 alias, which is the same module object — see
 `src/aiconfigurator/sdk/_compat.py`). The tree-walking shape mirrors
-`audit_kernel_source.py`'s `_iter_data_files`, specialized to the
+`check_kernel_source.py`'s `_iter_data_files`, specialized to the
 post-migration family-first layout (`<system>/<family>/<backend>/<version>/`)
 that is now the only layout on disk.
 
 Usage:
-    python3 tools/perf_database/audit_collector_data.py
-    python3 tools/perf_database/audit_collector_data.py \\
+    python3 tools/perf_database/check_collector_data.py
+    python3 tools/perf_database/check_collector_data.py \\
         --data-root aic-core/src/aiconfigurator_core/systems/data \\
         --catalog collector/op_backend_catalog.yaml
 
@@ -68,7 +68,7 @@ from pathlib import Path
 # `collector/` is a standalone top-level package (not part of the installed
 # wheel — see .claude/rules/repo-guide.md), so it is only importable when the
 # repo root is on sys.path. Running this file directly (`python3
-# tools/perf_database/audit_collector_data.py`) puts the script's own
+# tools/perf_database/check_collector_data.py`) puts the script's own
 # directory on sys.path[0], not the repo root, so the insert below is
 # required (mirrors collect.py:1808 / changed_ops.py's REPO_ROOT). Harmless
 # under pytest, where pytest.ini's `pythonpath = .` already covers it.
@@ -298,7 +298,7 @@ def check_r6_no_legacy_markers(data_root: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def run_audit(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
+def run_checks(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
     """Run all six rules and return {rule: [failure messages]} (empty list = pass).
 
     Pure function of (data_root, catalog_path); never raises on data
@@ -338,9 +338,9 @@ def render_report(results: dict[str, list[str]]) -> tuple[str, bool]:
     total = sum(len(v) for v in results.values())
     if any_failures:
         failed_rules = [rule for rule in RULES if results[rule]]
-        lines.append(f"\ncollector data audit FAILED: {total} failure(s) across rule(s) {', '.join(failed_rules)}")
+        lines.append(f"\ncollector data check FAILED: {total} failure(s) across rule(s) {', '.join(failed_rules)}")
     else:
-        lines.append("\ncollector data audit OK: all rules passed")
+        lines.append("\ncollector data check OK: all rules passed")
     return "\n".join(lines), any_failures
 
 
@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, default=CATALOG_PATH, help="Path to the op backend catalog yaml.")
     args = parser.parse_args(argv)
 
-    results = run_audit(args.data_root, args.catalog)
+    results = run_checks(args.data_root, args.catalog)
     report, failed = render_report(results)
     print(report)
     return 1 if failed else 0

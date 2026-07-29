@@ -211,12 +211,14 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 hc_mult: row.u32(hc_mult_col)?,
                 hidden_size: row.u32(hidden_size_col)?,
             };
-            // Last-wins parity with Python `load_mhc_module_data`, which assigns
-            // `mhc_data[op][hc_mult][hidden_size][num_tokens] = {...}` per row.
+            // First-wins parity with Python `load_mhc_module_data`, which now
+            // guards with the standard skip-on-key-conflict idiom
+            // (shared-layer contract, design §6.1).
             by_keys
                 .entry(key)
                 .or_default()
-                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -357,32 +359,32 @@ mod tests {
 
     /// Item 4: Python `load_mhc_module_data` keys `data[op][hc_mult][hidden]`
     /// — NO architecture level — so two rows differing ONLY in architecture
-    /// merge into one curve with per-row last-wins (later row overwrites).
-    /// The old Rust `MhcKey` carried `architecture`, splitting these rows
-    /// into two per-arch views and answering 1.0 for arch "A" (Python: 2.0).
+    /// merge into one curve with per-row FIRST-wins (skip-on-key-conflict,
+    /// shared-layer contract, design §6.1). The old Rust `MhcKey` carried
+    /// `architecture`, splitting these rows into two per-arch views.
     #[test]
-    fn mhc_rows_differing_only_in_architecture_merge_last_wins() {
+    fn mhc_rows_differing_only_in_architecture_merge_first_wins() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         write_mhc_parquet(
             &tmp.path().join("mhc_module_perf.parquet"),
             &[
                 ("ArchA", "pre", 8, 4, 7168, 1.0),
-                ("ArchB", "pre", 8, 4, 7168, 2.0), // same coordinate: LAST row wins
+                ("ArchB", "pre", 8, 4, 7168, 2.0), // same coordinate: FIRST row wins
                 ("ArchA", "pre", 16, 4, 7168, 4.0), // different token: merges into the curve
             ],
         );
         let table = MhcTable::new(tmp.path().to_path_buf());
-        // Exact hit at the duplicated coordinate: the merged view answers 2.0.
+        // Exact hit at the duplicated coordinate: the merged view answers 1.0.
         let got = table
             .query_module("pre", 8, 4, 7168, &linear_sol)
             .expect("query must succeed");
-        assert_eq!(got, 2.0);
+        assert_eq!(got, 1.0);
         // The ArchA-only token joins the same curve (single merged view):
-        // interior lerp between 2.0@8 and 4.0@16.
+        // interior lerp between 1.0@8 and 4.0@16.
         let mid = table
             .query_module("pre", 12, 4, 7168, &linear_sol)
             .expect("query must succeed");
-        assert_eq!(mid, 3.0);
+        assert_eq!(mid, 2.5);
     }
 
     /// Item 1 (mechanism): beyond-range holds must anchor on the CALLER'S sol

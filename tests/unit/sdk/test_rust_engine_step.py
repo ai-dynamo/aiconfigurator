@@ -94,12 +94,17 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
     """The mixed / decode helpers pass raw step args straight to the handle;
     the Rust engine owns the FPM packing."""
     mixed_calls = []
+    breakdown_calls = []
     decode_calls = []
 
     class _FakeHandle:
         def mixed_step_latency(self, *args, **kwargs):
             mixed_calls.append((args, kwargs))
             return 8.5
+
+        def mixed_step_breakdown(self, *args, **kwargs):
+            breakdown_calls.append((args, kwargs))
+            return 8.5, 5.0, 2.0, 1.5
 
         def decode_step_latency(self, *args, **kwargs):
             decode_calls.append((args, kwargs))
@@ -141,6 +146,27 @@ def test_mixed_and_decode_helpers_pass_raw_step_args(monkeypatch) -> None:
         )
     ]
     assert decode_calls == [((7, 256, 256), {"gen_seq_imbalance_correction_scale": 1.0})]
+
+    assert rust_engine_step.estimate_mixed_step_breakdown_with_rust(
+        model,
+        database,
+        ctx_tokens=384,
+        gen_tokens=7,
+        isl=256,
+        osl=256,
+        prefix=128,
+    ) == {
+        "total": 8.5,
+        "shared_non_attention": 5.0,
+        "context_attention": 2.0,
+        "decode_attention": 1.5,
+    }
+    assert breakdown_calls == [
+        (
+            (384, 7, 256, 256, 128),
+            {"seq_imbalance_correction_scale": 1.0, "gen_seq_imbalance_correction_scale": 1.0},
+        )
+    ]
 
 
 def test_rust_provenance_tier_forwarded_into_python_capture(monkeypatch) -> None:

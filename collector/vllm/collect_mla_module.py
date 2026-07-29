@@ -70,6 +70,7 @@ from collector.vllm.utils import (
     create_and_prepopulate_kv_cache_mla,
     create_common_attn_metadata,
     create_vllm_config,
+    enable_engine_fused_ops,
     setup_distributed,
     with_exit_stack,
 )
@@ -801,6 +802,7 @@ def run_mla_module(
 
     setup_distributed(device)
     torch.cuda.set_device(device)
+    enable_engine_fused_ops()
 
     # DSA's sparse_attn_indexer requires a WorkspaceManager.
     init_workspace_manager(torch.device(device))

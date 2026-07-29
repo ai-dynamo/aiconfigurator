@@ -2649,6 +2649,18 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens]
+            logger.debug(
+                f"value conflict in wideep context moe data: {quant_mode} {distribution} {topk} "
+                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values
         wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
             moe_ep_size
@@ -2717,6 +2729,18 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
+                moe_tp_size
+            ][moe_ep_size][num_tokens]
+            logger.debug(
+                f"value conflict in wideep generation moe data: {quant_mode} {distribution} {topk} "
+                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values
         wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
             moe_ep_size
@@ -2915,6 +2939,18 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][
+                inter_size
+            ][num_slots][moe_tp_size][moe_ep_size][num_tokens]
+            logger.debug(
+                f"value conflict in wideep moe compute data: {kernel_source} {quant_mode} {distribution} "
+                f"{topk} {num_experts} {hidden_size} {inter_size} {num_slots} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values with kernel_source dimension
         wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
             num_slots
@@ -3017,6 +3053,18 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+                moe_ep_size
+            ][num_tokens]
+            logger.debug(
+                f"value conflict in trtllm alltoall data: {kernel_source} {op_name} {quant_mode} "
+                f"{num_nodes} {hidden_size} {topk} {num_experts} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values with kernel_source and num_nodes dimensions
         trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
             moe_ep_size

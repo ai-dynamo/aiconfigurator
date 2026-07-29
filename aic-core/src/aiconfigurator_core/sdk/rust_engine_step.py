@@ -370,6 +370,43 @@ def estimate_mixed_step_latency_with_rust(
     return latency_ms
 
 
+def estimate_mixed_step_breakdown_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    ctx_tokens: int,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+    prefix: int,
+    seq_imbalance_correction_scale: float = 1.0,
+    gen_seq_imbalance_correction_scale: float = 1.0,
+) -> dict[str, float]:
+    """Estimate one mixed step and retain its three execution components.
+
+    Same three-pass composition as ``estimate_mixed_step_latency_with_rust``
+    (``total`` is the identical sum), reported per pass so the agg speculative
+    scheduler can consume the shared/context-attention/decode-attention split.
+    """
+    handle = _cached_engine_handle(model, database)
+    total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
+        int(ctx_tokens),
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        int(prefix or 0),
+        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+    )
+    _note_rust_provenance(handle)
+    return {
+        "total": float(total),
+        "shared_non_attention": float(shared_non_attention),
+        "context_attention": float(context_attention),
+        "decode_attention": float(decode_attention),
+    }
+
+
 def estimate_decode_step_latency_with_rust(
     model: Any,
     database: Any,

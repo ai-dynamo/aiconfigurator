@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The audit must derive a reproducible latency metric for every perf table.
+"""The scan must derive a reproducible latency metric for every perf table.
 
 Two properties are covered:
 
 * Latency composition — the DeepEP dispatch/combine tables have no single
   `latency` column: the SDK sums component columns at load time
-  (sdk/operations/moe.py). If the audit picked one component instead, the
+  (sdk/operations/moe.py). If the scan picked one component instead, the
   manifest's row counts and divergence stats would describe a fragment of the
   latency, and the normal-mode table would be dropped entirely for having no
   recognised latency column.
@@ -21,12 +21,12 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "perf_database"))
-from audit_kernel_source import (
-    _audit_one_file,
+from check_kernel_source import (
     _build_shape_key,
     _compose_latency,
     _resolve_latency_columns,
-    audit,
+    _scan_one_file,
+    scan,
 )
 
 pytestmark = pytest.mark.unit
@@ -131,8 +131,8 @@ def _write_csv(path: Path, header: list[str], rows: list[dict]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
-def test_audit_one_file_records_composed_latency(tmp_path):
-    """End-to-end: a normal-schema table is audited, not skipped for lack of `latency`."""
+def test_scan_one_file_records_composed_latency(tmp_path):
+    """End-to-end: a normal-schema table is scanned, not skipped for lack of `latency`."""
     row = {
         "framework": "sglang",
         "version": "0.5.10",
@@ -152,7 +152,7 @@ def test_audit_one_file_records_composed_latency(tmp_path):
     path = tmp_path / "wideep_deepep_normal_perf.txt"
     _write_csv(path, _NORMAL_HEADER, [row])
 
-    result = _audit_one_file("h200_sxm", "sglang", "0.5.10", path)
+    result = _scan_one_file("h200_sxm", "sglang", "0.5.10", path)
 
     assert result.rows_scanned == 1
     assert result.rows_skipped == 0
@@ -186,7 +186,7 @@ def test_merge_order_is_file_order_not_completion_order(tmp_path):
         )
 
     for _ in range(5):
-        groups = audit(tmp_path)
+        groups = scan(tmp_path)
         (group,) = groups.values()
         (by_framework,) = group.latency_by_shape_framework.values()
         assert by_framework["sglang"] == pytest.approx(2.0)
