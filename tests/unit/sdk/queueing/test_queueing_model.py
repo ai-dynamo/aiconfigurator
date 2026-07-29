@@ -916,3 +916,34 @@ class TestArrivalPlaneAndChunkPricing:
         chunked = RecordingHook()
         evaluate_closed_loop(WorkloadSpec(isl=6000, osl=32, concurrency=8), eng, chunked, backend="vllm")
         assert not chunked.mixed_calls, "mid-prompt chunks are outside the hook's regime"
+
+
+class TestKvPressureHonesty:
+    """KV-pressure semantics are modeled ONLY as the GUARANTEED_NO_EVICT
+    admission gate (trtllm). vLLM preempts-and-recomputes and SGLang
+    retracts — different dynamics; accepting kv inputs and ignoring them
+    would silently return optimistic numbers, so calendars reject loudly
+    (same contract as unconsumed workload-fidelity tiers)."""
+
+    def _eng(self, **kw):
+        return EngineSpec(max_num_batched_tokens=4096, max_num_seqs=8, **kw)
+
+    def test_vllm_rejects_kv_capacity(self):
+        wl = WorkloadSpec(isl=1024, osl=16, concurrency=4)
+        with pytest.raises(ValueError, match="KV-pressure"):
+            evaluate_closed_loop(wl, self._eng(kv_capacity_tokens=65536), TIMING, backend="vllm")
+
+    def test_sglang_rejects_kv_capacity(self):
+        wl = WorkloadSpec(isl=1024, osl=16, concurrency=4)
+        with pytest.raises(ValueError, match="KV-pressure"):
+            evaluate_closed_loop(wl, self._eng(kv_capacity_tokens=65536), TIMING, backend="sglang")
+
+    def test_trtllm_without_gne_rejects_kv_capacity(self):
+        wl = WorkloadSpec(isl=1024, osl=16, concurrency=4)
+        with pytest.raises(ValueError, match="MAX_UTILIZATION"):
+            evaluate_closed_loop(wl, self._eng(kv_capacity_tokens=65536), TIMING, backend="trtllm")
+
+    def test_trtllm_gne_still_consumes_kv(self):
+        wl = WorkloadSpec(isl=2048, osl=64, concurrency=64)
+        eng = self._eng(guaranteed_no_evict=True, kv_capacity_tokens=4 * (2048 + 64))
+        assert CALENDARS["trtllm"].admission_cap(wl, eng) == 4

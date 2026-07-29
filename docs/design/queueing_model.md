@@ -60,6 +60,14 @@ measurement/interpolation), which this package consumes as a black box.
 | TRT-LLM | fused like vLLM + `GUARANTEED_NO_EVICT` admission cap | **validated** live on h20e_sxm trtllm 1.3.0rc20 (chunked on/off ITL signatures, KV-capped deep queueing ±3%, TPOT ≤2% at C≥32; see `TrtllmCalendar` flag comment) |
 | SGLang | mixed-chunk pass (per-iteration extend budget is `chunked_prefill_size` SHARED across the batch, and mixed decode rows debit it — verified against sglang 0.5.14 `PrefillAdder`); with `EngineSpec.enable_mixed_chunk=False` (SGLang's own server default), alternating passes (dedicated prefill batches pause decode → ITL spikes are whole cohort prefill waves) | **validated** live on h20e_sxm sglang 0.5.14, both branches (mixed budget spike ±1.7%; alternating TPOT <1%, X exact at C=32) |
 
+KV-pressure scope: the only modeled admission-under-KV-pressure semantics is
+the GUARANTEED_NO_EVICT gate (TRT-LLM row above, validated in the KV-capped
+deep-queueing arm). vLLM preempts-and-recomputes and SGLang retracts under KV
+pressure — different dynamics that no calendar reproduces, so those calendars
+REJECT `kv_capacity_tokens`/`guaranteed_no_evict` inputs loudly (and the
+trtllm calendar rejects `kv_capacity_tokens` without the no-evict gate, i.e.
+MAX_UTILIZATION) instead of silently returning optimistic numbers.
+
 ## 3.1 Workload-fidelity contract (input tiers × evaluator tiers × error bars)
 
 Two orthogonal axes grade every prediction. The INPUT axis (W-tiers) is

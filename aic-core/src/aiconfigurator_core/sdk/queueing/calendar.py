@@ -74,6 +74,20 @@ class BaseCalendar:
     validated = False
 
     def admission_cap(self, wl: WorkloadSpec, eng: EngineSpec) -> int:
+        # KV-pressure honesty: only the GUARANTEED_NO_EVICT admission gate
+        # (TrtllmCalendar) is modeled. vLLM preempts-and-recomputes and
+        # SGLang retracts under KV pressure — different dynamics that this
+        # calendar does NOT reproduce. Accepting the input and ignoring it
+        # would silently return optimistic numbers, so reject loudly
+        # (same contract as unconsumed workload-fidelity tiers).
+        if eng.kv_capacity_tokens or eng.guaranteed_no_evict:
+            raise ValueError(
+                f"backend '{self.name}' models no KV-pressure admission semantics "
+                "(vLLM recompute-preemption / SGLang retract are not modeled): "
+                "unset kv_capacity_tokens/guaranteed_no_evict, or use "
+                "backend='trtllm' with guaranteed_no_evict=True (the modeled, "
+                "validated no-evict gate)"
+            )
         return eng.max_num_seqs
 
     def step(
@@ -184,10 +198,22 @@ class TrtllmCalendar(FusedCalendar):
     validated = True
 
     def admission_cap(self, wl, eng):
-        cap = eng.max_num_seqs
         if eng.guaranteed_no_evict and eng.kv_capacity_tokens:
-            cap = min(cap, max(1, eng.kv_capacity_tokens // (wl.isl + wl.osl)))
-        return cap
+            return min(
+                eng.max_num_seqs,
+                max(1, eng.kv_capacity_tokens // (wl.isl + wl.osl)),
+            )
+        if eng.kv_capacity_tokens:
+            # kv capacity without the no-evict gate = MAX_UTILIZATION-style
+            # evict/resume, which is not modeled — reject rather than
+            # silently ignoring the KV limit
+            raise ValueError(
+                "trtllm calendar models KV pressure only under "
+                "guaranteed_no_evict=True (GUARANTEED_NO_EVICT admission); "
+                "MAX_UTILIZATION evict/resume dynamics are not modeled — "
+                "set guaranteed_no_evict=True or unset kv_capacity_tokens"
+            )
+        return eng.max_num_seqs
 
 
 class AlternatingCalendar(BaseCalendar):
