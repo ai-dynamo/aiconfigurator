@@ -377,6 +377,11 @@ def _run_tandem(
         for r in arrived[:cap]:
             if budget <= 0:
                 break
+            if not prefill_eng.enable_chunked_prefill and r.remaining_prefill > budget:
+                # chunked prefill off: admission stops once a whole prompt no
+                # longer fits the remaining budget (same rule as the agg
+                # FusedCalendar; TRT-LLM disagg ctx workers deploy this way)
+                break
             if r.prefill_start_ms < 0:
                 r.prefill_start_ms = start_ms
             chunk = min(r.remaining_prefill, budget)

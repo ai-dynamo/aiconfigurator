@@ -857,6 +857,28 @@ class TestDisaggWorkloadTiers:
             assert p["xfer_ms"] >= p["isl"] * 100_000 / 1e9 * 1000.0 * 0.999
             assert p["e2e_ms"] > p["ttft_ms"]
 
+    def test_chunked_off_prefill_stops_admission_at_whole_prompts(self):
+        """enable_chunked_prefill=False on the prefill engine: a prompt that
+        no longer fits the remaining budget is NOT split (the agg
+        FusedCalendar rule; TRT-LLM disagg ctx workers deploy chunked-off).
+        With budget 8192 and prompts 6144+4096, chunked-off runs them as two
+        solo passes; chunked-on co-schedules the second prompt's head chunk
+        into the first pass, so the FIRST request's pass (and TTFT) longer."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        trace = [(0.0, 6144, 0, 4), (0.0, 4096, 0, 4)]
+        wl = WorkloadSpec(isl=5120, osl=4, request_rate=1.0)
+        kw = dict(arrival_trace=trace, warmup_requests=0)
+        eng_off = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
+        eng_on = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=True)
+        r_off = evaluate_disagg(wl, eng_off, eng_off, TIMING, TIMING, self._fast_fabric(), **kw)
+        r_on = evaluate_disagg(wl, eng_on, eng_on, TIMING, TIMING, self._fast_fabric(), **kw)
+        t0_off = r_off.per_request[0]["ttft_ms"]
+        t1_off = r_off.per_request[1]["ttft_ms"]
+        assert t0_off == pytest.approx(TIMING.prefill_ms(1, 6144, 0))
+        assert t1_off == pytest.approx(TIMING.prefill_ms(1, 6144, 0) + TIMING.prefill_ms(1, 4096, 0))
+        assert r_on.per_request[0]["ttft_ms"] > t0_off  # head chunk rides along
+
     def test_mixed_open_loop_is_single_evaluation_passthrough(self):
         """Open-loop workloads have no initial-cohort phase to mix over:
         evaluate_disagg_mixed returns the single evaluation (including
