@@ -102,6 +102,17 @@ class DisaggSpec:
     # queued attractor — see design doc failure mode 15; the saturated
     # regime is unaffected.
     prefill_inflight_cap: Optional[int] = None
+    # Serving-flow placement of the KV handoff. False (default): the prefill
+    # worker's first token streams to the user immediately and the transfer
+    # lands in the FIRST ITL GAP (the DES oracle's idealized flow — the gate
+    # families pin this arm). True: the user-visible first token waits for
+    # the transfer (decode-attach flow) — TTFT = prefill + handoff, gap 1
+    # clean. Measured mapping: TRT-LLM native disaggregated serving and the
+    # dynamo mocker/frontend are BOTH decode-attach (h20e slow-link A/B,
+    # UCX_TLS=cuda_copy,tcp: c=1 TTFT absorbed the full 2.2 s transfer while
+    # the decode ITL spike stayed unchanged — exp1 fabric appendix). On
+    # NVLink the two flows differ by ~3 ms and are indistinguishable.
+    handoff_in_ttft: bool = False
 
     def __post_init__(self) -> None:
         if self.num_prefill_workers < 1 or self.num_decode_workers < 1:
@@ -398,21 +409,15 @@ def _run_tandem(
         end = start_ms + prefill_timing.prefill_ms(batch_count, batch_isl // batch_count, batch_prefix // batch_count)
         for r in finished:
             q.remove(r)
-            # the prefill worker emits the first (TTFT) token off the final
-            # chunk's logits — user-visible from this stage
-            r.generated = 1
-            r.first_token_ms = end
-            r.last_token_ms = end
-            ttft_ms = end - r.arrival_ms
-            if r.is_initial_burst:
-                ttft_transient.add(ttft_ms)
-            elif completions >= warmup_reqs:
-                ttft_steady.add(ttft_ms)
-                prefill_waits.append(r.prefill_start_ms - r.arrival_ms)
-            elif transient_prewarmup:
-                # open loop/sessions: pre-warmup TTFTs are transient (same
-                # bucketing as calendar.evaluate_open_loop)
-                ttft_transient.add(ttft_ms)
+            if fabric is not None and spec.handoff_in_ttft and r.osl > 1:
+                # decode-attach flow: the first token becomes user-visible
+                # only after the KV handoff — emission happens at transfer
+                # completion (TTFT = prefill + handoff, gap 1 clean)
+                dst = decode.next_worker()
+                r.xfer_submit_ms = end
+                submit_xfer(end, widx, dst, r.isl * spec.kv_bytes_per_token, r)
+                continue
+            _emit_first_token(r, end)
             if r.generated >= r.osl:
                 _complete(r, end)  # osl == 1 finishes on the prefill worker
             elif fabric is None:
@@ -422,6 +427,24 @@ def _run_tandem(
                 r.xfer_submit_ms = end
                 submit_xfer(end, widx, dst, r.isl * spec.kv_bytes_per_token, r)
         return end
+
+    def _emit_first_token(r: _Req, t_ms: float) -> None:
+        """The prefill worker samples the first (TTFT) token off the final
+        chunk's logits; depending on the serving flow it is user-visible at
+        the prefill pass end or at handoff completion."""
+        r.generated = 1
+        r.first_token_ms = t_ms
+        r.last_token_ms = t_ms
+        ttft_ms = t_ms - r.arrival_ms
+        if r.is_initial_burst:
+            ttft_transient.add(ttft_ms)
+        elif completions >= warmup_reqs:
+            ttft_steady.add(ttft_ms)
+            prefill_waits.append(r.prefill_start_ms - r.arrival_ms)
+        elif transient_prewarmup:
+            # open loop/sessions: pre-warmup TTFTs are transient (same
+            # bucketing as calendar.evaluate_open_loop)
+            ttft_transient.add(ttft_ms)
 
     def run_decode_pass(widx: int, start_ms: float) -> float:
         """One decode iteration: the running set (capped at max_num_seqs)
@@ -491,6 +514,8 @@ def _run_tandem(
             for t_done, (dst, r) in fabric.pop_completed(now):
                 r.xfer_ms = t_done - r.xfer_submit_ms
                 xfer_durations.append(r.xfer_ms)
+                if r.first_token_ms < 0:  # decode-attach flow: TTFT lands here
+                    _emit_first_token(r, t_done)
                 decode.dispatch(r, t_done, widx=dst)
 
         for i in range(len(prefill.queues)):

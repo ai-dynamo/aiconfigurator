@@ -857,6 +857,29 @@ class TestDisaggWorkloadTiers:
             assert p["xfer_ms"] >= p["isl"] * 100_000 / 1e9 * 1000.0 * 0.999
             assert p["e2e_ms"] > p["ttft_ms"]
 
+    def test_handoff_flow_placement(self):
+        """Serving-flow split: default (DES-idealized) streams the first
+        token prefill-side and the handoff lands in gap 1; decode-attach
+        (handoff_in_ttft=True — TRT-LLM native disagg / dynamo, per the
+        slow-link A/B) absorbs the transfer into TTFT with gap 1 clean.
+        Same total timeline, different placement."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        trace = [(0.0, 2048, 0, 4)]
+        wl = WorkloadSpec(isl=2048, osl=4, request_rate=1.0)
+        kw = dict(arrival_trace=trace, warmup_requests=0)
+        eng = EngineSpec()
+        xfer = 2048 * 100_000 / 1e9 * 1000.0  # 204.8 ms solo
+        gap1 = evaluate_disagg(wl, eng, eng, TIMING, TIMING, self._spec(), **kw)
+        ttft_flow = evaluate_disagg(wl, eng, eng, TIMING, TIMING, self._spec(handoff_in_ttft=True), **kw)
+        prefill = TIMING.prefill_ms(1, 2048, 0)
+        assert gap1.per_request[0]["ttft_ms"] == pytest.approx(prefill)
+        assert gap1.itl.maximum >= xfer * 0.999
+        assert ttft_flow.per_request[0]["ttft_ms"] == pytest.approx(prefill + xfer, rel=1e-3)
+        assert ttft_flow.itl.maximum < xfer  # gap 1 is a clean decode gap
+        # placement moves time between TTFT and gap 1, not the total
+        assert ttft_flow.per_request[0]["e2e_ms"] == pytest.approx(gap1.per_request[0]["e2e_ms"], rel=1e-3)
+
     def test_chunked_off_prefill_stops_admission_at_whole_prompts(self):
         """enable_chunked_prefill=False on the prefill engine: a prompt that
         no longer fits the remaining budget is NOT split (the agg
