@@ -788,16 +788,16 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
-        # WideEP DeepSeek/Kimi remaps FMHA/KV labels to match collector tagging on
+        # WideEP DeepSeek remaps FMHA/KV labels to match collector tagging on
         # the wideep_*_mla tables (see collect_mla_module.py). Must run before the
         # data-driven fp8->bf16 fallback so those roles are not downgraded.
         for role in roles:
             backend_name = self._role_attr(role, "backend_name")
-            is_deepseek_mla = self._architecture in (
-                "DeepseekV3ForCausalLM",
-                "KimiK25ForConditionalGeneration",
-            )
-            # WideEP routes DeepSeek/Kimi attention through the wideep_*_mla tables,
+            # DeepSeek-V3 only: the WideEP MLA ops and perf tables are specific to
+            # its shape, and models/deepseek.py likewise routes only this
+            # architecture to WideEPDeepSeekModel.
+            is_deepseek_mla = self._architecture == "DeepseekV3ForCausalLM"
+            # WideEP routes DeepSeek attention through the wideep_*_mla tables,
             # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
             # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
             # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
@@ -825,7 +825,7 @@ class Task:
         # compute dtype follows the kv-cache dtype; the generation MLA module
         # loader drops the degenerate mla_dtype column), so an fp8 label is
         # inert on decode -- and validate likewise checks fmha only for
-        # context-using roles. WideEP DeepSeek/Kimi above already remapped to
+        # context-using roles. WideEP DeepSeek above already remapped to
         # fp8_block, so this fp8->bf16 path does not touch those roles.
         for role in roles:
             if role == "decode":

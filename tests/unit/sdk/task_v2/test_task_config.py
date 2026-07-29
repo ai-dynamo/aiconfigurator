@@ -1000,7 +1000,7 @@ def test_run_validates_by_default():
 
 
 def test_wideep_deepseek_resolves_fp8_block_mla_labels():
-    """WideEP DeepSeek/Kimi query the wideep_*_mla tables, which the collector labels
+    """WideEP DeepSeek queries the wideep_*_mla tables, which the collector labels
     fp8_block (fmha) / fp8 (kv) even though physically a bf16 run (collect_mla_module.py).
     The task must resolve those labels so DB validation matches -- NOT the narrow-EP bf16
     downgrade that applies without WideEP."""
@@ -1025,6 +1025,25 @@ def test_wideep_deepseek_resolves_fp8_block_mla_labels():
         total_gpus=8,
     )
     assert t_narrow.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+
+def test_wideep_kimi_skips_deepseek_mla_label_remap():
+    """Kimi K2.5 reuses the DeepSeek architecture but is deliberately OUT of the WideEP
+    path (models/deepseek.py routes KIMIK25 away from WideEPDeepSeekModel), so the
+    fp8_block/fp8 MLA label remap above must not fire for it -- otherwise the task
+    labels a WideEP config that model construction never builds. Kimi WideEP support
+    is deferred to its own PR; this pins the deferral."""
+    t = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K2.5",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    assert t.moe_backend == "deepep_moe"
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
 
 
 def test_enable_wideep_normalizes_moe_backend():
