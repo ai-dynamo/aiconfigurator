@@ -27,6 +27,7 @@ from .closed_form import (
 )
 from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
 from .spec import stratified_quantiles, workload_fidelity, Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
+from .sessions import SessionTurn, evaluate_sessions
 from .timing import DatabaseTimingModel
 from .trace import (
     TraceRecord,

@@ -78,10 +78,10 @@ below bit-for-bit (parity-tested), so callers pass whatever they have.
 | Tier | Input | What it buys | Validation record |
 |---|---|---|---|
 | W0 | `(isl, osl)` + `concurrency` | structural signatures, saturated throughput, SLA ordering | h20e trtllm/sglang + b300 vllm, ±1–6% |
-| W1 | + `request_rate` (open loop) | queue-wait TTFT under real arrivals (closed loop cannot express it) | h20e trtllm tp4, TTFT p50 ±4–8% at ρ≤0.7 |
+| W1 | + `request_rate` (open loop) | queue-wait TTFT under real arrivals (closed loop cannot express it) | h20e trtllm tp4, TTFT p50 ±3–8% at ρ≤0.7; p99 −16~−24% with the correlation-free arrival stream (was −49~−54% under the anti-clustering rotation) |
 | W2 | + `isl_quantiles` / `osl_quantiles` (marginals) | frees TTFT from the homogeneous-convoy artifact (measured 2× pessimism at cv 0.25) | h20e trtllm tp4, TTFT +2%/+31% at C=8/32 |
 | W3 | + joint shape/prefix streams, empirical inter-arrival quantiles; `arrival_trace` exact replay | prefix-hit economics, isl↔osl correlation, super-Poisson burst first-order; verbatim (arrival, isl, prefix, osl) pairing | Mooncake conversation trace on h20e trtllm tp4: X exact, TTFT p50 −11%/p99 −7%, TPOT −5% (with ingest slope + hook regime split) |
-| W4 | + temporal structure (windowed non-stationarity, burst ordering, sessions) | p99 tail fidelity, peak/off-peak capacity split | contract placeholder — not implemented |
+| W4 | + session structure (`evaluate_sessions`: lanes of turns with think gaps — arrivals become an OUTPUT of the recursion) | a-priori prediction of agentic workloads whose arrival process depends on serving speed (no replay needed) | cc-traces 10 sessions/315 turns, zero arrival feed-in: TTFT bands −11~−35%, p90/p99 +8/+13%; emergent dispatch instants drift |Δ| p50 81 s over 6–40 min sessions, bias −105 s — the frozen decode-corner timing bias advances the timeline, desynchronizing prefill storms (the W4 error-propagation path; windowed non-stationarity remains future work) |
 
 W3 trace timestamps must declare their reference plane: recorded traces
 capture CLIENT DISPATCH, but the engine's FCFS queue orders by SCHEDULER
@@ -103,7 +103,7 @@ Error-bar clauses that travel with every tier (measured, see §5/§6):
 steady-TTFT precision is bounded by osl × (timing-layer TPOT error) in
 closed loop (§6.16) and amplified by 1/(1−ρ) near capacity in open loop —
 treat ρ ≳ 0.8 open-loop predictions as optimistic bounds; deterministic
-arrival streams anti-cluster, so open-loop p99 tails run ~2× light until
+synthetic arrival streams use a correlation-free per-period shuffle (count dispersion 0.96 vs Poisson 1.0); the residual finite-period truncation leaves open-loop p99 ~16–24% light at ρ≥0.8, previously ~2× under
 W4. `QueueingReport.workload_fidelity` (set by every evaluator; see
 `workload_fidelity()`) declares the consumed tier so downstream consumers
 can gate on prediction quality without re-deriving it; evaluators that do
