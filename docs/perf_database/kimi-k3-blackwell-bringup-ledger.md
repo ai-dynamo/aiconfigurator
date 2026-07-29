@@ -146,7 +146,21 @@ overwrite.)
    which deep_gemm entry point and dtype the branch's `_use_mega_moe` path
    invokes. HARDWARE: the collector is cross-rank
    (`ep_size == WORLD_SIZE`), so EP8 needs an 8-GPU Blackwell node — cannot
-   run on 1x B200. Perspective from the GB300 DSV4 megamoe table: at 8
+   run on 1x B200. The `kimi_k3` model-config entry is already in
+   `collect_dsv4_megamoe.py`; on an 8-GPU node inside the kimi-k3 branch
+   image (`lmsysorg/sglang@sha256:4b8a7542...`, repo at /workspace):
+
+   ```bash
+   cd /workspace && export PYTHONPATH=/workspace
+   torchrun --nproc_per_node=8 collector/sglang/collect_dsv4_megamoe.py \
+     --model-config kimi_k3 --activation-clamp 0.03125 \
+     --system-name b200_sxm --phases context,generation
+   ```
+
+   Verify first that the image's deep_gemm carries the SiTU patch (the
+   sentinel silently selects plain swiglu on an unpatched kernel — compare
+   one cell against `activation_clamp=10.0` and expect a latency/output
+   difference). Perspective from the GB300 DSV4 megamoe table: at 8
    global tokens the module (incl. cross-rank transfer) costs ~0.10-0.11
    ms/layer — the same magnitude as the collected flashinfer_mxfp4 lane — so
    this lane matters for serving-truth fidelity and higher concurrency, not

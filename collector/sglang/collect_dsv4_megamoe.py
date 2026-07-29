@@ -69,6 +69,21 @@ DEFAULT_MODEL_CONFIGS = {
         "routed_scaling_factor": 2.5,
         "norm_topk_prob": True,
     },
+    # Kimi-K3 LatentMoE routed experts: the mega kernel runs in the 3584-wide
+    # latent space with SiTU activation, selected in the patched deep_gemm
+    # mega kernel by the activation_clamp == 0.03125 sentinel — pass
+    # `--activation-clamp 0.03125` when collecting this config (serving call:
+    # models/kimi_k3.py fp8_fp4_mega_moe(recipe=(1,1,32),
+    # activation_clamp=_K3_MEGA_SITU_SENTINEL_CLAMP) @ kimi-k3 branch).
+    "kimi_k3": {
+        "model": "moonshotai/Kimi-K3",
+        "hidden_size": 3584,
+        "inter_size": 3072,
+        "routed_num_experts": 896,
+        "routed_topk": 16,
+        "routed_scaling_factor": 1.0,
+        "norm_topk_prob": True,
+    },
 }
 
 DEFAULT_GPUS_PER_NODE = {
