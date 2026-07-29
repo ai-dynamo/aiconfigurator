@@ -222,7 +222,9 @@ overwrite.)
    forward_extend/decode/target_verify per phase — dispatch fidelity by
    construction, nothing replicated. Interim mitigations already landed:
    covered()-driven fused-decode dispatch, fused-verify probe with source
-   citations, per-key consumer routing.
+   citations, per-key consumer routing. Full design (KDA+GDN unified module
+   family, prefix-cache and CP semantics):
+   docs/perf_database/linear-attention-module-design.md.
 7. **Hopper system (if ever re-added)**: recollect sglang kda context with
    the fixed int32 guard rather than restoring the old dataset (coverage hole
    above), and re-run the moe marlin lane to reconfirm the EP>1 crash before
