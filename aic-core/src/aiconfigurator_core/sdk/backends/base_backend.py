@@ -5,6 +5,7 @@ import copy
 import dataclasses
 import inspect
 import logging
+import math
 from collections import defaultdict
 from typing import ClassVar
 
@@ -19,10 +20,11 @@ from aiconfigurator_core.sdk.perf_database import PerfDatabase
 from aiconfigurator_core.sdk.rust_engine_step import (
     RustEngineUnsupportedError,
     estimate_decode_step_latency_with_rust,
-    estimate_mixed_step_latency_with_rust,
+    estimate_mixed_step_breakdown_with_rust,
     estimate_static_latency_breakdown_with_rust,
     should_use_rust_engine_step,
 )
+from aiconfigurator_core.sdk.step_estimate import MixedStepInput, StepEstimate
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +89,8 @@ class BaseBackend:
         """
         return getattr(model, "_hidden_size", h)
 
-    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, osl: int) -> int:
-        """Return the number of decode tokens per mix step for a batch of b requests.
+    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, decode_iterations: float) -> int:
+        """Return logical decode requests per mix step for a batch of b requests.
 
         A mix step is a forward pass that contains both prefill tokens (for requests
         still completing their context phase) and decode tokens (for requests already
@@ -98,8 +100,8 @@ class BaseBackend:
         Subclasses should override to match their engine's scheduling behaviour.
         """
         steps_to_finish_ctx = np.ceil(isl * b / ctx_tokens)
-        if steps_to_finish_ctx >= osl:
-            return max(1, int(b // (steps_to_finish_ctx / osl)))
+        if steps_to_finish_ctx >= decode_iterations:
+            return max(1, int(b // (steps_to_finish_ctx / decode_iterations)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
     def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
@@ -1055,43 +1057,93 @@ class BaseBackend:
         osl: int,
         prefix: int,
     ) -> tuple[float, float, dict, dict]:
-        """Latency / energy for one mixed (chunked-prefill + decode) step.
+        """Compatibility wrapper around :meth:`run_mixed`.
 
-        Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source)``.
-        The per-op dicts represent the breakdown for this step alone; the
-        caller stores them under the "mix_step" key of the run_agg
-        per-ops summary.
+        ``isl`` must be the text-only isl; :meth:`run_mixed` derives the visual
+        context tokens from ``runtime_config``'s image fields.
         """
+        mixed_runtime_config = copy.copy(runtime_config)
+        mixed_runtime_config.isl = isl
+        mixed_runtime_config.osl = osl
+        mixed_runtime_config.prefix = prefix
+        estimate = self.run_mixed(
+            model,
+            database,
+            mixed_runtime_config,
+            MixedStepInput(
+                context_tokens=ctx_tokens,
+                num_decode_requests=gen_tokens,
+            ),
+        )
+        return estimate.legacy_tuple()
+
+    def run_mixed(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        step: MixedStepInput,
+    ) -> StepEstimate:
+        """Estimate one scheduled mixed prefill/decode forward pass.
+
+        ``runtime_config.isl`` is the text-only isl; the visual context tokens
+        implied by the config's image fields are added here, exactly as
+        ``run_static`` / ``run_agg`` do, so direct callers (e.g.
+        ``InferenceSession.run_mixed``) get the effective sequence length
+        without pre-adjusting the config.
+        """
+        isl = int(runtime_config.isl or 0)
+        osl = int(runtime_config.osl or 0)
+        prefix = int(runtime_config.prefix or 0)
+        if isl <= 0:
+            raise ValueError("runtime_config.isl must be positive for a mixed step")
+        if osl <= 0:
+            raise ValueError("runtime_config.osl must be positive for a mixed step")
+        if prefix < 0:
+            raise ValueError("runtime_config.prefix must be non-negative")
+        # The internal pass configs below carry no image fields, so the visual
+        # contribution is applied exactly once.
+        isl += self._visual_context_tokens(model, runtime_config)
+
+        decode_query_tokens = step.num_decode_requests * (model._nextn + 1)
         if should_use_rust_engine_step(runtime_config, database):
             try:
-                latency_ms = estimate_mixed_step_latency_with_rust(
+                components = estimate_mixed_step_breakdown_with_rust(
                     model,
                     database,
-                    ctx_tokens=ctx_tokens,
-                    gen_tokens=gen_tokens,
+                    ctx_tokens=step.context_tokens,
+                    gen_tokens=step.num_decode_requests,
                     isl=isl,
                     osl=osl,
                     prefix=prefix,
                     seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 )
-                return (
-                    latency_ms,
-                    0.0,
-                    {"rust_engine_step_mixed": latency_ms},
-                    {"rust_engine_step_mixed": "rust"},
-                )
             except RustEngineUnsupportedError as exc:
                 logger.warning(
                     "engine-step backend 'rust' cannot compile this model; using the python step: %s",
                     exc,
+                )
+            else:
+                latency_ms = components["total"]
+                return StepEstimate(
+                    latency_ms=latency_ms,
+                    energy_wms=0.0,
+                    component_latency_ms={key: value for key, value in components.items() if key != "total"},
+                    per_op_latency_ms={"rust_engine_step_mixed": latency_ms},
+                    per_op_source={"rust_engine_step_mixed": "rust"},
+                    context_tokens=step.context_tokens,
+                    num_decode_requests=step.num_decode_requests,
+                    num_decode_query_tokens=decode_query_tokens,
                 )
 
         ctx_scale = runtime_config.seq_imbalance_correction_scale
         gen_scale = runtime_config.gen_seq_imbalance_correction_scale
 
         # Pass 1: combined single-batch inference to extract non-attention latency.
-        num_tokens_combined = ctx_tokens + gen_tokens
+        # Every decode request verifies one target token plus all scheduled
+        # drafts. Acceptance does not reduce this current-iteration work.
+        num_tokens_combined = step.context_tokens + decode_query_tokens
         summary = self.run_static(
             model,
             database,
@@ -1101,7 +1153,7 @@ class BaseBackend:
                 beam_width=1,
                 isl=num_tokens_combined,
                 osl=1,
-                prefix=prefix * np.floor(ctx_tokens / isl),
+                prefix=prefix * np.floor(step.context_tokens / isl),
                 seq_imbalance_correction_scale=ctx_scale,
             ),
             mode="static_ctx",
@@ -1121,7 +1173,7 @@ class BaseBackend:
                 mix_non_attn_sources[layer_name] = source_dict.get(layer_name, "silicon")
 
         # Pass 2: context attention split full isl over num_steps and averaged.
-        batch_size = np.ceil(ctx_tokens / isl)
+        batch_size = np.ceil(step.context_tokens / isl)
         summary = self.run_static(
             model,
             database,
@@ -1138,7 +1190,7 @@ class BaseBackend:
         latency_dict = summary.get_context_latency_dict()
         energy_wms_dict = summary.get_context_energy_wms_dict()
         ctx_attn_source = summary.get_context_source_dict().get("context_attention", "silicon")
-        scale_factor = np.ceil(isl / ctx_tokens)
+        scale_factor = np.ceil(isl / step.context_tokens)
         ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
         ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
@@ -1146,12 +1198,12 @@ class BaseBackend:
         gen_attention_latency_ms = 0.0
         gen_attention_energy_wms = 0.0
         gen_attn_source = "silicon"
-        if gen_tokens > 0:
+        if step.num_decode_requests > 0:
             summary = self.run_static(
                 model,
                 database,
                 RuntimeConfig(
-                    batch_size=gen_tokens,
+                    batch_size=step.num_decode_requests,
                     beam_width=1,
                     isl=isl + osl // 2,
                     osl=2,
@@ -1165,7 +1217,7 @@ class BaseBackend:
             gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
             gen_attn_source = summary.get_generation_source_dict().get("generation_attention", "silicon")
 
-        per_ops_step_data = {
+        per_ops_step_data: dict[str, float] = {
             **mix_non_attn_ops,
             "context_attention (scaled)": ctx_attention_latency_ms,
             "generation_attention": gen_attention_latency_ms,
@@ -1176,9 +1228,27 @@ class BaseBackend:
             "generation_attention": gen_attn_source,
         }
 
-        total_latency_ms = non_attention_latency_ms + ctx_attention_latency_ms + gen_attention_latency_ms
-        total_energy_wms = non_attention_energy_wms + ctx_attention_energy_wms + gen_attention_energy_wms
-        return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
+        component_latency_ms = {
+            "shared_non_attention": non_attention_latency_ms,
+            "context_attention": ctx_attention_latency_ms,
+            "decode_attention": gen_attention_latency_ms,
+        }
+        component_energy_wms = {
+            "shared_non_attention": non_attention_energy_wms,
+            "context_attention": ctx_attention_energy_wms,
+            "decode_attention": gen_attention_energy_wms,
+        }
+        return StepEstimate(
+            latency_ms=sum(component_latency_ms.values()),
+            energy_wms=sum(component_energy_wms.values()),
+            component_latency_ms=component_latency_ms,
+            component_energy_wms=component_energy_wms,
+            per_op_latency_ms=per_ops_step_data,
+            per_op_source=per_ops_step_source,
+            context_tokens=step.context_tokens,
+            num_decode_requests=step.num_decode_requests,
+            num_decode_query_tokens=decode_query_tokens,
+        )
 
     def _get_genonly_step_latency(
         self,
@@ -1309,7 +1379,23 @@ class BaseBackend:
         engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config, database) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
-        balance_score = isl * b / ctx_tokens / osl
+        # None (or an omitted kwarg) means the caller did not model speculative
+        # progress here; the summary then stays eligible for the upper-layer
+        # post-hoc projection (SpeculativeDecodingProfile.project_summary).
+        _explicit_progress = kwargs.pop("decode_tokens_per_iteration", None)
+        speculative_scheduling = _explicit_progress is not None
+        decode_tokens_per_iteration = float(_explicit_progress) if speculative_scheduling else 1.0
+        max_decode_progress = float(model._nextn + 1)
+        if (
+            not math.isfinite(decode_tokens_per_iteration)
+            or decode_tokens_per_iteration < 1.0
+            or decode_tokens_per_iteration > max_decode_progress
+        ):
+            raise ValueError(
+                f"decode_tokens_per_iteration must be finite and within [1, nextn + 1={max_decode_progress:g}]"
+            )
+        decode_iterations = 1.0 + max(osl - 1, 0) / decode_tokens_per_iteration
+        balance_score = isl * b / ctx_tokens / decode_iterations
 
         # Backend-specific kwargs (TRT-LLM: max_seq_len / max_num_tokens /
         # free_gpu_memory_fraction; others: {}).
@@ -1323,6 +1409,10 @@ class BaseBackend:
         cache_key = (
             self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
             visual_cache_key,
+            # Explicit progress and an omitted kwarg schedule identically at
+            # 1.0 but record different scheduling metadata, so they must not
+            # share a cache entry.
+            decode_tokens_per_iteration if speculative_scheduling else None,
         )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
@@ -1336,25 +1426,25 @@ class BaseBackend:
         encoder_memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, b)
         encoder_memory_total = encoder_memory.get("total", 0.0)
 
-        # Compute num_mix_steps / num_genonly_steps within osl steps such that
-        # all ctx tokens are consumed.
+        # Compute the mean-field number of engine iterations needed to consume
+        # all context and commit the requested output tokens.
         steps_to_finish_ctx = np.ceil(isl * b / ctx_tokens)
         num_mix_steps = num_genonly_steps = 0
         num_mix_steps_for_tpot_calc = 0  # correction for tpot calc only
         if b > 1:
-            num_mix_gen_tokens = self._mix_step_gen_tokens(b, ctx_tokens, isl, osl)
+            num_mix_gen_tokens = self._mix_step_gen_tokens(b, ctx_tokens, isl, decode_iterations)
             assert num_mix_gen_tokens >= 1, (
                 f"num_mix_gen_tokens: {num_mix_gen_tokens}, b: {b}, ctx_tokens: {ctx_tokens}, isl: {isl}"
             )
             num_mix_ctx_tokens = ctx_tokens
-            if steps_to_finish_ctx >= osl:
+            if steps_to_finish_ctx >= decode_iterations:
                 num_mix_steps = steps_to_finish_ctx
                 num_genonly_steps = 0
                 num_genonly_tokens = 0
                 num_mix_steps_for_tpot_calc = num_mix_steps
             else:
                 num_mix_steps = steps_to_finish_ctx
-                num_genonly_steps = osl - num_mix_steps
+                num_genonly_steps = decode_iterations - num_mix_steps
                 num_genonly_tokens = b
                 num_mix_steps_for_tpot_calc = self._tpot_mix_steps(num_mix_steps)
         elif b == 1:
@@ -1362,7 +1452,7 @@ class BaseBackend:
             num_mix_steps = 1
             num_mix_ctx_tokens = ctx_tokens
             num_mix_gen_tokens = 0
-            num_genonly_steps = osl - 1
+            num_genonly_steps = max(decode_iterations - 1.0, 0.0)
             num_genonly_tokens = 1
             num_mix_steps_for_tpot_calc = 0
 
@@ -1370,9 +1460,22 @@ class BaseBackend:
         per_ops_data: dict[str, dict] = {}
         per_ops_source: dict[str, dict] = {}
 
-        mix_step_latency_ms, mix_step_energy_wms, mix_per_ops, mix_per_ops_src = self._get_mix_step_latency(
-            model, database, runtime_config, num_mix_ctx_tokens, num_mix_gen_tokens, isl, osl, prefix
+        # run_mixed derives the image-augmented effective isl from the config's
+        # own image fields, so the raw runtime_config is passed unchanged (no
+        # pre-adjustment here, or the visual tokens would be counted twice).
+        mix_step_estimate = self.run_mixed(
+            model,
+            database,
+            runtime_config,
+            MixedStepInput(
+                context_tokens=num_mix_ctx_tokens,
+                num_decode_requests=num_mix_gen_tokens,
+            ),
         )
+        mix_step_latency_ms = mix_step_estimate.latency_ms
+        mix_step_energy_wms = mix_step_estimate.energy_wms
+        mix_per_ops = mix_step_estimate.per_op_latency_ms
+        mix_per_ops_src = mix_step_estimate.per_op_source
         mix_efficiency = self._mix_step_efficiency(num_mix_ctx_tokens, num_mix_gen_tokens)
         mix_step_latency_ms *= mix_efficiency
         mix_step_energy_wms *= mix_efficiency
@@ -1407,6 +1510,7 @@ class BaseBackend:
         tpot = (
             (mix_step_latency_ms * num_mix_steps_for_tpot_calc + genonly_step_latency_ms * num_genonly_steps)
             / _tpot_steps
+            / decode_tokens_per_iteration
             if _tpot_steps > 0
             else 0.0
         )
@@ -1555,12 +1659,34 @@ class BaseBackend:
             "num_genonly_steps": float(num_genonly_steps),
             "mix_step_latency_ms": float(mix_step_latency_ms),
             "genonly_step_latency_ms": float(genonly_step_latency_ms),
+            "mix_step_energy_wms": float(mix_step_energy_wms),
+            "genonly_step_energy_wms": float(genonly_step_energy_wms),
+            "mix_efficiency": float(mix_efficiency),
+            "decode_iterations": decode_iterations,
+            "mix_context_tokens": float(num_mix_ctx_tokens),
+            "mix_decode_requests": float(num_mix_gen_tokens),
+            "mix_decode_query_tokens": float(mix_step_estimate.num_decode_query_tokens),
         }
+        if speculative_scheduling:
+            # Recorded only when the caller explicitly supplied the progress:
+            # its presence tells SpeculativeDecodingProfile.project_summary
+            # that the scheduler already modeled it, so the post-hoc scalar
+            # projection must not be applied on top.
+            per_ops_data["scheduling"]["decode_tokens_per_iteration"] = decode_tokens_per_iteration
         if encoder_latency_dict:
             per_ops_data["encoder"] = dict(encoder_latency_dict)
             per_ops_source["encoder"] = dict(encoder_source_dict)
         summary.set_per_ops_data(per_ops_data)
         summary.set_per_ops_source(per_ops_source)
+        summary.set_step_estimates(
+            {
+                # Raw run_mixed output (pre-mix_efficiency); the authoritative
+                # scheduled latency is scheduling["mix_step_latency_ms"], which
+                # already includes the mix_efficiency scale.
+                "mixed": mix_step_estimate,
+                "scheduling": dict(per_ops_data["scheduling"]),
+            }
+        )
 
         self._agg_cache[cache_key] = summary
         return summary
@@ -1570,6 +1696,11 @@ class BaseBackend:
     ) -> InferenceSummary:
         """
         Find the best agg result under constraints.
+
+        Note: this legacy sweep is not speculation-aware — it never forwards
+        ``decode_tokens_per_iteration`` to :meth:`run_agg`, so its TPOT filter
+        compares unprojected values. Speculative workloads should use the
+        ``sweep.py`` path via ``predict_agg_worker``.
 
         Args:
             model: the model to be tested
