@@ -1261,6 +1261,7 @@ def cli_estimate(
             model_path=model_path,
             system_name=system_name,
             decode_system_name=decode_system,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
             backend_name=backend_name,
             resolved_version=resolved_version,
             isl=isl,
@@ -1728,6 +1729,7 @@ def _run_disagg_estimate(
     prefix: int = 0,
     nextn: int = 0,
     nextn_accepted: float | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> EstimateResult:
     """Run disaggregated estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1828,6 +1830,7 @@ def _run_disagg_estimate(
         decode_batch_size=decode_batch_size,
         decode_num_worker=decode_num_workers,
         speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
 
     if summary.check_oom():

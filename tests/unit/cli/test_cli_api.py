@@ -749,3 +749,34 @@ class TestCLIRecommendUnit:
         saved_df = captured["best_configs"]["agg"]
         assert "total_gpus_needed" in saved_df.columns
         assert int(saved_df.iloc[0]["total_gpus_needed"]) == 24
+
+
+def test_disagg_estimate_honors_explicit_free_gpu_memory_fraction():
+    """cli_estimate(mode="disagg") must thread an explicit KV fraction into
+    BOTH worker evaluations (reviewer regression: the disagg branch dropped it
+    and evaluated with backend defaults, admitting configurations the caller's
+    budget cannot hold). A deliberately tiny fraction flips a comfortably
+    feasible point to the KV-budget OOM; omitting it keeps the default pass.
+    """
+    import pytest
+
+    from aiconfigurator.cli.api import cli_estimate
+
+    common_kw = dict(
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        mode="disagg",
+        backend_name="trtllm",
+        isl=4096,
+        osl=1024,
+        prefill_tp_size=2,
+        prefill_batch_size=1,
+        prefill_num_workers=1,
+        decode_tp_size=2,
+        decode_batch_size=64,
+        decode_num_workers=1,
+    )
+    result = cli_estimate(**common_kw)  # backend default fraction: feasible
+    assert result is not None
+    with pytest.raises(RuntimeError, match="OOM"):
+        cli_estimate(**common_kw, free_gpu_memory_fraction=0.001)
