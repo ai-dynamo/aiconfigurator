@@ -259,6 +259,33 @@ overwrite.)
    69 KDA layers = 2.5 ms/step at bs8 vs ~2 ms KDA-attributed in the nsys
    breakdown — same zone, delta = intra-graph gaps + module-boundary
    elementwise now correctly owned by the module row.
+
+   **Collector + dataset LANDED (2026-07-29):**
+   `collector/sglang/collect_kda_module.py` (standalone, megamoe pattern,
+   `PerfFile.LINEAR_ATTN_MODULE`, experimental — no SDK consumer yet) and
+   `b300_sxm/kda/sglang/0.5.16/linear_attn_module_perf.parquet` — 435 rows
+   over the four K3 shard geometries (96/tp heads for tp 1/2/4/8), grid =
+   the declared cases/base_ops/kda.yaml sweeps. kernel_source is the
+   OBSERVED path: fused decode engaged exactly on the 12-head shard (11
+   rows), triton packed on 24/48/96 (32), chunk_kda context (392). Sanity:
+   module−kernel delta = projection cost, scales with shard weights (h12
+   bs1 33.3 vs 6.7 µs; h96 bs1 165.0 vs 12.2 µs) and stays flat bs1→bs8
+   (weight-bound). Failures all classified: conv int32 guard raises
+   (mirror the kernel lane), ONE fatal FIXME(kernel-limit) — the 262144-
+   token context band on the 12-head shard dies with
+   cudaErrorIllegalAddress below the conv int32 bound (culprit kernel in
+   the full-layer path unidentified; generation runs first + guard cells
+   first so only that band is lost) — and h96 generation bs=1024 (Triton
+   invalid argument in the packed decode path, non-fatal). Decode-prep
+   extends auto-shrink below the conv int32 bound (h48 bs1024 / h96 bs512
+   died there before the fix). Verify (DSPARK) module phase deferred —
+   kernel-level fused-verify rows + per-key routing cover it meanwhile.
+   ENVIRONMENT DRIFT NOTE: collected from lmsysorg/sglang@sha256:81a9c006
+   (re-pulled tag; reports 0.5.16 like the original 4b8a7542-digest image
+   the kda_perf/E2E work used, but is a newer kimi-k3 branch build — its
+   sgl JIT cache was ABI-incompatible with the old snapshot). Next: GDN
+   module collector on the same harness, then SDK/Rust module ops
+   (migration order in the design doc).
 7. **Hopper system (if ever re-added)**: recollect sglang kda context with
    the fixed int32 guard rather than restoring the old dataset (coverage hole
    above), and re-run the moe marlin lane to reconfirm the EP>1 crash before

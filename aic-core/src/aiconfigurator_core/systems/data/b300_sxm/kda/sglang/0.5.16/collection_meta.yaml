@@ -9,3 +9,14 @@ runtime:
 tables:
   kda_perf:
     status: complete
+  # Module-level linear-attention rows (whole KimiK3DeltaAttention layer,
+  # collector/sglang/collect_kda_module.py; experimental producer, no SDK
+  # consumer yet — design: docs/perf_database/linear-attention-module-design.md).
+  # partial: verify (DSPARK target-verify) phase deferred; the 262144-token
+  # context band on the 12-head shard fails fatally (FIXME(kernel-limit) in
+  # the collector); h96 generation bs=1024 fails (Triton invalid argument).
+  # Collected 2026-07-29 on 1xB300 SM103 from lmsysorg/sglang@sha256:81a9c006
+  # (also reports 0.5.16 but is a NEWER kimi-k3 branch build than the image
+  # the kda_perf rows came from — branch tags drift; re-verify on bumps).
+  linear_attn_module_perf:
+    status: partial
