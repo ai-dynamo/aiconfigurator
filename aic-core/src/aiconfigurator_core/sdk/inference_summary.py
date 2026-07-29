@@ -101,6 +101,9 @@ class InferenceSummary:
         self._free_gpu_memory_fraction: float | None = None
         self._kv_cache_reserved_fraction: float = 0.0
         self._kv_cache_tolerance: float = 0.0
+        # of_free (TRT-LLM) vs of_total (vLLM/SGLang) budget semantics; consumed
+        # by the estimate detail report so its displayed max batch matches the gate.
+        self._fraction_of_free: bool = True
         self._kv_bytes_per_seq: float | None = None
         self._kv_seq_len_used: int | None = None
 
@@ -111,6 +114,7 @@ class InferenceSummary:
         free_gpu_memory_fraction: float | None = None,
         kv_cache_reserved_fraction: float = 0.0,
         kv_cache_tolerance: float = 0.0,
+        fraction_of_free: bool = True,
     ) -> None:
         """
         Set memory and check oom.
@@ -121,6 +125,12 @@ class InferenceSummary:
 
         When *free_gpu_memory_fraction* is not ``None``, also performs the
         KV cache budget check using the same *memory_dict*.
+
+        *fraction_of_free* selects the budget semantics: ``True`` applies the
+        fraction to the free pool after non-KV allocations (TRT-LLM
+        ``free_gpu_memory_fraction``); ``False`` applies it to TOTAL device
+        memory before subtracting non-KV (vLLM ``gpu_memory_utilization`` /
+        SGLang ``mem_fraction_static``).
         """
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))
@@ -129,12 +139,14 @@ class InferenceSummary:
         self._free_gpu_memory_fraction = free_gpu_memory_fraction
         self._kv_cache_reserved_fraction = kv_cache_reserved_fraction
         self._kv_cache_tolerance = kv_cache_tolerance
+        self._fraction_of_free = fraction_of_free
         if free_gpu_memory_fraction is not None:
             self._check_and_set_kv_cache_oom(
                 mem_capacity,
                 free_gpu_memory_fraction,
                 kv_cache_reserved_fraction,
                 kv_cache_tolerance,
+                fraction_of_free,
             )
 
     def _check_and_set_kv_cache_oom(
@@ -143,26 +155,32 @@ class InferenceSummary:
         free_gpu_memory_fraction: float,
         kv_cache_reserved_fraction: float,
         kv_cache_tolerance: float,
+        fraction_of_free: bool = True,
     ) -> None:
         """Check whether the KV cache exceeds the fraction-based memory budget.
 
         Uses ``self._memory`` (set by :meth:`set_memory_and_check_oom`).
 
-        Equivalent to the inflation formula
-        ``kv / (frac*(1-res)*(1-tol)) + non_kv >= capacity`` rewritten as
-        ``kv > (capacity - non_kv) * frac * (1-res) * (1-tol)``.
+        Budget math is delegated to :func:`memory.kv_cache_budget_bytes` so the
+        estimate and the sweep share one formula (closes TODO(#1208)):
+        ``of_free`` (TRT-LLM) gives ``(capacity - non_kv) * frac * scale``;
+        ``of_total`` (vLLM/SGLang) gives ``capacity * frac * scale - non_kv``.
         """
         self._is_kv_cache_oom = False
         if self._is_oom:
             return
+        from aiconfigurator_core.sdk.memory import kv_cache_budget_bytes
+
         mem_cap_gib = mem_capacity / (1 << 30)
         kv_gib = self._memory.get("kvcache", 0.0)
         non_kv_gib = self._memory["total"] - kv_gib
-        kv_budget = (
-            (mem_cap_gib - non_kv_gib)
-            * free_gpu_memory_fraction
-            * (1 - kv_cache_reserved_fraction)
-            * (1 - kv_cache_tolerance)
+        kv_budget = kv_cache_budget_bytes(
+            capacity=mem_cap_gib,
+            non_kv=non_kv_gib,
+            fraction=free_gpu_memory_fraction,
+            of_free=fraction_of_free,
+            reserved=kv_cache_reserved_fraction,
+            tolerance=kv_cache_tolerance,
         )
         self._is_kv_cache_oom = kv_gib > kv_budget
 

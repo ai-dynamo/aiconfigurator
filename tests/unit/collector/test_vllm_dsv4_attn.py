@@ -82,6 +82,7 @@ def dsv4_module(monkeypatch):
         BatchSpec=SimpleNamespace,
         create_common_attn_metadata=lambda *_args, **_kwargs: None,
         create_vllm_config=lambda *_args, **_kwargs: None,
+        enable_engine_fused_ops=lambda *_args, **_kwargs: None,
         setup_distributed=lambda *_args, **_kwargs: None,
     )
 

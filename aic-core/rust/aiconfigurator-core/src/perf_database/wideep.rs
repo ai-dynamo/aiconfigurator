@@ -899,12 +899,14 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
             if !quants_in_load_order.iter().any(|q| q == &key.quant) {
                 quants_in_load_order.push(key.quant.clone());
             }
-            // Last-wins parity with Python `load_wideep_*_moe_data`
-            // (direct-assign, no skip-on-conflict guard).
+            // First-wins parity with Python `load_wideep_*_moe_data`, which now
+            // guards with the standard skip-on-key-conflict idiom
+            // (shared-layer contract, design §6.1).
             by_keys
                 .entry(key)
                 .or_default()
-                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -1015,10 +1017,13 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
                 num_experts: row.u32(num_experts_col)?,
                 moe_ep_size,
             };
+            // First-wins parity with Python `load_trtllm_alltoall_data`
+            // (skip-on-key-conflict; shared-layer contract, design §6.1).
             by_keys
                 .entry(key)
                 .or_default()
-                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
         }
     }
     if !any_source || by_keys.is_empty() {

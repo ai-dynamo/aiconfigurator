@@ -61,6 +61,25 @@ impl Node {
         }
     }
 
+    /// First-wins leaf insert: keeps an existing leaf untouched. Loaders use
+    /// this when merging priority-ordered shared-layer sources (the first
+    /// source that has a coordinate wins; `insert` would let later, lower-
+    /// priority sources overwrite it).
+    pub fn insert_first_wins(&mut self, path: &[u32], value: f64) {
+        match self {
+            Node::Branch(map) => {
+                if path.len() == 1 {
+                    map.entry(path[0]).or_insert(Node::Leaf(value));
+                } else {
+                    map.entry(path[0])
+                        .or_insert_with(Node::branch)
+                        .insert_first_wins(&path[1..], value);
+                }
+            }
+            Node::Leaf(_) => panic!("insert into a leaf"),
+        }
+    }
+
     fn as_branch(&self) -> Option<&BTreeMap<u32, Node>> {
         match self {
             Node::Branch(map) => Some(map),

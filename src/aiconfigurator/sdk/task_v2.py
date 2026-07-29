@@ -875,11 +875,31 @@ class Task:
         database = self._try_load_role_database(role)
         if database is None:
             return []
+        ctx_op = self._attention_op_keys(role)[0]
+        if ctx_op == "context_mla" and self._attention_quant_identity_mixed(role):
+            # Mixed-projection checkpoints (e.g. V3.1-NVFP4: BF16 q/kv + NVFP4
+            # o_proj) bypass the profiled MLA-module row — no single-gemm_type
+            # module identity matches — so fmha availability must be judged on
+            # the granular table alone: a module-only fp8 slice cannot serve
+            # these models' queries.
+            ctx_op = "context_mla_granular"
         return context_fmha_supported_modes(
             database,
-            self._attention_op_keys(role)[0],
+            ctx_op,
             self._role_attr(role, "kvcache_quant_mode"),
         )
+
+    def _attention_quant_identity_mixed(self, role: str) -> bool:
+        """Whether the checkpoint's attention projections diverge in dtype
+        (some excluded from quantization, some not) under this role's gemm
+        mode — the condition that makes DeepSeek-family models bypass the
+        profiled MLA-module row (see DeepSeekModel.__init__)."""
+        from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions
+
+        if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.bfloat16:
+            return False  # everything runs BF16 -> uniform identity
+        excl = attention_projection_exclusions(self._raw_config) & {"q", "kv", "o"}
+        return bool(excl) and excl != {"q", "kv", "o"}
 
     def _resolve_search_space(self) -> None:
         roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
@@ -1507,6 +1527,7 @@ class Task:
             "decode_model_config": self.build_model_config(role="decode"),
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
+            "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,
@@ -1733,6 +1754,10 @@ class Task:
         p_backend = get_backend(self.prefill_backend_name)
         p_model = get_model(self.prefill_model_path, p_mc, self.prefill_backend_name)
 
+        worker_kwargs: dict[str, Any] = {}
+        if self.free_gpu_memory_fraction is not None:
+            worker_kwargs["free_gpu_memory_fraction"] = self.free_gpu_memory_fraction
+
         p_summary = predict_disagg_worker(
             model=p_model,
             backend=p_backend,
@@ -1742,11 +1767,12 @@ class Task:
             latency_correction=self.prefill_latency_correction,
             predictor=self.predictor,
             speculative_profile=self.build_speculative_profile(),
+            **worker_kwargs,
         )
-        if p_summary.check_oom():
+        if p_summary.check_oom() or p_summary.check_kv_cache_oom():
             raise RuntimeError(
                 f"OOM in prefill phase at tp={prefill_tp} pp={prefill_pp} dp={prefill_dp} "
-                f"batch_size={prefill_batch_size}."
+                f"batch_size={prefill_batch_size} (memory capacity or KV-cache budget exceeded)."
             )
 
         # --- Decode phase ---
@@ -1771,10 +1797,12 @@ class Task:
             latency_correction=self.decode_latency_correction,
             predictor=self.predictor,
             speculative_profile=self.build_speculative_profile(),
+            **worker_kwargs,
         )
-        if d_summary.check_oom():
+        if d_summary.check_oom() or d_summary.check_kv_cache_oom():
             raise RuntimeError(
-                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} batch_size={decode_batch_size}."
+                f"OOM in decode phase at tp={decode_tp} pp={decode_pp} dp={decode_dp} "
+                f"batch_size={decode_batch_size} (memory capacity or KV-cache budget exceeded)."
             )
 
         # --- Rate-match the pair ---

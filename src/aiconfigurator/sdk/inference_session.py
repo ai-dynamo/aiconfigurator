@@ -59,6 +59,7 @@ class InferenceSession:
         mode: str,
         stride: int = 32,
         latency_correction_scale: float = 1.0,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run static inference
@@ -68,10 +69,16 @@ class InferenceSession:
             mode (str): the mode to run inference, static, static_ctx, static_gen
             stride (int): the stride is used to accelerate the estimation, for a give osl,
                 will only computes the i, i+stride, i+2*stride, ... step, default is 32.
+            free_gpu_memory_fraction: Explicit KV-cache memory fraction for the
+                budget check (backend-defined semantics). When omitted the
+                backend applies its version-derived default.
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
+        # Forward the fraction only when set so stubbed/injected backends
+        # predating the kwarg keep working (same compat rule as predict.py).
+        extra = {} if free_gpu_memory_fraction is None else {"free_gpu_memory_fraction": free_gpu_memory_fraction}
         return self._backend.run_static(
             self._model,
             self._database,
@@ -79,6 +86,7 @@ class InferenceSession:
             mode,
             stride,
             latency_correction_scale,
+            **extra,
         )
 
     def run_static_latency_only(
@@ -276,6 +284,7 @@ class DisaggInferenceSession:
         decode_batch_size: int,
         decode_num_worker: int,
         speculative_profile: SpeculativeDecodingProfile | None = None,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -291,6 +300,10 @@ class DisaggInferenceSession:
             decode_num_worker (int): the number of decode workers
             speculative_profile: Optional accepted-token progress assumption.
                 Projects decode metrics before prefill/decode rate matching.
+            free_gpu_memory_fraction: Explicit KV-cache memory fraction applied
+                to BOTH worker evaluations (semantics are backend-defined, see
+                run_static). When omitted, each run_static falls back to the
+                backend's version-derived default.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -308,6 +321,7 @@ class DisaggInferenceSession:
             mode="static_ctx",
             runtime_config=prefill_runtime_config,
             latency_correction_scale=self._prefill_latency_correction_scale,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
@@ -316,6 +330,7 @@ class DisaggInferenceSession:
             mode="static_gen",
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
@@ -331,6 +346,15 @@ class DisaggInferenceSession:
         prefill_oom = prefill_summary.check_oom()
         decode_oom = decode_summary.check_oom()
         if prefill_oom or decode_oom:
+            disagg_summary.set_oom(True)
+        # KV-cache budget infeasibility (per-worker fraction-based check from
+        # run_static) disqualifies the combination just like a capacity OOM:
+        # the deployed engine could not admit the assumed decode batch, so the
+        # projected throughput would be unreachable (#1396).
+        prefill_kv_oom = prefill_summary.check_kv_cache_oom()
+        decode_kv_oom = decode_summary.check_kv_cache_oom()
+        if prefill_kv_oom or decode_kv_oom:
+            disagg_summary.set_kv_cache_oom(True)
             disagg_summary.set_oom(True)
 
         disagg_summary.set_summary_df(disagg_summary_df)
@@ -461,14 +485,21 @@ class DisaggInferenceSession:
                         runtime_config=overwritten_runtime_config,
                         latency_correction_scale=latency_correction_scale,
                     )
-                    if not summary.check_oom():
+                    if not summary.check_oom() and not summary.check_kv_cache_oom():
                         all_configs_oom = False
                         summary_df = pd.concat(
                             [summary_df, summary.get_summary_df()],
                             axis=0,
                             ignore_index=True,
                         )
-                    else:  # larger b will always OOM
+                    else:
+                        # Larger b will always OOM. check_kv_cache_oom covers
+                        # the fraction-based budget (e.g. vLLM only exposes
+                        # gpu_memory_utilization of total memory): a worker
+                        # whose KV for batch b cannot actually be allocated
+                        # must not enter the candidate pool, or the search
+                        # selects deployments whose projected concurrency is
+                        # physically unreachable (#1396).
                         break
             except Exception as e:
                 logger.warning(
@@ -1231,6 +1262,7 @@ class AFDInferenceSession:
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             kv_cache_reserved_fraction=reserved_fraction,
             kv_cache_tolerance=tolerance,
+            fraction_of_free=self._backend.memory_fraction_of_free(),
         )
         return summary
 
@@ -1598,7 +1630,7 @@ class AFDInferenceSession:
         if phase not in ("prefill", "decode", "both"):
             raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
         if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction()
+            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction(self._database.version)
 
         a_model, f_model = self._build_models()
 

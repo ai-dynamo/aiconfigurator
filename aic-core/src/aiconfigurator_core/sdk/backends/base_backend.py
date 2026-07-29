@@ -617,6 +617,7 @@ class BaseBackend:
         mode: str,
         stride: int = 32,
         latency_correction_scale: float = 1.0,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run the static inference.
@@ -842,7 +843,16 @@ class BaseBackend:
         summary.set_context_power_avg(context_power_avg)
         summary.set_generation_power_avg(generation_power_avg)
         summary.set_e2e_power_avg(e2e_power_avg)
-        summary.set_memory_and_check_oom(memory, database.system_spec["gpu"]["mem_capacity"])
+        summary.set_memory_and_check_oom(
+            memory,
+            database.system_spec["gpu"]["mem_capacity"],
+            **self._static_oom_check_kwargs(
+                database.system_spec["gpu"]["mem_capacity"],
+                free_gpu_memory_fraction=free_gpu_memory_fraction,
+                backend_version=database.version,
+                model_config=model.config,
+            ),
+        )
         # KV-per-seq context for capacity probing in CLI detail reports.
         try:
             kv_seq_len_used = isl + img_ctx_tokens + beam_width * osl
@@ -858,13 +868,56 @@ class BaseBackend:
 
         return summary
 
-    def get_default_free_gpu_memory_fraction(self) -> float | None:
-        """Default KV cache memory fraction for this backend, if it has one."""
+    def get_default_free_gpu_memory_fraction(self, backend_version: str | None = None) -> float | None:
+        """Default KV cache memory fraction for this backend, if it has one.
+
+        ``backend_version`` lets backends whose framework changed the default
+        across releases resolve the right value (vLLM 0.19->0.22: 0.90->0.92).
+        """
         return None
 
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
         """Return backend-specific KV cache reserved fraction and tolerance."""
         return 0.0, 0.0
+
+    def memory_fraction_of_free(self) -> bool:
+        """Whether the memory fraction applies to FREE memory (after non-KV).
+
+        ``True`` for TRT-LLM's ``free_gpu_memory_fraction``; ``False`` for
+        backends whose fraction caps TOTAL device memory (vLLM
+        ``gpu_memory_utilization`` / SGLang ``mem_fraction_static``).
+        """
+        return True
+
+    def _static_oom_check_kwargs(
+        self,
+        mem_capacity_bytes: int | None = None,
+        free_gpu_memory_fraction: float | None = None,
+        backend_version: str | None = None,
+        model_config=None,
+    ) -> dict:
+        """Fraction-based KV budget kwargs for the static path.
+
+        A user-configured ``free_gpu_memory_fraction`` (Task / estimate API)
+        always wins; the backend default — possibly version-dependent (vLLM
+        0.14/0.19 ship 0.90, 0.22+ ship 0.92) or capacity-derived (SGLang) —
+        is the fallback. Backends without any default return ``{}``, which
+        skips the budget check (plain capacity OOM check still applies).
+        """
+        fraction = (
+            free_gpu_memory_fraction
+            if free_gpu_memory_fraction is not None
+            else self.get_default_free_gpu_memory_fraction(backend_version)
+        )
+        if fraction is None:
+            return {}
+        reserved, tolerance = self.get_kv_cache_memory_check_params()
+        return {
+            "free_gpu_memory_fraction": fraction,
+            "kv_cache_reserved_fraction": reserved,
+            "kv_cache_tolerance": tolerance,
+            "fraction_of_free": self.memory_fraction_of_free(),
+        }
 
     def get_partition_memory_usage(
         self,

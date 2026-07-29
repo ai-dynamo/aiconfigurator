@@ -551,6 +551,7 @@ def _get_disagg_worker_candidates(
     latency_correction: float,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Enumerate (parallel, batch_size) worker candidates for a disagg role.
 
@@ -599,11 +600,19 @@ def _get_disagg_worker_candidates(
                     latency_correction=latency_correction,
                     predictor=predictor,
                     speculative_profile=speculative_profile,
+                    free_gpu_memory_fraction=free_gpu_memory_fraction,
                 )
-                if not summary.check_oom():
+                if not summary.check_oom() and not summary.check_kv_cache_oom():
                     all_configs_oom = False
                     result_rows.append(summary.get_summary_df())
                 else:
+                    # Larger b will always OOM. check_kv_cache_oom covers the
+                    # fraction-based budget (e.g. vLLM only manages
+                    # gpu_memory_utilization of total memory): a worker whose
+                    # KV for batch b cannot actually be allocated must not
+                    # enter the candidate pool, or the search selects
+                    # deployments whose projected concurrency is physically
+                    # unreachable (#1396).
                     break
         except Exception as e:
             logger.warning(
@@ -765,6 +774,7 @@ def sweep_disagg(
     autoscale_ttft_correction_factor: float | None = None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
@@ -840,6 +850,7 @@ def sweep_disagg(
         latency_correction=prefill_latency_correction,
         predictor=predictor,
         speculative_profile=speculative_profile,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
     decode_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
@@ -853,6 +864,7 @@ def sweep_disagg(
         latency_correction=decode_latency_correction,
         predictor=predictor,
         speculative_profile=speculative_profile,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
 
     if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:

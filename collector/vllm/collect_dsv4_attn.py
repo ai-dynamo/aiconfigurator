@@ -62,7 +62,13 @@ from collector.case_generator import (
 )
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
-from collector.vllm.utils import BatchSpec, create_common_attn_metadata, create_vllm_config, setup_distributed
+from collector.vllm.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+    enable_engine_fused_ops,
+    setup_distributed,
+)
 
 __compat__ = "vllm==0.24.0"
 
@@ -138,6 +144,7 @@ def _patched_config_dir(model_id: str, *, compress_ratio: int):
 def _init_cuda(device: str) -> None:
     setup_distributed(device)
     torch.cuda.set_device(device)
+    enable_engine_fused_ops()
     init_workspace_manager(torch.device(device))
 
 
