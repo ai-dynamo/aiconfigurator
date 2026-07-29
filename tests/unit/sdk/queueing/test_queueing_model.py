@@ -525,15 +525,13 @@ class TestDisaggTandem:
 
         eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
         wl_fixed = WorkloadSpec(isl=4096, osl=8, concurrency=16)
-        wl_degen = WorkloadSpec(isl=4096, osl=8, concurrency=16,
-                                isl_quantiles=(4096,) * 4, osl_quantiles=(8,) * 4)
+        wl_degen = WorkloadSpec(isl=4096, osl=8, concurrency=16, isl_quantiles=(4096,) * 4, osl_quantiles=(8,) * 4)
         rep_f = evaluate_closed_loop(wl_fixed, eng, TIMING, backend="vllm")
         rep_d = evaluate_closed_loop(wl_degen, eng, TIMING, backend="vllm")
         assert rep_d.ttft_steady.mean == pytest.approx(rep_f.ttft_steady.mean, abs=1e-9)
         assert rep_d.throughput_rps == pytest.approx(rep_f.throughput_rps, rel=1e-12)
 
-        wl_var = WorkloadSpec(isl=4096, osl=8, concurrency=16,
-                              isl_quantiles=(1024, 3072, 5120, 7168))  # same mean 4096
+        wl_var = WorkloadSpec(isl=4096, osl=8, concurrency=16, isl_quantiles=(1024, 3072, 5120, 7168))  # same mean 4096
         rep_v = evaluate_closed_loop(wl_var, eng, TIMING, backend="vllm")
         assert rep_v.ttft_steady.mean < rep_f.ttft_steady.mean
         # throughput stays in the same regime (measured: <10% shift)
@@ -545,14 +543,16 @@ class TestDisaggTandem:
         with pytest.raises(ValueError):
             WorkloadSpec(isl=1024, osl=16, concurrency=2, isl_quantiles=(0, 512))
         with pytest.raises(ValueError):
-            WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2,
-                         isl_quantiles=(256, 2048))
+            WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2, isl_quantiles=(256, 2048))
 
     def test_workload_fidelity_contract(self):
         """Reports declare the input tier they consumed; the disagg tandem
         rejects inputs above its tier instead of silently downgrading."""
         from aiconfigurator.sdk.queueing import (
-            evaluate_closed_loop, evaluate_disagg, evaluate_open_loop, static_report,
+            evaluate_closed_loop,
+            evaluate_disagg,
+            evaluate_open_loop,
+            static_report,
         )
         from aiconfigurator_core.sdk.queueing.spec import workload_fidelity
 
@@ -578,21 +578,19 @@ class TestDisaggTandem:
         empirical inter-arrival strata express batched arrivals (zeros)."""
         from aiconfigurator.sdk.queueing import evaluate_closed_loop, evaluate_open_loop
         from aiconfigurator_core.sdk.queueing.spec import (
-            stratified_shape_tuples, workload_fidelity,
+            stratified_shape_tuples,
+            workload_fidelity,
         )
 
         eng = EngineSpec(max_num_batched_tokens=8192, enable_chunked_prefill=False)
         # C=1, single tuple: TTFT is exactly one prefill of the EFFECTIVE
         # prompt (isl - prefix) priced at (isl, prefix) — the per-slot prefix
         # reaches the timing call unmangled
-        solo = WorkloadSpec(isl=4096, osl=8, concurrency=1,
-                            shape_tuples=((4096, 3072, 8),))
+        solo = WorkloadSpec(isl=4096, osl=8, concurrency=1, shape_tuples=((4096, 3072, 8),))
         rep_solo = evaluate_closed_loop(solo, eng, TIMING)
         assert rep_solo.ttft_steady.mean == pytest.approx(TIMING.prefill_ms(1, 4096, 3072))
-        cold = WorkloadSpec(isl=4096, osl=8, concurrency=8,
-                            shape_tuples=((2048, 0, 8), (6144, 0, 8)))
-        warm = WorkloadSpec(isl=4096, osl=8, concurrency=8,
-                            shape_tuples=((2048, 1024, 8), (6144, 3072, 8)))
+        cold = WorkloadSpec(isl=4096, osl=8, concurrency=8, shape_tuples=((2048, 0, 8), (6144, 0, 8)))
+        warm = WorkloadSpec(isl=4096, osl=8, concurrency=8, shape_tuples=((2048, 1024, 8), (6144, 3072, 8)))
         assert workload_fidelity(warm) == "W3(closed-loop, joint-shapes)"
         rep_cold = evaluate_closed_loop(cold, eng, TIMING)
         rep_warm = evaluate_closed_loop(warm, eng, TIMING)
@@ -601,8 +599,7 @@ class TestDisaggTandem:
         assert rep_warm.workload_fidelity.startswith("W3")
 
         # batched arrivals: 3 of 4 inter-arrival strata are zero
-        wl = WorkloadSpec(isl=1024, osl=8, request_rate=4.0,
-                          arrival_quantiles=(0.0, 0.0, 0.0, 1000.0))
+        wl = WorkloadSpec(isl=1024, osl=8, request_rate=4.0, arrival_quantiles=(0.0, 0.0, 0.0, 1000.0))
         rep = evaluate_open_loop(wl, eng, TIMING)
         assert rep.throughput_rps == pytest.approx(4.0, rel=0.1)
         assert "empirical-arrivals" in rep.workload_fidelity
@@ -614,15 +611,19 @@ class TestDisaggTandem:
         with pytest.raises(ValueError):  # prefix >= isl
             WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 512, 8),))
         with pytest.raises(ValueError):  # exclusive with marginals
-            WorkloadSpec(isl=1024, osl=8, concurrency=2,
-                         shape_tuples=((512, 0, 8),), isl_quantiles=(512,))
+            WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 0, 8),), isl_quantiles=(512,))
         with pytest.raises(ValueError):  # arrivals need open loop
             WorkloadSpec(isl=1024, osl=8, concurrency=2, arrival_quantiles=(1.0,))
         from aiconfigurator.sdk.queueing import evaluate_disagg
+
         with pytest.raises(ValueError):  # tandem rejects W3 inputs
             evaluate_disagg(
                 WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 0, 8),)),
-                EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec(),
+                EngineSpec(),
+                EngineSpec(),
+                TIMING,
+                TIMING,
+                self._spec(),
             )
 
     def test_open_loop_exact_trace_replay(self):
@@ -670,8 +671,11 @@ class TestDisaggTandem:
         with pytest.raises(RuntimeError):
             # far beyond capacity: the waiting queue must diverge, not hang
             evaluate_open_loop(
-                WorkloadSpec(isl=4096, osl=8, request_rate=1000.0), eng, TIMING,
-                warmup_requests=512, window_requests=2048,
+                WorkloadSpec(isl=4096, osl=8, request_rate=1000.0),
+                eng,
+                TIMING,
+                warmup_requests=512,
+                window_requests=2048,
             )
 
     def test_turnaround_delays_replacement_visibility(self):
@@ -877,9 +881,7 @@ class TestArrivalPlaneAndChunkPricing:
         trace = [(0.0, 4000, 0, 4), (0.0, 500, 0, 4)]
         wl = WorkloadSpec(isl=2048, osl=4, request_rate=1.0, ingest_us_per_token=ingest)
         eng = EngineSpec(max_num_batched_tokens=4096, max_num_seqs=cap, enable_chunked_prefill=True)
-        return evaluate_open_loop(
-            wl, eng, SyntheticTiming(), backend="vllm", warmup_requests=0, arrival_trace=trace
-        )
+        return evaluate_open_loop(wl, eng, SyntheticTiming(), backend="vllm", warmup_requests=0, arrival_trace=trace)
 
     def test_same_instant_burst_keeps_dispatch_order_without_ingest(self):
         rep = self._trace_rep(ingest=0.0)

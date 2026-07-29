@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from dataclasses import dataclass
+from itertools import pairwise
+from typing import Optional
 
 from .spec import WorkloadSpec, stratified_quantiles, stratified_shape_tuples
 
@@ -103,11 +105,7 @@ class TraceRecord:
         if self.hash_ids is None:
             return []
         if self.block_tokens % page_tokens:
-            raise ValueError(
-                f"block_tokens={self.block_tokens} is not a whole multiple "
-                f"of page_tokens={page_tokens}"
-            )
-        per_block = self.block_tokens // page_tokens
+            raise ValueError(f"block_tokens={self.block_tokens} is not a whole multiple of page_tokens={page_tokens}")
         out = []
         remaining = self.isl
         for h in self.hash_ids:
@@ -131,21 +129,22 @@ def load_mooncake_jsonl(
     isl+osl exceed a serving cap (record the dropped fraction — the filter
     changes the workload)."""
     records = []
-    for line in open(path):
-        r = json.loads(line)
-        if max_total_tokens and r["input_length"] + r["output_length"] > max_total_tokens:
-            continue
-        records.append(
-            TraceRecord(
-                arrival_ms=float(r["timestamp"]),
-                isl=int(r["input_length"]),
-                osl=max(1, int(r["output_length"])),
-                hash_ids=tuple(r["hash_ids"]),
-                block_tokens=512,
+    with open(path) as f:
+        for line in f:
+            r = json.loads(line)
+            if max_total_tokens and r["input_length"] + r["output_length"] > max_total_tokens:
+                continue
+            records.append(
+                TraceRecord(
+                    arrival_ms=float(r["timestamp"]),
+                    isl=int(r["input_length"]),
+                    osl=max(1, int(r["output_length"])),
+                    hash_ids=tuple(r["hash_ids"]),
+                    block_tokens=512,
+                )
             )
-        )
-        if limit and len(records) >= limit:
-            break
+            if limit and len(records) >= limit:
+                break
     return records
 
 
@@ -162,32 +161,33 @@ def load_cc_sessions_jsonl(
     request beyond ``max_total_tokens`` are dropped whole (a partial session
     breaks the multi-turn prefix chain)."""
     sessions = []
-    for li, line in enumerate(open(path)):
-        s = json.loads(line)
-        block = int(s.get("block_size", 64))
-        flat = []
-        for r in s["requests"]:
-            flat.extend(r["requests"] if r.get("type") == "subagent" else [r])
-        flat.sort(key=lambda r: r["t"])
-        if max_total_tokens and any(r["in"] + r["out"] > max_total_tokens for r in flat):
-            continue
-        sid = s.get("id", str(li))
-        sessions.append(
-            [
-                TraceRecord(
-                    arrival_ms=float(r["t"]) * 1000.0,
-                    isl=int(r["in"]),
-                    osl=max(1, int(r["out"])),
-                    hash_ids=tuple(r["hash_ids"]),
-                    block_tokens=block,
-                    session=sid,
-                    api_time_ms=float(r["api_time"]) * 1000.0 if r.get("api_time") else None,
-                )
-                for r in flat
-            ]
-        )
-        if limit_sessions and len(sessions) >= limit_sessions:
-            break
+    with open(path) as f:
+        for li, line in enumerate(f):
+            s = json.loads(line)
+            block = int(s.get("block_size", 64))
+            flat = []
+            for r in s["requests"]:
+                flat.extend(r["requests"] if r.get("type") == "subagent" else [r])
+            flat.sort(key=lambda r: r["t"])
+            if max_total_tokens and any(r["in"] + r["out"] > max_total_tokens for r in flat):
+                continue
+            sid = s.get("id", str(li))
+            sessions.append(
+                [
+                    TraceRecord(
+                        arrival_ms=float(r["t"]) * 1000.0,
+                        isl=int(r["in"]),
+                        osl=max(1, int(r["out"])),
+                        hash_ids=tuple(r["hash_ids"]),
+                        block_tokens=block,
+                        session=sid,
+                        api_time_ms=float(r["api_time"]) * 1000.0 if r.get("api_time") else None,
+                    )
+                    for r in flat
+                ]
+            )
+            if limit_sessions and len(sessions) >= limit_sessions:
+                break
     return sessions
 
 
@@ -225,7 +225,7 @@ def workload_from_trace(
     capacity_pages = max(1, kv_capacity_tokens // page_tokens)
     ns = [r.session for r in records]
     hits = prefix_hits(
-        (r.pages(page_tokens, namespace=n) for r, n in zip(records, ns)),
+        (r.pages(page_tokens, namespace=n) for r, n in zip(records, ns, strict=True)),
         capacity_pages,
     )
     prefix_tokens = [h * page_tokens for h in hits]
@@ -233,20 +233,16 @@ def workload_from_trace(
     t0 = records[0].arrival_ms
     arrival = [(r.arrival_ms - t0) * time_scale for r in records]
     trace = [
-        (t, r.isl, min(px, max(0, r.isl - 1)), r.osl)
-        for t, r, px in zip(arrival, records, prefix_tokens)
+        (t, r.isl, min(px, max(0, r.isl - 1)), r.osl) for t, r, px in zip(arrival, records, prefix_tokens, strict=True)
     ]
 
     span_s = max(arrival[-1], 1e-9) / 1000.0
     rate = len(records) / span_s if span_s > 0 else float("nan")
-    gaps = [b - a for a, b in zip(arrival, arrival[1:])]
+    gaps = [b - a for a, b in pairwise(arrival)]
     # fully-cached prompts (oracle prefix == isl) still compute >= 1 token
     # (the engine always runs the last token to produce logits), hence the
     # same isl-1 clamp the exact-replay tuples use
-    shape_records = [
-        (r.isl, min(px, max(0, r.isl - 1)), r.osl)
-        for r, px in zip(records, prefix_tokens)
-    ]
+    shape_records = [(r.isl, min(px, max(0, r.isl - 1)), r.osl) for r, px in zip(records, prefix_tokens, strict=True)]
     wl = WorkloadSpec(
         isl=max(1, int(sum(r.isl for r in records) / len(records))),
         osl=max(1, int(sum(r.osl for r in records) / len(records))),

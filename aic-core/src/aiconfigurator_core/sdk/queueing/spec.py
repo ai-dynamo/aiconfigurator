@@ -199,7 +199,7 @@ def stratified_shape_tuples(records, k: int = 32) -> tuple:
     return tuple(rs[min(n - 1, int((j + 0.5) / k * n))] for j in range(k))
 
 
-def workload_fidelity(wl: "WorkloadSpec") -> str:
+def workload_fidelity(wl: WorkloadSpec) -> str:
     """The W-tier of the workload description an evaluation consumed — the
     input side of the fidelity contract (design doc, "Workload-fidelity
     contract"): W0 fixed shape, W1 + open-loop arrivals, W2 + shape

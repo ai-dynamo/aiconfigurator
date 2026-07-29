@@ -1,35 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pass-calendar limit-cycle evaluator.
+"""Pass-calendar evaluators: closed loop (limit cycle) and open loop.
 
-For a stationary closed-loop workload, the continuous-batching engine is a
-deterministic dynamical system: identical requests + closed-loop arrivals
-make every pass a pure function of the previous state, so the system enters
-a limit cycle after the initial admission staircase. This module evaluates
-that recursion at pass granularity (aggregate slot state, no event heap, no
-KV manager, no RNG) and reads TTFT/ITL/TPOT distributions off the cycle.
+The continuous-batching engine's scheduler is a deterministic arithmetic:
+each iteration ("pass") decides who is in the batch and how the token
+budget splits between running decodes and queued prefill chunks. This
+module evaluates that recursion at pass granularity (aggregate slot state,
+no event heap, no KV manager, no runtime RNG) and reads TTFT/ITL/TPOT
+DISTRIBUTIONS off the resulting calendar — for closed loops (fixed slots,
+immediate replacement: the system enters a limit cycle) and open loops
+(rate-driven arrivals with a FIFO waiting queue; synthetic quantile
+streams, or verbatim ``arrival_trace`` replay).
 
 This is an evaluation of the scheduling algorithm's own arithmetic — not a
-statistical fit and not a per-request simulation. Step semantics are
-anchored to the vLLM v1 scheduler's behavior: one token budget shared by
-decode tokens and prefill chunks, the running set served before the waiting
-queue in admission order, and chunked prefill consuming whatever budget the
-decodes leave. The full clause provenance table and validation record live
-in docs/design/queueing_model.md; upstream scheduling changes surface as
+statistical fit and not a per-request simulation. The full clause
+provenance table and validation record live in
+docs/design/queueing_model.md; upstream scheduling changes surface as
 validation-gate drift (design doc §6).
 
-Backend calendars:
-  - vllm    : fused pass — unified token budget, running decodes spend first,
-              chunked prefill shares the remainder (VALIDATED, see design doc §5)
-  - trtllm  : fused pass like vllm (max_num_tokens budget); optional
-              GUARANTEED_NO_EVICT admission cap (STRUCTURAL, not yet
-              validated against a trtllm oracle)
-  - sglang  : mixed-chunk pass by default (prefill chunks share the iteration
-              with the running decodes — matches AIC's SGLang agg deployment
-              rule, which sets enable_mixed_chunk=true); with mixed chunk off,
-              alternating passes — dedicated prefill batches pause decode and
-              ITL spikes are whole prefill batches
-              (STRUCTURAL, not yet validated against an SGLang reference)
+Backend calendars (validation records in the class docstrings and design
+doc §3/§5):
+  - vllm    : fused pass — unified token budget, running decodes spend
+              first, chunked prefill shares the remainder in admission
+              order (head takes what it needs, leftover flows on)
+  - trtllm  : fused like vllm; GUARANTEED_NO_EVICT admission cap (the only
+              modeled KV-pressure semantics — others reject loudly);
+              chunk semantics probe-verified on a live engine (FCFS greedy
+              head chunks with last-chunk leftover co-scheduling)
+  - sglang  : mixed-chunk pass by default (per-iteration extend budget
+              shared across the batch, mixed decode rows debit it —
+              matches AIC's SGLang agg deployment rule); with mixed chunk
+              off, alternating passes (dedicated prefill batches pause
+              decode: ITL spikes are whole prefill batches)
 """
 
 from __future__ import annotations
@@ -382,9 +384,7 @@ def evaluate_closed_loop(
 
         def _new_slot(**kw) -> _Slot:
             isl_i, px_i, osl_i = wl.shape_tuples[next(tuple_stream)]
-            return _Slot(
-                remaining_prefill=max(1, isl_i - px_i), isl=isl_i, osl=osl_i, prefix=px_i, **kw
-            )
+            return _Slot(remaining_prefill=max(1, isl_i - px_i), isl=isl_i, osl=osl_i, prefix=px_i, **kw)
 
         mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
     else:
@@ -405,9 +405,7 @@ def evaluate_closed_loop(
                 **kw,
             )
 
-        mean_osl = (
-            sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
-        )
+        mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
 
     slots = [_new_slot(is_initial_burst=True) for _ in range(c)]
     pending: list[_Slot] = []  # dispatched replacements not yet visible to the scheduler
@@ -425,9 +423,7 @@ def evaluate_closed_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max(
-        (t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,))
-    )
+    max_osl = max((t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,)))
     max_passes = 200 * (warmup_generations + window_generations) * max(1, max_osl)
     for _ in range(max_passes):
         if completions >= target:
@@ -491,9 +487,7 @@ def evaluate_closed_loop(
             # closed loop: the client dispatches the replacement at the
             # completion instant (arrival_ms=now, the TTFT origin); the
             # scheduler sees it only after the frontend turnaround
-            pending.append(
-                _new_slot(arrival_ms=now, eligible_ms=now + wl.turnaround_ms)
-            )
+            pending.append(_new_slot(arrival_ms=now, eligible_ms=now + wl.turnaround_ms))
     else:
         raise RuntimeError("pass-calendar did not converge within max_passes")
 
@@ -514,11 +508,7 @@ def evaluate_closed_loop(
         # client turnaround on a live vLLM 0.24 server moved steady TTFT p50
         # by 0.1 ms). So the calendar contributes the distribution SHAPE and
         # the identity pins its location; no client-side parameter survives.
-        identity_mean = (
-            wl.concurrency / throughput * 1000.0
-            - max(0.0, mean_osl - 1.0) * tpot.mean
-            - wl.turnaround_ms
-        )
+        identity_mean = wl.concurrency / throughput * 1000.0 - max(0.0, mean_osl - 1.0) * tpot.mean - wl.turnaround_ms
         if identity_mean > 0:
             delta = identity_mean - ttft_steady.mean
             ttft_steady = ttft_steady.shifted(delta)
@@ -619,7 +609,7 @@ def evaluate_open_loop(
         stride = max(1, round(k * 0.6180339887))
         while gcd(stride, k) != 1:
             stride += 1
-        _arrival_index = lambda n: (n * stride) % k  # noqa: E731
+        _arrival_index = lambda n: (n * stride) % k
     else:
         # W1 exponential path: Poisson inter-arrivals are i.i.d. — serial
         # correlation ZERO. A low-discrepancy rotation is NEGATIVELY
@@ -667,9 +657,7 @@ def evaluate_open_loop(
                 osl=max(1, int(osl_i)),
                 prefix=int(px_i),
                 arrival_ms=float(t_i),
-                eligible_ms=float(t_i)
-                + wl.turnaround_ms
-                + int(isl_i) * wl.ingest_us_per_token / 1000.0,
+                eligible_ms=float(t_i) + wl.turnaround_ms + int(isl_i) * wl.ingest_us_per_token / 1000.0,
             )
             for (t_i, isl_i, px_i, osl_i) in arrival_trace
         ]
@@ -688,9 +676,7 @@ def evaluate_open_loop(
                     osl=osl_i,
                     prefix=px_i,
                     arrival_ms=t_arr,
-                    eligible_ms=t_arr
-                    + wl.turnaround_ms
-                    + isl_i * wl.ingest_us_per_token / 1000.0,
+                    eligible_ms=t_arr + wl.turnaround_ms + isl_i * wl.ingest_us_per_token / 1000.0,
                 )
             )
 
@@ -715,9 +701,7 @@ def evaluate_open_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max(
-        (t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,))
-    )
+    max_osl = max((t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,)))
     max_passes = 400 * total * max(1, max_osl) // max(1, min(cap, total))
     for _ in range(max_passes):
         if completions >= total:

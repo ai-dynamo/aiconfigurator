@@ -14,12 +14,13 @@ SPDX-License-Identifier: Apache-2.0
 ## 1. What it is
 
 An **algorithm-derived** (not data-fitted) correction for continuous-batching
-queueing dynamics. For stationary workloads (fixed isl/osl/prefix,
-closed-loop concurrency or open-loop Poisson rate) it produces
-**distributions** of TTFT and ITL — not just means — by evaluating the
-scheduler's own pass calendar: every request's TTFT is (the pass in flight
-at arrival) + (its own prefill chunk passes), and every ITL gap is a pass
-duration.
+queueing dynamics. It produces **distributions** of TTFT and ITL — not just
+means — by evaluating the scheduler's own pass calendar: every request's
+TTFT is (the pass in flight at arrival) + (its own prefill chunk passes),
+and every ITL gap is a pass duration. Workload inputs follow the fidelity
+contract of §3.1: from fixed shapes + closed-loop concurrency (W0) through
+open-loop rates (W1), shape marginals/joints (W2/W3), verbatim trace replay
+(W3), to session lanes with endogenous arrivals (W4).
 
 One model, two precision tiers:
 

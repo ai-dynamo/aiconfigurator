@@ -4,18 +4,25 @@
 derived from scheduler semantics — the structural replacement for the
 empirical `_ttft_queuing_factor` heuristic.
 
-Two precision tiers of the same model:
+One model, several entry points along the workload-fidelity contract
+(design doc §3.1):
     closed_form.operating_point_columns   O(1) arithmetic on the run_agg
                                           operating point (sweep hot path)
-    evaluate_closed_loop                  limit-cycle evaluator: the model's
-                                          recursion evaluated numerically —
-                                          captures cohort effects the
-                                          closed form approximates
+    evaluate_closed_loop                  W0/W2 closed loop (fixed slots,
+                                          immediate replacement)
+    evaluate_open_loop                    W1-W3 open loop (rate / quantile
+                                          streams / exact arrival_trace
+                                          replay)
+    evaluate_sessions                     W4 session lanes (endogenous
+                                          arrivals: turn k+1 dispatches at
+                                          completion_k + think gap)
+    evaluate_disagg                       fixed-shape prefill/decode tandem
     closed_form.static_degenerate_columns static-batching mapping
     DatabaseTimingModel                   timing adapter over (model, database)
+    trace.workload_from_trace             recorded traces -> exact replay +
+                                          W3 stream inputs (prefix-cache
+                                          oracle included)
 
-Scope: stationary closed-loop workloads (fixed isl/osl/prefix +
-concurrency). Open-loop rates and timestamped traces are out of scope.
 Validation methodology and recorded results: docs/design/queueing_model.md §5.
 """
 
@@ -26,8 +33,16 @@ from .closed_form import (
     static_degenerate_columns,
 )
 from .disagg import DisaggSpec, evaluate_disagg, evaluate_disagg_mixed
-from .spec import stratified_quantiles, workload_fidelity, Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec
 from .sessions import SessionTurn, evaluate_sessions
+from .spec import (
+    Distribution,
+    EngineSpec,
+    QueueingReport,
+    TimingModel,
+    WorkloadSpec,
+    stratified_quantiles,
+    workload_fidelity,
+)
 from .timing import DatabaseTimingModel
 from .trace import (
     TraceRecord,
@@ -46,17 +61,25 @@ __all__ = [
     "Distribution",
     "EngineSpec",
     "QueueingReport",
+    "SessionTurn",
     "TimingModel",
+    "TraceRecord",
+    "TraceWorkload",
     "WorkloadSpec",
     "evaluate_closed_loop",
-    "stratified_quantiles",
-    "workload_fidelity",
-    "evaluate_open_loop",
     "evaluate_disagg",
     "evaluate_disagg_mixed",
+    "evaluate_open_loop",
+    "evaluate_sessions",
+    "load_cc_sessions_jsonl",
+    "load_mooncake_jsonl",
     "operating_point_columns",
+    "prefix_hits",
     "static_degenerate_columns",
     "static_report",
+    "stratified_quantiles",
+    "workload_fidelity",
+    "workload_from_trace",
 ]
 
 
