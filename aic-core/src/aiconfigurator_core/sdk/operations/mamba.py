@@ -708,6 +708,15 @@ class KDAKernel(GDNKernel):
                 conv_channels = 3 * proj_size
                 read_bytes = x * conv_channels * (d_conv + 1) * 2 + (x * 4 * proj_size * 2 + state_bytes * b)
                 write_bytes = x * conv_channels * 2 + (x * proj_size * 2 + state_bytes * x)
+            elif kernel_source_local == "kda_fused_decode":
+                # Fused attempt-and-verify decode (12-head TP8 shard): conv
+                # update + packed recurrence + gated RMSNorm in one launch
+                # (sum of the two constituent decode byte models above).
+                conv_channels = 3 * proj_size
+                read_bytes = x * conv_channels * (d_conv + 1) * 2 + (
+                    x * (3 * proj_size + proj_size) * 2 + state_bytes * b
+                )
+                write_bytes = x * conv_channels * 2 + (x * proj_size * 2 + state_bytes * b)
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
@@ -721,6 +730,29 @@ class KDAKernel(GDNKernel):
             by_key = kda_data[kernel_source][phase]
         except KeyError:
             by_key = {}
+
+        # Serving decodes the K3 TP8 12-head shard through the fused
+        # attempt-and-verify kernel (kda_fused_decode: conv + recurrence +
+        # gated RMSNorm in one launch), so SM100-era datasets carry a single
+        # "kda_fused_decode" generation row for that shard and no Triton pair.
+        # Route per model key — BEFORE the nearest-shard fallback, which would
+        # otherwise silently price the fused shard with another shard's Triton
+        # rows. Rust twin: operators/mamba.rs::KdaOp::query.
+        if (
+            phase == "generation"
+            and kernel_source in ("fused_recurrent_kda_packed_decode", "causal_conv1d_update")
+            and model_key not in by_key
+        ):
+            try:
+                fused_by_key = kda_data["kda_fused_decode"]["generation"]
+            except KeyError:
+                fused_by_key = {}
+            if model_key in fused_by_key:
+                if kernel_source == "causal_conv1d_update":
+                    return PerformanceResult(0.0, energy=0.0, source="silicon")
+                kernel_source = "kda_fused_decode"
+                by_key = fused_by_key
+
         if model_key not in by_key:
             # Nearest same-d_model shard fallback (collector rows are per-TP shard).
             keys_same_d_model = [k for k in by_key if k[0] == d_model]

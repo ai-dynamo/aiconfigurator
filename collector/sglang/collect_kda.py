@@ -329,6 +329,24 @@ def run_kda_context_benchmark(
         raise RuntimeError(f"SGLang KDA context collection failed strict completeness: {summary}")
 
 
+def _resolve_generation_kernel(num_v_heads: int, head_k_dim: int, head_v_dim: int):
+    """Mirror serving's attempt-and-verify fused decode: TritonKDAKernel offers
+    every decode step to sglang.kernels.ops.attention.kda_fused_decode, whose
+    covered() accepts exactly the K3 TP8 12-head/128-dim shard (the kernel is
+    compiled for _H=12; the model stashes the static args only for that shard,
+    _prepare_fused_decode @ models/kimi_k3.py). For that shard the fused kernel
+    IS the serving decode (conv + recurrence + gated RMSNorm in one launch);
+    every other shard runs the Triton packed pair.
+
+    Returns (covered, kda_fused_decode) for the fused shard, else None.
+    """
+    if not (num_v_heads == 12 and head_k_dim == 128 and head_v_dim == 128):
+        return None
+    from sglang.kernels.ops.attention.kda_fused_decode import covered, kda_fused_decode
+
+    return covered, kda_fused_decode
+
+
 def run_kda_generation_benchmark(
     d_model: int,
     d_conv: int,
@@ -394,6 +412,70 @@ def run_kda_generation_benchmark(
                 "head_v_dim": head_v_dim,
                 "model_name": model_name,
             }
+
+            fused_decode = _resolve_generation_kernel(num_v_heads, head_k_dim, head_v_dim)
+            if fused_decode is not None:
+                covered, kda_fused_decode = fused_decode
+                # Serving static args (_prepare_fused_decode): per-block
+                # transposed fp32 conv weights [d_conv, proj], dense fp32
+                # conv bias, fp32 o_norm weight; onorm gate is a per-token
+                # bf16 activation.
+                conv_weight_f32 = torch.randn(conv_channels, d_conv, dtype=torch.float32, device=device)
+                conv_weight_f32_t = conv_weight_f32.t().contiguous()
+                w_q_t = conv_weight_f32_t[:, :proj_size].contiguous()
+                w_k_t = conv_weight_f32_t[:, proj_size : 2 * proj_size].contiguous()
+                w_v_t = conv_weight_f32_t[:, 2 * proj_size :].contiguous()
+                conv_bias = torch.zeros(conv_channels, dtype=torch.float32, device=device)
+                onorm_g = torch.randn(batch_size, proj_size, dtype=dtype, device=device)
+                onorm_weight = torch.randn(head_v_dim, dtype=torch.float32, device=device)
+                conv_states = conv_pool  # [B, d_conv-1, conv_channels]
+                if not covered(mixed_qkv, a, b, conv_states, recurrent_state, state_indices, onorm_g):
+                    raise RuntimeError(
+                        "kda_fused_decode.covered() rejected the 12-head shard the serving "
+                        "path runs fused — collector tensor layouts drifted from the kernel contract"
+                    )
+
+                def run_fused_decode():
+                    kda_fused_decode(
+                        mixed_qkv,
+                        a,
+                        b,
+                        conv_states,
+                        w_q_t,
+                        w_k_t,
+                        w_v_t,
+                        conv_bias,
+                        a_log,
+                        dt_bias,
+                        onorm_g,
+                        onorm_weight,
+                        recurrent_state,
+                        state_indices,
+                        scale=head_k_dim**-0.5,
+                        onorm_eps=1e-6,
+                        lower_bound=KDA_LOWER_BOUND,
+                    )
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_fused_decode,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=1,
+                ) as results:
+                    if not log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="SGLang",
+                        version=sglang_version,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="kda",
+                        kernel_source="kda_fused_decode",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    ):
+                        raise RuntimeError(f"failed to persist SGLang KDA generation row to {perf_filename}")
+                successful_points += 1
+                continue
 
             def run_conv1d_update():
                 causal_conv1d_update(

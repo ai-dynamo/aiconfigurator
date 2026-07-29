@@ -257,6 +257,44 @@ impl KdaOp {
             }
             kernel_source = "fused_kda_decode_mtp_dspark";
         }
+        // Fused attempt-and-verify decode: the K3 TP8 12-head shard serves
+        // decode through kda_fused_decode (conv + recurrence + gated RMSNorm
+        // in one launch), so SM100-era datasets carry a single fused
+        // generation row for that shard and no Triton pair. Route per model
+        // key — Python twin does this BEFORE its nearest-shard fallback.
+        if self.phase == "generation"
+            && matches!(
+                kernel_source,
+                "fused_recurrent_kda_packed_decode" | "causal_conv1d_update"
+            )
+            && !db.state_space.kda_has_key(
+                kernel_source,
+                "generation",
+                self.d_model,
+                self.d_conv,
+                self.num_k_heads,
+                self.head_k_dim,
+                self.num_v_heads,
+                self.head_v_dim,
+            )
+            && db.state_space.kda_has_key(
+                "kda_fused_decode",
+                "generation",
+                self.d_model,
+                self.d_conv,
+                self.num_k_heads,
+                self.head_k_dim,
+                self.num_v_heads,
+                self.head_v_dim,
+            )
+        {
+            if kernel_source == "causal_conv1d_update" {
+                return Ok(PerformanceResult::new(0.0, Source::Silicon)
+                    .clamp_non_negative()
+                    .scaled(self.scale_factor));
+            }
+            kernel_source = "kda_fused_decode";
+        }
         match db.state_space.query_kda(
             kernel_source,
             &self.phase,
@@ -411,6 +449,17 @@ impl KdaOp {
                     x * conv_channels * 2.0 + (x * proj_size * 2.0 + state_bytes * x),
                 )
             }
+            // Fused attempt-and-verify decode (12-head TP8 shard): conv
+            // update + packed recurrence + gated RMSNorm in one launch (sum
+            // of the two constituent decode byte models above).
+            "kda_fused_decode" => {
+                let conv_channels = 3.0 * proj_size;
+                (
+                    x * conv_channels * (d_conv + 1.0) * 2.0
+                        + (x * (3.0 * proj_size + proj_size) * 2.0 + state_bytes * b),
+                    x * conv_channels * 2.0 + (x * proj_size * 2.0 + state_bytes * b),
+                )
+            }
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };
         read_bytes + write_bytes
@@ -452,6 +501,22 @@ mod tests {
         // Generation drops the runtime seq (Python passes seq_len=None).
         let gen = kda_op("fused_recurrent_kda_packed_decode", "generation", 0);
         assert_eq!(gen.effective_coords(8, 4096), (8, 0));
+    }
+
+    #[test]
+    fn kda_fused_decode_sol_is_conv_plus_packed_recurrence() {
+        // The fused attempt-and-verify decode covers the conv update AND the
+        // packed recurrence (plus the folded gated RMSNorm); its byte model
+        // must equal the sum of the two constituent models (Python parity).
+        let fused = kda_op("kda_fused_decode", "generation", 0);
+        let conv = kda_op("causal_conv1d_update", "generation", 0);
+        let recurrence = kda_op("fused_recurrent_kda_packed_decode", "generation", 0);
+        for b in [1.0, 8.0, 256.0] {
+            assert_eq!(
+                fused.sol_total_bytes(b, 0.0),
+                conv.sol_total_bytes(b, 0.0) + recurrence.sol_total_bytes(b, 0.0)
+            );
+        }
     }
 
     #[test]

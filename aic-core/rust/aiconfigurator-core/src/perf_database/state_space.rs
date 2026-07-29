@@ -412,6 +412,38 @@ impl StateSpaceTable {
             Err(_) => false,
         }
     }
+
+    /// Whether the loaded KDA table holds rows for exactly this
+    /// (kernel_source, phase, model dims) key. Python twin: the per-model-key
+    /// membership checks in `KDAKernel._query_kda_table` that route the
+    /// fused-decode shard (the 12-head TP8 shard has a single
+    /// `kda_fused_decode` generation row and no Triton pair).
+    #[allow(clippy::too_many_arguments)]
+    pub fn kda_has_key(
+        &self,
+        kernel_source: &str,
+        phase: &str,
+        d_model: u32,
+        d_conv: u32,
+        num_k_heads: u32,
+        head_k_dim: u32,
+        num_v_heads: u32,
+        head_v_dim: u32,
+    ) -> bool {
+        match self.load_kda() {
+            Ok(grids) => grids.by_keys.contains_key(&KdaKey {
+                kernel_source: kernel_source.to_string(),
+                phase: phase.to_string(),
+                d_model,
+                d_conv,
+                num_k_heads,
+                head_k_dim,
+                num_v_heads,
+                head_v_dim,
+            }),
+            Err(_) => false,
+        }
+    }
 }
 
 /// One perf_interp engine query per phase, mirroring Python v2's

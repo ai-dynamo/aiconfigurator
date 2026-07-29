@@ -300,8 +300,8 @@ REGISTRY: list[OpEntry] = [
         run_func="run_kda_torch",
         perf_filename=PerfFile.KDA,
         # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch; debugged
-        # on Hopper (SM90) and B200 (SM100) so far.
-        unverified_sms=(80, 89, 103, 120),
+        # on Hopper (SM90), B200 (SM100) and B300 (SM103) so far.
+        unverified_sms=(80, 89, 120),
     ),
     OpEntry(
         op="mhc_module",

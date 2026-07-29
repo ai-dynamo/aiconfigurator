@@ -94,6 +94,54 @@ def test_vllm_verify_kernel_is_never_rerouted():
     assert result.source == "sol"
 
 
+def _generation_grid(latency):
+    entry = {"latency": latency, "power": 0.0, "energy": 0.0}
+    return {MODEL_KEY: {b: entry for b in (1, 4, 16, 64)}}
+
+
+def _query_gen(db, kernel_source, shard=None):
+    return KDAKernel._query_kda_table(
+        db,
+        phase="generation",
+        kernel_source=kernel_source,
+        batch_size=16,
+        seq_len=None,
+        **(shard or SHARD),
+    )
+
+
+def test_fused_decode_shard_routes_per_model_key():
+    # The 12-head TP8 shard ships one fused generation row and no Triton pair;
+    # other shards keep the Triton rows. Routing is per model key and must win
+    # over the nearest-shard fallback.
+    other_key = (7168, 24, 128, 24, 128, 4)
+    other_shard = dict(SHARD, num_k_heads=24, num_v_heads=24)
+    db = _StubDatabase(
+        {
+            "kda_fused_decode": {"generation": _generation_grid(0.2)},
+            "fused_recurrent_kda_packed_decode": {"generation": {other_key: _generation_grid(0.4)[MODEL_KEY]}},
+            "causal_conv1d_update": {"generation": {other_key: _generation_grid(0.1)[MODEL_KEY]}},
+        }
+    )
+    fused = _query_gen(db, "fused_recurrent_kda_packed_decode")
+    assert float(fused) == pytest.approx(0.2) and fused.source == "silicon"
+    conv = _query_gen(db, "causal_conv1d_update")
+    assert float(conv) == 0.0 and conv.source == "silicon"
+    # The 24-head shard still reads its own Triton rows.
+    assert float(_query_gen(db, "fused_recurrent_kda_packed_decode", other_shard)) == pytest.approx(0.4)
+    assert float(_query_gen(db, "causal_conv1d_update", other_shard)) == pytest.approx(0.1)
+
+
+def test_fused_decode_sol_is_conv_plus_packed_recurrence():
+    empty = _StubDatabase({})
+    empty._kda_data = {}
+    fused = _query_gen(empty, "kda_fused_decode")
+    conv = _query_gen(empty, "causal_conv1d_update")
+    recurrence = _query_gen(empty, "fused_recurrent_kda_packed_decode")
+    assert fused.source == "sol"
+    assert float(fused) == pytest.approx(float(conv) + float(recurrence))
+
+
 def test_fused_sol_byte_model_is_the_sum_of_conv_and_recurrence():
     empty = _StubDatabase({})
     empty._kda_data = {}  # not loaded -> pure SOL path
