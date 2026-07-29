@@ -375,37 +375,14 @@ def evaluate_closed_loop(
         raise ValueError("admission cap rejected all concurrency")
 
     # deterministic per-slot shape streams (fixed-shape workloads yield the
-    # nominal isl/osl forever, reproducing the homogeneous recursion exactly);
-    # osl uses an offset start so isl/osl strata pair pseudo-independently
-    from .spec import _shape_stream
+    # nominal isl/osl forever, reproducing the homogeneous recursion exactly)
+    from .spec import _shape_drawer
 
-    if wl.shape_tuples:
-        tuple_stream = _shape_stream(tuple(range(len(wl.shape_tuples))), 0)
+    draw_shape, mean_osl, max_osl = _shape_drawer(wl)
 
-        def _new_slot(**kw) -> _Slot:
-            isl_i, px_i, osl_i = wl.shape_tuples[next(tuple_stream)]
-            return _Slot(remaining_prefill=max(1, isl_i - px_i), isl=isl_i, osl=osl_i, prefix=px_i, **kw)
-
-        mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
-    else:
-        isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
-        osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
-        if wl.osl_quantiles:
-            for _ in range(len(wl.osl_quantiles) // 2):
-                next(osl_stream)
-
-        def _new_slot(**kw) -> _Slot:
-            isl_i = next(isl_stream)
-            osl_i = next(osl_stream)
-            return _Slot(
-                remaining_prefill=max(1, isl_i - wl.prefix),
-                isl=isl_i,
-                osl=osl_i,
-                prefix=wl.prefix,
-                **kw,
-            )
-
-        mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    def _new_slot(**kw) -> _Slot:
+        isl_i, px_i, osl_i = draw_shape()
+        return _Slot(remaining_prefill=max(1, isl_i - px_i), isl=isl_i, osl=osl_i, prefix=px_i, **kw)
 
     slots = [_new_slot(is_initial_burst=True) for _ in range(c)]
     pending: list[_Slot] = []  # dispatched replacements not yet visible to the scheduler
@@ -423,7 +400,6 @@ def evaluate_closed_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max((t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,)))
     max_passes = 200 * (warmup_generations + window_generations) * max(1, max_osl)
     for _ in range(max_passes):
         if completions >= target:
@@ -572,79 +548,12 @@ def evaluate_open_loop(
     # not joint temporal structure — e.g. a multi-turn follow-up landing
     # right after its parent, prefix-hot and tiny, in the same burst).
     # warmup_requests/window_requests still split the sequence.
-    from math import gcd, log
-
-    from .spec import _shape_stream
+    from .spec import _interarrival_stream, _shape_drawer
 
     calendar = CALENDARS[backend]
     cap = calendar.admission_cap(wl, eng)
 
-    if wl.shape_tuples:
-        tuple_stream = _shape_stream(tuple(range(len(wl.shape_tuples))), 0)
-
-        def _next_shape():
-            return wl.shape_tuples[next(tuple_stream)]
-
-        mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
-    else:
-        isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
-        osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
-        if wl.osl_quantiles:
-            for _ in range(len(wl.osl_quantiles) // 2):
-                next(osl_stream)
-
-        def _next_shape():
-            return next(isl_stream), wl.prefix, next(osl_stream)
-
-        mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
-
-    # deterministic inter-arrival strata, exact-mean normalized: empirical
-    # (W3, raw trace inter-arrivals — zeros express batched arrivals) when
-    # provided, else exponential (Poisson-like)
-    if wl.arrival_quantiles:
-        # W3 empirical path: golden-stride rotation (validated arm — the
-        # Mooncake stream-mode results were produced with this ordering)
-        strata = list(wl.arrival_quantiles)
-        k = len(strata)
-        stride = max(1, round(k * 0.6180339887))
-        while gcd(stride, k) != 1:
-            stride += 1
-        _arrival_index = lambda n: (n * stride) % k
-    else:
-        # W1 exponential path: Poisson inter-arrivals are i.i.d. — serial
-        # correlation ZERO. A low-discrepancy rotation is NEGATIVELY
-        # correlated by construction (anti-clusters: windowed count
-        # dispersion 0.25 vs Poisson's 1.0), which starved queueing tails
-        # ~2x at low utilization; blocky orders overshoot (positive
-        # correlation). The correlation-free deterministic order is a
-        # PER-PERIOD COUNTER-SEEDED SHUFFLE: period p uses the fixed
-        # permutation Random(p*2654435761 + 97003) — a pure function of the
-        # period index, bit-for-bit reproducible, no runtime randomness
-        # (the zero-RNG rule bans nondeterminism, not pseudorandomness).
-        # Each period consumes the full stratum multiset, so every k
-        # arrivals reproduce the exact mean. k = 256 keeps the
-        # without-replacement correlation (~ -1/k) small while a 512-request
-        # default window still spans 2 periods (windowed rate stays exact).
-        # M/D/1 calibration vs true Poisson: count dispersion 0.96, queue
-        # p99 within 8% at rho <= 0.7, -18% at rho 0.83 (was -80%); the
-        # residual sub-Poisson tail is the finite-period truncation of
-        # burst runs rarer than 1/k.
-        import random as _random
-
-        k = 256
-        strata = [-log(1.0 - (i + 0.5) / k) for i in range(k)]
-        _period_perms: dict = {}
-
-        def _arrival_index(n):
-            p, r = divmod(n, k)
-            perm = _period_perms.get(p)
-            if perm is None:
-                perm = list(range(k))
-                _random.Random(p * 2654435761 + 97003).shuffle(perm)
-                _period_perms[p] = perm
-            return perm[r]
-
-    scale = (1000.0 / wl.request_rate) / (sum(strata) / k)
+    draw_shape, mean_osl, max_osl = _shape_drawer(wl)
 
     trace_order: list = []
     if arrival_trace is not None:
@@ -662,13 +571,19 @@ def evaluate_open_loop(
             for (t_i, isl_i, px_i, osl_i) in arrival_trace
         ]
         trace_order = list(pending)
+        max_osl = max([max_osl] + [s.osl for s in pending])
     else:
+        # deterministic inter-arrival strata, exact-mean normalized:
+        # empirical (W3, raw trace inter-arrivals — zeros express batched
+        # arrivals) when provided, else exponential under the
+        # correlation-free per-period shuffle (see _interarrival_stream)
         total = warmup_requests + window_requests
         pending = []
+        gap_stream = _interarrival_stream(wl)
         t_arr = 0.0
-        for n in range(total):
-            t_arr += strata[_arrival_index(n)] * scale
-            isl_i, px_i, osl_i = _next_shape()
+        for _ in range(total):
+            t_arr += next(gap_stream)
+            isl_i, px_i, osl_i = draw_shape()
             pending.append(
                 _Slot(
                     remaining_prefill=max(1, isl_i - px_i),
@@ -701,7 +616,6 @@ def evaluate_open_loop(
     e2e = Distribution()
     steady_completions = 0
 
-    max_osl = max((t[2] for t in wl.shape_tuples) if wl.shape_tuples else (wl.osl_quantiles or (wl.osl,)))
     max_passes = 400 * total * max(1, max_osl) // max(1, min(cap, total))
     for _ in range(max_passes):
         if completions >= total:

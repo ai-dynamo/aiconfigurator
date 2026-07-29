@@ -509,12 +509,19 @@ class TestDisaggTandem:
         assert rep.ttft_steady.values and rep.itl.values
         assert rep.throughput_rps > 0
 
-    def test_open_loop_rejected(self):
+    def test_rejects_kv_pressure_inputs(self):
+        """The tandem models no KV admission gate and no hold-until-transfer
+        accounting — engines carrying KV-pressure knobs are rejected loudly
+        (same honesty contract as the agg calendars) instead of silently
+        returning optimistic numbers."""
         from aiconfigurator.sdk.queueing import evaluate_disagg
 
-        wl = WorkloadSpec(isl=128, osl=8, request_rate=5.0)
-        with pytest.raises(ValueError):
-            evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        wl = WorkloadSpec(isl=1024, osl=8, concurrency=2)
+        gne = EngineSpec(guaranteed_no_evict=True, kv_capacity_tokens=8192)
+        with pytest.raises(ValueError, match="KV-pressure"):
+            evaluate_disagg(wl, gne, EngineSpec(), TIMING, TIMING, self._spec())
+        with pytest.raises(ValueError, match="KV-pressure"):
+            evaluate_disagg(wl, EngineSpec(), EngineSpec(kv_capacity_tokens=8192), TIMING, TIMING, self._spec())
 
     def test_variable_shape_parity_and_desync(self):
         """Degenerate quantile streams reproduce the fixed-shape recursion
@@ -546,8 +553,8 @@ class TestDisaggTandem:
             WorkloadSpec(isl=1024, osl=16, prefix=512, concurrency=2, isl_quantiles=(256, 2048))
 
     def test_workload_fidelity_contract(self):
-        """Reports declare the input tier they consumed; the disagg tandem
-        rejects inputs above its tier instead of silently downgrading."""
+        """Reports declare the input tier they consumed — including the
+        disagg tandem, which consumes W0-W3 like the agg calendars."""
         from aiconfigurator.sdk.queueing import (
             evaluate_closed_loop,
             evaluate_disagg,
@@ -567,10 +574,20 @@ class TestDisaggTandem:
         assert evaluate_open_loop(w1, eng, TIMING).workload_fidelity.startswith("W1")
         assert evaluate_closed_loop(w2, eng, TIMING).workload_fidelity.startswith("W2")
         assert static_report(100.0, 5.0, osl=8).workload_fidelity.startswith("W0")
-        rep = evaluate_disagg(w0, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
-        assert rep.workload_fidelity.startswith("W0")
-        with pytest.raises(ValueError):
-            evaluate_disagg(w2, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        de = EngineSpec()
+        assert (
+            evaluate_disagg(w0, de, de, TIMING, TIMING, self._spec()).workload_fidelity.startswith("W0")
+        )
+        assert (
+            evaluate_disagg(w1, de, de, TIMING, TIMING, self._spec()).workload_fidelity.startswith("W1")
+        )
+        assert (
+            evaluate_disagg(w2, de, de, TIMING, TIMING, self._spec()).workload_fidelity.startswith("W2")
+        )
+        w3 = WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 0, 8), (1536, 256, 8)))
+        assert (
+            evaluate_disagg(w3, de, de, TIMING, TIMING, self._spec()).workload_fidelity.startswith("W3")
+        )
 
     def test_w3_joint_shapes_prefix_and_empirical_arrivals(self):
         """Joint (isl, prefix, osl) strata carry per-request prefix hits
@@ -616,14 +633,25 @@ class TestDisaggTandem:
             WorkloadSpec(isl=1024, osl=8, concurrency=2, arrival_quantiles=(1.0,))
         from aiconfigurator.sdk.queueing import evaluate_disagg
 
-        with pytest.raises(ValueError):  # tandem rejects W3 inputs
+        with pytest.raises(ValueError):  # trace replay is an open-loop mode
             evaluate_disagg(
-                WorkloadSpec(isl=1024, osl=8, concurrency=2, shape_tuples=((512, 0, 8),)),
+                WorkloadSpec(isl=1024, osl=8, concurrency=2),
                 EngineSpec(),
                 EngineSpec(),
                 TIMING,
                 TIMING,
                 self._spec(),
+                arrival_trace=[(0.0, 512, 0, 8)],
+            )
+        with pytest.raises(ValueError):  # stagger shapes the closed-loop burst only
+            evaluate_disagg(
+                WorkloadSpec(isl=1024, osl=8, request_rate=2.0),
+                EngineSpec(),
+                EngineSpec(),
+                TIMING,
+                TIMING,
+                self._spec(),
+                initial_stagger_ms=5.0,
             )
 
     def test_open_loop_exact_trace_replay(self):
@@ -697,6 +725,162 @@ class TestDisaggTandem:
         # in TTFT — the same convention as the agg calendar (and as a real
         # client, which times TTFT from its own send)
         assert 400.0 < rep1.ttft_steady.mean - rep0.ttft_steady.mean < 600.0
+
+
+class TestDisaggWorkloadTiers:
+    """W1-W3 coverage of the tandem: per-request shapes/prefix/transfer
+    bytes, open-loop arrivals, exact trace replay. The shape and arrival
+    streams are shared with the agg calendars (spec._shape_drawer /
+    spec._interarrival_stream), so identical workload inputs reach both
+    evaluators."""
+
+    def _spec(self, **kw):
+        from aiconfigurator.sdk.queueing import DisaggSpec
+
+        base = dict(
+            num_prefill_workers=1,
+            num_decode_workers=1,
+            kv_bytes_per_token=100_000,
+            egress_bytes_per_s=1e9,
+            ingress_bytes_per_s=1e9,
+            bw_efficiency=1.0,
+        )
+        base.update(kw)
+        return DisaggSpec(**base)
+
+    def _fast_fabric(self):
+        # ~1 ms/handoff: keeps the transfer off the critical path so rate
+        # sweeps exercise prefill/decode queueing, not the NIC
+        return self._spec(egress_bytes_per_s=100e9, ingress_bytes_per_s=100e9)
+
+    def test_degenerate_quantiles_reproduce_fixed_shape(self):
+        """Degenerate shape streams must reproduce the fixed-shape tandem
+        recursion exactly (the same parity contract as the agg calendar)."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        eng = EngineSpec()
+        fixed = WorkloadSpec(isl=1024, osl=8, concurrency=4)
+        degen = WorkloadSpec(isl=1024, osl=8, concurrency=4, isl_quantiles=(1024,) * 4, osl_quantiles=(8,) * 4)
+        rf = evaluate_disagg(fixed, eng, eng, TIMING, TIMING, self._spec())
+        rd = evaluate_disagg(degen, eng, eng, TIMING, TIMING, self._spec())
+        assert rd.ttft_steady.mean == pytest.approx(rf.ttft_steady.mean, abs=1e-9)
+        assert rd.throughput_rps == pytest.approx(rf.throughput_rps, rel=1e-12)
+        assert rd.kv_transfer_ms == pytest.approx(rf.kv_transfer_ms, abs=1e-9)
+
+    def test_per_request_prefix_reaches_prefill_timing_and_transfer_moves_full_context(self):
+        """C=1 single joint stratum: steady TTFT is exactly one prefill of
+        the EFFECTIVE prompt priced at (isl, prefix), and the KV handoff
+        moves the FULL context (cached prefix saves prefill compute, not
+        transfer bytes — the decode pool holds no copy of the prefix)."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        wl = WorkloadSpec(isl=4096, osl=4, concurrency=1, shape_tuples=((4096, 3072, 4),))
+        rep = evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        assert rep.ttft_steady.mean == pytest.approx(TIMING.prefill_ms(1, 4096, 3072))
+        assert rep.kv_transfer_ms == pytest.approx(4096 * 100_000 / 1e9 * 1000.0, rel=1e-6)
+
+    def test_transfer_bytes_follow_per_request_isl(self):
+        """Heterogeneous shapes at C=1: each handoff prices its OWN isl
+        (solo transfers 51.2 / 204.8 ms alternating), not the workload's
+        nominal mean — the nominal isl is deliberately set off the tuple
+        mean so scalar pricing (old behavior: 99.9 ms for every request)
+        cannot masquerade as the per-request answer."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        wl = WorkloadSpec(isl=999, osl=4, concurrency=1, shape_tuples=((512, 0, 4), (2048, 0, 4)))
+        rep = evaluate_disagg(wl, EngineSpec(), EngineSpec(), TIMING, TIMING, self._spec())
+        # near-even alternation: the mean sits by 128 ms, far from 99.9
+        assert 115.0 < rep.kv_transfer_ms < 141.0
+        # the big stratum's handoff is visible in the first ITL gap
+        assert rep.itl.maximum >= 204.8 * 0.999
+
+    def test_open_loop_rate_tracking_queueing_and_determinism(self):
+        """Open loop: throughput tracks the arrival rate below capacity,
+        steady TTFT strictly grows with utilization (queue wait the closed
+        loop cannot represent), and identical inputs reproduce bit-equal
+        outputs (zero-RNG contract)."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        eng = EngineSpec()
+        spec = self._fast_fabric()
+        low = evaluate_disagg(WorkloadSpec(isl=1024, osl=8, request_rate=2.0), eng, eng, TIMING, TIMING, spec)
+        high = evaluate_disagg(WorkloadSpec(isl=1024, osl=8, request_rate=25.0), eng, eng, TIMING, TIMING, spec)
+        assert low.mode == "disagg"
+        assert low.throughput_rps == pytest.approx(2.0, rel=0.05)
+        assert high.throughput_rps == pytest.approx(25.0, rel=0.05)
+        assert high.ttft_steady.mean > low.ttft_steady.mean
+        again = evaluate_disagg(WorkloadSpec(isl=1024, osl=8, request_rate=2.0), eng, eng, TIMING, TIMING, spec)
+        assert again.ttft_steady.mean == low.ttft_steady.mean
+        assert again.kv_transfer_ms == low.kv_transfer_ms
+
+    def test_open_loop_backlog_diverges_beyond_capacity(self):
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        eng = EngineSpec(max_num_batched_tokens=8192)
+        with pytest.raises(RuntimeError, match="diverged"):
+            evaluate_disagg(
+                WorkloadSpec(isl=4096, osl=8, request_rate=1000.0),
+                eng,
+                eng,
+                TIMING,
+                TIMING,
+                self._fast_fabric(),
+                warmup_requests=512,
+                window_requests=2048,
+            )
+
+    def test_trace_replay_ordering_per_request_and_handoff(self):
+        """arrival_trace evaluates a verbatim (arrival, isl, prefix, osl)
+        sequence: ordering is load-bearing (front-loading the heavy
+        requests differs from back-loading), per-request diagnostics come
+        back in trace order with the KV-handoff duration attached."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg
+
+        eng = EngineSpec(max_num_batched_tokens=4096)
+        heavy = [(0.0, 4096, 0, 8)] * 6
+        light = [(0.0, 256, 0, 8)] * 6
+        mk = lambda seq: [(i * 10.0, a, b, c) for i, (_, a, b, c) in enumerate(seq)]
+        wl = WorkloadSpec(isl=2176, osl=8, request_rate=5.0)
+        kw = dict(warmup_requests=0)
+        r1 = evaluate_disagg(wl, eng, eng, TIMING, TIMING, self._spec(), arrival_trace=mk(heavy + light), **kw)
+        r2 = evaluate_disagg(wl, eng, eng, TIMING, TIMING, self._spec(), arrival_trace=mk(light + heavy), **kw)
+        again = evaluate_disagg(wl, eng, eng, TIMING, TIMING, self._spec(), arrival_trace=mk(heavy + light), **kw)
+        assert r1.ttft_steady.mean == again.ttft_steady.mean  # deterministic
+        # light-first lets the small requests finish before the heavy queue forms
+        assert r2.ttft_steady.quantile(0.5) < r1.ttft_steady.quantile(0.5)
+        assert r1.per_request is not None and len(r1.per_request) == 12
+        assert [p["isl"] for p in r1.per_request] == [4096] * 6 + [256] * 6  # trace order
+        for p in r1.per_request:
+            assert p["ttft_ms"] is not None and p["e2e_ms"] is not None
+            # every request decodes (osl 8), so every request paid a handoff
+            # at least as long as its solo transfer time
+            assert p["xfer_ms"] >= p["isl"] * 100_000 / 1e9 * 1000.0 * 0.999
+            assert p["e2e_ms"] > p["ttft_ms"]
+
+    def test_mixed_open_loop_is_single_evaluation_passthrough(self):
+        """Open-loop workloads have no initial-cohort phase to mix over:
+        evaluate_disagg_mixed returns the single evaluation (including
+        trace-replay diagnostics)."""
+        from aiconfigurator.sdk.queueing import evaluate_disagg_mixed
+
+        eng = EngineSpec()
+        rep = evaluate_disagg_mixed(
+            WorkloadSpec(isl=1024, osl=8, request_rate=2.0), eng, eng, TIMING, TIMING, self._fast_fabric()
+        )
+        assert rep.mode == "disagg"
+        assert rep.throughput_rps == pytest.approx(2.0, rel=0.05)
+        trace = [(i * 100.0, 512, 0, 4) for i in range(8)]
+        rep_tr = evaluate_disagg_mixed(
+            WorkloadSpec(isl=512, osl=4, request_rate=10.0),
+            eng,
+            eng,
+            TIMING,
+            TIMING,
+            self._fast_fabric(),
+            arrival_trace=trace,
+            warmup_requests=0,
+        )
+        assert rep_tr.per_request is not None and len(rep_tr.per_request) == 8
 
 
 class TestDisaggReportUpgrade:

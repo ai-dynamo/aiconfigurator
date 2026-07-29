@@ -16,7 +16,11 @@ One model, several entry points along the workload-fidelity contract
     evaluate_sessions                     W4 session lanes (endogenous
                                           arrivals: turn k+1 dispatches at
                                           completion_k + think gap)
-    evaluate_disagg                       fixed-shape prefill/decode tandem
+    evaluate_disagg                       W0-W3 prefill/decode tandem
+                                          (closed or open loop, exact
+                                          arrival_trace replay; KV handoff
+                                          priced per request on the
+                                          max-min-fair transfer fabric)
     closed_form.static_degenerate_columns static-batching mapping
     DatabaseTimingModel                   timing adapter over (model, database)
     trace.workload_from_trace             recorded traces -> exact replay +

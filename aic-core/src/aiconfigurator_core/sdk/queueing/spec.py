@@ -71,8 +71,8 @@ class WorkloadSpec:
     # fixed-shape runs keeps each component's convoy structure and cannot
     # reproduce the measured desynchronization (h20e trtllm tp4,
     # isl cv=0.25: steady TTFT 1.8s -> 0.66s, throughput within 10%).
-    # Scope: closed-loop agg calendars; the disagg tandem stays
-    # fixed-shape for now.
+    # Consumed by every pass-calendar evaluator (agg closed/open loop and
+    # the disagg tandem) through the shared ``_shape_drawer``.
     isl_quantiles: Optional[tuple] = None
     osl_quantiles: Optional[tuple] = None
     # W3 joint shape strata: tuple of (isl, prefix, osl) triples drawn as a
@@ -240,6 +240,93 @@ def _shape_stream(quantiles: Optional[tuple], fallback: int):
         n += 1
 
 
+def _shape_drawer(wl: WorkloadSpec):
+    """Per-request shape source shared by the agg calendars and the disagg
+    tandem: returns ``(draw, mean_osl, max_osl)`` where each ``draw()``
+    yields one ``(isl, prefix, osl)``. Fixed-shape workloads yield the
+    nominal shape forever (reproducing the homogeneous recursion exactly);
+    joint tuples draw whole strata; marginal quantiles use independent
+    streams with an offset osl start so isl/osl pair pseudo-independently."""
+    if wl.shape_tuples:
+        tuple_stream = _shape_stream(tuple(range(len(wl.shape_tuples))), 0)
+
+        def draw():
+            return wl.shape_tuples[next(tuple_stream)]
+
+        mean_osl = sum(t[2] for t in wl.shape_tuples) / len(wl.shape_tuples)
+        max_osl = max(t[2] for t in wl.shape_tuples)
+    else:
+        isl_stream = _shape_stream(wl.isl_quantiles, wl.isl)
+        osl_stream = _shape_stream(wl.osl_quantiles, wl.osl)
+        if wl.osl_quantiles:
+            for _ in range(len(wl.osl_quantiles) // 2):
+                next(osl_stream)
+
+        def draw():
+            return next(isl_stream), wl.prefix, next(osl_stream)
+
+        mean_osl = sum(wl.osl_quantiles) / len(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+        max_osl = max(wl.osl_quantiles) if wl.osl_quantiles else wl.osl
+    return draw, mean_osl, max_osl
+
+
+def _interarrival_stream(wl: WorkloadSpec):
+    """Deterministic inter-arrival stream (ms), exact-mean normalized to
+    1000/request_rate, shared by the open-loop evaluators.
+
+    Empirical strata (W3, ``arrival_quantiles``) use a golden-stride
+    rotation — the validated arm (the Mooncake stream-mode results were
+    produced with this ordering). Exponential strata (W1) must NOT: Poisson
+    inter-arrivals are i.i.d. — serial correlation ZERO — and a
+    low-discrepancy rotation is negatively correlated by construction
+    (anti-clusters: windowed count dispersion 0.25 vs Poisson's 1.0), which
+    starved queueing tails ~2x at low utilization; blocky orders overshoot
+    (positive correlation). The correlation-free deterministic order is a
+    PER-PERIOD COUNTER-SEEDED SHUFFLE: period p uses the fixed permutation
+    Random(p*2654435761 + 97003) — a pure function of the period index,
+    bit-for-bit reproducible, no runtime randomness (the zero-RNG rule bans
+    nondeterminism, not pseudorandomness). Each period consumes the full
+    stratum multiset, so every k arrivals reproduce the exact mean. k = 256
+    keeps the without-replacement correlation (~ -1/k) small while a
+    512-request default window still spans 2 periods (windowed rate stays
+    exact). M/D/1 calibration vs true Poisson: count dispersion 0.96, queue
+    p99 within 8% at rho <= 0.7, -18% at rho 0.83 (was -80%); the residual
+    sub-Poisson tail is the finite-period truncation of burst runs rarer
+    than 1/k."""
+    from math import gcd, log
+
+    if wl.arrival_quantiles:
+        strata = list(wl.arrival_quantiles)
+        k = len(strata)
+        stride = max(1, round(k * 0.6180339887))
+        while gcd(stride, k) != 1:
+            stride += 1
+
+        def index(n: int) -> int:
+            return (n * stride) % k
+    else:
+        import random as _random
+
+        k = 256
+        strata = [-log(1.0 - (i + 0.5) / k) for i in range(k)]
+        period_perms: dict = {}
+
+        def index(n: int) -> int:
+            p, r = divmod(n, k)
+            perm = period_perms.get(p)
+            if perm is None:
+                perm = list(range(k))
+                _random.Random(p * 2654435761 + 97003).shuffle(perm)
+                period_perms[p] = perm
+            return perm[r]
+
+    scale = (1000.0 / wl.request_rate) / (sum(strata) / k)
+    n = 0
+    while True:
+        yield strata[index(n)] * scale
+        n += 1
+
+
 @dataclass(frozen=True)
 class EngineSpec:
     """Engine scheduling parameters (names follow vLLM; per-backend calendars
@@ -381,9 +468,10 @@ class QueueingReport:
     # downstream consumers can gate on prediction quality without
     # re-deriving what the workload description contained
     workload_fidelity: str = "W0(closed-loop, fixed-shape)"
-    # trace-replay diagnostics (evaluate_open_loop arrival_trace mode only):
-    # one dict per request in trace order — arrival_ms, isl, prefix, osl,
-    # ttft_ms, e2e_ms. None outside trace mode; not part of the summary
+    # trace-replay diagnostics (arrival_trace mode of evaluate_open_loop /
+    # evaluate_disagg only): one dict per request in trace order —
+    # arrival_ms, isl, prefix, osl, ttft_ms, e2e_ms (+ xfer_ms for disagg's
+    # KV handoff). None outside trace mode; not part of the summary
     # contract, intended for per-request diffing against reference
     # simulators/live replays.
     per_request: Optional[list] = None

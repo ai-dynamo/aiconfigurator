@@ -13,19 +13,40 @@ Serving-flow semantics (matching the disagg deployment and the DES oracle):
     computed fair share — the handoff lands in the FIRST ITL GAP, not TTFT;
   - the decode worker continues the same sequence from token 2 and pays no
     prefill compute (KV-connector semantics: transferred KV counts as
-    computed tokens).
+    computed tokens). The transfer moves the FULL context (per-request isl
+    x kv_bytes_per_token): cached prefix saves prefill compute, not handoff
+    bytes — the decode pool holds no copy of the prefix KV.
 
 Rate matching is an OUTPUT here, not an input: for a candidate
-(num_prefill_workers, num_decode_workers) the closed-loop recursion yields
-throughput and both stages' behavior directly — pool imbalance surfaces as
-prefill queueing (TTFT) or decode saturation (ITL/throughput) instead of
-scalar throughput derates.
+(num_prefill_workers, num_decode_workers) the recursion yields throughput
+and both stages' behavior directly — pool imbalance surfaces as prefill
+queueing (TTFT) or decode saturation (ITL/throughput) instead of scalar
+throughput derates.
+
+Workload coverage follows the same fidelity contract as the agg calendars
+(design doc §3.1): W0 closed loop, W1 open-loop rates (deterministic
+exponential arrivals under the correlation-free per-period shuffle),
+W2 shape marginals, W3 joint (isl, prefix, osl) strata / empirical
+inter-arrival strata / verbatim ``arrival_trace`` replay. All shape and
+arrival draws come from the SAME deterministic streams as the agg
+calendars (``spec._shape_drawer`` / ``spec._interarrival_stream``), so
+agg-vs-disagg comparisons see identical workloads. Open-loop arrivals are
+routed to prefill workers by a static round-robin router at the
+scheduler-visibility instant (arrival + turnaround + isl x ingest slope
+— the same arrival-plane mapping as the agg calendar), matching TRT-LLM's
+native disagg router; kv_router-style pending-queue admission is
+approximated by ``prefill_inflight_cap=1``.
 
 The router dispatch policy is exposed as ``prefill_inflight_cap`` (kappa):
   None  = engine-batched admission (all queued prompts share a prefill
           pass's token budget — matches the DES round-robin driver)
   1     = serialized prefills per worker (approximates a kv_router-style
           pending-queue admission; measured impact on TTFT mean ~20%)
+
+KV-pressure semantics are NOT modeled (no admission gate, no
+hold-until-transfer accounting): engines carrying ``kv_capacity_tokens`` /
+``guaranteed_no_evict`` are rejected loudly rather than silently ignored —
+the same honesty contract as the agg calendars.
 
 Same methodology as the agg evaluator (`calendar.evaluate_closed_loop`):
 deterministic pass-level recursion, no RNG, no per-token events. Validated
@@ -39,7 +60,16 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .spec import Distribution, EngineSpec, QueueingReport, TimingModel, WorkloadSpec, workload_fidelity
+from .spec import (
+    Distribution,
+    EngineSpec,
+    QueueingReport,
+    TimingModel,
+    WorkloadSpec,
+    _interarrival_stream,
+    _shape_drawer,
+    workload_fidelity,
+)
 
 
 @dataclass(frozen=True)
@@ -182,11 +212,19 @@ class _TransferFabric:
 class _Req:
     arrival_ms: float
     remaining_prefill: int
+    isl: int
+    prefix: int = 0
+    osl: int = 1
     generated: int = 0
     first_token_ms: float = -1.0
     last_token_ms: float = -1.0
     prefill_start_ms: float = -1.0
     xfer_submit_ms: float = -1.0
+    xfer_ms: float = 0.0
+    # open loop: when the router/scheduler first SEES this request
+    # (arrival + turnaround + isl x ingest slope); TTFT is measured from
+    # arrival_ms — the same arrival-plane convention as the agg calendar
+    eligible_ms: float = 0.0
     pool_arrival_ms: float = 0.0  # when the req joined its CURRENT pool
     gaps: list = field(default_factory=list)
     is_initial_burst: bool = False
@@ -245,40 +283,125 @@ def evaluate_disagg(
     warmup_generations: int = 4,
     window_generations: int = 4,
     initial_stagger_ms: float = 0.0,
+    warmup_requests: int = 128,
+    window_requests: int = 512,
+    arrival_trace=None,
 ) -> QueueingReport:
-    """Run the tandem pass-calendar recursion for a closed-loop workload.
+    """Run the tandem pass-calendar recursion (closed OR open loop).
 
     ``prefill_timing`` / ``decode_timing`` are separate so heterogeneous
     deployments (different GPUs or parallelisms per pool) price each stage
     with its own estimators; pass the same object for homogeneous setups.
 
-    ``initial_stagger_ms`` spaces the initial burst's arrivals: the tandem
-    system is MULTI-STABLE (the steady limit cycle depends on the initial
-    cohort phase — e.g. a "large slow prefill batch" cycle vs a "small
-    fast batch" pipeline cycle), so single-phase results are one attractor
-    among several. Use ``evaluate_disagg_mixed`` for phase-robust output.
+    Closed loop (``wl.concurrency``): fixed slots, the replacement is
+    dispatched at the completion instant and becomes visible to the prefill
+    pool after ``wl.turnaround_ms``; ``warmup_generations`` /
+    ``window_generations`` split the limit cycle. ``initial_stagger_ms``
+    spaces the initial burst's arrivals: the tandem system is MULTI-STABLE
+    (the steady limit cycle depends on the initial cohort phase — e.g. a
+    "large slow prefill batch" cycle vs a "small fast batch" pipeline
+    cycle), so single-phase results are one attractor among several. Use
+    ``evaluate_disagg_mixed`` for phase-robust output.
+
+    Open loop (``wl.request_rate``): arrivals come from the same
+    deterministic streams as ``calendar.evaluate_open_loop`` (exponential
+    strata under the correlation-free per-period shuffle, or empirical
+    ``arrival_quantiles``), or verbatim from ``arrival_trace`` tuples
+    ``(arrival_ms, isl, prefix, osl)`` — pairing and ordering preserved,
+    per-request diagnostics in ``QueueingReport.per_request`` (with
+    ``xfer_ms``, the request's KV-handoff duration on the fabric). The
+    router assigns arrivals round-robin across prefill workers at the
+    scheduler-visibility instant; there is no burst phase to mix over, so
+    a single evaluation is already phase-robust. ``warmup_requests`` /
+    ``window_requests`` split the sequence. Raises RuntimeError when the
+    prefill backlog diverges (request_rate at or beyond capacity). Note
+    TTFT is prefill-side: a saturated transfer fabric or decode pool shows
+    up in ITL/e2e/throughput, not TTFT.
     """
-    if wl.concurrency is None:
-        raise ValueError("the disagg tandem model requires a closed-loop workload")
-    if wl.isl_quantiles or wl.osl_quantiles or wl.shape_tuples:
-        # fixed-shape only for now: rejecting loudly beats silently pricing a
-        # homogeneous tandem while claiming shape-marginal fidelity
-        raise ValueError("the disagg tandem model is fixed-shape; shape quantiles/tuples are not consumed here")
-    c = wl.concurrency
+    closed_loop = wl.concurrency is not None
+    if arrival_trace is not None and closed_loop:
+        raise ValueError("arrival_trace requires an open-loop workload (request_rate)")
+    if not closed_loop and initial_stagger_ms:
+        raise ValueError("initial_stagger_ms shapes the closed-loop initial burst only")
+    # KV-pressure honesty (same contract as the agg calendars): the tandem
+    # models no KV admission gate and no hold-until-transfer accounting, so
+    # accepting these inputs would silently return optimistic numbers.
+    for stage, eng in (("prefill", prefill_eng), ("decode", decode_eng)):
+        if eng.kv_capacity_tokens or eng.guaranteed_no_evict:
+            raise ValueError(
+                f"the disagg tandem models no KV-pressure admission semantics ({stage} "
+                "engine sets kv_capacity_tokens/guaranteed_no_evict): unset them, or "
+                "size the deployment so KV never binds"
+            )
     prefill = _Pool(spec.num_prefill_workers)
     decode = _Pool(spec.num_decode_workers)
     fabric = _TransferFabric(spec) if (spec.kv_bytes_per_token > 0 and spec.egress_bytes_per_s > 0) else None
-    transfer_bytes = wl.isl * spec.kv_bytes_per_token
 
-    for k in range(c):
-        t0 = k * initial_stagger_ms
-        prefill.dispatch(_Req(arrival_ms=t0, remaining_prefill=wl.effective_isl, is_initial_burst=True), t0)
+    draw_shape, mean_osl, max_osl = _shape_drawer(wl)
+
+    def _new_req(arrival_ms: float, **kw) -> _Req:
+        isl_i, px_i, osl_i = draw_shape()
+        return _Req(
+            arrival_ms=arrival_ms,
+            remaining_prefill=max(1, isl_i - px_i),
+            isl=isl_i,
+            prefix=px_i,
+            osl=osl_i,
+            **kw,
+        )
+
+    pending: list[_Req] = []  # open loop: not-yet-visible arrivals, scheduler-arrival order
+    trace_order: list[_Req] = []
+    if closed_loop:
+        c = wl.concurrency
+        for k in range(c):
+            t0 = k * initial_stagger_ms
+            prefill.dispatch(_new_req(t0, is_initial_burst=True), t0)
+        warmup_reqs = warmup_generations * c
+        target = (warmup_generations + window_generations) * c
+    else:
+        if arrival_trace is not None:
+            target = len(arrival_trace)
+            warmup_reqs = min(warmup_requests, max(0, target - 1))
+            pending = [
+                _Req(
+                    arrival_ms=float(t_i),
+                    remaining_prefill=max(1, int(isl_i) - int(px_i)),
+                    isl=int(isl_i),
+                    prefix=int(px_i),
+                    osl=max(1, int(osl_i)),
+                )
+                for (t_i, isl_i, px_i, osl_i) in arrival_trace
+            ]
+            trace_order = list(pending)
+            max_osl = max([max_osl] + [r.osl for r in pending])
+        else:
+            target = warmup_requests + window_requests
+            warmup_reqs = warmup_requests
+            gap_stream = _interarrival_stream(wl)
+            t_arr = 0.0
+            for _ in range(target):
+                t_arr += next(gap_stream)
+                pending.append(_new_req(t_arr))
+        for r in pending:
+            r.eligible_ms = r.arrival_ms + wl.turnaround_ms + r.isl * wl.ingest_us_per_token / 1000.0
+        # arrival-plane mapping (see WorkloadSpec.ingest_us_per_token): the
+        # router serves by *scheduler* arrival, and the size-dependent
+        # ingest slope reorders near-simultaneous dispatches shortest-first.
+        # Stable sort: exact ties keep dispatch order.
+        if wl.ingest_us_per_token > 0:
+            pending.sort(key=lambda r: r.eligible_ms)
 
     completions = 0
-    warmup_reqs = warmup_generations * c
-    target = (warmup_generations + window_generations) * c
     steady_start_ms = None
     now = 0.0
+    released = 0  # open loop: pending[:released] handed to the router
+    started = 0  # requests whose prefill has begun (divergence guard)
+    # backlog bound before declaring divergence: mirrors the agg open loop's
+    # max(4*cap, total/2) with the tandem's admission analog (kappa or the
+    # engine seq cap, per prefill worker)
+    backlog_cap = spec.num_prefill_workers * (spec.prefill_inflight_cap or prefill_eng.max_num_seqs)
+    max_backlog = max(4 * backlog_cap, target // 2)
 
     ttft_transient = Distribution()
     ttft_steady = Distribution()
@@ -292,7 +415,7 @@ def evaluate_disagg(
     def run_prefill_pass(widx: int, start_ms: float) -> float:
         """One static prefill pass: queued prompts (up to kappa) share the
         token budget; completers emit their FIRST token at pass end."""
-        nonlocal completions, steady_start_ms, steady_completions
+        nonlocal completions, steady_start_ms, steady_completions, started
         q = prefill.queues[widx]
         budget = prefill_eng.max_num_batched_tokens
         arrived = [r for r in q if r.pool_arrival_ms <= start_ms]
@@ -306,8 +429,9 @@ def evaluate_disagg(
                 break
             if r.prefill_start_ms < 0:
                 r.prefill_start_ms = start_ms
+                started += 1
             chunk = min(r.remaining_prefill, budget)
-            computed_before = wl.prefix + (wl.effective_isl - r.remaining_prefill)
+            computed_before = r.prefix + (max(1, r.isl - r.prefix) - r.remaining_prefill)
             r.remaining_prefill -= chunk
             budget -= chunk
             batch_count += 1
@@ -331,30 +455,34 @@ def evaluate_disagg(
             elif completions >= warmup_reqs:
                 ttft_steady.add(ttft_ms)
                 prefill_waits.append(r.prefill_start_ms - r.arrival_ms)
-            if r.generated >= wl.osl:
+            elif not closed_loop:
+                # open loop: pre-warmup TTFTs are transient (same bucketing
+                # as calendar.evaluate_open_loop)
+                ttft_transient.add(ttft_ms)
+            if r.generated >= r.osl:
                 _complete(r, end)  # osl == 1 finishes on the prefill worker
             elif fabric is None:
                 decode.dispatch(r, end)
             else:
                 dst = decode.next_worker()
                 r.xfer_submit_ms = end
-                fabric.submit(widx, dst, transfer_bytes, end, (dst, r))
+                fabric.submit(widx, dst, r.isl * spec.kv_bytes_per_token, end, (dst, r))
         return end
 
     def run_decode_pass(widx: int, start_ms: float) -> float:
         """One decode iteration: the running set (capped at max_num_seqs)
         emits one token each; no prefill compute on decode workers."""
         q = decode.queues[widx]
-        emitters = [r for r in q if r.generated < wl.osl and r.pool_arrival_ms <= start_ms][: decode_eng.max_num_seqs]
+        emitters = [r for r in q if r.generated < r.osl and r.pool_arrival_ms <= start_ms][: decode_eng.max_num_seqs]
         if not emitters:
             return start_ms
-        ctx = sum(wl.isl + r.generated for r in emitters) // len(emitters)
+        ctx = sum(r.isl + r.generated for r in emitters) // len(emitters)
         end = start_ms + decode_timing.decode_ms(len(emitters), ctx)
         for r in emitters:
             r.generated += 1
             r.gaps.append(end - r.last_token_ms)  # gap 1 carries the handoff
             r.last_token_ms = end
-            if r.generated >= wl.osl:
+            if r.generated >= r.osl:
                 q.remove(r)
                 _complete(r, end)
         return end
@@ -378,34 +506,50 @@ def evaluate_disagg(
         # exactly on the completion/worker-free knife edge, which at high
         # utilization locks the zero-wait pipeline attractor real deployments
         # never hold (validated: h20e 2P1D kappa=1 at the saturation knee).
-        prefill.dispatch(
-            _Req(arrival_ms=end_ms, remaining_prefill=wl.effective_isl),
-            end_ms + wl.turnaround_ms,
-        )
+        if closed_loop:
+            prefill.dispatch(_new_req(end_ms), end_ms + wl.turnaround_ms)
 
     def _any_req(_r: _Req) -> bool:
         return True
 
     def _decoding(r: _Req) -> bool:
-        return r.generated < wl.osl
+        return r.generated < r.osl
 
-    max_iters = 200 * (warmup_generations + window_generations) * max(1, wl.osl)
+    if closed_loop:
+        max_iters = 200 * (warmup_generations + window_generations) * max(1, max_osl)
+    else:
+        # pure stall backstop (every iteration performs at least one discrete
+        # event: an arrival release, a fabric completion, or a pass)
+        max_iters = 400 * (target + 1) * max(1, max_osl)
     for _ in range(max_iters):
         if completions >= target:
             break
         t_pf = min((prefill.next_start(i, _any_req) for i in range(len(prefill.queues))), default=math.inf)
         t_dc = min((decode.next_start(i, _decoding) for i in range(len(decode.queues))), default=math.inf)
         t_tr = fabric.next_completion_ms() if fabric and fabric.has_flows() else None
-        now = min(t_pf, t_dc, t_tr if t_tr is not None else math.inf)
+        t_arr = pending[released].eligible_ms if released < len(pending) else math.inf
+        now = min(t_pf, t_dc, t_arr, t_tr if t_tr is not None else math.inf)
         if now == math.inf:
             raise RuntimeError(
-                f"disagg tandem recursion stalled (C={c}, {spec.num_prefill_workers}P"
+                f"disagg tandem recursion stalled ({spec.num_prefill_workers}P"
                 f"{spec.num_decode_workers}D) — invalid configuration"
+            )
+
+        while released < len(pending) and pending[released].eligible_ms <= now:
+            r = pending[released]
+            prefill.dispatch(r, r.eligible_ms)
+            released += 1
+        if not closed_loop and released - started > max_backlog:
+            raise RuntimeError(
+                f"disagg prefill backlog diverged ({spec.num_prefill_workers}P"
+                f"{spec.num_decode_workers}D, rate={wl.request_rate}/s) — request_rate "
+                "is at or beyond this deployment's prefill capacity; no steady state exists"
             )
 
         if fabric is not None:
             for t_done, (dst, r) in fabric.pop_completed(now):
-                xfer_durations.append(t_done - r.xfer_submit_ms)
+                r.xfer_ms = t_done - r.xfer_submit_ms
+                xfer_durations.append(r.xfer_ms)
                 decode.dispatch(r, t_done, widx=dst)
 
         for i in range(len(prefill.queues)):
@@ -420,6 +564,21 @@ def evaluate_disagg(
     window_ms = now - (steady_start_ms if steady_start_ms is not None else 0.0)
     throughput = steady_completions / (window_ms / 1000.0) if window_ms > 0 else 0.0
 
+    per_request = None
+    if trace_order:
+        per_request = [
+            dict(
+                arrival_ms=r.arrival_ms,
+                isl=r.isl,
+                prefix=r.prefix,
+                osl=r.osl,
+                ttft_ms=(r.first_token_ms - r.arrival_ms) if r.first_token_ms >= 0 else None,
+                e2e_ms=(r.last_token_ms - r.arrival_ms) if r.last_token_ms >= 0 else None,
+                xfer_ms=r.xfer_ms if r.xfer_submit_ms >= 0 else None,
+            )
+            for r in trace_order
+        ]
+
     return QueueingReport(
         ttft_steady=ttft_steady,
         ttft_transient=ttft_transient,
@@ -427,13 +586,14 @@ def evaluate_disagg(
         tpot=tpot,
         e2e=e2e,
         throughput_rps=throughput,
-        output_tokens_per_s=throughput * wl.osl,
+        output_tokens_per_s=throughput * mean_osl,
         backend=backend,
         mode="disagg",
         num_requests=wl.num_requests,
         kv_transfer_ms=(sum(xfer_durations) / len(xfer_durations)) if xfer_durations else 0.0,
         prefill_queue_ms=(sum(prefill_waits) / len(prefill_waits)) if prefill_waits else 0.0,
         workload_fidelity=workload_fidelity(wl),
+        per_request=per_request,
     )
 
 
@@ -446,19 +606,39 @@ def evaluate_disagg_mixed(
     spec: DisaggSpec,
     backend: str = "vllm",
     phases: int = 4,
+    warmup_requests: int = 128,
+    window_requests: int = 512,
+    arrival_trace=None,
 ) -> QueueingReport:
     """Phase-robust tandem output: an equal-weight mixture over a
     deterministic set of initial-arrival staggers.
 
-    The tandem system is multi-stable — the steady limit cycle depends on
-    the initial cohort phase (simultaneous arrivals lock a large-batch
-    prefill cycle; spread arrivals lock a small-batch pipeline cycle, with
-    TTFTs differing by multiples). A single phase is therefore one
-    attractor among several, and which one a real deployment lands in is
-    set by arrival jitter outside the model. The mixture over staggers
+    The closed-loop tandem system is multi-stable — the steady limit cycle
+    depends on the initial cohort phase (simultaneous arrivals lock a
+    large-batch prefill cycle; spread arrivals lock a small-batch pipeline
+    cycle, with TTFTs differing by multiples). A single phase is therefore
+    one attractor among several, and which one a real deployment lands in
+    is set by arrival jitter outside the model. The mixture over staggers
     spanning [0, t_solo_prefill] is the phase-agnostic estimate; it stays
     deterministic (no RNG) and each component is a valid limit cycle.
+
+    Open-loop workloads have no initial-cohort phase (arrivals are
+    externally timed), so a single evaluation is already phase-robust and
+    is returned directly.
     """
+    if wl.concurrency is None:
+        return evaluate_disagg(
+            wl,
+            prefill_eng,
+            decode_eng,
+            prefill_timing,
+            decode_timing,
+            spec,
+            backend,
+            warmup_requests=warmup_requests,
+            window_requests=window_requests,
+            arrival_trace=arrival_trace,
+        )
     t_solo = max(1e-6, prefill_timing.prefill_ms(1, wl.isl, wl.prefix))
     offsets = [k * t_solo / max(1, phases - 1) for k in range(max(1, phases))]
     reps = [

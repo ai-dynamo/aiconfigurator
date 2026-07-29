@@ -108,8 +108,16 @@ synthetic arrival streams use a correlation-free per-period shuffle (count dispe
 W4. `QueueingReport.workload_fidelity` (set by every evaluator; see
 `workload_fidelity()`) declares the consumed tier so downstream consumers
 can gate on prediction quality without re-deriving it; evaluators that do
-not consume a tier REJECT its inputs loudly (e.g. the fixed-shape disagg
-tandem raises on shape quantiles) instead of silently downgrading.
+not consume an input REJECT it loudly (e.g. every calendar raises on the
+unmodeled KV-pressure semantics rather than ignoring `kv_capacity_tokens`)
+instead of silently downgrading. The disagg tandem consumes W0–W3 through
+the same deterministic shape/arrival streams as the agg calendars
+(`spec._shape_drawer` / `spec._interarrival_stream`), so identical
+workload inputs reach both evaluators; its open-loop router is static
+round-robin at the scheduler-visibility instant (the TRT-LLM native
+disagg mapping), and the KV handoff is priced per request
+(`isl × kv_bytes_per_token` — full context: cached prefix saves prefill
+compute, not transfer bytes). W4 session lanes remain agg-only.
 
 ## 4. New summary columns (additive; legacy `ttft`/`tpot` untouched)
 
@@ -129,7 +137,12 @@ tandem raises on shape quantiles) instead of silently downgrading.
   metadata with their own timing models (heterogeneous P/D supported),
   KV handoff computed on a max-min-fair per-NIC transfer fabric wired from
   the system spec, first token emitted prefill-side (the handoff lands in
-  the first ITL gap), and phase-mixed output (see §6.15).
+  the first ITL gap), and phase-mixed output (see §6.15). The tandem
+  accepts the full W0–W3 workload contract (variable shapes, per-request
+  prefix, open-loop rates, exact `arrival_trace` replay with per-request
+  `xfer_ms` diagnostics); the DES gate families pin the fixed-shape
+  closed-loop core, the shared-stream construction carries the agg-side
+  W1–W3 validation record across.
 
 Additionally: `ttft_steady_p99_{lo,hi}` (the cohort bracket — structural
 bounds on the steady distribution's support, used by the sweep funnel) and
