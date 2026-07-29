@@ -203,10 +203,11 @@ overwrite.)
    `unverified_sms`. Expect the B200 collectors to work unchanged (the CuTe
    MTP probe checks capability major == 10, which matches SM103); verify on
    the actual node, run smoke, then lift the marker.
-5. **sglang `kda_fused_decode` decode kernel** (TODO in the collector):
-   attempt-and-verify fused decode, compiled for the TP8 12-head shard; not
-   collected on any SM yet, so decode rows stay slightly pessimistic where it
-   engages. Needs a `covered()`-mirroring dispatch like the verify one.
+5. **sglang `kda_fused_decode` decode kernel** — DONE (2026-07-29, campaign
+   row above): covered()-driven generation dispatch in the collector, per-key
+   consumer routing in Python+Rust, b300_sxm rows collected. Kept here for
+   history; the remaining fused-lane gap is the kda_onorm double-count for
+   the fused shard (fusion-boundary discussion pending).
 6. **Module-level KDA collection (direction).** The kda collector is
    kernel-level by construction (it followed the GDN hybrid-linear precedent:
    novel state kernels in kda_perf, projections via the shared gemm table,
@@ -225,6 +226,39 @@ overwrite.)
    citations, per-key consumer routing. Full design (KDA+GDN unified module
    family, prefix-cache and CP semantics):
    docs/perf_database/linear-attention-module-design.md.
+
+   **Prototype VALIDATED (2026-07-29, 1×B300 SM103, kimi-k3 branch image;
+   script + raw results in collector_artifacts/proto_kda_module.py|
+   proto_kda_module_results_b300.txt).** Shrunk 4-layer K3 (3 KDA + 1 MLA,
+   per-rank TP8 shard realized at tp1: linear_attn num_heads 96→12 AND MLA
+   num_attention_heads 96→12 — full 96 q-heads are rejected by the
+   trtllm_mla decode kernel; num_experts 896→64; `is_kda_layer` uses
+   1-indexed lists), built through sglang's own ModelRunner, batches via the
+   `sglang.benchmark.one_batch` pattern. One KimiK3DeltaAttention module is
+   timed by capture-and-replay: a forward-pre-hook grabs the layer's real
+   (args, kwargs) AND the active ForwardContext during a full
+   `model_runner.forward`, then replays the module under
+   `forward_context(...)` — decode/graphed under the framework's own
+   `model_capture_mode()` + torch.cuda.graph, mirroring serving. The fused
+   CuTeDSL decode ENGAGED inside the replay (`_k3_onorm_consumed=True`) with
+   zero dispatch logic replicated. Numbers vs the kernel-level table
+   (12-head shard): decode bs1 34.5 µs, bs8 36.6 µs, bs64 66.0 µs per layer
+   vs kda_fused_decode 6.7/6.7/17.0 µs — the module rows absorb the
+   projection GEMMs, tiny bfa GEMVs and ghost elementwise the kernel-sum
+   misses (the audit's "norm/elementwise 4x pessimistic" gap). Prefill bs1
+   seq1024: 225 µs graphed (GPU truth; kernels 126 µs + projections ~99 µs)
+   vs 742 µs eager — the eager number is python-launch-bound, so the
+   collector must graph both phases (dsv4 pattern). Framework plumbing
+   required outside the scheduler (0.5.16): `ParallelState.trivial()` for
+   the ModelRunner ctor, `init_cuda_graphs()` even when graphs are disabled,
+   and the scheduler-side global trio `initialize_moe_config` +
+   `initialize_fp8_gemm_config` + `initialize_fp4_gemm_config` — without
+   the first, the resolved flashinfer_mxfp4 MoE backend is silently lost and
+   MoE falls back to the sm103-less triton runner
+   (benchmark/one_batch.py:878 does the same). E2E cross-check: 36.6 µs ×
+   69 KDA layers = 2.5 ms/step at bs8 vs ~2 ms KDA-attributed in the nsys
+   breakdown — same zone, delta = intra-graph gaps + module-boundary
+   elementwise now correctly owned by the module row.
 7. **Hopper system (if ever re-added)**: recollect sglang kda context with
    the fixed int32 guard rather than restoring the old dataset (coverage hole
    above), and re-run the moe marlin lane to reconfirm the EP>1 crash before
