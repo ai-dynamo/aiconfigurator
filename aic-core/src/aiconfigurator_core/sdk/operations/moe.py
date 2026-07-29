@@ -1140,7 +1140,12 @@ class MoEDispatch(Operation):
                 num_experts=num_experts,
             )
             if lookup_node == 1 and sms == 20:  # only collect sm=20 for now
-                data = node_data[sms]
+                # .get(), not [] -- node_data is a nested defaultdict from the
+                # loader, so indexing a missing sms would auto-vivify an empty
+                # branch INTO the shared cached table (see load_data caches) and
+                # skew later 2-axis (sms, tokens) queries on the same slice.
+                # An empty dict here still fails cleanly in perf_interp.query.
+                data = node_data.get(sms, {})
                 # 1-D tokens curve; linear token proxy SOL (see deepep_ll note).
                 config = perf_interp.OpInterpConfig(
                     axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
