@@ -223,9 +223,12 @@ class TestRecommendPicking:
 
         def min_gpus(cli_result):
             df = cli_result.best_configs.get(cli_result.chosen_exp)
-            if df is None or df.empty or "total_gpus_needed" not in df.columns:
-                return 0
-            return int(df["total_gpus_needed"].min())
+            assert df is not None and not df.empty and "total_gpus_needed" in df.columns, (
+                f"{cli_result.chosen_exp} has no total_gpus_needed results"
+            )
+            result = int(df["total_gpus_needed"].min())
+            assert result > 0
+            return result
 
         low_gpus = min_gpus(result_low)
         high_gpus = min_gpus(result_high)

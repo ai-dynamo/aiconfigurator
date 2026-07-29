@@ -403,8 +403,8 @@ aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --sys
 or
 aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm --ttft 1000 --tpot 10 --isl 3000 --osl 512 --prefix 0
 ```
-`model_path`, `total_gpus`, `system` are three required arguments to define the problem.
-If you want to specify your problem with more details, we allow to define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
+`model_path` and `system` are always required. You must provide either `--total-gpus` (fixed GPU budget) or a load target (`--target-request-rate` / `--target-concurrency`, mutually exclusive). When a load target is given without `--total-gpus`, default mode automatically routes to the recommend engine to find the minimum GPU count.
+If you want to specify your problem with more details, you can define `ttft`, `tpot`, `isl`, `osl` and `prefix`.
 
 #### Additional arguments
 
