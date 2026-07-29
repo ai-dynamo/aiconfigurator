@@ -438,11 +438,71 @@ def run_kda_module_benchmark(
     successful_points = 0
     failed_points = 0
 
-    # --- context (extend) phase: bs x isl grid, ascending token count so a
-    # genuine capacity failure loses only the tail of the sweep -------------
+    # --- generation (decode) phase FIRST: the top of the context token range
+    # can hit CUDA-context-fatal kernel faults (see FIXME(kernel-limit) below)
+    # that kill everything after them; decode rows must not be collateral ----
+    for batch_size in grid["generation_batch_sizes"]:
+        replay = None
+        try:
+            if aic_debug:
+                print(f"  generation bs={batch_size}", flush=True)
+            # The prep extend is instrumental (decode cost is state-size
+            # invariant); shrink it when bs x isl would cross the conv int32
+            # bound that is fatal at large batch (silicon: h48 bs=1024 and
+            # h96 bs=512 both died at prep_tokens*conv_channels = 2.4e9).
+            prep_isl = _DECODE_PREP_ISL
+            while prep_isl > 8 and batch_size * prep_isl * conv_channels >= 2**31:
+                prep_isl //= 2
+            batch, fb_ext = _make_extend_batch(_make_reqs(batch_size, prep_isl), runner)
+            with torch.no_grad():
+                runner.forward(fb_ext)  # real prefill so conv/SSM state exists
+            fb_dec = _make_decode_batch(batch, runner)
+            replay, fused = _capture_module_graph(runner, module, fb_dec, f"generation bs={batch_size}")
+            with benchmark_with_power(
+                device=torch.device(device),
+                kernel_func=replay,
+                num_warmups=5,
+                num_runs=30,
+                repeat_n=1,
+                # kernel_func is already a captured-graph replay; the helper's
+                # own capture would replay-inside-capture and abort.
+                use_cuda_graph=False,
+            ) as results:
+                _log_row(
+                    geometry=geometry,
+                    phase="generation",
+                    batch_size=batch_size,
+                    seq_len=1,
+                    num_tokens=batch_size,
+                    model_name=model_name,
+                    kernel_source=("kda_module[kda_fused_decode]" if fused else "kda_module[triton_packed_decode]"),
+                    results=results,
+                    sglang_version=sglang_version,
+                    perf_filename=perf_filename,
+                )
+            successful_points += 1
+        except Exception as e:
+            failed_points += 1
+            print(f"  Error at generation batch_size={batch_size}: {e}", flush=True)
+            if aic_debug:
+                import traceback
+
+                traceback.print_exc()
+        finally:
+            replay = None  # drops the closure holding the graph
+            torch.cuda.empty_cache()
+
+    # --- context (extend) phase: guard-raising cells first (their classified
+    # failure records cost nothing and must not be lost to a later fatal
+    # cell), then real cells ascending by token count so a capacity failure
+    # or the fatal top-of-range fault loses only the tail -------------------
+    def _passes_guards(cell):
+        tokens = cell[0] * cell[1]
+        return tokens * conv_channels < 2**31 and tokens <= int(runner.max_total_num_tokens)
+
     ctx_cells = sorted(
         ((bs, sl) for bs in grid["context_batch_sizes"] for sl in grid["context_sequence_lengths"]),
-        key=lambda c: c[0] * c[1],
+        key=lambda c: (_passes_guards(c), c[0] * c[1]),
     )
     for batch_size, seq_len in ctx_cells:
         total_tokens = batch_size * seq_len
@@ -453,6 +513,15 @@ def run_kda_module_benchmark(
             # spans total_tokens * conv_channels; silicon-confirmed on SM90/
             # SM100). The module drives the same kernel via the backend, and
             # the failure is a fatal illegal address — raise before capture.
+            # FIXME(kernel-limit): the FULL-LAYER extend additionally crashed
+            # with cudaErrorIllegalAddress at total_tokens=262144 on the
+            # 12-head shard (B300/SM103, kimi-k3 image
+            # lmsysorg/sglang@sha256:81a9c006..., 2026-07-29) — BELOW this
+            # conv guard's bound, so another kernel in the layer path breaks
+            # first (unidentified; MLA KV write / chunk internals suspected).
+            # Unverified against framework source; the affected top-of-range
+            # cells fail fatally at runtime and, with generation running
+            # first and cells ascending, only that band is lost.
             if total_tokens * conv_channels >= 2**31:
                 raise ValueError(
                     "SGLang causal_conv1d Triton kernel int32 token-offset overflow: "
@@ -501,51 +570,6 @@ def run_kda_module_benchmark(
         finally:
             # release this cell's captured graph (its private pool holds
             # GiB-scale activations at large token counts) before the next
-            replay = None  # drops the closure holding the graph
-            torch.cuda.empty_cache()
-
-    # --- generation (decode) phase: bs grid, state prepped by a real extend --
-    for batch_size in grid["generation_batch_sizes"]:
-        replay = None
-        try:
-            if aic_debug:
-                print(f"  generation bs={batch_size}", flush=True)
-            batch, fb_ext = _make_extend_batch(_make_reqs(batch_size, _DECODE_PREP_ISL), runner)
-            with torch.no_grad():
-                runner.forward(fb_ext)  # real prefill so conv/SSM state exists
-            fb_dec = _make_decode_batch(batch, runner)
-            replay, fused = _capture_module_graph(runner, module, fb_dec, f"generation bs={batch_size}")
-            with benchmark_with_power(
-                device=torch.device(device),
-                kernel_func=replay,
-                num_warmups=5,
-                num_runs=30,
-                repeat_n=1,
-                # kernel_func is already a captured-graph replay; the helper's
-                # own capture would replay-inside-capture and abort.
-                use_cuda_graph=False,
-            ) as results:
-                _log_row(
-                    geometry=geometry,
-                    phase="generation",
-                    batch_size=batch_size,
-                    seq_len=1,
-                    num_tokens=batch_size,
-                    model_name=model_name,
-                    kernel_source=("kda_module[kda_fused_decode]" if fused else "kda_module[triton_packed_decode]"),
-                    results=results,
-                    sglang_version=sglang_version,
-                    perf_filename=perf_filename,
-                )
-            successful_points += 1
-        except Exception as e:
-            failed_points += 1
-            print(f"  Error at generation batch_size={batch_size}: {e}", flush=True)
-            if aic_debug:
-                import traceback
-
-                traceback.print_exc()
-        finally:
             replay = None  # drops the closure holding the graph
             torch.cuda.empty_cache()
 
