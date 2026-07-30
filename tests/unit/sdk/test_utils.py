@@ -1139,15 +1139,22 @@ class TestParseCompressedTensorsQuant:
         algo, _ = parse_compressed_tensors_quant(self._make_quant_config(8, "float"))
         assert algo == "fp8"
 
-    def test_block_fp8_base_algo(self):
-        """RedHatAI DSV4 compressed-tensors weights use block-scaled FP8."""
+    @pytest.mark.parametrize(
+        ("strategy", "block_structure"),
+        [
+            pytest.param("block", None, id="block-strategy"),
+            pytest.param("group", [128, 128], id="block-structure"),
+        ],
+    )
+    def test_block_fp8_base_algo(self, strategy, block_structure):
+        """Either compressed-tensors block signal selects block-scaled FP8."""
         from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
 
         cfg = self._make_quant_config(8, "float")
         cfg["config_groups"]["group_0"]["weights"].update(
             {
-                "strategy": "block",
-                "block_structure": [128, 128],
+                "strategy": strategy,
+                "block_structure": block_structure,
             }
         )
         algo, _ = parse_compressed_tensors_quant(cfg)
