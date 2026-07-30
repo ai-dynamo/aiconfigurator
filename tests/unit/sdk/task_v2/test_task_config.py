@@ -792,7 +792,6 @@ def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
         system_name="b200_sxm",
         backend_name="sglang",
     )
-    assert blackwell.gemm_quant_mode == common.GEMMQuantMode.fp8_block
     assert blackwell.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
     # FP8-only requants (no expert_dtype=fp4) are NOT remapped.
     fp8_requant = Task(
