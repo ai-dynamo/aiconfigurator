@@ -60,6 +60,30 @@ DEEPEP_LL_SUPPORTED_HIDDEN = (2048, 2560, 4096, 5120, 6144, 7168, 8192)
 # for later shapes). Override for a different build via DEEPEP_LL_MAX_TOPK.
 DEEPEP_LL_MAX_TOPK = int(os.environ.get("DEEPEP_LL_MAX_TOPK", "11"))
 
+# `num_max_dispatch_tokens_per_rank` is the receive-buffer slot capacity, which
+# SGLang pins to a constant independent of the batch size
+# (SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK, default 128). Sizing it to the
+# swept token count instead both misrepresents the deployed configuration and
+# leaves DeepEP's FP8 scale tensor entirely unwritten below ~128 slots, which
+# dequantises every payload to zero.
+DEEPEP_LL_DISPATCH_CAPACITY = int(os.environ.get("DEEPEP_LL_DISPATCH_CAPACITY", "128"))
+
+
+def _dispatch_capacity(num_tokens: int) -> int:
+    """Slot capacity for a token count, mirroring SGLang's fixed-capacity buffer."""
+    return max(DEEPEP_LL_DISPATCH_CAPACITY, num_tokens)
+
+
+def _ensure_low_latency_qp_depth(max_tokens: int) -> None:
+    """Keep DeepEP LL's NVSHMEM queue deep enough for the dispatch capacity.
+
+    DeepEP asserts `nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`.
+    """
+    min_qp_depth = max(128, 2 * (_dispatch_capacity(max_tokens) + 1))
+    current = os.environ.get("NVSHMEM_QP_DEPTH")
+    if current is None or int(current) < min_qp_depth:
+        os.environ["NVSHMEM_QP_DEPTH"] = str(min_qp_depth)
+
 
 def _hidden_allowlist():
     raw = os.environ.get("DEEPEP_LL_HIDDEN_ALLOWLIST", "").strip()
@@ -218,8 +242,8 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
 
         # Buffer allocation can OOM for large shapes; that fails symmetrically
         # before any collective, so we can skip the shape and keep the group intact.
-        max_tokens = max(tokens)
-        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(max_tokens, hidden, num_ranks, num_experts)
+        max_capacity = _dispatch_capacity(max(tokens))
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(max_capacity, hidden, num_ranks, num_experts)
         if rank == 0:
             print(
                 f"[deepep_ll] hidden={hidden} experts={num_experts} topk={num_topk} "
@@ -254,7 +278,8 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
         try:
             for num_tokens in tokens:
                 token_metrics: list[dict] = []
-                buffer.clean_low_latency_buffer(num_tokens, hidden, num_experts)
+                capacity = _dispatch_capacity(num_tokens)
+                buffer.clean_low_latency_buffer(capacity, hidden, num_experts)
                 test_low_latency.test_main(
                     num_tokens,
                     hidden,
@@ -265,7 +290,9 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
                     group,
                     buffer,
                     seed=1,
-                    do_check=False,
+                    do_check=True,
+                    enable_route_masking=False,
+                    dispatch_capacity=capacity,
                     metrics_out=token_metrics if rank == 0 else None,
                 )
                 dist.barrier()
@@ -337,6 +364,7 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
     version = dataset_version_label("DEEPEP_LL_VERSION")
 
     output_path = os.path.join(os.getcwd(), str(perf_filename))
+    _ensure_low_latency_qp_depth(max(DEEPEP_LL_TOKENS))
 
     # Single-node distributed bootstrap (WORLD_SIZE = number of NODES = 1).
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
