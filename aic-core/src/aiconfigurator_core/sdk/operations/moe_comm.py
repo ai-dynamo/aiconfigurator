@@ -422,15 +422,28 @@ def _validate_a2a_request(comm_backend: str, phase: str) -> None:
 
 
 def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
-    """Exact ``comm_dtype`` key, else the sole collected dtype (debug log).
+    """Three-step dtype resolution: exact key -> fp8_block alias -> sole dtype.
 
-    A slice collected under exactly one dtype answers any requested dtype —
-    the legacy tables have no dtype axis (DeepEP rows live under "default"),
-    so a caller asking for a payload dtype must still reach them. With two or
-    more collected dtypes there is no unambiguous stand-in: typed miss.
+    1. Exact ``comm_dtype`` key.
+    2. ``fp8_block`` tries ``fp8`` (debug log): fp8_block is a behavioral mode
+       that reuses the fp8 comm tables — the same normalization the legacy
+       ``query_trtllm_alltoall`` applies via ``_normalize_quant_mode_for_table``.
+       Exact-first ordering keeps real fp8_block rows winning if a future
+       collection ships them.
+    3. The sole collected dtype (debug log): the legacy tables have no dtype
+       axis (DeepEP rows live under "default"), so a caller asking for a
+       payload dtype must still reach them. With two or more collected dtypes
+       there is no unambiguous stand-in: typed miss.
     """
     if comm_dtype in phase_slice:
         return phase_slice[comm_dtype]
+    if comm_dtype == "fp8_block" and "fp8" in phase_slice:
+        logger.debug(
+            "moe_a2a: comm_dtype 'fp8_block' not collected; normalizing to 'fp8' "
+            "(behavioral mode reusing the fp8 comm tables; %s)",
+            query_context,
+        )
+        return phase_slice["fp8"]
     if len(phase_slice) == 1:
         sole = next(iter(phase_slice))
         logger.debug(
@@ -454,7 +467,9 @@ class MoEAllToAll(Operation):
     three legacy per-backend adapters). Loaded on every inference backend
     ({"sglang", "vllm", "trtllm"} all have legacy comm sources); ``None``
     otherwise. Comm ops see per-rank token counts: ``query(x=...)`` scales by
-    ``scale_factor`` only — never by ``attention_dp_size``.
+    ``scale_factor`` only — never by ``attention_dp_size``. ``comm_dtype``
+    resolves exact-first, then the legacy ``fp8_block`` -> ``fp8`` behavioral
+    aliasing, then the sole-collected-dtype fallback (typed miss otherwise).
     """
 
     _data_cache: ClassVar[dict] = {}

@@ -188,5 +188,46 @@ def test_l1_trtllm_alltoall_query_equivalence():
     assert comparisons > 500
 
 
+@pytest.mark.skipif(
+    not os.path.exists(TRTLLM_ALLTOALL_PATH),
+    reason="shipped gb200 trtllm 1.3.0rc10 alltoall parquet not present",
+)
+def test_l1_fp8_block_normalization_matches_legacy():
+    """Caller-side dtype alias: ``fp8_block`` reuses the fp8 comm tables.
+
+    The legacy query normalizes fp8_block -> fp8 via
+    ``_normalize_quant_mode_for_table`` before the table walk; ``query_moe_a2a``
+    must mirror it. The slice-driven sweep above only probes STORED dtype keys,
+    so this caller-visible alias needs its own shipped-data probe.
+    """
+    from aiconfigurator_core.sdk import common
+
+    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    assert db is not None
+
+    legacy_table = load_trtllm_alltoall_data(TRTLLM_ALLTOALL_PATH)
+    assert legacy_table
+    dispatch_fp8 = legacy_table["NVLinkTwoSided"]["alltoall_dispatch"][common.MoEQuantMode.fp8]
+    (node, hidden, topk, experts, ep), tokens = min(_iter_slices(dispatch_fp8, 5), key=lambda kv: kv[0])
+
+    comparisons = 0
+    for tok in _token_probes(tokens):
+        unified = db.query_moe_a2a("nvlink_two_sided", "dispatch", "fp8_block", ep, node, hidden, topk, experts, tok)
+        legacy = db.query_trtllm_alltoall(
+            op_name="alltoall_dispatch",
+            num_tokens=tok,
+            hidden_size=hidden,
+            topk=topk,
+            num_experts=experts,
+            moe_ep_size=ep,
+            quant_mode=common.MoEQuantMode.fp8_block,
+            moe_backend="wideep",
+            node_num=node,
+        )
+        _assert_equivalent(unified, legacy, f"fp8_block {node=} {hidden=} {topk=} {experts=} {ep=} {tok=}")
+        comparisons += 1
+    assert comparisons > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
