@@ -239,7 +239,14 @@ def run_moe_torch(
                 topk_ids_list.append(ids)
 
             print("actual num_tokens: ", [topk_ids.shape[0] for topk_ids in topk_ids_list])
-            output_list = [torch.empty((tw.shape[0], padded_hidden), dtype=hidden_states.dtype, device=device) for tw in topk_weights_list]
+            output_list = [
+                torch.empty(
+                    (tw.shape[0], padded_hidden),
+                    dtype=hidden_states.dtype,
+                    device=device,
+                )
+                for tw in topk_weights_list
+            ]
 
         elif distributed == "balanced":
             actual_logits = balanced_logits(num_tokens, num_experts, topk).bfloat16().to(device)
