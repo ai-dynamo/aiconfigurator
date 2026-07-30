@@ -14,6 +14,12 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 (with legacy per-backend adapters) into one nested dict keyed by
 ``[comm_backend][phase][comm_dtype][ep_size][node_num][hidden_size][topk]
 [num_experts][sms][num_tokens]``.
+
+The module also owns the large-EP compute side of the same family:
+``load_moe_ep_data`` loads the unified ``moe_ep_perf.parquet`` EP MoE compute
+table (with legacy sglang/trtllm wideep adapters) into one nested dict keyed
+by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
+[num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 
+from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations.base import _read_filtered_rows
 
 logger = logging.getLogger(__name__)
@@ -368,6 +375,255 @@ def load_moe_a2a_data(
         first_occurrence = key not in seen
         seen.add(key)
         _store_a2a_leaf(
+            data,
+            key,
+            {"latency": latency, "power": power, "energy": energy},
+            overwrite=first_occurrence,
+        )
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# EP MoE compute (moe_ep_perf.parquet) — same family, compute side
+# ---------------------------------------------------------------------------
+
+
+def _moe_ep_store() -> defaultdict:
+    """Empty moe_ep store: 11 auto-vivifying levels over a token->leaf dict.
+
+    Key order: ``[kernel_source][quant][distribution][inference_phase][topk]
+    [num_experts][num_slots][hidden_size][inter_size][moe_tp_size]
+    [moe_ep_size]`` -> ``{num_tokens: leaf}``. ``quant`` is a
+    :class:`common.MoEQuantMode` member, matching the sibling MoE loaders.
+    """
+    return defaultdict(  # kernel_source
+        lambda: defaultdict(  # quant
+            lambda: defaultdict(  # distribution
+                lambda: defaultdict(  # inference_phase
+                    lambda: defaultdict(  # topk
+                        lambda: defaultdict(  # num_experts
+                            lambda: defaultdict(  # num_slots
+                                lambda: defaultdict(  # hidden_size
+                                    lambda: defaultdict(  # inter_size
+                                        lambda: defaultdict(  # moe_tp_size
+                                            lambda: defaultdict(dict)  # moe_ep_size -> {num_tokens: leaf}
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+
+def _store_ep_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: bool) -> None:
+    """Store one ``{"latency", "power", "energy"}`` leaf under the 12-part key.
+
+    ``key`` is ``(kernel_source, quant, distribution, inference_phase, topk,
+    num_experts, num_slots, hidden_size, inter_size, moe_tp_size, moe_ep_size,
+    num_tokens)``. ``overwrite=False`` keeps the first-stored leaf on a
+    collision (debug log) — the intra-source convention new-schema rows
+    follow. ``overwrite=True`` replaces whatever is there — used by the
+    legacy adapters (their oracles assign unconditionally, so the last legacy
+    row wins) and by the first new-schema occurrence of a key to take
+    precedence over legacy-adapted rows.
+    """
+    *outer_key, num_tokens = key
+    bucket = data
+    for part in outer_key:
+        bucket = bucket[part]
+    if num_tokens in bucket and not overwrite:
+        logger.debug("value conflict in moe_ep data: %s", " ".join(str(part) for part in key))
+        return
+    bucket[num_tokens] = leaf
+
+
+def _adapt_legacy_sglang_wideep_moe(data: defaultdict, rows, *, inference_phase: str) -> None:
+    """Adapt legacy sglang ``wideep_{context,generation}_moe_perf`` rows.
+
+    Mirrors ``load_wideep_context_moe_data`` / ``load_wideep_generation_moe_data``
+    (the oracles): straight ``MoEQuantMode[moe_dtype]`` with no
+    kernel-source-based quant rerouting (unlike ``load_moe_data``), and
+    unconditional assignment — the last row wins on an intra-file key
+    collision (``overwrite=True``). ``kernel_source`` is pinned to
+    ``"deepep_moe"`` (spec §4.2; the legacy column spells it ``deepepmoe``
+    and the oracles never read it), ``num_slots = num_experts`` (the legacy
+    sglang tables have no EPLB redundancy axis), and ``inference_phase``
+    comes from which kwarg carried the source file.
+    """
+    for row in rows:
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        num_experts = int(row["num_experts"])
+        key = (
+            "deepep_moe",
+            common.MoEQuantMode[row["moe_dtype"]],
+            row["distribution"],
+            inference_phase,
+            int(row["topk"]),
+            num_experts,
+            num_experts,  # num_slots = num_experts
+            int(row["hidden_size"]),
+            int(row["inter_size"]),
+            int(row["moe_tp_size"]),
+            int(row["moe_ep_size"]),
+            int(row["num_tokens"]),
+        )
+        _store_ep_leaf(data, key, {"latency": latency, "power": power, "energy": power * latency}, overwrite=True)
+
+
+def _adapt_legacy_sglang_context_moe(data: defaultdict, rows) -> None:
+    _adapt_legacy_sglang_wideep_moe(data, rows, inference_phase="context")
+
+
+def _adapt_legacy_sglang_generation_moe(data: defaultdict, rows) -> None:
+    _adapt_legacy_sglang_wideep_moe(data, rows, inference_phase="generation")
+
+
+def _adapt_legacy_trtllm_wideep_moe(data: defaultdict, rows) -> None:
+    """Adapt legacy trtllm ``wideep_moe_perf`` rows.
+
+    Mirrors ``load_wideep_moe_compute_data`` (the oracle): native
+    ``kernel_source`` (``"moe_torch_flow"`` when the column is absent),
+    ``num_slots`` and ``_eplb`` distributions pass through unchanged, no
+    quant rerouting, unconditional assignment (``overwrite=True``, last row
+    wins). The legacy table has no context/generation split — one kernel
+    measured across the token range — so each row is registered under BOTH
+    ``inference_phase`` values with identical (but independent) leaves.
+    """
+    for row in rows:
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        base_key = (
+            row.get("kernel_source", "moe_torch_flow"),
+            common.MoEQuantMode[row["moe_dtype"]],
+            row["distribution"],
+        )
+        shape_key = (
+            int(row["topk"]),
+            int(row["num_experts"]),
+            int(row["num_slots"]),
+            int(row["hidden_size"]),
+            int(row["inter_size"]),
+            int(row["moe_tp_size"]),
+            int(row["moe_ep_size"]),
+            int(row["num_tokens"]),
+        )
+        for inference_phase in ("context", "generation"):
+            leaf = {"latency": latency, "power": power, "energy": power * latency}
+            _store_ep_leaf(data, (*base_key, inference_phase, *shape_key), leaf, overwrite=True)
+
+
+def _load_legacy_ep(
+    data: defaultdict,
+    legacy_context_sources,
+    legacy_generation_sources,
+    legacy_trtllm_wideep_sources,
+) -> bool:
+    """Adapt legacy wideep compute tables into the unified ``data`` store.
+
+    Mapping (spec §4.2): sglang ``wideep_context_moe_perf`` /
+    ``wideep_generation_moe_perf`` -> ``kernel_source="deepep_moe"`` with the
+    inference phase set per source kwarg; trtllm ``wideep_moe_perf`` -> native
+    kernel sources, registered under both phases.
+
+    UNITS: the legacy ``latency`` column is already in **milliseconds** — the
+    oracle loaders store it raw and their query paths feed it through the same
+    ``perf_interp`` machinery as the regular (ms) moe table with no /1000
+    anywhere; shipped values span ~0.03-62 ms, physically sensible for MoE
+    compute. Stored raw here, no unit conversion — bit-exact equality with the
+    oracles is pinned by the shipped-data equivalence sweeps.
+
+    Returns True when at least one legacy source exists — an
+    existing-but-empty file counts, the same exists-but-empty semantic the
+    new-schema path has.
+    """
+    loaded = False
+    for sources, adapt in (
+        (legacy_context_sources, _adapt_legacy_sglang_context_moe),
+        (legacy_generation_sources, _adapt_legacy_sglang_generation_moe),
+        (legacy_trtllm_wideep_sources, _adapt_legacy_trtllm_wideep_moe),
+    ):
+        if sources is None:
+            continue
+        rows = _read_filtered_rows(sources)
+        if rows is None:
+            continue
+        loaded = True
+        adapt(data, rows)
+    return loaded
+
+
+def load_moe_ep_data(
+    sources,
+    legacy_context_sources=None,
+    legacy_generation_sources=None,
+    legacy_trtllm_wideep_sources=None,
+) -> dict | None:
+    """Load the unified EP MoE compute table (``moe_ep_perf.parquet``).
+
+    ``sources`` is the new-schema source list (``(path, kernel_source_filter)``
+    tuples, or a single path) read via ``_read_filtered_rows``; the three
+    ``legacy_*_sources`` feed the legacy wideep adapters
+    (:func:`_load_legacy_ep`). Legacy rows load first; a new-schema row
+    overwrites a legacy leaf at the same key, while collisions **within** the
+    new schema keep the first row (debug log) like every sibling loader.
+
+    Returns:
+        dict: ``[kernel_source][quant][distribution][inference_phase][topk]
+        [num_experts][num_slots][hidden_size][inter_size][moe_tp_size]
+        [moe_ep_size][num_tokens]`` -> dict with ``latency`` (ms — the column
+        is already in milliseconds, unlike the us-collected a2a table),
+        ``power`` (W) and ``energy`` (W·ms) keys. ``quant`` is a
+        :class:`common.MoEQuantMode` member; ``inference_phase`` is stored as
+        collected (``context``/``generation``); validation happens at query
+        time. ``None`` when no source loaded anything.
+    """
+    data = _moe_ep_store()
+    legacy_loaded = _load_legacy_ep(
+        data, legacy_context_sources, legacy_generation_sources, legacy_trtllm_wideep_sources
+    )
+
+    rows = _read_filtered_rows(sources)
+    if rows is None and not legacy_loaded:
+        logger.debug(f"MoE EP data sources {sources} not found.")
+        return None
+    rows = rows or []
+
+    # Check if the power column exists (optional in the schema)
+    has_power = len(rows) > 0 and "power" in rows[0]
+    if len(rows) > 0 and not has_power:
+        logger.debug("moe_ep data has no power column - power will default to 0.0")
+
+    seen: set[tuple] = set()
+    for row in rows:
+        key = (
+            row["kernel_source"],
+            common.MoEQuantMode[row["moe_dtype"]],
+            row["distribution"],
+            row["inference_phase"],  # stored as collected; validated at query time
+            int(row["topk"]),
+            int(row["num_experts"]),
+            int(row["num_slots"]),
+            int(row["hidden_size"]),
+            int(row["inter_size"]),
+            int(row["moe_tp_size"]),
+            int(row["moe_ep_size"]),
+            int(row["num_tokens"]),
+        )
+        latency = float(row["latency"])  # already ms (spec §4.2) — stored raw
+        power = float(row.get("power", 0.0))
+        energy = power * latency  # watt-milliseconds
+
+        # The first new-schema occurrence of a key overwrites any
+        # legacy-adapted leaf; repeats fall into the helper's keep-first path.
+        first_occurrence = key not in seen
+        seen.add(key)
+        _store_ep_leaf(
             data,
             key,
             {"latency": latency, "power": power, "energy": energy},
