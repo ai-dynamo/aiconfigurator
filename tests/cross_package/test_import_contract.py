@@ -29,6 +29,7 @@ CORE_SDK_LEAF_MODULES = [
     "inference_summary",
     "memory",
     "models.base",
+    "models.blocks.moe",
     "models.blocks.vit",
     "models.deepseek",
     "models.deepseek_v32",
