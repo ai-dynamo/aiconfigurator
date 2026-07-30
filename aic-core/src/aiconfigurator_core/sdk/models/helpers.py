@@ -156,7 +156,9 @@ def _get_model_info(model_path: str) -> dict:
         plus the derived MoE fields "num_shared_experts" and "num_moe_layers"
         (both 0 for dense models).
     """
-    info = get_model_config_from_model_path(model_path)
+    # Shallow-copy: get_model_config_from_model_path is @cache'd, so mutating
+    # its return value would poison every other caller's dict.
+    info = dict(get_model_config_from_model_path(model_path))
     info["num_shared_experts"] = _derive_num_shared_experts(info)
     info["num_moe_layers"] = _derive_num_moe_layers(info)
     return info
