@@ -3172,6 +3172,40 @@ class PerfDatabase:
             moe_backend=moe_backend,
         )
 
+    @functools.lru_cache(maxsize=32768)
+    def query_moe_a2a(
+        self,
+        comm_backend: str,
+        phase: str,
+        comm_dtype: str,
+        ep_size: int,
+        node_num: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        num_tokens: int,
+        sms: int = 0,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """Query the unified large-EP MoE all-to-all comm table. Delegates to
+        ``MoEAllToAll``; see ``operations.moe_comm.MoEAllToAll._query_a2a_table``."""
+        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
+
+        return MoEAllToAll._query_a2a_table(
+            self,
+            comm_backend=comm_backend,
+            phase=phase,
+            comm_dtype=comm_dtype,
+            ep_size=ep_size,
+            node_num=node_num,
+            hidden_size=hidden_size,
+            topk=topk,
+            num_experts=num_experts,
+            num_tokens=num_tokens,
+            sms=sms,
+            database_mode=database_mode,
+        )
+
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries
     # ═══════════════════════════════════════════════════════════════════

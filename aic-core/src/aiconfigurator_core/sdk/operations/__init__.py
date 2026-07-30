@@ -47,6 +47,7 @@ from aiconfigurator_core.sdk.operations.mla import (
     WideEPGenerationMLA,
 )
 from aiconfigurator_core.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
 from aiconfigurator_core.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
 from aiconfigurator_core.sdk.operations.overlap import FallbackOp, OverlapOp
 
@@ -86,6 +87,7 @@ __all__ = [
     "Mamba2",
     "Mamba2Kernel",
     "MoE",
+    "MoEAllToAll",
     "MoEDispatch",
     "Operation",
     "OverlapOp",
