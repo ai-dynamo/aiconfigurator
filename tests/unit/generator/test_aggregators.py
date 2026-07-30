@@ -61,3 +61,13 @@ def test_collect_generator_params_preserves_explicit_dynamo_version():
     )
 
     assert result["generator_dynamo_version"] == "0.9.0"
+
+
+def test_collect_generator_params_omits_unspecified_dynamo_version():
+    result = collect_generator_params(
+        service={"model_path": "test/model"},
+        k8s={},
+        backend="vllm",
+    )
+
+    assert "generator_dynamo_version" not in result

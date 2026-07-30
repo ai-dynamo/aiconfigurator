@@ -174,6 +174,8 @@ def test_vllm_engine_args_yaml_still_uses_dict_fallback(tmp_path, monkeypatch):
         ["--is-decode-worker"],
         ["--disaggregation-mode", "prefill"],
         ["--disaggregation-mode", "decode"],
+        ["--disaggregation-mode=prefill"],
+        ["--disaggregation-mode=decode"],
     ],
 )
 def test_vllm_validator_accepts_supported_dynamo_worker_role_interfaces(role_args, monkeypatch):
