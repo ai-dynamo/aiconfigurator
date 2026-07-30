@@ -46,12 +46,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install check script dependencies
+      - name: Install manifest generator dependencies
         run: pip install "tqdm>=4.0.0" pandas pyarrow numpy pyyaml
 
       - name: Regenerate manifest
         run: |
-          python3 tools/perf_database/check_kernel_source.py \
+          python3 tools/perf_database/generate_op_kernel_source_manifest.py \
             --data-root aic-core/src/aiconfigurator_core/systems/data \
             --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml
 

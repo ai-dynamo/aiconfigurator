@@ -5,7 +5,7 @@
 
 The primary enforcement surface of the whole Collector V3 design: run on every
 PR touching `data/`, `collector/`, or the manifest (sibling of
-`check_kernel_source.py`). Exits non-zero on ANY failure and prints every
+`generate_op_kernel_source_manifest.py`). Exits non-zero on ANY failure and prints every
 failure it finds — never stops at the first one.
 
 Six rules, each named after the design section it enforces:
@@ -44,7 +44,7 @@ parsers `aiconfigurator_core.sdk.perf_database._parse_reuse_yaml` /
 `_load_collection_meta_yaml` (via the `aiconfigurator.sdk` compatibility
 alias, which is the same module object — see
 `src/aiconfigurator/sdk/_compat.py`). The tree-walking shape mirrors
-`check_kernel_source.py`'s `_iter_data_files`, specialized to the
+`generate_op_kernel_source_manifest.py`'s `_iter_data_files`, specialized to the
 post-migration family-first layout (`<system>/<family>/<backend>/<version>/`)
 that is now the only layout on disk.
 

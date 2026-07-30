@@ -84,7 +84,7 @@ Backend pairs whose latest tables disagree on shape columns are NOT force-
 joined: extra columns that are constant in their table are dropped (recorded
 in the pair-summary align_notes); otherwise the pair is skipped and reported as `schema_mismatch`.
 
-Shape-key convention follows check_kernel_source.py: every column that is not
+Shape-key convention follows generate_op_kernel_source_manifest.py: every column that is not
 a meta column ({framework, version, device, op_name, kernel_source}) and not
 a latency column is part of the shape key. Sweep columns get log2-bucketed to
 form the local-baseline bucket key.
@@ -116,7 +116,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backend_facts import load_backend_map, translate
-from check_kernel_source import _META_COLUMNS, _iter_data_files
+from generate_op_kernel_source_manifest import _META_COLUMNS, _iter_data_files
 
 logger = logging.getLogger(__name__)
 

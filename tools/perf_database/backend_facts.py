@@ -52,7 +52,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from check_kernel_source import _iter_data_files
+from generate_op_kernel_source_manifest import _iter_data_files
 
 logger = logging.getLogger(__name__)
 
