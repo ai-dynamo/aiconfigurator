@@ -216,13 +216,15 @@ _LEGACY_TRTLLM_KERNEL_TO_BACKEND = {
 }
 
 # op_name -> (phase, comm_dtype); None means the row's ``moe_dtype`` passes
-# through (prepare/dispatch). Combine is keyed by payload precision instead:
-# the standard kernel returns bfloat16 whatever moe_dtype the run used, the
-# low-precision variant returns fp4.
+# through. comm_dtype is the table's dtype axis: the run's moe_dtype for
+# prepare/dispatch/standard combine (dispatch payload == run dtype physically;
+# standard-combine payload is always bf16 but is keyed by run dtype so every
+# legacy leaf maps 1:1, losslessly), and "fp4" for the low-precision combine
+# kernel (distinct key — an nvfp4 run's standard combine keys as "nvfp4").
 _LEGACY_TRTLLM_OP_TO_PHASE_DTYPE = {
     "alltoall_prepare": ("prepare", None),
     "alltoall_dispatch": ("dispatch", None),
-    "alltoall_combine": ("combine", "bfloat16"),
+    "alltoall_combine": ("combine", None),
     "alltoall_combine_low_precision": ("combine", "fp4"),
 }
 

@@ -195,14 +195,14 @@ def test_trtllm_op_name_phase_and_dtype_routing(tmp_path):
 
     backend = data["nvlink_two_sided"]
     assert set(backend.keys()) == {"prepare", "dispatch", "combine"}
-    # prepare and dispatch pass the row's moe_dtype through; combine is keyed by
-    # payload precision: bfloat16 for the standard kernel (whatever moe_dtype the
-    # run used), fp4 for the low-precision variant.
+    # prepare, dispatch and standard combine pass the run's moe_dtype through
+    # (lossless 1:1 legacy fidelity); only the low-precision combine kernel
+    # gets the pinned "fp4" payload key.
     assert set(backend["prepare"].keys()) == {"fp8"}
     assert set(backend["dispatch"].keys()) == {"fp8"}
-    assert set(backend["combine"].keys()) == {"bfloat16", "fp4"}
+    assert set(backend["combine"].keys()) == {"fp8", "fp4"}
     assert _leaf(data, ("nvlink_two_sided", "prepare", "fp8", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.01
-    assert _leaf(data, ("nvlink_two_sided", "combine", "bfloat16", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.03
+    assert _leaf(data, ("nvlink_two_sided", "combine", "fp8", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.03
     assert _leaf(data, ("nvlink_two_sided", "combine", "fp4", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.04
 
 
@@ -252,9 +252,9 @@ def test_trtllm_kernel_source_column_absent_defaults_to_two_sided(tmp_path):
     assert set(data.keys()) == {"nvlink_two_sided"}
 
 
-def test_trtllm_combine_dtype_collapse_keeps_first_row(tmp_path):
-    # Standard-combine rows measured under several moe_dtype configs all map to
-    # the bfloat16 payload key; the intra-source keep-first convention decides.
+def test_trtllm_multi_dtype_combine_rows_map_lossless(tmp_path):
+    # Standard-combine rows measured under different run dtypes keep distinct
+    # keys — no collapse, every legacy leaf survives 1:1 with its own latency.
     rows = [
         _row(ALLTOALL_ROW, op_name="alltoall_combine", moe_dtype="bfloat16", latency=0.011),
         _row(ALLTOALL_ROW, op_name="alltoall_combine", moe_dtype="fp8", latency=0.012),
@@ -264,8 +264,21 @@ def test_trtllm_combine_dtype_collapse_keeps_first_row(tmp_path):
     data = _load_adapted(tmp_path, legacy_trtllm_alltoall_sources=[(path, None)])
 
     combine = data["nvlink_two_sided"]["combine"]
-    assert set(combine.keys()) == {"bfloat16"}
+    assert set(combine.keys()) == {"bfloat16", "fp8"}
     assert _leaf(data, ("nvlink_two_sided", "combine", "bfloat16", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.011
+    assert _leaf(data, ("nvlink_two_sided", "combine", "fp8", 16, 4, 7168, 8, 256, 0, 128))["latency"] == 0.012
+
+
+def test_trtllm_power_column_populates_energy(tmp_path):
+    # The shipped gb200 file has no power column; a legacy file that does must
+    # feed the energy = power * latency(ms) leaf field.
+    path = _write_parquet(tmp_path, [_row(ALLTOALL_ROW, power=350.0)], "trtllm_alltoall_perf.parquet")
+
+    data = _load_adapted(tmp_path, legacy_trtllm_alltoall_sources=[(path, None)])
+
+    leaf = _leaf(data, ("nvlink_two_sided", "dispatch", "fp8", 16, 4, 7168, 8, 256, 0, 128))
+    assert leaf["power"] == 350.0
+    assert leaf["energy"] == 350.0 * 0.25  # W * ms, latency stored raw (already ms)
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +407,8 @@ def test_shipped_deepep_equivalence_sweep(tmp_path):
         visited += table_visited
 
     assert visited > 100  # silent-empty sweep guard
+    # No stray adapted leaves beyond the per-phase mapped rows (2 per legacy leaf).
+    assert len(list(_iter_leaves(adapted, 9))) == len(expected) == 2 * visited
 
 
 @pytest.mark.skipif(
@@ -404,17 +419,16 @@ def test_shipped_trtllm_alltoall_equivalence_sweep(tmp_path):
     """Every legacy alltoall leaf equals the adapted leaf under the mapped keys.
 
     Latencies must match bit-exactly (the column is already ms; the adapter
-    stores it raw). Standard-combine rows collected under several moe_dtype
-    values collapse onto the single bfloat16 payload key, where the keep-first
-    convention pins the surviving value — such shadowed legacy leaves must
-    match the first row mapped to their key, and only alltoall_combine rows
-    may be shadowed at all.
+    stores it raw). The mapping is lossless 1:1: prepare/dispatch/standard
+    combine are keyed by the run's moe_dtype and low-precision combine by
+    "fp4", so no two legacy rows may share a mapped key and every legacy leaf
+    must survive with its own latency — zero duplicates, zero shadowing.
     """
     kernel_to_backend = {"NVLinkTwoSided": "nvlink_two_sided", "NVLinkOneSided": "nvlink_one_sided"}
     op_to_phase_dtype = {
         "alltoall_prepare": ("prepare", None),
         "alltoall_dispatch": ("dispatch", None),
-        "alltoall_combine": ("combine", "bfloat16"),
+        "alltoall_combine": ("combine", None),
         "alltoall_combine_low_precision": ("combine", "fp4"),
     }
 
@@ -443,9 +457,10 @@ def test_shipped_trtllm_alltoall_equivalence_sweep(tmp_path):
             num_tokens,
         )
 
-    # First-mapped-row-wins expectation, straight from the parquet (row order).
+    # Expectation straight from the parquet; the remap must be collision-free.
+    rows = pq.read_table(TRTLLM_ALLTOALL_PATH).to_pylist()
     expected = {}
-    for row in pq.read_table(TRTLLM_ALLTOALL_PATH).to_pylist():
+    for row in rows:
         ep_size = int(row["moe_ep_size"])
         node_num = int(row["num_nodes"]) if "num_nodes" in row else max(1, ep_size // 4)
         key = mapped_key(
@@ -459,10 +474,10 @@ def test_shipped_trtllm_alltoall_equivalence_sweep(tmp_path):
             ep_size,
             int(row["num_tokens"]),
         )
-        expected.setdefault(key, float(row["latency"]))
+        assert key not in expected, f"duplicate mapped key {key}"
+        expected[key] = float(row["latency"])
 
     visited = 0
-    shadowed = 0
     # legacy layout: [kernel][op][quant][node][hidden][topk][experts][ep]{tokens}
     for legacy_key, legacy_leaf in _iter_leaves(legacy, 8):
         kernel_source, op_name, quant, node_num, hidden_size, topk, num_experts, ep_size, num_tokens = legacy_key
@@ -471,17 +486,14 @@ def test_shipped_trtllm_alltoall_equivalence_sweep(tmp_path):
         )
         leaf = _leaf(adapted, key)
         assert leaf["latency"] == expected[key]
-        if leaf["latency"] != legacy_leaf["latency"]:
-            shadowed += 1
-            assert op_name == "alltoall_combine", f"only combine dtype-collapse may shadow, got {legacy_key}"
-        else:
-            assert leaf["power"] == legacy_leaf["power"]
-            assert leaf["energy"] == legacy_leaf["energy"]
+        assert leaf["latency"] == legacy_leaf["latency"]  # zero shadowing: 1:1
+        assert leaf["power"] == legacy_leaf["power"]
+        assert leaf["energy"] == legacy_leaf["energy"]
         visited += 1
 
     assert visited > 500  # silent-empty sweep guard
-    # No stray adapted leaves beyond the mapped rows.
-    assert len(list(_iter_leaves(adapted, 9))) == len(expected)
+    # Lossless 1:1: adapted leaves == legacy leaves == parquet rows, no strays.
+    assert len(list(_iter_leaves(adapted, 9))) == visited == len(expected)
     # The mapping-specific populations the adapter must preserve:
     prepare_store = adapted.get("nvlink_two_sided", {}).get("prepare", {})
     assert len(list(_iter_leaves(prepare_store, 7))) > 0
