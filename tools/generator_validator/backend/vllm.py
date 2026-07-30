@@ -40,8 +40,27 @@ def _dict_to_cli_args(payload: dict[str, Any]) -> list[str]:
 
 
 def _normalize_cli_args(args: list[str]) -> list[str]:
-    ignored_flags = {"--is-prefill-worker", "--is-decode-worker"}
-    return [str(item) for item in args if str(item) not in ignored_flags]
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        item = str(args[index])
+        if item == "--disaggregation-mode":
+            if index + 1 >= len(args):
+                raise ValueError("--disaggregation-mode requires a value.")
+            mode = str(args[index + 1])
+            if mode not in {"agg", "pd", "prefill", "decode", "encode"}:
+                raise ValueError(f"Unsupported --disaggregation-mode value: {mode}")
+            index += 2
+            continue
+        if item.startswith("--disaggregation-mode="):
+            mode = item.partition("=")[2]
+            if mode not in {"agg", "pd", "prefill", "decode", "encode"}:
+                raise ValueError(f"Unsupported --disaggregation-mode value: {mode}")
+            index += 1
+            continue
+        normalized.append(item)
+        index += 1
+    return normalized
 
 
 def _parse_args_with_errors(parser, args: list[str], context: str):
