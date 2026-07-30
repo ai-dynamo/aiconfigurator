@@ -332,16 +332,11 @@ def _populate_vllm(context: dict[str, Any], resolved_facts: Any = None) -> list[
                 )
             else:
                 transfer_config = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-            args.extend(["--disaggregation-mode", "prefill", "--kv-transfer-config", transfer_config])
+            args.extend(context["vllm_prefill_worker_role_args"])
+            args.extend(["--kv-transfer-config", transfer_config])
         elif role == "decode":
-            args.extend(
-                [
-                    "--disaggregation-mode",
-                    "decode",
-                    "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
-                ]
-            )
+            args.extend(context["vllm_decode_worker_role_args"])
+            args.extend(["--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'])
         elif role is None and kvbm_enabled:
             args.extend(
                 [

@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 import yaml
 
 from aiconfigurator.generator.api import generate_backend_artifacts
 
-_BACKEND_VERSION = "0.26.0"
-_REMOVED_ROLE_FLAGS = {"--is-prefill-worker", "--is-decode-worker"}
+_VERSION_CASES = [
+    pytest.param("0.9.0", "0.14.1", "legacy", id="dynamo-0.9"),
+    pytest.param("1.0.0", "0.16.0", "disaggregation-mode", id="dynamo-1.0"),
+    pytest.param("1.4.0", "0.26.0", "disaggregation-mode", id="dynamo-1.4"),
+]
 
 _PARAMS = {
     "ServiceConfig": {
@@ -56,11 +60,13 @@ _PARAMS = {
 }
 
 
-def _render() -> dict[str, str]:
+def _render(dynamo_version: str, backend_version: str) -> dict[str, str]:
+    params = copy.deepcopy(_PARAMS)
+    params["generator_dynamo_version"] = dynamo_version
     return generate_backend_artifacts(
-        copy.deepcopy(_PARAMS),
+        params,
         "vllm",
-        backend_version=_BACKEND_VERSION,
+        backend_version=backend_version,
         deployment_target="dynamo-j2",
     )
 
@@ -70,30 +76,51 @@ def _value_after(args: list[str], flag: str) -> str:
     return args[args.index(flag) + 1]
 
 
-def test_vllm_disaggregated_k8s_workers_use_disaggregation_mode():
-    artifacts = _render()
+@pytest.mark.parametrize("dynamo_version,backend_version,interface", _VERSION_CASES)
+def test_vllm_disaggregated_k8s_workers_use_versioned_role_interface(
+    dynamo_version,
+    backend_version,
+    interface,
+):
+    artifacts = _render(dynamo_version, backend_version)
     manifest = yaml.safe_load(artifacts["k8s_deploy.yaml"])
     services = manifest["spec"]["services"]
 
     prefill_args = services["VllmPrefillWorker"]["extraPodSpec"]["mainContainer"]["args"]
     decode_args = services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"]
 
-    assert _REMOVED_ROLE_FLAGS.isdisjoint(prefill_args)
-    assert _REMOVED_ROLE_FLAGS.isdisjoint(decode_args)
-    assert _value_after(prefill_args, "--disaggregation-mode") == "prefill"
-    assert _value_after(decode_args, "--disaggregation-mode") == "decode"
+    if interface == "legacy":
+        assert "--is-prefill-worker" in prefill_args
+        assert "--is-decode-worker" in decode_args
+        assert "--disaggregation-mode" not in prefill_args
+        assert "--disaggregation-mode" not in decode_args
+    else:
+        assert "--is-prefill-worker" not in prefill_args
+        assert "--is-decode-worker" not in decode_args
+        assert _value_after(prefill_args, "--disaggregation-mode") == "prefill"
+        assert _value_after(decode_args, "--disaggregation-mode") == "decode"
     assert "--kv-transfer-config" in prefill_args
     assert "--kv-transfer-config" in decode_args
 
 
-def test_vllm_disaggregated_launch_artifacts_use_disaggregation_mode():
-    artifacts = _render()
+@pytest.mark.parametrize("dynamo_version,backend_version,interface", _VERSION_CASES)
+def test_vllm_disaggregated_launch_artifacts_use_versioned_role_interface(
+    dynamo_version,
+    backend_version,
+    interface,
+):
+    artifacts = _render(dynamo_version, backend_version)
     run_scripts = "\n".join(content for name, content in artifacts.items() if name.startswith("run_"))
     sflow = artifacts["sflow.yaml"]
 
     for content in (run_scripts, sflow):
-        assert "--is-prefill-worker" not in content
-        assert "--is-decode-worker" not in content
-        assert content.count("--disaggregation-mode prefill") == 1
-        assert content.count("--disaggregation-mode decode") == 1
+        if interface == "legacy":
+            assert content.count("--is-prefill-worker") == 1
+            assert content.count("--is-decode-worker") == 1
+            assert "--disaggregation-mode" not in content
+        else:
+            assert "--is-prefill-worker" not in content
+            assert "--is-decode-worker" not in content
+            assert content.count("--disaggregation-mode prefill") == 1
+            assert content.count("--disaggregation-mode decode") == 1
         assert content.count("--kv-transfer-config") >= 2

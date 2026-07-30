@@ -351,7 +351,8 @@ def _vllm_server_script(
         cmd_parts.append(f"  {cli_args} \\")
 
     if disagg_mode == "prefill":
-        cmd_parts.append("  --disaggregation-mode prefill \\")
+        role_args = " ".join(context["vllm_prefill_worker_role_args"])
+        cmd_parts.append(f"  {role_args} \\")
         if context.get("sflow_kvbm_env_exports"):
             cmd_parts.append(
                 '  --kv-transfer-config \'{"kv_connector":"PdConnector","kv_role":"kv_both",'
@@ -363,7 +364,8 @@ def _vllm_server_script(
         else:
             cmd_parts.append('  --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' \\')
     elif disagg_mode == "decode":
-        cmd_parts.append("  --disaggregation-mode decode \\")
+        role_args = " ".join(context["vllm_decode_worker_role_args"])
+        cmd_parts.append(f"  {role_args} \\")
         cmd_parts.append('  --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' \\')
     elif context.get("sflow_kvbm_env_exports"):
         cmd_parts.append(

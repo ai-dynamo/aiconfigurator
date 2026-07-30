@@ -167,12 +167,28 @@ def test_vllm_engine_args_yaml_still_uses_dict_fallback(tmp_path, monkeypatch):
     assert resolved_model is None
 
 
-@pytest.mark.parametrize("flag", ["--is-prefill-worker", "--is-decode-worker"])
-def test_vllm_validator_rejects_removed_worker_role_flags(flag, monkeypatch):
+@pytest.mark.parametrize(
+    "role_args",
+    [
+        ["--is-prefill-worker"],
+        ["--is-decode-worker"],
+        ["--disaggregation-mode", "prefill"],
+        ["--disaggregation-mode", "decode"],
+    ],
+)
+def test_vllm_validator_accepts_supported_dynamo_worker_role_interfaces(role_args, monkeypatch):
     monkeypatch.setattr(vllm_backend, "_import_vllm_engine_args", _fake_vllm_import)
 
-    with pytest.raises(ValueError, match=flag):
-        vllm_backend.validate_vllm_engine_args_from_cli([*_base_vllm_args(), flag])
+    config = vllm_backend.validate_vllm_engine_args_from_cli([*_base_vllm_args(), *role_args])
+
+    assert config == {"model": "Qwen/Qwen3-0.6B"}
+
+
+def test_vllm_validator_rejects_mixed_worker_role_interfaces():
+    with pytest.raises(ValueError, match="Cannot mix legacy"):
+        vllm_backend._normalize_cli_args(
+            [*_base_vllm_args(), "--is-prefill-worker", "--disaggregation-mode", "prefill"]
+        )
 
 
 @pytest.mark.parametrize(
