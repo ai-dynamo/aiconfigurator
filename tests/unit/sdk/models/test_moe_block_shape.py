@@ -15,7 +15,8 @@ import dataclasses
 import pytest
 
 from aiconfigurator.sdk.models.blocks import MoEBlockShape
-from aiconfigurator.sdk.models.helpers import _get_model_info
+from aiconfigurator.sdk.models.helpers import _derive_num_moe_layers, _get_model_info
+from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
 
@@ -57,6 +58,43 @@ class TestGetModelInfoDerivedMoeFields:
         info = _get_model_info("deepseek-ai/DeepSeek-R1")
         assert isinstance(info["num_shared_experts"], int)
         assert isinstance(info["num_moe_layers"], int)
+
+    def test_does_not_mutate_cached_config_parse(self):
+        """The derived keys must not leak into the @cache'd parse dict.
+
+        ``get_model_config_from_model_path`` is ``@cache``d: every caller gets
+        the same dict object, so ``_get_model_info`` must copy before mutating
+        (same hazard ``get_model`` documents for its own mutations).
+        """
+        held = get_model_config_from_model_path("deepseek-ai/DeepSeek-R1")
+        _get_model_info("deepseek-ai/DeepSeek-R1")
+        assert "num_shared_experts" not in held
+        assert "num_moe_layers" not in held
+
+    def test_raw_moe_layer_freq_list_is_honored(self):
+        """Per-layer 0/1 list in the raw config, for archs the parser does not normalize."""
+        info = {
+            "architecture": "DeepseekV3ForCausalLM",
+            "num_experts": 8,
+            "topk": 2,
+            "layers": 4,
+            "extra_params": None,
+            "raw_config": {"moe_layer_freq": [0, 1, 1, 0]},
+        }
+        assert _derive_num_moe_layers(info) == 2
+
+    def test_raw_moe_layer_freq_scalar_stride_is_honored(self):
+        """HF DeepSeek-V2 semantics: layer i is MoE iff i >= first_k_dense and i % freq == 0."""
+        info = {
+            "architecture": "DeepseekV3ForCausalLM",
+            "num_experts": 8,
+            "topk": 2,
+            "layers": 10,
+            "extra_params": None,
+            "raw_config": {"first_k_dense_replace": 1, "moe_layer_freq": 2},
+        }
+        # MoE layers: i in {2, 4, 6, 8}
+        assert _derive_num_moe_layers(info) == 4
 
 
 class TestMoEBlockShape:
