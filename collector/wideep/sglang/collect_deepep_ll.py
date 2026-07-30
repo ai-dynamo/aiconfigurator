@@ -171,6 +171,25 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _prime_cuda_profiler() -> None:
+    """Burn the process's first ``torch.profiler`` session on a throwaway kernel.
+
+    On the WideEP SGLang 0.5.10 runtime (torch 2.9.1 / CUDA 13) the first
+    profiler session of a process yields an empty table, so ``bench_kineto``
+    trips its "exactly one matching kernel" assertion and loses the first
+    benchmarked token of every shape. Priming costs one trivial kernel and
+    leaves every measured session untouched.
+    """
+    import torch
+
+    try:
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]):
+            torch.ones(1, device="cuda").mul_(2)
+        torch.cuda.synchronize()
+    except Exception:  # profiling is best-effort priming; never fail collection here
+        print(f"[deepep_ll] profiler priming failed (continuing):\n{traceback.format_exc()}", flush=True)
+
+
 def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, version):
     """Per-rank entrypoint spawned across all GPUs of the single node."""
     if DEEPEP_DIR not in sys.path:
@@ -193,6 +212,7 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
     rank, num_ranks, group = init_dist(local_rank, num_gpus)
     if device_name is None:
         device_name = torch.cuda.get_device_name(local_rank)
+    _prime_cuda_profiler()
     written = 0
 
     def flush(shape_metrics):
