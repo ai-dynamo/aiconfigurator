@@ -717,6 +717,14 @@ def _cell_generator_overrides(
                     "2",
                 ]
             )
+    if cell.workload_kind == "decode":
+        # Decode points read each request's own synthetic KV and never
+        # exercise shared-prefix reuse, so prefix caching only adds
+        # block-hash bookkeeping between points; pin it off for a stable
+        # decode measurement. PREFILL CELLS MUST KEEP IT ON: the runtime's
+        # _bench_prefill_kv_read_points collapses the prefill kv-read axis
+        # to [0] when prefix caching is disabled.
+        scheduler_args.append("--no-enable-prefix-caching")
     model_args = []
     architecture = getattr(getattr(plan, "capability", None), "architecture", None)
     if architecture == "GlmMoeDsaForCausalLM":
@@ -792,9 +800,11 @@ def _configured_sampling_metadata(
     cell: FPMCell,
     *,
     smoke: bool,
-) -> dict[str, int]:
+) -> dict[str, int | str]:
     if cell.workload_kind != "prefill":
-        return {}
+        # Auditable measurement condition: decode engines run with prefix
+        # caching pinned off (see _cell_generator_overrides).
+        return {"decode_prefix_caching": "disabled"}
     if smoke:
         return {"prefill_max_new_token_samples": 2}
     profile = plan.options.prefill_sampling

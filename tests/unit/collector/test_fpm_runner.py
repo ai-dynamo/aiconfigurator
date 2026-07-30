@@ -997,6 +997,34 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
     assert "--enable-expert-parallel" not in script
 
 
+@pytest.mark.parametrize("workload_kind", ["prefill", "decode"])
+def test_decode_render_pins_prefix_caching_off_and_prefill_keeps_it(tmp_path, workload_kind):
+    """Decode engines must run with prefix caching disabled; prefill engines
+    must NOT get the flag — the runtime collapses the prefill kv-read axis
+    to [0] without prefix caching."""
+
+    cell = FPMCell(
+        cell_id=f"prefix-cache-{workload_kind}",
+        workload_kind=workload_kind,
+        topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        parallel_strategy="pure_tp",
+    )
+    plan = _plan(cell)
+    plan.model_path = "nvidia/GLM-5.2-NVFP4"
+    plan.capability = SimpleNamespace(architecture="GlmMoeDsaForCausalLM")
+
+    _render_cell(plan, cell, tmp_path, {})
+
+    script = (tmp_path / "run.sh").read_text()
+    if workload_kind == "decode":
+        assert "--no-enable-prefix-caching" in script
+    else:
+        assert "--no-enable-prefix-caching" not in script
+
+
 def _expected_meta(data: bytes) -> dict:
     import hashlib
 
