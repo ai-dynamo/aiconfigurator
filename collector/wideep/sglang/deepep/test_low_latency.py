@@ -42,9 +42,8 @@ def test_main(
     num_local_experts = num_experts // num_ranks
 
     # `num_max_dispatch_tokens_per_rank` is the per-rank slot capacity of the
-    # receive buffer, not the batch size. DeepEP only populates the FP8 scale
-    # tensor when the capacity is large enough, so a capacity tied to a tiny
-    # num_tokens silently yields all-zero scales.
+    # receive buffer, not the batch size. Capacities far below SGLang's fixed
+    # 128 read back all-zero FP8 scales for received tokens, so keep them apart.
     if dispatch_capacity is None:
         dispatch_capacity = num_tokens
     assert dispatch_capacity >= num_tokens, f"{dispatch_capacity=} < {num_tokens=}"

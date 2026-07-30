@@ -63,9 +63,12 @@ DEEPEP_LL_MAX_TOPK = int(os.environ.get("DEEPEP_LL_MAX_TOPK", "11"))
 # `num_max_dispatch_tokens_per_rank` is the receive-buffer slot capacity, which
 # SGLang pins to a constant independent of the batch size
 # (SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK, default 128). Sizing it to the
-# swept token count instead both misrepresents the deployed configuration and
-# leaves DeepEP's FP8 scale tensor entirely unwritten below ~128 slots, which
-# dequantises every payload to zero.
+# swept token count instead misrepresents the deployed configuration, and it also
+# breaks FP8: at capacities 1/2/4/8 every scale read back for a received token is
+# 0.0 while its FP8 payload is intact, so the dequantised value is -0.0 and the
+# dispatch correctness check fails. Measured on GB200 across two DeepEP 1.2.1
+# builds; the upstream scale-store arithmetic does not explain it, so treat 128 as
+# the validated configuration rather than a derived lower bound.
 DEEPEP_LL_DISPATCH_CAPACITY = int(os.environ.get("DEEPEP_LL_DISPATCH_CAPACITY", "128"))
 
 
