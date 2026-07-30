@@ -1,6 +1,6 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
+As mentioned in root Readme, CLI supports six modes: `default`, `recommend`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
@@ -344,6 +344,58 @@ agg_supported, disagg_supported = cli_support(
 print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ```
 
+### Recommend mode (deployment sizing)
+This mode finds the minimum number of GPUs needed to meet a performance target. It is designed as a procurement sizing tool — the output is unconstrained, suitable for driving purchasing decisions.
+
+Instead of specifying a GPU count (like `default` mode), you specify exactly one load target (request rate or concurrency) along with SLA constraints, and the system calculates the minimum GPUs required.
+
+The recommender searches both tensor-parallel and pipeline-parallel configurations to find the most efficient layout. For models too large to fit on a single node, it automatically escalates to multi-node configurations.
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend trtllm \
+    --target-request-rate 50 --ttft 2000 --tpot 30 --isl 4000 --osl 1000
+```
+
+or with a concurrency target:
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend sglang \
+    --target-concurrency 200 --ttft 2000 --tpot 30
+```
+
+**Required arguments:**
+- `--model-path` (alias `--model`): HuggingFace model path or local path containing `config.json`
+- `--system`: System name (GPU type)
+- Exactly one of the following (mutually exclusive):
+  - `--target-request-rate`: Target system request rate in req/s
+  - `--target-concurrency`: Target number of concurrent users
+
+**Optional arguments:**
+- `--backend`: Backend name (`trtllm`, `vllm`, `sglang`, `auto`). Default: `trtllm`
+- `--ttft`, `--tpot`: SLA targets in ms (default: 2000ms, 30ms)
+- `--request-latency`: End-to-end request latency target in ms
+- `--isl`, `--osl`: Input/output sequence lengths (default: 4000, 1000)
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers`
+- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`
+- All other arguments match `default` mode (quantization, prefix caching, etc.)
+
+The output includes `total_gpus_needed` and `replicas_needed` columns, showing both agg and disagg configurations ranked by fewest GPUs first.
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_recommend
+
+result = cli_recommend(
+    model_path="Qwen/Qwen3-32B",
+    system="h200_sxm",
+    target_request_rate=50.0,
+    ttft=2000,
+    tpot=30,
+)
+for mode, df in result.best_configs.items():
+    print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
+```
+
 ### Default mode
 This mode is triggered by
 ```bash
@@ -398,7 +450,7 @@ The command will create two experiments for the given problem, one is `agg` and 
 #### Spica migration
 
 The experimental Spica smart sweeper has moved to Dynamo's standalone
-[AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+[AI Simulate distribution](https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview).
 The AIC `--thorough-sweep` and `--thorough-config` flags have been removed. Install
 it from a matching Dynamo checkout with `python -m pip install ./aisimulate`, then run Spica
 through `python -m aisimulate.spica`. Runnable configurations and tools live under

@@ -102,7 +102,7 @@ Example: `data/h200_sxm/attention/trtllm/1.3.0rc10/context_attention_perf.parque
   deprecated, warning logged), so tools and the GitLab auto-collect pipeline do
   not have to cut over the same day.
 - Path-aware consumers to sweep in the same PR: loader discovery,
-  `tools/perf_database/audit_kernel_source.py`, `tools/perf_database/parquet_diff.py`,
+  `tools/perf_database/check_kernel_source.py`, `tools/perf_database/parquet_diff.py`,
   `tools/support_matrix/*`, chart tooling, collector finalize output paths.
   The GitLab auto-collect pipeline is updated in lockstep; in-flight data PRs
   rebase after the move.
@@ -405,7 +405,7 @@ requirements out.
 
 ### CI audit (fail-closed surface)
 
-One audit tool (sibling of `audit_kernel_source.py`), run on every PR touching
+One audit tool (sibling of `check_kernel_source.py`), run on every PR touching
 `data/`, `collector/`, or the manifest. Hard failures:
 
 - a parquet table without a matching provenance entry;

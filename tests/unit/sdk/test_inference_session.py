@@ -17,10 +17,26 @@ import pytest
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
-from aiconfigurator.sdk.inference_session import DisaggInferenceSession
+from aiconfigurator.sdk.inference_session import DisaggInferenceSession, InferenceSession
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 
 pytestmark = pytest.mark.unit
+
+
+def test_inference_session_exposes_structured_mixed_step() -> None:
+    model = MagicMock()
+    database = MagicMock()
+    backend = MagicMock()
+    runtime_config = RuntimeConfig(isl=2048, osl=512)
+    step = MixedStepInput(context_tokens=4096, num_decode_requests=7)
+    estimate = StepEstimate(latency_ms=12.5, energy_wms=50.0)
+    backend.run_mixed.return_value = estimate
+
+    session = InferenceSession(model, database, backend)
+
+    assert session.run_mixed(runtime_config, step) is estimate
+    backend.run_mixed.assert_called_once_with(model, database, runtime_config, step)
 
 
 def _static_row(
@@ -114,11 +130,14 @@ def _build_mock_backend():
         summary = _make_summary(row, runtime_config)
         if mode == "static_ctx":
             summary.set_encoder_latency_dict({"encoder_attention": 0.5})
+            summary.set_encoder_energy_wms_dict({"encoder_attention": 100.0})
             summary.set_encoder_source_dict({"encoder_attention": "mixed"})
             summary.set_context_latency_dict({"context_attention": 1.0})
+            summary.set_context_energy_wms_dict({"context_attention": 200.0})
             summary.set_context_source_dict({"context_attention": "silicon"})
         elif mode == "static_gen":
             summary.set_generation_latency_dict({"generation_attention": 2.0})
+            summary.set_generation_energy_wms_dict({"generation_attention": 300.0})
             summary.set_generation_source_dict({"generation_attention": "empirical"})
         return summary
 
@@ -228,6 +247,7 @@ class TestRequireSameTPFiltering:
             "decode": {"generation_attention": "empirical"},
         }
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
+        assert result.get_power_data_coverage() == 1.0
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

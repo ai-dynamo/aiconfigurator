@@ -795,20 +795,13 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
             let batch_size = row.u32(batch_size_col)?;
             let isl = row.u32(isl_col)?;
             let latency = row.f64(latency_col)?;
-            // Last-wins parity with Python `load_context_mla_module_data`
-            // and `load_generation_mla_module_data`. Unlike the legacy CSV
-            // loaders and most other Python perf-DB loaders (GEMM, attention,
-            // MoE, MHC, wideep) which guard with `try/except KeyError` for
-            // first-wins semantics, these two MLA-module parquet loaders use
-            // direct assignment and therefore last-wins. (Python DSA is
-            // neither: it is two-phase — last-row-wins within a file,
-            // first-source-wins across sources; see
-            // `operations/dsa.py:1461-1502` and `dsa.rs::load_dsa_parquet`.)
-            // Some perf-DB parquet shards (notably b300_sxm/vllm/0.19.0
-            // `mla_generation_module_perf.parquet`) contain duplicate
-            // (num_heads, batch_size, sequence_tokens) rows; first-wins here
-            // caused a constant +0.247ms/step decode drift on b300 because
-            // Rust picked the slightly-higher latency for ~184 affected keys.
+            // First-wins parity with Python `load_context_mla_module_data`,
+            // which now guards with the standard skip-on-key-conflict idiom
+            // (shared-layer contract: the primary version's rows must not be
+            // shadowed by later sibling-version sources — design §6.1). Note
+            // this also flips intra-file duplicate resolution to first-row-
+            // wins; duplicate rows are re-measurements of the same shape and
+            // a file-hygiene issue, not a semantic axis.
             let inner = raw
                 .entry(key)
                 .or_default()
@@ -816,7 +809,7 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
                 .or_default()
                 .entry(isl)
                 .or_default();
-            inner.insert(batch_size, latency);
+            inner.entry(batch_size).or_insert(latency);
         }
     }
     if !any_source || raw.is_empty() {
@@ -867,7 +860,7 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
             let batch_size = row.u32(batch_size_col)?;
             let isl = row.u32(isl_col)?;
             let latency = row.f64(latency_col)?;
-            // Generation module: (num_heads, b, s) axis order. Last-wins on
+            // Generation module: (num_heads, b, s) axis order. First-wins on
             // duplicate rows -- see the note in `load_context_module_parquet`.
             let sequence_tokens = isl + row.u32(step_col)?;
             let inner = raw
@@ -877,7 +870,7 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
                 .or_default()
                 .entry(batch_size)
                 .or_default();
-            inner.insert(sequence_tokens, latency);
+            inner.entry(sequence_tokens).or_insert(latency);
         }
     }
     if !any_source || raw.is_empty() {

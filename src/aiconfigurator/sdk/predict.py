@@ -54,6 +54,7 @@ def predict_disagg_worker(
     stride: int = 32,
     predictor: Predictor | None = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> InferenceSummary:
     """Predict perf for one phase of a disaggregated worker.
 
@@ -82,7 +83,13 @@ def predict_disagg_worker(
         workers, the predictor interface (and the call site) can be
         extended without touching every caller.
     """
+    # Forward the fraction only when set so injected Predictor
+    # implementations predating the kwarg keep working.
+    predictor_kwargs: dict[str, Any] = {}
+    if free_gpu_memory_fraction is not None:
+        predictor_kwargs["free_gpu_memory_fraction"] = free_gpu_memory_fraction
     summary = (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
+        **predictor_kwargs,
         model=model,
         backend=backend,
         database=database,
@@ -130,6 +137,9 @@ def predict_agg_worker(
     Returns:
         InferenceSummary for the aggregated worker.
     """
+    if speculative_profile is not None and speculative_profile.expected_accepted_tokens > 0:
+        backend_kwargs["decode_tokens_per_iteration"] = speculative_profile.tokens_per_iteration
+
     summary = (predictor or DEFAULT_PREDICTOR).predict_agg_worker(
         model=model,
         backend=backend,
