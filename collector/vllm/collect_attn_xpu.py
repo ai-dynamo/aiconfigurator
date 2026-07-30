@@ -256,9 +256,10 @@ def run_attention_torch(
 
     if backend_name_str in {"FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"}:
         # The collector helper populates cache as [2, num_blocks, ...] because
-        # that layout makes K/V insertion simple. vLLM V1 backends consume it as
-        # [num_blocks, 2, ...].
-        kv_cache = kv_cache.transpose(0, 1).contiguous()
+        # that layout makes K/V insertion simple. vLLM V1 FA-style backends
+        # consume packed K/V as [num_blocks, num_kv_heads, block_size,
+        # 2 * head_size], then transpose block/head dims and split K/V.
+        kv_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1).transpose(1, 2).contiguous()
 
     if backend_name_str == "FLASHINFER":
         # For FlashInfer default to HND layout

@@ -1162,10 +1162,13 @@ def collect_vllm(
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
 
+    is_xpu_backend = False
     if _cuda_available():
         from collector.vllm.registry import REGISTRY
     elif _xpu_available():
         from collector.vllm.registry import REGISTRY_XPU as REGISTRY
+
+        is_xpu_backend = True
     else:
         raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
 
@@ -1177,11 +1180,22 @@ def collect_vllm(
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return None, None
 
-    from collector.framework_manifest import require_collector_runtime
+    from collector.framework_manifest import CollectorRuntime, require_collector_runtime
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("vllm")}
-    runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    if is_xpu_backend:
+        runtime = CollectorRuntime(
+            framework="vllm",
+            version=version,
+            images={"default": f"installed-vllm-xpu:{version}"},
+            source_repo="https://github.com/vllm-project/vllm.git",
+        )
+        logger.warning(
+            "vLLM XPU collector is using installed runtime v%s; skipping stock CUDA manifest pin", version
+        )
+    else:
+        runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     registry = _registry_with_requested_wideep(REGISTRY, "vllm", ops, case_plan)
     collections = build_collections(registry, "vllm", version, ops, logger=logger)
