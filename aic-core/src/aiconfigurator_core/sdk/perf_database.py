@@ -3229,6 +3229,44 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
+    @functools.lru_cache(maxsize=32768)
+    def query_moe_ep(
+        self,
+        kernel_source: str,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        inference_phase: str,
+        topk: int,
+        num_experts: int,
+        num_slots: int,
+        hidden_size: int,
+        inter_size: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        num_tokens: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """Query the unified large-EP MoE expert-compute table. Delegates to
+        ``EPMoE``; see ``operations.moe_comm.EPMoE._query_ep_table``."""
+        from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+
+        return EPMoE._query_ep_table(
+            self,
+            kernel_source=kernel_source,
+            quant_mode=quant_mode,
+            workload_distribution=workload_distribution,
+            inference_phase=inference_phase,
+            topk=topk,
+            num_experts=num_experts,
+            num_slots=num_slots,
+            hidden_size=hidden_size,
+            inter_size=inter_size,
+            moe_tp_size=moe_tp_size,
+            moe_ep_size=moe_ep_size,
+            num_tokens=num_tokens,
+            database_mode=database_mode,
+        )
+
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries
     # ═══════════════════════════════════════════════════════════════════

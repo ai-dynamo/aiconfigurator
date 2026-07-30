@@ -23,6 +23,9 @@ The module also owns the large-EP compute side of the same family:
 table (with legacy sglang/trtllm wideep adapters) into one nested dict keyed
 by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
 [num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
+``EPMoE`` is the op class over that table: it owns the class-level cache +
+``load_data`` and the ``_query_ep_table`` lookup behind
+``PerfDatabase.query_moe_ep``.
 """
 
 from __future__ import annotations
@@ -917,3 +920,369 @@ def load_moe_ep_data(
         )
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# EPMoE — the op class over the unified moe_ep table
+# ---------------------------------------------------------------------------
+
+
+_EP_PHASES = ("context", "generation")
+
+
+def _validate_ep_phase(inference_phase: str) -> None:
+    """Shared ctor/query validation: an unknown inference phase is a ValueError."""
+    if inference_phase not in _EP_PHASES:
+        raise ValueError(f"Invalid inference_phase '{inference_phase}'. Must be one of {list(_EP_PHASES)}")
+
+
+def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_phase: str, query_context: str) -> str:
+    """Distribution fallback chain: requested -> "uniform" -> sole-available.
+
+    Candidates are the distributions that actually carry ``inference_phase``
+    data — the legacy sglang tables are separate files per phase, so their
+    fallback is inherently phase-scoped; the unified table nests phase below
+    distribution and must filter to match. The two legacy oracles disagree
+    beyond the exact hit (sglang: "uniform" or typed miss; trtllm: first
+    collected distribution in load order): the unified chain answers
+    "uniform" when collected, else the sole collected distribution (which
+    covers the trtllm single-alternative reality deterministically), and
+    refuses to guess between two or more non-uniform candidates: typed miss.
+    """
+    candidates = [dist for dist, phases in quant_slice.items() if inference_phase in phases]
+    if workload_distribution in candidates:
+        return workload_distribution
+    if "uniform" in candidates:
+        logger.debug(
+            "moe_ep: workload_distribution %r not collected; falling back to 'uniform' (%s)",
+            workload_distribution,
+            query_context,
+        )
+        return "uniform"
+    if len(candidates) == 1:
+        logger.debug(
+            "moe_ep: workload_distribution %r not collected; falling back to sole available %r (%s)",
+            workload_distribution,
+            candidates[0],
+            query_context,
+        )
+        return candidates[0]
+    raise PerfDataNotAvailableError(
+        f"Missing silicon data for the requested lookup; workload_distribution '{workload_distribution}' is not "
+        f"available for {query_context}; collected distributions with {inference_phase} data: {sorted(candidates)}."
+    )
+
+
+class EPMoE(Operation):
+    """Unified large-EP MoE expert-compute op (one inference phase per instance).
+
+    Owns ``_moe_ep_data`` — the unified compute table loaded by
+    :func:`load_moe_ep_data` (new-schema ``moe_ep_perf.parquet`` plus the
+    legacy sglang wideep context/generation and trtllm wideep adapters).
+    Loaded on every inference backend ({"sglang", "vllm", "trtllm"} all have
+    legacy compute sources); ``None`` otherwise. ``query(x=...)`` scales
+    tokens by ``attention_dp_size`` (attention DP globalizes tokens through
+    the A2A dispatch — the same scaling as the legacy ``MoE`` /
+    ``TrtLLMWideEPMoE`` query paths) and always queries ``moe_tp_size=1``:
+    the large-EP family is EP-only. ``num_slots`` defaults to ``num_experts``
+    (no EPLB redundancy); ``kernel_source=None`` auto-resolves per backend at
+    query time (see :meth:`_resolve_kernel_source`).
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        *,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        attention_dp_size: int,
+        inference_phase: str,
+        num_slots: int | None = None,
+        kernel_source: str | None = None,
+        is_gated: bool = True,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        _validate_ep_phase(inference_phase)
+        self._hidden_size = hidden_size
+        self._inter_size = inter_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._num_slots = num_slots if num_slots is not None else num_experts
+        self._moe_ep_size = moe_ep_size
+        self._quant_mode = quant_mode
+        self._workload_distribution = workload_distribution
+        self._attention_dp_size = attention_dp_size
+        self._inference_phase = inference_phase
+        self._kernel_source = kernel_source
+        self._is_gated = is_gated
+        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down).
+        # EP-only family: no moe_tp division (moe_tp == 1 by construction).
+        num_gemms = 3 if is_gated else 2
+        self._weights = hidden_size * inter_size * num_experts * quant_mode.value.memory * num_gemms // moe_ep_size
+
+    # ------------------------------------------------------------------
+    # Data ownership
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        return _cache_key(database)
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        """Idempotent. Loads the unified moe_ep table (new schema + legacy
+        adapters) on the three inference backends; binds ``None`` otherwise.
+        """
+        import os
+
+        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            if database.backend in cls._SUPPORTED_BACKENDS:
+                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.moe_ep.value
+                )
+                sources = database._build_op_sources(PerfDataFilename.moe_ep, primary, system_data_root)
+
+                legacy_sources = {}
+                for kwarg, filename_enum in (
+                    ("legacy_context_sources", PerfDataFilename.wideep_context_moe),
+                    ("legacy_generation_sources", PerfDataFilename.wideep_generation_moe),
+                    ("legacy_trtllm_wideep_sources", PerfDataFilename.wideep_moe_compute),
+                ):
+                    legacy_primary = resolve_op_data_path(
+                        system_data_root, database.backend, database.version, filename_enum.value
+                    )
+                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
+
+                cls._data_cache[key] = LoadedOpData(
+                    load_moe_ep_data(sources, **legacy_sources),
+                    PerfDataFilename.moe_ep,
+                    primary,
+                )
+            else:
+                cls._data_cache[key] = None
+
+            cls._record_load()
+
+        if "_moe_ep_data" not in database.__dict__:
+            database._moe_ep_data = cls._data_cache[key]
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._data_cache.clear()
+
+    # ------------------------------------------------------------------
+    # kernel_source auto-resolution (kernel_source=None)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _resolve_kernel_source(cls, database: PerfDatabase, quant_mode: common.MoEQuantMode) -> str:
+        """Resolve the collected kernel key when the caller pins none.
+
+        sglang/vllm large-EP MoE has a single collected kernel
+        (``"deepep_moe"``, spec §4.2). trtllm replicates
+        ``TrtLLMWideEPMoE._select_kernel`` (TensorRT-LLM's
+        ``MoEOpSelector.select_op``) against the unified table's kernel keys:
+        Blackwell (SM >= 100) + fp8_block -> ``"deepgemm"``, otherwise
+        ``"moe_torch_flow"`` (Cutlass); an absent preferred kernel falls back
+        to the first collected kernel key. Copied, not imported — the legacy
+        classmethod consults its trtllm-only ``_wideep_moe_compute_data``
+        table, which this family retires.
+        """
+        if database.backend in ("sglang", "vllm"):
+            return "deepep_moe"
+
+        cls.load_data(database)
+        sm_version = database.system_spec["gpu"]["sm_version"]
+        is_blackwell = sm_version >= 100
+        quant_mode_str = quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode)
+        preferred = "deepgemm" if is_blackwell and "fp8_block" in quant_mode_str else "moe_torch_flow"
+
+        ep_data = database._moe_ep_data
+        if ep_data:
+            available_kernels = list(ep_data.keys())
+            if preferred in available_kernels:
+                return preferred
+            if available_kernels:
+                fallback = available_kernels[0]
+                logger.debug(f"Preferred MoE kernel '{preferred}' not available, falling back to '{fallback}'")
+                return fallback
+
+        return preferred
+
+    # ------------------------------------------------------------------
+    # Query table (behind PerfDatabase.query_moe_ep)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _query_ep_table(
+        cls,
+        database: PerfDatabase,
+        kernel_source: str,
+        quant_mode: common.MoEQuantMode,
+        workload_distribution: str,
+        inference_phase: str,
+        topk: int,
+        num_experts: int,
+        num_slots: int,
+        hidden_size: int,
+        inter_size: int,
+        moe_tp_size: int,
+        moe_ep_size: int,
+        num_tokens: int,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """Silicon lookup against the unified moe_ep table.
+
+        SILICON walks the slice (kernel -> quant -> distribution-with-fallback
+        -> phase -> topk -> experts -> slots -> hidden -> inter -> tp -> ep),
+        then resolves tokens on a 1-D ``perf_interp`` Grid curve: RAW lerp in
+        range; beyond the collected range the engine holds the boundary util
+        and the wideep-MoE roofline SOL carries the growth — exactly the
+        legacy retrieval (``MoE._query_moe_table`` deepep branch /
+        ``TrtLLMWideEPMoE._query_compute_table``). The sglang oracle's
+        singleton-underflow guard is adopted family-wide: a single measured
+        token point cannot define the low-token launch floor, so querying
+        below it is a typed miss (the trtllm oracle would boundary-hold there;
+        the guard is the deliberate, safer behavior). SOL/SOL_FULL/EMPIRICAL
+        have no estimation tier yet and raise
+        ``EmpiricalNotImplementedError``; HYBRID falls back to that same
+        raise when silicon data misses.
+        """
+        cls.load_data(database)
+        _validate_ep_phase(inference_phase)
+
+        if database_mode is None:
+            database_mode = database._default_database_mode
+
+        query_context = (
+            f"moe_ep {kernel_source}/{inference_phase}: {quant_mode=}, {workload_distribution=}, "
+            f"{topk=}, {num_experts=}, {num_slots=}, {hidden_size=}, {inter_size=}, "
+            f"{moe_tp_size=}, {moe_ep_size=}, {num_tokens=}"
+        )
+
+        if database_mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL):
+            raise EmpiricalNotImplementedError(
+                f"{database_mode.name} mode is not available for {query_context}: "
+                "silicon data required (estimation tier is a planned follow-up)."
+            )
+
+        # Verbatim wideep-MoE roofline (TrtLLMWideEPMoE._query_compute_table's
+        # get_sol): num_slots (not num_experts) sizes the weight-read term —
+        # EPLB redundant mode replicates experts across slots. sglang-adapted
+        # slices pin num_slots == num_experts, where this reduces exactly to
+        # the sglang oracle's SOL (MoE._query_moe_table's get_sol). num_gemms
+        # is pinned to 3 (gated): the forward has no is_gated axis and both
+        # legacy queries default is_gated=True (neither legacy wideep op
+        # forwards it from query()). The SOL only shapes the beyond-range
+        # boundary util-hold; in-range lookups are raw lerp on measured points.
+        num_gemms = 3
+
+        def get_sol_latency(tokens: int) -> float:
+            total_tokens = tokens * topk
+            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
+            mem_bytes = quant_mode.value.memory * (
+                total_tokens // moe_ep_size * hidden_size * 2  # input+output
+                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate activations
+                + hidden_size
+                * inter_size
+                * num_gemms
+                // moe_tp_size
+                * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
+            )
+            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
+            return max(sol_math, sol_mem)
+
+        def get_silicon() -> PerformanceResult:
+            quant_slice = util_empirical.require_data_slice(database._moe_ep_data, kernel_source, quant_mode)
+            used_distribution = _resolve_ep_distribution(
+                quant_slice, workload_distribution, inference_phase, query_context
+            )
+            moe_dict = util_empirical.require_data_slice(
+                quant_slice,
+                used_distribution,
+                inference_phase,
+                topk,
+                num_experts,
+                num_slots,
+                hidden_size,
+                inter_size,
+                moe_tp_size,
+                moe_ep_size,
+            )
+            token_points = sorted(moe_dict)
+            if len(token_points) == 1 and num_tokens < token_points[0]:
+                raise PerfDataNotAvailableError(
+                    "MoE EP silicon token underflow has only one measured point; cannot infer "
+                    f"low-token latency from a singleton. measured_token={token_points[0]}, {query_context}."
+                )
+            config = perf_interp.OpInterpConfig(
+                axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=get_sol_latency
+            )
+            result = perf_interp.query(config, moe_dict, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
+            return database._interp_pr(lat, energy=energy)
+
+        def get_empirical() -> float:
+            raise EmpiricalNotImplementedError(
+                f"HYBRID empirical fallback is not available for {query_context}: "
+                "silicon data required (estimation tier is a planned follow-up)."
+            )
+
+        return database._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=f"Failed to query moe_ep data for {query_context}",
+        )
+
+    # ------------------------------------------------------------------
+    # Op contract
+    # ------------------------------------------------------------------
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        # Attention DP globalizes tokens: the A2A dispatch delivers every DP
+        # rank's tokens to the experts (same scaling as legacy MoE /
+        # TrtLLMWideEPMoE query()).
+        num_tokens = kwargs.get("x") * self._attention_dp_size
+        kernel_source = self._kernel_source
+        if kernel_source is None:
+            kernel_source = self._resolve_kernel_source(database, self._quant_mode)
+        result = database.query_moe_ep(
+            kernel_source,
+            self._quant_mode,
+            self._workload_distribution,
+            self._inference_phase,
+            self._topk,
+            self._num_experts,
+            self._num_slots,
+            self._hidden_size,
+            self._inter_size,
+            1,  # moe_tp_size — the large-EP family is EP-only
+            self._moe_ep_size,
+            num_tokens,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs) -> float:
+        return self._weights * self._scale_factor
