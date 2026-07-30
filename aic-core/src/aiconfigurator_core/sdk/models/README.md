@@ -2,6 +2,13 @@
 
 This package implements the model layer of the AIConfigurator SDK. Each model class defines the operation pipeline (context and generation ops) for a specific LLM architecture family.
 
+## `blocks/`
+
+`blocks/` holds composition helpers — reusable pipeline-fragment builders that model classes call to construct parts of their op lists — not model classes. Modules under `blocks/` must stay side-effect-free: no `@register_model` is allowed here.
+
+- `vit.py` — `build_encoder_ops()` for ViT-based vision encoders (moved from `models/vit_ops.py`, which remains as a compatibility shim)
+- `moe.py` — generic MoE-block builders (forthcoming)
+
 ## Package Structure
 
 ```
