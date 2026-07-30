@@ -937,17 +937,23 @@ def _validate_ep_phase(inference_phase: str) -> None:
 
 
 def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_phase: str, query_context: str) -> str:
-    """Distribution fallback chain: requested -> "uniform" -> sole-available.
+    """Distribution fallback chain: requested -> "uniform" -> first-available.
 
     Candidates are the distributions that actually carry ``inference_phase``
-    data — the legacy sglang tables are separate files per phase, so their
-    fallback is inherently phase-scoped; the unified table nests phase below
-    distribution and must filter to match. The two legacy oracles disagree
-    beyond the exact hit (sglang: "uniform" or typed miss; trtllm: first
-    collected distribution in load order): the unified chain answers
-    "uniform" when collected, else the sole collected distribution (which
-    covers the trtllm single-alternative reality deterministically), and
-    refuses to guess between two or more non-uniform candidates: typed miss.
+    data, in table insertion order — the legacy sglang tables are separate
+    files per phase, so their fallback is inherently phase-scoped; the
+    unified table nests phase below distribution and must filter to match.
+    The chain reproduces both legacy oracles on their shipped tables: the
+    sglang tables include "uniform", so step 2 fires there (the sglang
+    oracle's own fallback); the trtllm gb200 table has no "uniform", so
+    step 3 fires there with the same first-collected distribution the trtllm
+    oracle picks (``available_distributions[0]`` — e.g. the production
+    default request "power_law" resolves to "power_law_1.01_eplb"). The
+    residual corner — a table lacking "uniform" where the sglang oracle
+    would raise but the unified chain answers first-available — is strictly
+    more permissive and unreachable on shipped sglang data, the same stance
+    the comm-dtype fallback takes. A typed miss remains only when no
+    collected distribution carries the requested phase.
     """
     candidates = [dist for dist, phases in quant_slice.items() if inference_phase in phases]
     if workload_distribution in candidates:
@@ -959,9 +965,9 @@ def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_
             query_context,
         )
         return "uniform"
-    if len(candidates) == 1:
+    if candidates:
         logger.debug(
-            "moe_ep: workload_distribution %r not collected; falling back to sole available %r (%s)",
+            "moe_ep: workload_distribution %r not collected; falling back to first available %r (%s)",
             workload_distribution,
             candidates[0],
             query_context,
@@ -969,7 +975,7 @@ def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_
         return candidates[0]
     raise PerfDataNotAvailableError(
         f"Missing silicon data for the requested lookup; workload_distribution '{workload_distribution}' is not "
-        f"available for {query_context}; collected distributions with {inference_phase} data: {sorted(candidates)}."
+        f"available for {query_context}; no collected distribution carries {inference_phase} data."
     )
 
 
