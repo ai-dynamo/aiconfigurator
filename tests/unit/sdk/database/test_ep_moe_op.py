@@ -6,8 +6,9 @@
 Query semantics against an injected ``db._moe_ep_data`` store (the
 ``__dict__``-gated bind in ``load_data`` honors pre-set attributes): ADP token
 scaling + interpolation and scale_factor, the ``num_slots`` default, the
-distribution fallback chain (requested -> "uniform" -> sole-available ->
-typed miss, phase-scoped like the per-phase legacy sglang tables), missing
+distribution fallback chain (requested -> "uniform" -> first-available in
+table insertion order, phase-scoped like the per-phase legacy sglang tables;
+typed miss only when no distribution carries the phase), missing
 phase raising, the gated/non-gated weights formula, inference_phase
 validation, the silicon-only tier contract (SOL/SOL_FULL/EMPIRICAL raise
 ``EmpiricalNotImplementedError``), and kernel_source auto-resolution
@@ -73,7 +74,8 @@ def _build_injected_store():
                 ("deepep_moe", common.MoEQuantMode.bfloat16, "power_law_1.2", "context", *_SLICE),
                 {16: _leaf(0.30)},
             ),
-            # fp8: two non-uniform distributions -> no unambiguous stand-in.
+            # fp8: two non-uniform distributions, no uniform -> the
+            # first-available (insertion-order) fallback answers.
             (
                 ("deepep_moe", common.MoEQuantMode.fp8, "power_law_0.6", "context", *_SLICE),
                 {16: _leaf(0.40)},
@@ -171,18 +173,20 @@ def test_distribution_fallback_is_phase_scoped(ep_db):
 
 def test_distribution_fallback_to_sole_available(ep_db):
     # bfloat16 has only "power_law_1.2": requested "uniform" is absent, the
-    # sole collected distribution answers.
+    # sole collected distribution answers (first-available degenerate case).
     op = _make_op(quant_mode=common.MoEQuantMode.bfloat16, workload_distribution="uniform")
     assert float(op.query(ep_db, x=16)) == pytest.approx(0.30, rel=1e-12)
 
 
-def test_multi_distribution_without_uniform_raises(ep_db):
-    # fp8 has {power_law_0.6, power_law_1.2}: no exact hit, no uniform, no
-    # sole distribution -> typed miss.
-    with pytest.raises(PerfDataNotAvailableError, match="workload_distribution"):
-        ep_db.query_moe_ep(
-            "deepep_moe", common.MoEQuantMode.fp8, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 16, 16
-        )
+def test_multi_distribution_without_uniform_falls_back_to_first_available(ep_db):
+    # fp8 has {power_law_0.6, power_law_1.2}, no uniform: the first collected
+    # distribution in table insertion order answers — the trtllm oracle's
+    # ``available_distributions[0]`` behavior (its shipped gb200 table has no
+    # uniform, so this path is production-reachable, e.g. via "power_law").
+    result = ep_db.query_moe_ep(
+        "deepep_moe", common.MoEQuantMode.fp8, "power_law", "context", 8, 256, 256, 7168, 2048, 1, 16, 16
+    )
+    assert float(result) == pytest.approx(0.40, rel=1e-12)
 
 
 def test_missing_phase_raises(ep_db):

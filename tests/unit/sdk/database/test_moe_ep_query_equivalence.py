@@ -19,6 +19,13 @@ beyond-range util-hold ({min, max, midpoints of adjacent collected points,
   kernel). The legacy table has no phase split, so BOTH unified phases must
   return bit-identical values. NO carve-outs.
 
+Both sweeps also probe an UNCOLLECTED distribution (``"power_law"`` — the
+production default request string, absent from both shipped tables) once per
+slice: on sglang this pins the ->"uniform" fallback against ``query_moe``;
+on gb200 (whose table has no "uniform") it pins the ->first-available
+fallback against ``query_wideep_moe_compute``'s
+``available_distributions[0]`` behavior.
+
 The 2 x max overflow probes compare like-for-like because ``query_moe_ep``
 reproduces the oracle boundary util-hold exactly: the same ``perf_interp``
 Grid token axis with the same wideep-MoE roofline SOL (num_slots-based; equal
@@ -57,6 +64,10 @@ TRTLLM_WIDEEP_PATH = resolve_op_data_path(
 )
 
 REL_TOL = 1e-9
+
+# Uncollected in both shipped tables (asserted in each sweep): exercises the
+# distribution-fallback path on real data.
+UNCOLLECTED_DIST = "power_law"
 
 
 def _iter_slices(nested, depth):
@@ -103,31 +114,37 @@ def test_l1_sglang_wideep_moe_query_equivalence():
     ):
         legacy_table = loader(path)
         assert legacy_table
+        assert all(UNCOLLECTED_DIST not in legacy_table[quant] for quant in legacy_table)
         comparisons = 0
         for (quant, dist, topk, experts, hidden, inter, tp, ep), tokens in _iter_slices(legacy_table, 8):
-            for tok in _token_probes(tokens):
-                # num_slots = num_experts: the legacy sglang tables have no
-                # EPLB redundancy axis (spec §4.2 adapter pin).
-                unified = db.query_moe_ep(
-                    "deepep_moe", quant, dist, phase, topk, experts, experts, hidden, inter, tp, ep, tok
-                )
-                legacy = db.query_moe(
-                    num_tokens=tok,
-                    hidden_size=hidden,
-                    inter_size=inter,
-                    topk=topk,
-                    num_experts=experts,
-                    moe_tp_size=tp,
-                    moe_ep_size=ep,
-                    quant_mode=quant,
-                    workload_distribution=dist,
-                    is_context=is_context,
-                    moe_backend="deepep_moe",
-                )
-                _assert_equivalent(
-                    unified, legacy, f"sglang wideep {phase} {quant.name} {dist} {topk=} {experts=} {ep=} {tok=}"
-                )
-                comparisons += 1
+            # The collected distribution plus one uncollected probe pinning
+            # the fallback path (legacy resolves "power_law" -> "uniform").
+            for probe_dist, probe_tokens in ((dist, _token_probes(tokens)), (UNCOLLECTED_DIST, [min(tokens)])):
+                for tok in probe_tokens:
+                    # num_slots = num_experts: the legacy sglang tables have no
+                    # EPLB redundancy axis (spec §4.2 adapter pin).
+                    unified = db.query_moe_ep(
+                        "deepep_moe", quant, probe_dist, phase, topk, experts, experts, hidden, inter, tp, ep, tok
+                    )
+                    legacy = db.query_moe(
+                        num_tokens=tok,
+                        hidden_size=hidden,
+                        inter_size=inter,
+                        topk=topk,
+                        num_experts=experts,
+                        moe_tp_size=tp,
+                        moe_ep_size=ep,
+                        quant_mode=quant,
+                        workload_distribution=probe_dist,
+                        is_context=is_context,
+                        moe_backend="deepep_moe",
+                    )
+                    _assert_equivalent(
+                        unified,
+                        legacy,
+                        f"sglang wideep {phase} {quant.name} {probe_dist} {topk=} {experts=} {ep=} {tok=}",
+                    )
+                    comparisons += 1
         assert comparisons > 100, f"sglang wideep {phase} sweep too small: {comparisons}"
 
 
@@ -148,38 +165,49 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
     legacy_table = load_wideep_moe_compute_data(TRTLLM_WIDEEP_PATH)
     assert legacy_table
 
+    assert all(
+        UNCOLLECTED_DIST not in legacy_table[kernel][quant] and "uniform" not in legacy_table[kernel][quant]
+        for kernel in legacy_table
+        for quant in legacy_table[kernel]
+    )
+
     comparisons = 0
     slots_seen: set[int] = set()
     dists_seen: set[str] = set()
     for (kernel, quant, dist, topk, experts, hidden, inter, slots, tp, ep), tokens in _iter_slices(legacy_table, 10):
         slots_seen.add(slots)
         dists_seen.add(dist)
-        for tok in _token_probes(tokens):
-            context = f"trtllm wideep {kernel} {quant.name} {dist} {slots=} {experts=} {hidden=} {ep=} {tok=}"
-            # The legacy table has no context/generation split: both unified
-            # phases carry the same rows and must return identical values.
-            unified_ctx = db.query_moe_ep(
-                kernel, quant, dist, "context", topk, experts, slots, hidden, inter, tp, ep, tok
-            )
-            unified_gen = db.query_moe_ep(
-                kernel, quant, dist, "generation", topk, experts, slots, hidden, inter, tp, ep, tok
-            )
-            assert float(unified_ctx) == float(unified_gen), context
-            assert unified_ctx.energy == unified_gen.energy, context
-            legacy = db.query_wideep_moe_compute(
-                num_tokens=tok,
-                hidden_size=hidden,
-                inter_size=inter,
-                topk=topk,
-                num_experts=experts,
-                num_slots=slots,
-                moe_tp_size=tp,
-                moe_ep_size=ep,
-                quant_mode=quant,
-                workload_distribution=dist,
-            )
-            _assert_equivalent(unified_ctx, legacy, context)
-            comparisons += 1
+        # The collected distribution plus one uncollected probe pinning the
+        # fallback path: with no "uniform" collected, both the legacy oracle
+        # and the unified query must answer with the FIRST available
+        # distribution in table insertion order.
+        for probe_dist, probe_tokens in ((dist, _token_probes(tokens)), (UNCOLLECTED_DIST, [min(tokens)])):
+            for tok in probe_tokens:
+                context = f"trtllm wideep {kernel} {quant.name} {probe_dist} {slots=} {experts=} {hidden=} {ep=} {tok=}"
+                # The legacy table has no context/generation split: both unified
+                # phases carry the same rows and must return identical values.
+                unified_ctx = db.query_moe_ep(
+                    kernel, quant, probe_dist, "context", topk, experts, slots, hidden, inter, tp, ep, tok
+                )
+                unified_gen = db.query_moe_ep(
+                    kernel, quant, probe_dist, "generation", topk, experts, slots, hidden, inter, tp, ep, tok
+                )
+                assert float(unified_ctx) == float(unified_gen), context
+                assert unified_ctx.energy == unified_gen.energy, context
+                legacy = db.query_wideep_moe_compute(
+                    num_tokens=tok,
+                    hidden_size=hidden,
+                    inter_size=inter,
+                    topk=topk,
+                    num_experts=experts,
+                    num_slots=slots,
+                    moe_tp_size=tp,
+                    moe_ep_size=ep,
+                    quant_mode=quant,
+                    workload_distribution=probe_dist,
+                )
+                _assert_equivalent(unified_ctx, legacy, context)
+                comparisons += 1
     assert comparisons > 500, f"trtllm wideep sweep too small: {comparisons}"
     # The sweep genuinely covered the EPLB axes.
     assert {256, 288, 384} <= slots_seen
