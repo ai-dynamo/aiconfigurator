@@ -1191,9 +1191,7 @@ def collect_vllm(
             images={"default": f"installed-vllm-xpu:{version}"},
             source_repo="https://github.com/vllm-project/vllm.git",
         )
-        logger.warning(
-            "vLLM XPU collector is using installed runtime v%s; skipping stock CUDA manifest pin", version
-        )
+        logger.warning("vLLM XPU collector is using installed runtime v%s; skipping stock CUDA manifest pin", version)
     else:
         runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
