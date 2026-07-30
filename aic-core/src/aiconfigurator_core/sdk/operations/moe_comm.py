@@ -151,6 +151,129 @@ def _normalize_sms(raw: object) -> int:
     return 0 if math.isnan(value) else int(value)
 
 
+def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_columns: dict) -> None:
+    """Adapt legacy sglang DeepEP rows (normal or ll table) into ``data``.
+
+    One legacy row becomes one dispatch row + one combine row; each phase
+    latency is the sum of its ``phase_columns`` entries in **microseconds**
+    (the legacy query path divides by 1000), stored as ms. ``comm_dtype`` is
+    ``"default"`` and ``ep_size = node_num * 8`` — the legacy tables were
+    collected on 8-GPU HGX fleets with no dtype axis. HT rows keep their
+    ``dispatch_sms`` budget for both phases (the legacy table keys the whole
+    row by it); LL rows have no SM budget -> 0.
+    """
+    for row in rows:
+        node_num = int(row["node_num"])
+        sms = int(row["dispatch_sms"]) if comm_backend == "deepep_ht" else 0
+        power = float(row.get("power", 0.0))
+        for phase, columns in phase_columns.items():
+            latency_us = 0.0
+            for column in columns:
+                latency_us += float(row[column])
+            latency = latency_us / 1000.0  # us -> ms
+            key = (
+                comm_backend,
+                phase,
+                "default",
+                node_num * 8,
+                node_num,
+                int(row["hidden_size"]),
+                int(row["num_topk"]),
+                int(row["num_experts"]),
+                sms,
+                int(row["num_token"]),
+            )
+            leaf = {"latency": latency, "power": power, "energy": power * latency}
+            _store_a2a_leaf(data, key, leaf, overwrite=False)
+
+
+def _adapt_legacy_deepep_normal(data: defaultdict, rows) -> None:
+    _adapt_legacy_deepep(
+        data,
+        rows,
+        comm_backend="deepep_ht",
+        phase_columns={
+            "dispatch": ("dispatch_transmit_us", "dispatch_notify_us"),
+            "combine": ("combine_transmit_us", "combine_notify_us"),
+        },
+    )
+
+
+def _adapt_legacy_deepep_ll(data: defaultdict, rows) -> None:
+    # The legacy LL table never had the four-way transmit/notify split — only
+    # per-phase averages (see load_wideep_deepep_ll_data).
+    _adapt_legacy_deepep(
+        data,
+        rows,
+        comm_backend="deepep_ll",
+        phase_columns={"dispatch": ("dispatch_avg_t_us",), "combine": ("combine_avg_t_us",)},
+    )
+
+
+_LEGACY_TRTLLM_KERNEL_TO_BACKEND = {
+    "NVLinkTwoSided": "nvlink_two_sided",
+    "NVLinkOneSided": "nvlink_one_sided",
+}
+
+# op_name -> (phase, comm_dtype); None means the row's ``moe_dtype`` passes
+# through (prepare/dispatch). Combine is keyed by payload precision instead:
+# the standard kernel returns bfloat16 whatever moe_dtype the run used, the
+# low-precision variant returns fp4.
+_LEGACY_TRTLLM_OP_TO_PHASE_DTYPE = {
+    "alltoall_prepare": ("prepare", None),
+    "alltoall_dispatch": ("dispatch", None),
+    "alltoall_combine": ("combine", "bfloat16"),
+    "alltoall_combine_low_precision": ("combine", "fp4"),
+}
+
+
+def _adapt_legacy_trtllm_alltoall(data: defaultdict, rows) -> None:
+    """Adapt legacy trtllm ``trtllm_alltoall_perf`` rows into ``data``.
+
+    UNITS: the legacy ``latency`` column is already in **milliseconds** —
+    ``load_trtllm_alltoall_data`` stores it raw and ``query_trtllm_alltoall``
+    returns table values without the /1000 the DeepEP query path applies (its
+    SOL tier computes ms directly; shipped gb200 values span ~0.01-17 ms).
+    Stored raw here, no us->ms conversion.
+
+    ``node_num``: the legacy GB200 NVL4 files carry no ``num_nodes`` column,
+    so it is derived as ``max(1, moe_ep_size // 4)`` — here once, mirroring
+    ``load_trtllm_alltoall_data``, and never anywhere else; an explicit
+    ``num_nodes`` column wins when present, also mirroring the legacy loader.
+    """
+    for row in rows:
+        kernel_source = row.get("kernel_source", "NVLinkTwoSided")
+        comm_backend = _LEGACY_TRTLLM_KERNEL_TO_BACKEND.get(kernel_source)
+        phase_dtype = _LEGACY_TRTLLM_OP_TO_PHASE_DTYPE.get(row["op_name"])
+        if comm_backend is None or phase_dtype is None:
+            logger.debug(
+                "skipping legacy trtllm_alltoall row with no unified mapping: "
+                f"kernel_source={kernel_source} op_name={row['op_name']}"
+            )
+            continue
+        phase, comm_dtype = phase_dtype
+        if comm_dtype is None:
+            comm_dtype = row["moe_dtype"]
+        ep_size = int(row["moe_ep_size"])
+        node_num = int(row["num_nodes"]) if "num_nodes" in row else max(1, ep_size // 4)
+        latency = float(row["latency"])  # already ms — see docstring
+        power = float(row.get("power", 0.0))
+        key = (
+            comm_backend,
+            phase,
+            comm_dtype,
+            ep_size,
+            node_num,
+            int(row["hidden_size"]),
+            int(row["topk"]),
+            int(row["num_experts"]),
+            0,  # legacy alltoall rows carry no SM budget
+            int(row["num_tokens"]),
+        )
+        leaf = {"latency": latency, "power": power, "energy": power * latency}
+        _store_a2a_leaf(data, key, leaf, overwrite=False)
+
+
 def _load_legacy_a2a(
     data: defaultdict,
     legacy_normal_sources,
@@ -161,11 +284,26 @@ def _load_legacy_a2a(
 
     Mapping (spec §4.1): sglang ``wideep_deepep_normal_perf`` -> ``deepep_ht``,
     ``wideep_deepep_ll_perf`` -> ``deepep_ll``, trtllm ``trtllm_alltoall_perf``
-    -> ``nvlink_two_sided``/``nvlink_one_sided``. Returns True when at least
-    one legacy source contributed rows. Stub for now — the adapters land with
-    the legacy-compat task; the sources are accepted and ignored.
+    -> ``nvlink_two_sided``/``nvlink_one_sided``. All adapters store with
+    ``overwrite=False`` (intra-source keep-first), so a later new-schema row
+    can still take precedence via its overwrite path. Returns True when at
+    least one legacy source exists — an existing-but-empty file counts, the
+    same exists-but-empty semantic the new-schema path has.
     """
-    return False
+    loaded = False
+    for sources, adapt in (
+        (legacy_normal_sources, _adapt_legacy_deepep_normal),
+        (legacy_ll_sources, _adapt_legacy_deepep_ll),
+        (legacy_trtllm_alltoall_sources, _adapt_legacy_trtllm_alltoall),
+    ):
+        if sources is None:
+            continue
+        rows = _read_filtered_rows(sources)
+        if rows is None:
+            continue
+        loaded = True
+        adapt(data, rows)
+    return loaded
 
 
 def load_moe_a2a_data(
