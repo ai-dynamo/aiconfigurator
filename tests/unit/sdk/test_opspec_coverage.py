@@ -42,6 +42,11 @@ EXEMPT: dict[str, str] = {
     # forward_model="fpm" is forced onto the Python engine step in
     # base_backend (no Rust op variant yet); the Rust port lands separately.
     "FPMForwardOp": "FPM forces the Python route; Rust port is a separate PR",
+    # Large-EP SDK foundation (AIC-1438 PR 1): no model instantiates this op
+    # yet — PR 2 wires the consumers. The _to_opspec branch, Rust mirror, and
+    # parity case land with that wiring; until then the op is unreachable
+    # from the engine step.
+    "MoEAllToAll": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
 }
 
 

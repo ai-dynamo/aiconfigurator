@@ -14,6 +14,9 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 (with legacy per-backend adapters) into one nested dict keyed by
 ``[comm_backend][phase][comm_dtype][ep_size][node_num][hidden_size][topk]
 [num_experts][sms][num_tokens]``.
+``MoEAllToAll`` is the op class over that table: it owns the class-level
+cache + ``load_data`` and the ``_query_a2a_table`` lookup behind
+``PerfDatabase.query_moe_a2a``.
 
 The module also owns the large-EP compute side of the same family:
 ``load_moe_ep_data`` loads the unified ``moe_ep_perf.parquet`` EP MoE compute
@@ -28,11 +31,29 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import _read_filtered_rows
+from aiconfigurator_core.sdk import common, perf_interp
+from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.performance_result import PerformanceResult
+
+if TYPE_CHECKING:
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _cache_key(database: PerfDatabase) -> tuple:
+    """Shared cache key — same shape as every other migrated op family."""
+    return (
+        database.systems_root,
+        database.system,
+        database.backend,
+        database.version,
+        database.enable_shared_layer,
+    )
 
 
 @dataclass(frozen=True)
@@ -382,6 +403,256 @@ def load_moe_a2a_data(
         )
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# MoEAllToAll — the op class over the unified moe_a2a table
+# ---------------------------------------------------------------------------
+
+
+_A2A_PHASES = ("prepare", "dispatch", "combine")
+
+
+def _validate_a2a_request(comm_backend: str, phase: str) -> None:
+    """Shared ctor/query validation: unknown backend or phase is a ValueError."""
+    if comm_backend not in MOE_A2A_BACKENDS:
+        raise ValueError(f"Invalid comm_backend '{comm_backend}'. Must be one of {sorted(MOE_A2A_BACKENDS)}")
+    if phase not in _A2A_PHASES:
+        raise ValueError(f"Invalid phase '{phase}'. Must be one of {list(_A2A_PHASES)}")
+
+
+def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
+    """Exact ``comm_dtype`` key, else the sole collected dtype (debug log).
+
+    A slice collected under exactly one dtype answers any requested dtype —
+    the legacy tables have no dtype axis (DeepEP rows live under "default"),
+    so a caller asking for a payload dtype must still reach them. With two or
+    more collected dtypes there is no unambiguous stand-in: typed miss.
+    """
+    if comm_dtype in phase_slice:
+        return phase_slice[comm_dtype]
+    if len(phase_slice) == 1:
+        sole = next(iter(phase_slice))
+        logger.debug(
+            "moe_a2a: comm_dtype %r not collected; falling back to sole available %r (%s)",
+            comm_dtype,
+            sole,
+            query_context,
+        )
+        return phase_slice[sole]
+    raise PerfDataNotAvailableError(
+        f"Missing silicon data for the requested lookup; comm_dtype '{comm_dtype}' is not available for "
+        f"{query_context}; collected dtypes: {sorted(phase_slice)}."
+    )
+
+
+class MoEAllToAll(Operation):
+    """Unified large-EP MoE all-to-all comm op (one phase per instance).
+
+    Owns ``_moe_a2a_data`` — the unified comm table loaded by
+    :func:`load_moe_a2a_data` (new-schema ``moe_a2a_perf.parquet`` plus the
+    three legacy per-backend adapters). Loaded on every inference backend
+    ({"sglang", "vllm", "trtllm"} all have legacy comm sources); ``None``
+    otherwise. Comm ops see per-rank token counts: ``query(x=...)`` scales by
+    ``scale_factor`` only — never by ``attention_dp_size``.
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        *,
+        phase: str,
+        comm_backend: str,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        node_num: int,
+        comm_dtype: str = "default",
+        sms: int = 0,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        _validate_a2a_request(comm_backend, phase)
+        self._phase = phase
+        self._comm_backend = comm_backend
+        self._hidden_size = hidden_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_ep_size = moe_ep_size
+        self._node_num = node_num
+        self._comm_dtype = comm_dtype
+        self._sms = sms
+
+    # ------------------------------------------------------------------
+    # Data ownership
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        return _cache_key(database)
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        """Idempotent. Loads the unified moe_a2a table (new schema + legacy
+        adapters) on the three inference backends; binds ``None`` otherwise.
+        """
+        import os
+
+        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            if database.backend in cls._SUPPORTED_BACKENDS:
+                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+
+                primary = resolve_op_data_path(
+                    system_data_root, database.backend, database.version, PerfDataFilename.moe_a2a.value
+                )
+                sources = database._build_op_sources(PerfDataFilename.moe_a2a, primary, system_data_root)
+
+                legacy_sources = {}
+                for kwarg, filename_enum in (
+                    ("legacy_normal_sources", PerfDataFilename.wideep_deepep_normal),
+                    ("legacy_ll_sources", PerfDataFilename.wideep_deepep_ll),
+                    ("legacy_trtllm_alltoall_sources", PerfDataFilename.trtllm_alltoall),
+                ):
+                    legacy_primary = resolve_op_data_path(
+                        system_data_root, database.backend, database.version, filename_enum.value
+                    )
+                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
+
+                cls._data_cache[key] = LoadedOpData(
+                    load_moe_a2a_data(sources, **legacy_sources),
+                    PerfDataFilename.moe_a2a,
+                    primary,
+                )
+            else:
+                cls._data_cache[key] = None
+
+            cls._record_load()
+
+        if "_moe_a2a_data" not in database.__dict__:
+            database._moe_a2a_data = cls._data_cache[key]
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._data_cache.clear()
+
+    # ------------------------------------------------------------------
+    # Query table (behind PerfDatabase.query_moe_a2a)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _query_a2a_table(
+        cls,
+        database: PerfDatabase,
+        comm_backend: str,
+        phase: str,
+        comm_dtype: str,
+        ep_size: int,
+        node_num: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        num_tokens: int,
+        sms: int = 0,
+        database_mode: common.DatabaseMode | None = None,
+    ) -> PerformanceResult:
+        """Silicon lookup against the unified moe_a2a table.
+
+        SILICON walks the slice (backend -> phase -> dtype-with-fallback ->
+        ep -> node -> hidden -> topk -> experts), then resolves ``sms``: an
+        exact sms key gets a 1-D token interpolation, otherwise a 2-D
+        (sms, tokens) grid — the same split the legacy DeepEP-normal query
+        uses. SOL/SOL_FULL/EMPIRICAL have no estimation tier yet and raise
+        ``EmpiricalNotImplementedError``; HYBRID falls back to that same
+        raise when silicon data misses.
+        """
+        cls.load_data(database)
+        _validate_a2a_request(comm_backend, phase)
+
+        if database_mode is None:
+            database_mode = database._default_database_mode
+
+        query_context = (
+            f"moe_a2a {comm_backend}/{phase}: {comm_dtype=}, {ep_size=}, {node_num=}, "
+            f"{hidden_size=}, {topk=}, {num_experts=}, {sms=}, {num_tokens=}"
+        )
+
+        if database_mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL):
+            raise EmpiricalNotImplementedError(
+                f"{database_mode.name} mode is not available for {query_context}: "
+                "silicon data required (estimation tier is a planned follow-up)."
+            )
+
+        def get_silicon() -> PerformanceResult:
+            phase_slice = util_empirical.require_data_slice(database._moe_a2a_data, comm_backend, phase)
+            dtype_slice = _resolve_comm_dtype_slice(phase_slice, comm_dtype, query_context)
+            by_sms = util_empirical.require_data_slice(dtype_slice, ep_size, node_num, hidden_size, topk, num_experts)
+            # 1-D/2-D token curves with a linear token proxy SOL for the
+            # boundary util-hold: per-slice payload bytes scale ~linearly with
+            # tokens (hidden/topk/dtype fixed), so the proxy is
+            # ratio-equivalent to any bandwidth roofline (see the DeepEP notes
+            # in operations/moe.py).
+            if sms in by_sms:
+                config = perf_interp.OpInterpConfig(
+                    axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
+                )
+                result = perf_interp.query(config, by_sms[sms], num_tokens)
+            else:
+                config = perf_interp.OpInterpConfig(
+                    axes=("sms", "num_tokens"), resolver=perf_interp.Grid(), sol_fn=lambda _sm, t: float(t)
+                )
+                result = perf_interp.query(config, by_sms, sms, num_tokens)
+            lat = perf_interp.get_value(result, "latency")
+            energy = perf_interp.get_value(result, "energy")
+            return database._interp_pr(lat, energy=energy)
+
+        def get_empirical() -> float:
+            raise EmpiricalNotImplementedError(
+                f"HYBRID empirical fallback is not available for {query_context}: "
+                "silicon data required (estimation tier is a planned follow-up)."
+            )
+
+        return database._query_silicon_or_hybrid(
+            get_silicon=get_silicon,
+            get_empirical=get_empirical,
+            database_mode=database_mode,
+            error_msg=f"Failed to query moe_a2a data for {query_context}",
+        )
+
+    # ------------------------------------------------------------------
+    # Op contract
+    # ------------------------------------------------------------------
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        num_tokens = kwargs.get("x")  # per-rank tokens — comm ops never ADP-scale
+        result = database.query_moe_a2a(
+            self._comm_backend,
+            self._phase,
+            self._comm_dtype,
+            self._moe_ep_size,
+            self._node_num,
+            self._hidden_size,
+            self._topk,
+            self._num_experts,
+            num_tokens,
+            sms=self._sms,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+    def get_weights(self, **kwargs) -> float:
+        """All-to-all communication has no weight memory."""
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
