@@ -3244,6 +3244,78 @@ class PerfDatabase:
             database_mode=database_mode,
         )
 
+    def moe_a2a_coverage(self, hidden_size: int, topk: int, num_experts: int) -> dict[str, set[tuple[int, int]]]:
+        """Probe moe_a2a coverage for one model shape (PR 2's enumerator contract).
+
+        Returns ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
+        dispatch AND combine phases carry a non-empty token curve for the
+        shape, under ANY ``comm_dtype`` and ANY ``sms`` (the prepare phase is
+        not required). Read-only key walk over the table bound by
+        ``MoEAllToAll.load_data`` — no query execution, and non-vivifying
+        (``.get`` only: injected stores may be auto-vivifying defaultdicts).
+        An absent or unloaded table — including a ``LoadedOpData`` wrapping
+        ``None``, which raises on item access but is falsy — yields ``{}``.
+        Deliberately not lru_cached: the returned sets are mutable.
+        """
+        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
+
+        MoEAllToAll.load_data(self)
+        table = self._moe_a2a_data
+        if not table:
+            return {}
+
+        def pairs_for(by_phase, phase: str) -> set[tuple[int, int]]:
+            pairs: set[tuple[int, int]] = set()
+            for by_ep in (by_phase.get(phase) or {}).values():  # ANY comm_dtype
+                for ep_size, by_node in by_ep.items():
+                    for node_num, by_hidden in by_node.items():
+                        by_sms = ((by_hidden.get(hidden_size) or {}).get(topk) or {}).get(num_experts) or {}
+                        if any(by_sms.values()):  # ANY sms with a non-empty token curve
+                            pairs.add((ep_size, node_num))
+            return pairs
+
+        coverage: dict[str, set[tuple[int, int]]] = {}
+        for comm_backend, by_phase in table.items():
+            covered = pairs_for(by_phase, "dispatch") & pairs_for(by_phase, "combine")
+            if covered:
+                coverage[comm_backend] = covered
+        return coverage
+
+    def moe_ep_compute_coverage(
+        self,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        quant_mode: common.MoEQuantMode,
+        inference_phase: str,
+    ) -> set[int]:
+        """Probe moe_ep compute coverage for one model shape (PR 2's enumerator contract).
+
+        Returns the ``{moe_ep_size}`` set with a non-empty token curve for
+        the shape, unioned across ANY ``kernel_source``, ANY workload
+        distribution, and ANY ``num_slots``, with ``moe_tp_size`` fixed to 1
+        (the large-EP family is EP-only). Same read-only, non-vivifying,
+        never-raising contract as :meth:`moe_a2a_coverage`; an absent or
+        unloaded table yields an empty set. Deliberately not lru_cached: the
+        returned set is mutable.
+        """
+        from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+
+        EPMoE.load_data(self)
+        table = self._moe_ep_data
+        if not table:
+            return set()
+
+        covered: set[int] = set()
+        for by_quant in table.values():  # ANY kernel_source
+            for by_phase in (by_quant.get(quant_mode) or {}).values():  # ANY distribution
+                by_slots = ((by_phase.get(inference_phase) or {}).get(topk) or {}).get(num_experts) or {}
+                for by_hidden in by_slots.values():  # ANY num_slots
+                    by_ep = ((by_hidden.get(hidden_size) or {}).get(inter_size) or {}).get(1) or {}  # moe_tp == 1
+                    covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
+        return covered
+
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries
     # ═══════════════════════════════════════════════════════════════════
