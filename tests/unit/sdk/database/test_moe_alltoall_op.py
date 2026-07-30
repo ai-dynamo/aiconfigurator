@@ -75,6 +75,13 @@ def _build_injected_store():
             (("nvlink_two_sided", "prepare", "fp8", *_SLICE, 0), {16: _leaf(0.05)}),
             (("nvlink_two_sided", "dispatch", "fp8", *_SLICE, 0), {16: _leaf(0.06)}),
             (("nvlink_two_sided", "dispatch", "bfloat16", *_SLICE, 0), {16: _leaf(0.07)}),
+            # nvlink_one_sided dispatch collected under fp8 only (fp8_block
+            # normalization target when it is the sole dtype).
+            (("nvlink_one_sided", "dispatch", "fp8", *_SLICE, 0), {16: _leaf(0.08)}),
+            # combine with BOTH a real fp8_block key and an fp8 key: exact-first
+            # ordering must keep the collected fp8_block row winning.
+            (("nvlink_two_sided", "combine", "fp8_block", *_SLICE, 0), {16: _leaf(0.09)}),
+            (("nvlink_two_sided", "combine", "fp8", *_SLICE, 0), {16: _leaf(0.11)}),
         ]
     )
 
@@ -138,6 +145,27 @@ def test_multi_dtype_missing_requested_raises(a2a_db):
     # dispatch has {fp8, bfloat16}: no sole dtype to fall back to.
     with pytest.raises(PerfDataNotAvailableError, match="nvfp4"):
         a2a_db.query_moe_a2a("nvlink_two_sided", "dispatch", "nvfp4", 16, 2, 7168, 8, 256, 16, sms=0)
+
+
+def test_fp8_block_normalizes_to_fp8_when_fp8_is_sole_dtype(a2a_db):
+    # fp8_block is a behavioral mode reusing the fp8 comm tables (the same
+    # normalization legacy query_trtllm_alltoall applies).
+    result = a2a_db.query_moe_a2a("nvlink_one_sided", "dispatch", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
+    assert float(result) == pytest.approx(0.08, rel=1e-12)
+
+
+def test_fp8_block_normalizes_to_fp8_among_multiple_dtypes(a2a_db):
+    # {fp8, bfloat16} collected: the sole-dtype fallback cannot answer here,
+    # so this pins the fp8_block -> fp8 aliasing specifically (the reviewer's
+    # gb200 repro shape).
+    result = a2a_db.query_moe_a2a("nvlink_two_sided", "dispatch", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
+    assert float(result) == pytest.approx(0.06, rel=1e-12)
+
+
+def test_exact_fp8_block_key_wins_over_normalization(a2a_db):
+    # combine has BOTH fp8_block (0.09) and fp8 (0.11): exact key first.
+    result = a2a_db.query_moe_a2a("nvlink_two_sided", "combine", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
+    assert float(result) == pytest.approx(0.09, rel=1e-12)
 
 
 def test_prepare_phase_query(a2a_db):
