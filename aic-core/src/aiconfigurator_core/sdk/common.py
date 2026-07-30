@@ -265,6 +265,7 @@ DEEPSEEK_V4_HF_MODELS = frozenset(
     {
         "deepseek-ai/DeepSeek-V4-Flash",
         "deepseek-ai/DeepSeek-V4-Pro",
+        "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
         "sgl-project/DeepSeek-V4-Flash-FP8",
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }

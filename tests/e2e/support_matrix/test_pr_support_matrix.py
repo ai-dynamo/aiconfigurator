@@ -33,6 +33,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.build, pytest.mark.support_matrix]
 # Add cases only when the whole e2e job still fits that budget.
 PR_CASES: list[tuple[str, str, str]] = [
     ("nvidia/DeepSeek-V3.1-NVFP4", "b200_sxm", "trtllm"),
+    ("RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8", "b200_sxm", "sglang"),
     ("meta-llama/Meta-Llama-3.1-8B", "b200_sxm", "sglang"),
     ("MiniMaxAI/MiniMax-M2.5", "b200_sxm", "vllm"),
     ("openai/gpt-oss-20b", "h100_sxm", "trtllm"),
