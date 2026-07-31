@@ -109,9 +109,9 @@ def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     return bool(attention_projection_exclusions(raw_config))
 
 
-def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
+def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = False) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
-    backend / wideep combination.
+    backend / large-EP combination.
 
     Single source of truth shared by ``task_v2.Task`` (resolve-time FMHA
     fallback + validate) and the estimate-path FMHA guard
@@ -130,7 +130,7 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
         # models/kimi_k3.py) so it falls through to the GQA keys below.
         return "context_mla", "generation_mla"
     if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
-        if enable_wideep:
+        if is_large_ep:
             if backend_name == "sglang":
                 return "wideep_context_mla", "wideep_generation_mla"
             # trtllm wideep context queries the granular context_mla table
@@ -141,6 +141,77 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
             return "context_mla_granular", "generation_mla"
         return "context_mla", "generation_mla"
     return "context_attention", "generation_attention"
+
+
+def power_law_distribution(base: str, alpha: float, *, eplb_suffix: bool = False) -> str:
+    """Model-owned workload-distribution string for a MoE block.
+
+    ``power_law`` is the only distribution with an alpha axis; any other value
+    (``uniform``, ...) passes through untouched. ``eplb_suffix`` appends the
+    TRT-LLM large-EP ``_eplb`` marker — those tables carry EPLB-balanced rows
+    under their own distribution key instead of correcting the token count.
+    """
+    if base != "power_law":
+        return base
+    return f"{base}_{alpha}_eplb" if eplb_suffix else f"{base}_{alpha}"
+
+
+def validate_trtllm_large_ep(
+    *,
+    attention_dp_size: int,
+    moe_ep_size: int,
+    topk: int,
+    num_experts: int,
+    wideep_num_slots: int | None,
+    enable_eplb: bool,
+) -> None:
+    """Validate a TRT-LLM large-EP (wideEP) config.
+
+    Transcribed verbatim from the deleted ``TrtllmWideEPDeepSeekModel`` /
+    ``TrtllmWideEPDeepSeekV32Model`` constructors (deepseek.py:638-678 at
+    commit 8372e60), which derive the rules from TensorRT-LLM's WideEPMoE
+    constraints (``fused_moe_wide_ep.py``).
+
+    Raises:
+        ValueError: attention DP disabled, EP size not above 1, or a
+            ``wideep_num_slots`` value that EPLB cannot serve.
+    """
+    # 1. Attention DP must be enabled for WideEP
+    if attention_dp_size <= 1:
+        raise ValueError(
+            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. Attention DP should be used with WideEP."
+        )
+
+    # 2. EP size must be > 1 for WideEP (parallel_size > 1)
+    if moe_ep_size <= 1:
+        raise ValueError(
+            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. WideEP should only be enabled with parallel_size > 1."
+        )
+
+    # 3. EP size must be > top_k for AlltoAll to be effective
+    # FIXME: this warning should make the comm mode fallback to NCCL!!
+    if moe_ep_size <= topk:
+        logger.warning(
+            f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
+            "AlltoAll communication will be disabled. Consider increasing moe_ep_size."
+        )
+
+    # 4. num_slots validation
+    num_slots = wideep_num_slots if wideep_num_slots else num_experts
+
+    # num_slots must be >= num_experts
+    if num_slots < num_experts:
+        raise ValueError(
+            f"wideep_num_slots ({num_slots}) must be >= num_experts ({num_experts}). "
+            "There should be at least num_experts slots in the model engine."
+        )
+
+    # When EPLB is off, num_slots must equal num_experts
+    if not enable_eplb and num_slots != num_experts:
+        raise ValueError(
+            f"When enable_eplb=False, wideep_num_slots ({num_slots}) must equal "
+            f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
+        )
 
 
 @cache

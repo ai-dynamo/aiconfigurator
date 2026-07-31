@@ -168,22 +168,14 @@ def get_model(
 # Re-export concrete model classes for backward compatibility. Auto-discovery
 # above already imported them; we list them here for static analysis / IDE
 # support and so wildcard imports work.
-from aiconfigurator_core.sdk.models.deepseek import (
-    DeepSeekModel,
-    TrtllmWideEPDeepSeekModel,
-    WideEPDeepSeekModel,
-)
+from aiconfigurator_core.sdk.models.deepseek import DeepSeekModel
 from aiconfigurator_core.sdk.models.deepseek_v4 import DeepSeekV4Model
-from aiconfigurator_core.sdk.models.deepseek_v32 import (
-    DeepSeekV32Model,
-    TrtllmWideEPDeepSeekV32Model,
-    WideEPDeepSeekV32Model,
-)
+from aiconfigurator_core.sdk.models.deepseek_v32 import DeepSeekV32Model
 from aiconfigurator_core.sdk.models.gemma4 import Gemma4MixModel
 from aiconfigurator_core.sdk.models.gpt import GPTModel
 from aiconfigurator_core.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
-from aiconfigurator_core.sdk.models.moe import MOEModel, SGLangEPMOEModel
+from aiconfigurator_core.sdk.models.moe import MOEModel
 from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator_core.sdk.models.nemotron_nas import NemotronNas
 from aiconfigurator_core.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
@@ -204,11 +196,6 @@ __all__ = [
     "Qwen3VLMoEModel",
     "Qwen3VLModel",
     "Qwen35Model",
-    "SGLangEPMOEModel",
-    "TrtllmWideEPDeepSeekModel",
-    "TrtllmWideEPDeepSeekV32Model",
-    "WideEPDeepSeekModel",
-    "WideEPDeepSeekV32Model",
     "_apply_model_quant_defaults",
     "_architecture_to_model_family",
     "_get_model_info",
