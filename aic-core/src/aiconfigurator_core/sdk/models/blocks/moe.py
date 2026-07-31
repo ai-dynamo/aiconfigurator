@@ -92,7 +92,8 @@ def register_moe_block(family: str = "*", framework: str = "*", system: str = "*
     ``ctx`` carries the full :func:`build_moe_block_ops` parameter set:
     ``prefix``/``shape``/``cfg``/``quant_mode``/``workload_distribution``/
     ``scale_factor``/``backend_name``/``inference_phase``/``model_family``/
-    ``attn_cp_size``/``gpus_per_node``. It must return the block's op list.
+    ``attn_cp_size``/``gpus_per_node``/``shared_gemm_quant_mode``. It must
+    return the block's op list.
 
     Raises:
         ValueError: On a duplicate ``(family, framework, system)`` key — a
@@ -160,6 +161,7 @@ def build_moe_block_ops(
     model_family: str = "*",  # registry family axis; "*" matches only wildcard registrations
     attn_cp_size: int = 1,
     gpus_per_node: int = 8,
+    shared_gemm_quant_mode=None,  # common.GEMMQuantMode | None
 ) -> list:
     """Build the MoE-block op list: router, shared experts, dispatch/compute/combine.
 
@@ -167,6 +169,13 @@ def build_moe_block_ops(
     scale their MoE ops by their OWN layer count (e.g. DeepSeek uses all 61
     layers, not the 58 MoE-true ``shape.num_moe_layers``) and gate parity
     depends on passing that legacy value through unchanged.
+
+    ``shared_gemm_quant_mode`` overrides ``cfg.gemm_quant_mode`` for the
+    shared-expert GEMMs only (``None`` keeps them on the model-wide mode).
+    Checkpoints may exclude the shared experts from quantization while the
+    routed experts stay quantized — e.g. ``nvidia/GLM-5.2-NVFP4`` ignores
+    every ``mlp.shared_experts*`` module, which the DeepSeekV32 family reads
+    into ``extra_params["dsa_shared_expert_quant_mode"]``.
 
     Dispatches to a :func:`register_moe_block` variant when one matches
     ``(model_family, backend_name, system)``; the system query value is read
@@ -189,6 +198,7 @@ def build_moe_block_ops(
         "model_family": model_family,
         "attn_cp_size": attn_cp_size,
         "gpus_per_node": gpus_per_node,
+        "shared_gemm_quant_mode": shared_gemm_quant_mode,
     }
 
     def default() -> list:
@@ -216,6 +226,7 @@ def _default_moe_block_ops(
     model_family: str,
     attn_cp_size: int,
     gpus_per_node: int,
+    shared_gemm_quant_mode=None,
 ) -> list:
     """The generic pipeline: verbatim transcription of the legacy fused sites.
 
@@ -246,6 +257,7 @@ def _default_moe_block_ops(
             inference_phase=inference_phase,
             attn_cp_size=attn_cp_size,
             gpus_per_node=gpus_per_node,
+            shared_gemm_quant_mode=shared_gemm_quant_mode,
         )
 
     # Router GEMM: hidden_size -> num_experts, always emitted (spec section 4.4.4).
@@ -269,6 +281,7 @@ def _default_moe_block_ops(
     # form scales the intermediate size by ``num_shared_experts``.
     if shape.num_shared_experts > 0:
         shared_inter_size = shape.num_shared_experts * shape.moe_inter_size
+        shared_quant_mode = shared_gemm_quant_mode or cfg.gemm_quant_mode
         block_ops.extend(
             [
                 ops.GEMM(
@@ -276,7 +289,7 @@ def _default_moe_block_ops(
                     scale_factor,
                     2 * shared_inter_size // cfg.tp_size,
                     shape.hidden_size,
-                    cfg.gemm_quant_mode,
+                    shared_quant_mode,
                     **seq_split_kwargs,
                 ),
                 ops.ElementWise(
@@ -292,7 +305,7 @@ def _default_moe_block_ops(
                     scale_factor,
                     shape.hidden_size,
                     shared_inter_size // cfg.tp_size,
-                    cfg.gemm_quant_mode,
+                    shared_quant_mode,
                     **seq_split_kwargs,
                 ),
             ]
@@ -393,6 +406,7 @@ def _large_ep_shared_expert_ops(
     backend_name: str,
     is_context: bool,
     attn_cp_size: int,
+    shared_gemm_quant_mode=None,
 ) -> list:
     """Shared experts under a large-EP comm backend: FULL weights, no ÷tp.
 
@@ -411,6 +425,7 @@ def _large_ep_shared_expert_ops(
     if shape.num_shared_experts == 0:
         return []
     shared_inter_size = shape.num_shared_experts * shape.moe_inter_size
+    shared_quant_mode = shared_gemm_quant_mode or cfg.gemm_quant_mode
     if backend_name == "trtllm":
         names = (f"{prefix}_shared_gate_up_gemm", f"{prefix}_shared_act_gate", f"{prefix}_shared_ffn2_gemm")
         token_kwargs = {}
@@ -423,7 +438,7 @@ def _large_ep_shared_expert_ops(
             scale_factor,
             2 * shared_inter_size,
             shape.hidden_size,
-            cfg.gemm_quant_mode,
+            shared_quant_mode,
             **token_kwargs,
         ),
         ops.ElementWise(
@@ -439,7 +454,7 @@ def _large_ep_shared_expert_ops(
             scale_factor,
             shape.hidden_size,
             shared_inter_size,
-            cfg.gemm_quant_mode,
+            shared_quant_mode,
             **token_kwargs,
         ),
     ]
@@ -458,6 +473,7 @@ def _large_ep_block_ops(
     inference_phase: str,
     attn_cp_size: int,
     gpus_per_node: int,
+    shared_gemm_quant_mode=None,
 ) -> list:
     """Large-EP branch: router + shared experts + A2A dispatch/EPMoE/combine.
 
@@ -551,7 +567,9 @@ def _large_ep_block_ops(
         )
     )
 
-    shared_ops = _large_ep_shared_expert_ops(prefix, shape, cfg, scale_factor, backend_name, is_context, attn_cp_size)
+    shared_ops = _large_ep_shared_expert_ops(
+        prefix, shape, cfg, scale_factor, backend_name, is_context, attn_cp_size, shared_gemm_quant_mode
+    )
 
     if backend_name == "trtllm" and shared_ops:
         # moe_reduce_add_shared_output: sum routed output over top_k + add

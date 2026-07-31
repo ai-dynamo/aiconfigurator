@@ -80,7 +80,7 @@ class DeepSeekModel(BaseModel):
 
     #: TRT-LLM large-EP decode PDL overlap discount, transcribed from the
     #: deleted ``TrtllmWideEPDeepSeekModel._pdl_factor`` (deepseek.py:604 at
-    #: commit 8372e60). Applies to the MoE block only.
+    #: commit 8372e60). Scales every decode-layer op, attention included.
     _PDL_FACTOR = 0.9
 
     def _large_ep_moe_ops(self, phase: str, shape: MoEBlockShape, scale_factor: float) -> list:
@@ -253,6 +253,13 @@ class DeepSeekModel(BaseModel):
             num_moe_layers=self._num_layers,
         )
         if self._is_large_ep and backend_name == "trtllm":
+            # ===== TRT-LLM large EP (wideEP) =====
+            # Attention + non-MoE wiring transcribed verbatim from the deleted
+            # TrtllmWideEPDeepSeekModel (deepseek.py:638-1049 at commit
+            # 8372e60): the GRANULAR MLA stack (no MLAModule FallbackOp -- this
+            # is what the ``context_mla_granular`` / ``generation_mla``
+            # capability keys feed), an explicit q_a_layernorm, the BMM/RoPE
+            # overlap, and the PDL-discounted decode scale.
             validate_trtllm_large_ep(
                 attention_dp_size=attention_dp_size,
                 moe_ep_size=moe_ep_size,
@@ -261,6 +268,121 @@ class DeepSeekModel(BaseModel):
                 wideep_num_slots=self.config.wideep_num_slots,
                 enable_eplb=self.config.enable_eplb,
             )
+            # _gen_layer_scale = num_layers * mtp_scale * pdl_factor
+            gen_scale = self._num_layers * self._mtp_scale_factor * self._PDL_FACTOR
+            # Context phase does NOT use CUDA Graph, so maybe_execute_in_parallel
+            # falls back to sequential execution. All ops are modeled sequentially.
+            self.context_ops.extend(
+                [
+                    ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                    ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                    # kv_a_proj_with_mqa: hidden_size -> compressed_dim (1536+512+64=2112)
+                    ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                    # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
+                    ops.ElementWise("context_q_a_layernorm", self._num_layers, 1536, 1536, 0.8),
+                    ops.GEMM(
+                        "context_q_b_proj_gemm",
+                        self._num_layers,
+                        24576 // tp_size,
+                        1536,
+                        gemm_quant_mode,
+                    ),
+                    ops.GEMM(
+                        "context_kv_b_proj_gemm",
+                        self._num_layers,
+                        32768 // tp_size,
+                        512,
+                        gemm_quant_mode,
+                    ),
+                    ops.ContextMLA(
+                        "context_attention",
+                        self._num_layers,
+                        128 // tp_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                    ),
+                    ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                    ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            # Shared experts (full size -- WideEP ADP mode, shared_tp_size=1),
+            # router, A2A dispatch/EPMoE/combine and moe_reduce_add.
+            self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
+            self.context_ops.append(
+                ops.GEMM(
+                    "context_logits_gemm",
+                    1,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            self.generation_ops.extend(
+                [
+                    ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                    ops.ElementWise("generation_add_norm_1", gen_scale, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("generation_downscale_gemm", gen_scale, 2112, h, gemm_quant_mode),
+                    # q_a_layernorm: RMSNorm on q_compressed (dim=1536). In TRT-LLM
+                    # kv_a_layernorm (dim=512) runs in parallel but is much smaller,
+                    # so we model only q_a_layernorm as the dominant one.
+                    ops.ElementWise("generation_q_a_layernorm", gen_scale, 1536, 1536, 0.8),
+                    ops.GEMM("generation_q_b_proj_gemm", gen_scale, 24576 // tp_size, 1536, gemm_quant_mode),
+                    # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
+                    # Main stream: q_nope * W_absorption -> absorbed_q
+                    # Aux stream: RoPE(q_pe) + write compressed_kv to KV cache
+                    # Effective latency = max(bmm_pre, rope_kvcache)
+                    ops.OverlapOp(
+                        "generation_bmm_rope_overlap",
+                        group_a=[
+                            ops.MLABmm(
+                                "generation_bmm_pre",
+                                gen_scale,
+                                self._num_heads // tp_size,
+                                mla_bmm_quant_mode,
+                                if_pre=True,
+                            ),
+                        ],
+                        group_b=[
+                            # mla_rope_generation: RoPE on q_pe (64d) + KV cache write (512+64=576d)
+                            ops.ElementWise(
+                                "generation_rope_kvcache",
+                                gen_scale,
+                                576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
+                                576,
+                                0.8,
+                            ),
+                        ],
+                    ),
+                    ops.GenerationMLA("generation_attention", gen_scale, 128 // tp_size, kvcache_quant_mode),
+                    ops.MLABmm(
+                        "generation_bmm_post",
+                        gen_scale,
+                        self._num_heads // tp_size,
+                        mla_bmm_quant_mode,
+                        if_pre=False,
+                    ),
+                    ops.GEMM("generation_proj_gemm", gen_scale, h, h // tp_size, gemm_quant_mode),
+                    ops.ElementWise("generation_add_norm_2", gen_scale, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            # OverlapOp(routed, shared) + moe_reduce_add, from the builder.
+            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, gen_scale))
+            self.generation_ops.append(
+                ops.GEMM(
+                    "generation_logits_gemm",
+                    1 * self._mtp_scale_factor,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            # pp
+            pp_scale_factor = pp_size - 1
+            self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+            self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+            return
 
         if self._is_large_ep and backend_name == "sglang":
             # ===== sglang large-EP (deepep) =====
@@ -473,8 +595,8 @@ class DeepSeekModel(BaseModel):
         )
 
         if self._is_large_ep:
-            # Large EP (non-sglang; sglang returned above): router + full-size
-            # shared experts + A2A dispatch/EPMoE/combine + moe_reduce_add.
+            # Large EP on a framework without its own attention stack (see the
+            # generation site below).
             self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
         else:
             # Context shared moe: gate+up fused into one GEMM (matches TRT-LLM GatedMLP).
@@ -718,13 +840,12 @@ class DeepSeekModel(BaseModel):
         # Graph is enabled. Model with OverlapOp: latency = max(shared, routed).
 
         if self._is_large_ep:
-            # Large EP (non-sglang; sglang returned above): the builder owns the
-            # OverlapOp + reduce_add structure. The MoE block carries the legacy
-            # TRT-LLM PDL discount.
-            gen_moe_scale = self._num_layers * self._mtp_scale_factor
-            if backend_name == "trtllm":
-                gen_moe_scale *= self._PDL_FACTOR
-            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, gen_moe_scale))
+            # Large EP on a framework without its own attention stack (the
+            # sglang/trtllm branches returned above): regular attention wiring,
+            # builder MoE block.
+            self.generation_ops.extend(
+                self._large_ep_moe_ops("generation", moe_shape, self._num_layers * self._mtp_scale_factor)
+            )
         else:
             # group_b: shared expert path (aux CUDA stream)
             gen_shared_ops = [

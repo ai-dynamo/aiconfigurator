@@ -19,15 +19,12 @@ mapped through A6:
   ``{p}_moe_prepare`` + ``{p}_moe_dispatch``; legacy
   ``{p}_moe_post_dispatch`` == ``{p}_moe_combine``.
 
-Two graph-level deviations from the recordings are intentional (controller
-adjudicated, see the task-6 report):
-
-1. trtllm large-EP keeps the family's REGULAR attention wiring (the fused
-   ``{p}_mla_block`` / DSA stack) instead of the deleted class's flat
-   granular MLA stack, and only the MoE block carries the legacy PDL factor.
-2. MOEModel large-EP keeps MOEModel's own non-MoE wiring (vocab//tp
-   embedding, embedding all-reduce, P2P) — the deleted SGLangEPMOEModel
-   omitted those.
+Zero-regression contract: outside the MoE block every op is byte-identical
+to the deleted classes' (verified mechanically against the 8372e60 archive
+over 15 configs — see the task-6 report, Fix round 1). The one ledgered
+ordering difference is that the builder emits the trtllm router GEMM BEFORE
+the shared triplet where the legacy graph emitted it after; the op set and
+per-op state are unchanged and the phase cost is a sum.
 
 Value equivalence of the MoE block itself (comm + compute latencies against
 the surviving legacy query methods) is covered by
@@ -61,6 +58,12 @@ PDL_FACTOR = 0.9  # TrtllmWideEPDeepSeek{,V32}Model._pdl_factor
 
 def _names(op_list):
     return [op._name for op in op_list]
+
+
+def _op(op_list, name):
+    """The single top-level op with this name."""
+    (found,) = [op for op in op_list if op._name == name]
+    return found
 
 
 def _build(model_path, backend, **cfg_kwargs):
@@ -255,14 +258,19 @@ class TestDeepSeekSglangLargeEP:
 
 
 class TestDeepSeekTrtllmLargeEP:
-    # DEVIATION (intentional): the attention span is DeepSeekModel's regular
-    # wiring (``{p}_mla_block`` FallbackOp), not the deleted class's flat
-    # granular stack. The MoE span is RECORDED from
-    # TrtllmWideEPDeepSeekModel @ 8372e60 under the A6 mapping.
+    # RECORDED from TrtllmWideEPDeepSeekModel @ 8372e60 under the A6 mapping:
+    # the GRANULAR MLA stack (q_a_layernorm, no mla_block FallbackOp, the
+    # bmm/rope overlap) that the ``context_mla_granular`` / ``generation_mla``
+    # capability keys feed.
     CONTEXT: ClassVar[list[str]] = [
         "context_embedding",
         "context_add_norm_1",
-        "context_mla_block",
+        "context_downscale_gemm",
+        "context_q_a_layernorm",
+        "context_q_b_proj_gemm",
+        "context_kv_b_proj_gemm",
+        "context_attention",
+        "context_proj_gemm",
         "context_add_norm_2",
         "context_router_gemm",
         "context_shared_gate_up_gemm",
@@ -279,7 +287,13 @@ class TestDeepSeekTrtllmLargeEP:
     GENERATION: ClassVar[list[str]] = [
         "generation_embedding",
         "generation_add_norm_1",
-        "generation_mla_block",
+        "generation_downscale_gemm",
+        "generation_q_a_layernorm",
+        "generation_q_b_proj_gemm",
+        "generation_bmm_rope_overlap",
+        "generation_attention",
+        "generation_bmm_post",
+        "generation_proj_gemm",
         "generation_add_norm_2",
         "generation_moe_overlap",
         "generation_moe_reduce_add",
@@ -291,10 +305,16 @@ class TestDeepSeekTrtllmLargeEP:
         model = _deepseek_trtllm()
         assert _names(model.context_ops) == self.CONTEXT
         assert _names(model.generation_ops) == self.GENERATION
+        # The granular stack, not the fused mla_block FallbackOp.
+        assert isinstance(_op(model.context_ops, "context_attention"), ops.ContextMLA)
+        assert isinstance(_op(model.generation_ops, "generation_attention"), ops.GenerationMLA)
+        bmm_rope = _op(model.generation_ops, "generation_bmm_rope_overlap")
+        assert _names(bmm_rope._group_a) == ["generation_bmm_pre"]
+        assert _names(bmm_rope._group_b) == ["generation_rope_kvcache"]
 
     def test_generation_overlaps_routed_and_shared(self):
         model = _deepseek_trtllm()
-        overlap = model.generation_ops[4]
+        overlap = _op(model.generation_ops, "generation_moe_overlap")
         assert isinstance(overlap, ops.OverlapOp)
         assert _names(overlap._group_a) == [
             "generation_router_gemm",
@@ -309,17 +329,35 @@ class TestDeepSeekTrtllmLargeEP:
             "generation_shared_ffn2_gemm",
         ]
 
-    def test_moe_block_carries_the_legacy_pdl_factor_in_generation(self):
+    def test_legacy_pdl_factor_scales_the_whole_decode_stack(self):
         model = _deepseek_trtllm()
-        assert model.context_ops[10]._scale_factor == DS_LAYERS
-        overlap = model.generation_ops[4]
+        assert _op(model.context_ops, "context_moe")._scale_factor == DS_LAYERS
+        # Attention AND MoE carry the PDL discount (the legacy class scaled
+        # every decode layer op by it); embedding/logits stay at the mtp scale.
+        for name in (
+            "generation_add_norm_1",
+            "generation_downscale_gemm",
+            "generation_q_a_layernorm",
+            "generation_q_b_proj_gemm",
+            "generation_attention",
+            "generation_bmm_post",
+            "generation_proj_gemm",
+            "generation_add_norm_2",
+            "generation_moe_reduce_add",
+        ):
+            assert _op(model.generation_ops, name)._scale_factor == DS_LAYERS * PDL_FACTOR, name
+        assert _op(model.generation_ops, "generation_embedding")._scale_factor == 1.0
+        assert _op(model.generation_ops, "generation_logits_gemm")._scale_factor == 1.0
+        overlap = _op(model.generation_ops, "generation_moe_overlap")
         assert all(op._scale_factor == DS_LAYERS * PDL_FACTOR for op in overlap._group_a)
         assert all(op._scale_factor == DS_LAYERS * PDL_FACTOR for op in overlap._group_b)
-        assert model.generation_ops[5]._scale_factor == DS_LAYERS * PDL_FACTOR
 
     def test_a2a_axes_and_nvfp4_combine_dtype(self):
         model = _deepseek_trtllm()
-        prepare, dispatch, moe, combine = model.context_ops[8:12]
+        prepare = _op(model.context_ops, "context_moe_prepare")
+        dispatch = _op(model.context_ops, "context_moe_dispatch")
+        moe = _op(model.context_ops, "context_moe")
+        combine = _op(model.context_ops, "context_moe_combine")
         for a2a in (prepare, dispatch, combine):
             assert isinstance(a2a, ops.MoEAllToAll)
             assert a2a._comm_backend == "nvlink_two_sided"
@@ -327,7 +365,7 @@ class TestDeepSeekTrtllmLargeEP:
             assert a2a._attention_tp_size == 1  # trtllm alltoall gets undivided tokens
         assert combine._comm_dtype == "nvfp4"  # context keeps the standard rows
         assert isinstance(moe, ops.EPMoE)
-        gen_combine = model.generation_ops[4]._group_a[-1]
+        gen_combine = _op(model.generation_ops, "generation_moe_overlap")._group_a[-1]
         assert gen_combine._comm_dtype == "fp4"  # generation low-precision combine
 
     @pytest.mark.parametrize(
@@ -336,13 +374,13 @@ class TestDeepSeekTrtllmLargeEP:
     )
     def test_eplb_rides_the_distribution_suffix(self, enable_eplb, expected):
         model = _deepseek_trtllm(enable_eplb=enable_eplb)
-        moe = model.context_ops[10]
+        moe = _op(model.context_ops, "context_moe")
         assert moe._workload_distribution == expected
         assert moe._enable_eplb is False  # trtllm never uses the deepep 0.8 correction
 
     def test_num_slots_flows_into_the_ep_moe_op(self):
         model = _deepseek_trtllm(enable_eplb=True, wideep_num_slots=288)
-        assert model.context_ops[10]._num_slots == 288
+        assert _op(model.context_ops, "context_moe")._num_slots == 288
 
 
 class TestTrtllmLargeEPValidation:
@@ -494,13 +532,59 @@ class TestDeepSeekV32LargeEP:
 
     def test_trtllm_pdl_factor_and_eplb_suffix(self):
         model = _v32_trtllm(enable_eplb=True)
-        assert model.context_ops[10]._workload_distribution == "power_law_1.01_eplb"
-        overlap = model.generation_ops[4]
+        assert _op(model.context_ops, "context_moe")._workload_distribution == "power_law_1.01_eplb"
+        overlap = _op(model.generation_ops, "generation_moe_overlap")
         assert all(op._scale_factor == DS_LAYERS * PDL_FACTOR for op in overlap._group_a)
+        # The legacy class scaled the whole decode stack by the PDL factor.
+        for name in ("generation_add_norm_1", "generation_attention", "generation_add_norm_2"):
+            assert _op(model.generation_ops, name)._scale_factor == DS_LAYERS * PDL_FACTOR, name
 
     def test_trtllm_validation_applies(self):
         with pytest.raises(ValueError, match="must equal"):
             _v32_trtllm(enable_eplb=False, wideep_num_slots=288)
+
+
+class TestGLMSharedExpertQuantMode:
+    """GLM-5.2-NVFP4 excludes ``mlp.shared_experts*`` from NVFP4.
+
+    The legacy shared-expert dtype is asymmetric and is reproduced as such:
+    the trtllm class sized its shared GEMMs with
+    ``_dsa_shared_expert_quant_mode`` (bf16 here) while the sglang class used
+    the plain ``gemm_quant_mode`` (nvfp4). Weights recorded from the legacy
+    classes at 8372e60.
+    """
+
+    GLM = "nvidia/GLM-5.2-NVFP4"
+    LEGACY_BF16_GATE_UP_WEIGHTS = 50331648
+    LEGACY_NVFP4_GATE_UP_WEIGHTS = 14155776.0
+
+    def _build(self, backend, comm):
+        return _build(
+            self.GLM,
+            backend,
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            attention_dp_size=16,
+            moe_backend="deepep_moe" if backend == "sglang" else None,
+            moe_comm_backend=dict(comm),
+            num_gpus_per_node=4,
+        )
+
+    def test_trtllm_keeps_the_shared_experts_unquantized(self):
+        model = self._build("trtllm", TRTLLM_COMM)
+        gate_up = _op(model.context_ops, "context_shared_gate_up_gemm")
+        assert gate_up._quant_mode is common.GEMMQuantMode.bfloat16
+        assert gate_up._weights == self.LEGACY_BF16_GATE_UP_WEIGHTS
+        assert _op(model.context_ops, "context_shared_ffn2_gemm")._quant_mode is common.GEMMQuantMode.bfloat16
+        # The routed experts stay on the model-wide MoE mode.
+        assert _op(model.context_ops, "context_moe")._quant_mode is common.MoEQuantMode.nvfp4
+
+    def test_sglang_uses_the_model_wide_gemm_mode(self):
+        model = self._build("sglang", SGLANG_COMM)
+        gate_up = _op(model.context_ops, "context_gate_ffn1_gemm")
+        assert gate_up._quant_mode is common.GEMMQuantMode.nvfp4
+        assert gate_up._weights == self.LEGACY_NVFP4_GATE_UP_WEIGHTS
 
 
 # ---------------------------------------------------------------------------
@@ -509,10 +593,9 @@ class TestDeepSeekV32LargeEP:
 
 
 class TestMOEModelLargeEP:
-    # DEVIATION (intentional): MOEModel keeps its own non-MoE wiring, so the
-    # graph carries vocab//tp embedding + ``{p}_embedding_ar`` + P2P that the
-    # deleted SGLangEPMOEModel omitted. The MoE span is RECORDED from
-    # SGLangEPMOEModel @ 8372e60 under the A6 mapping.
+    # RECORDED from SGLangEPMOEModel @ 8372e60 under the A6 mapping. The legacy
+    # large-EP graph replicates the embedding (no vocab//tp shard) and ends at
+    # the logits gemm — no ``{p}_embedding_ar``, no P2P.
     CONTEXT: ClassVar[list[str]] = [
         "context_embedding",
         "context_add_norm_1",
@@ -524,8 +607,6 @@ class TestMOEModelLargeEP:
         "context_moe_dispatch",
         "context_moe",
         "context_moe_combine",
-        "context_embedding_ar",
-        "context_p2p",
     ]
     GENERATION: ClassVar[list[str]] = [
         "generation_embedding",
@@ -539,8 +620,6 @@ class TestMOEModelLargeEP:
         "generation_moe",
         "generation_moe_combine",
         "generation_logits_gemm",
-        "generation_embedding_ar",
-        "generation_p2p",
     ]
 
     def test_graphs_and_backends(self):
@@ -552,6 +631,9 @@ class TestMOEModelLargeEP:
         assert isinstance(model.context_ops[8], ops.EPMoE)
         assert model.context_ops[8]._scale_factor == QWEN3_LAYERS
         assert model.generation_ops[8]._scale_factor == float(QWEN3_LAYERS)
+        # Embedding replicated, not vocab-sharded (legacy large-EP form).
+        fused = _moe_sglang()
+        assert model.context_ops[0]._row_size == _op(fused.context_ops, "context_embedding")._row_size
 
     def test_distributions_use_the_moe_family_alpha(self):
         model = _moe_sglang(moe_comm_backend=dict(SGLANG_COMM))
