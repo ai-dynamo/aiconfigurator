@@ -50,3 +50,24 @@ class TestK8sHfHomeDefaulting:
         result = collect_generator_params(service=service, k8s=k8s, backend=backend)
 
         assert result["K8sConfig"]["k8s_hf_home"] == "/workspace/model_cache"
+
+
+def test_collect_generator_params_preserves_explicit_dynamo_version():
+    result = collect_generator_params(
+        service={"model_path": "test/model"},
+        k8s={},
+        backend="vllm",
+        generator_dynamo_version="0.9.0",
+    )
+
+    assert result["generator_dynamo_version"] == "0.9.0"
+
+
+def test_collect_generator_params_omits_unspecified_dynamo_version():
+    result = collect_generator_params(
+        service={"model_path": "test/model"},
+        k8s={},
+        backend="vllm",
+    )
+
+    assert "generator_dynamo_version" not in result
