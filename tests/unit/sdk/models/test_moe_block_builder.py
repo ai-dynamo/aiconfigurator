@@ -222,7 +222,7 @@ def _toy_shape(num_shared_experts=0):
     )
 
 
-def _toy_cfg(family=None, system=None):
+def _toy_cfg(system=None):
     model_config = config.ModelConfig(
         tp_size=1,
         moe_tp_size=1,
@@ -231,8 +231,6 @@ def _toy_cfg(family=None, system=None):
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         moe_quant_mode=common.MoEQuantMode.bfloat16,
     )
-    if family is not None:
-        model_config.model_family = family
     if system is not None:
         model_config.system = system
     return model_config
@@ -272,10 +270,25 @@ def moe_block_registry():
 class TestRegisterMoeBlock:
     """G3 registry: most-specific-wins selection with a ``default`` continuation."""
 
-    def test_registry_starts_empty(self):
-        # Task 4 registers no variants at module scope; a non-empty registry
-        # here means some test leaked a registration past its fixture.
-        assert moe_blocks._MOE_BLOCK_REGISTRY == {}
+    def test_registry_ships_exactly_the_deepseek_sglang_variants(self):
+        # Task 5 registers the two A3 DeepSeek router-fidelity variants at
+        # import time; anything else here means some test leaked a
+        # registration past its fixture.
+        assert set(moe_blocks._MOE_BLOCK_REGISTRY) == {
+            ("DEEPSEEK", "sglang", "*"),
+            ("DEEPSEEKV32", "sglang", "*"),
+        }
+
+    def test_duplicate_registration_raises(self, moe_block_registry):
+        @register_moe_block(family="TOYFAM", framework="sglang")
+        def _first(default, **ctx):
+            return default()
+
+        with pytest.raises(ValueError, match=r"\('TOYFAM', 'sglang', '\*'\)"):
+
+            @register_moe_block(family="TOYFAM", framework="sglang")
+            def _second(default, **ctx):
+                return default()
 
     def test_most_specific_wins_across_three_specificities(self, moe_block_registry):
         @register_moe_block(family="TOYFAM")
@@ -290,13 +303,13 @@ class TestRegisterMoeBlock:
         def _fully_exact(default, **ctx):
             return ["fully_exact"]
 
-        cfg = _toy_cfg(family="TOYFAM", system="toy_system")
-        assert _build_toy(cfg, backend_name="sglang") == ["fully_exact"]
+        cfg = _toy_cfg(system="toy_system")
+        assert _build_toy(cfg, backend_name="sglang", model_family="TOYFAM") == ["fully_exact"]
 
-        cfg_other_system = _toy_cfg(family="TOYFAM", system="other_system")
-        assert _build_toy(cfg_other_system, backend_name="sglang") == ["family_framework"]
+        cfg_other_system = _toy_cfg(system="other_system")
+        assert _build_toy(cfg_other_system, backend_name="sglang", model_family="TOYFAM") == ["family_framework"]
 
-        assert _build_toy(_toy_cfg(family="TOYFAM"), backend_name="trtllm") == ["family"]
+        assert _build_toy(_toy_cfg(), backend_name="trtllm", model_family="TOYFAM") == ["family"]
 
     def test_exact_family_beats_exact_framework_and_system(self, moe_block_registry):
         """Left-to-right priority: family > framework > system (exact beats wildcard per position)."""
@@ -309,8 +322,8 @@ class TestRegisterMoeBlock:
         def _framework_system(default, **ctx):
             return ["framework_system"]
 
-        cfg = _toy_cfg(family="TOYFAM", system="toy_system")
-        assert _build_toy(cfg, backend_name="sglang") == ["family"]
+        cfg = _toy_cfg(system="toy_system")
+        assert _build_toy(cfg, backend_name="sglang", model_family="TOYFAM") == ["family"]
 
     def test_exact_framework_beats_exact_system(self, moe_block_registry):
         @register_moe_block(framework="sglang")
@@ -321,18 +334,18 @@ class TestRegisterMoeBlock:
         def _system_only(default, **ctx):
             return ["system"]
 
-        cfg = _toy_cfg(family="TOYFAM", system="toy_system")
-        assert _build_toy(cfg, backend_name="sglang") == ["framework"]
+        cfg = _toy_cfg(system="toy_system")
+        assert _build_toy(cfg, backend_name="sglang", model_family="TOYFAM") == ["framework"]
 
     def test_unmatched_family_falls_to_default(self, moe_block_registry):
         @register_moe_block(family="OTHERFAM", framework="sglang")
         def _other_family(default, **ctx):
             return ["other_family"]
 
-        result = _build_toy(_toy_cfg(family="TOYFAM"), backend_name="sglang")
+        result = _build_toy(_toy_cfg(), backend_name="sglang", model_family="TOYFAM")
         assert [op._name for op in result] == _FUSED_CONTEXT_NAMES
 
-    def test_no_family_on_cfg_matches_only_wildcards(self, moe_block_registry):
+    def test_default_family_matches_only_wildcards(self, moe_block_registry):
         @register_moe_block(family="TOYFAM")
         def _family_only(default, **ctx):
             return ["family"]
@@ -347,7 +360,7 @@ class TestRegisterMoeBlock:
         def _append_marker(default, **ctx):
             return default() + [marker]
 
-        result = _build_toy(_toy_cfg(family="TOYFAM"))
+        result = _build_toy(_toy_cfg(), model_family="TOYFAM")
         assert [op._name for op in result] == _FUSED_CONTEXT_NAMES + ["context_variant_marker"]
         assert result[-1] is marker
 
@@ -360,7 +373,7 @@ class TestRegisterMoeBlock:
             calls.append(default())
             return calls[0]
 
-        _build_toy(_toy_cfg(family="TOYFAM"))
+        _build_toy(_toy_cfg(), model_family="TOYFAM")
         first, second = calls
         assert [op._name for op in first] == [op._name for op in second]
         assert all(a is not b for a, b in zip(first, second, strict=True))
@@ -374,7 +387,7 @@ class TestRegisterMoeBlock:
             return default()
 
         shape = _toy_shape()
-        cfg = _toy_cfg(family="TOYFAM")
+        cfg = _toy_cfg()
         build_moe_block_ops(
             "generation",
             shape,
@@ -384,6 +397,7 @@ class TestRegisterMoeBlock:
             scale_factor=12.5,
             backend_name="vllm",
             inference_phase="generation",
+            model_family="TOYFAM",
             attn_cp_size=2,
             gpus_per_node=4,
         )
@@ -396,6 +410,7 @@ class TestRegisterMoeBlock:
             "scale_factor",
             "backend_name",
             "inference_phase",
+            "model_family",
             "attn_cp_size",
             "gpus_per_node",
         }
@@ -407,6 +422,7 @@ class TestRegisterMoeBlock:
         assert captured["scale_factor"] == 12.5
         assert captured["backend_name"] == "vllm"
         assert captured["inference_phase"] == "generation"
+        assert captured["model_family"] == "TOYFAM"
         assert captured["attn_cp_size"] == 2
         assert captured["gpus_per_node"] == 4
 
@@ -419,16 +435,45 @@ class TestRegisterMoeBlock:
 
 
 class TestLargeEPSeam:
-    """cfg.moe_comm_backend drives the large-EP branch — emission lands in Task 5."""
+    """cfg.moe_comm_backend drives the large-EP branch (emission pinned in
+    test_moe_block_builder_large_ep.py; this smoke pins the seam itself)."""
 
-    def test_comm_backend_for_phase_raises_not_implemented(self):
+    def test_comm_backend_for_phase_emits_large_ep_ops(self):
         cfg = _toy_cfg()
+        cfg.moe_ep_size = 8
+        cfg.attention_dp_size = 8
         cfg.moe_comm_backend = {"context": "deepep_ht"}
-        with pytest.raises(NotImplementedError, match="large-EP emission lands in the next commit"):
-            _build_toy(cfg, prefix="context")
+        result = _build_toy(cfg, prefix="context")
+        assert [op._name for op in result] == [
+            "context_router_gemm",
+            "context_moe_dispatch",
+            "context_moe",
+            "context_moe_combine",
+        ]
+        assert isinstance(result[1], ops.MoEAllToAll)
+        assert isinstance(result[2], ops.EPMoE)
+        assert isinstance(result[3], ops.MoEAllToAll)
 
     def test_comm_backend_other_phase_falls_back_to_fused(self):
         cfg = _toy_cfg()
         cfg.moe_comm_backend = {"context": "deepep_ht"}
         result = _build_toy(cfg, prefix="generation")
         assert [op._name for op in result] == [name.replace("context", "generation") for name in _FUSED_CONTEXT_NAMES]
+
+
+class TestPrefixPhaseConsistency:
+    """``prefix`` is derived from ``inference_phase``; a mismatch is a caller bug."""
+
+    def test_mismatched_prefix_and_phase_asserts(self):
+        cfg = _toy_cfg()
+        with pytest.raises(AssertionError, match="prefix"):
+            build_moe_block_ops(
+                "context",
+                _toy_shape(),
+                cfg,
+                cfg.moe_quant_mode,
+                "uniform",
+                scale_factor=10,
+                backend_name="sglang",
+                inference_phase="generation",
+            )

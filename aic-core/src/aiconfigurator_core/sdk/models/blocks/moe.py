@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.helpers import check_is_moe
+from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 
 
 @dataclass(frozen=True)
@@ -90,12 +91,19 @@ def register_moe_block(family: str = "*", framework: str = "*", system: str = "*
     generic pipeline's ops (compose with it rather than reimplementing) and
     ``ctx`` carries the full :func:`build_moe_block_ops` parameter set:
     ``prefix``/``shape``/``cfg``/``quant_mode``/``workload_distribution``/
-    ``scale_factor``/``backend_name``/``inference_phase``/``attn_cp_size``/
-    ``gpus_per_node``. It must return the block's op list.
+    ``scale_factor``/``backend_name``/``inference_phase``/``model_family``/
+    ``attn_cp_size``/``gpus_per_node``. It must return the block's op list.
+
+    Raises:
+        ValueError: On a duplicate ``(family, framework, system)`` key — a
+            collision is a wiring bug, never a legitimate override.
     """
 
     def _decorator(fn: Callable) -> Callable:
-        _MOE_BLOCK_REGISTRY[(family, framework, system)] = fn
+        key = (family, framework, system)
+        if key in _MOE_BLOCK_REGISTRY:
+            raise ValueError(f"duplicate MoE-block variant registration for {key}")
+        _MOE_BLOCK_REGISTRY[key] = fn
         return fn
 
     return _decorator
@@ -108,8 +116,8 @@ def _match_rank(key: tuple[str, str, str], query: tuple[str | None, str | None, 
     family > framework > system, encoded as the 3-bit number
     ``(family_exact, framework_exact, system_exact)``. Ties are impossible:
     for a fixed query the exact positions determine the key, so two distinct
-    matching keys always differ in rank. Unknown query values (``None``)
-    match only wildcard positions.
+    matching keys always differ in rank. Unknown query values (``None``, or
+    the ``"*"`` default of ``model_family``) match only wildcard positions.
     """
     rank = 0
     for bit, want, have in zip((4, 2, 1), key, query, strict=True):
@@ -149,6 +157,7 @@ def build_moe_block_ops(
     scale_factor: float,  # num layers x mtp factor — model-owned (NOT shape.num_moe_layers)
     backend_name: str,  # "sglang" | "vllm" | "trtllm"
     inference_phase: str,  # "context" | "generation"
+    model_family: str = "*",  # registry family axis; "*" matches only wildcard registrations
     attn_cp_size: int = 1,
     gpus_per_node: int = 8,
 ) -> list:
@@ -160,10 +169,14 @@ def build_moe_block_ops(
     depends on passing that legacy value through unchanged.
 
     Dispatches to a :func:`register_moe_block` variant when one matches
-    ``(family, framework, system)``; the family/system query values are read
-    from optional ``cfg`` attributes (``model_family`` / ``system``) — absent
-    attributes match only wildcard registrations.
+    ``(model_family, backend_name, system)``; the system query value is read
+    from the optional ``cfg.system`` attribute — an absent attribute matches
+    only wildcard registrations.
     """
+    assert prefix == inference_phase, (
+        f"prefix {prefix!r} must equal the inference_phase-derived prefix {inference_phase!r} "
+        "(context->'context', generation->'generation'); a mismatch is a caller bug"
+    )
     ctx = {
         "prefix": prefix,
         "shape": shape,
@@ -173,6 +186,7 @@ def build_moe_block_ops(
         "scale_factor": scale_factor,
         "backend_name": backend_name,
         "inference_phase": inference_phase,
+        "model_family": model_family,
         "attn_cp_size": attn_cp_size,
         "gpus_per_node": gpus_per_node,
     }
@@ -181,7 +195,7 @@ def build_moe_block_ops(
         return _default_moe_block_ops(**ctx)
 
     variant = _select_moe_block_variant(
-        family=getattr(cfg, "model_family", None),
+        family=model_family,
         framework=backend_name,
         system=getattr(cfg, "system", None),
     )
@@ -199,6 +213,7 @@ def _default_moe_block_ops(
     scale_factor: float,
     backend_name: str,
     inference_phase: str,
+    model_family: str,
     attn_cp_size: int,
     gpus_per_node: int,
 ) -> list:
@@ -211,6 +226,27 @@ def _default_moe_block_ops(
     is_context = inference_phase == "context"
     seq_split_kwargs = {"seq_split": attn_cp_size} if is_context else {}
     dispatch_cp_kwargs = {"attn_cp_size": attn_cp_size} if is_context else {}
+
+    # Large-EP branch: a per-phase comm backend on cfg selects the
+    # MoEAllToAll + EPMoE emission (with its own shared-expert flavor).
+    # ``moe_comm_backend`` (dict[str, str] | None) does not exist on
+    # ModelConfig yet — hence getattr; absent/uncovered phase means the fused
+    # path below.
+    comm_backend = (getattr(cfg, "moe_comm_backend", None) or {}).get(inference_phase)
+    if comm_backend:
+        return _large_ep_block_ops(
+            comm_backend,
+            prefix=prefix,
+            shape=shape,
+            cfg=cfg,
+            quant_mode=quant_mode,
+            workload_distribution=workload_distribution,
+            scale_factor=scale_factor,
+            backend_name=backend_name,
+            inference_phase=inference_phase,
+            attn_cp_size=attn_cp_size,
+            gpus_per_node=gpus_per_node,
+        )
 
     # Router GEMM: hidden_size -> num_experts, always emitted (spec section 4.4.4).
     # Transcribed from MOEModel.__init__ (models/moe.py:181-192 context,
@@ -262,14 +298,6 @@ def _default_moe_block_ops(
             ]
         )
 
-    # Large-EP seam: a per-phase comm backend on cfg selects the MoEAllToAll +
-    # EPMoE emission. ``moe_comm_backend`` (dict[str, str] | None) does not
-    # exist on ModelConfig yet — hence getattr; absent/uncovered phase means
-    # the fused path below.
-    comm_backend = (getattr(cfg, "moe_comm_backend", None) or {}).get(inference_phase)
-    if comm_backend:
-        raise NotImplementedError("large-EP emission lands in the next commit")
-
     # Fused/small-EP path: dispatch tokens to experts, moe calc and get tokens
     # back. Transcribed from MOEModel.__init__ (models/moe.py:195-237 context,
     # :285-325 generation) — argument lists value-identical.
@@ -317,3 +345,242 @@ def _default_moe_block_ops(
         ]
     )
     return block_ops
+
+
+# ---------------------------------------------------------------------------
+# Large-EP emission (cfg.moe_comm_backend selects a MoEAllToAll/EPMoE graph)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_dtype(comm_backend: str, quant_mode) -> str:
+    """Comm-table dtype key for the prepare/dispatch phases.
+
+    DeepEP rows have no dtype axis — the adapted tables key everything under
+    ``"default"`` (moe_comm.py ``_adapt_legacy_deepep``). The trtllm nvlink
+    rows key the run's ``moe_dtype`` string, i.e. the ``MoEQuantMode`` member
+    name (``_adapt_legacy_trtllm_alltoall`` passes the parquet string through
+    and the legacy loader spells it via ``MoEQuantMode[...]``); ``fp8_block``
+    resolves to the ``fp8`` rows at query time — the same behavioral aliasing
+    the legacy ``_normalize_quant_mode_for_table`` applied.
+    """
+    if comm_backend.startswith("deepep"):
+        return "default"
+    return quant_mode.name
+
+
+def _combine_dtype(comm_backend: str, quant_mode, inference_phase: str) -> str:
+    """Comm-table dtype key for the combine phase.
+
+    DeepEP: ``"default"`` (no dtype axis). nvlink: the adapted tables pin the
+    low-precision combine kernel under ``"fp4"``; the legacy graph enables it
+    only in GENERATION for nvfp4 runs (``use_low_precision_combine=
+    (moe_quant_mode == nvfp4)``, deepseek.py:1005-1011) while the context
+    post_dispatch site (deepseek.py:798-812) never passes the flag — context
+    combine stays on the standard rows keyed by the run dtype.
+    """
+    if comm_backend.startswith("deepep"):
+        return "default"
+    if inference_phase == "generation" and quant_mode == common.MoEQuantMode.nvfp4:
+        return "fp4"
+    return quant_mode.name
+
+
+def _large_ep_shared_expert_ops(
+    prefix: str,
+    shape: MoEBlockShape,
+    cfg,
+    scale_factor: float,
+    backend_name: str,
+    is_context: bool,
+    attn_cp_size: int,
+) -> list:
+    """Shared experts under a large-EP comm backend: FULL weights, no ÷tp.
+
+    Both legacy wideEP graphs replicate the whole shared expert per rank
+    (ADP mode, ``shared_tp_size=1``):
+
+    - trtllm (deepseek.py:720-744 context, :940-962 generation): the fused
+      ``{prefix}_shared_*`` names at full ``2 * moe_inter_size``, no token
+      scaling and no CP kwargs (TrtllmWideEP rejects CP).
+    - sglang/vllm deepep (deepseek.py:1174-1204 context, :1294-1318
+      generation): the ``{prefix}_gate_ffn1_gemm`` / ``{prefix}_act_gate`` /
+      ``{prefix}_ffn2_gemm`` names — full size, with the CONTEXT triplet
+      carrying ``scale_num_tokens=tp_size`` (attention TP shards the token
+      stream) plus ``seq_split``; the generation site passes neither.
+    """
+    if shape.num_shared_experts == 0:
+        return []
+    shared_inter_size = shape.num_shared_experts * shape.moe_inter_size
+    if backend_name == "trtllm":
+        names = (f"{prefix}_shared_gate_up_gemm", f"{prefix}_shared_act_gate", f"{prefix}_shared_ffn2_gemm")
+        token_kwargs = {}
+    else:
+        names = (f"{prefix}_gate_ffn1_gemm", f"{prefix}_act_gate", f"{prefix}_ffn2_gemm")
+        token_kwargs = {"scale_num_tokens": cfg.tp_size, "seq_split": attn_cp_size} if is_context else {}
+    return [
+        ops.GEMM(
+            names[0],
+            scale_factor,
+            2 * shared_inter_size,
+            shape.hidden_size,
+            cfg.gemm_quant_mode,
+            **token_kwargs,
+        ),
+        ops.ElementWise(
+            names[1],
+            scale_factor,
+            2 * shared_inter_size,
+            shared_inter_size,
+            0.8,
+            **token_kwargs,
+        ),
+        ops.GEMM(
+            names[2],
+            scale_factor,
+            shape.hidden_size,
+            shared_inter_size,
+            cfg.gemm_quant_mode,
+            **token_kwargs,
+        ),
+    ]
+
+
+def _large_ep_block_ops(
+    comm_backend: str,
+    *,
+    prefix: str,
+    shape: MoEBlockShape,
+    cfg,
+    quant_mode,
+    workload_distribution: str,
+    scale_factor: float,
+    backend_name: str,
+    inference_phase: str,
+    attn_cp_size: int,
+    gpus_per_node: int,
+) -> list:
+    """Large-EP branch: router + shared experts + A2A dispatch/EPMoE/combine.
+
+    Fidelity notes (each transcribed from the legacy wideEP graphs):
+
+    - ``node_num = nodes_for(moe_ep * moe_tp, gpus_per_node)`` (A5): both
+      legacy classes derive the comm node span from the whole MoE group,
+      which coincides only under pp=1 configs.
+    - ``attention_tp_size=cfg.tp_size`` only for deepep backends (the legacy
+      sglang dispatch divides tokens by ``scale_num_tokens=tp``); the legacy
+      trtllm alltoall queried undivided tokens -> nvlink passes 1.
+    - ``sms`` rides only ``deepep_ht`` (the legacy normal-mode table keys an
+      SM budget; LL and nvlink rows carry none).
+    - ``enable_eplb`` reaches EPMoE only for deepep backends: the sglang MoE
+      query corrects prefill tokens by 0.8 under EPLB, while trtllm EPLB
+      rides the ``_eplb`` workload-distribution suffix instead.
+    - trtllm structure: a trailing ``{prefix}_moe_reduce_add`` ElementWise
+      (deepseek.py:816-824 context, :1022-1032 generation) and, in
+      generation, the routed/shared OverlapOp (deepseek.py:1014-1020).
+    """
+    is_context = inference_phase == "context"
+    seq_split_kwargs = {"seq_split": attn_cp_size} if is_context else {}
+    is_deepep = comm_backend.startswith("deepep")
+
+    spec = MOE_A2A_BACKENDS[comm_backend]
+    node_num = nodes_for(cfg.moe_ep_size * cfg.moe_tp_size, gpus_per_node)  # A5
+    a2a_kwargs = {
+        "comm_backend": comm_backend,
+        "hidden_size": shape.hidden_size,
+        "topk": shape.topk,
+        "num_experts": shape.num_experts,
+        "moe_ep_size": cfg.moe_ep_size,
+        "node_num": node_num,
+        "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
+        "attention_tp_size": cfg.tp_size if is_deepep else 1,
+    }
+
+    # Routed path: router GEMM (spec section 4.4.4 — always emitted here; the
+    # DeepSeek-sglang registered variants strip it for legacy fidelity), then
+    # prepare (when the backend declares it), dispatch, expert compute, combine.
+    routed_ops = [
+        ops.GEMM(
+            f"{prefix}_router_gemm",
+            scale_factor,
+            shape.num_experts,
+            shape.hidden_size,
+            common.GEMMQuantMode.bfloat16,
+            **seq_split_kwargs,
+        )
+    ]
+    for comm_phase in spec.comm_phases[:-1]:  # prepare (if declared), dispatch
+        routed_ops.append(
+            ops.MoEAllToAll(
+                f"{prefix}_moe_{comm_phase}",
+                scale_factor,
+                phase=comm_phase,
+                comm_dtype=_dispatch_dtype(comm_backend, quant_mode),
+                **a2a_kwargs,
+            )
+        )
+    routed_ops.append(
+        ops.EPMoE(
+            f"{prefix}_moe",
+            scale_factor,
+            hidden_size=shape.hidden_size,
+            inter_size=shape.moe_inter_size,
+            topk=shape.topk,
+            num_experts=shape.num_experts,
+            moe_ep_size=cfg.moe_ep_size,
+            quant_mode=quant_mode,
+            workload_distribution=workload_distribution,
+            attention_dp_size=cfg.attention_dp_size,
+            inference_phase=inference_phase,
+            num_slots=cfg.wideep_num_slots or None,
+            is_gated=shape.is_gated,
+            enable_eplb=cfg.enable_eplb and is_deepep,
+        )
+    )
+    routed_ops.append(
+        ops.MoEAllToAll(
+            f"{prefix}_moe_combine",
+            scale_factor,
+            phase="combine",
+            comm_dtype=_combine_dtype(comm_backend, quant_mode, inference_phase),
+            **a2a_kwargs,
+        )
+    )
+
+    shared_ops = _large_ep_shared_expert_ops(prefix, shape, cfg, scale_factor, backend_name, is_context, attn_cp_size)
+
+    if backend_name == "trtllm":
+        # moe_reduce_add_shared_output: sum routed output over top_k + add
+        # shared output (deepseek.py:816-824, :1022-1032).
+        reduce_add = ops.ElementWise(
+            f"{prefix}_moe_reduce_add", scale_factor, 2 * shape.hidden_size, shape.hidden_size, 0.8
+        )
+        if not is_context and shared_ops:
+            # Generation overlaps shared/routed on parallel streams (CUDA
+            # Graph, deepseek.py:1014-1020); context runs sequentially.
+            return [ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops), reduce_add]
+        return [routed_ops[0], *shared_ops, *routed_ops[1:], reduce_add]
+    return [routed_ops[0], *shared_ops, *routed_ops[1:]]
+
+
+# ---------------------------------------------------------------------------
+# Registered variants shipped with the builder
+# ---------------------------------------------------------------------------
+
+
+@register_moe_block(family="DEEPSEEK", framework="sglang")
+def _deepseek_sglang_moe_block(default, *, prefix, cfg, inference_phase, **_ctx):
+    """DeepSeek-on-sglang router fidelity (A3): strip the router under deepep.
+
+    The legacy sglang wideEP DeepSeek graphs (WideEPDeepSeekModel /
+    WideEPDeepSeekV32Model) never wire a router GEMM on the deepep path,
+    while the generic pipeline always emits one (spec section 4.4.4). Any
+    other phase/backend combination returns ``default()`` unchanged.
+    """
+    block_ops = default()
+    comm_backend = (getattr(cfg, "moe_comm_backend", None) or {}).get(inference_phase)
+    if comm_backend and comm_backend.startswith("deepep"):
+        return [op for op in block_ops if op._name != f"{prefix}_router_gemm"]
+    return block_ops
+
+
+register_moe_block(family="DEEPSEEKV32", framework="sglang")(_deepseek_sglang_moe_block)
