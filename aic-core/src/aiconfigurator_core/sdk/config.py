@@ -44,6 +44,10 @@ class ModelConfig:
     enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
+    # internal — per-phase comm backend {"context": ..., "generation": ...}; set by the enumerator, never a user flag
+    moe_comm_backend: dict | None = None
+    # internal — set alongside moe_comm_backend by the enumerator (system topology)
+    num_gpus_per_node: int = 8
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.

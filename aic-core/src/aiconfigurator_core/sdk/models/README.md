@@ -18,11 +18,9 @@ models/
   helpers.py         # Standalone utilities: model info lookup, quant defaults, family resolution
   gpt.py             # GPTModel
   llama.py           # LLAMAModel (also covers Qwen2, Qwen3, MiMo)
-  moe.py             # MOEModel + SGLangEPMOEModel (Mixtral, Qwen3MoE, MiniMax-M2, gpt-oss, etc.)
-  deepseek.py        # DeepSeekModel + TrtllmWideEPDeepSeekModel + WideEPDeepSeekModel
-                     #   (also serves the KIMIK25 family — Kimi K2.5)
-  deepseek_v32.py    # DeepSeekV32Model + TrtllmWideEPDeepSeekV32Model + WideEPDeepSeekV32Model
-                     #   (DeepSeek V3.2 / GLM-5 with DSA attention)
+  moe.py             # MOEModel (Mixtral, Qwen3MoE, MiniMax-M2, gpt-oss, etc.)
+  deepseek.py        # DeepSeekModel (also serves the KIMIK25 family — Kimi K2.5)
+  deepseek_v32.py    # DeepSeekV32Model (DeepSeek V3.2 / GLM-5 with DSA attention)
   deepseek_v4.py     # DeepSeekV4Model (mHC + SWA/CSA/HCA compressed attention)
   nemotron_nas.py    # NemotronNas (PUZZLE NAS models)
   nemotron_h.py      # NemotronHModel (Mamba + MoE + Transformer hybrid)
@@ -47,11 +45,7 @@ class LLAMAModel(BaseModel):
 class DeepSeekModel(BaseModel):
     @classmethod
     def create(cls, model_info, model_config, backend_name):
-        family = model_info["model_family"]
-        if family == "KIMIK25":
-            ...  # Kimi-specific construction
-        else:
-            ...  # DeepSeek V3 / R1 construction (with WideEP dispatch)
+        ...  # DeepSeek V3 / R1 + Kimi K2.5 construction
 ```
 
 When the package is imported, all model modules are auto-discovered via `pkgutil.iter_modules`, which triggers the decorators and populates `_MODEL_REGISTRY`.
@@ -69,15 +63,15 @@ model_path
 
 ### `create()` Classmethod
 
-Each model class has a `create(cls, model_info, model_config, backend_name)` classmethod that handles construction. Per-family construction details (MoE prefix args, WideEP dispatch, post-construction hooks like `set_hybrid_config`) live inside `create()`, keeping `get_model()` itself generic.
+Each model class has a `create(cls, model_info, model_config, backend_name)` classmethod that handles construction. Per-family construction details (MoE prefix args, post-construction hooks like `set_hybrid_config`) live inside `create()`, keeping `get_model()` itself generic.
 
 | Model | Why it overrides `create()` |
 |-------|-----------------------------|
 | GPTModel | Standard args, simple wrapper |
 | LLAMAModel | Standard args, simple wrapper |
-| MOEModel | Passes MoE-specific args (`topk`, `num_experts`, `moe_inter_size`); 2-way dispatch to `SGLangEPMOEModel` when `backend_name == "sglang"` and `model_config.moe_backend == "deepep_moe"` |
-| DeepSeekModel | 3-way dispatch (`WideEPDeepSeekModel`, `TrtllmWideEPDeepSeekModel`, default) based on `backend_name` and WideEP config; also branches on `KIMIK25` family to thread `backend_name` as a kwarg |
-| DeepSeekV32Model | 3-way dispatch on `enable_wideep` (different condition than `DEEPSEEK`) |
+| MOEModel | Passes MoE-specific args (`topk`, `num_experts`, `moe_inter_size`) and threads `backend_name` |
+| DeepSeekModel | Passes MoE args and threads `backend_name` (serves DEEPSEEK + KIMIK25) |
+| DeepSeekV32Model | Passes MoE args, resolves the DSA quant/skip `extra_params`, threads `backend_name` |
 | DeepSeekV4Model | Single class, MoE prefix args |
 | NemotronHModel | Passes MoE args + calls `set_hybrid_config()` after construction |
 | HybridMoEModel | Passes MoE args + calls `set_hybrid_config()` after construction |
