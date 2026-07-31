@@ -506,6 +506,36 @@ class TestTrtllmLargeEPStructure:
         assert moe._quant_mode is common.MoEQuantMode.nvfp4
         assert moe._enable_eplb is False
 
+    @pytest.mark.parametrize("phase", ["context", "generation"])
+    def test_sharedless_shape_emits_no_reduce_add_or_overlap(self, phase):
+        # moe_reduce_add models the routed-topk + SHARED add (2h -> h); a
+        # shape without shared experts has no shared output to add, so the
+        # block stays flat: router + prepare/dispatch/moe/combine only.
+        cfg = _trtllm_cfg(enable_eplb=False, wideep_num_slots=None)
+        shape = MoEBlockShape(
+            hidden_size=1024, moe_inter_size=512, topk=4, num_experts=64, num_shared_experts=0, num_moe_layers=10
+        )
+        built = build_moe_block_ops(
+            phase,
+            shape,
+            cfg,
+            cfg.moe_quant_mode,
+            _trtllm_distribution(False),
+            scale_factor=_trtllm_scale(phase),
+            backend_name="trtllm",
+            inference_phase=phase,
+            model_family="DEEPSEEK",
+            gpus_per_node=4,
+        )
+        assert _names(built) == [
+            f"{phase}_router_gemm",
+            f"{phase}_moe_prepare",
+            f"{phase}_moe_dispatch",
+            f"{phase}_moe",
+            f"{phase}_moe_combine",
+        ]
+        assert not any(isinstance(op, ops.OverlapOp) for op in built)
+
 
 @trtllm_data_present
 class TestTrtllmLargeEPValues:
@@ -695,9 +725,69 @@ class TestVllmG2Seed:
             dispatch, moe, combine = built[1:]
             expected_backend = cfg.moe_comm_backend[phase]
             assert dispatch._comm_backend == combine._comm_backend == expected_backend
-            for x in (16, 64):
-                latencies = [_lat(dispatch, vllm_toy_db, x), _lat(moe, vllm_toy_db, x), _lat(combine, vllm_toy_db, x)]
-                assert all(latency > 0 for latency in latencies), (phase, x, latencies)
+            # Exact arithmetic against the hand-built rows at x=64 (an exact
+            # collected point): a2a leaves are base_us*factor us -> ms, x10
+            # scale; EPMoE globalizes tokens by dp (64*8=512), and the toy
+            # token curve is linear so the lerp between 128 and 4096 is exact:
+            # 0.5 ms * 512/128 = 2.0 ms, x10 scale.
+            base_us = 100.0 if phase == "context" else 50.0
+            assert _lat(dispatch, vllm_toy_db, 64) == pytest.approx(base_us / 1000.0 * 10, rel=1e-9)
+            assert _lat(combine, vllm_toy_db, 64) == pytest.approx(2 * base_us / 1000.0 * 10, rel=1e-9)
+            assert _lat(moe, vllm_toy_db, 64) == pytest.approx(2.0 * 10, rel=1e-9)
+
+
+class TestDeepEPAttentionTpTokenScaling:
+    """attention_tp_size divides deepep A2A tokens in CONTEXT only.
+
+    Every legacy generation dispatch site uses the default token divisor 1
+    (deepseek.py:1321-1340, deepseek_v32 generation site, moe.py generation
+    site); ``scale_num_tokens=tp_size`` appears at the CONTEXT sites only
+    (deepseek.py:1206-1227, moe.py context site). The toy tables are exactly
+    linear in tokens, so expectations are hand-computable (see vllm_toy_db).
+    """
+
+    def _build_tp2(self, phase):
+        cfg = config.ModelConfig(
+            tp_size=2,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+        cfg.moe_comm_backend = {"context": "deepep_ht", "generation": "deepep_ll"}
+        shape = MoEBlockShape(
+            hidden_size=4096, moe_inter_size=1408, topk=4, num_experts=64, num_shared_experts=0, num_moe_layers=10
+        )
+        built = build_moe_block_ops(
+            phase,
+            shape,
+            cfg,
+            cfg.moe_quant_mode,
+            "uniform",
+            scale_factor=10,
+            backend_name="vllm",
+            inference_phase=phase,
+        )
+        router, dispatch, _moe, combine = built
+        assert router._name == f"{phase}_router_gemm"
+        return dispatch, combine
+
+    def test_context_divides_tokens_by_attention_tp(self, vllm_toy_db):
+        dispatch, combine = self._build_tp2("context")
+        assert dispatch._attention_tp_size == combine._attention_tp_size == 2
+        # x=128 -> 128 // 2 = 64, the exact deepep_ht collected point:
+        # dispatch 100 us, combine 200 us; ms x10 scale.
+        assert _lat(dispatch, vllm_toy_db, 128) == pytest.approx(100.0 / 1000.0 * 10, rel=1e-9)
+        assert _lat(combine, vllm_toy_db, 128) == pytest.approx(200.0 / 1000.0 * 10, rel=1e-9)
+
+    def test_generation_does_not_divide_tokens(self, vllm_toy_db):
+        dispatch, combine = self._build_tp2("generation")
+        assert dispatch._attention_tp_size == combine._attention_tp_size == 1
+        # x=128 stays undivided; the linear deepep_ll curve lerps exactly:
+        # dispatch 50 us * 128/64 = 100 us, combine 200 us; ms x10 scale.
+        assert _lat(dispatch, vllm_toy_db, 128) == pytest.approx(100.0 / 1000.0 * 10, rel=1e-9)
+        assert _lat(combine, vllm_toy_db, 128) == pytest.approx(200.0 / 1000.0 * 10, rel=1e-9)
 
 
 if __name__ == "__main__":
