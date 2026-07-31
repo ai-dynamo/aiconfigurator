@@ -1888,6 +1888,231 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
     return None
 
 
+def _reuse_op_source_records(
+    op_filename_enum: PerfDataFilename,
+    primary_path: str,
+    system_data_root: str,
+    *,
+    backend: str,
+    version: str,
+    enable_shared_layer: bool,
+    strict_provenance: bool,
+    kernel_source_manifest_entries: dict[str, tuple[dict, ...]],
+) -> list[dict[str, object]]:
+    """Reuse-channel sources (design §6.2-§6.4) for one op file, in priority order.
+
+    This is everything ``PerfDatabase._build_op_sources`` admits AFTER the
+    active backend/version's own primary file: declared donors, nearest-earlier
+    same-backend siblings, then kernel-identity-gated cross-backend fill. Only
+    sources whose file exists are returned; each record carries ``version``,
+    ``path``, ``channel`` and ``ks_filter``, plus ``low_fidelity`` on
+    cross-backend records so the caller can warn about them.
+
+    Module-level (rather than a method) so the CLI can ask "would the database
+    find rows for this op at this version?" via ``resolve_op_data_sources``
+    without instantiating -- and therefore fully loading -- a ``PerfDatabase``.
+    Both callers share this one implementation so the ordering and the
+    exclusions below cannot drift apart.
+    """
+    if not enable_shared_layer:
+        return []
+    if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
+        return []
+    if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
+        return []
+
+    op_file_basename = op_filename_enum.value
+    backend_lower = backend.lower()
+    records: list[dict[str, object]] = []
+
+    # Channel 2 (design §6.3): declared donors from the REQUESTED version
+    # dir's reuse.yaml, in file order. Duplicate (table, from_version)
+    # entries in one reuse.yaml would otherwise admit the same source
+    # twice -- table is fixed to op_file_basename for this call, so
+    # `declared_donor_versions` membership alone is the (table,
+    # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
+    # task 5, FIX 2).
+    declared_donor_versions: set[str] = set()
+    for reuse_entry in _requested_version_reuse_entries(
+        system_data_root, backend_lower, version, op_file_basename, strict=strict_provenance
+    ):
+        from_version = reuse_entry["from_version"]
+        if from_version in declared_donor_versions:
+            logger.debug(
+                "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
+                reuse_entry["table"],
+                from_version,
+                system_data_root,
+            )
+            continue
+        donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
+        if not os.path.isfile(donor_path):
+            continue
+        records.append(
+            {
+                "version": from_version,
+                "path": donor_path,
+                "channel": "declared_reuse",
+                "ks_filter": None,
+            }
+        )
+        declared_donor_versions.add(from_version)
+
+    # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
+    # sibling versions can't be ordered against the requested version, so
+    # they're excluded here (logged once) — an explicit declaration still
+    # works for them. Versions already admitted as declared donors above
+    # are excluded too — the dominant real reuse.yaml pattern points
+    # BACKWARD at an earlier sibling, and without this exclusion that same
+    # physical source would be listed twice (channels declared_reuse AND
+    # fallback), doubling I/O and duplicating data_provenance rows.
+    requested_parsed = parse_support_matrix_version(version)
+    if requested_parsed is not None:
+        sibling_versions = {v for v, _ in _iter_backend_version_dirs(system_data_root, backend_lower)}
+        sibling_versions.discard(version)
+        sibling_versions -= declared_donor_versions
+        earlier_versions = []
+        for sibling_version in sibling_versions:
+            parsed = parse_support_matrix_version(sibling_version)
+            if parsed is None:
+                _warn_unparseable_sibling_version_once(system_data_root, backend_lower, sibling_version)
+                continue
+            if parsed >= requested_parsed:
+                continue  # Never admit newer-than-requested implicitly.
+            earlier_versions.append((parsed, sibling_version))
+        earlier_versions.sort(key=lambda item: item[0], reverse=True)  # nearest-earlier first
+        for _, sibling_version in earlier_versions:
+            sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
+            if not os.path.isfile(sibling_path):
+                continue
+            records.append({"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None})
+
+    # Channel 4 aka §6.4 (cross-backend fill, kernel-identity gated). Same
+    # mechanism as before; the active backend is excluded from
+    # `ordered_frameworks` because channels 2-3 above already cover it.
+    per_framework_filter: dict[str, set[str]] = defaultdict(set)
+    per_framework_fallback: dict[str, set[str]] = defaultdict(set)
+    for entry in kernel_source_manifest_entries.get(op_file_basename, ()):
+        frameworks_lower = {fw.lower() for fw in entry.get("frameworks") or []}
+        if backend_lower not in frameworks_lower:
+            continue  # Active backend isn't listed as a consumer of this kernel_source.
+        ks = entry.get("kernel_source")
+        if not ks:
+            continue
+        tier = entry.get("tier")
+        if tier in ("shared", "shared_fallback"):
+            for fw in frameworks_lower:
+                per_framework_filter[fw].add(ks)
+            if tier == "shared_fallback":
+                for fw in frameworks_lower:
+                    per_framework_fallback[fw].add(ks)
+
+    ordered_frameworks = sorted(set(per_framework_filter) - {backend_lower})
+
+    # Sort key for newest-first ordering. Parseable PEP 440 versions form one
+    # group and always rank above unparseable strings — guarantees `1.10.0`
+    # beats `1.2.0` regardless of the lexicographic accident.
+    def _newest_first(candidate_version: str) -> tuple:
+        parsed = parse_support_matrix_version(candidate_version)
+        return (1, parsed) if parsed is not None else (0, candidate_version)
+
+    for framework in ordered_frameworks:
+        ks_filter = per_framework_filter[framework]
+        fallback_only = per_framework_fallback.get(framework, set())
+        fw_versions = sorted(
+            {v for v, _ in _iter_backend_version_dirs(system_data_root, framework)},
+            key=_newest_first,
+            reverse=True,
+        )
+        for sibling_version in fw_versions:
+            sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
+            if not os.path.isfile(sibling_path):
+                continue
+            records.append(
+                {
+                    "version": sibling_version,
+                    "path": sibling_path,
+                    "channel": "cross_backend",
+                    "ks_filter": ks_filter,
+                    "low_fidelity": bool(fallback_only & ks_filter),
+                }
+            )
+    return records
+
+
+def resolve_op_data_sources(
+    system: str,
+    backend: str,
+    version: str,
+    op_filename: str | PerfDataFilename,
+    systems_paths: str | list[str] | None = None,
+    *,
+    shared_layer: bool = True,
+    strict_provenance: bool | None = None,
+) -> list[str]:
+    """Existing perf files a ``get_database`` would read for one op table.
+
+    Answers "if I ask the perf database for this table at this version, will
+    it find rows?" — the returned list is empty exactly when every source
+    ``PerfDatabase._build_op_sources`` would admit is absent from disk. Paths
+    come back in load priority order (primary first, then the reuse channels),
+    resolved across both the family-first and legacy tree layouts.
+
+    Use this instead of ``os.path.isfile(resolve_op_data_path(...))`` whenever
+    the question is availability rather than the identity of one specific
+    file: a version bucket that inherits a table from an earlier bucket has no
+    raw file of its own, yet the database loads it fine.
+
+    Searches ``systems_paths`` in order and answers from the first root that
+    holds anything for this op, mirroring how ``get_database`` keeps looking
+    past a root that declares the system but not the data. Returns an empty
+    list when no root has it. Raises ``ValueError`` for an op filename that is
+    not a known ``PerfDataFilename``.
+    """
+    op_filename_enum = op_filename if isinstance(op_filename, PerfDataFilename) else PerfDataFilename(str(op_filename))
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+
+    effective_strict = _strict_provenance_enabled(strict_provenance)
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path, encoding="utf-8") as f:
+                system_spec = yaml.load(f, Loader=yaml.SafeLoader) or {}
+            data_dir = system_spec["data_dir"]
+        except Exception:
+            logger.warning(f"failed to read system spec at {system_yaml_path}, continuing searching")
+            continue
+
+        system_data_root = os.path.join(systems_root, data_dir)
+        primary_path = resolve_op_data_path(system_data_root, backend.lower(), version, op_filename_enum.value)
+        paths = []
+        if os.path.isfile(primary_path) and not _version_dir_partial_for_request(
+            os.path.dirname(primary_path), system_data_root, strict=effective_strict
+        ):
+            paths.append(primary_path)
+        paths.extend(
+            str(record["path"])
+            for record in _reuse_op_source_records(
+                op_filename_enum,
+                primary_path,
+                system_data_root,
+                backend=backend,
+                version=version,
+                enable_shared_layer=shared_layer,
+                strict_provenance=effective_strict,
+                kernel_source_manifest_entries=_load_op_kernel_source_manifest_entries(systems_root),
+            )
+        )
+        if paths:
+            return paths
+    return []
+
+
 def _requested_version_reuse_entries(
     system_data_root: str, backend: str, version: str, op_file_basename: str, *, strict: bool
 ) -> list[dict[str, str]]:
@@ -2257,6 +2482,10 @@ class PerfDatabase:
         cross-backend row would silently clobber an active-backend row on key
         conflict. Same-backend sources (primary/declared/fallback) use no
         filter, same as reading the active backend's own file.
+
+        Channels 2-4 live in the module-level ``_reuse_op_source_records`` so
+        that ``resolve_op_data_sources`` can answer availability questions
+        under the exact same rules without loading a database.
         """
         op_file_basename = op_filename_enum.value
         records: list[dict[str, object]] = []
@@ -2294,136 +2523,26 @@ class PerfDatabase:
             ]
             return [(record["path"], record["ks_filter"]) for record in records]
 
-        if not self.enable_shared_layer:
-            return _finish()
-        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
-            return _finish()
-        if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
-            return _finish()
-
-        backend_lower = self.backend.lower()
-
-        # Channel 2 (design §6.3): declared donors from the REQUESTED version
-        # dir's reuse.yaml, in file order. Duplicate (table, from_version)
-        # entries in one reuse.yaml would otherwise admit the same source
-        # twice -- table is fixed to op_file_basename for this call, so
-        # `declared_donor_versions` membership alone is the (table,
-        # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
-        # task 5, FIX 2).
-        declared_donor_versions: set[str] = set()
-        for reuse_entry in _requested_version_reuse_entries(
-            system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
-        ):
-            from_version = reuse_entry["from_version"]
-            if from_version in declared_donor_versions:
-                logger.debug(
-                    "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
-                    reuse_entry["table"],
-                    from_version,
-                    system_data_root,
+        reuse_records = _reuse_op_source_records(
+            op_filename_enum,
+            primary_path,
+            system_data_root,
+            backend=self.backend,
+            version=self.version,
+            enable_shared_layer=self.enable_shared_layer,
+            strict_provenance=self.strict_provenance,
+            kernel_source_manifest_entries=self._op_kernel_source_manifest_entries,
+        )
+        for record in reuse_records:
+            if record.pop("low_fidelity", False):
+                logger.warning(
+                    "Loading low-fidelity fallback rows for %s from %s. Queries "
+                    "returning these rows are framework-implicit and may differ "
+                    "from real backend behavior.",
+                    op_file_basename,
+                    record["path"],
                 )
-                continue
-            donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
-            if not os.path.isfile(donor_path):
-                continue
-            records.append(
-                {
-                    "version": from_version,
-                    "path": donor_path,
-                    "channel": "declared_reuse",
-                    "ks_filter": None,
-                }
-            )
-            declared_donor_versions.add(from_version)
-
-        # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
-        # sibling versions can't be ordered against the requested version, so
-        # they're excluded here (logged once) — an explicit declaration still
-        # works for them. Versions already admitted as declared donors above
-        # are excluded too — the dominant real reuse.yaml pattern points
-        # BACKWARD at an earlier sibling, and without this exclusion that same
-        # physical source would be listed twice (channels declared_reuse AND
-        # fallback), doubling I/O and duplicating data_provenance rows.
-        requested_parsed = parse_support_matrix_version(self.version)
-        if requested_parsed is not None:
-            sibling_versions = {v for v, _ in _iter_backend_version_dirs(system_data_root, backend_lower)}
-            sibling_versions.discard(self.version)
-            sibling_versions -= declared_donor_versions
-            earlier_versions = []
-            for sibling_version in sibling_versions:
-                parsed = parse_support_matrix_version(sibling_version)
-                if parsed is None:
-                    _warn_unparseable_sibling_version_once(system_data_root, backend_lower, sibling_version)
-                    continue
-                if parsed >= requested_parsed:
-                    continue  # Never admit newer-than-requested implicitly.
-                earlier_versions.append((parsed, sibling_version))
-            earlier_versions.sort(key=lambda item: item[0], reverse=True)  # nearest-earlier first
-            for _, sibling_version in earlier_versions:
-                sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
-                if not os.path.isfile(sibling_path):
-                    continue
-                records.append(
-                    {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
-                )
-
-        # Channel 4 aka §6.4 (cross-backend fill, kernel-identity gated). Same
-        # mechanism as before; the active backend is excluded from
-        # `ordered_frameworks` because channels 2-3 above already cover it.
-        per_framework_filter: dict[str, set[str]] = defaultdict(set)
-        per_framework_fallback: dict[str, set[str]] = defaultdict(set)
-        for entry in self._op_kernel_source_manifest_entries.get(op_file_basename, ()):
-            frameworks_lower = {fw.lower() for fw in entry.get("frameworks") or []}
-            if backend_lower not in frameworks_lower:
-                continue  # Active backend isn't listed as a consumer of this kernel_source.
-            ks = entry.get("kernel_source")
-            if not ks:
-                continue
-            tier = entry.get("tier")
-            if tier in ("shared", "shared_fallback"):
-                for fw in frameworks_lower:
-                    per_framework_filter[fw].add(ks)
-                if tier == "shared_fallback":
-                    for fw in frameworks_lower:
-                        per_framework_fallback[fw].add(ks)
-
-        ordered_frameworks = sorted(set(per_framework_filter) - {backend_lower})
-
-        # Sort key for newest-first ordering. Parseable PEP 440 versions form one
-        # group and always rank above unparseable strings — guarantees `1.10.0`
-        # beats `1.2.0` regardless of the lexicographic accident.
-        def _newest_first(version: str) -> tuple:
-            parsed = parse_support_matrix_version(version)
-            return (1, parsed) if parsed is not None else (0, version)
-
-        for framework in ordered_frameworks:
-            ks_filter = per_framework_filter[framework]
-            fallback_only = per_framework_fallback.get(framework, set())
-            fw_versions = sorted(
-                {v for v, _ in _iter_backend_version_dirs(system_data_root, framework)},
-                key=_newest_first,
-                reverse=True,
-            )
-            for sibling_version in fw_versions:
-                sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
-                if not os.path.isfile(sibling_path):
-                    continue
-                records.append(
-                    {
-                        "version": sibling_version,
-                        "path": sibling_path,
-                        "channel": "cross_backend",
-                        "ks_filter": ks_filter,
-                    }
-                )
-                if fallback_only & ks_filter:
-                    logger.warning(
-                        "Loading low-fidelity fallback rows for %s from %s. Queries "
-                        "returning these rows are framework-implicit and may differ "
-                        "from real backend behavior.",
-                        op_file_basename,
-                        sibling_path,
-                    )
+        records.extend(reuse_records)
         return _finish()
 
     def is_inter_node(self, num_gpus: int) -> bool:

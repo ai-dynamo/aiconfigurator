@@ -29,7 +29,11 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
-from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
+from aiconfigurator.sdk.perf_database import (
+    PerfDatabase,
+    _load_op_kernel_source_manifest_entries,
+    resolve_op_data_sources,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -557,3 +561,93 @@ def test_data_provenance_populated_per_op_file(systems_root: Path) -> None:
     _sources_for(db, systems_root, common.PerfDataFilename.moe)
 
     assert set(db.data_provenance.keys()) == {"gemm_perf.parquet", "moe_perf.parquet"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_op_data_sources — the same ordering, answered without loading a
+# database. Callers that only need "will a query find rows?" must get exactly
+# the sources _build_op_sources would admit and find on disk.
+# ---------------------------------------------------------------------------
+
+
+def _existing_sources(db: PerfDatabase, systems_root: Path, op: common.PerfDataFilename) -> list[str]:
+    return [entry["path"] for entry in db.data_provenance[op.value] if entry["exists"]]
+
+
+def test_resolve_op_data_sources_matches_build_op_sources_across_channels(systems_root: Path) -> None:
+    backend, requested, declared, earlier = "trtllm", "1.3.0", "1.4.0", "1.2.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{declared}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+    _write(systems_root, "data/h100_sxm/gemm/sglang/0.5.0/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", declared)]},
+    )
+    _write_manifest(systems_root, [("gemm_perf.parquet", "cutlass", "shared", [backend, "sglang"])])
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary", "declared_reuse", "fallback", "cross_backend"]
+    assert resolve_op_data_sources(
+        "h100_sxm", backend, requested, common.PerfDataFilename.gemm, str(systems_root)
+    ) == _existing_sources(db, systems_root, common.PerfDataFilename.gemm)
+
+
+def test_resolve_op_data_sources_finds_comm_table_inherited_by_a_later_version(systems_root: Path) -> None:
+    """The shape that made the CLI's DeepEP gate skip every sweep: the
+    requested (latest) version dir exists under ``comm/`` but carries no
+    DeepEP table, so the primary resolves to the legacy-shaped path, the comm
+    exclusion does not fire (see ``_op_file_family_from_path``), and the
+    earlier sibling fills. A raw-file probe at the requested version sees
+    nothing; the database sees the sibling."""
+    backend, requested, earlier = "sglang", "0.5.14", "0.5.10"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{earlier}/wideep_deepep_normal_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    _sources_for(db, systems_root, common.PerfDataFilename.wideep_deepep_normal)
+
+    sources = resolve_op_data_sources(
+        "h100_sxm", backend, requested, common.PerfDataFilename.wideep_deepep_normal, str(systems_root)
+    )
+    assert len(sources) == 1
+    assert sources[0].endswith(f"comm/{backend}/{earlier}/wideep_deepep_normal_perf.parquet")
+    assert sources == _existing_sources(db, systems_root, common.PerfDataFilename.wideep_deepep_normal)
+
+
+def test_resolve_op_data_sources_honors_family_layout_comm_exclusion(systems_root: Path) -> None:
+    """When the requested version DOES carry the comm table, the exclusion
+    fires off the family-shaped primary and the earlier sibling stays out —
+    the helper must not report more than the database would load."""
+    backend, requested, earlier = "trtllm", "1.3.0", "1.2.0"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{earlier}/custom_allreduce_perf.parquet")
+
+    sources = resolve_op_data_sources(
+        "h100_sxm", backend, requested, common.PerfDataFilename.custom_allreduce, str(systems_root)
+    )
+
+    assert len(sources) == 1
+    assert sources[0].endswith(f"comm/{backend}/{requested}/custom_allreduce_perf.parquet")
+
+
+def test_resolve_op_data_sources_empty_when_nothing_on_disk(systems_root: Path) -> None:
+    _write(systems_root, "data/h100_sxm/gemm/trtllm/1.0.0/gemm_perf.parquet")
+
+    root = str(systems_root)
+    assert resolve_op_data_sources("h100_sxm", "trtllm", "1.0.0", common.PerfDataFilename.moe, root) == []
+    assert resolve_op_data_sources("no_such_sys", "trtllm", "1.0.0", common.PerfDataFilename.gemm, root) == []
+
+
+def test_resolve_op_data_sources_shared_layer_off_sees_primary_only(systems_root: Path) -> None:
+    backend, requested, earlier = "trtllm", "1.3.0", "1.2.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    assert (
+        resolve_op_data_sources(
+            "h100_sxm", backend, requested, common.PerfDataFilename.gemm, str(systems_root), shared_layer=False
+        )
+        == []
+    )

@@ -26,6 +26,7 @@ from aiconfigurator.cli.main import (
 )
 from aiconfigurator.cli.main import main as cli_main
 from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
+from aiconfigurator.sdk import perf_database
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
@@ -586,8 +587,8 @@ class TestBuildDefaultTaskConfigs:
         caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
 
         with patch(
-            "aiconfigurator.cli.main._get_backend_data_path",
-            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
+            "aiconfigurator.cli.main.perf_database.resolve_op_data_sources",
+            side_effect=lambda system, backend, version, filename: [],
         ):
             result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
@@ -618,8 +619,8 @@ class TestBuildDefaultTaskConfigs:
             (tmp_path / filename).write_text("header\n", encoding="utf-8")
 
         with patch(
-            "aiconfigurator.cli.main._get_backend_data_path",
-            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
+            "aiconfigurator.cli.main.perf_database.resolve_op_data_sources",
+            side_effect=lambda system, backend, version, filename: [str(tmp_path / filename)],
         ):
             result = build_default_tasks(
                 model_path="deepseek-ai/DeepSeek-R1",
@@ -634,23 +635,32 @@ class TestBuildDefaultTaskConfigs:
 
 
 class TestSglangDeepepPerfDataSkipReason:
-    """`_sglang_deepep_perf_data_skip_reason` must find DeepEP perf files under the
-    family-first layout (e.g. comm/sglang/<version>/), not just the legacy
-    sglang/<version>/ shape."""
+    """`_sglang_deepep_perf_data_skip_reason` must decide DeepEP availability the
+    way the perf database does: across the family-first layout (e.g.
+    comm/sglang/<version>/) as well as the legacy sglang/<version>/ shape, and
+    including tables the requested version inherits from an earlier one."""
 
     def _write_system_yaml(self, systems_root, system_name, data_dir):
         (systems_root / f"{system_name}.yaml").write_text(f"data_dir: {data_dir}\n", encoding="utf-8")
+
+    def _write_version_dir(self, systems_root, version, *filenames):
+        version_dir = systems_root / "data" / "fake_sys" / "comm" / "sglang" / version
+        version_dir.mkdir(parents=True)
+        for filename in filenames:
+            (version_dir / filename).write_bytes(b"stub")
+        return version_dir
 
     @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
     def test_none_when_both_files_exist_under_family_dir(self, mock_systems_paths, tmp_path):
         systems_root = tmp_path
         mock_systems_paths.return_value = [str(systems_root)]
         self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
-
-        version_dir = systems_root / "data" / "fake_sys" / "comm" / "sglang" / "0.5.6.post2"
-        version_dir.mkdir(parents=True)
-        (version_dir / "wideep_deepep_normal_perf.parquet").write_bytes(b"stub")
-        (version_dir / "wideep_deepep_ll_perf.parquet").write_bytes(b"stub")
+        self._write_version_dir(
+            systems_root,
+            "0.5.6.post2",
+            "wideep_deepep_normal_perf.parquet",
+            "wideep_deepep_ll_perf.parquet",
+        )
 
         reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
 
@@ -666,6 +676,44 @@ class TestSglangDeepepPerfDataSkipReason:
         reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
 
         assert reason is not None
+        assert "wideep_deepep_normal_perf.parquet" in reason
+        assert "wideep_deepep_ll_perf.parquet" in reason
+
+    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
+    def test_none_when_default_version_inherits_deepep_from_earlier_version(self, mock_systems_paths, tmp_path):
+        """The latest version bucket routinely ships without its own DeepEP
+        tables and inherits them from an earlier bucket. Gating on a raw file
+        at the resolved version skipped every DeepEP sweep by default even
+        though the perf database loads those rows fine."""
+        systems_root = tmp_path
+        mock_systems_paths.return_value = [str(systems_root)]
+        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
+        self._write_version_dir(
+            systems_root,
+            "0.5.10",
+            "custom_allreduce_perf.parquet",
+            "wideep_deepep_normal_perf.parquet",
+            "wideep_deepep_ll_perf.parquet",
+        )
+        self._write_version_dir(systems_root, "0.5.14", "custom_allreduce_perf.parquet")
+
+        assert perf_database.get_latest_database_version(system="fake_sys", backend="sglang") == "0.5.14"
+        assert _sglang_deepep_perf_data_skip_reason("fake_sys", None, None) is None
+
+    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
+    def test_names_missing_files_when_no_version_has_deepep(self, mock_systems_paths, tmp_path):
+        """The inherit-aware lookup must still refuse a tree where no version
+        carries the DeepEP tables at all."""
+        systems_root = tmp_path
+        mock_systems_paths.return_value = [str(systems_root)]
+        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
+        self._write_version_dir(systems_root, "0.5.10", "custom_allreduce_perf.parquet")
+        self._write_version_dir(systems_root, "0.5.14", "custom_allreduce_perf.parquet")
+
+        reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, None)
+
+        assert reason is not None
+        assert "0.5.14" in reason
         assert "wideep_deepep_normal_perf.parquet" in reason
         assert "wideep_deepep_ll_perf.parquet" in reason
 

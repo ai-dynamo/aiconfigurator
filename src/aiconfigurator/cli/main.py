@@ -32,7 +32,6 @@ from aiconfigurator.sdk.errors import (
     is_expected_cli_error,
 )
 from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -1279,15 +1278,6 @@ def _get_system_data_root(system_name: str) -> str | None:
     return None
 
 
-def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str, op_filename: str) -> str | None:
-    """Resolve one perf-data file's on-disk path for (system, backend, version),
-    across both the family-first and legacy tree layouts (see resolve_op_data_path)."""
-    system_data_root = _get_system_data_root(system_name)
-    if system_data_root is None:
-        return None
-    return resolve_op_data_path(system_data_root, backend_name, backend_version, op_filename)
-
-
 _SGLANG_DEEPEP_REQUIRED_FILES = (
     common.PerfDataFilename.wideep_deepep_normal.value,
     common.PerfDataFilename.wideep_deepep_ll.value,
@@ -1306,8 +1296,15 @@ def _sglang_deepep_perf_data_skip_reason(
     decode_system_name: str | None,
     backend_version: str | None,
 ) -> str | None:
-    """Return a concise skip reason when optional SGLang DeepEP data is absent."""
-    missing_paths: list[str] = []
+    """Return a concise skip reason when optional SGLang DeepEP data is absent.
+
+    Availability is decided the same way the perf database decides it
+    (``resolve_op_data_sources``), not by probing for a raw file at the
+    resolved version: a version bucket that inherits the DeepEP tables from an
+    earlier bucket carries no file of its own yet queries fine, and gating on
+    the raw file would skip the sweeps for data the run would have found.
+    """
+    missing_tables: list[str] = []
     missing_versions: list[str] = []
 
     systems_to_check = [system_name]
@@ -1324,19 +1321,18 @@ def _sglang_deepep_perf_data_skip_reason(
             continue
 
         for filename in _SGLANG_DEEPEP_REQUIRED_FILES:
-            resolved_path = _get_backend_data_path(
+            sources = perf_database.resolve_op_data_sources(
                 system_to_check, common.BackendName.sglang.value, resolved_version, filename
             )
-            if resolved_path is None or not os.path.isfile(resolved_path):
-                missing_paths.append(
-                    resolved_path
-                    or f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
+            if not sources:
+                missing_tables.append(
+                    f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
                 )
 
     if missing_versions:
         return "no database version available for " + ", ".join(missing_versions)
-    if missing_paths:
-        return "missing required DeepEP perf data: " + ", ".join(missing_paths)
+    if missing_tables:
+        return "missing required DeepEP perf data: " + ", ".join(missing_tables)
     return None
 
 
