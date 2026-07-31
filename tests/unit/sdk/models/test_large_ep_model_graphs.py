@@ -50,6 +50,11 @@ QWEN3 = "Qwen/Qwen3-235B-A22B"
 SGLANG_COMM = {"context": "deepep_ht", "generation": "deepep_ll"}
 TRTLLM_COMM = {"context": "nvlink_two_sided", "generation": "nvlink_two_sided"}
 
+# Node widths are hardware facts the enumerator must inject; large-EP
+# construction raises without them (helpers.large_ep_gpus_per_node).
+H200_GPUS_PER_NODE = 8
+GB200_GPUS_PER_NODE = 4
+
 # Recorded from the legacy classes at 8372e60 (nextn=0 -> mtp factor 1.0).
 DS_LAYERS = 61
 QWEN3_LAYERS = 94
@@ -83,6 +88,7 @@ def _deepseek_sglang(tp_size=1, attention_dp_size=32, **extra):
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
         moe_comm_backend=dict(SGLANG_COMM),
+        num_gpus_per_node=H200_GPUS_PER_NODE,
         **extra,
     )
 
@@ -98,7 +104,7 @@ def _deepseek_trtllm(**extra):
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
         moe_comm_backend=dict(TRTLLM_COMM),
-        num_gpus_per_node=4,
+        num_gpus_per_node=GB200_GPUS_PER_NODE,
         **extra,
     )
 
@@ -115,6 +121,7 @@ def _v32_sglang(tp_size=1, attention_dp_size=32, **extra):
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
         moe_comm_backend=dict(SGLANG_COMM),
+        num_gpus_per_node=H200_GPUS_PER_NODE,
         **extra,
     )
 
@@ -130,25 +137,29 @@ def _v32_trtllm(**extra):
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
         moe_comm_backend=dict(TRTLLM_COMM),
-        num_gpus_per_node=4,
+        num_gpus_per_node=GB200_GPUS_PER_NODE,
         **extra,
     )
 
 
-def _moe_sglang(**extra):
+def _moe_sglang(tp_size=1, attention_dp_size=8, **extra):
     return _build(
         QWEN3,
         "sglang",
-        tp_size=1,
+        tp_size=tp_size,
         moe_tp_size=1,
         moe_ep_size=8,
-        attention_dp_size=8,
+        attention_dp_size=attention_dp_size,
         moe_backend="deepep_moe",
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         moe_quant_mode=common.MoEQuantMode.bfloat16,
         kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
         **extra,
     )
+
+
+def _moe_sglang_large_ep(**extra):
+    return _moe_sglang(moe_comm_backend=dict(SGLANG_COMM), num_gpus_per_node=H200_GPUS_PER_NODE, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +409,7 @@ class TestTrtllmLargeEPValidation:
                 gemm_quant_mode=common.GEMMQuantMode.fp8_block,
                 moe_quant_mode=common.MoEQuantMode.nvfp4,
                 moe_comm_backend=dict(TRTLLM_COMM),
+                num_gpus_per_node=GB200_GPUS_PER_NODE,
             )
 
     def test_requires_ep_size_above_one(self):
@@ -412,6 +424,7 @@ class TestTrtllmLargeEPValidation:
                 gemm_quant_mode=common.GEMMQuantMode.fp8_block,
                 moe_quant_mode=common.MoEQuantMode.nvfp4,
                 moe_comm_backend=dict(TRTLLM_COMM),
+                num_gpus_per_node=GB200_GPUS_PER_NODE,
             )
 
     def test_rejects_redundant_slots_without_eplb(self):
@@ -434,6 +447,7 @@ class TestTrtllmLargeEPValidation:
                 gemm_quant_mode=common.GEMMQuantMode.fp8_block,
                 moe_quant_mode=common.MoEQuantMode.nvfp4,
                 moe_comm_backend=dict(TRTLLM_COMM),
+                num_gpus_per_node=GB200_GPUS_PER_NODE,
             )
         assert "AlltoAll communication will be disabled" in caplog.text
 
@@ -568,7 +582,7 @@ class TestGLMSharedExpertQuantMode:
             attention_dp_size=16,
             moe_backend="deepep_moe" if backend == "sglang" else None,
             moe_comm_backend=dict(comm),
-            num_gpus_per_node=4,
+            num_gpus_per_node=GB200_GPUS_PER_NODE if backend == "trtllm" else H200_GPUS_PER_NODE,
         )
 
     def test_trtllm_keeps_the_shared_experts_unquantized(self):
@@ -623,7 +637,7 @@ class TestMOEModelLargeEP:
     ]
 
     def test_graphs_and_backends(self):
-        model = _moe_sglang(moe_comm_backend=dict(SGLANG_COMM))
+        model = _moe_sglang_large_ep()
         assert _names(model.context_ops) == self.CONTEXT
         assert _names(model.generation_ops) == self.GENERATION
         assert model.context_ops[7]._comm_backend == "deepep_ht"
@@ -631,17 +645,24 @@ class TestMOEModelLargeEP:
         assert isinstance(model.context_ops[8], ops.EPMoE)
         assert model.context_ops[8]._scale_factor == QWEN3_LAYERS
         assert model.generation_ops[8]._scale_factor == float(QWEN3_LAYERS)
-        # Embedding replicated, not vocab-sharded (legacy large-EP form).
-        fused = _moe_sglang()
-        assert model.context_ops[0]._row_size == _op(fused.context_ops, "context_embedding")._row_size
+
+    def test_embedding_is_replicated_not_vocab_sharded(self):
+        # Only observable at tp>1: the legacy large-EP graph kept the FULL vocab
+        # (recorded from SGLangEPMOEModel @ 8372e60), while the fused MOEModel
+        # shards it over TP and pays an all-reduce.
+        large_ep = _moe_sglang_large_ep(tp_size=2, attention_dp_size=4)
+        fused = _moe_sglang(tp_size=2, attention_dp_size=4)
+        assert _op(large_ep.context_ops, "context_embedding")._row_size == 151936
+        assert _op(fused.context_ops, "context_embedding")._row_size == 75968
+        assert _op(large_ep.generation_ops, "generation_embedding")._row_size == 151936
 
     def test_distributions_use_the_moe_family_alpha(self):
-        model = _moe_sglang(moe_comm_backend=dict(SGLANG_COMM))
+        model = _moe_sglang_large_ep()
         assert model.context_ops[8]._workload_distribution == "power_law_1.2"
         assert model.generation_ops[8]._workload_distribution == "power_law_1.2"
 
     def test_eplb_flattens_prefill_only(self):
-        model = _moe_sglang(moe_comm_backend=dict(SGLANG_COMM), enable_eplb=True)
+        model = _moe_sglang_large_ep(enable_eplb=True)
         assert model.context_ops[8]._workload_distribution == "power_law_0.6"
         assert model.context_ops[8]._enable_eplb is True
         # Decode keeps the family alpha; the EPLB token correction is
@@ -660,6 +681,63 @@ class TestMOEModelLargeEP:
 # ---------------------------------------------------------------------------
 # (e) Fused goldens — RECORDED at 8372e60, must be unchanged by this task
 # ---------------------------------------------------------------------------
+
+
+class TestNodeWidthIsRequired:
+    """``num_gpus_per_node`` has no default: a wrong node width silently
+    mis-prices cross-node all-to-all, so large-EP construction must raise."""
+
+    MESSAGE = "moe_comm_backend is set but num_gpus_per_node is not"
+
+    def test_deepseek_sglang_large_ep_raises(self):
+        with pytest.raises(ValueError, match=self.MESSAGE):
+            _build(
+                DSR1,
+                "sglang",
+                tp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=32,
+                attention_dp_size=32,
+                moe_backend="deepep_moe",
+                gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+                moe_quant_mode=common.MoEQuantMode.fp8_block,
+                moe_comm_backend=dict(SGLANG_COMM),
+            )
+
+    def test_deepseek_v32_large_ep_raises(self):
+        with pytest.raises(ValueError, match=self.MESSAGE):
+            _build(
+                DSV32,
+                "trtllm",
+                tp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=16,
+                attention_dp_size=16,
+                gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+                moe_quant_mode=common.MoEQuantMode.nvfp4,
+                moe_comm_backend=dict(TRTLLM_COMM),
+            )
+
+    def test_moe_family_large_ep_raises(self):
+        with pytest.raises(ValueError, match=self.MESSAGE):
+            _moe_sglang(moe_comm_backend=dict(SGLANG_COMM))
+
+    @pytest.mark.parametrize("model_path", [DSR1, DSV32])
+    def test_fused_configs_do_not_need_it(self, model_path):
+        model = _build(
+            model_path,
+            "sglang",
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+        )
+        assert "context_moe_post_dispatch" in _names(model.context_ops)
+
+    def test_fused_moe_family_does_not_need_it(self):
+        assert "context_moe_post_dispatch" in _names(_moe_sglang().context_ops)
 
 
 class TestFusedGraphsUnchanged:

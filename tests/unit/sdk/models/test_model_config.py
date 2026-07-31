@@ -1056,6 +1056,7 @@ class TestGetModelMOESGLangDispatch:
             attention_dp_size=8,
             moe_backend="deepep_moe",
             moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
         assert isinstance(model, models.MOEModel)
@@ -1080,6 +1081,7 @@ class TestGetModelMOESGLangDispatch:
             attention_dp_size=4,
             moe_backend="deepep_moe",
             moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
         assert isinstance(model, models.MOEModel)
