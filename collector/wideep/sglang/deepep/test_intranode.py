@@ -238,7 +238,16 @@ def test_main(
                     event.current_stream_wait() if async_mode else ()
                     check_x = combined_x.float() / is_token_in_rank.sum(dim=1).unsqueeze(1)
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
-                    assert calc_diff(check_x, ref_x) < 5e-6
+                    # Bounds are upstream's, unchanged. Report the shape and the
+                    # variant that failed: the collector sweeps far past upstream's
+                    # default configuration, so the first failure here needs to be
+                    # diagnosable from the log alone rather than reproduced by hand.
+                    payload_diff = calc_diff(check_x, ref_x)
+                    assert payload_diff < 5e-6, (
+                        f"combine payload diff too large: {payload_diff=}, {num_tokens=}, {hidden=}, "
+                        f"{num_experts=}, {num_topk=}, {num_sms=}, fp8={isinstance(current_x, tuple)}, "
+                        f"{async_mode=}, {previous_mode=}, {with_topk=}"
+                    )
                     if with_topk:
                         check_topk_weights = (
                             combined_topk_weights
@@ -246,7 +255,12 @@ def test_main(
                             else (combined_topk_weights / is_token_in_rank.sum(dim=1).unsqueeze(1))
                         )
                         ref_topk_weights = topk_weights_pure_rand if current_x is x_pure_rand else topk_weights
-                        assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
+                        weight_diff = calc_diff(check_topk_weights, ref_topk_weights)
+                        assert weight_diff < 1e-9, (
+                            f"combine top-k weight diff too large: {weight_diff=}, {num_tokens=}, {hidden=}, "
+                            f"{num_experts=}, {num_topk=}, {num_sms=}, fp8={isinstance(current_x, tuple)}, "
+                            f"{async_mode=}, {previous_mode=}"
+                        )
 
                     # For later tuning
                     dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
@@ -280,6 +294,13 @@ def test_main(
     dispatch_metric = None
     for current_x in filter(lambda elem: elem is not None, (x_e4m3, x)):
         best_time, best_results = 1e10, None
+        # Timing of `Buffer.get_dispatch_config(num_ranks)`, which is what SGLang
+        # actually runs (srt/layers/moe/token_dispatcher/deepep.py: it uses
+        # `normal_dispatch_config or Buffer.get_dispatch_config(group.size())`).
+        # The persisted metric is the tuned best-of-16, so it is optimistic against
+        # deployment by a per-point margin. Recording the default alongside lets
+        # that margin be quantified from a campaign log without a re-run.
+        default_time = None
         nvl_recv_bytes = (
             (dispatch_bf16_nvl_recv_bytes * fp8_factor)
             if isinstance(current_x, tuple)
@@ -296,6 +317,8 @@ def test_main(
             t = bench(lambda args=tune_args: buffer.dispatch(**args))[0]
             if t < best_time and nvl_chunk_size > 0:
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
+            if nvl_chunk_size == 0:
+                default_time = t
             if local_rank == 0:
                 nvl_chunk_size_str = nvl_chunk_size if nvl_chunk_size else "default"
                 print(
@@ -304,6 +327,7 @@ def test_main(
                     flush=True,
                 )
         if local_rank == 0:
+            # Format is load-bearing: extract_data.py regex-matches this line.
             print(
                 f"[tuning] Best dispatch ({'FP8' if isinstance(current_x, tuple) else 'BF16'}): "
                 f"SMs {best_results[0]}, NVL chunk {best_results[1]}, RDMA chunk 0, transmit: "
@@ -311,6 +335,15 @@ def test_main(
                 f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
                 flush=True,
             )
+            if default_time is not None:
+                print(
+                    f"[config-gap] dispatch ({'FP8' if isinstance(current_x, tuple) else 'BF16'}) "
+                    f"num_tokens={num_tokens} hidden={hidden} num_experts={num_experts} "
+                    f"num_topk={num_topk} sms={num_sms}: production default "
+                    f"{default_time * 1e6:.2f} us vs tuned {best_time * 1e6:.2f} us "
+                    f"(tuned/default {best_time / default_time:.3f})",
+                    flush=True,
+                )
             print("", flush=True)
 
         if dispatch_metric is None and best_results is not None:
@@ -338,6 +371,9 @@ def test_main(
 
     # Tune combine performance
     best_time, best_results = 1e10, None
+    # See the dispatch loop: `Buffer.get_combine_config(num_ranks)` is SGLang's
+    # deployed configuration, recorded so the tuned-vs-deployed gap is measurable.
+    default_time = None
     for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
         if nvl_chunk_size > 0:
             config = deep_ep.Config(num_sms, nvl_chunk_size, nvl_buffer_size)
@@ -347,6 +383,8 @@ def test_main(
             config = deep_ep.Buffer.get_combine_config(num_ranks)
         tune_args = {"x": recv_x, "handle": handle, "config": config}
         t = bench(lambda args=tune_args: buffer.combine(**args))[0]
+        if nvl_chunk_size == 0:
+            default_time = t
         if local_rank == 0:
             nvl_chunk_size_str = nvl_chunk_size if nvl_chunk_size else "default"
             print(
@@ -358,12 +396,21 @@ def test_main(
                 best_time, best_results = t, (num_sms, nvl_chunk_size)
 
     if local_rank == 0:
+        # Format is load-bearing: extract_data.py regex-matches this line.
         print(
             f"[tuning] Best combine: SMs {best_results[0]}, NVL chunk {best_results[1]}, "
             f"RDMA chunk 0, transmit: {best_time * 1e6:.2f} us, notify: 0.00 us, BW: 0.00 GB/s "
             f"(RDMA), {combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
             flush=True,
         )
+        if default_time is not None:
+            print(
+                f"[config-gap] combine num_tokens={num_tokens} hidden={hidden} "
+                f"num_experts={num_experts} num_topk={num_topk} sms={num_sms}: production default "
+                f"{default_time * 1e6:.2f} us vs tuned {best_time * 1e6:.2f} us "
+                f"(tuned/default {best_time / default_time:.3f})",
+                flush=True,
+            )
         print("", flush=True)
         if metrics_out is not None and dispatch_metric is not None and best_results is not None:
             # Intranode normal-mode dispatch/combine run entirely over NVLink, so
