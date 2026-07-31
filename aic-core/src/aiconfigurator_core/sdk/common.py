@@ -683,6 +683,14 @@ ColumnsStatic = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+# Out-of-band result column: True when the row's latency includes an op tagged
+# PerformanceResult.source == "estimated". Deliberately NOT a member of
+# ColumnsStatic / ColumnsAgg / ColumnsDisagg -- those are the declared result
+# schemas the sweep constructs against, and a DataFrame built with
+# columns=<schema> would drop this, so it is attached after construction the
+# way "_per_ops_source" is.
+ESTIMATED_COLUMN = "_estimated"
+
 """
 Columns for Agg inference summary dataframe
 """

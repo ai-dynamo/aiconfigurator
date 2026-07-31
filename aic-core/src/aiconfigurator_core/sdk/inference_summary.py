@@ -491,6 +491,37 @@ class InferenceSummary:
         """Get per-operation latency breakdown data (populated by run_agg)."""
         return self._per_ops_data
 
+    def has_estimated_source(self) -> bool:
+        """Whether any op in this summary was tagged ``"estimated"``.
+
+        ``"estimated"`` means a value modeled from measurements taken at a
+        different coordinate rather than measured at the requested one -- today
+        only the WideEP DeepEP multi-node dispatch/combine substitution. A
+        result carrying one is not a measurement and callers surface it as
+        such; see ``PerformanceResult`` for the full source vocabulary.
+
+        Reads the phase dicts and ``per_ops_source`` because run_static
+        populates the former and run_agg/disagg assembly the latter. Matches
+        ``"estimated"`` exactly: ``"mixed"`` is the merge of differing sources
+        for one op name and arises benignly (e.g. partial empirical fallback),
+        so treating it as estimated would over-report.
+        """
+
+        def walk(node) -> bool:
+            if isinstance(node, dict):
+                return any(walk(v) for v in node.values())
+            return node == "estimated"
+
+        return any(
+            walk(d)
+            for d in (
+                self._encoder_source_dict,
+                self._context_source_dict,
+                self._generation_source_dict,
+                self._per_ops_source,
+            )
+        )
+
     def set_per_ops_source(self, per_ops_source: dict) -> None:
         """Set per-operation data-source breakdown ("silicon"/"empirical"/"sol"/"mixed")."""
         self._per_ops_source = per_ops_source

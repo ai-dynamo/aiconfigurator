@@ -488,14 +488,20 @@ class TestSGLangNonDeepEPAttentionTpDp:
 
 @pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestWideEpDeepEpLlNodeNumFallback:
-    """node_num resolution in _query_wideep_deepep_ll_table.
+    """node_num resolution in the WideEP DeepEP tables.
 
-    A multi-node request (node_num > 1) is served only by measurements at that
-    node scale -- an uncollected scale raises instead of silently substituting
-    node_num=1 single-node rows, which ignore the cross-node all-to-all and run
-    ~3x optimistic. Sub-node scales (node_num < 1, what MoEDispatch.query
-    derives for a config smaller than one node) still resolve against
-    node_num=1, and node_num=1 itself is untouched.
+    The contract has three cases and they must stay distinguishable:
+
+    * A measured node scale answers from its own rows, silently, tagged
+      ``"silicon"``. Real multi-node data must never be downgraded.
+    * An unmeasured multi-node scale (node_num > 1) still answers -- refusing
+      would remove WideEP from every system whose DeepEP tables carry
+      node_num=1 only -- but it answers from node_num=1 rows, warns with the
+      measured error for that scale, and tags ``"estimated"`` so the CLI can
+      mark the config row. What is forbidden is substituting *silently*.
+    * A sub-node scale (node_num < 1, what MoEDispatch.query derives for a
+      config smaller than one node) keeps the older, quieter fallback and is
+      NOT an estimate: it stays intra-node in both directions.
     """
 
     @staticmethod
@@ -510,8 +516,9 @@ class TestWideEpDeepEpLlNodeNumFallback:
             2: {7168: {8: {256: self._leaf(200.0)}}},
         }
         db._default_database_mode = common.DatabaseMode.SILICON
-        # _interp_pr(lat, energy=...) -> echo the latency so tests can assert which bucket was used
-        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat)
+        # _interp_pr(lat, energy=...) -> echo the latency so tests can assert which bucket was
+        # used, and tag "silicon" the way the real one does so source assertions are meaningful.
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat, energy=energy, source="silicon")
         return db
 
     def _query(self, db, node_num, num_experts=256):
@@ -525,39 +532,101 @@ class TestWideEpDeepEpLlNodeNumFallback:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-    def test_exact_node_num_used(self, monkeypatch):
-        """Requested node_num present -> uses it, no fallback."""
+    @pytest.fixture(autouse=True)
+    def _reset_warning_dedupe(self):
+        """The once-per-scale dedupe is process-global; isolate it per test."""
+        MoEDispatch._wideep_fallback_logged.clear()
+        yield
+        MoEDispatch._wideep_fallback_logged.clear()
+
+    def test_measured_multi_node_scale_is_neither_warned_nor_marked(self, monkeypatch, caplog):
+        """node_num=2 is collected here: real data, used as-is, still "silicon"."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
-        res = self._query(db, node_num=2)
-        assert float(res) == pytest.approx(0.2)  # 200us/1000, node_num=2 bucket
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            res = self._query(db, node_num=2)
+        assert float(res) == pytest.approx(0.2)  # 200us/1000, the node_num=2 bucket
+        assert res.source == "silicon"
+        assert caplog.records == []
 
-    def test_multi_node_miss_raises_instead_of_substituting_node_num_1(self, monkeypatch):
-        """Requested node_num > 1 missing -> raise; node_num=1 rows must not stand in."""
-        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-
+    def test_unmeasured_multi_node_scale_substitutes_but_marks_estimated(self, monkeypatch):
+        """node_num=4 is absent -> node_num=1 rows, tagged so the caller can surface it."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
-        with pytest.raises(PerfDataNotAvailableError, match="node_num=4"):
-            self._query(db, node_num=4)  # 4 not collected; node_num=1 is present but ineligible
+        res = self._query(db, node_num=4)
+        assert float(res) == pytest.approx(0.1)  # 100us/1000, the node_num=1 bucket
+        assert res.source == "estimated"
+
+    def test_unmeasured_multi_node_scale_warns_with_the_measured_error(self, monkeypatch, caplog):
+        """The warning names the scale and quotes the measured ratio for it."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            self._query(db, node_num=4)
+        message = caplog.records[0].getMessage()
+        assert "node_num=4" in message
+        assert "EXTRAPOLATING" in message
+        # 3.1x is the measured node4/node1 median for the ll table; asserting the
+        # figure keeps the message honest if _MEASURED_NODE_SCALING is edited.
+        assert "3.1x" in message
+
+    def test_warning_magnitude_tracks_the_node_scale(self, monkeypatch, caplog):
+        """node_num=2 and node_num=8 are different propositions and say so."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        db._wideep_deepep_ll_data.pop(2)  # force node_num=2 to extrapolate too
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            self._query(db, node_num=2)
+            self._query(db, node_num=8)
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 2  # one per scale, not one per table
+        assert "2.2x" in messages[0]
+        assert "3.5x" in messages[1]
+
+    def test_beyond_the_largest_measured_scale_is_stated_as_a_floor(self, monkeypatch, caplog):
+        """Nobody measured node_num=16, so the message must not invent a figure for it."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            self._query(db, node_num=16)
+        message = caplog.records[0].getMessage()
+        assert "no campaign measured node_num=16" in message
+        assert "lower bound" in message
+        assert "3.5x" in message  # quoted as the node_num=8 floor, not as node_num=16
+
+    def test_multi_node_warning_is_once_per_scale_not_once_per_query(self, monkeypatch, caplog):
+        """A sweep hits each scale thousands of times; the log must not."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            for _ in range(5):
+                self._query(db, node_num=4)
+        assert len(caplog.records) == 1
 
     def test_sub_node_falls_back_to_node_num_1(self, monkeypatch):
-        """node_num < 1 (a config smaller than one node) still uses node_num=1."""
+        """node_num < 1 (a config smaller than one node) still uses node_num=1..."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
         res = self._query(db, node_num=4 / 8)  # MoEDispatch.query: num_gpus / num_gpus_per_node
         assert float(res) == pytest.approx(0.1)  # 100us/1000, node_num=1 fallback
 
-    def test_sub_node_fallback_warns_once_per_table(self, monkeypatch, caplog):
-        """The approximation warning is emitted once per table per run, not per query."""
+    def test_sub_node_fallback_is_not_an_estimate(self, monkeypatch):
+        """...and is not marked: no cross-node collective is being modelled away."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
-        MoEDispatch._wideep_fallback_logged.clear()
+        db = self._db_with_ll_data()
+        assert self._query(db, node_num=4 / 8).source == "silicon"
+
+    def test_sub_node_fallback_keeps_its_own_warning(self, monkeypatch, caplog):
+        """The sub-node message stays distinct from the multi-node one."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
         with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
             self._query(db, node_num=4 / 8)
-            self._query(db, node_num=2 / 8)
-        warnings = [r for r in caplog.records if "sub-node" in r.getMessage()]
-        assert len(warnings) == 1
+            self._query(db, node_num=4 / 8)
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "sub-node" in message
+        assert "EXTRAPOLATING" not in message
 
     def test_node_num_1_no_fallback(self, monkeypatch):
         """node_num=1 uses its own data directly."""
@@ -565,6 +634,7 @@ class TestWideEpDeepEpLlNodeNumFallback:
         db = self._db_with_ll_data()
         res = self._query(db, node_num=1)
         assert float(res) == pytest.approx(0.1)
+        assert res.source == "silicon"
 
     def test_node_num_1_missing_shape_raises(self, monkeypatch):
         """node_num=1 with no rows for the shape -> not-available (as before)."""
@@ -576,7 +646,11 @@ class TestWideEpDeepEpLlNodeNumFallback:
             self._query(db, node_num=1, num_experts=999)  # experts=999 absent at every node_num
 
     def test_neither_present_raises(self, monkeypatch):
-        """Neither the exact node_num nor node_num=1 has the shape -> not-available (as before)."""
+        """No rows at the requested scale AND none at node_num=1 -> still not-available.
+
+        Marking an estimate requires something to estimate from; with nothing to
+        substitute, the config is dropped from the sweep as it always was.
+        """
         from aiconfigurator.sdk.errors import PerfDataNotAvailableError
 
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
@@ -584,16 +658,15 @@ class TestWideEpDeepEpLlNodeNumFallback:
         with pytest.raises(PerfDataNotAvailableError):
             self._query(db, node_num=4, num_experts=999)  # experts=999 absent at every node_num
 
-    def test_normal_table_shares_the_fail_closed_path(self, monkeypatch):
+    def test_normal_table_shares_the_same_path(self, monkeypatch, caplog):
         """The normal-mode table resolves node_num through the same helper, so it
-        fails closed on a multi-node miss too."""
-        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
-
+        substitutes, warns and marks identically -- with its own measured ratios,
+        which diverge sharply from ll's at node 8 (6.2x vs 3.5x)."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = MagicMock()
         db._wideep_deepep_normal_data = {1: {7168: {8: {256: {20: self._leaf(100.0)}}}}}
         db._default_database_mode = common.DatabaseMode.SILICON
-        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat)
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat, energy=energy, source="silicon")
 
         def query(node_num):
             return MoEDispatch._query_wideep_deepep_normal_table(
@@ -607,9 +680,16 @@ class TestWideEpDeepEpLlNodeNumFallback:
                 database_mode=common.DatabaseMode.SILICON,
             )
 
-        with pytest.raises(PerfDataNotAvailableError, match="wideep_deepep_normal"):
-            query(node_num=4)
-        assert float(query(node_num=1)) == pytest.approx(0.1)
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            estimated = query(node_num=8)
+        assert float(estimated) == pytest.approx(0.1)
+        assert estimated.source == "estimated"
+        assert "wideep_deepep_normal" in caplog.records[0].getMessage()
+        assert "6.2x" in caplog.records[0].getMessage()
+
+        exact = query(node_num=1)
+        assert float(exact) == pytest.approx(0.1)
+        assert exact.source == "silicon"
 
 
 if __name__ == "__main__":

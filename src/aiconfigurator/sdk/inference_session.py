@@ -497,8 +497,16 @@ class DisaggInferenceSession:
                     )
                     if not summary.check_oom() and not summary.check_kv_cache_oom():
                         all_configs_oom = False
+                        candidate_df = summary.get_summary_df().copy()
+                        # Out-of-band column (leading underscore, like
+                        # _per_ops_source): carries op provenance forward without
+                        # touching the declared ColumnsStatic schema. Disagg rows
+                        # are composed arithmetically from these candidates and
+                        # have no summary of their own, so this is the only place
+                        # the flag can be captured for them.
+                        candidate_df[common.ESTIMATED_COLUMN] = summary.has_estimated_source()
                         summary_df = pd.concat(
-                            [summary_df, summary.get_summary_df()],
+                            [summary_df, candidate_df],
                             axis=0,
                             ignore_index=True,
                         )

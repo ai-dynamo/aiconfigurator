@@ -23,6 +23,7 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
+from aiconfigurator.sdk.common import ESTIMATED_COLUMN
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
@@ -40,6 +41,48 @@ def _apply_inclusive_tpot(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df["tpot"] = (df["ttft"] + df["tpot"] * (df["osl"] - 1)) / df["osl"]
     return df
+
+
+# Marks a ranked row whose numbers rest on extrapolated data. Kept to one
+# ASCII character so it cannot disturb the PrettyTable column widths or the
+# plain-output tests.
+ESTIMATE_MARK = "*"
+
+ESTIMATE_FOOTNOTE = (
+    f"  {ESTIMATE_MARK} Estimated: this row's latency includes at least one op modeled from "
+    "measurements at a\n    different scale rather than measured directly -- today that is the WideEP "
+    "DeepEP\n    multi-node dispatch/combine cost, extrapolated from single-node data. It is "
+    "optimistic.\n    See the wideep_deepep warnings in the log for the measured error at each node "
+    "scale, and\n    per_ops_source.json in each top-N directory for which ops are affected."
+)
+
+
+def _row_is_estimated(row) -> bool:
+    """Whether a result row rests on any op tagged ``"estimated"``.
+
+    Reads the out-of-band ``common.ESTIMATED_COLUMN`` the sweep attaches to
+    every agg and disagg row, which the summary derives from
+    ``PerformanceResult.source``. Falls back to scanning ``_per_ops_source``
+    for rows produced by callers that predate the flag; absent both, a row is
+    reported as not estimated, since claiming otherwise on no evidence would
+    label measured configurations as guesses.
+    """
+    if not hasattr(row, "get"):
+        return False
+    flag = row.get(ESTIMATED_COLUMN)
+    if flag is not None and not pd.isna(flag):  # NaN where a ragged concat left a hole
+        return bool(flag)
+
+    sources = row.get("_per_ops_source")
+    if not isinstance(sources, dict):
+        return False
+
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            return any(walk(v) for v in node.values())
+        return node == "estimated"
+
+    return walk(sources)
 
 
 def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold: float = 0.9) -> bool:
@@ -129,6 +172,7 @@ def _plot_worker_setup_table(
     ranking_label = "total_gpus_needed" if "replicas_needed" in top_configs.columns else "tokens/s/gpu"
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
+    any_estimated = False
 
     # Check if it is disagg config by checking for prefill/decode specific columns
     is_disagg = "(p)tp" in top_configs.columns
@@ -206,8 +250,10 @@ def _plot_worker_setup_table(
                 f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
                 f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
             )
+            estimated = _row_is_estimated(row)
+            any_estimated |= estimated
             row_data = [
-                i + 1,
+                f"{i + 1}{ESTIMATE_MARK}" if estimated else f"{i + 1}",
                 row["backend"],
             ]
             row_data.extend(
@@ -275,8 +321,10 @@ def _plot_worker_setup_table(
                 gpus_worker = (
                     f"{row['pp'] * row['tp']} (={_cli_underline(str(row['tp']))}x{_cli_underline(str(row['pp']))})"
                 )
+            estimated = _row_is_estimated(row)
+            any_estimated |= estimated
             row_data = [
-                i + 1,
+                f"{i + 1}{ESTIMATE_MARK}" if estimated else f"{i + 1}",
                 row["backend"],
             ]
             row_data.extend(
@@ -300,6 +348,8 @@ def _plot_worker_setup_table(
             table.add_row(row_data)
 
     buf.append(table.get_string())
+    if any_estimated:
+        buf.append(ESTIMATE_FOOTNOTE)
     return "\n".join(buf)
 
 
@@ -423,6 +473,12 @@ def log_final_summary(
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
         summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
+        if _row_is_estimated(best_conf_details):
+            # The headline numbers are the ones most likely to be read in
+            # isolation, so the caveat belongs next to them and not only under
+            # the table.
+            summary_box.append(f"    - {ESTIMATE_MARK} ESTIMATED: these numbers include extrapolated WideEP DeepEP")
+            summary_box.append("        multi-node cost, not direct measurements, and are optimistic.")
     else:
         summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
@@ -673,7 +729,9 @@ def save_results(
 
             # 1. Save best config dataframe (display copy carries inclusive TPOT if flag set)
             #    Strip the object-typed _per_ops_source column before CSV write; it is
-            #    saved as one per_ops_source.json per topN/ subdir below.
+            #    saved as one per_ops_source.json per topN/ subdir below. The boolean
+            #    _estimated column is kept: a CSV read outside the CLI is exactly the
+            #    place the table's asterisk would otherwise be lost.
             best_config_df = display_best_configs.get(exp_name)  # top n configs
             best_config_per_ops_source: list[dict | None] = []
             if best_config_df is not None:

@@ -59,6 +59,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_MEASURED_NODE_SCALING_SOURCE = "h100_sxm/h200_sxm sglang 0.5.6.post2"
+
+# Measured node-N / node-1 ratios of DeepEP dispatch+combine cost, per table.
+# Medians over every (hidden, topk, experts, tokens) shape that the
+# ``_MEASURED_NODE_SCALING_SOURCE`` campaign collected at both scales -- the
+# only campaign in the tree that measured more than one node scale, and the
+# two systems agree to the digit. n=13 shapes for ll, n=23 for normal.
+#
+# These describe how wrong the node_num=1 substitution is; they are quoted in
+# the warning and NOWHERE ELSE. Nothing scales a latency by them. Turning them
+# into a correction factor would be a node-scaling model, which needs its own
+# validation (and would have to explain why normal degrades to 6.2x at node 8
+# while ll only reaches 3.5x) -- see the TODO in
+# ``_resolve_wideep_deepep_node_data``.
+_MEASURED_NODE_SCALING: dict[str, dict[int, float]] = {
+    "ll": {2: 2.2, 4: 3.1, 8: 3.5},
+    "normal": {2: 1.8, 4: 3.1, 8: 6.2},
+}
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family."""
     return (
@@ -881,9 +901,10 @@ class MoEDispatch(Operation):
 
     _normal_data_cache: ClassVar[dict] = {}
     _ll_data_cache: ClassVar[dict] = {}
-    # Tables whose sub-node -> node_num=1 substitution has already been logged
-    # this process. The fallback fires once per swept parallel config (thousands
-    # of times), so we emit the INFO only once per table. Cleared in clear_cache.
+    # (table, node_num) pairs whose node_num=1 substitution has already been
+    # logged this process. The fallback fires once per swept parallel config
+    # (thousands of times), so warn only once per distinct node scale. Cleared
+    # in clear_cache.
     _wideep_fallback_logged: ClassVar[set] = set()
 
     def __init__(
@@ -998,67 +1019,121 @@ class MoEDispatch(Operation):
         hidden_size: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, dict]:
+    ) -> tuple[int, dict, bool]:
         """Resolve DeepEP dispatch/combine rows for ``(node_num, hidden, topk, experts)``.
 
-        A genuinely multi-node request (``node_num > 1``) is served ONLY by
-        measurements at that node scale. When they are absent this raises
-        rather than substituting single-node rows: node_num=1 is an
-        NVLink-only all-to-all that ignores the cross-node RDMA path, and on
-        the H100/H200 campaign that collected both scales the substitution
-        runs ~3x optimistic and worsens with token count. Because the
-        substituted cost is frozen in the EP-scale dimension it does not
-        merely shift absolute latency, it systematically flatters larger-EP
-        configs in the ranking — a plausible-looking wrong number is worse
-        than a clean miss, which callers already handle by dropping the
-        parallel config from the candidate pool.
+        Prefer measurements at the requested node scale. When a genuinely
+        multi-node request (``node_num > 1``) has none, fall back to the
+        node_num=1 rows for the SAME (hidden, topk, num_experts) and report
+        that the answer is extrapolated, so the caller can tag its
+        ``PerformanceResult`` as ``"estimated"``. Refusing instead would strip
+        WideEP from four of the six systems that carry DeepEP data at all:
+        every table in the tree has node_num=1 only, except h100/h200 at
+        0.5.6.post2, and gb200/gb300 hold 4 GPUs per node so they need
+        node_num=2 by 8 GPUs. That removes the capability rather than
+        protecting it. What must never happen is the substitution passing
+        itself off as a measurement, which is why it both warns per node scale
+        and marks the result.
+
+        The extrapolation is optimistic, not merely noisy: node_num=1 is an
+        NVLink-only all-to-all with no cross-node RDMA leg. See
+        ``_MEASURED_NODE_SCALING`` for how far off, measured.
 
         Sub-node scales (``node_num < 1``, produced by ``MoEDispatch.query``
         as ``num_gpus / num_gpus_per_node`` whenever a config uses fewer GPUs
-        than one node holds) still resolve against the node_num=1 rows. That
-        substitution stays intra-node in both directions — no cross-node
-        collective is being modelled away — and it is the only representation
-        those configs have.
+        than one node holds) also resolve against the node_num=1 rows, but
+        are NOT flagged: that substitution stays intra-node in both
+        directions -- no cross-node collective is being modelled away -- and
+        it is the only representation those configs have.
 
         Read via .get() chains so a miss does not auto-vivify nested entries.
-        TODO(perf enhancement): true multi-node coverage, either by collecting
-        it (test_internode) or by fitting a node-scaling extrapolation model
-        validated against the H100/H200 node 2/4/8 measurements.
+        TODO(perf enhancement): replace the flat reuse with true multi-node
+        coverage, either by collecting it (test_internode) or by fitting a
+        node-scaling model against the h100/h200 node 2/4/8 measurements.
 
-        Returns ``(lookup_node, node_data)``. Raises
-        ``PerfDataNotAvailableError`` when the requested scale has no rows and
-        no in-node substitution applies.
+        Returns ``(lookup_node, node_data, extrapolated)``. Raises
+        ``PerfDataNotAvailableError`` when neither the requested scale nor the
+        node_num=1 rows have this shape.
         """
         lookup_node = node_num
+        extrapolated = False
         node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
-        if not node_data and node_num > 1:
-            raise PerfDataNotAvailableError(
-                f"wideep_deepep_{table} data missing for node_num={node_num} "
-                f"hidden={hidden_size} topk={topk} experts={num_experts}. "
-                "Multi-node requests are not served from node_num=1 single-node "
-                "measurements -- that substitution ignores the cross-node all-to-all "
-                "and is ~3x optimistic. Collect data at this node scale."
-            )
         if not node_data and node_num != 1:
             fallback = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
             if fallback:
-                if table not in cls._wideep_fallback_logged:
-                    cls._wideep_fallback_logged.add(table)
-                    logger.warning(
-                        "wideep_deepep_%s: sub-node (node_num<1) configs reuse node_num=1 "
-                        "single-node data (APPROXIMATION: a partial node's all-to-all is "
-                        "smaller than a full one, so this over-estimates latency). "
-                        "Logged once per run.",
-                        table,
-                    )
+                cls._warn_wideep_node_substitution(table, node_num)
                 lookup_node = 1
+                extrapolated = node_num > 1
                 node_data = fallback
         if not node_data:
             raise PerfDataNotAvailableError(
                 f"wideep_deepep_{table} data missing for node_num={node_num} "
                 f"(and node_num=1 fallback) hidden={hidden_size} topk={topk} experts={num_experts}"
             )
-        return lookup_node, node_data
+        return lookup_node, node_data, extrapolated
+
+    @classmethod
+    def _warn_wideep_node_substitution(cls, table: str, node_num: float) -> None:
+        """Warn once per (table, node scale) that node_num=1 rows are standing in.
+
+        Keyed on the scale, not just the table, because the two cases differ in
+        kind and the multi-node case differs in degree: a sweep that touches
+        node_num 2, 4 and 8 gets three lines quantifying three different
+        errors, while still collapsing the thousands of repeat queries at each
+        scale into one.
+        """
+        if (table, node_num) in cls._wideep_fallback_logged:
+            return
+        cls._wideep_fallback_logged.add((table, node_num))
+        if node_num < 1:
+            logger.warning(
+                "wideep_deepep_%s: sub-node (node_num=%s) configs reuse node_num=1 single-node "
+                "data. This stays within one node, so it is an approximation of scale, not of "
+                "topology; it over-estimates, since a partial node's all-to-all is smaller than "
+                "a full one. Logged once per node scale.",
+                table,
+                node_num,
+            )
+            return
+        logger.warning(
+            "wideep_deepep_%s: node_num=%s has no measured data, so this run is EXTRAPOLATING "
+            "from node_num=1 single-node measurements, which carry no cross-node RDMA leg. "
+            "Affected results are marked source='estimated' and flagged in the config table. "
+            "Measured reference: %s. Logged once per node scale.",
+            table,
+            node_num,
+            cls._measured_node_scaling_note(table, node_num),
+        )
+
+    @staticmethod
+    def _measured_node_scaling_note(table: str, node_num: float) -> str:
+        """How wrong the node_num=1 substitution is, in measured terms only.
+
+        Quotes ``_MEASURED_NODE_SCALING`` at the requested scale, or at the
+        largest measured scale as a floor when the request is beyond it. Never
+        interpolates between measured scales and never states a figure for a
+        scale nobody measured -- the whole point is to avoid passing a modelled
+        number off as knowledge.
+        """
+        measured = _MEASURED_NODE_SCALING.get(table)
+        if not measured:
+            return "none available for this table"
+        # Float keys hash equal to their int counterparts, so node_num=8.0 hits
+        # the 8 entry -- MoEDispatch.query always produces floats.
+        exact = measured.get(node_num)
+        if exact:
+            return (
+                f"real node_num={node_num} dispatch+combine ran {exact}x the node_num=1 cost "
+                f"(median over shapes, {_MEASURED_NODE_SCALING_SOURCE}), so expect this estimate to be "
+                f"roughly that factor optimistic"
+            )
+        largest = max(measured)
+        return (
+            f"no campaign measured node_num={node_num}; at the largest measured scale "
+            f"(node_num={largest}) real dispatch+combine ran {measured[largest]}x the node_num=1 cost "
+            f"(median over shapes, {_MEASURED_NODE_SCALING_SOURCE}), and the ratio grew monotonically "
+            f"with node count, so treat that as a lower bound on how optimistic this estimate is"
+        )
 
     @classmethod
     def _query_wideep_deepep_ll_table(
@@ -1091,7 +1166,7 @@ class MoEDispatch(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
-            _lookup_node, data = cls._resolve_wideep_deepep_node_data(
+            _lookup_node, data, extrapolated = cls._resolve_wideep_deepep_node_data(
                 database._wideep_deepep_ll_data,
                 table="ll",
                 node_num=node_num,
@@ -1109,7 +1184,23 @@ class MoEDispatch(Operation):
             result = perf_interp.query(config, data, num_tokens)
             lat = perf_interp.get_value(result, "latency")
             energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_pr(database, lat / 1000.0, energy / 1000.0, extrapolated=extrapolated)
+
+    @staticmethod
+    def _wideep_pr(database: PerfDatabase, latency: float, energy: float, *, extrapolated: bool) -> PerformanceResult:
+        """Tag a DeepEP table result with the provenance the caller can act on.
+
+        ``"estimated"`` is the existing ``PerformanceResult`` source for a value
+        modeled from measured components rather than measured directly, and it
+        is what a node_num=1 -> multi-node substitution is. Riding the existing
+        tag means the mark reaches the user through machinery that already
+        exists: it survives arithmetic (mismatched sources merge to ``"mixed"``),
+        ``base_backend`` records it per op into the phase source dicts, and it
+        lands in ``per_ops_source.json`` and the config table's estimate flag.
+        """
+        if not extrapolated:
+            return database._interp_pr(latency, energy=energy)
+        return PerformanceResult(latency, energy=energy, source="estimated")
 
     @classmethod
     def _query_wideep_deepep_normal_table(
@@ -1145,7 +1236,7 @@ class MoEDispatch(Operation):
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
             )
         else:
-            lookup_node, node_data = cls._resolve_wideep_deepep_node_data(
+            lookup_node, node_data, extrapolated = cls._resolve_wideep_deepep_node_data(
                 database._wideep_deepep_normal_data,
                 table="normal",
                 node_num=node_num,
@@ -1182,7 +1273,7 @@ class MoEDispatch(Operation):
                 result = perf_interp.query(config, data, sms, num_tokens)
                 lat = perf_interp.get_value(result, "latency")
                 energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_pr(database, lat / 1000.0, energy / 1000.0, extrapolated=extrapolated)
 
     # ------------------------------------------------------------------
     # Op contract — legacy body lifted verbatim. Heavy branching across

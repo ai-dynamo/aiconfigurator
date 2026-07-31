@@ -299,6 +299,7 @@ def _sweep_one_parallel_agg(
 
     results_dict_list: list[dict] = []
     results_per_ops_source: list[dict | None] = []
+    results_estimated: list[bool] = []
     capped_b: list[int] = []
     saw_model_fit = False
     saw_memory_fit = False
@@ -353,12 +354,14 @@ def _sweep_one_parallel_agg(
             if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
+                results_estimated.append(summary.has_estimated_source())
 
     if not results_dict_list:
         return pd.DataFrame(columns=common.ColumnsAgg), saw_model_fit, saw_memory_fit
 
     df = pd.DataFrame(results_dict_list, columns=common.ColumnsAgg).round(3)
     df["_per_ops_source"] = results_per_ops_source
+    df[common.ESTIMATED_COLUMN] = results_estimated
     df = df.sort_values(by="seq/s", ascending=False).round(3)
     if top_k > 0:
         df = df.head(top_k)
@@ -613,7 +616,12 @@ def _get_disagg_worker_candidates(
                 )
                 if not summary.check_oom() and not summary.check_kv_cache_oom():
                     all_configs_oom = False
-                    result_rows.append(summary.get_summary_df())
+                    candidate_df = summary.get_summary_df().copy()
+                    # See ESTIMATED_COLUMN: out-of-band provenance that the
+                    # rate-matched disagg rows below OR together, since those
+                    # rows are composed arithmetically and own no summary.
+                    candidate_df[common.ESTIMATED_COLUMN] = summary.has_estimated_source()
+                    result_rows.append(candidate_df)
                 else:
                     # Larger b will always OOM. check_kv_cache_oom covers the
                     # fraction-based budget (e.g. vLLM only manages
@@ -738,6 +746,10 @@ def _find_best_disagg_under_constraint(
                     prefill_degradation=prefill_degradation,
                     decode_degradation=decode_degradation,
                 )
+                # A deployment is only as measured as its least measured half.
+                disagg_dict[common.ESTIMATED_COLUMN] = bool(
+                    p_worker.get(common.ESTIMATED_COLUMN) or d_worker.get(common.ESTIMATED_COLUMN)
+                )
                 category_results.append(disagg_dict)
         if category_results:
             best = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
@@ -749,7 +761,10 @@ def _find_best_disagg_under_constraint(
         logger.debug("sweep_disagg: no disagg summary after constraints")
         return None
 
+    # columns=ColumnsDisagg drops anything outside the declared schema, so the
+    # out-of-band flag is reattached rather than passed through.
     df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
+    df[common.ESTIMATED_COLUMN] = [bool(r.get(common.ESTIMATED_COLUMN)) for r in all_category_results]
     df = df.sort_values(by=["tokens/s/gpu"], ascending=[False]).head(return_top_k).reset_index(drop=True)
     return df
 
