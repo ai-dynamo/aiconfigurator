@@ -5,7 +5,9 @@ schema_version: 1
 provenance: legacy
 runtime:
   framework: sglang
-  version: 0.5.10
+  version: 0.5.12
 tables:
-  custom_allreduce_perf:
+  wideep_deepep_ll_perf:
+    status: complete
+  wideep_deepep_normal_perf:
     status: complete
