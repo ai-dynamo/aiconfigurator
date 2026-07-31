@@ -110,7 +110,9 @@ def test_disagg_large_ep_sets_larger_replica_budget():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("enable_wideep", True),
+        # enable_wideep is no longer in this list: the deprecated flag is
+        # accepted + warned + ignored instead of raising (downgrade pinned by
+        # test_wideep_deprecation.test_disagg_top_level_enable_wideep_warns_instead_of_raising).
         ("enable_chunked_prefill", True),
         ("enable_eplb", True),
         ("gemm_quant_mode", common.GEMMQuantMode.fp8),
@@ -1033,7 +1035,8 @@ def test_enable_wideep_normalizes_moe_backend():
     RESOLVED task (v1 __init__ parity, and the effective-config artifact the
     gate compares) -- while being inert in modeling: the per-tuple ModelConfig
     never carries deepep_moe, so a fused tuple cannot inherit the wideEP
-    compute tables. Task 9 owns the user-facing deprecation warnings."""
+    compute tables. The user-facing deprecation warnings are pinned in
+    test_wideep_deprecation.py."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",

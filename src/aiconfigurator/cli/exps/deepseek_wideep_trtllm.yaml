@@ -22,7 +22,6 @@ gb200_wideep_agg:
   nextn_accepted: 0.85
   model_path: nvidia/DeepSeek-V3.1-NVFP4
   system_name: gb200
-  enable_wideep: true
 gb200_wideep_eplb_agg:
   isl: 4000
   serving_mode: agg
@@ -34,7 +33,6 @@ gb200_wideep_eplb_agg:
   nextn_accepted: 0.85
   model_path: deepseek-ai/DeepSeek-V3
   system_name: gb200
-  enable_wideep: true
   enable_eplb: true
   gemm_quant_mode: nvfp4
   moe_quant_mode: nvfp4
@@ -50,7 +48,6 @@ gb200_wideep_eplb_slots288_agg:
   nextn_accepted: 0.85
   model_path: deepseek-ai/DeepSeek-V3
   system_name: gb200
-  enable_wideep: true
   enable_eplb: true
   gemm_quant_mode: nvfp4
   moe_quant_mode: nvfp4
@@ -64,9 +61,7 @@ gb200_wideep_disagg:
   nextn: 1
   nextn_accepted: 0.85
   prefill_model_path: nvidia/DeepSeek-V3.1-NVFP4
-  prefill_enable_wideep: true
   decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
-  decode_enable_wideep: true
   prefill_system_name: gb200
   decode_system_name: gb200
   max_gpu_per_replica: 512
@@ -80,10 +75,8 @@ gb200_wideep_eplb_disagg:
   nextn: 1
   nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
-  prefill_enable_wideep: true
   prefill_enable_eplb: true
   decode_model_path: deepseek-ai/DeepSeek-V3
-  decode_enable_wideep: true
   decode_enable_eplb: true
   prefill_system_name: gb200
   decode_system_name: gb200
@@ -103,10 +96,8 @@ gb200_wideep_eplb_slots288_disagg:
   nextn: 1
   nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
-  prefill_enable_wideep: true
   prefill_enable_eplb: true
   decode_model_path: deepseek-ai/DeepSeek-V3
-  decode_enable_wideep: true
   decode_enable_eplb: true
   prefill_system_name: gb200
   decode_system_name: gb200

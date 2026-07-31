@@ -881,7 +881,9 @@ def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
             comm_quant_mode=None,
             moe_backend=moe_backend,
             attention_backend=None,
-            enable_wideep=False,
+            # enable_wideep dropped from the fixture: the deprecated flag left
+            # the engine identity (constant False; moe_comm_backend +
+            # num_gpus_per_node carry the regime).
             enable_eplb=False,
             wideep_num_slots=None,
             cp_style=None,

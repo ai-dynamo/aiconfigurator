@@ -913,7 +913,10 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "sms": getattr(model_config, "sms", None),
                         "moe_backend": getattr(model_config, "moe_backend", None),
                         "attention_backend": getattr(model_config, "attention_backend", None),
-                        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
+                        # enable_wideep is gone from the identity: the deprecated
+                        # flag is constant False on every Task-built ModelConfig;
+                        # moe_comm_backend + num_gpus_per_node below carry the
+                        # large-EP regime.
                         "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
                         "wideep_num_slots": getattr(model_config, "wideep_num_slots", None),
                         # Large EP: the per-phase comm backend selects a whole
