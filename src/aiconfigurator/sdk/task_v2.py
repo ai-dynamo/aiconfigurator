@@ -14,9 +14,10 @@ Design:
   search candidates.  After construction, every active field has a
   concrete value.
 - Strict prefix discipline: in disagg mode, top-level worker-spec fields
-  (model_path, system_name, backend_name, quant_*, enable_wideep, ...)
-  are not used and setting them raises ValueError.  Use prefill_* /
-  decode_* fields explicitly.
+  (model_path, system_name, backend_name, quant_*, ...) are not used and
+  setting them raises ValueError.  Use prefill_* / decode_* fields
+  explicitly.  (Deprecated exception: enable_wideep only warns — it is
+  ignored everywhere, see _warn_large_ep_flag.)
 - ``from_yaml`` is a thin pass-through: YAML keys must equal field names.
 - ``sweep_agg_kwargs()`` / ``sweep_disagg_kwargs()`` build the exact
   kwargs needed by :mod:`aiconfigurator.sdk.sweep` — no caller
@@ -70,6 +71,32 @@ _LARGE_EP_EMPTY_COVERAGE_LOGGED: set[tuple[str, str, str, str | None]] = set()
 # Same dedupe key, for the "generation covered but context is not" warning
 # (see Task._resolve_moe_comm_backend).
 _LARGE_EP_ASYMMETRIC_COVERAGE_WARNED: set[tuple[str, str, str, str | None]] = set()
+
+# ---------------------------------------------------------------------------
+# Deprecated large-EP flags: accepted, warned once per key per process, ignored
+# (large-EP participation is coverage-driven per tuple — see
+# _resolve_moe_comm_backend). The parsed VALUES are kept: the resolved task /
+# exp_config.yaml artifact still carries them, and enable_wideep still spells
+# moe_backend="deepep_moe" (_normalize_wideep_moe_backend), both deliberately
+# retained for artifact stability. Mirrors _warn_legacy_marker_once in
+# aiconfigurator_core.sdk.perf_database.
+# ---------------------------------------------------------------------------
+
+_DEPRECATED_LARGE_EP_KEYS = ("enable_wideep", "prefill_enable_wideep", "decode_enable_wideep")
+_LARGE_EP_DEPRECATION_MSG = (
+    "'%s' is deprecated and ignored: large-EP is explored automatically from data "
+    "coverage; restrict EP sizes with *_moe_ep_candidates."
+)
+_warned_large_ep_keys: set[str] = set()
+
+
+def _warn_large_ep_flag(key: str) -> None:
+    """One-time-per-key deprecation warning for the legacy large-EP flags."""
+    if key in _warned_large_ep_keys:
+        return
+    _warned_large_ep_keys.add(key)
+    warnings.warn(_LARGE_EP_DEPRECATION_MSG % key, DeprecationWarning, stacklevel=3)
+    logger.warning(_LARGE_EP_DEPRECATION_MSG, key)
 
 
 def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
@@ -579,6 +606,17 @@ class Task:
     # =====================================================================
 
     def __post_init__(self) -> None:
+        # Deprecation surface first, on the raw constructor values (both the
+        # Task(...) and from_yaml paths land here): a truthy legacy flag or an
+        # explicit user moe_backend="deepep_moe" warns once per key per
+        # process. Checked BEFORE _normalize_wideep_moe_backend so the
+        # retained enable_wideep -> deepep_moe normalization never triggers a
+        # second warning for a value the user did not write.
+        for _key in _DEPRECATED_LARGE_EP_KEYS:
+            if getattr(self, _key):
+                _warn_large_ep_flag(_key)
+        if self.moe_backend == "deepep_moe":
+            _warn_large_ep_flag("moe_backend=deepep_moe")
         self._check_prefix_discipline()
         # Validate the MTP pair BEFORE model-identity resolution: the latter is
         # skipped when no primary model path is set, and the check must not
@@ -667,9 +705,10 @@ class Task:
     def _check_prefix_discipline(self) -> None:
         """In disagg mode, top-level worker-spec fields must be at their defaults.
 
-        Setting top-level ``enable_wideep=True`` while serving_mode='disagg'
-        is the kind of silent override that the legacy V1/V2 paths swallowed
-        without warning.  Be explicit here.
+        Exception: top-level ``enable_wideep=True`` no longer raises. The flag
+        is deprecated-and-ignored everywhere (disagg normalization reads only
+        the prefill_/decode_ flags), so the leakage is harmless; the
+        deprecation warning already fired from ``__post_init__``.
         """
         if self.serving_mode != "disagg":
             return
@@ -678,9 +717,6 @@ class Task:
             leakage.append("model_path")
         if self.system_name:
             leakage.append("system_name")
-        # Don't flag enable_wideep=False (default), only True.
-        if self.enable_wideep:
-            leakage.append("enable_wideep")
         if self.enable_chunked_prefill:
             leakage.append("enable_chunked_prefill")
         if self.enable_eplb:

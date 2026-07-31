@@ -338,6 +338,9 @@ def _trtllm_scale(phase):
 
 
 def _trtllm_cfg(enable_eplb, wideep_num_slots):
+    # enable_wideep=True dropped: the deprecated flag is inert -- the large-EP
+    # graph is selected by moe_comm_backend (set below), which is what this
+    # oracle exercises.
     cfg = config.ModelConfig(
         tp_size=1,
         moe_tp_size=1,
@@ -345,7 +348,6 @@ def _trtllm_cfg(enable_eplb, wideep_num_slots):
         attention_dp_size=16,
         gemm_quant_mode=TRTLLM_GEMM_QUANT,
         moe_quant_mode=TRTLLM_MOE_QUANT,
-        enable_wideep=True,
         enable_eplb=enable_eplb,
         wideep_num_slots=wideep_num_slots,
     )
