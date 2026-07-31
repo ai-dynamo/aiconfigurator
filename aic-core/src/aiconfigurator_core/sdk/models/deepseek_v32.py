@@ -12,6 +12,7 @@ from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_b
 from aiconfigurator_core.sdk.models.helpers import (
     attention_modules_excluded_from_quant,
     attention_projection_exclusions,
+    large_ep_gpus_per_node,
     mtp_scale_factor,
     power_law_distribution,
     quant_exclude_patterns,
@@ -218,7 +219,7 @@ class DeepSeekV32Model(BaseModel):
             inference_phase=phase,
             model_family=self.model_family,
             attn_cp_size=self.config.cp_size,
-            gpus_per_node=self.config.num_gpus_per_node,
+            gpus_per_node=self._gpus_per_node,
             shared_gemm_quant_mode=shared_gemm_quant_mode,
         )
 
@@ -228,6 +229,9 @@ class DeepSeekV32Model(BaseModel):
         self._backend_name = backend_name
         # Large EP: see ``ModelConfig.moe_comm_backend`` (enumerator-owned).
         self._is_large_ep = bool(self.config.moe_comm_backend)
+        # Node width is a hardware fact with no default: an unset value would
+        # silently mis-price cross-node all-to-all (see large_ep_gpus_per_node).
+        self._gpus_per_node = large_ep_gpus_per_node(self.config) if self._is_large_ep else 0
 
         assert (
             self.config.tp_size * self.config.attention_dp_size * self.config.cp_size

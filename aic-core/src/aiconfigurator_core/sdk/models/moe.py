@@ -9,7 +9,11 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor, power_law_distribution
+from aiconfigurator_core.sdk.models.helpers import (
+    large_ep_gpus_per_node,
+    mtp_scale_factor,
+    power_law_distribution,
+)
 from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,9 @@ class MOEModel(BaseModel):
         # fused dispatch/MoE/dispatch one. No flag selects it -- see
         # ``ModelConfig.moe_comm_backend``.
         self._is_large_ep = bool(self.config.moe_comm_backend)
+        # Node width is a hardware fact with no default: an unset value would
+        # silently mis-price cross-node all-to-all (see large_ep_gpus_per_node).
+        self._gpus_per_node = large_ep_gpus_per_node(self.config) if self._is_large_ep else 0
 
         # MTP scale factor: throughput boost / compute overhead
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
@@ -211,7 +218,7 @@ class MOEModel(BaseModel):
                 inference_phase="context",
                 model_family=self.model_family,
                 attn_cp_size=cp,
-                gpus_per_node=self.config.num_gpus_per_node,
+                gpus_per_node=self._gpus_per_node,
             )
         )
 
@@ -261,7 +268,7 @@ class MOEModel(BaseModel):
                 inference_phase="generation",
                 model_family=self.model_family,
                 attn_cp_size=cp,
-                gpus_per_node=self.config.num_gpus_per_node,
+                gpus_per_node=self._gpus_per_node,
             )
         )
         # logits gemm

@@ -281,7 +281,7 @@ def _default_moe_block_ops(
     # form scales the intermediate size by ``num_shared_experts``.
     if shape.num_shared_experts > 0:
         shared_inter_size = shape.num_shared_experts * shape.moe_inter_size
-        shared_quant_mode = shared_gemm_quant_mode or cfg.gemm_quant_mode
+        shared_quant_mode = cfg.gemm_quant_mode if shared_gemm_quant_mode is None else shared_gemm_quant_mode
         block_ops.extend(
             [
                 ops.GEMM(
@@ -425,7 +425,7 @@ def _large_ep_shared_expert_ops(
     if shape.num_shared_experts == 0:
         return []
     shared_inter_size = shape.num_shared_experts * shape.moe_inter_size
-    shared_quant_mode = shared_gemm_quant_mode or cfg.gemm_quant_mode
+    shared_quant_mode = cfg.gemm_quant_mode if shared_gemm_quant_mode is None else shared_gemm_quant_mode
     if backend_name == "trtllm":
         names = (f"{prefix}_shared_gate_up_gemm", f"{prefix}_shared_act_gate", f"{prefix}_shared_ffn2_gemm")
         token_kwargs = {}

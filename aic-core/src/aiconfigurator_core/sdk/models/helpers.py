@@ -148,6 +148,26 @@ def power_law_distribution(base: str, alpha: float, *, eplb_suffix: bool = False
     return f"{base}_{alpha}_eplb" if eplb_suffix else f"{base}_{alpha}"
 
 
+def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
+    """Node width for a large-EP config; raises when the enumerator omitted it.
+
+    The comm node span (``nodes_for(moe_ep * moe_tp, gpus_per_node)``) is a
+    hardware fact that the model classes have no other channel to — the legacy
+    ops read it from ``database.system_spec["node"]["num_gpus_per_node"]`` at
+    query time, while the large-EP ops take ``node_num`` at construction (the
+    PR 1 op contract). A default would therefore be silently wrong rather than
+    merely approximate: on a GB200 NVL72 (4 GPUs/node) an EP32 decode would be
+    priced as a 4-node cross-rack all-to-all instead of an intra-node one. Only
+    large-EP construction calls this; fused configs never need the value.
+
+    Raises:
+        ValueError: If ``num_gpus_per_node`` is unset.
+    """
+    if model_config.num_gpus_per_node is None:
+        raise ValueError("moe_comm_backend is set but num_gpus_per_node is not — the enumerator must set both")
+    return model_config.num_gpus_per_node
+
+
 def validate_trtllm_large_ep(
     *,
     attention_dp_size: int,

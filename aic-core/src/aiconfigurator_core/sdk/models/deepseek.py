@@ -11,6 +11,7 @@ from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
 from aiconfigurator_core.sdk.models.helpers import (
     attention_projection_exclusions,
+    large_ep_gpus_per_node,
     mtp_scale_factor,
     power_law_distribution,
     validate_trtllm_large_ep,
@@ -109,7 +110,7 @@ class DeepSeekModel(BaseModel):
             inference_phase=phase,
             model_family=self.model_family,
             attn_cp_size=self.config.cp_size,
-            gpus_per_node=self.config.num_gpus_per_node,
+            gpus_per_node=self._gpus_per_node,
         )
 
     def __init__(
@@ -136,6 +137,9 @@ class DeepSeekModel(BaseModel):
         # in its deepep attention stack. No user flag selects it -- see
         # ``ModelConfig.moe_comm_backend``.
         self._is_large_ep = bool(self.config.moe_comm_backend)
+        # Node width is a hardware fact with no default: an unset value would
+        # silently mis-price cross-node all-to-all (see large_ep_gpus_per_node).
+        self._gpus_per_node = large_ep_gpus_per_node(self.config) if self._is_large_ep else 0
 
         # make sure the paralel width is same (cp is an independent attention
         # dimension that also contributes to the width the MoE must match)
