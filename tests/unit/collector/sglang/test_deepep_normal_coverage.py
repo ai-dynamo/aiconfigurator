@@ -16,10 +16,15 @@ import pytest
 
 from collector.wideep.sglang.collect_deepep_normal import (
     DEEPEP_NORMAL_DEFAULT_SMS,
+    DEEPEP_NORMAL_MAX_HIDDEN,
+    DEEPEP_NORMAL_MAX_TOPK,
+    DEEPEP_NORMAL_TMA_BYTES_PER_WARP,
     DEEPEP_NORMAL_TOKENS,
+    _excluded_shapes,
     _sms_list,
     _tokens_list,
     _verify_axis_coverage,
+    get_deepep_normal_test_cases,
 )
 
 _FIELDNAMES = (
@@ -161,3 +166,56 @@ class TestVerifyAxisCoverage:
         _write_perf_csv(path, [])
         with pytest.raises(RuntimeError, match=r"wrote no data rows"):
             _verify_axis_coverage(path, _SMS, _TOKENS)
+
+
+@pytest.mark.unit
+class TestHiddenCeiling:
+    def test_ceiling_is_derived_from_the_kernel_constant(self):
+        # intranode.cu asserts half_hidden_bytes + sizeof(uint64_t) <=
+        # kNumTMABytesPerWarp. For a 2-byte payload half_hidden_bytes == hidden, so
+        # the condition is exactly hidden + 8 <= kNumTMABytesPerWarp.
+        assert DEEPEP_NORMAL_TMA_BYTES_PER_WARP == 8192
+        assert DEEPEP_NORMAL_MAX_HIDDEN == 8184
+
+    @pytest.mark.parametrize("hidden", [2048, 4096, 6144, 7168, 8064])
+    def test_measured_passing_hidden_sizes_are_admitted(self, hidden):
+        assert hidden <= DEEPEP_NORMAL_MAX_HIDDEN
+
+    def test_hidden_8192_is_over_the_ceiling_by_the_mbarrier(self):
+        # The observed GB200 failure, and the margin: 8 bytes, the mbarrier itself.
+        assert DEEPEP_NORMAL_MAX_HIDDEN < 8192
+        assert 8192 - DEEPEP_NORMAL_MAX_HIDDEN == 8
+
+    def test_case_set_excludes_only_the_trapping_shape(self):
+        planned = {(c["hidden_size"], c["num_experts"], c["topk"]) for c in get_deepep_normal_test_cases()}
+        assert (8192, 512, 22) not in planned
+        # Same top-k, feasible hidden: proves the filter keys on hidden alone and
+        # normal mode still has no top-k cap in the range the model set uses.
+        assert (4096, 512, 22) in planned
+        assert all(hidden <= DEEPEP_NORMAL_MAX_HIDDEN for hidden, _, _ in planned)
+
+    def test_topk_stays_under_the_device_assert(self):
+        planned = get_deepep_normal_test_cases()
+        assert planned, "model configs should yield MoE shapes"
+        assert max(case["topk"] for case in planned) <= DEEPEP_NORMAL_MAX_TOPK
+
+    def test_exclusion_is_reported_with_a_reason(self):
+        # A shape that is planned nowhere is indistinguishable downstream from one
+        # that was forgotten, so the reason has to reach the campaign log.
+        reasons = dict(_excluded_shapes())
+        assert (8192, 512, 22) in reasons
+        assert "kNumTMABytesPerWarp" in reasons[(8192, 512, 22)]
+
+    def test_override_can_readmit_the_shape_for_retesting(self, monkeypatch):
+        monkeypatch.setenv("DEEPEP_NORMAL_MAX_HIDDEN", "16352")
+        import importlib
+
+        import collector.wideep.sglang.collect_deepep_normal as module
+
+        reloaded = importlib.reload(module)
+        try:
+            planned = {(c["hidden_size"], c["num_experts"], c["topk"]) for c in reloaded.get_deepep_normal_test_cases()}
+            assert (8192, 512, 22) in planned
+        finally:
+            monkeypatch.delenv("DEEPEP_NORMAL_MAX_HIDDEN")
+            importlib.reload(module)
