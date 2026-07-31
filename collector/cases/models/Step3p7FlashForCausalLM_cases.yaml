@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Step3p7FlashForCausalLM
+model_path: stepfun-ai/Step-3.7-Flash-FP8
+model_paths:
+  - stepfun-ai/Step-3.7-Flash-FP8
+  - stepfun-ai/Step-3.7-Flash
+include_base: true
+base_ops:
+  - gemm
+framework_specific_base_ops:
+  vllm:
+    - attention_context
+    - attention_generation
+description: >
+  StepFun Step-3.7-Flash hybrid plan: 1-full:3-SWA-512 GQA (64 Q / 8 KV, head_dim 128),
+  dense-first-3 then 288-expert top-8 MoE (inter 1280) + one shared expert (dim 1280).
+  Heals the 288-expert / inter-1280 MoE grouped-GEMM shape that AIC otherwise
+  interpolates (database-mode HYBRID) on h100_sxm.
+
+model_ops:
+  - gemm
+  - moe
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  vllm:
+    attention_context:
+      cases: all
+    attention_generation:
+      cases: all
+
+model_case_values:
+  attention:
+    - model_path: stepfun-ai/Step-3.7-Flash-FP8
+      model_aliases:
+        - stepfun-ai/Step-3.7-Flash
+      num_attention_heads: 64
+      num_key_value_heads: 8
+      head_dim: 128
+      window_sizes: [0, 512]
+      tensor_parallel_sizes: [1, 2, 4, 8]
+  moe:
+    - model_path: stepfun-ai/Step-3.7-Flash-FP8
+      model_aliases:
+        - stepfun-ai/Step-3.7-Flash
+      hidden_size: 4096
+      inter_size: 1280
+      topk: 8
+      num_experts: 288

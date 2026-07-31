@@ -6,6 +6,25 @@ provenance: legacy
 runtime:
   framework: vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0
+  image_digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
 tables:
   moe_perf:
     status: complete
+    # Base rows are legacy (provenance: legacy). This release APPENDS 2349
+    # freshly-measured Step-3.7-Flash MoE rows (288 experts, inter 1280, topk 8,
+    # hidden 4096) on NVIDIA H100 80GB HBM3 under vllm 0.24.0, healing the
+    # previously HYBRID-interpolated 288-expert / inter-1280 grouped-GEMM shape.
+    appended:
+      model: stepfun-ai/Step-3.7-Flash-FP8
+      collected_at: '2026-07-31'
+      rows: 2349
+      collector_hash: sha256:520930ea82b1d49b16a2eda39b08bc0b35378f1f001a281b0d91bc993af8b710
+      case_plan_hash: sha256:ba180b03dd3f08260c00379bac2db553399c3b53b76505faf0e19f80619c34c2
+      dtypes: [bfloat16, fp8, fp8_block]
+      # Honest caveats:
+      #  - clocks were UNLOCKED (shared SLURM, no sudo) -> slightly noisier than
+      #    a locked-clock collection.
+      #  - 12 fp8_block TP>=4 cases are a documented representability limit
+      #    (inter 1280 / TP not divisible by fp8 block_n=128 for TP>=4),
+      #    intentionally absent (not faked). bf16 + fp8-per-tensor cover all topologies.
