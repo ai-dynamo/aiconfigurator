@@ -466,17 +466,22 @@ def _large_ep_block_ops(
     - ``node_num = nodes_for(moe_ep * moe_tp, gpus_per_node)`` (A5): both
       legacy classes derive the comm node span from the whole MoE group,
       which coincides only under pp=1 configs.
-    - ``attention_tp_size=cfg.tp_size`` only for deepep backends (the legacy
-      sglang dispatch divides tokens by ``scale_num_tokens=tp``); the legacy
-      trtllm alltoall queried undivided tokens -> nvlink passes 1.
+    - ``attention_tp_size=cfg.tp_size`` only for deepep backends in CONTEXT:
+      the legacy dispatch sites pass ``scale_num_tokens=tp_size`` at the
+      context sites only (deepseek.py:1206-1227, models/moe.py context site);
+      every generation site uses the default divisor 1 (deepseek.py:
+      1320-1340, models/moe.py generation site). The legacy trtllm alltoall
+      queried undivided tokens -> nvlink passes 1 in both phases.
     - ``sms`` rides only ``deepep_ht`` (the legacy normal-mode table keys an
       SM budget; LL and nvlink rows carry none).
     - ``enable_eplb`` reaches EPMoE only for deepep backends: the sglang MoE
       query corrects prefill tokens by 0.8 under EPLB, while trtllm EPLB
       rides the ``_eplb`` workload-distribution suffix instead.
-    - trtllm structure: a trailing ``{prefix}_moe_reduce_add`` ElementWise
-      (deepseek.py:816-824 context, :1022-1032 generation) and, in
-      generation, the routed/shared OverlapOp (deepseek.py:1014-1020).
+    - trtllm structure: when the shape has shared experts, a trailing
+      ``{prefix}_moe_reduce_add`` ElementWise (deepseek.py:816-824 context,
+      :1022-1032 generation — it models the routed-topk + SHARED add) and,
+      in generation, the routed/shared OverlapOp (deepseek.py:1014-1020);
+      shared-less shapes stay flat with neither.
     """
     is_context = inference_phase == "context"
     seq_split_kwargs = {"seq_split": attn_cp_size} if is_context else {}
@@ -492,7 +497,7 @@ def _large_ep_block_ops(
         "moe_ep_size": cfg.moe_ep_size,
         "node_num": node_num,
         "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
-        "attention_tp_size": cfg.tp_size if is_deepep else 1,
+        "attention_tp_size": cfg.tp_size if is_deepep and is_context else 1,
     }
 
     # Routed path: router GEMM (spec section 4.4.4 — always emitted here; the
@@ -548,13 +553,14 @@ def _large_ep_block_ops(
 
     shared_ops = _large_ep_shared_expert_ops(prefix, shape, cfg, scale_factor, backend_name, is_context, attn_cp_size)
 
-    if backend_name == "trtllm":
+    if backend_name == "trtllm" and shared_ops:
         # moe_reduce_add_shared_output: sum routed output over top_k + add
-        # shared output (deepseek.py:816-824, :1022-1032).
+        # shared output (deepseek.py:816-824, :1022-1032) — only meaningful
+        # when there IS a shared output to add.
         reduce_add = ops.ElementWise(
             f"{prefix}_moe_reduce_add", scale_factor, 2 * shape.hidden_size, shape.hidden_size, 0.8
         )
-        if not is_context and shared_ops:
+        if not is_context:
             # Generation overlaps shared/routed on parallel streams (CUDA
             # Graph, deepseek.py:1014-1020); context runs sequentially.
             return [ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops), reduce_add]
