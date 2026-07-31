@@ -946,7 +946,8 @@ def parse_compressed_tensors_quant(
     Returns ``(base_algo, ignored_categories)`` where:
 
     - ``base_algo``: weight quantization algorithm (``"int4_wo"``, ``"int8_wo"``,
-      ``"fp8"``), or ``None`` when the config carries no quantization information.
+      ``"fp8"``, ``"fp8_block"``), or ``None`` when the config carries no
+      quantization information.
     - ``ignored_categories``: frozenset of layer-category names excluded from
       quantization (i.e. remaining in float16/bfloat16).  Empty when nothing is
       ignored or when ``base_algo`` is ``None``.
@@ -970,7 +971,9 @@ def parse_compressed_tensors_quant(
             elif num_bits == 8 and "int" in w_type:
                 base_algo = "int8_wo"
             elif num_bits == 8 and "float" in w_type:
-                base_algo = "fp8"
+                strategy = str(weights.get("strategy", "")).lower()
+                block_structure = weights.get("block_structure")
+                base_algo = "fp8_block" if strategy == "block" or block_structure else "fp8"
         if base_algo:
             break
 
