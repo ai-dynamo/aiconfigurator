@@ -1028,6 +1028,25 @@ def test_run_validates_by_default():
         t.run()  # default validate=True
 
 
+def test_enable_wideep_normalizes_moe_backend():
+    """The deprecated flag still spells the deprecated moe_backend on the
+    RESOLVED task (v1 __init__ parity, and the effective-config artifact the
+    gate compares) -- while being inert in modeling: the per-tuple ModelConfig
+    never carries deepep_moe, so a fused tuple cannot inherit the wideEP
+    compute tables. Task 9 owns the user-facing deprecation warnings."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+    )
+    assert t.moe_backend == "deepep_moe"
+    assert t.to_dict()["moe_backend"] == "deepep_moe"
+    assert t.build_model_config(role="agg", parallel=(1, 1, 8, 1, 8, 1)).moe_backend is None
+    assert t.build_model_config(role="agg").moe_backend is None
+
+
 def test_large_ep_replica_size_is_bounded():
     """Large-EP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
     unbounded -- v2 sweep gates replica size by this list, mirroring v1 get_working_list."""

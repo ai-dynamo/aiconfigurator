@@ -46,9 +46,9 @@ _LL_PAIRS = ((8, 1), (16, 2))
 _EP_QUANT = "bfloat16"
 
 
-def _a2a_rows() -> list[dict]:
+def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> list[dict]:
     rows = []
-    for backend, pairs in (("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS)):
+    for backend, pairs in backends:
         for ep_size, node_num in pairs:
             for phase in ("dispatch", "combine"):
                 for num_tokens in (128, 1024):
@@ -71,9 +71,9 @@ def _a2a_rows() -> list[dict]:
     return rows
 
 
-def _ep_rows() -> list[dict]:
+def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list[dict]:
     rows = []
-    for phase, pairs in (("context", _HT_PAIRS), ("generation", _LL_PAIRS)):
+    for phase, pairs in phases:
         for ep_size, _node in pairs:
             for num_tokens in (128, 1024):
                 rows.append(
@@ -108,8 +108,27 @@ def _write_version_dir(root: str, family: str, filename: str, rows: list[dict]) 
         yaml.safe_dump({"status": "complete", "schema_version": 2, "tables": {stem: {"status": "complete"}}}, f)
 
 
-@pytest.fixture
-def synth_systems(tmp_path):
+@pytest.fixture(autouse=True)
+def _one_shot_log_state():
+    """Snapshot/restore the module-level one-shot log dedupe sets.
+
+    They are process-global by design (one log per model/system, not per Task),
+    so a test that needs a fresh log must not leave the set emptied for the
+    tests that run after it."""
+    import aiconfigurator.sdk.task_v2 as task_v2
+
+    empty_before = set(task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED)
+    asym_before = set(task_v2._LARGE_EP_ASYMMETRIC_COVERAGE_WARNED)
+    try:
+        yield
+    finally:
+        task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()
+        task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.update(empty_before)
+        task_v2._LARGE_EP_ASYMMETRIC_COVERAGE_WARNED.clear()
+        task_v2._LARGE_EP_ASYMMETRIC_COVERAGE_WARNED.update(asym_before)
+
+
+def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
     """A synthetic systems root (8 GPUs/node, SM 90) holding ONLY the two
     large-EP tables, mounted alongside the shipped default systems path."""
     root = str(tmp_path / "systems")
@@ -134,9 +153,33 @@ def synth_systems(tmp_path):
             },
             f,
         )
-    _write_version_dir(root, "comm", "moe_a2a_perf.parquet", _a2a_rows())
-    _write_version_dir(root, "moe", "moe_ep_perf.parquet", _ep_rows())
+    _write_version_dir(root, "comm", "moe_a2a_perf.parquet", a2a_rows)
+    _write_version_dir(root, "moe", "moe_ep_perf.parquet", ep_rows)
+    return root
 
+
+@pytest.fixture
+def synth_systems(tmp_path):
+    """Both phases collected (context via deepep_ht, generation via deepep_ll)."""
+    root = _build_synth_root(tmp_path, _a2a_rows(), _ep_rows())
+    databases_cache.clear()
+    set_systems_paths(["default", root])
+    try:
+        yield root
+    finally:
+        set_systems_paths(None)
+        databases_cache.clear()
+
+
+@pytest.fixture
+def synth_systems_generation_only(tmp_path):
+    """GENERATION rows only: the day a collection lands one phase ahead of the
+    other. No context comm/compute rows at all."""
+    root = _build_synth_root(
+        tmp_path,
+        _a2a_rows((("deepep_ll", _LL_PAIRS),)),
+        _ep_rows((("generation", _LL_PAIRS),)),
+    )
     databases_cache.clear()
     set_systems_paths(["default", root])
     try:
@@ -274,18 +317,39 @@ def _disagg_task(**overrides) -> Task:
 
 
 def test_disagg_roles_gate_on_their_own_phase(synth_systems):
-    """Only the phase a role RUNS gates the tuple (prefill->context,
-    decode->generation); the other phase joins the dict whenever the data
-    covers it, because the role's model object holds one whole graph (its
-    context ops size the memory model even on a decode worker)."""
+    """The phase a role RUNS gates the tuple (prefill->context,
+    decode->generation) and the context phase is required on top for every
+    role, because the role's model object holds one whole graph and its
+    context ops size the memory model even on a decode worker."""
     t = _disagg_task()
-    # ep=32: context-only coverage -> prefill takes it, decode stays fused.
+    # ep=32: context-only coverage -> prefill takes it, decode has no
+    # generation rows there and stays fused.
     assert t._resolve_moe_comm_backend("prefill", _tuple(dp=32, moe_ep=32)) == {"context": "deepep_ht"}
     assert t._resolve_moe_comm_backend("decode", _tuple(dp=32, moe_ep=32)) is None
     # ep=16: both phases covered -> both roles carry the full per-phase dict.
     both = {"context": "deepep_ht", "generation": "deepep_ll"}
     assert t._resolve_moe_comm_backend("decode", _tuple(dp=16, moe_ep=16)) == both
     assert t._resolve_moe_comm_backend("prefill", _tuple(dp=16, moe_ep=16)) == both
+
+
+def test_generation_only_coverage_keeps_decode_fused_and_warns(synth_systems_generation_only, caplog):
+    """Generation collected ahead of context: a decode tuple must NOT resolve a
+    generation-only comm backend. Its model would emit a FUSED context span
+    whose (÷tp shared experts, router GEMM) weights are what
+    base_backend._get_memory_usage sizes the worker from -- the same
+    mis-pricing class the disagg-decode capture caught, in the other
+    direction. One warning names the asymmetry."""
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.task_v2"):
+        t = _disagg_task()
+        assert t._resolve_moe_comm_backend("decode", _tuple(dp=8, moe_ep=8)) is None
+        assert t._resolve_moe_comm_backend("decode", _tuple(dp=16, moe_ep=16)) is None
+        assert t._resolve_moe_comm_backend("prefill", _tuple(dp=8, moe_ep=8)) is None
+    warnings = [r.message for r in caplog.records if "asymmetric" in r.message]
+    assert len(warnings) == 1, warnings
+    assert "context phase is not" in warnings[0]
+    # ...and the whole task falls back to the fused ladders/tuples.
+    assert t.decode_moe_ep_candidates == [1, 2, 4, 8]
+    assert all(t._resolve_moe_comm_backend("decode", tup) is None for tup in t.iter_parallel("decode"))
 
 
 def test_disagg_require_same_tp_is_exempt_per_pair(synth_systems):
@@ -317,7 +381,7 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
     the task keeps the fused ladders and states which collector to run."""
     import aiconfigurator.sdk.task_v2 as task_v2
 
-    task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()
+    task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()  # restored by the autouse fixture
     with caplog.at_level(logging.INFO, logger="aiconfigurator.sdk.task_v2"):
         t = Task(
             serving_mode="agg",
@@ -357,6 +421,127 @@ def test_shipped_trtllm_nvfp4_resolves_nvlink_two_sided_both_phases():
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=64, moe_ep=64)) == both
     mc = t.build_model_config(role="agg", parallel=_tuple(dp=8, moe_ep=8))
     assert mc.num_gpus_per_node == 4  # GB200 NVL4 — not the 8-GPU HGX default
+
+
+# ---------------------------------------------------------------------------
+# Attention-table capability: which regime's table decides validate()
+# ---------------------------------------------------------------------------
+
+
+class _SupportedOverride:
+    """Real database with an overridden ``supported_quant_mode`` map."""
+
+    def __init__(self, database, supported):
+        self._database = database
+        self.supported_quant_mode = supported
+
+    def __getattr__(self, name):
+        return getattr(self._database, name)
+
+
+def _override_supported(monkeypatch, drop=()):
+    """Patch every Task DB load to hide ``drop`` from supported_quant_mode."""
+    from aiconfigurator.sdk.perf_database import get_database
+
+    database = get_database("h200_sxm", "sglang", "0.5.14")
+    supported = {k: v for k, v in (database.supported_quant_mode or {}).items() if k not in drop}
+    monkeypatch.setattr(Task, "_try_load_role_database", lambda self, role: _SupportedOverride(database, supported))
+
+
+def _mixed_regime_task(**overrides) -> Task:
+    """DeepSeek-R1 on h200/sglang: covered, default ladders -> fused AND
+    large-EP tuples, i.e. two reachable attention tables
+    (context_mla=[bfloat16], wideep_context_mla=[fp8_block])."""
+    kwargs = {
+        "serving_mode": "agg",
+        "model_path": "deepseek-ai/DeepSeek-R1",
+        "system_name": "h200_sxm",
+        "backend_name": "sglang",
+        "backend_version": "0.5.14",
+    }
+    kwargs.update(overrides)
+    return Task(**kwargs)
+
+
+def test_mixed_regime_validate_keys_on_the_fused_table():
+    """Regression: an explicit fmha the FUSED table cannot serve must still
+    fail fast, exactly as before large EP became per-tuple -- the large-EP
+    table supporting it does not rescue the (majority) fused tuples, which
+    would otherwise die one by one inside the sweep."""
+    t = _mixed_regime_task(fmha_quant_mode=common.FMHAQuantMode.fp8_block)
+    assert len(t._reachable_attention_op_keys("agg")) == 2  # both regimes reachable
+    with pytest.raises(ValueError, match="Unsupported context_mla quant mode 'fp8_block'"):
+        t.validate()
+
+
+def test_uninformative_table_abstains_instead_of_green_lighting(monkeypatch):
+    """An op the DB records no supported_quant_mode for carries no capability
+    information: it must not green-light the check. With the fused entry gone,
+    the large-EP table becomes the deciding one."""
+    from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+
+    _override_supported(monkeypatch, drop=("context_mla", "context_mla_granular"))
+    t = _mixed_regime_task(fmha_quant_mode=common.FMHAQuantMode.bfloat16)
+    with pytest.raises(UnsupportedWideepConfigError, match="wideep_context_mla"):
+        t.validate()
+
+
+def test_all_tables_uninformative_abstains(monkeypatch):
+    """No information anywhere -> benefit of the doubt (legacy behavior)."""
+    _override_supported(monkeypatch, drop=("context_mla", "context_mla_granular", "wideep_context_mla"))
+    t = _mixed_regime_task(fmha_quant_mode=common.FMHAQuantMode.fp8_block)
+    t.validate()  # must not raise
+
+
+@pytest.mark.parametrize(
+    "kwargs, expect_large_ep, expect_raises",
+    [
+        # No coverage for the Qwen3 shape -> fused regime only.
+        (dict(model_path=SYNTH_MODEL, system_name="h200_sxm", backend_name="sglang", total_gpus=8), False, False),
+        # Dense model -> never large EP.
+        (
+            dict(model_path="meta-llama/Meta-Llama-3.1-70B", system_name="h100_sxm", backend_name="sglang"),
+            False,
+            False,
+        ),
+        # Covered model pinned to EP-only tuples -> large-EP regime only, and
+        # the inferred fp8 fmha has no wideep_context_mla slice (fp8_block).
+        (
+            dict(
+                model_path="deepseek-ai/DeepSeek-R1",
+                system_name="h200_sxm",
+                backend_name="sglang",
+                backend_version="0.5.14",
+                total_gpus=32,
+                agg_num_gpu_candidates=[8, 16, 32],
+                agg_tp_candidates=[1],
+                agg_pp_candidates=[1],
+                agg_dp_candidates=[8, 16, 32],
+                agg_moe_tp_candidates=[1],
+                agg_moe_ep_candidates=[8, 16, 32],
+            ),
+            True,
+            True,
+        ),
+    ],
+)
+def test_single_regime_tasks_match_the_pre_change_key_logic(kwargs, expect_large_ep, expect_raises):
+    """A task whose tuples all sit in ONE regime must resolve exactly the keys
+    the old three-branch ``attention_op_keys(family, backend, flag)`` call
+    produced, and validate to the same outcome -- the per-regime machinery is
+    only allowed to change MIXED tasks."""
+    from aiconfigurator.sdk.models import attention_op_keys
+
+    t = Task(serving_mode="agg", **kwargs)
+    pairs = t._reachable_attention_op_keys("agg")
+    assert len(pairs) == 1, pairs
+    assert pairs[0] == attention_op_keys(t.model_family, t.backend_name, expect_large_ep)
+    assert t._attention_op_keys("agg") == pairs[0]
+    if expect_raises:
+        with pytest.raises(Exception):  # noqa: B017 - type pinned in test_run_validates_by_default
+            t.validate()
+    else:
+        t.validate()
 
 
 # ---------------------------------------------------------------------------
