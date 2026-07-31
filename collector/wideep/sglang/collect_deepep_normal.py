@@ -73,13 +73,42 @@ DEEPEP_NORMAL_TOKENS = [
     131072,
 ]
 
-# SM-count sweep. The consumer keys the normal table on ``dispatch_sms`` and, for
-# ``node_num==1``, reads exactly ``sms==20`` (see
-# ``operations.moe._query_wideep_deepep_normal_table``: "only collect sm=20 for
-# now"). The existing single-node dataset likewise holds only ``sms=20``, so that
-# is the default. Override with a comma-separated list via DEEPEP_NORMAL_SMS
-# (e.g. "4,8,12,16,20,24") to populate the 2-D (sms, token) interpolation grid.
-DEEPEP_NORMAL_DEFAULT_SMS = (20,)
+# SM-count sweep. The consumer keys the normal table on ``dispatch_sms``. Only an
+# exact ``node_num==1 and sms==20`` query collapses to a 1-D token curve
+# (``operations.moe._query_wideep_deepep_normal_table``); every other sms takes the
+# 2-D ``(sms, num_tokens)`` grid branch, and ``MoEDispatch`` defaults to ``sms=12``
+# (``operations.moe``: ``self._sms = kwargs.get("sms", 12)``), so the grid branch is
+# the common path and needs the whole axis.
+#
+# The previous ``(20,)`` default, and the "only collect sm=20 for now" comment it
+# cited, were accurate about the legacy 0.5.6.post2 dataset: that file really does
+# hold sms=20 alone at ``node_num==1`` (the six-value grid appears there only at
+# ``node_num`` 2/4/8). They went stale when the 0.5.10 data landed -- all six
+# committed 0.5.10 files carry sms 4/8/12/16/20/24 at ``node_num==1``. Default to
+# the grid the consumer actually reads; DEEPEP_NORMAL_SMS still narrows it for smoke
+# runs, and ``_verify_axis_coverage`` asserts that what was swept is what landed.
+DEEPEP_NORMAL_DEFAULT_SMS = (4, 8, 12, 16, 20, 24)
+
+# Correctness checking. ``test_intranode.test_main(do_check=True)`` validates every
+# dispatch/combine variant at a point; the collector previously hard-coded it off,
+# which is what let a broken kernel reach a published table.
+#
+# The bound exists because the cost is dominated by allocation, not compute: the
+# validation loop's ``num_worst_tokens`` path asks for ``num_tokens * num_ranks``
+# extra tokens, and when the payload is FP8 that result goes through
+# ``per_token_cast_back``, whose ``x_fp8.to(torch.float32)`` intermediate is 4
+# bytes/element. At 131072 tokens x 8 ranks x hidden 8192 that single intermediate
+# is 34 GB, on top of ~17 GB for ``recv_x``. Checks validate kernels, not batch
+# sizes, so assert them across the part of the ladder where they are nearly free and
+# leave the tail perf-only. Set to 0 to disable entirely, or very large to check
+# every point.
+DEEPEP_NORMAL_CHECK_MAX_TOKENS = int(os.environ.get("DEEPEP_NORMAL_CHECK_MAX_TOKENS", "1024"))
+
+# Base seed, mirroring ``collect_deepep_ll.py``'s fixed ``seed=1``.
+# ``test_intranode.test_main`` never seeds (``test_low_latency.test_main`` does), so
+# without a per-point reseed every (sms, token) point draws a fresh routing and the
+# same point on two systems is not measured against the same traffic pattern.
+DEEPEP_NORMAL_SEED = int(os.environ.get("DEEPEP_NORMAL_SEED", "1"))
 
 # DeepEP per-token FP8 cast requires the hidden dimension to be 128-divisible
 # (deepep/utils.py per_token_cast_to_fp8). Unlike the low-latency kernels, the
@@ -96,7 +125,76 @@ def _sms_list():
     raw = os.environ.get("DEEPEP_NORMAL_SMS", "").strip()
     if not raw:
         return list(DEEPEP_NORMAL_DEFAULT_SMS)
+    sms_list = [int(tok) for tok in raw.replace(",", " ").split()]
+    # DeepEP splits the SM budget into ``num_sms / 2`` channels and
+    # ``Buffer.set_num_sms`` asserts evenness. That assert only fires on the
+    # default-config iteration of the tuning loop (the ``nvl_chunk_size == 0``
+    # branch in test_intranode.test_main), i.e. roughly fifteen successful bench
+    # passes into a shape and inside a live collective. Reject it at startup.
+    odd = sorted({sms for sms in sms_list if sms % 2})
+    if odd:
+        raise RuntimeError(f"DEEPEP_NORMAL_SMS values must be even (DeepEP channels = num_sms/2); got {odd}")
+    return sms_list
+
+
+def _tokens_list():
+    """Token ladder for the sweep, overridable via DEEPEP_NORMAL_TOKENS.
+
+    The ladder is heavily top-weighted: reconstructed from the committed 0.5.10
+    latencies and the exact call counts ``bench`` makes, the 131072-token point is
+    roughly 47% of a full sweep and 65536 another 23%. Trimming the tail is the only
+    large cost lever available, and a validation pass should not require editing this
+    file to get one.
+    """
+    raw = os.environ.get("DEEPEP_NORMAL_TOKENS", "").strip()
+    if not raw:
+        return list(DEEPEP_NORMAL_TOKENS)
     return [int(tok) for tok in raw.replace(",", " ").split()]
+
+
+def _verify_axis_coverage(output_path, sms_list, tokens):
+    """Assert every shape present in the perf CSV carries the full (sms, token) grid.
+
+    Nothing downstream can see these axes. ``get_deepep_normal_test_cases`` returns
+    shape dicts, so ``provenance.case_plan_hash`` is byte-identical whether one sms
+    or six were swept, and ``provenance.derive_table_status`` marks a table
+    ``complete`` whenever no case failed -- coverage is never consulted. A run that
+    swept ``(20,)`` instead of the six-sms grid therefore finalizes as a clean
+    ``status: complete`` table with one sixth of the rows and a matching case-plan
+    hash. This function is the only layer that knows what was asked for.
+
+    Checked per shape, so shapes legitimately absent from the CSV -- skipped for
+    ``num_experts % num_ranks`` or dropped on a buffer-allocation failure, both of
+    which the worker logs -- do not raise here. Whole-shape loss is accounted for by
+    the caller against the orchestrator's own succeeded/failed tally; this is about
+    an axis being short *within* the shapes that did run.
+    """
+    import csv
+
+    want_sms, want_tokens = set(sms_list), set(tokens)
+    seen: dict[tuple[int, int, int], tuple[set[int], set[int]]] = {}
+    with open(output_path, newline="") as handle:
+        for row in csv.DictReader(handle):
+            key = (int(row["hidden_size"]), int(row["num_experts"]), int(row["num_topk"]))
+            got_sms, got_tokens = seen.setdefault(key, (set(), set()))
+            got_sms.add(int(row["dispatch_sms"]))
+            got_tokens.add(int(row["num_token"]))
+
+    if not seen:
+        raise RuntimeError(f"DeepEP normal collection wrote no data rows to {output_path}")
+
+    short = [
+        f"hidden={hidden} experts={num_experts} topk={num_topk}: "
+        f"missing sms={sorted(want_sms - got_sms)} tokens={sorted(want_tokens - got_tokens)}"
+        for (hidden, num_experts, num_topk), (got_sms, got_tokens) in sorted(seen.items())
+        if (want_sms - got_sms) or (want_tokens - got_tokens)
+    ]
+    if short:
+        raise RuntimeError(
+            "DeepEP normal collection under-covers the swept axes; refusing to hand a partial table "
+            "to finalization, which would attest it as complete:\n  " + "\n  ".join(short)
+        )
+    return len(seen)
 
 
 def _iter_moe_configs():
@@ -189,6 +287,14 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
     rank, num_ranks, group = init_dist(local_rank, num_gpus)
     if device_name is None:
         device_name = torch.cuda.get_device_name(local_rank)
+    if rank == 0:
+        # ``dispatch_transmit_us`` is the FP8 dispatch when this is True and the BF16
+        # dispatch -- roughly twice the bytes -- when it is False: test_intranode
+        # gates its FP8 tensor on ``is_sm90_compiled()`` and records whichever
+        # variant comes first. No column distinguishes the two, and upstream's macro
+        # is opt-in at build time, so record the build property in the run log rather
+        # than assuming it across images.
+        print(f"[deepep_normal] deep_ep is_sm90_compiled={deep_ep.Buffer.is_sm90_compiled()}", flush=True)
     written = 0
 
     def flush(shape_metrics):
@@ -268,8 +374,6 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
             dist.barrier()
             continue
 
-        torch.manual_seed(rank)
-
         # A failure inside the benchmark leaves the process group in an undefined
         # state (a half-finished collective), so we cannot safely continue: log the
         # full traceback and re-raise. The orchestrator isolates each shape in its
@@ -285,20 +389,26 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
                         num_topk=num_topk,
                         num_experts=num_experts,
                     )
-                    # Only forward optional kwargs that the vendored
-                    # test_intranode.test_main actually accepts. A stale/upstream
-                    # copy predates the do_check/metrics_out params this repo adds,
-                    # and passing an unsupported one raises TypeError mid-shape
-                    # (observed on GB200, whose checkout carried an out-of-date
-                    # test_intranode). Both params exist in this repo's vendored
-                    # copy, so the full-node collectors that already succeed keep
-                    # passing them unchanged.
+                    # Both hooks are required now that correctness checking is on.
+                    # The previous inspect-gated skip degraded silently in both
+                    # directions: without ``metrics_out`` the sweep runs to
+                    # completion and writes ZERO rows while every shape reports
+                    # success (only the final "produced no output" check notices,
+                    # hours later), and without ``do_check`` upstream's default
+                    # ``True`` applies -- the opposite of what the call site says.
+                    # A stale checkout is how the GB200 TypeError happened in the
+                    # first place, so fail on the first shape instead of guessing.
                     accepted = inspect.signature(test_intranode.test_main).parameters
-                    kwargs = {}
-                    if "do_check" in accepted:
-                        kwargs["do_check"] = False
-                    if "metrics_out" in accepted:
-                        kwargs["metrics_out"] = token_metrics if rank == 0 else None
+                    missing = [name for name in ("do_check", "metrics_out") if name not in accepted]
+                    if missing:
+                        raise RuntimeError(
+                            f"vendored test_intranode.test_main lacks {missing}; refusing to collect. "
+                            "collector/wideep/sglang/deepep/test_intranode.py is stale."
+                        )
+                    # Reseed per point so a point's routing is a function of
+                    # (seed, rank, num_tokens) alone: reproducible across reruns and
+                    # identical across systems for the same point.
+                    torch.manual_seed(DEEPEP_NORMAL_SEED + rank)
                     test_intranode.test_main(
                         args,
                         num_sms,
@@ -307,7 +417,8 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
                         rank,
                         buffer,
                         group,
-                        **kwargs,
+                        do_check=num_tokens <= DEEPEP_NORMAL_CHECK_MAX_TOKENS,
+                        metrics_out=token_metrics if rank == 0 else None,
                     )
                     dist.barrier()
                     flush(token_metrics)
@@ -372,6 +483,10 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
     if not sms_list:
         raise RuntimeError("No SM counts resolved for DeepEP normal collection")
 
+    tokens = _tokens_list()
+    if not tokens:
+        raise RuntimeError("No token counts resolved for DeepEP normal collection")
+
     # Resolve the device name inside the worker (rank 0) so the parent never
     # creates a CUDA context that would persist across the per-shape spawns.
     device_name = None
@@ -391,7 +506,9 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
 
     print(
         f"[deepep_normal] starting full-node collection: {num_gpus} GPUs, {len(cases)} shapes, "
-        f"sms={sms_list}, tokens={DEEPEP_NORMAL_TOKENS}",
+        f"sms={sms_list}, tokens={tokens}, "
+        f"expecting {len(cases) * len(sms_list) * len(tokens)} rows, "
+        f"checks on for num_tokens <= {DEEPEP_NORMAL_CHECK_MAX_TOKENS}",
         flush=True,
     )
 
@@ -414,7 +531,7 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
                 args=(
                     num_gpus,
                     [case],
-                    list(DEEPEP_NORMAL_TOKENS),
+                    tokens,
                     sms_list,
                     output_path,
                     device_name,
@@ -435,10 +552,26 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
     if failed:
         print(f"[deepep_normal] failed shapes: {failed}", flush=True)
 
-    if Path(output_path).exists():
-        print(f"[deepep_normal] collection complete: {output_path}", flush=True)
-    else:
+    if not Path(output_path).exists():
         raise RuntimeError(f"DeepEP normal collection produced no output at {output_path}")
+
+    covered_shapes = _verify_axis_coverage(output_path, sms_list, tokens)
+    print(
+        f"[deepep_normal] axis coverage verified: {covered_shapes} shapes x {len(sms_list)} sms x {len(tokens)} tokens",
+        flush=True,
+    )
+    if covered_shapes < len(cases):
+        # Whole-shape loss, which `_verify_axis_coverage` deliberately does not
+        # police. Not fatal -- a shape can be skipped for `num_experts % num_ranks`
+        # or dropped on buffer allocation, both logged by the worker -- but it must
+        # be visible next to the "complete" message, because provenance will not
+        # show it.
+        print(
+            f"[deepep_normal] WARNING: {len(cases) - covered_shapes} of {len(cases)} shapes produced "
+            "no rows (skipped or failed); see the per-shape SKIP/FAILED lines above",
+            flush=True,
+        )
+    print(f"[deepep_normal] collection complete: {output_path}", flush=True)
     return {"succeeded": succeeded, "failed": failed}
 
 
