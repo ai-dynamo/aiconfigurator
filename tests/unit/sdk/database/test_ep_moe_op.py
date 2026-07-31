@@ -11,9 +11,11 @@ table insertion order, phase-scoped like the per-phase legacy sglang tables;
 typed miss only when no distribution carries the phase), missing
 phase raising, the gated/non-gated weights formula, inference_phase
 validation, the silicon-only tier contract (SOL/SOL_FULL/EMPIRICAL raise
-``EmpiricalNotImplementedError``), and kernel_source auto-resolution
+``EmpiricalNotImplementedError``), kernel_source auto-resolution
 (sglang/vllm -> "deepep_moe"; trtllm -> the replicated
-``TrtLLMWideEPMoE._select_kernel`` logic over the unified table's keys).
+``TrtLLMWideEPMoE._select_kernel`` logic over the unified table's keys), and
+the ``enable_eplb`` legacy-fidelity context correction (``int(tokens * 0.8)``
+on sglang-adapted kernel legs only, mirroring ``operations/moe.py``).
 """
 
 import pytest
@@ -93,6 +95,22 @@ def _build_injected_store():
             (
                 ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 32),
                 {64: _leaf(0.42)},
+            ),
+            # eplb-correction slices (num_experts=128 keeps them disjoint from
+            # the shared 256-expert shapes): context tokens include 80 so the
+            # corrected int(100 * 0.8) = 80 lands on a measured point, plus
+            # generation and deepgemm curves that must stay uncorrected.
+            (
+                ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 128, 128, 7168, 2048, 1, 16),
+                {64: _leaf(0.15), 80: _leaf(0.25), 100: _leaf(0.40)},
+            ),
+            (
+                ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "generation", 8, 128, 128, 7168, 2048, 1, 16),
+                {80: _leaf(0.33), 100: _leaf(0.55)},
+            ),
+            (
+                ("deepgemm", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 128, 128, 7168, 2048, 1, 16),
+                {80: _leaf(0.61), 100: _leaf(0.77)},
             ),
         ]
     )
@@ -297,6 +315,42 @@ def test_estimation_tiers_raise_empirical_not_implemented(ep_db, mode):
     # Full query context is part of the message.
     for fragment in ("deepep_moe", "context", "7168", "256"):
         assert fragment in message
+
+
+# ---------------------------------------------------------------------------
+# enable_eplb context correction (legacy fidelity: operations/moe.py applies
+# int(num_tokens * 0.8) when enable_eplb and is_context on the sglang path)
+# ---------------------------------------------------------------------------
+
+
+def test_eplb_context_correction_on_sglang_leg(ep_db):
+    # int(100 * 0.8) = 80: the eplb-on context query must equal the eplb-off
+    # query at 80 tokens and land exactly on the measured 80-token point.
+    eplb_on = _make_op(num_experts=128, enable_eplb=True)
+    eplb_off = _make_op(num_experts=128)
+    result = eplb_on.query(ep_db, x=100)
+    assert float(result) == float(eplb_off.query(ep_db, x=80))
+    assert float(result) == pytest.approx(0.25, rel=1e-12)
+
+
+def test_eplb_default_off_is_noop(ep_db):
+    # Without enable_eplb the 100-token context query stays uncorrected.
+    assert float(_make_op(num_experts=128).query(ep_db, x=100)) == pytest.approx(0.40, rel=1e-12)
+
+
+def test_eplb_generation_phase_unaffected(ep_db):
+    # The legacy correction is context-only (prefill): generation queries at
+    # 100 tokens must hit the 100-token point, not the corrected 80.
+    op = _make_op(num_experts=128, inference_phase="generation", enable_eplb=True)
+    assert float(op.query(ep_db, x=100)) == pytest.approx(0.55, rel=1e-12)
+
+
+def test_eplb_trtllm_deepgemm_leg_unaffected(ep_db):
+    # TrtLLMWideEPMoE never applied the 0.8 correction (its EPLB effect rides
+    # the ``_eplb`` distribution suffix): the deepgemm leg stays uncorrected
+    # even with enable_eplb on.
+    op = _make_op(num_experts=128, kernel_source="deepgemm", enable_eplb=True)
+    assert float(op.query(ep_db, x=100)) == pytest.approx(0.77, rel=1e-12)
 
 
 # ---------------------------------------------------------------------------

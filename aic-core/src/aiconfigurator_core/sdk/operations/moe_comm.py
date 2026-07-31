@@ -520,7 +520,10 @@ class MoEAllToAll(Operation):
     three legacy per-backend adapters). Loaded on every inference backend
     ({"sglang", "vllm", "trtllm"} all have legacy comm sources); ``None``
     otherwise. Comm ops see per-rank token counts: ``query(x=...)`` scales by
-    ``scale_factor`` only — never by ``attention_dp_size``. ``comm_dtype``
+    ``scale_factor`` only — never by ``attention_dp_size``.
+    ``attention_tp_size`` divides the token key before the lookup — legacy
+    fidelity with ``MoEDispatch``'s ``num_tokens // self._scale_num_tokens``
+    (plain floor division, no ``max(1, ...)`` guard). ``comm_dtype``
     resolves exact-first, then the legacy ``fp8_block`` -> ``fp8`` behavioral
     aliasing, then the sole-collected-dtype fallback (typed miss otherwise).
     """
@@ -543,6 +546,7 @@ class MoEAllToAll(Operation):
         node_num: int,
         comm_dtype: str = "default",
         sms: int = 0,
+        attention_tp_size: int = 1,
     ) -> None:
         super().__init__(name, scale_factor)
         _validate_a2a_request(comm_backend, phase)
@@ -555,6 +559,7 @@ class MoEAllToAll(Operation):
         self._node_num = node_num
         self._comm_dtype = comm_dtype
         self._sms = sms
+        self._attention_tp_size = attention_tp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -700,6 +705,10 @@ class MoEAllToAll(Operation):
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         num_tokens = kwargs.get("x")  # per-rank tokens — comm ops never ADP-scale
+        # Legacy fidelity: attention TP shards the token stream ahead of the
+        # A2A, mirroring MoEDispatch's ``num_tokens // self._scale_num_tokens``
+        # exactly — plain floor division, no max(1, ...) guard (0 is possible).
+        num_tokens = num_tokens // self._attention_tp_size
         result = database.query_moe_a2a(
             self._comm_backend,
             self._phase,
@@ -982,6 +991,12 @@ def load_moe_expert_compute_data(
 
 _EP_PHASES = ("context", "generation")
 
+#: Kernel legs adapted from the legacy sglang wideep tables — the loader pins
+#: ``"deepep_moe"`` (spec §4.2) and ``_resolve_kernel_source`` returns it for
+#: sglang/vllm. The EPLB context correction applies to these legs only; the
+#: trtllm legs (``deepgemm``/``moe_torch_flow``) never carried it.
+_SGLANG_ADAPTED_KERNEL_SOURCES = frozenset({"deepep_moe"})
+
 
 def _validate_ep_phase(inference_phase: str) -> None:
     """Shared ctor/query validation: an unknown inference phase is a ValueError."""
@@ -1045,7 +1060,12 @@ class MoEExpertCompute(Operation):
     ``TrtLLMWideEPMoE`` query paths) and always queries ``moe_tp_size=1``:
     the large-EP family is EP-only. ``num_slots`` defaults to ``num_experts``
     (no EPLB redundancy); ``kernel_source=None`` auto-resolves per backend at
-    query time (see :meth:`_resolve_kernel_source`).
+    query time (see :meth:`_resolve_kernel_source`). ``enable_eplb=True`` is
+    legacy fidelity with the sglang MoE query: tokens become
+    ``int(tokens * 0.8)`` before the table lookup when the phase is context
+    AND the resolved kernel leg is sglang-adapted
+    (``_SGLANG_ADAPTED_KERNEL_SOURCES``) — never on the trtllm legs, whose
+    EPLB effect rides the ``_eplb`` distribution suffix instead.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -1237,7 +1257,7 @@ class MoEExpertCompute(Operation):
         """
         cls.load_data(database)
         _validate_ep_phase(inference_phase)
-        if enable_eplb and inference_phase == "context" and kernel_source == "deepep_moe":
+        if enable_eplb and inference_phase == "context" and kernel_source in _SGLANG_ADAPTED_KERNEL_SOURCES:
             # Legacy sglang EPLB prefill correction (moe.py:649): EPLB
             # rebalancing flattens hot-expert load, modeled as int(tokens*0.8)
             # before the table walk. Context + deepep tables only — the trtllm
