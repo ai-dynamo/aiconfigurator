@@ -40,6 +40,18 @@ frameworks:
       images:
         default: "deepseek-v4-blackwell"
         grace_blackwell: "deepseek-v4-grace-blackwell"
+    families:
+      # DeepEP dispatch/combine only. The DeepSeek-V4 images ship deep_ep 1.1.0
+      # (kNumMaxTopK 9), which cannot run topk=10 shapes such as
+      # (4096, 512, 10); this image ships deep_ep 1.2.1+d28bd67 (kNumMaxTopK 11)
+      # and collects them, verified on GB200. It is a multi-arch index (amd64 +
+      # arm64), so one entry serves every system and no grace_blackwell variant
+      # is needed. `moe` (wideep_moe) deliberately stays on the DeepSeek-V4
+      # default: its DSv4 module support on this image is unverified.
+      comm:
+        version: "0.5.12"
+        images:
+          default: "lmsysorg/sglang:v0.5.12-cu130@sha256:42194170546745092e74cd5f81ad32a7c6e944c7111fe7bf13588152277ff356"
     notes: >
       Requires an SGLang image with DeepSeek-V4/DeepEP modules; stock
       lmsysorg/sglang images may not include them.

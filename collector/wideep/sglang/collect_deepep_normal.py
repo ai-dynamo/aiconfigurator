@@ -380,7 +380,7 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
     except ModuleNotFoundError:  # running with collector/ on sys.path
         from wideep.sglang import dataset_version_label
 
-    version = dataset_version_label("DEEPEP_NORMAL_VERSION")
+    version = dataset_version_label("DEEPEP_NORMAL_VERSION", "deepep_normal")
 
     output_path = os.path.join(os.getcwd(), str(perf_filename))
 

@@ -384,7 +384,7 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
     except ModuleNotFoundError:  # running with collector/ on sys.path
         from wideep.sglang import dataset_version_label
 
-    version = dataset_version_label("DEEPEP_LL_VERSION")
+    version = dataset_version_label("DEEPEP_LL_VERSION", "deepep_ll")
 
     output_path = os.path.join(os.getcwd(), str(perf_filename))
     _ensure_low_latency_qp_depth(max(DEEPEP_LL_TOKENS))
