@@ -86,18 +86,20 @@ def test_disagg_with_separate_role_specs():
     assert t.max_prefill_workers == 32
 
 
-def test_disagg_wideep_sets_larger_replica_budget():
+def test_disagg_large_ep_sets_larger_replica_budget():
+    """A model/system with large-EP coverage (DeepSeek nvfp4 on gb200/trtllm)
+    gets the multi-node replica budget -- no flag involved."""
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="gb200",
-        prefill_enable_wideep=True,
+        prefill_moe_quant_mode=common.MoEQuantMode.nvfp4,
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="gb200",
-        decode_enable_wideep=True,
+        decode_moe_quant_mode=common.MoEQuantMode.nvfp4,
     )
     assert t.max_gpu_per_replica == 512
-    assert t.num_gpu_per_replica is None  # wideep doesn't set a fixed list
+    assert t.num_gpu_per_replica is None  # large EP doesn't set a fixed list
 
 
 # ---------------------------------------------------------------------------
@@ -367,26 +369,30 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["autoscale_ttft_correction_factor"] == 1.8
 
 
-def test_sweep_disagg_require_same_tp_sglang_non_wideep():
-    """SGLang non-wideep disagg must enforce prefill/decode TP equality (dynamo#5870).
+def test_sweep_disagg_require_same_tp_sglang_fused():
+    """SGLang fused disagg must enforce prefill/decode TP equality (dynamo#5870).
 
-    WideEP relaxes it; other backends never get the SGLang-specific constraint.
+    Large EP relaxes it per PAIR now (a covered task hands sweep a predicate
+    instead of a bool -- see test_coverage_candidates); other backends never get
+    the SGLang-specific constraint.
     """
 
-    def mk(backend, **extra):
+    def mk(backend, model="deepseek-ai/DeepSeek-V3", **extra):
         return Task(
             serving_mode="disagg",
-            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_model_path=model,
             prefill_system_name="h200_sxm",
             prefill_backend_name=backend,
-            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_model_path=model,
             decode_system_name="h200_sxm",
             decode_backend_name=backend,
             **extra,
         ).sweep_disagg_kwargs(prefill_database=None, decode_database=None)
 
-    assert mk("sglang")["require_same_tp"] is True
-    assert mk("sglang", prefill_enable_wideep=True, decode_enable_wideep=True)["require_same_tp"] is False
+    # Qwen3 has no large-EP coverage on h200/sglang -> nothing can be exempt.
+    assert mk("sglang", model="Qwen/Qwen3-235B-A22B")["require_same_tp"] is True
+    # A covered model (DeepSeek on sglang) gets the per-pair predicate.
+    assert callable(mk("sglang")["require_same_tp"])
     assert mk("trtllm")["require_same_tp"] is False
 
 
@@ -505,7 +511,7 @@ def test_fmha_data_fallback_without_bf16_slice_left_untouched(monkeypatch, caplo
 
     from aiconfigurator.sdk import common
 
-    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role: ["fp8_block"])
+    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role, ctx_op=None: ["fp8_block"])
     with caplog.at_level(logging.WARNING):
         t = Task(
             serving_mode="agg",
@@ -581,12 +587,16 @@ def test_fmha_fallback_uses_joint_fmha_kv_capability(caplog):
     assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
-def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
-    """trtllm wideep context queries the granular context_mla table directly, so
+def test_large_ep_trtllm_context_fmha_capability_uses_granular_table(caplog):
+    """trtllm large-EP context queries the granular context_mla table directly, so
     the fmha fallback must key capability off the granular slices -- the merged
     context_mla list can contain module-only fp8 rows inherited cross-framework
-    via the shared layer (gb200: vllm module data), which the wideep path can
+    via the shared layer (gb200: vllm module data), which the large-EP path can
     never hit.  Regression for the deepseek_wideep_trtllm.yaml e2e failure.
+
+    Large EP is coverage-driven now (nvfp4 is the MoE quant the gb200 EP tables
+    carry), and the task's ladders mix both regimes, so bfloat16 is picked as
+    the mode that serves the granular AND the module table.
     """
     import logging
 
@@ -598,7 +608,8 @@ def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
             model_path="deepseek-ai/DeepSeek-V3",
             system_name="gb200",
             backend_name="trtllm",
-            enable_wideep=True,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
         )
     assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert any("context_mla_granular" in r.message for r in caplog.records)
@@ -735,15 +746,24 @@ def test_nextn_explicit_override_warns(caplog):
 
 def test_moe_backend_flows_into_model_config():
     """Task.moe_backend must reach the per-role ModelConfig so get_model selects the
-    right MoE kernel (v1 set it; v2 build_model_config used to drop it -> None)."""
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        moe_backend="deepep_moe",
-    )
-    assert t.build_model_config(role="agg").moe_backend == "deepep_moe"
+    right MoE kernel (v1 set it; v2 build_model_config used to drop it -> None).
+
+    ``deepep_moe`` is the exception: it used to select the wideEP model classes
+    and the wideep MoE compute tables, both of which are coverage-driven per
+    tuple now, so forwarding it would mis-price the fused tuples."""
+
+    def mc(moe_backend, model="deepseek-ai/DeepSeek-V3", **kw):
+        return Task(
+            serving_mode="agg",
+            model_path=model,
+            system_name="b200_sxm",
+            backend_name="sglang",
+            moe_backend=moe_backend,
+            **kw,
+        ).build_model_config(role="agg")
+
+    assert mc("megamoe", model="deepseek-ai/DeepSeek-V4-Pro").moe_backend == "megamoe"
+    assert mc("deepep_moe").moe_backend is None
 
 
 def test_dsv4_native_sglang_moe_remap():
@@ -963,15 +983,19 @@ def test_megamoe_sglang_parallel_lists_and_validation():
 
 
 def test_sglang_agg_default_moe_ep_search():
-    """SGLang non-wideep MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
+    """SGLang fused MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
     EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
-    masked by always passing explicit candidates, caught by default-path parity."""
-    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
+    masked by always passing explicit candidates, caught by default-path parity.
+
+    Probed on Qwen3 (no large-EP coverage on h200/sglang): a covered model gets
+    the union with the multi-node ladder instead (test_coverage_candidates)."""
+    qwen = "Qwen/Qwen3-235B-A22B"
+    t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
     assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
     t2 = Task(
         serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
+        model_path=qwen,
         system_name="h200_sxm",
         backend_name="sglang",
         moe_backend="deepep_moe",
@@ -981,8 +1005,10 @@ def test_sglang_agg_default_moe_ep_search():
 
 
 def test_run_validates_by_default():
-    """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
-    has no wideep_context_mla data for fp8/bf16 -> validate raises."""
+    """run() validates first (v1 fail-fast); validate=False skips it. An sglang
+    DeepSeek task whose tuples are ALL large-EP has only the wideep_context_mla
+    table to serve fmha, and that table carries fp8_block only -> validate
+    raises (a task that also has fused tuples falls back to them instead)."""
     from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
 
     t = Task(
@@ -990,39 +1016,35 @@ def test_run_validates_by_default():
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
-        enable_wideep=True,
         total_gpus=64,
+        agg_num_gpu_candidates=[8, 16, 32],
+        agg_tp_candidates=[1],
+        agg_pp_candidates=[1],
+        agg_dp_candidates=[8, 16, 32],
+        agg_moe_tp_candidates=[1],
+        agg_moe_ep_candidates=[8, 16, 32],
     )
     with pytest.raises(UnsupportedWideepConfigError):
         t.run()  # default validate=True
 
 
-def test_enable_wideep_normalizes_moe_backend():
-    """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
-    validation selects the wideep_*_moe ops."""
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        enable_wideep=True,
-    )
-    assert t.moe_backend == "deepep_moe"
-
-
-def test_wideep_replica_size_is_bounded():
-    """WideEP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
+def test_large_ep_replica_size_is_bounded():
+    """Large-EP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
     unbounded -- v2 sweep gates replica size by this list, mirroring v1 get_working_list."""
+    from aiconfigurator.sdk import common
+
     t = Task(
         serving_mode="disagg",
-        prefill_model_path="Qwen/Qwen3-235B-A22B",
-        prefill_system_name="b200_sxm",
+        prefill_model_path="deepseek-ai/DeepSeek-R1",
+        prefill_system_name="gb200",
         prefill_backend_name="trtllm",
-        prefill_enable_wideep=True,
-        decode_model_path="Qwen/Qwen3-235B-A22B",
-        decode_system_name="b200_sxm",
+        prefill_moe_quant_mode=common.MoEQuantMode.nvfp4,
+        prefill_gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+        decode_model_path="deepseek-ai/DeepSeek-R1",
+        decode_system_name="gb200",
         decode_backend_name="trtllm",
-        decode_enable_wideep=True,
+        decode_moe_quant_mode=common.MoEQuantMode.nvfp4,
+        decode_gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         total_gpus=64,
     )
     kw = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)

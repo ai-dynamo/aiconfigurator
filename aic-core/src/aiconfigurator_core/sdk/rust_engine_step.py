@@ -577,6 +577,13 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
                         "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
                         "wideep_num_slots": getattr(model_config, "wideep_num_slots", None),
+                        # Large EP: the per-phase comm backend selects a whole
+                        # different MoE graph (MoEAllToAll/EPMoE vs the fused
+                        # dispatch/MoE pair) and the node width prices its
+                        # cross-node all-to-all — two configs differing only in
+                        # these must not share one cached handle.
+                        "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
+                        "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
                     },
                 },
                 sort_keys=True,

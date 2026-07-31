@@ -168,6 +168,11 @@ def enumerate_parallel_config(
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
+        enable_wideep: DEPRECATED and ignored. Large-EP participation is decided per
+            parallel config from perf-data coverage (``PerfDatabase.moe_a2a_coverage`` /
+            ``moe_ep_compute_coverage``), not by a flag, so this no longer narrows the
+            enumeration. Still accepted so existing callers keep working; restrict the
+            search with ``moe_ep_list`` instead.
         real_silicon_sweep: when True, exclude PP (force pp_list=[1]) and filter by
             min_num_gpus/max_num_gpus bounds on total GPUs per config. For MoE models,
             only allows pure TEP, pure DEP, and (optionally) pure TP.
@@ -216,8 +221,8 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if (enable_wideep or moe_backend in {"deepep_moe", "megamoe"}) and moe_tp > 1:
-                                        continue  # SGLang EP-only MoE backends require moe_tp=1.
+                                    if moe_backend == "megamoe" and moe_tp > 1:
+                                        continue  # SGLang MegaMoE is EP-only (moe_tp=1).
                                 elif backend == common.BackendName.vllm:  # noqa: SIM102
                                     if moe_tp > 1 and moe_ep > 1:
                                         continue  # vllm does not support MoE TP and MoE EP simultaneously

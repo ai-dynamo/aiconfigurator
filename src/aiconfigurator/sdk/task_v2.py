@@ -37,12 +37,15 @@ from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import (
+    _get_model_info,
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
     check_is_moe,
     get_model_family,
     resolve_dsv4_moe_arch_mode,
 )
+from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
+from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
     is_blackwell_system,
@@ -58,6 +61,11 @@ from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config
 logger = logging.getLogger(__name__)
 
 ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe_ep, cp)
+
+# (model_path, system, backend, version) combos that already emitted the
+# "no large-EP coverage" INFO log (spec section 6: one log per model/system,
+# not one per Task or per probe).
+_LARGE_EP_EMPTY_COVERAGE_LOGGED: set[tuple[str, str, str, str | None]] = set()
 
 
 def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
@@ -466,6 +474,13 @@ class Task:
     _model_family: str = field(default="", repr=False, init=False)
     _raw_config: dict = field(default_factory=dict, repr=False, init=False)
     _architecture: str = field(default="", repr=False, init=False)
+    # Which fmha_quant_mode values came from an explicit field (per role) --
+    # handed from _resolve_quant_modes to _apply_fmha_data_fallback.
+    _fmha_explicit: dict = field(default_factory=dict, repr=False, init=False)
+    # role -> large-EP coverage (see _large_ep_coverage). Depends on the model /
+    # system / backend / MoE quant mode only, never on the candidate lists, so
+    # it survives post-construction edits to those.
+    _large_ep_coverage_cache: dict = field(default_factory=dict, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -575,12 +590,27 @@ class Task:
         self._resolve_backend_version()
         self._normalize_wideep_moe_backend()
         self._resolve_quant_modes()
+        # The search space is resolved BEFORE the data-driven FMHA fallback:
+        # the attention-op keys the fallback consults depend on whether any
+        # enumerated tuple is large-EP, which is only known once the candidate
+        # lists exist. The fallback in turn touches nothing the search space
+        # reads (it only rewrites fmha_quant_mode).
         self._resolve_search_space()
+        self._apply_fmha_data_fallback()
         self._validate_megamoe_backend_support()
 
     def _normalize_wideep_moe_backend(self) -> None:
-        """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so the
-        DB validation picks the wideep_*_moe ops and ModelConfig gets the right kernel."""
+        """Field-level compat mapping: ``enable_wideep`` still spells the
+        deprecated ``moe_backend="deepep_moe"`` (mirrors v1 ``__init__``), so a
+        task round-trips through ``to_dict`` / effective-config reports exactly
+        as before.
+
+        The VALUE is inert in resolution as of the coverage-driven large-EP
+        wiring: ``build_model_config`` never forwards ``deepep_moe`` (it used to
+        select the wideEP model classes and the wideep MoE compute tables),
+        ``enumerate_parallel_config`` only special-cases megamoe, and large-EP
+        participation comes from perf-data coverage. What it still does is pick
+        the fused EP-only sglang LADDER, exactly as on the flag-off path."""
         if self.moe_backend is not None:
             return
         wideep = (
@@ -785,6 +815,19 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
+        self._fmha_explicit = fmha_explicit
+
+    def _apply_fmha_data_fallback(self) -> None:
+        """Data-driven FMHA resolution (second half of quant resolution).
+
+        Split out of ``_resolve_quant_modes`` because it consults the role's
+        attention-op keys, which depend on whether any enumerated parallel
+        tuple is large-EP -- i.e. on the search space, which is resolved in
+        between (see ``__post_init__``).
+        """
+        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        fmha_explicit = self._fmha_explicit
+
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16
         # with a warning instead of failing validate later.  bf16-as-fp8 is
@@ -801,6 +844,12 @@ class Task:
         # loader drops the degenerate mla_dtype column), so an fp8 label is
         # inert on decode -- and validate likewise checks fmha only for
         # context-using roles.
+        # A task whose tuples span both regimes (fused AND large-EP) reaches TWO
+        # context tables, and fmha_quant_mode is one per-task value: score both
+        # candidate modes over the reachable tables and keep the inferred one
+        # unless bfloat16 serves strictly more of them. Single-regime tasks --
+        # every task before large EP became per-tuple -- score one table and
+        # behave exactly as before.
         for role in roles:
             if role == "decode":
                 continue
@@ -808,33 +857,224 @@ class Task:
                 continue
             if self._role_attr(role, "fmha_quant_mode") != common.FMHAQuantMode.fp8:
                 continue
-            supported = self._context_fmha_supported_modes(role)
-            if not supported or common.FMHAQuantMode.fp8.name in supported:
-                continue  # fp8 data present, or no DB to consult -> keep fp8
-            if common.FMHAQuantMode.bfloat16.name not in supported:
-                continue  # no bf16 slice either -> let validate report the gap
+            ctx_ops = [ctx for ctx, _gen in self._reachable_attention_op_keys(role)]
+            supported = {op: self._context_fmha_supported_modes(role, op) for op in ctx_ops}
+            informative = [modes for modes in supported.values() if modes]
+            if not informative:
+                continue  # no DB / no table to consult -> keep fp8
+            fp8_hits = sum(common.FMHAQuantMode.fp8.name in modes for modes in informative)
+            bf16_hits = sum(common.FMHAQuantMode.bfloat16.name in modes for modes in informative)
+            if fp8_hits >= bf16_hits or bf16_hits == 0:
+                continue  # fp8 data present, or nothing safe to fall back to
             self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.bfloat16)
-            ctx_op, _ = self._attention_op_keys(role)
+            missing = [op for op, modes in supported.items() if modes and common.FMHAQuantMode.fp8.name not in modes]
             field = "fmha_quant_mode" if self.serving_mode == "agg" else f"{role}_fmha_quant_mode"
             logger.warning(
                 f"{role} fmha_quant_mode=fp8 (inferred from the model checkpoint) has no "
-                f"{ctx_op!r} perf data for system={self._role_attr(role, 'system_name')!r}, "
+                f"{', '.join(repr(op) for op in missing)} perf data for "
+                f"system={self._role_attr(role, 'system_name')!r}, "
                 f"backend={self._role_attr(role, 'backend_name')!r}, "
                 f"version={self._role_attr(role, 'backend_version')!r}; falling back to bfloat16 "
                 f"FMHA data. Predictions are conservative if the deployed engine runs fp8 FMHA; "
                 f"set {field} explicitly to override."
             )
 
+    def _reachable_attention_op_keys(self, role: str) -> list[tuple[str, str]]:
+        """(context_op, generation_op) key pairs this role's tuples can reach.
+
+        Attention op keys are per-REGIME (the large-EP graphs query the wideep /
+        granular MLA tables, the fused graphs the module ones), and large EP is
+        a per-tuple property now, so one task can reach both: the fused pair
+        when any enumerated tuple stays fused, the large-EP pair when any tuple
+        resolves a comm backend. Both consumers are per-task data-availability
+        checks -- the resolve-time FMHA fallback and ``_check_role_against_db``
+        -- and both treat the list as "any of these tables can serve this task":
+        a per-tuple gap is pruned by the sweep, not fatal here. Fused first, so
+        the universally-reachable regime leads the diagnostics. Mapping lives in
+        ``models.attention_op_keys``."""
+        regimes: set[bool] = set()
+        for tup in self.iter_parallel(role):
+            regimes.add(self._resolve_moe_comm_backend(role, tup) is not None)
+            if len(regimes) == 2:
+                break
+        backend_name = self._role_attr(role, "backend_name")
+        return [attention_op_keys(self._model_family, backend_name, large) for large in sorted(regimes or {False})]
+
     def _attention_op_keys(self, role: str) -> tuple[str, str]:
-        """(context_op, generation_op) support-matrix keys for this role's model
-        family / backend / wideep combination (shared by the resolve-time FMHA
-        fallback and ``_check_role_against_db``; mapping lives in
-        ``models.attention_op_keys``)."""
-        return attention_op_keys(
-            self._model_family,
-            self._role_attr(role, "backend_name"),
-            bool(self._role_attr(role, "enable_wideep")),
-        )
+        """The role's primary (context_op, generation_op) keys: the large-EP
+        flavor when any enumerated tuple is large-EP, else the fused one.
+
+        Kept for callers that need ONE answer (diagnostics / single-op probes);
+        capability checks use :meth:`_reachable_attention_op_keys` instead."""
+        return self._reachable_attention_op_keys(role)[-1]
+
+    # =====================================================================
+    # Large-EP coverage (spec sections 4.4.3 / 4.5) -- no flag selects it
+    # =====================================================================
+
+    def _role_phases(self, role: str) -> tuple[str, ...]:
+        """Inference phases a role runs: agg does both, prefill/decode one."""
+        if role == "prefill":
+            return ("context",)
+        if role == "decode":
+            return ("generation",)
+        return ("context", "generation")
+
+    def _large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
+        """``{phase: {comm_backend: {ep_size, ...}}}`` explorable with large EP.
+
+        Per spec section 4.5, an EP size is explorable for a phase when its
+        comm backend carries dispatch+combine rows for the model shape at
+        ``(ep, nodes_for(ep, gpus_per_node))`` (topology check against THIS
+        system), the backend's registry feasibility rules admit the config,
+        and the EP expert-compute table covers the shape under the role's MoE
+        quant mode for that phase. BOTH phases are probed for every role: a
+        disagg worker only runs one of them, but its model object holds the
+        whole graph and the memory model sizes weights off the context ops, so
+        the phase the role does not run must be emitted in the same regime (the
+        deleted wideEP classes built both phases off one flag). Empty sets and
+        backends are dropped.
+
+        Backends are kept in registry-insertion order (the tie-break when two
+        backends cover the same EP); the caller picks the first one covering
+        the tuple's EP.
+
+        Never raises: a missing model shape, system spec, database or table
+        yields ``{}`` -- the fused path then serves every tuple.
+        """
+        cached = self._large_ep_coverage_cache.get(role)
+        if cached is not None:
+            return cached
+        coverage = self._compute_large_ep_coverage(role)
+        self._large_ep_coverage_cache[role] = coverage
+        return coverage
+
+    def _compute_large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
+        if not self._is_moe or self._model_family not in LARGE_EP_READY_FAMILIES:
+            return {}
+        model_path = self._role_attr(role, "model_path")
+        backend_name = self._role_attr(role, "backend_name")
+        system_name = self._role_attr(role, "system_name")
+        if not model_path:
+            return {}
+        try:
+            shape = MoEBlockShape.from_model_info(_get_model_info(model_path))
+        except Exception as exc:  # not a MoE checkpoint / unparsable config
+            logger.debug("large-EP coverage: no MoE shape for %s: %s", model_path, exc)
+            return {}
+
+        spec = load_system_spec(system_name)
+        gpus_per_node = int(spec.get("node", {}).get("num_gpus_per_node", 0) or 0)
+        sm_version = spec.get("gpu", {}).get("sm_version")
+        sm_version = int(sm_version) if sm_version is not None else None
+        database = self._try_load_role_database(role)
+        # The probes are a PerfDatabase contract; a database object without them
+        # (a lightweight double injected by a caller) carries no coverage
+        # information, which is the same answer as an absent table.
+        a2a_probe = getattr(database, "moe_a2a_coverage", None)
+        compute_probe = getattr(database, "moe_ep_compute_coverage", None)
+        coverage: dict[str, dict[str, set[int]]] = {}
+        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
+            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
+            quant_mode = self._role_attr(role, "moe_quant_mode")
+            for phase in ("context", "generation"):
+                compute = compute_probe(
+                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
+                )
+                per_backend: dict[str, set[int]] = {}
+                for name, backend_spec in MOE_A2A_BACKENDS.items():
+                    if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
+                        continue
+                    eps = {
+                        ep
+                        for ep, node_num in a2a.get(name, ())
+                        if node_num == nodes_for(ep, gpus_per_node)
+                        and backend_spec.feasible(
+                            topk=shape.topk,
+                            num_experts=shape.num_experts,
+                            moe_tp_size=1,
+                            moe_ep_size=ep,
+                            sm_version=sm_version,
+                        )
+                    } & compute
+                    if eps:
+                        per_backend[name] = eps
+                if per_backend:
+                    coverage[phase] = per_backend
+
+        if not coverage:
+            log_key = (model_path, system_name, backend_name, self._role_attr(role, "backend_version"))
+            if log_key not in _LARGE_EP_EMPTY_COVERAGE_LOGGED:
+                _LARGE_EP_EMPTY_COVERAGE_LOGGED.add(log_key)
+                logger.info(
+                    "large-EP exploration is OFF for %s on %s/%s: no MoE all-to-all + EP-compute "
+                    "coverage for this model shape (hidden=%d, topk=%d, experts=%d) under "
+                    "moe_quant_mode=%s. Run the moe_a2a and moe_ep collectors for this "
+                    "model/system to enable it; the fused (small-EP) path is unaffected.",
+                    model_path,
+                    system_name,
+                    backend_name,
+                    shape.hidden_size,
+                    shape.topk,
+                    shape.num_experts,
+                    getattr(self._role_attr(role, "moe_quant_mode"), "name", None),
+                )
+        return coverage
+
+    def _resolve_moe_comm_backend(self, role: str, parallel_tuple) -> dict[str, str] | None:
+        """Per-phase MoE comm backend for ONE parallel tuple, or None (fused).
+
+        Large EP needs ``moe_tp == 1`` and ``moe_ep > 1``; the phases the ROLE
+        RUNS must cover that EP, otherwise the whole tuple stays fused (an agg
+        worker cannot run context large-EP and generation fused -- it is one
+        model graph). The other phase of a disagg role joins whenever the data
+        covers it, so the role's model builds one coherent graph (see
+        ``_large_ep_coverage``). The per-phase backend is the first registry
+        entry covering this EP, so a phase served by two backends resolves
+        deterministically (e.g. trtllm nvlink_two_sided before nvlink_one_sided)
+        while an EP only one of them collected still resolves to that one.
+        """
+        _tp, _pp, _dp, moe_tp, moe_ep, _cp = tuple(parallel_tuple)
+        if moe_tp != 1 or moe_ep <= 1:
+            return None
+        coverage = self._large_ep_coverage(role)
+        if not coverage:
+            return None
+        required = self._role_phases(role)
+        resolved: dict[str, str] = {}
+        for phase in ("context", "generation"):
+            for name, eps in coverage.get(phase, {}).items():
+                if moe_ep in eps:
+                    resolved[phase] = name
+                    break
+            else:
+                if phase in required:
+                    return None
+        return resolved or None
+
+    def _large_ep_eps(self, role: str) -> set[int]:
+        """EP sizes this role could run large-EP: covered in EVERY phase it runs."""
+        coverage = self._large_ep_coverage(role)
+        eps: set[int] | None = None
+        for phase in self._role_phases(role):
+            per_backend = coverage.get(phase, {})
+            phase_eps = set().union(*per_backend.values()) if per_backend else set()
+            eps = phase_eps if eps is None else eps & phase_eps
+        return eps or set()
+
+    def _role_has_large_ep_tuple(self, role: str) -> bool:
+        """Whether any enumerated tuple for this role resolves a comm backend."""
+        if not self._large_ep_eps(role):
+            return False
+        return any(self._resolve_moe_comm_backend(role, tup) for tup in self.iter_parallel(role))
+
+    def _num_gpus_per_node(self, role: str) -> int | None:
+        """System node width (hardware fact) for this role, None when unknown.
+
+        Large-EP model construction raises when it is missing rather than
+        assuming 8 (``models.helpers.large_ep_gpus_per_node``)."""
+        spec = load_system_spec(self._role_attr(role, "system_name"))
+        return int(spec.get("node", {}).get("num_gpus_per_node", 0) or 0) or None
 
     def _try_load_role_database(self, role: str):
         """Load the role's perf DB, returning None when the perf data is
@@ -863,19 +1103,20 @@ class Task:
             logger.debug("perf DB unavailable for %s role (%s/%s/%s): %s", role, system, backend, version, exc)
             return None
 
-    def _context_fmha_supported_modes(self, role: str) -> list[str]:
-        """FMHA modes with perf data for this role's fmha-keyed context-attention
-        op, jointly with the role's resolved kv-cache mode (an fmha slice that
-        exists only under a different kv dtype cannot serve this role's
-        queries).  Returns [] when the DB (or the op's table) is unavailable,
-        meaning "no information" -- callers must not read that as "nothing
-        supported"."""
+    def _context_fmha_supported_modes(self, role: str, ctx_op: str | None = None) -> list[str]:
+        """FMHA modes with perf data for one fmha-keyed context-attention op
+        (default: this role's primary one), jointly with the role's resolved
+        kv-cache mode (an fmha slice that exists only under a different kv dtype
+        cannot serve this role's queries).  Returns [] when the DB (or the op's
+        table) is unavailable, meaning "no information" -- callers must not read
+        that as "nothing supported"."""
         from aiconfigurator.sdk.perf_database import context_fmha_supported_modes
 
         database = self._try_load_role_database(role)
         if database is None:
             return []
-        ctx_op = self._attention_op_keys(role)[0]
+        if ctx_op is None:
+            ctx_op = self._attention_op_keys(role)[0]
         if ctx_op == "context_mla" and self._attention_quant_identity_mixed(role):
             # Mixed-projection checkpoints (e.g. V3.1-NVFP4: BF16 q/kv + NVFP4
             # o_proj) bypass the profiled MLA-module row — no single-gemm_type
@@ -920,16 +1161,19 @@ class Task:
 
     def _large_pipeline_parallel_applies(self) -> bool:
         """v1 _large_pipeline_parallel_worker_defaults_apply: DeepSeek-V3.2/V4 MoE on
-        Blackwell, non-wideep, total_gpus>=16 get extra PP=2 / TP=8 / 16-GPU configs."""
+        Blackwell with total_gpus>=16 get extra PP=2 / TP=8 / 16-GPU configs.
+
+        The wideep / deepep_moe exclusions are gone with the flags: large EP is
+        a per-tuple property now, and a PP>1 tuple simply finds no (ep, node)
+        comm data and stays fused. MegaMoE keeps its own parallel lists, so it
+        still opts out."""
         if not self._is_moe or self._model_family not in _LARGE_PIPELINE_PARALLEL_MODEL_FAMILIES:
             return False
         if self.serving_mode == "agg":
-            wideep = self.enable_wideep
             systems = [self.system_name]
         else:
-            wideep = self.prefill_enable_wideep or self.decode_enable_wideep
             systems = [self.prefill_system_name, self.decode_system_name]
-        if wideep or self.moe_backend in ("deepep_moe", "megamoe"):
+        if self.moe_backend == "megamoe":
             return False
         if self.total_gpus is None or self.total_gpus < 16:
             return False
@@ -1006,59 +1250,86 @@ class Task:
             _set("agg_dp_candidates", mm["dp_list"])
             _set("agg_moe_tp_candidates", mm["moe_tp_list"])
             _set("agg_moe_ep_candidates", mm["moe_ep_list"])
-        elif self.backend_name == "trtllm" and self.enable_wideep:
-            _set("agg_num_gpu_candidates", [2, 4, 8, 16, 32, 64])
-            _set("agg_tp_candidates", [1, 2, 4, 8])
-            _set("agg_pp_candidates", [1])
-            _set("agg_dp_candidates", [2, 4, 8, 16, 32, 64])
-            _set("agg_moe_tp_candidates", [1])
-            _set("agg_moe_ep_candidates", [2, 4, 8, 16, 32, 64])
-        elif self.backend_name == "sglang" and self.enable_wideep:
-            _set("agg_num_gpu_candidates", [8, 16, 32, 64])
-            _set("agg_tp_candidates", [1, 2, 4, 8])
-            _set("agg_pp_candidates", [1])
-            _set("agg_dp_candidates", [1, 2, 4, 8, 16, 32, 64])
-            _set("agg_moe_tp_candidates", [1])
-            _set("agg_moe_ep_candidates", [8, 16, 32, 64])
-        elif self.backend_name == "sglang" and not self.enable_wideep:
-            _set("agg_num_gpu_candidates", [1, 2, 4, 8])
-            _set("agg_tp_candidates", [1, 2, 4, 8])
-            _set("agg_pp_candidates", [1])
-            _set("agg_dp_candidates", [1, 2, 4, 8])
-            if self.moe_backend == "deepep_moe":
-                # Intra-node DeepEP (ep 1-8, NVLink): EP-only
-                _set("agg_moe_tp_candidates", [1])
-                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
-            else:
-                # Standard comm (fused_moe + allgather/RS)
-                _set("agg_moe_tp_candidates", [1, 2, 4, 8])
-                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
-        elif self.backend_name in ("trtllm", "vllm"):
-            x = [1, 2, 4, 8]
-            _set("agg_num_gpu_candidates", x)
-            _set("agg_tp_candidates", x)
-            _set("agg_pp_candidates", [1])
-            _set("agg_dp_candidates", x)
-            _set("agg_moe_tp_candidates", x)
-            _set("agg_moe_ep_candidates", x)
-        else:
+            return
+        if self.backend_name not in ("trtllm", "sglang", "vllm"):
             raise ValueError(f"Unsupported backend: {self.backend_name}")
 
+        # Fused defaults: what a task without large-EP data explores today.
+        if self.backend_name == "sglang":
+            fused = {
+                "num_gpu": [1, 2, 4, 8],
+                "tp": [1, 2, 4, 8],
+                "pp": [1],
+                "dp": [1, 2, 4, 8],
+                # Intra-node DeepEP (ep 1-8, NVLink) is EP-only; standard comm
+                # (fused_moe + allgather/RS) also explores MoE TP.
+                "moe_tp": [1] if self.moe_backend == "deepep_moe" else [1, 2, 4, 8],
+                "moe_ep": [1, 2, 4, 8],
+            }
+        else:
+            x = [1, 2, 4, 8]
+            fused = {"num_gpu": x, "tp": x, "pp": [1], "dp": x, "moe_tp": x, "moe_ep": x}
+
+        # Large-EP ladder, offered when the perf data covers this model shape on
+        # this system (no flag): the single task explores BOTH regimes, so the
+        # lists are the union of the fused defaults and the multi-node ladder.
+        # vLLM has no shipped large-EP ladder to union in (its comm backends are
+        # registered but no data ships), so it keeps the fused lists.
+        wide = None
+        if self.backend_name == "trtllm":
+            wide = {
+                "num_gpu": [2, 4, 8, 16, 32, 64],
+                "tp": [1, 2, 4, 8],
+                "pp": [1],
+                "dp": [2, 4, 8, 16, 32, 64],
+                "moe_tp": [1],
+                "moe_ep": [2, 4, 8, 16, 32, 64],
+            }
+        elif self.backend_name == "sglang":
+            wide = {
+                "num_gpu": [8, 16, 32, 64],
+                "tp": [1, 2, 4, 8],
+                "pp": [1],
+                "dp": [1, 2, 4, 8, 16, 32, 64],
+                "moe_tp": [1],
+                "moe_ep": [8, 16, 32, 64],
+            }
+        if wide is not None and self._large_ep_eps("agg"):
+            fused = {dim: sorted(set(values) | set(wide[dim])) for dim, values in fused.items()}
+
+        for dim, values in fused.items():
+            _set(f"agg_{dim}_candidates", values)
+
     def _resolve_disagg_search(self) -> None:
-        prefill_cfg, decode_cfg = build_disagg_parallel_lists(
-            backend_name=self.prefill_backend_name,
-            is_moe=self._is_moe,
-            prefill_system=self.prefill_system_name,
-            decode_system=self.decode_system_name,
-            prefill_enable_wideep=self.prefill_enable_wideep,
-            decode_enable_wideep=self.decode_enable_wideep,
-            moe_backend=self.moe_backend,
-        )
-        for role, src in (("prefill", prefill_cfg), ("decode", decode_cfg)):
+        def _lists(wide: bool) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+            return build_disagg_parallel_lists(
+                backend_name=self.prefill_backend_name,
+                is_moe=self._is_moe,
+                prefill_system=self.prefill_system_name,
+                decode_system=self.decode_system_name,
+                prefill_enable_wideep=wide,
+                decode_enable_wideep=wide,
+                moe_backend=self.moe_backend,
+            )
+
+        # Per-role large-EP participation, from data coverage instead of the
+        # flags: a role whose shape/system is covered explores the union of the
+        # multi-node ladder and the fused defaults, its partner is unaffected.
+        # (The shared builder keys its sglang branch on either role, so the
+        # wide lists are fetched with both roles on and picked per role here.)
+        fused_cfgs = dict(zip(("prefill", "decode"), _lists(wide=False), strict=True))
+        large_ep = {role: bool(self._large_ep_eps(role)) for role in ("prefill", "decode")}
+        if any(large_ep.values()):
+            wide_cfgs = dict(zip(("prefill", "decode"), _lists(wide=True), strict=True))
+        for role, src in fused_cfgs.items():
+            if large_ep[role]:
+                src = {dim: sorted(set(values) | set(wide_cfgs[role][dim])) for dim, values in src.items()}
             self._fill_role_search(role, src)
 
-        # Replica defaults
-        if self.prefill_enable_wideep or self.decode_enable_wideep:
+        # Replica defaults. Keyed on the resolved CANDIDATES, not on coverage:
+        # a user list that pins the search to fused tuples (e.g. moe_ep=[1])
+        # keeps the fused replica ladder even on a covered model/system.
+        if any(self._role_has_large_ep_tuple(role) for role in ("prefill", "decode")):
             if self.max_gpu_per_replica is None:
                 self.max_gpu_per_replica = 512
         else:
@@ -1128,12 +1399,20 @@ class Task:
             rt.batch_size = batch_size
         return rt
 
-    def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
-        """Build a ModelConfig template for the given role (parallelism unset).
+    def build_model_config(
+        self,
+        *,
+        role: Literal["agg", "prefill", "decode"],
+        parallel: ParallelChoice | None = None,
+    ) -> config.ModelConfig:
+        """Build a ModelConfig for the given role, optionally for one tuple.
 
-        ``sweep_agg`` / ``sweep_disagg`` overwrite tp/pp/dp/moe_tp/moe_ep per
-        sweep point.  This template carries the resolved quant / nextn /
-        feature flags only.
+        Without ``parallel`` this is the template ``sweep_agg`` /
+        ``sweep_disagg`` overwrite tp/pp/dp/moe_tp/moe_ep on per sweep point;
+        with it, the MoE comm backend is resolved for that exact tuple (large
+        EP is a per-config property -- see ``_resolve_moe_comm_backend``), so
+        the model classes build the large-EP graph for the tuples the data
+        covers and the fused one for the rest.
         """
         return config.ModelConfig(
             gemm_quant_mode=self._role_attr(role, "gemm_quant_mode"),
@@ -1143,18 +1422,37 @@ class Task:
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
             nextn=self.nextn,
             enable_encoder_dp=self.enable_encoder_dp,
-            enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # moe_backend / attention_backend / wideep_num_slots are shared across roles
-            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
-            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
-            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
-            # in v2 and ModelConfig's default matches v1's.
-            moe_backend=self.moe_backend,
+            # attention_backend / wideep_num_slots are shared across roles (Task has no
+            # per-role variant) and fed to ModelConfig so get_model selects the MLA
+            # attention perf tables (fa3 vs flashinfer) and the EPLB slot count.
+            # workload_distribution remains non-configurable in v2 and ModelConfig's
+            # default matches v1's.
+            #
+            # moe_backend="deepep_moe" is NOT forwarded: it used to select both the
+            # sglang wideEP model classes and the wideep MoE compute tables for the
+            # FUSED op. Large EP is coverage-driven per tuple now, so passing it on
+            # would make a fused tuple price itself off the large-EP tables. MegaMoE
+            # is a real DeepSeek-V4 kernel selection and passes through.
+            moe_backend=self.moe_backend if self.moe_backend != "deepep_moe" else None,
             # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
+            moe_comm_backend=(self._resolve_moe_comm_backend(role, parallel) if parallel is not None else None),
+            # Hardware fact, injected alongside the comm backend: the large-EP
+            # ops take the comm node span at construction and would otherwise
+            # have no channel to it (models.helpers.large_ep_gpus_per_node).
+            num_gpus_per_node=self._num_gpus_per_node(role),
         )
+
+    def _model_config_factory(self, role: Literal["agg", "prefill", "decode"]):
+        """Per-tuple ModelConfig builder handed to ``sweep_*`` (see
+        ``sweep._point_model_config``)."""
+
+        def _build(parallel: ParallelChoice) -> config.ModelConfig:
+            return self.build_model_config(role=role, parallel=parallel)
+
+        return _build
 
     def build_speculative_profile(self) -> SpeculativeDecodingProfile:
         """Build the upper-layer expected-progress assumption for prediction."""
@@ -1191,7 +1489,6 @@ class Task:
                 cp_list=cp_list,
                 is_moe=self._is_moe,
                 backend=common.BackendName[self._role_attr(role, "backend_name")],
-                enable_wideep=self._role_attr(role, "enable_wideep"),
                 moe_backend=self.moe_backend,
             )
         )
@@ -1322,11 +1619,11 @@ class Task:
             return
 
         supported: dict = getattr(database, "supported_quant_mode", {}) or {}
-        moe_backend = self.moe_backend  # shared across roles
         is_moe = self._is_moe
 
-        # Pick the attention-module op keys for this (model family, backend, wideep).
-        ctx_op, gen_op = self._attention_op_keys(role)
+        # Attention-module op keys per regime this role's tuples can reach
+        # (fused and/or large EP) -- see _reachable_attention_op_keys.
+        attention_op_pairs = self._reachable_attention_op_keys(role)
 
         # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
         # tables for), not a backend-capability list. In SILICON that equals what we
@@ -1438,30 +1735,44 @@ class Task:
                 f"Supported {op} modes: {sorted(modes)}"
             )
 
+        def _check_any(ops: list[str], mode: Any) -> None:
+            """Pass when ANY reachable regime's op supports the mode.
+
+            A mixed task (some tuples fused, some large-EP) has one quant mode
+            but two attention tables; the tuples whose table lacks it are pruned
+            by the sweep's per-tuple guard, so validate must only fail when NO
+            regime can serve the task. The first (fused) failure is reported --
+            the universally-reachable regime is the actionable one."""
+            first_error: Exception | None = None
+            for op in ops:
+                try:
+                    _check(op, mode)
+                    return
+                except (ValueError, UnsupportedWideepConfigError) as exc:
+                    first_error = first_error or exc
+            if first_error is not None:
+                raise first_error
+
         # GEMM is always validated (applies to all worker shapes). It has the
         # same transfer ladder as MoE (shared primitive), so the same
         # HYBRID/EMPIRICAL relaxation applies.
         _check("gemm", self._role_attr(role, "gemm_quant_mode"), profile_transfer=True)
 
-        # MoE — only when model is MoE.
+        # MoE — only when model is MoE. The large-EP expert-compute tables are
+        # NOT validated here: coverage gating already decided, per tuple and per
+        # quant mode, which EP sizes have data (a tuple that slips through a
+        # partial-coverage hole is pruned by the sweep's per-tuple guard). Only
+        # the fused MoE op, which every task can still reach, is checked.
         if is_moe:
-            moe_mode = self._role_attr(role, "moe_quant_mode")
-            if backend == "sglang" and moe_backend == "deepep_moe":
-                # WideEP MoE: per-phase op keys (raises UnsupportedWideepConfigError).
-                if validate_context:
-                    _check("wideep_context_moe", moe_mode, profile_transfer=True)
-                if validate_generation:
-                    _check("wideep_generation_moe", moe_mode, profile_transfer=True)
-            else:
-                _check("moe", moe_mode, profile_transfer=True)
+            _check("moe", self._role_attr(role, "moe_quant_mode"), profile_transfer=True)
 
         # FMHA: only meaningful for context-using workers (agg, prefill).
         if validate_context:
-            _check(ctx_op, self._role_attr(role, "fmha_quant_mode"))
+            _check_any([ctx for ctx, _gen in attention_op_pairs], self._role_attr(role, "fmha_quant_mode"))
 
         # KV cache: only meaningful for generation-using workers (agg, decode).
         if validate_generation:
-            _check(gen_op, self._role_attr(role, "kvcache_quant_mode"))
+            _check_any([gen for _ctx, gen in attention_op_pairs], self._role_attr(role, "kvcache_quant_mode"))
 
     # =====================================================================
     # Properties
@@ -1537,7 +1848,9 @@ class Task:
             "runtime_config": runtime_config,
             "database": database,
             "backend_name": self.backend_name,
-            "model_config": self.build_model_config(role="agg"),
+            # Per-tuple builder: the MoE comm backend is resolved for each
+            # parallel config, not once for the task.
+            "model_config": self._model_config_factory("agg"),
             "parallel_config_list": parallel_config_list,
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
@@ -1564,11 +1877,6 @@ class Task:
             num_gpu_list = list(range(1, self.max_gpu_per_replica + 1))
         else:
             num_gpu_list = None
-        # SGLang non-wideep disaggregated serving requires prefill/decode TP to match
-        # (KV transfer layout constraint, ai-dynamo/dynamo#5870). WideEP relaxes it.
-        require_same_tp = self.prefill_backend_name == "sglang" and not (
-            self.prefill_enable_wideep or self.decode_enable_wideep
-        )
         runtime_config = self.build_runtime_config()
         if self.pareto_sweep:
             runtime_config.tpot = _LEGACY_TPOT_SWEEP
@@ -1577,12 +1885,13 @@ class Task:
             "runtime_config": runtime_config,
             "prefill_database": prefill_database,
             "prefill_backend_name": self.prefill_backend_name,
-            "prefill_model_config": self.build_model_config(role="prefill"),
+            # Per-tuple builders (see sweep_agg_kwargs).
+            "prefill_model_config": self._model_config_factory("prefill"),
             "prefill_parallel_config_list": prefill_parallel,
             "prefill_latency_correction": self.prefill_latency_correction,
             "decode_database": decode_database,
             "decode_backend_name": self.decode_backend_name,
-            "decode_model_config": self.build_model_config(role="decode"),
+            "decode_model_config": self._model_config_factory("decode"),
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
@@ -1594,8 +1903,33 @@ class Task:
             "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
-            "require_same_tp": require_same_tp,
+            "require_same_tp": self._require_same_tp_gate(),
         }
+
+    def _require_same_tp_gate(self):
+        """Per-PAIR "prefill and decode TP must match" predicate for sweep_disagg.
+
+        SGLang disaggregated serving requires matching TP (KV transfer layout,
+        ai-dynamo/dynamo#5870); large EP relaxes it. Large EP is per tuple now,
+        so the constraint is decided per candidate PAIR: a pair is exempt when
+        either side resolves a MoE comm backend. Non-sglang tasks return the
+        plain ``False`` the old bool API used (no predicate needed)."""
+        if self.prefill_backend_name != "sglang":
+            return False
+        large_ep_eps = {
+            role: {tup[4] for tup in self.iter_parallel(role) if self._resolve_moe_comm_backend(role, tup) is not None}
+            for role in ("prefill", "decode")
+        }
+        if not (large_ep_eps["prefill"] or large_ep_eps["decode"]):
+            return True  # nothing can be large EP -> the constraint always applies
+
+        def _requires_same_tp(prefill_row, decode_row) -> bool:
+            for role, row in (("prefill", prefill_row), ("decode", decode_row)):
+                if int(row["moe_tp"]) == 1 and int(row["moe_ep"]) in large_ep_eps[role]:
+                    return False
+            return True
+
+        return _requires_same_tp
 
     # =====================================================================
     # Optimization entry point
@@ -1718,7 +2052,7 @@ class Task:
         from aiconfigurator.sdk.models import get_model
         from aiconfigurator.sdk.predict import predict_agg_worker
 
-        model_config = self.build_model_config(role="agg")
+        model_config = self.build_model_config(role="agg", parallel=(tp, pp, dp, moe_tp, moe_ep, 1))
         model_config.tp_size = tp
         model_config.pp_size = pp
         model_config.attention_dp_size = dp if self._is_moe else 1
@@ -1800,7 +2134,9 @@ class Task:
         from aiconfigurator.sdk.sweep import _rate_match_dict
 
         # --- Prefill phase ---
-        p_mc = self.build_model_config(role="prefill")
+        p_mc = self.build_model_config(
+            role="prefill", parallel=(prefill_tp, prefill_pp, prefill_dp, prefill_moe_tp, prefill_moe_ep, 1)
+        )
         p_mc.tp_size = prefill_tp
         p_mc.pp_size = prefill_pp
         p_mc.attention_dp_size = prefill_dp if self._is_moe else 1
@@ -1834,7 +2170,9 @@ class Task:
             )
 
         # --- Decode phase ---
-        d_mc = self.build_model_config(role="decode")
+        d_mc = self.build_model_config(
+            role="decode", parallel=(decode_tp, decode_pp, decode_dp, decode_moe_tp, decode_moe_ep, 1)
+        )
         d_mc.tp_size = decode_tp
         d_mc.pp_size = decode_pp
         d_mc.attention_dp_size = decode_dp if self._is_moe else 1

@@ -16,6 +16,9 @@ workload-distribution string and scale factor) to the builder, which emits
 router GEMM, shared-expert GEMMs, and the dispatch/compute/combine ops.
 Family/framework/system-specific deviations register through
 :func:`register_moe_block` (the G3 escape hatch) instead of new model classes.
+
+:data:`LARGE_EP_READY_FAMILIES` names the model families whose classes are
+wired for the large-EP emission below — the enumerator's assignment gate.
 """
 
 from __future__ import annotations
@@ -27,6 +30,17 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.helpers import check_is_moe
 from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
+
+#: Model families whose classes construct a large-EP graph when the enumerator
+#: sets ``ModelConfig.moe_comm_backend``. The enumerator must never assign a
+#: comm backend outside this set: HYBRIDMOE / MINIMAXM3 raise on it by design
+#: (their shared-expert wiring is not reproduced by the large-EP branch), and
+#: DEEPSEEKV4 owns its own MegaMoE path. QWEN3VL_MOE is deliberately excluded
+#: even though it rides MOEModel: ``Qwen3VLMoEModel.create`` never forwards
+#: ``backend_name``, so the builder would see an empty framework and pick the
+#: wrong large-EP shared-expert/reduce flavor. Wiring it is a documented
+#: follow-up.
+LARGE_EP_READY_FAMILIES = frozenset({"MOE", "DEEPSEEK", "DEEPSEEKV32", "KIMIK25"})
 
 
 @dataclass(frozen=True)
