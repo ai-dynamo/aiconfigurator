@@ -3,6 +3,7 @@
 
 """Unit tests for MoEDispatch communication logic across SM versions."""
 
+import logging
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -487,10 +488,14 @@ class TestSGLangNonDeepEPAttentionTpDp:
 
 @pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestWideEpDeepEpLlNodeNumFallback:
-    """node_num fallback in _query_wideep_deepep_ll_table.
+    """node_num resolution in _query_wideep_deepep_ll_table.
 
-    Prefer measured data for the requested node_num; if that (node_num, hidden,
-    topk, experts) has no rows, fall back to node_num=1 with the same EP config.
+    A multi-node request (node_num > 1) is served only by measurements at that
+    node scale -- an uncollected scale raises instead of silently substituting
+    node_num=1 single-node rows, which ignore the cross-node all-to-all and run
+    ~3x optimistic. Sub-node scales (node_num < 1, what MoEDispatch.query
+    derives for a config smaller than one node) still resolve against
+    node_num=1, and node_num=1 itself is untouched.
     """
 
     @staticmethod
@@ -527,12 +532,32 @@ class TestWideEpDeepEpLlNodeNumFallback:
         res = self._query(db, node_num=2)
         assert float(res) == pytest.approx(0.2)  # 200us/1000, node_num=2 bucket
 
-    def test_fallback_to_node_num_1(self, monkeypatch):
-        """Requested node_num missing but node_num=1 present -> falls back to node_num=1."""
+    def test_multi_node_miss_raises_instead_of_substituting_node_num_1(self, monkeypatch):
+        """Requested node_num > 1 missing -> raise; node_num=1 rows must not stand in."""
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
-        res = self._query(db, node_num=4)  # 4 not collected
+        with pytest.raises(PerfDataNotAvailableError, match="node_num=4"):
+            self._query(db, node_num=4)  # 4 not collected; node_num=1 is present but ineligible
+
+    def test_sub_node_falls_back_to_node_num_1(self, monkeypatch):
+        """node_num < 1 (a config smaller than one node) still uses node_num=1."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=4 / 8)  # MoEDispatch.query: num_gpus / num_gpus_per_node
         assert float(res) == pytest.approx(0.1)  # 100us/1000, node_num=1 fallback
+
+    def test_sub_node_fallback_warns_once_per_table(self, monkeypatch, caplog):
+        """The approximation warning is emitted once per table per run, not per query."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        MoEDispatch._wideep_fallback_logged.clear()
+        db = self._db_with_ll_data()
+        with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
+            self._query(db, node_num=4 / 8)
+            self._query(db, node_num=2 / 8)
+        warnings = [r for r in caplog.records if "sub-node" in r.getMessage()]
+        assert len(warnings) == 1
 
     def test_node_num_1_no_fallback(self, monkeypatch):
         """node_num=1 uses its own data directly."""
@@ -540,6 +565,15 @@ class TestWideEpDeepEpLlNodeNumFallback:
         db = self._db_with_ll_data()
         res = self._query(db, node_num=1)
         assert float(res) == pytest.approx(0.1)
+
+    def test_node_num_1_missing_shape_raises(self, monkeypatch):
+        """node_num=1 with no rows for the shape -> not-available (as before)."""
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with pytest.raises(PerfDataNotAvailableError):
+            self._query(db, node_num=1, num_experts=999)  # experts=999 absent at every node_num
 
     def test_neither_present_raises(self, monkeypatch):
         """Neither the exact node_num nor node_num=1 has the shape -> not-available (as before)."""
@@ -549,6 +583,33 @@ class TestWideEpDeepEpLlNodeNumFallback:
         db = self._db_with_ll_data()
         with pytest.raises(PerfDataNotAvailableError):
             self._query(db, node_num=4, num_experts=999)  # experts=999 absent at every node_num
+
+    def test_normal_table_shares_the_fail_closed_path(self, monkeypatch):
+        """The normal-mode table resolves node_num through the same helper, so it
+        fails closed on a multi-node miss too."""
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = MagicMock()
+        db._wideep_deepep_normal_data = {1: {7168: {8: {256: {20: self._leaf(100.0)}}}}}
+        db._default_database_mode = common.DatabaseMode.SILICON
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat)
+
+        def query(node_num):
+            return MoEDispatch._query_wideep_deepep_normal_table(
+                db,
+                node_num=node_num,
+                num_tokens=128,
+                num_experts=256,
+                topk=8,
+                hidden_size=7168,
+                sms=20,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        with pytest.raises(PerfDataNotAvailableError, match="wideep_deepep_normal"):
+            query(node_num=4)
+        assert float(query(node_num=1)) == pytest.approx(0.1)
 
 
 if __name__ == "__main__":

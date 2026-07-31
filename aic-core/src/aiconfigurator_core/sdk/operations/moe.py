@@ -881,9 +881,9 @@ class MoEDispatch(Operation):
 
     _normal_data_cache: ClassVar[dict] = {}
     _ll_data_cache: ClassVar[dict] = {}
-    # Tables whose node_num=1 single-node fallback has already been logged this
-    # process. The fallback fires once per swept parallel config (thousands of
-    # times), so we emit the INFO only once per table. Cleared in clear_cache.
+    # Tables whose sub-node -> node_num=1 substitution has already been logged
+    # this process. The fallback fires once per swept parallel config (thousands
+    # of times), so we emit the INFO only once per table. Cleared in clear_cache.
     _wideep_fallback_logged: ClassVar[set] = set()
 
     def __init__(
@@ -1001,39 +1001,53 @@ class MoEDispatch(Operation):
     ) -> tuple[int, dict]:
         """Resolve DeepEP dispatch/combine rows for ``(node_num, hidden, topk, experts)``.
 
-        Prefer measured data for the requested node scale; fall back to
-        single-node (node_num=1) data with the SAME (hidden, topk, num_experts)
-        when the exact node_num was not collected. This keeps the EP config
-        identical and only relaxes the all-to-all node scale, so multi-node
-        WideEP configs can use single-node collected data.
+        A genuinely multi-node request (``node_num > 1``) is served ONLY by
+        measurements at that node scale. When they are absent this raises
+        rather than substituting single-node rows: node_num=1 is an
+        NVLink-only all-to-all that ignores the cross-node RDMA path, and on
+        the H100/H200 campaign that collected both scales the substitution
+        runs ~3x optimistic and worsens with token count. Because the
+        substituted cost is frozen in the EP-scale dimension it does not
+        merely shift absolute latency, it systematically flatters larger-EP
+        configs in the ranking — a plausible-looking wrong number is worse
+        than a clean miss, which callers already handle by dropping the
+        parallel config from the candidate pool.
 
-        Note: node_num=1 is a smaller all-to-all than a real multi-node run,
-        so this under-estimates dispatch/combine latency at large EP.
+        Sub-node scales (``node_num < 1``, produced by ``MoEDispatch.query``
+        as ``num_gpus / num_gpus_per_node`` whenever a config uses fewer GPUs
+        than one node holds) still resolve against the node_num=1 rows. That
+        substitution stays intra-node in both directions — no cross-node
+        collective is being modelled away — and it is the only representation
+        those configs have.
+
         Read via .get() chains so a miss does not auto-vivify nested entries.
-        TODO(perf enhancement): extrapolate single-node -> multi-node.
-        The node_num=1 fallback below is only a rough approximation for real
-        multi-node WideEP: it reuses single-node (NVLink-only) numbers and
-        ignores the cross-node RDMA all-to-all cost, so it under-estimates
-        dispatch/combine latency and is notably inaccurate at large batch /
-        token sizes. This data is NOT directly usable for accurate multi-node
-        sizing; a follow-up PR should either collect true multi-node data
-        (test_internode) or fit a node-scaling extrapolation model.
+        TODO(perf enhancement): true multi-node coverage, either by collecting
+        it (test_internode) or by fitting a node-scaling extrapolation model
+        validated against the H100/H200 node 2/4/8 measurements.
 
         Returns ``(lookup_node, node_data)``. Raises
-        ``PerfDataNotAvailableError`` when neither the exact node nor the
-        node_num=1 fallback has rows.
+        ``PerfDataNotAvailableError`` when the requested scale has no rows and
+        no in-node substitution applies.
         """
         lookup_node = node_num
         node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if not node_data and node_num > 1:
+            raise PerfDataNotAvailableError(
+                f"wideep_deepep_{table} data missing for node_num={node_num} "
+                f"hidden={hidden_size} topk={topk} experts={num_experts}. "
+                "Multi-node requests are not served from node_num=1 single-node "
+                "measurements -- that substitution ignores the cross-node all-to-all "
+                "and is ~3x optimistic. Collect data at this node scale."
+            )
         if not node_data and node_num != 1:
             fallback = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
             if fallback:
                 if table not in cls._wideep_fallback_logged:
                     cls._wideep_fallback_logged.add(table)
                     logger.warning(
-                        "wideep_deepep_%s: multi-node (node_num>1) configs reuse node_num=1 "
-                        "single-node data (APPROXIMATION: ignores cross-node all-to-all, "
-                        "under-estimates latency at large batch -- see TODO perf enhancement). "
+                        "wideep_deepep_%s: sub-node (node_num<1) configs reuse node_num=1 "
+                        "single-node data (APPROXIMATION: a partial node's all-to-all is "
+                        "smaller than a full one, so this over-estimates latency). "
                         "Logged once per run.",
                         table,
                     )
