@@ -122,7 +122,7 @@ jobs:
           startsWith(github.ref, 'refs/heads/pull-request/')
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
-          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
           ARTIFACTORY_SUBPATH: ${{ steps.pr-staging.outputs.subpath }}
           UPLOAD_UPPER: ${{ matrix.upload_upper }}
@@ -156,7 +156,7 @@ jobs:
       - name: Mark the validated matrix complete
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
-          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
         shell: bash
         run: |
