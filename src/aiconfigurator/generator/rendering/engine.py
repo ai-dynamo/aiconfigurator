@@ -22,6 +22,7 @@ from packaging.version import InvalidVersion, Version
 from aiconfigurator.generator.dynamo_features import (
     frontend_cli_args_string,
     kvbm_shell_exports_from_dyn_config,
+    vllm_worker_role_args,
 )
 
 from .rule_engine import apply_rule_plugins
@@ -293,6 +294,10 @@ def render_backend_templates(
     _raw_param_values = param_values
     param_values = apply_rule_plugins(dict(param_values), backend)
     context = prepare_template_context(param_values, backend)
+    if backend == "vllm":
+        dynamo_version = param_values.get("generator_dynamo_version")
+        context["vllm_prefill_worker_role_args"] = vllm_worker_role_args("prefill", dynamo_version)
+        context["vllm_decode_worker_role_args"] = vllm_worker_role_args("decode", dynamo_version)
     # Assign backend-specific working_dir (removes need for input-driven path)
     backend_dirs = {
         "trtllm": "/workspace/components/backends/trtllm",
