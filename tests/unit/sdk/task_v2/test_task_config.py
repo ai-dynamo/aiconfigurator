@@ -1046,6 +1046,60 @@ def test_wideep_kimi_skips_deepseek_mla_label_remap():
     assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
 
 
+def test_deepep_moe_without_enable_wideep_keys_wideep_mla_tables():
+    """The intra-node DeepEP sweep (cli ``agg_deepep`` / ``disagg_deepep``) sets
+    moe_backend=deepep_moe with enable_wideep UNSET, and models/deepseek.py dispatches
+    to WideEPDeepSeekModel -- which builds WideEPContextMLA / WideEPGenerationMLA -- on
+    moe_backend alone. So the op keys validate against must be the wideep_*_mla tables,
+    matching the fp8_block/fp8 labels _resolve_quant_modes assigns on that same
+    predicate. Keying the tables on enable_wideep instead resolved fmha=fp8_block but
+    checked narrow-EP context_mla (bfloat16 only), rejecting a config the model layer
+    builds happily."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+        total_gpus=8,
+    )
+    assert t.enable_wideep is False
+    # The quant remap and the table selection must agree, or validate rejects the pair.
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    assert t._attention_op_keys("agg") == ("wideep_context_mla", "wideep_generation_mla")
+
+    # Plain narrow EP (no deepep_moe) keeps the narrow-EP tables and the bf16 downgrade.
+    t_narrow = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        total_gpus=8,
+    )
+    assert t_narrow._attention_op_keys("agg") == ("context_mla", "generation_mla")
+
+
+def test_deepep_moe_kimi_keeps_narrow_ep_mla_tables():
+    """Guard for the guard above: Kimi K2.5 is routed away from WideEPDeepSeekModel
+    (models/deepseek.py dispatches on the DeepSeek architecture), so deepep_moe must NOT
+    pull it into the wideep_*_mla tables -- that would validate against tables whose ops
+    are never built, the mirror of the bug the DeepSeek case pins. Widening the
+    DeepseekV3ForCausalLM guard in _attention_op_keys fails here, and would also break
+    test_wideep_kimi_skips_deepseek_mla_label_remap."""
+    t = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K2.5",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+        total_gpus=8,
+    )
+    assert t._architecture != "DeepseekV3ForCausalLM"
+    assert t._attention_op_keys("agg") == ("context_mla", "generation_mla")
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+
 def test_enable_wideep_normalizes_moe_backend():
     """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
     validation selects the wideep_*_moe ops."""

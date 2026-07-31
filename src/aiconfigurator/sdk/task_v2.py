@@ -856,11 +856,22 @@ class Task:
         family / backend / wideep combination (shared by the resolve-time FMHA
         fallback and ``_check_role_against_db``; mapping lives in
         ``models.attention_op_keys``)."""
-        return attention_op_keys(
-            self._model_family,
-            self._role_attr(role, "backend_name"),
-            bool(self._role_attr(role, "enable_wideep")),
+        backend_name = self._role_attr(role, "backend_name")
+        # Three sites decide "is this WideEP attention?" and they must agree:
+        # models/deepseek.py dispatches to WideEPDeepSeekModel -- which builds
+        # WideEPContextMLA / WideEPGenerationMLA -- on the deepep_moe MoE backend
+        # ALONE, and _resolve_quant_modes remaps fmha->fp8_block / kv->fp8 on that
+        # same predicate. Keying this on enable_wideep instead made the intra-node
+        # DeepEP sweep (deepep_moe with enable_wideep unset) validate a WideEP
+        # label against the narrow-EP context_mla table and reject the config.
+        # The DeepseekV3ForCausalLM guard mirrors the remap's, keeping Kimi K2.5
+        # out of the WideEP tables that model construction never builds for it.
+        wideep_attention = bool(self._role_attr(role, "enable_wideep")) or (
+            backend_name == "sglang"
+            and self.moe_backend == "deepep_moe"
+            and self._architecture == "DeepseekV3ForCausalLM"
         )
+        return attention_op_keys(self._model_family, backend_name, wideep_attention)
 
     def _try_load_role_database(self, role: str):
         """Load the role's perf DB, returning None when the perf data is
