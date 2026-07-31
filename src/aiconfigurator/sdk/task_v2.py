@@ -69,6 +69,10 @@ ParallelChoice = tuple[int, int, int, int, int, int]  # (tp, pp, dp, moe_tp, moe
 # not one per Task or per probe).
 _LARGE_EP_EMPTY_COVERAGE_LOGGED: set[tuple[str, str, str, str | None]] = set()
 
+# Same dedupe key, for the "generation covered but context is not" warning
+# (see Task._resolve_moe_comm_backend).
+_LARGE_EP_ASYMMETRIC_COVERAGE_WARNED: set[tuple[str, str, str, str | None]] = set()
+
 
 def _default_cp_list_for(model_family: str, backend_name: str) -> list[int]:
     """Default prefill/agg ``cp_list`` for the CP auto-sweep; ``[1]`` otherwise.
@@ -1126,6 +1130,16 @@ class Task:
             return ("generation",)
         return ("context", "generation")
 
+    def _required_large_ep_phases(self, role: str) -> tuple[str, ...]:
+        """Phases that must be covered before a role can run large EP.
+
+        The phases the role RUNS, plus CONTEXT for every role: a worker's model
+        object holds the whole graph and the memory model sizes its weights
+        from ``model.context_ops`` (``base_backend._get_memory_usage``), so a
+        decode worker with a fused context span and a large-EP decode step
+        would be priced with the wrong (÷tp shared expert, router) weights."""
+        return ("context",) if role != "agg" else self._role_phases(role)
+
     def _large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
         """``{phase: {comm_backend: {ep_size, ...}}}`` explorable with large EP.
 
@@ -1233,12 +1247,20 @@ class Task:
         Large EP needs ``moe_tp == 1`` and ``moe_ep > 1``; the phases the ROLE
         RUNS must cover that EP, otherwise the whole tuple stays fused (an agg
         worker cannot run context large-EP and generation fused -- it is one
-        model graph). The other phase of a disagg role joins whenever the data
-        covers it, so the role's model builds one coherent graph (see
-        ``_large_ep_coverage``). The per-phase backend is the first registry
-        entry covering this EP, so a phase served by two backends resolves
-        deterministically (e.g. trtllm nvlink_two_sided before nvlink_one_sided)
-        while an EP only one of them collected still resolves to that one.
+        model graph). The CONTEXT phase is required on top of that for every
+        role, decode included: a worker's model object holds the whole graph
+        and the memory model sizes weights off ``model.context_ops``
+        (``base_backend._get_memory_usage``), so a decode worker whose context
+        span fell back to the fused emission would be priced with the fused
+        shared-expert/router weights while its decode step runs large EP.
+        Generation-only coverage therefore keeps the tuple fused, with one
+        warning naming the asymmetry (shipped data covers both phases; this
+        fires the day a collection lands one phase ahead of the other).
+
+        The per-phase backend is the first registry entry covering this EP, so
+        a phase served by two backends resolves deterministically (e.g. trtllm
+        nvlink_two_sided before nvlink_one_sided) while an EP only one of them
+        collected still resolves to that one.
         """
         _tp, _pp, _dp, moe_tp, moe_ep, _cp = tuple(parallel_tuple)
         if moe_tp != 1 or moe_ep <= 1:
@@ -1246,23 +1268,51 @@ class Task:
         coverage = self._large_ep_coverage(role)
         if not coverage:
             return None
-        required = self._role_phases(role)
         resolved: dict[str, str] = {}
         for phase in ("context", "generation"):
             for name, eps in coverage.get(phase, {}).items():
                 if moe_ep in eps:
                     resolved[phase] = name
                     break
-            else:
-                if phase in required:
-                    return None
-        return resolved or None
+        required = set(self._role_phases(role)) | set(self._required_large_ep_phases(role))
+        missing = required - set(resolved)
+        if missing:
+            if missing == {"context"}:
+                self._warn_context_coverage_gap(role, moe_ep)
+            return None
+        return resolved
+
+    def _warn_context_coverage_gap(self, role: str, moe_ep: int) -> None:
+        """One-shot warning: the role's own phase is covered but context is not."""
+        key = (
+            self._role_attr(role, "model_path"),
+            self._role_attr(role, "system_name"),
+            self._role_attr(role, "backend_name"),
+            self._role_attr(role, "backend_version"),
+        )
+        if key in _LARGE_EP_ASYMMETRIC_COVERAGE_WARNED:
+            return
+        _LARGE_EP_ASYMMETRIC_COVERAGE_WARNED.add(key)
+        logger.warning(
+            "large-EP coverage for %s on %s/%s is asymmetric: the %s phase is collected at "
+            "moe_ep=%d but the context phase is not. Keeping those configs on the fused path -- "
+            "a worker's weights are sized from its context ops, so a context-fused / "
+            "generation-large-EP graph would be mis-priced. Collect the missing context rows "
+            "(moe_a2a + moe_ep) to enable them.",
+            key[0],
+            key[1],
+            key[2],
+            " / ".join(self._role_phases(role)),
+            moe_ep,
+        )
 
     def _large_ep_eps(self, role: str) -> set[int]:
-        """EP sizes this role could run large-EP: covered in EVERY phase it runs."""
+        """EP sizes this role could run large-EP: covered in every phase it runs
+        AND in the context phase that sizes its weights (see
+        ``_required_large_ep_phases``)."""
         coverage = self._large_ep_coverage(role)
         eps: set[int] | None = None
-        for phase in self._role_phases(role):
+        for phase in set(self._role_phases(role)) | set(self._required_large_ep_phases(role)):
             per_backend = coverage.get(phase, {})
             phase_eps = set().union(*per_backend.values()) if per_backend else set()
             eps = phase_eps if eps is None else eps & phase_eps
@@ -2116,23 +2166,49 @@ class Task:
                 f"Supported {op} modes: {sorted(modes)}"
             )
 
-        def _check_any(ops: list[str], mode: Any) -> None:
-            """Pass when ANY reachable regime's op supports the mode.
+        def _check_attention(ops: list[str], mode: Any) -> None:
+            """Validate one quant mode against the reachable attention regimes.
 
-            A mixed task (some tuples fused, some large-EP) has one quant mode
-            but two attention tables; the tuples whose table lacks it are pruned
-            by the sweep's per-tuple guard, so validate must only fail when NO
-            regime can serve the task. The first (fused) failure is reported --
-            the universally-reachable regime is the actionable one."""
-            first_error: Exception | None = None
-            for op in ops:
+            ``ops`` is ordered by authority (``_reachable_attention_op_keys``:
+            fused first, then large EP), and the rule is "the FIRST INFORMATIVE
+            op decides":
+
+            - An op whose table the DB records no ``supported_quant_mode`` for
+              carries no capability information: it abstains. It must neither
+              green-light the check (an absent table is not a capability
+              statement) nor fail it -- the legacy per-op check skipped it too.
+            - The first informative op is the regime the task MUST be able to
+              run: the fused one whenever any enumerated tuple is fused, the
+              large-EP one for a large-EP-only task (which is what the flag
+              used to select). Failing it is fatal, exactly as before this
+              became a per-tuple property.
+            - A later regime that cannot serve the mode is NOT fatal: its
+              tuples are pruned by the sweep's per-tuple guard. Say so once, so
+              losing them is not silent.
+            - No informative op at all -> abstain (legacy behavior for ops the
+              DB records nothing about)."""
+            informative = [op for op in ops if supported.get(op)]
+            if not informative:
+                return
+            _check(informative[0], mode)
+            unusable = []
+            for op in informative[1:]:
                 try:
                     _check(op, mode)
-                    return
-                except (ValueError, UnsupportedWideepConfigError) as exc:
-                    first_error = first_error or exc
-            if first_error is not None:
-                raise first_error
+                except (ValueError, UnsupportedWideepConfigError):
+                    unusable.append(op)
+            if unusable:
+                logger.info(
+                    "%s: %s has no %s data for %s; the parallel configs that need "
+                    "%s will be skipped during the sweep (the %r regime still runs). "
+                    "Set a quant mode those tables carry to model them.",
+                    role,
+                    ", ".join(unusable),
+                    getattr(mode, "name", mode),
+                    f"{system}/{backend}/{version}",
+                    " / ".join(unusable),
+                    informative[0],
+                )
 
         # GEMM is always validated (applies to all worker shapes). It has the
         # same transfer ladder as MoE (shared primitive), so the same
@@ -2149,11 +2225,11 @@ class Task:
 
         # FMHA: only meaningful for context-using workers (agg, prefill).
         if validate_context:
-            _check_any([ctx for ctx, _gen in attention_op_pairs], self._role_attr(role, "fmha_quant_mode"))
+            _check_attention([ctx for ctx, _gen in attention_op_pairs], self._role_attr(role, "fmha_quant_mode"))
 
         # KV cache: only meaningful for generation-using workers (agg, decode).
         if validate_generation:
-            _check_any([gen for _ctx, gen in attention_op_pairs], self._role_attr(role, "kvcache_quant_mode"))
+            _check_attention([gen for _ctx, gen in attention_op_pairs], self._role_attr(role, "kvcache_quant_mode"))
 
     # =====================================================================
     # Properties
