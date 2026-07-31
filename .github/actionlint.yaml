@@ -2,3 +2,4 @@ self-hosted-runner:
   labels:
     - prod-aiconfigurator-default-amd64-v1
     - prod-aiconfigurator-default-arm64-v1
+    - prod-aiconfigurator-default-macos-arm64-v1

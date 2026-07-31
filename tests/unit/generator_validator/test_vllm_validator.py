@@ -84,8 +84,8 @@ def _write_vllm_result_tree(root: Path) -> None:
     _write_k8s_manifest(
         root / "disagg" / "top1" / "k8s_deploy.yaml",
         {
-            "VllmPrefillWorker": [*_base_vllm_args(), "--is-prefill-worker"],
-            "VllmDecodeWorker": [*_base_vllm_args(), "--is-decode-worker"],
+            "VllmPrefillWorker": [*_base_vllm_args(), "--disaggregation-mode", "prefill"],
+            "VllmDecodeWorker": [*_base_vllm_args(), "--disaggregation-mode", "decode"],
         },
     )
 
@@ -165,3 +165,42 @@ def test_vllm_engine_args_yaml_still_uses_dict_fallback(tmp_path, monkeypatch):
 
     assert config == {"model": "Qwen/Qwen3-0.6B"}
     assert resolved_model is None
+
+
+@pytest.mark.parametrize(
+    "role_args",
+    [
+        ["--is-prefill-worker"],
+        ["--is-decode-worker"],
+        ["--disaggregation-mode", "prefill"],
+        ["--disaggregation-mode", "decode"],
+        ["--disaggregation-mode=prefill"],
+        ["--disaggregation-mode=decode"],
+    ],
+)
+def test_vllm_validator_accepts_supported_dynamo_worker_role_interfaces(role_args, monkeypatch):
+    monkeypatch.setattr(vllm_backend, "_import_vllm_engine_args", _fake_vllm_import)
+
+    config = vllm_backend.validate_vllm_engine_args_from_cli([*_base_vllm_args(), *role_args])
+
+    assert config == {"model": "Qwen/Qwen3-0.6B"}
+
+
+def test_vllm_validator_rejects_mixed_worker_role_interfaces():
+    with pytest.raises(ValueError, match="Cannot mix legacy"):
+        vllm_backend._normalize_cli_args(
+            [*_base_vllm_args(), "--is-prefill-worker", "--disaggregation-mode", "prefill"]
+        )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--disaggregation-mode"],
+        ["--disaggregation-mode", "invalid"],
+        ["--disaggregation-mode=invalid"],
+    ],
+)
+def test_vllm_validator_rejects_invalid_disaggregation_mode(args):
+    with pytest.raises(ValueError, match="disaggregation-mode"):
+        vllm_backend._normalize_cli_args(args)
