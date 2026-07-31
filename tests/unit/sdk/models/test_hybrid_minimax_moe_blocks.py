@@ -186,6 +186,18 @@ class TestHybridMoEBlocksViaBuilder:
         assert all(op._attn_cp_size == 2 for op in generation_dispatches)
         assert all(not op._is_context for op in generation_dispatches)
 
+    def test_moe_comm_backend_is_rejected_loudly(self):
+        """The builder fires its large-EP emission off cfg.moe_comm_backend
+        internally; this family has no large-EP wiring (no node-width
+        resolution, fused-only builder calls), so a config carrying a comm
+        backend must fail construction instead of silently mis-modeling."""
+        with pytest.raises(ValueError, match="large-EP is not wired for the HYBRIDMOE family"):
+            _build(SCOUT, moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"})
+
+    def test_fused_construction_without_comm_backend_still_works(self):
+        model = _build(SCOUT, moe_comm_backend=None)
+        assert "context_global_moe_pre_dispatch" in _names(model.context_ops)
+
     def test_builder_receives_family_and_backend(self, monkeypatch):
         """The builder call passes model_family/backend_name so registered
         variants can target this family."""
@@ -264,6 +276,17 @@ class TestMiniMaxM3MoEBlockViaBuilder:
         assert gate_up._k == 6144
         ffn2 = _op(model.context_ops, "context_shared_ffn2_gemm")
         assert ffn2._n == 6144 and ffn2._k == 3072 // 8
+
+    def test_moe_comm_backend_is_rejected_loudly(self):
+        """A comm-backend-carrying config would fire the builder's large-EP
+        emission with NO shared experts (this family passes
+        num_shared_experts=0 and hand-wires the triplet) — fail loudly."""
+        with pytest.raises(ValueError, match="large-EP is not wired for the MINIMAXM3 family"):
+            _build(M3, moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"})
+
+    def test_fused_construction_without_comm_backend_still_works(self):
+        model = _build(M3, moe_comm_backend=None)
+        assert "context_moe_pre_dispatch" in _names(model.context_ops)
 
     def test_builder_receives_family_and_backend(self, monkeypatch):
         calls = []
