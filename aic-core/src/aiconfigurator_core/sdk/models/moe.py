@@ -142,9 +142,14 @@ class MOEModel(BaseModel):
         else:
             attn_scale_factor = 1
 
+        # Large EP replicates the embedding table instead of sharding it over TP
+        # (transcribed from the deleted SGLangEPMOEModel, models/moe.py:490/588 at
+        # commit 8372e60, which also emitted no embedding all-reduce and no P2P).
+        embedding_vocab_size = self._vocab_size if self._is_large_ep else self._vocab_size // tp_size
+
         self.context_ops.extend(
             [
-                ops.Embedding("context_embedding", 1, self._vocab_size // tp_size, h, 0.3, seq_split=cp),
+                ops.Embedding("context_embedding", 1, embedding_vocab_size, h, 0.3, seq_split=cp),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
                     "context_qkv_gemm",
@@ -212,7 +217,7 @@ class MOEModel(BaseModel):
 
         self.generation_ops.extend(
             [
-                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size // tp_size, h, 0.3),
+                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, embedding_vocab_size, h, 0.3),
                 ops.ElementWise("generation_add_norm_1", self._num_layers * self._mtp_scale_factor, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
                     "generation_qkv_gemm",
@@ -271,6 +276,12 @@ class MOEModel(BaseModel):
                 )
             ]
         )
+
+        if self._is_large_ep:
+            # The legacy large-EP graph ends at the logits gemm: with the
+            # embedding replicated there is nothing to all-reduce, and it never
+            # modeled pipeline P2P.
+            return
 
         # All-reduce after embedding: needed when tp > 1
         # Embedding shards vocab across TP ranks and all-reduces

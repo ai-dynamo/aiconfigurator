@@ -180,7 +180,7 @@ class DeepSeekV32Model(BaseModel):
 
     #: TRT-LLM large-EP decode PDL overlap discount, transcribed from the
     #: deleted ``TrtllmWideEPDeepSeekV32Model._pdl_factor`` (deepseek_v32.py:463
-    #: at commit 8372e60). Applies to the MoE block only.
+    #: at commit 8372e60). Scales every decode-layer op, attention included.
     _PDL_FACTOR = 0.9
 
     def _large_ep_moe_ops(self, phase: str, shape: MoEBlockShape, scale_factor: float) -> list:
@@ -190,10 +190,20 @@ class DeepSeekV32Model(BaseModel):
         classes at commit 8372e60: sglang flattens the prefill alpha to 0.6
         under EPLB (deepseek_v32.py:740-751); trtllm keeps alpha 1.01 in both
         phases and marks EPLB with the ``_eplb`` suffix (deepseek_v32.py:479-486).
+
+        The shared-expert dtype is asymmetric in the legacy classes and is
+        reproduced as such: trtllm sized its shared GEMMs with
+        ``_dsa_shared_expert_quant_mode`` (deepseek_v32.py:536-555, 631-653),
+        i.e. bf16 for checkpoints like ``nvidia/GLM-5.2-NVFP4`` that exclude
+        ``mlp.shared_experts*`` from quantization, while sglang used the plain
+        ``gemm_quant_mode`` (deepseek_v32.py:796-819) -- so the override is
+        passed on trtllm only.
         """
         base = self.config.workload_distribution
+        shared_gemm_quant_mode = None
         if self._backend_name == "trtllm":
             distribution = power_law_distribution(base, self._power_law_alpha, eplb_suffix=self.config.enable_eplb)
+            shared_gemm_quant_mode = _dsa_shared_expert_quant_mode(self.extra_params, self.config.gemm_quant_mode)
         else:
             alpha = 0.6 if (phase == "context" and self.config.enable_eplb) else self._power_law_alpha
             distribution = power_law_distribution(base, alpha)
@@ -209,6 +219,7 @@ class DeepSeekV32Model(BaseModel):
             model_family=self.model_family,
             attn_cp_size=self.config.cp_size,
             gpus_per_node=self.config.num_gpus_per_node,
+            shared_gemm_quant_mode=shared_gemm_quant_mode,
         )
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
@@ -269,6 +280,12 @@ class DeepSeekV32Model(BaseModel):
             num_moe_layers=self._num_layers,
         )
         if self._is_large_ep and backend_name == "trtllm":
+            # ===== TRT-LLM large EP (wideEP) =====
+            # Attention + non-MoE wiring transcribed verbatim from the deleted
+            # TrtllmWideEPDeepSeekV32Model (deepseek_v32.py:488-710 at commit
+            # 8372e60): the add_norms carry NO ``scale_num_tokens=cp_size`` (the
+            # fused path's CP form) and the whole decode stack carries the PDL
+            # discount.
             validate_trtllm_large_ep(
                 attention_dp_size=attention_dp_size,
                 moe_ep_size=moe_ep_size,
@@ -277,6 +294,69 @@ class DeepSeekV32Model(BaseModel):
                 wideep_num_slots=self.config.wideep_num_slots,
                 enable_eplb=self.config.enable_eplb,
             )
+            self.context_ops.extend(
+                [
+                    ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                    ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                    ops.ContextDSAModule(
+                        "context_attention",
+                        self._num_layers,
+                        local_heads,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        dsa_gemm_quant_mode,
+                        architecture=self.architecture,
+                        cp_size=self.config.cp_size,
+                        index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                        dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    ),
+                    ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
+            self.context_ops.append(
+                ops.GEMM(
+                    "context_logits_gemm",
+                    1,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            generation_scale = self._num_layers * self._mtp_scale_factor * self._PDL_FACTOR
+            self.generation_ops.extend(
+                [
+                    ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                    ops.ElementWise("generation_add_norm_1", generation_scale, 2 * h, 2 * h, 0.8),
+                    ops.GenerationDSAModule(
+                        "generation_attention",
+                        generation_scale,
+                        local_heads,
+                        kvcache_quant_mode,
+                        dsa_gemm_quant_mode,
+                        architecture=self.architecture,
+                        index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                        dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    ),
+                    ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, generation_scale))
+            self.generation_ops.append(
+                ops.GEMM(
+                    "generation_logits_gemm",
+                    1 * self._mtp_scale_factor,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            pp_scale_factor = pp_size - 1
+            self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+            self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+            return
 
         if self._is_large_ep and backend_name == "sglang":
             # ===== sglang large-EP (deepep) =====
@@ -439,8 +519,8 @@ class DeepSeekV32Model(BaseModel):
             ),
         ]
         if self._is_large_ep:
-            # Large EP (non-sglang; sglang returned above): router + full-size
-            # shared experts + A2A dispatch/EPMoE/combine + moe_reduce_add.
+            # Large EP on a framework without its own attention stack (see the
+            # generation site below).
             self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
         else:
             self.context_ops.extend(fused_context_moe_ops)
@@ -486,13 +566,11 @@ class DeepSeekV32Model(BaseModel):
         )
 
         if self._is_large_ep:
-            # Large EP (non-sglang; sglang returned above): the builder owns the
-            # OverlapOp + reduce_add structure. The MoE block carries the legacy
-            # TRT-LLM PDL discount.
-            gen_moe_scale = self._num_layers * self._mtp_scale_factor
-            if backend_name == "trtllm":
-                gen_moe_scale *= self._PDL_FACTOR
-            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, gen_moe_scale))
+            # Large EP on a framework without its own attention stack (the
+            # sglang/trtllm branches returned above).
+            self.generation_ops.extend(
+                self._large_ep_moe_ops("generation", moe_shape, self._num_layers * self._mtp_scale_factor)
+            )
         else:
             gen_shared_ops = [
                 ops.GEMM(

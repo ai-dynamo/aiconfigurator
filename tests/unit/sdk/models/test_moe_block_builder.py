@@ -400,6 +400,7 @@ class TestRegisterMoeBlock:
             model_family="TOYFAM",
             attn_cp_size=2,
             gpus_per_node=4,
+            shared_gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         )
         assert set(captured) == {
             "prefix",
@@ -413,6 +414,7 @@ class TestRegisterMoeBlock:
             "model_family",
             "attn_cp_size",
             "gpus_per_node",
+            "shared_gemm_quant_mode",
         }
         assert captured["prefix"] == "generation"
         assert captured["shape"] is shape
@@ -425,6 +427,7 @@ class TestRegisterMoeBlock:
         assert captured["model_family"] == "TOYFAM"
         assert captured["attn_cp_size"] == 2
         assert captured["gpus_per_node"] == 4
+        assert captured["shared_gemm_quant_mode"] is common.GEMMQuantMode.bfloat16
 
     def test_decorator_returns_function_unchanged(self, moe_block_registry):
         def variant(default, **ctx):
