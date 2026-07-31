@@ -756,6 +756,34 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"num_experts={num_experts}, top_k={topk}, "
             f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
         )
+    elif architecture in {"Step3p7FlashForCausalLM", "Step3p5FlashForCausalLM"}:
+        # StepFun Step-3.7-Flash: hybrid SWA/global attention (Gemma-style
+        # ``layer_types``) + dense-first-``first_k_dense_replace`` then MoE FFN,
+        # with one shared expert on the MoE layers. Same head geometry (num_kv_heads
+        # / head_dim) on both attention types, so the SWA dim fields stay 0 and fall
+        # back to the model-level defaults. attn_layer_pattern: 1=full, 0=sliding.
+        layer_types_raw = config.get("layer_types", [])
+        if len(layer_types_raw) != layers:
+            raise ValueError(f"Step3p7 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
+        if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
+            raise ValueError("Step3p7 layer_types must contain only 'sliding_attention' or 'full_attention'")
+        attn_pattern = tuple(1 if lt == "full_attention" else 0 for lt in layer_types_raw)
+        first_k_dense = int(config.get("first_k_dense_replace", 0) or 0)
+        moe_freq = tuple(0 if i < first_k_dense else 1 for i in range(layers))
+        extra_params = HybridMoEConfig(
+            attn_layer_pattern=attn_pattern,
+            moe_layer_freq=moe_freq,
+            # SWA and global layers share head geometry -> 0 = fall back to defaults.
+            sliding_window_size=config.get("sliding_window", 0) or config.get("sliding_window_size", 0),
+            dense_inter_size=0,  # dense layers use model-level inter_size
+        )
+        logger.info(
+            f"Step3p7 hybrid config: "
+            f"global_attn_layers={sum(attn_pattern)}, swa_layers={attn_pattern.count(0)}, "
+            f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
+            f"sliding_window_size={extra_params.sliding_window_size}, "
+            f"share_expert_dim={config.get('share_expert_dim', 0)}"
+        )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.
         layer_types_raw = config.get("layer_types", [])
