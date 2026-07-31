@@ -62,6 +62,17 @@ class MiniMaxM3Model(BaseModel):
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
         self._backend_name = backend_name
+        # Fused-only family: the MoE-block builder keys its large-EP emission
+        # off cfg.moe_comm_backend, but this family calls the builder with
+        # num_shared_experts=0 (shared triplet hand-wired) and resolves no
+        # node width — a comm backend here would silently drop the shared
+        # experts from the routed path and mis-price the all-to-all. Loud,
+        # not silent (same principle as the num_gpus_per_node raise).
+        if getattr(self.config, "moe_comm_backend", None):
+            raise ValueError(
+                "large-EP is not wired for the MINIMAXM3 family yet — moe_comm_backend "
+                "must not be set; see models/README blocks/ section"
+            )
         assert (
             self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
