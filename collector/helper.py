@@ -688,15 +688,30 @@ def log_perf(
 ) -> bool:
     lock_file = perf_filename + ".lock"
 
-    # Try for 1 sec (10 * 0.1s)
+    # Try for 30s (300 * 0.1s). The old 1s window lost measured rows whenever
+    # a sibling worker was wedged in a CUDA crash storm while other workers
+    # queued behind the lock (H200 K3 moe 2026-08-01: 47 rows measured but
+    # dropped). A worker SIGKILLed inside its critical section (host OOM
+    # killer) skips `finally` and leaves the lock behind forever, so a lock
+    # older than the stale threshold is broken instead of waited on.
+    stale_lock_seconds = 60.0
     got_lock = False
-    for _ in range(10):
+    for _ in range(300):
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             got_lock = True
             break
         except OSError:
+            try:
+                if time.time() - os.path.getmtime(lock_file) > stale_lock_seconds:
+                    print(f"Breaking stale lock for {perf_filename}")
+                    os.unlink(lock_file)
+                    continue
+            except OSError:
+                # Lock vanished between the open attempt and the stat/unlink —
+                # retry immediately.
+                continue
             time.sleep(0.1)
 
     if not got_lock:

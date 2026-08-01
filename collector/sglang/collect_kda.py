@@ -416,9 +416,16 @@ def run_kda_generation_benchmark(
             # in one launch; False -> the Triton packed pair, serving's
             # fallback). No shard shapes are replicated here — covered() is
             # the framework's dispatch decision.
-            fused = _fused_decode_module()
+            #
+            # SM90+ only: the JIT kernel emits mbarrier.try_wait.parity, which
+            # ptxas rejects below sm_90 ("requires .target sm_90 or higher",
+            # L40S/SM89 2026-08-01 — covered() accepts the shapes and the
+            # compile failure then kills every batch cell of the 12-head
+            # shard). Pre-Hopper decode is the Triton packed pair, same as
+            # serving after its own JIT failure.
+            fused = _fused_decode_module() if get_sm_version() >= 90 else None
             onorm_g = torch.randn(batch_size, proj_size, dtype=dtype, device=device)
-            if fused.covered(mixed_qkv, a, b, conv_pool, recurrent_state, state_indices, onorm_g):
+            if fused is not None and fused.covered(mixed_qkv, a, b, conv_pool, recurrent_state, state_indices, onorm_g):
                 kda_fused_decode = fused.kda_fused_decode
                 # Serving static args (_prepare_fused_decode): per-block
                 # transposed fp32 conv weights [d_conv, proj], dense fp32
