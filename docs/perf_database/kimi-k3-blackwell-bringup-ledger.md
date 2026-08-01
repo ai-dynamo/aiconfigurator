@@ -2,9 +2,11 @@
 
 Campaign ledger for bringing Kimi-K3 (`KimiK3ForConditionalGeneration`) perf
 data onto Blackwell. The collectors were first debugged on Hopper (SM90)
-silicon; per the PR owner's scope decision (2026-07-28) the PR packages
-**Blackwell data only** — no Hopper system or Hopper perf data ships with it.
-Read this before collecting on any SM100/SM103 node; it records what is
+silicon; per the PR owner's scope decision (2026-07-28) the PR initially
+packaged **Blackwell data only**. On 2026-08-01 the owner widened scope to
+ada + hopper + blackwell **sglang-only** and the remaining sglang lanes were
+collected via the aic-auto-collector harness (see the 2026-08-01 section);
+vllm remains b200-only by that scope decision. This document records what is
 verified, what each platform's serving dispatch actually runs, and what
 remains.
 
@@ -20,8 +22,14 @@ Status legend: `done` = collected, quality-gated, packaged under
 | moe (K3 shape) | b200_sxm (SM100) | sglang 0.5.14 | **done (2026-07-28)** | 3078 | `sglang_flashinfer_trtllm_moe` (flashinfer_mxfp4 lane), w4a16_mxfp4, TP 1-32 x EP 1-128 x 3 distributions, **zero failures** — the Hopper marlin EP>1 crash does not transfer; rows merged into the existing 139k-row 0.5.14 table (142,243 total) |
 | moe (K3 shape, **w4a8_mxfp4_mxfp8**) | b300_sxm (SM103) | sglang 0.5.14 | **done (2026-07-29)** | 3078 | the Blackwell serving-truth precision lane: mxfp8 activations (`Mxfp4MoEMethod` default, mxfp4.py:1311-1330 @ kimi-k3 branch); merged into the shared b300 0.5.14 table (251,441 total). Same-shape delta vs the bf16-activation w4a16 lane at 8 tokens: 89.8 vs 102.5 µs/layer (~12%) — small-batch MoE is weight-bytes-bound, so the E2E dummy-vs-model MoE gap is dominated by the dummy routing collapse artifact, not precision. SDK: `resolve_kimi_k3_moe_arch_mode` routes K3+sglang+Blackwell onto this label; Hopper keeps W4A16 marlin |
 | kda | b300_sxm (SM103) | sglang 0.5.16 | **done (2026-07-29)** | 976 | SM103 verified and lifted from the sglang kda `unverified_sms`; includes the NEW `kda_fused_decode` generation lane for the TP8 12-head shard (attempt-and-verify fused conv+recurrence+onorm, 6.6 µs/layer @ 8 tokens vs 15 µs for the Triton pair — matches the E2E nsys 0.40 ms/step); same known failures as B200 (52 int32 cells + the (256,8,96h) verify kernel-limit) |
-| kda | b300_sxm vllm / gb200 / gb300 | — | open | — | vllm kda on Blackwell-Ultra not yet run (103 stays in the vllm `unverified_sms`); gb200/gb300 open |
-| kda | rtx_pro_6000 (SM120) | both | open | — | FlashKDA claims SM120 support (vllm); sglang CuTe paths are SM100-only → Triton verify |
+| kda | gb200 / gb300 | sglang 0.5.16 | **done (2026-08-01)** | 976 + 976 | identical dispatch and failure spectrum to b300 (fused CuTeDSL verify, `kda_fused_decode` on the 12-head shard, 52 int32 cells + the (256,8,96h) verify kernel-limit cell) |
+| kda | h100_sxm / h200_sxm (SM90) | sglang 0.5.16 | **done (2026-08-01)** | 1085 + 1085 | Hopper RECOLLECTION with the fixed int32 guard (396 context cells/kernel vs the old H20 220); Triton verify pair + `kda_fused_decode` engages on the 12-head shard on SM90 too |
+| kda | rtx_pro_6000_server (SM120) | sglang 0.5.16 | **done (2026-08-01)** | 1085 | full grid clean; SM120 lifted from `unverified_sms` (probe job 381312864); Triton verify, `kda_fused_decode` engages |
+| kda | l40s (SM89) | sglang 0.5.16 | **done (2026-08-01)** | see note | SM89 lifted from `unverified_sms` (probe job 381312863, 1074 rows); `kda_fused_decode` JIT fails ptxas below sm_90 (`mbarrier.try_wait.parity`) — fused attempt now gated to SM90+ in `collect_kda.py`; recollected at the fixed revision for the 12-head-shard generation rows |
+| moe (K3 shape) | gb200 / gb300 | sglang 0.5.14 | **done (2026-08-01)** | 6156 + 6156 | both precision lanes (w4a16_mxfp4 + w4a8_mxfp4_mxfp8) in one run, zero failures, merged into the shared 0.5.14 tables |
+| moe (K3 shape) | h100_sxm / h200_sxm | sglang 0.5.14 | **done (2026-08-01)** | 541 / see note | marlin lane; the EP>1 IMA crash family reproduces on H100/H200 (2537/2587 cells — third system family, upstream issue still unfiled). H200's first run lost 47 measured rows to perf-log lock races during the crash storms (log_perf window widened to 30s + stale-lock break); recollected |
+| moe (K3 shape) | l40s (SM89) | sglang 0.5.14 | **done (2026-08-01)** | 2997 | SM89 dispatches `sglang_fused_moe_triton` (no marlin/flashinfer lane); 81 OOM cells classified (48 GB card) |
+| kda | b300_sxm vllm / gb200 / gb300 / rtx / l40s / hopper | vllm | out of scope | — | owner scope decision 2026-08-01: sglang only. Full vllm kda artifacts for h100/h200/gb200 + limit-probe artifacts for l40s/b300/rtx were already collected before the scope cut (pipelines 60591225/60591349/60591439) and can be ingested later; 103/89/120 stay in the vllm `unverified_sms` |
 
 Hopper (SM90) collection history: the collectors were brought up on Hopper
 silicon first (sglang kda 744 rows / vllm kda 1203 rows / K3-shape moe 488
@@ -320,3 +328,35 @@ Gotchas hit on B200 that will recur:
   measurements (cache the CUTE_DSL_CACHE_DIR between smoke and full runs).
 - Delete stale `kda_perf.txt` in the working dir between backend runs —
   `log_perf` appends, and a mixed-backend staging file poisons the parquet.
+
+## 2026-08-01 multi-arch sglang campaign (ada + hopper + blackwell)
+
+Run via the aic-auto-collector GitLab harness (ref `campaign/rc20-restore`,
+AIC revision = this branch), one pipeline per (framework image, op family):
+kda 60591215 + probes 60591341, moe 60591217, reruns 60603368 (l40s kda at
+the fixed revision) / 60603372 (h200 moe). Verified by artifact content, not
+job status: rows per op, `errors_*.json` decomposition, duplicate-key scan,
+device-name check, and `KDAKernel._query_kda_table` spot queries per system.
+
+Collector fixes that came out of the campaign (commit 39a950b24):
+
+1. **SM89 fused-decode gate** (`collect_kda.py`): the `kda_fused_decode` JIT
+   kernel emits `mbarrier.try_wait.parity`, which ptxas rejects below sm_90.
+   `covered()` accepts the shapes first, so on L40S the compile failure
+   killed all 11 generation batch cells of the 12-head shard. The fused
+   attempt is now `get_sm_version() >= 90`, mirroring serving's fallback to
+   the Triton pair.
+2. **log_perf lock hardening** (`helper.py`): the 1s lock window dropped 47
+   measured H200 K3 moe rows while sibling workers were wedged in marlin IMA
+   crash storms (two bursts, 07:42 and 08:07). Window widened to 30s and
+   locks older than 60s (SIGKILLed owner skipped `finally`) are broken.
+
+Registry: sglang kda `unverified_sms` is now `(80,)` — SM89/SM120 verified by
+the probe runs above.
+
+Open observation (pre-existing, NOT changed by this campaign): with the
+experimental `linear_attn_module_perf` table marked `status: partial` in
+b300_sxm's 0.5.16 collection_meta, `get_database("b300_sxm", "sglang",
+"0.5.16")` fails with "marked incomplete in either layout" while every other
+kda system (kda_perf-only meta) loads. If that is not intended, either the
+loader's completeness rule or the b300 meta needs an owner decision.
