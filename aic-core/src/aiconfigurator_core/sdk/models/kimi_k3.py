@@ -43,6 +43,18 @@ class KimiK3Model(BaseModel):
 
     # KDA state slots per request (sglang mamba radix cache, extra_buffer
     # strategy). Governs the per-request constant state-pool cost.
+    #
+    # DELIBERATELY a flat proxy (owner decision 2026-07-31: annotate, don't
+    # model the split). Serving actually charges this in two parts — 1-2
+    # ACTIVE slots per running request (live state + snapshot buffer) plus a
+    # GLOBAL radix checkpoint cache pool with its own budget/LRU (optionally
+    # INT8-compressed, 4x denser), which does not scale with concurrency
+    # (see the Day-0 cache write-ups referenced in
+    # docs/perf_database/linear-attention-module-design.md). The flat 5x is
+    # acceptable because the KDA term is secondary for K3's target
+    # workloads: at TP8 one slot is ~54 MB/rank (5x = 270 MB/request) vs
+    # ~1.8 GB/request of MLA KV at 128k context — it only dominates for
+    # short-context high-concurrency mixes, where it over-charges.
     KDA_STATE_SLOTS_PER_REQUEST = 5
 
     @classmethod
@@ -649,11 +661,20 @@ class KimiK3Model(BaseModel):
         return n_kda * (ssm_bytes + conv_bytes) * self.KDA_STATE_SLOTS_PER_REQUEST
 
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """KDA state is charged INSIDE the kvcache budget: MLA KV and KDA
+        state draw from one elastic byte pool here. That matches sglang's
+        opt-in --enable-unified-memory mode; the DEFAULT is two separately
+        sized pools (MLA KV vs KDA state) with a boot-time ratio, where a
+        mismatched workload saturates one pool while the other idles — so
+        this estimate is optimistic for default-mode deployments (owner
+        decision 2026-07-31: annotate, don't model the split)."""
         seq_len = max(0, seq_len)
         token_bytes = seq_len * self.config.kvcache_quant_mode.value.memory * self.get_kvcache_elements_per_token()
         return token_bytes + self._kda_state_bytes_per_request()
 
     def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        # Same single-elastic-budget assumption as
+        # get_kvcache_bytes_per_sequence — see the note there.
         per_token = self.config.kvcache_quant_mode.value.memory * self.get_kvcache_elements_per_token()
         budget = kv_budget_bytes - self._kda_state_bytes_per_request()
         if budget <= 0 or per_token <= 0:

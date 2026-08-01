@@ -93,16 +93,18 @@ One full-model KDA state copy is 96h x 128 x 128 x fp32 x 69 layers
 ~ 0.4 GiB (matches the kvcache.ai calculator figure cited by the Mooncake
 post), TP-sharded. The current SDK model charges
 `KDA_STATE_SLOTS_PER_REQUEST = 5` state slots per admitted request and
-treats MLA KV + KDA state as one elastic byte budget. Two refinements the
-serving write-ups motivate (not yet implemented):
+treats MLA KV + KDA state as one elastic byte budget. Owner decision
+2026-07-31: keep both as-is and ANNOTATE the behavior in the code (the KDA
+term is secondary — at TP8, 5 slots = 270 MB/request vs ~1.8 GB/request of
+MLA KV at 128k context), rather than modeling the split. The two known
+deviations, recorded at the charging sites in `models/kimi_k3.py`:
 
 1. The flat per-request slot multiplier folds the radix checkpoint budget
    into admission cost. Serving actually splits an ACTIVE pool
    (1 running slot + snapshot double-buffer per request) from a global
    checkpoint cache pool with its own budget/LRU — and the optional INT8
-   compressed pool stores inactive temporal states 4x denser. A closer
-   model: per-request active slots + a global checkpoint-pool byte term,
-   with a compression factor knob.
+   compressed pool stores inactive temporal states 4x denser. The flat 5x
+   over-charges short-context high-concurrency mixes.
 2. The single elastic budget matches sglang's opt-in
    `--enable-unified-memory` mode. The DEFAULT is two separately sized
    pools (MLA KV vs KDA state) with a boot-time ratio; under a mismatched
