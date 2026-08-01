@@ -656,7 +656,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
-    assert len(moe_cases) == 5025
+    # +99 from Step-3.7-Flash (FP8 + BF16 aliases) activating all-frameworks MoE.
+    assert len(moe_cases) == 5124
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
