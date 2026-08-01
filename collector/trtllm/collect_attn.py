@@ -337,6 +337,14 @@ def run_attention_torch(
         position_ids=None,
         cross=None,
         request_ids=request_ids,
+        # Serving populates prompt_lens with the current-chunk length for
+        # context requests and request.py_prompt_len for generation requests
+        # (pyexecutor/model_engine.py:3015,3180,3227,3277,3353,3760@1.3.0rc20);
+        # the field is part of the shared AttentionMetadata contract
+        # (attention_backend/interface.py:134-138@1.3.0rc20) that every
+        # backend inherits — FlashInferAttentionMetadata does not consume it
+        # directly. With chunked_prefill=False the current chunk IS the full
+        # prompt, so input_seq_lens matches both phases here.
         prompt_lens=input_seq_lens,
         all_rank_num_tokens=None,
     )

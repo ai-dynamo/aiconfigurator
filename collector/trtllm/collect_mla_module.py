@@ -186,9 +186,12 @@ def _get_precision_combos(phase: str, attn_type: str):
         # attention_backend/trtllm.py:1105@1.3.0rc20): hardware-validated on
         # RTX PRO 6000 2026-07-19 (rc20, DeepSeek-V3 ctx+gen, prefix 0/128,
         # b=4/s=2048/h=128, finite latencies through the module collector's
-        # framework-dispatch path). SM121 stays excluded: no SM121 hardware
-        # has validated any fp8-KV MLA module path yet.
-        if sm > 86 and sm != 121:
+        # framework-dispatch path). SM121 is hardware-unvalidated but stays
+        # QUEUED: generation-time exclusion of an SM is not a sanctioned
+        # filter (layer_permissions.md — execute or raise); if the framework
+        # lacks the path there the cases fail classified, and maturity is
+        # expressed via the registry unverified_sms marker, not here.
+        if sm > 86:
             attn_combos.append(("bfloat16", "fp8"))
 
     return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]

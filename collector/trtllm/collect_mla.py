@@ -527,7 +527,24 @@ def _run_attn_for_backend(
         cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
         fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
 
-        has_fp8_kv_cache = attn_mla.has_fp8_kv_cache if hasattr(attn_mla, "has_fp8_kv_cache") else False
+        # Validate the backend quant state instead of defaulting to BF16 on a
+        # missing attribute: rc20 exposes TrtllmAttention.has_fp8_kv_cache
+        # (derived from QuantMode.has_fp8_kv_cache()). A silent False default
+        # would set up the BF16 scale/buffer path under an fp8-KV label —
+        # mislabeled rows, worse than a crash. Probe-and-raise per
+        # layer_permissions.md.
+        if not hasattr(attn_mla, "has_fp8_kv_cache"):
+            raise RuntimeError(
+                "TrtllmAttention.has_fp8_kv_cache missing (rc20 API drift); "
+                "refusing to default the MLA generation quant path to BF16"
+            )
+        has_fp8_kv_cache = attn_mla.has_fp8_kv_cache
+        expected_fp8_kv = kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8
+        if bool(has_fp8_kv_cache) != expected_fp8_kv:
+            raise RuntimeError(
+                f"MLA generation quant-state mismatch: backend has_fp8_kv_cache="
+                f"{has_fp8_kv_cache}, requested kv_cache_dtype={kv_cache_dtype}"
+            )
         if has_fp8_kv_cache:
             mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
             mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)

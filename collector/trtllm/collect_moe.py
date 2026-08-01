@@ -201,16 +201,11 @@ def get_moe_test_cases():
             if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
                 continue
 
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or (inter_s // moe_tp) % 128 != 0
-            ):
-                continue
-
-            # SM100/103 DeepGEMM fp8_block TP-shard alignment is enforced at
-            # runtime in run_moe_torch (cited raise), not filtered here —
-            # generation-time drops are sanctioned for memory feasibility
-            # only (layer_permissions.md).
+            # fp8_block 128-alignment (hidden_size and TP-sharded inter size)
+            # is enforced at runtime in run_moe_torch as a cited, classified
+            # raise — generation-time drops are sanctioned for memory
+            # feasibility only (layer_permissions.md), and a silent drop here
+            # made the runtime guard unreachable dead code.
 
             # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
             weight_bits = {
@@ -389,20 +384,23 @@ def run_moe_torch(
 
     sm_version = get_sm_version()
 
-    # FIXME(kernel-limit): SM100/103 DeepGEMM fp8_block grouped GEMM requires
-    # the TP-sharded intermediate size to be 128-aligned; misaligned shards
-    # trip the scale-factor layout assert "layout.hpp:78: sf.size(-2) ==
-    # ceil_div(mn, gran_mn)" (hardware-observed on B200 during the rc20
-    # campaign). Raise a cited, classified error instead of filtering the
-    # shapes at generation time (layer_permissions.md sanctions only
-    # memory-feasibility drops there). SM120 fp8_block takes the Triton path
-    # and Hopper takes CUTLASS — the constraint does not apply to either.
-    # Re-verify against DeepGEMM on the next framework version bump.
-    if moe_type == "fp8_block" and is_sm_100f(sm_version) and (inter_size // moe_tp_size) % 128 != 0:
+    # FIXME(kernel-limit): fp8_block weight scales are 128x128-blocked, so
+    # hidden_size and the TP-sharded intermediate size must be 128-aligned on
+    # every path: SM100/103 DeepGEMM trips the scale-factor layout assert
+    # "layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)" (hardware-observed
+    # on B200 during the rc20 campaign); Hopper's CUTLASS runner is
+    # DeepGEMM-JIT-backed for fp8_block grouped GEMM and shares the same
+    # 1x128/128x128 scale layout; SM120's Triton block-scale path uses the
+    # same 128 granularity. Raise a cited, classified error instead of
+    # filtering the shapes at generation time (layer_permissions.md sanctions
+    # only memory-feasibility drops there). Re-verify the per-SM paths on the
+    # next framework version bump.
+    if moe_type == "fp8_block" and (hidden_size % 128 != 0 or (inter_size // moe_tp_size) % 128 != 0):
         raise ValueError(
-            f"DeepGEMM fp8_block MoE requires 128-aligned TP-sharded intermediate size on "
-            f"SM100/103; got inter_size={inter_size} / moe_tp={moe_tp_size} = "
-            f"{inter_size // moe_tp_size} (deepgemm layout.hpp:78 assert)"
+            f"fp8_block MoE requires 128-aligned hidden_size and TP-sharded intermediate "
+            f"size (128x128-blocked weight scales; deepgemm layout.hpp:78 on SM90/100/103, "
+            f"Triton block-scale on SM120); got hidden_size={hidden_size}, "
+            f"inter_size={inter_size} / moe_tp={moe_tp_size} = {inter_size // moe_tp_size}"
         )
 
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:

@@ -802,6 +802,12 @@ def convert_perf_csv_to_parquet(
 
     parquet_path = csv_path.with_suffix(".parquet")
     tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    # Serialize the read-merge-replace sequence per parquet target: the source
+    # .lock above only guards CSV writers. Two finalizers racing here would
+    # both read the same existing parquet and the later os.replace would
+    # silently drop the earlier merge's rows.
+    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+    lock_fd = _acquire_merge_lock(merge_lock)
     try:
         table = pc.read_csv(csv_path)
         if merge_existing and parquet_path.exists():
@@ -813,7 +819,38 @@ def convert_perf_csv_to_parquet(
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+        _release_merge_lock(merge_lock, lock_fd)
     return parquet_path
+
+
+_MERGE_LOCK_TIMEOUT_S = 600
+_MERGE_LOCK_POLL_S = 0.2
+
+
+def _acquire_merge_lock(lock_path: Path) -> int:
+    """Advisory O_EXCL lock file with a stale-lock timeout.
+
+    Finalization normally runs single-process, so contention is rare; the
+    timeout keeps a crashed holder (stale file) from wedging every later run.
+    """
+    deadline = time.monotonic() + _MERGE_LOCK_TIMEOUT_S
+    while True:
+        try:
+            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                logging.getLogger(__name__).warning(
+                    "convert_perf_csv_to_parquet: merge lock %s held past %ds; treating as stale and stealing it.",
+                    lock_path.name,
+                    _MERGE_LOCK_TIMEOUT_S,
+                )
+                lock_path.unlink(missing_ok=True)
+            time.sleep(_MERGE_LOCK_POLL_S)
+
+
+def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
+    os.close(lock_fd)
+    lock_path.unlink(missing_ok=True)
 
 
 def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
@@ -825,13 +862,23 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
     log = logging.getLogger(__name__)
     old_table = pq.read_table(parquet_path)
 
-    # Compare (name, type) pairs, not just column-name sets: matching names
+    # Compare (name, type) pairs for IDENTITY columns only: matching names
     # with drifted types would otherwise round-trip through pandas and
-    # silently rewrite the parquet under a different schema. Order-insensitive
+    # silently rewrite the parquet under a different schema. Metric columns
+    # are exempt from the type check — pyarrow.csv infers an all-empty
+    # optional metric column (e.g. power on a power-off run) as `null` while
+    # populated runs infer `double`, and treating that drift as a mismatch
+    # made the merge silently OVERWRITE the accumulated dataset. Metric
+    # values are cast to the existing metric type instead. Order-insensitive
     # (the merge realigns column order below); Arrow metadata is ignored
     # (pandas round-trips change it).
-    old_fields = sorted((f.name, str(f.type)) for f in old_table.schema)
-    new_fields = sorted((f.name, str(f.type)) for f in new_table.schema)
+    def fields(schema):
+        return sorted(
+            (f.name, str(f.type)) if f.name not in PERF_METRIC_COLUMNS else (f.name, "<metric>") for f in schema
+        )
+
+    old_fields = fields(old_table.schema)
+    new_fields = fields(new_table.schema)
     if old_fields != new_fields:
         log.warning(
             "convert_perf_csv_to_parquet: schema mismatch merging %s "
@@ -841,6 +888,13 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
             new_fields,
         )
         return new_table
+    for f in old_table.schema:
+        if f.name in PERF_METRIC_COLUMNS and new_table.schema.field(f.name).type != f.type:
+            new_table = new_table.set_column(
+                new_table.schema.get_field_index(f.name),
+                f.name,
+                new_table.column(f.name).cast(f.type),
+            )
 
     new_df = new_table.to_pandas()
     old_df = old_table.to_pandas()

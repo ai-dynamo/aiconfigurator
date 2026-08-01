@@ -40,16 +40,37 @@ from helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def _supported_dtypes() -> set[str]:
-    # fp8 axis mirrors serving's fp8_block_scaling_bmm_out wrapper dispatch
-    # (attention.py:1159-1190@1.3.0rc20): SM89/90 and SM120 invoke the fp8
-    # torch op (different activation-quant helpers); SM100/103 default to
-    # plain bf16 torch.bmm on dequantized weights, so the axis stays closed
-    # there and bf16 remains the honest measurement.
+    # fp8 axis opens wherever fp8 checkpoints exist (sm > 86, matching the
+    # fp8-KV floors elsewhere). WHICH kernel an fp8 case measures is a
+    # runtime dispatch decision in the run functions (_fp8_bmm_serving_path),
+    # mirroring serving's fp8_block_scaling_bmm_out wrapper
+    # (attention.py:1159-1190@1.3.0rc20) — closing the axis at generation
+    # time silently removed SM100/103 coverage (layer_permissions.md:
+    # execute or raise; dispatch may change HOW, never WHETHER).
     dtype_list = ["bfloat16"]
-    sm = get_sm_version()
-    if 86 < sm < 100 or sm == 120:
+    if get_sm_version() > 86:
         dtype_list += ["fp8"]
     return set(dtype_list)
+
+
+def _fp8_bmm_serving_path() -> bool:
+    """True where serving invokes torch.ops.trtllm.fp8_block_scaling_bmm_out.
+
+    Serving's wrapper dispatch (attention.py:1159-1190@1.3.0rc20): SM89/90
+    and SM120 call the fp8 torch op (different activation-quant helpers);
+    every other SM — SM100/103 included — runs plain bf16 torch.bmm on
+    weights dequantized at load time, so that is the serving-true
+    measurement there (recorded via kernel_source).
+    """
+    sm = get_sm_version()
+    return 86 < sm < 100 or sm == 120
+
+
+def _dequant_fp8_weight(weight_fp8: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
+    """Dequantize a 128x128-block-scaled fp8 weight to bf16 (load-time step
+    serving performs on SMs where the fp8 bmm op is not dispatched)."""
+    scale = weight_scale.repeat_interleave(128, dim=1).repeat_interleave(128, dim=2)
+    return (weight_fp8.to(torch.bfloat16) * scale[:, : weight_fp8.shape[1], : weight_fp8.shape[2]]).contiguous()
 
 
 def _prep_fp8_weight(weight_fp8: torch.Tensor, weight_scale: torch.Tensor):
@@ -112,6 +133,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
     kv_lora_rank = 512
     # record graph
     if dtype == "bfloat16":
+        kernel_source = "trtllm_bmm_out"
         q_nope = torch.randn([num_tokens, num_heads, qk_nope_head_dim]).bfloat16().to(torch.device(device))
         k_b_proj_trans = torch.randn([num_heads, kv_lora_rank, qk_nope_head_dim]).bfloat16().to(torch.device(device))
         out = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
@@ -152,21 +174,18 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
             op_name="mla_gen_pre",
-            kernel_source="default",
+            kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
         )
     elif dtype == "fp8":
         q_nope = torch.randn([num_tokens, num_heads, qk_nope_head_dim], dtype=torch.bfloat16).to(torch.device(device))
-        # q_nope_fp8 = torch.randn(
-        #     [num_heads, num_tokens, qk_nope_head_dim], dtype=torch.bfloat16, device=device
-        # ).to(dtype=torch.float8_e4m3fn)
-        k_b_proj_trans = torch.randn(
-            [num_heads, kv_lora_rank, qk_nope_head_dim], dtype=torch.bfloat16, device=device
-        ).to(dtype=torch.float8_e4m3fn)
+        k_b_proj_raw = torch.randn([num_heads, kv_lora_rank, qk_nope_head_dim], dtype=torch.bfloat16, device=device).to(
+            dtype=torch.float8_e4m3fn
+        )
         # positive scales: the SM120 prep path (resmooth to e8m0) works in
         # log2 domain and would NaN on randn's negative values
-        k_b_proj_trans_scale = (
+        k_b_proj_scale_raw = (
             torch.rand(
                 [num_heads, kv_lora_rank // 128, qk_nope_head_dim // 128],
                 dtype=torch.float32,
@@ -174,24 +193,32 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
             )
             + 0.5
         )
-        k_b_proj_trans, k_b_proj_trans_scale = _prep_fp8_weight(k_b_proj_trans, k_b_proj_trans_scale)
-        # q_nope_out = (
-        #     torch.randn([num_heads, num_tokens, kv_lora_rank]).bfloat16().to(torch.device(device))
-        # )
         fused_q = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
         # => num_heads, num_tokens, kv_lora_rank
-        q_nope_fp8, q_nope_scales = _quantize_fp8_activation(q_nope)
-        q_nope_out = fused_q.transpose(0, 1)
-        torch.ops.trtllm.fp8_block_scaling_bmm_out(
-            q_nope_fp8, k_b_proj_trans, q_nope_scales, k_b_proj_trans_scale, q_nope_out
-        )
 
-        def kernel_func():
-            q_nope_fp8, q_nope_scales = _quantize_fp8_activation(q_nope)
-            q_nope_out = fused_q.transpose(0, 1)
-            torch.ops.trtllm.fp8_block_scaling_bmm_out(
-                q_nope_fp8, k_b_proj_trans, q_nope_scales, k_b_proj_trans_scale, q_nope_out
-            )
+        if _fp8_bmm_serving_path():
+            k_b_proj_trans, k_b_proj_trans_scale = _prep_fp8_weight(k_b_proj_raw, k_b_proj_scale_raw)
+            kernel_source = "trtllm_fp8_block_scaling_bmm_out"
+
+            def kernel_func():
+                q_nope_fp8, q_nope_scales = _quantize_fp8_activation(q_nope)
+                q_nope_out = fused_q.transpose(0, 1)
+                torch.ops.trtllm.fp8_block_scaling_bmm_out(
+                    q_nope_fp8, k_b_proj_trans, q_nope_scales, k_b_proj_trans_scale, q_nope_out
+                )
+        else:
+            # Serving dequantizes the fp8 weight at load and runs the plain
+            # bf16 bmm on these SMs (_fp8_bmm_serving_path docstring).
+            k_b_proj_bf16 = _dequant_fp8_weight(k_b_proj_raw, k_b_proj_scale_raw)
+            kernel_source = "trtllm_bmm_out_dequant_bf16"
+
+            def kernel_func():
+                q_nope_trans = q_nope.transpose(0, 1)
+                k_b_proj_bf16_trans = k_b_proj_bf16.transpose(1, 2)
+                q_nope_out = fused_q.transpose(0, 1)
+                torch.ops.trtllm.bmm_out(q_nope_trans, k_b_proj_bf16_trans, q_nope_out)
+
+        kernel_func()  # dry run
 
         # Use benchmark_with_power context manager
         with benchmark_with_power(
@@ -216,7 +243,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
             op_name="mla_gen_pre",
-            kernel_source="default",
+            kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
         )
@@ -233,6 +260,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
     v_head_dim = 128
     # record graph
     if dtype == "bfloat16":
+        kernel_source = "trtllm_bmm_out"
         attn_out_latent = torch.randn([num_tokens, num_heads, kv_lora_rank]).bfloat16().to(torch.device(device))
         v_b_proj = torch.randn([num_heads, v_head_dim, kv_lora_rank]).bfloat16().to(torch.device(device))
         attn_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
@@ -270,41 +298,48 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
             op_name="mla_gen_post",
-            kernel_source="default",
+            kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
         )
     elif dtype == "fp8":
         attn_out_latent = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
-        v_b_proj = torch.randn([num_heads, v_head_dim, kv_lora_rank], dtype=torch.bfloat16, device=device).to(
+        v_b_proj_raw = torch.randn([num_heads, v_head_dim, kv_lora_rank], dtype=torch.bfloat16, device=device).to(
             dtype=torch.float8_e4m3fn
         )
         # positive scales: see the pre-BMM note (SM120 e8m0 resmooth)
-        v_b_proj_scale = (
+        v_b_proj_scale_raw = (
             torch.rand([num_heads, v_head_dim // 128, kv_lora_rank // 128], dtype=torch.float32, device=device) + 0.5
         )
-        v_b_proj, v_b_proj_scale = _prep_fp8_weight(v_b_proj, v_b_proj_scale)
         attn_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
-        # dry run
-        attn_out_latent_fp8, attn_out_latent_scales = _quantize_fp8_activation(attn_out_latent)
-        torch.ops.trtllm.fp8_block_scaling_bmm_out(
-            attn_out_latent_fp8,
-            v_b_proj,
-            attn_out_latent_scales,
-            v_b_proj_scale,
-            attn_output.transpose(0, 1),
-        )
+        if _fp8_bmm_serving_path():
+            v_b_proj, v_b_proj_scale = _prep_fp8_weight(v_b_proj_raw, v_b_proj_scale_raw)
+            kernel_source = "trtllm_fp8_block_scaling_bmm_out"
 
-        def kernel_func():
-            attn_out_latent_fp8, attn_out_latent_scales = _quantize_fp8_activation(attn_out_latent)
-            torch.ops.trtllm.fp8_block_scaling_bmm_out(
-                attn_out_latent_fp8,
-                v_b_proj,
-                attn_out_latent_scales,
-                v_b_proj_scale,
-                attn_output.transpose(0, 1),
-            )
+            def kernel_func():
+                attn_out_latent_fp8, attn_out_latent_scales = _quantize_fp8_activation(attn_out_latent)
+                torch.ops.trtllm.fp8_block_scaling_bmm_out(
+                    attn_out_latent_fp8,
+                    v_b_proj,
+                    attn_out_latent_scales,
+                    v_b_proj_scale,
+                    attn_output.transpose(0, 1),
+                )
+        else:
+            # Serving dequantizes the fp8 weight at load and runs the plain
+            # bf16 bmm on these SMs (_fp8_bmm_serving_path docstring).
+            v_b_proj_bf16 = _dequant_fp8_weight(v_b_proj_raw, v_b_proj_scale_raw)
+            kernel_source = "trtllm_bmm_out_dequant_bf16"
+
+            def kernel_func():
+                torch.ops.trtllm.bmm_out(
+                    attn_out_latent.transpose(0, 1),
+                    v_b_proj_bf16.transpose(1, 2),
+                    attn_output.transpose(0, 1),
+                )
+
+        kernel_func()  # dry run
 
         # Use benchmark_with_power context manager
         with benchmark_with_power(
@@ -329,7 +364,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
             op_name="mla_gen_post",
-            kernel_source="default",
+            kernel_source=kernel_source,
             perf_filename=perf_filename,
             power_stats=results["power_stats"],
         )

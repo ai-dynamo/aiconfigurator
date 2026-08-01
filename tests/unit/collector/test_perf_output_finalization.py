@@ -153,3 +153,46 @@ def test_finalize_merge_falls_back_to_overwrite_on_schema_mismatch(tmp_path):
     perf.write_text("op,latency\nmatmul,5.0\n")
     finalize_perf_files([perf])
     assert pq.read_table(parquet).to_pylist() == [{"op": "matmul", "latency": 5.0}]
+
+
+def test_finalize_merge_tolerates_metric_column_type_drift(tmp_path):
+    """An all-empty optional metric column (e.g. power on a power-off run) is
+    inferred as `null` by pyarrow.csv while populated runs infer `double`.
+    That drift must NOT be treated as a schema mismatch — the old behavior
+    silently overwrote the accumulated parquet with the new run's subset."""
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+
+    perf.write_text("shape,latency,power\ns1,1.0,5.0\ns2,2.0,6.0\n")
+    finalize_perf_files([perf])
+
+    # New run with power entirely empty -> pyarrow infers `null` for it.
+    perf.write_text("shape,latency,power\ns3,3.0,\n")
+    finalize_perf_files([perf])
+
+    rows = {r["shape"]: r for r in pq.read_table(parquet).to_pylist()}
+    assert sorted(rows) == ["s1", "s2", "s3"]  # accumulated, not overwritten
+    assert rows["s1"]["power"] == 5.0
+    assert rows["s3"]["power"] is None
+    # metric column keeps the existing (double) type
+    assert str(pq.read_table(parquet).schema.field("power").type) == "double"
+
+
+def test_finalize_merge_still_overwrites_on_identity_type_mismatch(tmp_path):
+    """Identity-column type drift stays a hard mismatch (overwrite path)."""
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+
+    perf.write_text("shape,latency\n1,1.0\n")  # shape inferred int64
+    finalize_perf_files([perf])
+    perf.write_text("shape,latency\ns2,2.0\n")  # shape inferred string
+    finalize_perf_files([perf])
+    assert [r["shape"] for r in pq.read_table(parquet).to_pylist()] == ["s2"]
+
+
+def test_finalize_releases_merge_lock(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    perf.write_text("shape,latency\ns1,1.0\n")
+    finalize_perf_files([perf])
+    assert not parquet.with_name(f"{parquet.name}.mergelock").exists()

@@ -598,15 +598,15 @@ def get_wideep_moe_compute_all_test_cases():
     - Only for DeepSeek-V3 model with power_law distribution
     """
     moe_list = []
-    if 90 <= get_sm_version() < 100:
-        # Hopper only, mirroring the moe_trtllm fp8_block axis floor
-        # (base_ops/moe.yaml min_sm: 90): TRT-LLM's fp8_block grouped-GEMM
-        # is DeepGEMM-JIT-backed even under the CUTLASS runner
-        # (CutlassFp8BlockScaleGemmRunner::moeGemm -> grouped_gemm_dispatch
-        # -> deep_gemm::jit::Compiler), and the compiler accepts exactly
-        # SM90 ("DeepGEMM only supports Hopper (SM90) architectures",
-        # deep_gemm/compiler.cuh:330@1.3.0rc20). Hardware-observed on L40S
-        # 2026-07-21: SM89 gate100 failed 100/100 with that signature.
+    if get_sm_version() >= 90:
+        # min_sm 90 mirrors the moe_trtllm fp8_block axis floor
+        # (base_ops/moe.yaml min_sm: 90; hardware-observed on L40S 2026-07-21:
+        # SM89 gate100 failed 100/100 in the DeepGEMM compiler). SM100+ stays
+        # QUEUED even though this WideEP runner's grouped GEMM is
+        # DeepGEMM-JIT-backed and the rc20 compiler accepts exactly SM90 —
+        # that is a framework gap, so the case must fail classified at the
+        # cited runtime raise in run_wideep_moe_compute, not vanish here
+        # (layer_permissions.md: execute or raise).
         moe_list += ["fp8_block"]
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]  # SM100+ uses nvfp4
@@ -718,6 +718,20 @@ def run_wideep_moe_compute(
             - Router and MoE both use full num_tokens
             This is simpler but less accurate for WideEP simulation.
     """
+    # FIXME(kernel-limit): this runner's fp8_block grouped GEMM is
+    # DeepGEMM-JIT-backed even under the CUTLASS runner
+    # (CutlassFp8BlockScaleGemmRunner::moeGemm -> grouped_gemm_dispatch ->
+    # deep_gemm::jit::Compiler), and the rc20 compiler accepts exactly SM90
+    # ("DeepGEMM only supports Hopper (SM90) architectures",
+    # deep_gemm/compiler.cuh:330@1.3.0rc20). Cases stay queued on other SMs
+    # and fail here classified (layer_permissions.md: execute or raise).
+    # Re-verify on the next framework version bump.
+    if moe_type == "fp8_block" and get_sm_version() != 90:
+        raise ValueError(
+            f"WideEP fp8_block grouped GEMM is DeepGEMM-backed and SM90-only in "
+            f"trtllm 1.3.0rc20 (deep_gemm/compiler.cuh:330); got SM{get_sm_version()}"
+        )
+
     _install_slot_lora_pad_patch()
     # Default num_slots to num_experts (no redundancy)
     if num_slots is None:
