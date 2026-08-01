@@ -118,7 +118,7 @@ def test_dsv4_cases_skip_unrelated_model_filter(monkeypatch):
     assert common_test_cases.get_dsv4_hca_attn_test_cases() == []
 
 
-def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch):
+def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch, capsys):
     """The sglang registry's topk-calib getter (deepseekv4_sparse_modules)
     applies the same canonical-calib restriction as the shared case_generator
     getter — otherwise a full/raw run would schedule a second model's calib
@@ -146,6 +146,8 @@ def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch):
     # full/raw: sparse kernels expand both default models, calib only canonical
     assert {c[0] for c in ns["get_dsv4_paged_mqa_logits_test_cases"]()} == {_FLASH_FP8, _PRO_FP8}
     assert {c[0] for c in ns["get_dsv4_topk_calib_test_cases"]()} == {_FLASH_FP8}
-    # targeted non-canonical model: calib case is dropped (logged upstream)
+    # targeted non-canonical model: calib case is dropped, with the reason logged
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
+    capsys.readouterr()
     assert ns["get_dsv4_topk_calib_test_cases"]() == []
+    assert "calib keys carry no model geometry" in capsys.readouterr().out
