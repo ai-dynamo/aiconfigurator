@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: sglang
+  version: 0.5.16
+tables:
+  # Kimi-K3 MegaMoE module rows (DeepGEMM fp8_fp4_mega_moe + fused symm-buffer
+  # a2a, SiTU activation, EP8 cross-rank), collected 2026-08-01 on 8x B200
+  # via torchrun collect_dsv4_megamoe --model-config kimi_k3
+  # --activation-clamp 0.03125 in the kimi-k3 branch image
+  # (lmsysorg/sglang@sha256:6d9594a4, reports 0.5.16). 64 rows: context 24 +
+  # generation 40, 4 routing distributions, w4a8_mxfp4_mxfp8/fp8_fp4.
+  # SiTU sentinel VERIFIED live in-kernel: rerunning generation cells at
+  # --activation-clamp 10.0 shifts latency (-3.5% at 64 tokens/rank,
+  # ~0% at 1 token where bandwidth hides it) — a silently-unpatched kernel
+  # would show identical latencies at both clamps.
+  # K3 rows share the DSV4 megamoe schema (no model column); shapes
+  # (3584/3072, 896x16) distinguish them from DSV4.
+  dsv4_megamoe_module_perf:
+    status: complete
