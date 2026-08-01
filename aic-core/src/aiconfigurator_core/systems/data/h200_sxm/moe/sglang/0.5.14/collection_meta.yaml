@@ -8,4 +8,9 @@ runtime:
   version: 0.5.14
 tables:
   moe_perf:
+    # 2026-08-01: appended 488 Kimi-K3 w4a16_mxfp4 rows (3584/3072, 896x16,
+    # sglang_marlin_moe, TP 1-32 x 3 distributions) — union of two runs at the
+    # lock-fixed collector revision (487 + 1 collateral-only cell from run 1).
+    # Every moe_ep_size > 1 K3 cell crashes with CUDA IMA (2590 cells) — the
+    # known sglang 0.5.14 Hopper marlin EP-slice bug, candidate upstream issue.
     status: complete
