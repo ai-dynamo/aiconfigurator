@@ -190,36 +190,16 @@ def get_moe_test_cases():
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
-        inter_s = common_moe_testcase.inter_size
-        moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
             if not moe_model_allows_quantization("trtllm", model_name, moe_type):
                 continue
 
-            # w4afp8 requires k shape to be multiple of 128
-            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
-                continue
-
-            # fp8_block 128-alignment (hidden_size and TP-sharded inter size)
-            # is enforced at runtime in run_moe_torch as a cited, classified
-            # raise — generation-time drops are sanctioned for memory
-            # feasibility only (layer_permissions.md), and a silent drop here
-            # made the runtime guard unreachable dead code.
-
-            # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
-            weight_bits = {
-                "bfloat16": 16,
-                "fp8": 8,
-                "fp8_block": 8,
-                "int4_wo": 4,
-                "w4a16_mxfp4": 4,
-                "w4a8_mxfp4_mxfp8": 4,
-                "w4afp8": 4,
-                "nvfp4": 4,
-            }[moe_type]
-            if (inter_s // moe_tp) % (256 // weight_bits) != 0:
-                continue
+            # Alignment constraints (w4afp8 %128, fp8_block 128x128 block
+            # scales, the TLLM_CHECK weight-bits alignment) are enforced in
+            # run_moe_torch as cited, classified raises — generation-time
+            # drops are sanctioned for memory feasibility only
+            # (layer_permissions.md: execute or raise).
 
             min_latency_mode_options = [False]
 
@@ -401,6 +381,34 @@ def run_moe_torch(
             f"size (128x128-blocked weight scales; deepgemm layout.hpp:78 on SM90/100/103, "
             f"Triton block-scale on SM120); got hidden_size={hidden_size}, "
             f"inter_size={inter_size} / moe_tp={moe_tp_size} = {inter_size // moe_tp_size}"
+        )
+
+    if moe_type == "w4afp8" and (inter_size // moe_tp_size) % 128 != 0:
+        raise ValueError(
+            f"w4afp8 MoE requires a 128-aligned TP-sharded intermediate size (grouped-GEMM "
+            f"k alignment); got inter_size={inter_size} / moe_tp={moe_tp_size} = "
+            f"{inter_size // moe_tp_size}"
+        )
+
+    # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0,
+    # "the inter size ... must be a multiple of ...") — the fused-MoE plugin's
+    # weight-layout alignment (cpp moe kernels, checked at op init).
+    _weight_bits = {
+        "bfloat16": 16,
+        "fp8": 8,
+        "fp8_block": 8,
+        "int4_wo": 4,
+        "w4a16_mxfp4": 4,
+        "w4a8_mxfp4_mxfp8": 4,
+        "w4afp8": 4,
+        "nvfp4": 4,
+    }[moe_type]
+    if (inter_size // moe_tp_size) % (256 // _weight_bits) != 0:
+        raise ValueError(
+            f"TRT-LLM fused MoE requires the TP-sharded intermediate size to be a multiple "
+            f"of 256/weight_bits = {256 // _weight_bits} for {moe_type} (TLLM_CHECK_WITH_INFO "
+            f"weight-layout alignment); got inter_size={inter_size} / moe_tp={moe_tp_size} = "
+            f"{inter_size // moe_tp_size}"
         )
 
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:

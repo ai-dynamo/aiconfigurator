@@ -190,9 +190,33 @@ def test_finalize_merge_still_overwrites_on_identity_type_mismatch(tmp_path):
     assert [r["shape"] for r in pq.read_table(parquet).to_pylist()] == ["s2"]
 
 
-def test_finalize_releases_merge_lock(tmp_path):
+def test_finalize_merge_lock_does_not_block_sequential_runs(tmp_path):
+    """The flock-based merge lock must release on close: a second finalize of
+    the same target must proceed (and the lock file itself stays, by design —
+    unlinking would reopen the create/steal race)."""
     perf = tmp_path / "gemm_perf.txt"
     parquet = perf.with_suffix(".parquet")
     perf.write_text("shape,latency\ns1,1.0\n")
     finalize_perf_files([perf])
-    assert not parquet.with_name(f"{parquet.name}.mergelock").exists()
+    perf.write_text("shape,latency\ns2,2.0\n")
+    finalize_perf_files([perf])  # would deadlock if the first run kept the flock
+    assert sorted(r["shape"] for r in pq.read_table(parquet).to_pylist()) == ["s1", "s2"]
+
+
+def test_finalize_merge_tolerates_reverse_metric_type_drift(tmp_path):
+    """Old parquet has an all-null metric column, the NEW run has real values:
+    the null side must be cast toward double — the naive cast direction
+    (double -> null) raises ArrowNotImplementedError and aborted finalize."""
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+
+    perf.write_text("shape,latency,power\ns1,1.0,\n")  # power inferred as null
+    finalize_perf_files([perf])
+    perf.write_text("shape,latency,power\ns2,2.0,7.5\n")
+    finalize_perf_files([perf])
+
+    rows = {r["shape"]: r for r in pq.read_table(parquet).to_pylist()}
+    assert sorted(rows) == ["s1", "s2"]
+    assert rows["s1"]["power"] is None
+    assert rows["s2"]["power"] == 7.5
+    assert str(pq.read_table(parquet).schema.field("power").type) == "double"

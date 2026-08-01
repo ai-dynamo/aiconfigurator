@@ -67,7 +67,8 @@ mappings:
   - {framework: trtllm, kernel_source: trtllm_bmm_out, match: {op_file: mla_bmm_perf}, backend: cublas, source: "collector/trtllm/collect_mla_bmm.py (torch.ops.trtllm.bmm_out)"}
   - {framework: trtllm, kernel_source: trtllm_bmm_out_dequant_bf16, match: {op_file: mla_bmm_perf}, backend: cublas, source: "collector/trtllm/collect_mla_bmm.py (fp8 case on SMs where serving dequantizes and runs bf16 bmm_out; attention.py:1159-1190@1.3.0rc20)"}
   - {framework: trtllm, kernel_source: trtllm_fp8_block_scaling_bmm_out, match: {op_file: mla_bmm_perf}, backend: trtllm_internal, source: "collector/trtllm/collect_mla_bmm.py (torch.ops.trtllm.fp8_block_scaling_bmm_out, SM89/90/120)"}
-  - {framework: trtllm, kernel_source: default, match: {op_file: mla_bmm_perf}, backend: cublas, source: "collector/trtllm/collect_mla_bmm.py pre-label rows (rc20 campaign; bf16 bmm_out or fp8_block_scaling_bmm_out by bmm_dtype)"}
+  - {framework: trtllm, kernel_source: default, match: {op_file: mla_bmm_perf, bmm_dtype: bfloat16}, backend: cublas, source: "collector/trtllm/collect_mla_bmm.py pre-label rows (rc20 campaign; torch.ops.trtllm.bmm_out)"}
+  - {framework: trtllm, kernel_source: default, match: {op_file: mla_bmm_perf, bmm_dtype: fp8}, backend: trtllm_internal, source: "collector/trtllm/collect_mla_bmm.py pre-label rows (rc20 campaign; torch.ops.trtllm.fp8_block_scaling_bmm_out on SM89/90/120)"}
 
   # MoE families (label names the constructed serving method).
   - {framework: sglang, kernel_source: sglang_fused_moe_triton, backend: triton_fused_moe, source: "collector/sglang/collect_moe.py"}

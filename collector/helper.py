@@ -823,34 +823,23 @@ def convert_perf_csv_to_parquet(
     return parquet_path
 
 
-_MERGE_LOCK_TIMEOUT_S = 600
-_MERGE_LOCK_POLL_S = 0.2
-
-
 def _acquire_merge_lock(lock_path: Path) -> int:
-    """Advisory O_EXCL lock file with a stale-lock timeout.
+    """Advisory flock on a per-target lock file (blocking).
 
-    Finalization normally runs single-process, so contention is rare; the
-    timeout keeps a crashed holder (stale file) from wedging every later run.
+    flock is atomic, releases automatically when the holding process exits
+    (no stale-lock handling needed), and unlike an O_EXCL create-and-steal
+    scheme cannot let two finalizers past the gate. The lock file itself is
+    left in place — unlinking it would reopen the create/steal race.
     """
-    deadline = time.monotonic() + _MERGE_LOCK_TIMEOUT_S
-    while True:
-        try:
-            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                logging.getLogger(__name__).warning(
-                    "convert_perf_csv_to_parquet: merge lock %s held past %ds; treating as stale and stealing it.",
-                    lock_path.name,
-                    _MERGE_LOCK_TIMEOUT_S,
-                )
-                lock_path.unlink(missing_ok=True)
-            time.sleep(_MERGE_LOCK_POLL_S)
+    import fcntl
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
 
 def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
-    os.close(lock_fd)
-    lock_path.unlink(missing_ok=True)
+    os.close(lock_fd)  # closing releases the flock
 
 
 def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
@@ -888,8 +877,23 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
             new_fields,
         )
         return new_table
+    # Reconcile metric-column types on BOTH sides: an all-empty metric column
+    # is inferred as `null`, and Arrow can cast null -> anything (all nulls)
+    # but not double -> null. Whichever side is null-typed is cast toward the
+    # other; a genuine numeric-vs-numeric drift casts new toward old.
     for f in old_table.schema:
-        if f.name in PERF_METRIC_COLUMNS and new_table.schema.field(f.name).type != f.type:
+        if f.name not in PERF_METRIC_COLUMNS:
+            continue
+        new_field = new_table.schema.field(f.name)
+        if new_field.type == f.type:
+            continue
+        if pa.types.is_null(f.type):
+            old_table = old_table.set_column(
+                old_table.schema.get_field_index(f.name),
+                f.name,
+                old_table.column(f.name).cast(new_field.type),
+            )
+        else:
             new_table = new_table.set_column(
                 new_table.schema.get_field_index(f.name),
                 f.name,

@@ -8,10 +8,12 @@
 #   SM120    -> the same torch op with per_token_quant_and_transform;
 #   SM100/103 (is_sm_100f) -> plain bf16 torch.bmm on dequantized weights by
 #              default (opt-in cute_dsl_fp8_bmm_blackwell only).
-# So the fp8 axis of THIS op (the Hopper quantize+bmm pair) is correctly
-# closed on SM100/103: serving never invokes that torch op there, and the
-# bf16 axis (torch.ops.trtllm.bmm_out, attention.py:2507) remains the honest
-# SM100 measurement.
+# The fp8 axis is therefore OPEN on every SM>86 and the run functions
+# dispatch per serving: the fp8 torch op on SM89/90/120, load-time dequant +
+# bf16 torch.ops.trtllm.bmm_out on SM100/103 (what serving actually runs for
+# an fp8 checkpoint there), a classified raise anywhere else — mirroring the
+# wrapper's own NotImplementedError (attention.py:1080-1093@1.3.0rc20). The
+# invoked op is recorded per-row in kernel_source.
 # SM120 half RESOLVED on 1.3.0rc20/SM120 (2026-07-19, RTX PRO 6000): the
 # serving pair — fp8_utils.per_token_quant_and_transform(need_permute102=True)
 # activation quant + resmooth_to_fp8_e8m0/transform_sf_into_required_layout
@@ -56,14 +58,27 @@ def _supported_dtypes() -> set[str]:
 def _fp8_bmm_serving_path() -> bool:
     """True where serving invokes torch.ops.trtllm.fp8_block_scaling_bmm_out.
 
-    Serving's wrapper dispatch (attention.py:1159-1190@1.3.0rc20): SM89/90
-    and SM120 call the fp8 torch op (different activation-quant helpers);
-    every other SM — SM100/103 included — runs plain bf16 torch.bmm on
-    weights dequantized at load time, so that is the serving-true
-    measurement there (recorded via kernel_source).
+    Serving's wrapper dispatch (attention.py:1080-1093,1159-1190@1.3.0rc20):
+    SM89/90 and SM120 call the fp8 torch op (different activation-quant
+    helpers); SM100/103 (is_sm_100f, _utils.py:793-796) run plain bf16
+    torch.bmm on weights dequantized at load time; every OTHER SM raises
+    NotImplementedError in serving itself — the collector mirrors that with
+    _require_fp8_bmm_dispatch instead of inventing a fallback
+    (layer_permissions.md: no invented fallbacks).
     """
     sm = get_sm_version()
     return 86 < sm < 100 or sm == 120
+
+
+def _require_fp8_bmm_dispatch() -> None:
+    """Raise (classified) on SMs where serving has no fp8 mla_bmm path."""
+    sm = get_sm_version()
+    if not (_fp8_bmm_serving_path() or sm in (100, 103)):
+        raise RuntimeError(
+            f"serving's fp8_block_scaling_bmm_out wrapper raises NotImplementedError on "
+            f"SM{sm} (attention.py:1080-1093@1.3.0rc20); no serving-true fp8 mla_bmm "
+            f"measurement exists on this platform"
+        )
 
 
 def _dequant_fp8_weight(weight_fp8: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
@@ -200,6 +215,7 @@ def run_mla_gen_pre(num_tokens, num_heads, dtype, num_warmups, num_runs, *, perf
         fused_q = torch.randn([num_tokens, num_heads, kv_lora_rank], dtype=torch.bfloat16, device=device)
         # => num_heads, num_tokens, kv_lora_rank
 
+        _require_fp8_bmm_dispatch()
         if _fp8_bmm_serving_path():
             k_b_proj_trans, k_b_proj_trans_scale = _prep_fp8_weight(k_b_proj_raw, k_b_proj_scale_raw)
             kernel_source = "trtllm_fp8_block_scaling_bmm_out"
@@ -317,6 +333,7 @@ def run_mla_gen_post(num_tokens, num_heads, dtype, num_warmups, num_runs, *, per
         )
         attn_output = torch.randn([num_tokens, num_heads, v_head_dim]).bfloat16().to(torch.device(device))
 
+        _require_fp8_bmm_dispatch()
         if _fp8_bmm_serving_path():
             v_b_proj, v_b_proj_scale = _prep_fp8_weight(v_b_proj_raw, v_b_proj_scale_raw)
             kernel_source = "trtllm_fp8_block_scaling_bmm_out"
