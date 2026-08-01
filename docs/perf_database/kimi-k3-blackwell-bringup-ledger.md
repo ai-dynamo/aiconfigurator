@@ -158,6 +158,12 @@ packaged b200_sxm tables: sglang verify recurrence 0.0640 ms silicon + conv
   known double-count is kda_onorm (~0.2 ms/step empirical) for the 12-head
   shard where the fused kernel folds it — pending the op-graph fusion-boundary
   discussion.
+  OWNER DECISION 2026-08-02: the k3_ar_fusion comm lane is a WON'T-DO —
+  the AR term's ~0.9 ms/step optimism at bs8 is judged acceptable for the
+  PR's purposes; the -34% figure above stays documented as a known model
+  characteristic. rtx_pro_6000 K3 MoE and the Hopper EP>1 marlin issue are
+  DEFERRED (not dropped): rtx waits for the next SM120 node; Hopper waits
+  on the upstream marlin fix or issue filing.
 
 ## Open pre-work for the remaining lanes
 
