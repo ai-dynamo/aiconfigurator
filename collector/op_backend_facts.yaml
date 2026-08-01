@@ -2177,14 +2177,22 @@ ops:
       - {framework: "trtllm", version: "1.3.0rc10", system: "h200_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc10", system: "rtx_pro_6000_server", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc10", system: "rtx_pro_6000_server", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "b300_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb200", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
+      - {framework: "trtllm", version: "1.3.0rc20", system: "gb300", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out_dequant_bf16"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "h100_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "h100_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["trtllm_internal"], kernel_sources: ["trtllm_fp8_block_scaling_bmm_out"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "h100_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["trtllm_bmm_out"]}
