@@ -27,6 +27,8 @@ Status legend: `done` = collected, quality-gated, packaged under
 | kda | rtx_pro_6000_server (SM120) | sglang 0.5.16 | **done (2026-08-01)** | 1085 | full grid clean; SM120 lifted from `unverified_sms` (probe job 381312864); Triton verify, `kda_fused_decode` engages |
 | kda | l40s (SM89) | sglang 0.5.16 | **done (2026-08-01)** | see note | SM89 lifted from `unverified_sms` (probe job 381312863, 1074 rows); `kda_fused_decode` JIT fails ptxas below sm_90 (`mbarrier.try_wait.parity`) — fused attempt now gated to SM90+ in `collect_kda.py`; recollected at the fixed revision for the 12-head-shard generation rows |
 | moe (K3 shape) | gb200 / gb300 | sglang 0.5.14 | **done (2026-08-01)** | 6156 + 6156 | both precision lanes (w4a16_mxfp4 + w4a8_mxfp4_mxfp8) in one run, zero failures, merged into the shared 0.5.14 tables |
+| moe (K3 shape, **w4a8_mxfp4_mxfp8**) | b200_sxm (SM100) | sglang 0.5.14 | **done (2026-08-01)** | 3078 | closes the gap where the Blackwell resolver queries w4a8 but b200 carried only w4a16 — b200 sglang SILICON E2E now resolves; 8xB200, stock 0.5.14 image, zero failures (resumed across a node recycle), merged into the shared table (145,321 total) |
+| moe (K3 shape, w4a16_mxfp4) | b200_sxm | vllm 0.1.dev19262 | in progress (2026-08-01) | — | serving-truth audit DONE (see the vllm section below); collector fix + collection pending |
 | moe (K3 shape) | h100_sxm / h200_sxm | sglang 0.5.14 | **done (2026-08-01)** | 541 / see note | marlin lane; the EP>1 IMA crash family reproduces on H100/H200 (2537/2587 cells — third system family, upstream issue still unfiled). H200's first run lost 47 measured rows to perf-log lock races during the crash storms (log_perf window widened to 30s + stale-lock break); recollected |
 | moe (K3 shape) | l40s (SM89) | sglang 0.5.14 | **done (2026-08-01)** | 2997 | SM89 dispatches `sglang_fused_moe_triton` (no marlin/flashinfer lane); 81 OOM cells classified (48 GB card) |
 | kda | b300_sxm vllm / gb200 / gb300 / rtx / l40s / hopper | vllm | out of scope | — | owner scope decision 2026-08-01: sglang only. Full vllm kda artifacts for h100/h200/gb200 + limit-probe artifacts for l40s/b300/rtx were already collected before the scope cut (pipelines 60591225/60591349/60591439) and can be ingested later; 103/89/120 stay in the vllm `unverified_sms` |
@@ -360,3 +362,60 @@ b300_sxm's 0.5.16 collection_meta, `get_database("b300_sxm", "sglang",
 "0.5.16")` fails with "marked incomplete in either layout" while every other
 kda system (kda_perf-only meta) loads. If that is not intended, either the
 loader's completeness rule or the b300 meta needs an owner decision.
+RESOLVED 2026-08-01 (owner, commit d4ac8532): the meta was wrong, not the
+loader — `partial` gates the whole version dir by design; the module table's
+in-scope phases are complete (verify is deliberately out of scope), so the
+status is now `complete` with the scope documented in the meta comment.
+
+## vLLM K3 serving-truth audit + owner decisions — 2026-08-01
+
+Audited in the manifest-pinned preview image
+(`vllm/vllm-openai@sha256:e90e2603`, reports 0.1.dev19262+gb6bbf29dd),
+cross-checked against the vLLM Day-0 posts
+(vllm.ai/blog/2026-07-22-kimi-k3-preview, /2026-07-27-k3) and
+recipes.vllm.ai/moonshotai/Kimi-K3. K3's checkpoint descriptor
+(compressed-tensors mxfp4-pack: float/4bit/group32/symmetric, no
+input_activations) resolves to `CompressedTensorsW4A4Mxfp4MoEMethod`; the
+serving MoE path then splits by deployment tier:
+
+1. **Single-node / TP (recipes carry no quantization override)**: SiTU is
+   not in `CutlassExpertsMxfp4._supports_activation` (SILU/GELU/GELU_TANH/
+   SWIGLUOAI only, cutlass_moe.py:321-327), so the method falls back to
+   **MarlinExperts weight-only = W4A16 + SiTU**
+   (compressed_tensors_moe_w4a4_mxfp4.py:58-71). This is TRUE ON EVERY SM —
+   the CUTLASS W4A4 device gate covers capability families 100 (incl.
+   SM103)/110/120; the block is the activation, not the GPU. → the
+   kernel-level vllm MoE lane label `w4a16_mxfp4` is correct.
+2. **Recommended DEP scale-out** (`--moe-backend deep_gemm_mega_moe` in the
+   recipes): DeepGEMM MegaMoE (`KimiK3MegaMoEExperts`, fp8 activations x
+   fp4 weights = W4A8 semantics, SiTU/EP/latent required) — but the pinned
+   image DOES NOT SHIP `deep_gemm` (ModuleNotFoundError), so this path is
+   unrunnable at the pin.
+3. **TRTLLM-Gen mxfp4**: the kernel + explicit SiTU mapping exist in-image
+   (`TrtLlmMxfp4ExpertsBase` maps situ beta/linear_beta to gatedActAlpha/
+   Beta; flashinfer 0.6.15, same prerelease as sglang), but the
+   compressed-tensors method never selects it (oracle
+   `select_mxfp4_moe_backend` is consumed by the OCP/DSV4 methods only).
+   The Day-0 deep-dive's "SiTU wired into TRTLLM-Gen" is not reachable for
+   K3 at this pin.
+
+Image drift: the `vllm/vllm-openai:kimi-k3` tag now points to
+sha256:d61e062d (newer than the e90e2603 pin).
+
+**Owner decisions (2026-08-01):**
+- Keep the vllm pin at e90e2603 for now — the W4A16 Marlin lane is
+  build-invariant; a pin bump triggers the full kda dispatch re-audit and
+  is deferred to the MegaMoE lane work.
+- W4A8 scope is covered by the SGLANG trtllm-gen lane
+  (`sglang_flashinfer_trtllm_moe`, collected on b200/b300/gb200/gb300);
+  vllm W4A8 = future **vllm MegaMoE module lane** (needs the newer image
+  with deep_gemm + 8-GPU EP; open item, peer of the sglang MegaMoE item).
+- vllm kernel-level W4A16 lane proceeds: fix `collect_moe.py` to construct
+  the checkpoint-truth `CompressedTensorsConfig` (mxfp4-pack descriptor)
+  with SiTU instead of `Mxfp4Config()` (OCP path), run in the preview
+  image, and merge rows incrementally into the vllm 0.24.0 moe table
+  (rows keep their honest runtime version column; meta annotates).
+- Lane order after that: B200 `linear_attn_module` (single GPU) → vllm K3
+  MLA precise-case activation (after the preview-mla.py vs stock-kernel
+  audit) → sglang MegaMoE module lane (8-GPU torchrun, first host that
+  qualifies).
