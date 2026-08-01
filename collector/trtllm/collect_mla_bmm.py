@@ -70,7 +70,11 @@ def _dequant_fp8_weight(weight_fp8: torch.Tensor, weight_scale: torch.Tensor) ->
     """Dequantize a 128x128-block-scaled fp8 weight to bf16 (load-time step
     serving performs on SMs where the fp8 bmm op is not dispatched)."""
     scale = weight_scale.repeat_interleave(128, dim=1).repeat_interleave(128, dim=2)
-    return (weight_fp8.to(torch.bfloat16) * scale[:, : weight_fp8.shape[1], : weight_fp8.shape[2]]).contiguous()
+    # multiply in float32 (bf16 * f32 type-promotes to f32 anyway), then cast
+    # back: torch.bmm requires out dtype == input dtype, and the serving path
+    # stores the dequantized weight as bf16.
+    dequant = weight_fp8.to(torch.float32) * scale[:, : weight_fp8.shape[1], : weight_fp8.shape[2]]
+    return dequant.to(torch.bfloat16).contiguous()
 
 
 def _prep_fp8_weight(weight_fp8: torch.Tensor, weight_scale: torch.Tensor):
