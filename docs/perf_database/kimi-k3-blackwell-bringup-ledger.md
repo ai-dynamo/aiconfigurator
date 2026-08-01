@@ -459,4 +459,6 @@ a generator extension — a mechanism change parked for owner approval.
   GQA shape (64q/16kv/64hd) for BOTH backends. vllm DSPARK draft ops and
   draft-KV bytes are therefore mispriced (5 draft layers, small but
   real). Fix = backend-conditional draft geometry in models/kimi_k3.py
-  (SDK scope).
+  (SDK scope). OWNER DECISION 2026-08-02: WON'T-FIX — the draft is 5
+  layers vs the 93-layer target, percent-level error accepted; this note
+  stays as the known-inaccuracy record for the vllm DSPARK column.
