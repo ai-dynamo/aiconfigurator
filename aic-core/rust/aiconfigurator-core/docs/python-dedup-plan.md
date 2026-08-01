@@ -46,9 +46,11 @@ the flip must bake separately from deletion so a post-flip drift still has a
 one-env-var rollback; conversely P0's heavy lifting shipped in #1355 and P4 is
 a one-line shim, so neither deserves a standalone PR anymore.
 
-**Done since the original draft:** full parity scan complete
-(`parity-scan-report.md`: gate CLOSED, 0 REGRESSION); engine-step parity,
-compile-engine parity, and perf gates in CI; #1355 (SILICON audit +
+**Done since the original draft:** the 2026-07 opt-in-rust parity scan
+completed (`parity-scan-report.md`: gate CLOSED, 0 REGRESSION — historical
+evidence for the opt-in path, distinct from PR-1's own forced-rust scan,
+which reruns against the flipped default as its merge evidence); engine-step
+parity, compile-engine parity, and perf gates in CI; #1355 (SILICON audit +
 HYBRID/EMPIRICAL port) merged.
 
 ## Motivation

@@ -1471,7 +1471,8 @@ def build_default_tasks(
         moe_backend: Explicit SGLang MoE backend override.
         engine_step_backend: Engine-step latency backend ("python" or "rust");
             unset defaults to the compiled Rust engine (power-carrying databases
-            delegate to the Python step).
+            delegate to the Python step, as do SDK callers passing synthetic
+            database objects the compiled engine cannot re-load from disk).
 
     Returns:
         Dict with Task objects. When backend='auto', returns 6 configs
