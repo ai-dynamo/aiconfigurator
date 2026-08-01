@@ -59,17 +59,55 @@ side; the module table keeps that symmetry.
 
 Linear attention has no paged KV; the per-request state is O(1) (conv window
 + SSM state). The serving branch implements radix/prefix caching via
-**state checkpoints**: every `mamba_track_interval` tokens the decode kernel
-force-flushes the SSM state into `temporal[slot]` (radix track boundary
-`seq_lens % mamba_track_interval == 0`); a prefix hit COW-copies the nearest
-checkpoint (`MambaPool.copy_from`) and replays at most `track_interval`
-tail tokens (ReplaySSM ring is the snapshot-free variant). Modeling
-consequence: a prefix hit removes the WHOLE cached-prefix KDA context cost
-and replaces it with one state copy + a <=interval-token replay — i.e. the
-module context query runs at `seq = isl - prefix_hit (+ replay tail)`. The
-module design needs no extra table axis for this; it is a query-time seq
-adjustment on the consumer side (wire it to the CLI `--prefix` input when
-K3 prefix modeling lands).
+**state checkpoints**: a prefix hit COW-copies the nearest valid checkpoint
+(`MambaPool.copy_from`; Snapshot/Donate on the write side) and replays the
+tail tokens from that boundary. A token-prefix match alone is NOT
+recoverable — KDA state cannot be truncated backward, so the hit floors to
+the nearest checkpoint at or before the match point, and the MLA KV beyond
+that boundary does not save the replay (the tail forward must run all
+layers to rebuild KDA state).
+
+Checkpoint placement (per the Day-0 serving write-ups — sglang: prefill
+CHUNK boundaries + a fixed decode interval + radix fork nodes, with a
+per-path count budget, LRU eviction and an optional INT8-compressed cache
+pool; vllm: `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` + prompt-end states +
+Marconi-style cache-on-second-hit; overview:
+https://mp.weixin.qq.com/s/Yxmt-Foq2D7b46sYOk7WAg) is therefore SPARSE and
+adaptive, and the replay tail is bounded by the local checkpoint spacing —
+up to `chunked_prefill_size` (8-16k tokens) for prefill-built prefixes,
+`mamba_track_interval` for decode-built ones, and unbounded when eviction
+removed the boundary. The Mooncake post's worked example is the first-order
+effect: 15k shared / 10k spacing → only 10k reusable, recompute doubles.
+
+Modeling consequence: a prefix hit runs the module context query at
+`seq = isl - checkpoint_floor(prefix_hit)`, NOT `isl - prefix_hit`. The
+module design still needs no extra table axis; it is a query-time seq
+adjustment on the consumer side — but when the CLI `--prefix` input is
+wired for K3, the effective prefix must floor to a checkpoint-spacing
+parameter (backend-dependent as above) instead of using the raw match
+length.
+
+### Capacity side (memory model, `models/kimi_k3.py`)
+
+One full-model KDA state copy is 96h x 128 x 128 x fp32 x 69 layers
+~ 0.4 GiB (matches the kvcache.ai calculator figure cited by the Mooncake
+post), TP-sharded. The current SDK model charges
+`KDA_STATE_SLOTS_PER_REQUEST = 5` state slots per admitted request and
+treats MLA KV + KDA state as one elastic byte budget. Two refinements the
+serving write-ups motivate (not yet implemented):
+
+1. The flat per-request slot multiplier folds the radix checkpoint budget
+   into admission cost. Serving actually splits an ACTIVE pool
+   (1 running slot + snapshot double-buffer per request) from a global
+   checkpoint cache pool with its own budget/LRU — and the optional INT8
+   compressed pool stores inactive temporal states 4x denser. A closer
+   model: per-request active slots + a global checkpoint-pool byte term,
+   with a compression factor knob.
+2. The single elastic budget matches sglang's opt-in
+   `--enable-unified-memory` mode. The DEFAULT is two separately sized
+   pools (MLA KV vs KDA state) with a boot-time ratio; under a mismatched
+   workload the binding pool saturates while the other idles, so real
+   capacity can be below the elastic estimate.
 
 ## Context parallelism
 
