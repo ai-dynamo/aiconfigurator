@@ -1,14 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM 0.24.0 production-path MoE collector.
+"""vLLM production-path MoE collector.
 
 Shared MoE cases come from YAML. Every quantization mode is built through
 ``FusedMoE`` so vLLM owns routing, TP/EP sharding, weight post-processing, and
 backend selection exactly as it does for model execution.
+
+Runtime: the moe family is pinned to the vLLM kimi-k3 preview build
+(0.1.dev19262 — see frameworks.vllm.families.moe in framework_manifest.yaml;
+K3's SITU activation does not exist in stock 0.24.0, which would silently
+dispatch a different kernel). The 0.24-era APIs this module uses were
+verified importable and behavior-compatible on the preview build; the
+version-specific dispatch citations below name the build they were read at.
 """
 
-__compat__ = "vllm==0.24.0"
+__compat__ = "vllm==0.1.dev19262"
 
 import json
 import os
@@ -145,6 +152,13 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "renormalize": renormalize,
         "scoring_func": scoring_func,
         "activation": activation,
+        # SiTU (Kimi-K3) is parameterized: FusedMoE requires the betas when
+        # activation == "situ" (the TRTLLM experts assert beta > 0; the
+        # marlin epilogue reads both). Sourced from the packaged config.
+        "activation_situ_beta": (model_config.get("activation_situ_beta") if activation == "situ" else None),
+        "activation_situ_linear_beta": (
+            model_config.get("activation_situ_linear_beta") if activation == "situ" else None
+        ),
         "routed_scaling_factor": float(model_config.get("routed_scaling_factor") or 1.0),
         "swiglu_limit": model_config.get("swiglu_limit") if model_type in ("deepseek_v4", "deepseek_ref") else None,
         "use_grouped_topk": use_grouped_topk,
@@ -386,7 +400,26 @@ def run_moe_torch(
             weight_block_size=[128, 128],
         )
     elif moe_type == "w4a16_mxfp4":
-        quant_config = Mxfp4Config()
+        checkpoint_qc = _load_model_moe_config(model_name).get("quantization_config") or {}
+        is_ct_mxfp4 = checkpoint_qc.get("quant_method") == "compressed-tensors" and "mxfp4" in str(
+            checkpoint_qc.get("format", "")
+        )
+        if is_ct_mxfp4:
+            # Kimi-K3-style compressed-tensors mxfp4-pack checkpoints: vLLM
+            # resolves this descriptor to CompressedTensorsW4A4Mxfp4MoEMethod
+            # (compressed_tensors_moe.py:66-71 @0.1.dev19262). Its CUTLASS
+            # W4A4 path rejects the SITU activation
+            # (CutlassExpertsMxfp4._supports_activation, cutlass_moe.py:
+            # 321-327 — SILU/GELU/GELU_TANH/SWIGLUOAI only), so the method
+            # falls back to weight-only MarlinExperts, which supports SITU
+            # (compressed_tensors_moe_w4a4_mxfp4.py:58-71) — the w4a16
+            # identity this lane persists. Constructing the checkpoint's own
+            # config (instead of the OCP Mxfp4Config) lets that selection run
+            # exactly as serving; OCP mxfp4 checkpoints (gpt-oss family) keep
+            # the Mxfp4Config path below.
+            quant_config = CompressedTensorsConfig.from_config(checkpoint_qc)
+        else:
+            quant_config = Mxfp4Config()
     elif moe_type == "w4a8_mxfp4_mxfp8":
         # Native DeepSeek-V4 (expert_dtype=fp4) serving path: vLLM overrides
         # the checkpoint's fp8 quant_method to DeepseekV4FP8Config
@@ -508,6 +541,8 @@ def run_moe_torch(
             apply_router_weight_on_input=runtime_config["apply_router_weight_on_input"],
             has_bias=runtime_config["has_bias"],
             activation=runtime_config["activation"],
+            activation_situ_beta=runtime_config["activation_situ_beta"],
+            activation_situ_linear_beta=runtime_config["activation_situ_linear_beta"],
             router_logits_dtype=router_logits_dtype,
             apply_routed_scale_to_output=runtime_config["apply_routed_scale_to_output"],
         )

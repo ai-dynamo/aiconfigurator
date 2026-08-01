@@ -46,6 +46,22 @@ frameworks:
         version: "0.1.dev19262"
         images:
           default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
+      # K3-driven pin (owner decision 2026-08-01): stock v0.24.0 has no SITU
+      # activation (upstream v0.24.0 activation.py), so a Kimi-K3
+      # compressed-tensors mxfp4 case there would dispatch CUTLASS W4A4 +
+      # silu — a different kernel than K3 serving (SITU -> MarlinExperts
+      # weight-only, compressed_tensors_moe_w4a4_mxfp4.py:58-71 @ preview).
+      # The preview build is a superset of the stock moe paths, so non-K3
+      # vllm moe collections remain valid here; the family schema has no
+      # per-model pin (recorded image-routing gap). Pre-existing 0.24.0 moe
+      # rows are untouched; K3 rows merge into the 0.24.0 table per the
+      # owner decision, carrying their honest runtime version column.
+      # Re-verify at the next tag bump (tag has already drifted to
+      # sha256:d61e062d).
+      moe:
+        version: "0.1.dev19262"
+        images:
+          default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"
