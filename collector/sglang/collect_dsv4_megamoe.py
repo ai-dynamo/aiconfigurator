@@ -430,7 +430,17 @@ def make_pre_dispatch(pre_dispatch: str):
         return copy_pre_dispatch
 
     if pre_dispatch == "sglang_jit":
-        from sglang.jit_kernel.deepseek_v4 import mega_moe_pre_dispatch
+        # Import-path drift across sglang builds, same pre-dispatch kernel
+        # (deepseek_v4/mega_moe_pre_dispatch.cuh) and identical signature:
+        #   - kimi-k3 branch (0.5.16): serving imports it from
+        #     sglang.kernels.ops.attention.dsv4
+        #     (srt/layers/moe/mega_moe.py:24 @ image sha256:6d9594a4)
+        #   - deepseek-v4 wideep image (0.5.10): sglang.jit_kernel.deepseek_v4
+        # Each fallback matches that build's own serving import.
+        try:
+            from sglang.kernels.ops.attention.dsv4 import mega_moe_pre_dispatch
+        except ModuleNotFoundError:
+            from sglang.jit_kernel.deepseek_v4 import mega_moe_pre_dispatch
 
         def sglang_jit_pre_dispatch(hidden_states, topk_ids, topk_weights, buffer, num_tokens: int):
             del num_tokens
