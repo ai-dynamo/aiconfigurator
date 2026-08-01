@@ -239,14 +239,45 @@ _RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL"}
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route to the compiled engine only when it can give the SAME answer.
 
-    The compiled engine implements the SILICON path and the util-space
-    empirical layer (HYBRID / EMPIRICAL). The SOL/SOL_FULL diagnostic modes
-    stay on the Python step -- delegating keeps the two backends
-    answer-identical instead of capability-divergent.
+    The compiled engine is the DEFAULT. The Python step remains reachable
+    three ways, all answer-parity delegations rather than capabilities:
+
+    * an explicit ``engine_step_backend="python"`` (config or env) — the
+      escape hatch retained for one release cycle;
+    * the SOL / SOL_FULL diagnostic modes, which only the Python step
+      implements (the compiled engine answers SILICON / HYBRID / EMPIRICAL);
+    * by default (not when ``"rust"`` is explicitly requested), a database
+      whose perf tables carry measured power columns — energy does not cross
+      the FFI yet, so rust-routing an agg sweep would silently zero its
+      ``power_w``. Explicit ``"rust"`` keeps its historical force semantics
+      (the parity scan tooling relies on it and measures latency only).
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    if str(backend or "python").lower() != "rust":
+    requested = str(backend).lower() if backend else None
+    if requested is not None and requested != "rust":
         return False
+    if requested is None:
+        # Deferred import: perf_database is heavy and this module must stay
+        # light to import (engine.py imports it at top level).
+        from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+        if not isinstance(database, PerfDatabase):
+            # The compiled engine re-loads perf data from disk by
+            # (system, backend, version); a synthetic/duck-typed database has
+            # no on-disk identity it could resolve. Only an explicit "rust"
+            # request bypasses this (and owns the resulting load error).
+            return False
+        if _database_has_power_data(database):
+            logger.debug(
+                "engine-step backend defaulting to the python step: database %s/%s/%s carries "
+                "measured power data and energy does not cross the FFI yet "
+                "(set %s=rust to force the compiled engine).",
+                database.system,
+                database.backend,
+                database.version,
+                ENGINE_STEP_BACKEND_ENV,
+            )
+            return False
     if database is not None:
         mode = getattr(database, "get_default_database_mode", lambda: None)()
         if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
@@ -257,6 +288,65 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
             )
             return False
     return True
+
+
+# Power-data probe results keyed by (system, backend, version). The probe is
+# a filesystem schema scan, so the answer is immutable for a given identity;
+# memoizing here keeps the per-step routing gate free of I/O.
+_POWER_DATA_CACHE: dict[tuple[str, str, str], bool] = {}
+
+
+def _database_has_power_data(database: Any) -> bool:
+    """True when the database's perf-data tree carries measured power columns.
+
+    Detection is a parquet *schema* scan (no row reads) over the database's
+    ``<data_dir>/<family>/<backend>/<version>/*.parquet`` tree, plus the
+    deprecated ``<data_dir>/<backend>/<version>`` layout. All sibling version
+    dirs of the backend are scanned, not just ``database.version``: the loader
+    may fill gaps from sibling-version channels, and over-matching only keeps
+    that database on the (status quo) Python step. Collectors write power
+    columns only when power was actually measured, so column presence is the
+    signal — no row values are inspected.
+
+    Any probe failure (mock database objects in tests, missing tree, no
+    pyarrow) means "no power data": those databases cannot produce energy on
+    the Python step either, so rust-routing them changes nothing.
+    """
+    system = getattr(database, "system", None)
+    backend = getattr(database, "backend", None)
+    if not system or not backend:
+        return False
+    key = (str(system), _backend_name(backend), str(getattr(database, "version", "")))
+    cached = _POWER_DATA_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = _scan_for_power_columns(database)
+    _POWER_DATA_CACHE[key] = result
+    return result
+
+
+def _scan_for_power_columns(database: Any) -> bool:
+    try:
+        import pyarrow.parquet as pq
+
+        systems_root = getattr(database, "systems_root", None)
+        spec = getattr(database, "system_spec", None)
+        data_dir_rel = spec.get("data_dir") if isinstance(spec, dict) else None
+        if not systems_root or not data_dir_rel:
+            return False
+        data_dir = Path(systems_root) / data_dir_rel
+        backend = _backend_name(database.backend)
+        candidates = list(data_dir.glob(f"*/{backend}/*/*.parquet")) + list(data_dir.glob(f"{backend}/*/*.parquet"))
+        for parquet_path in candidates:
+            try:
+                names = pq.read_schema(parquet_path).names
+            except Exception:  # one unreadable file must not poison the probe
+                continue
+            if any("power" in name for name in names):
+                return True
+        return False
+    except Exception:  # probe failures mean "no power data", see docstring
+        return False
 
 
 def _note_rust_provenance(handle: Any) -> None:

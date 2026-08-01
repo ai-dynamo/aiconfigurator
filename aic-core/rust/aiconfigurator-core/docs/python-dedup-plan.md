@@ -5,25 +5,51 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
-**Status (2026-07-13): NOT STARTED — plan of record, not yet implemented.**
-The switch is still opt-in: `engine_step_backend` defaults to Python
-(`config.py`), `should_use_rust_engine_step` returns Python unless it is set to
-`"rust"`, and the `operations/*.py` `query()` methods plus the
-`perf_database.py` latency-query methods are all still present. None of the
-gates below has run.
+**Status (2026-08-01): REVISED — consolidated to three PRs; PR-1 in flight.**
+Since the 2026-07-13 draft, #1355 closed every SILICON parity divergence AND
+ported the util-space empirical layer, so the compiled engine now answers
+SILICON / HYBRID / EMPIRICAL itself (`rust_engine_step.py`,
+`_RUST_SUPPORTED_DATABASE_MODES`). The old Gate-1 blocker (#1333) is gone and
+the original P0 (DRIFT triage) is substantially done. The remaining gaps, and
+which PR owns each:
 
-**New blocker since drafting:** the Rust engine-step is **SILICON-only** (no
-`util_empirical` layer), so `should_use_rust_engine_step` delegates
-HYBRID/EMPIRICAL databases back to Python for answer-parity. A *global* default
-flip (Gate 1) therefore cannot ship until the empirical-layer port lands
-(issue #1333); until then any flip is silicon-only or staged per-family.
+- **Energy/power does not cross the FFI.** The static path already
+  compensates (the rust branch of `_run_static_breakdown` runs the Python
+  phase runners for energy only), but the agg mixed/decode step paths return
+  `energy_wms=0.0` — an unconditional default flip would silently zero agg
+  `power_w` on the systems that ship measured power columns (b200_sxm,
+  h200_sxm, gb200). → PR-1 handles this by *routing*, not porting: default
+  resolution delegates power-carrying databases to the Python step. The
+  actual energy-across-FFI port (rust perf leaves deliberately carry no
+  power today, `perf_interp.rs`) lands in PR-2 and removes that routing carve-out.
+  Note the energy compensation also means the Python `query()` layer is a
+  live dependency of rust-routed static runs — another reason deletion
+  cannot precede the energy port.
+- **AFD** is Python-only (no rust operators; `RustEngineUnsupportedError`
+  → Python-step fallback). Harmless at flip time, blocks deletion. → PR-2.
+- **SOL / SOL_FULL** modes route to the Python step by design. Blocks
+  deletion, not the flip. → PR-2 (port or retire the modes).
 
-**Done since drafting:** the full parity scan is complete
-(`parity-scan-report.md`: gate CLOSED, 0 REGRESSION), and the
-engine-step parity, compile-engine parity, and engine-step perf gates all run
-in CI (`.github/workflows/build-test.yml`).
+## Revised PR sequence (2026-08-01) — supersedes the P0–P4 table below
 
-**Branch base:** `main` tip (post #1200 / #1201).
+| # | PR | Scope | Maps to |
+| --- | --- | --- | --- |
+| **PR-1** | Rust default | Flip default resolution to the compiled engine; power-carrying and non-`PerfDatabase` databases delegate to the Python step; explicit `"rust"`/`"python"` keep force semantics (`"python"` is the escape hatch, retained one release). Propagate `engine_step_backend` into the internal `RuntimeConfig` constructions (`run_mixed` passes 1–3, `_get_genonly_step_latency`) so the escape hatch binds the whole composition. Forced-rust full-matrix scan as merge evidence. No deletion. Bake one release cycle. | P0+P1 |
+| **PR-2** | Golden anchor + gap closure | Capture Python `run_static`/`run_agg`/step goldens while Python is alive; rewire parity tests to Rust-vs-golden; energy-across-FFI (removes PR-1's power routing carve-out); resolve AFD (per-op values via the planned op-list evaluation FFI, per `.claude/rules/rust-core/parity.md`) and SOL/SOL_FULL (port or retire). These goldens double as the EngineSpec IR anchor required by the model-builder plan. | P2 + gaps |
+| **PR-3** | Delete + retire switch | Delete per the keep/delete inventory below; `"python"` value becomes a warning no-op (deprecation shim = folded P4); propose the `.claude/rules` dual-implementation → golden-diff rewrite (human-owned, proposal only). | P3+P4 |
+
+Strictly sequential. PR-2 may start once PR-1 merges; PR-3 waits for PR-1 to
+bake one release cycle. Rationale for 3 (not 2, not 5): goldens must merge
+green from the live Python path *before* any deletion (a golden captured in
+the deletion PR risks self-referential regeneration and reverts with it), and
+the flip must bake separately from deletion so a post-flip drift still has a
+one-env-var rollback; conversely P0's heavy lifting shipped in #1355 and P4 is
+a one-line shim, so neither deserves a standalone PR anymore.
+
+**Done since the original draft:** full parity scan complete
+(`parity-scan-report.md`: gate CLOSED, 0 REGRESSION); engine-step parity,
+compile-engine parity, and perf gates in CI; #1355 (SILICON audit +
+HYBRID/EMPIRICAL port) merged.
 
 ## Motivation
 
@@ -141,7 +167,7 @@ Only after Gates 1–2 hold and have soaked one release cycle:
   no-op for one cycle, then dropped.
 - Re-run goldens (Gate 2) + smoke harness; numbers unchanged.
 
-## PR sequence
+## PR sequence (SUPERSEDED — see "Revised PR sequence (2026-08-01)" above)
 
 | # | PR | Lands | Gated? |
 | --- | --- | --- | --- |

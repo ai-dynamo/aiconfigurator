@@ -24,6 +24,82 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
     assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
+def test_engine_step_backend_defaults_to_rust(monkeypatch, tmp_path: Path) -> None:
+    """With nothing requested, the compiled engine is the default for a real
+    database (one the compiled engine could re-load from disk)."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+    database = _power_probe_database(tmp_path, with_power=False)
+
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
+    # Unknown values keep their historical meaning: not rust.
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
+
+
+def _power_probe_database(tmp_path: Path, *, with_power: bool):
+    """A real ``PerfDatabase`` instance (loader bypassed) whose data tree the
+    power probe can scan. Default routing requires the real type: synthetic
+    database doubles delegate to the Python step."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+    system = f"probe_{'with' if with_power else 'without'}_power"
+    version_dir = tmp_path / "data" / system / "gemm" / "vllm" / "1.0.0"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    columns = {"latency": [1.0]}
+    if with_power:
+        columns["power"] = [512.0]
+    pq.write_table(pa.table(columns), version_dir / "gemm_perf.parquet")
+    database = PerfDatabase.__new__(PerfDatabase)
+    database.system = system
+    database.backend = "vllm"
+    database.version = "1.0.0"
+    database.systems_root = str(tmp_path)
+    database.system_spec = {"data_dir": f"data/{system}"}
+    database._default_database_mode = common.DatabaseMode.SILICON
+    return database
+
+
+def test_default_routing_delegates_power_carrying_databases(monkeypatch, tmp_path: Path) -> None:
+    """Energy does not cross the FFI yet: a database with measured power
+    columns stays on the Python step by default, but an explicit ``rust``
+    request keeps its force semantics."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+
+    power_db = _power_probe_database(tmp_path, with_power=True)
+    plain_db = _power_probe_database(tmp_path, with_power=False)
+
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), power_db)
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), plain_db)
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"), power_db)
+    # Synthetic database doubles have no on-disk identity the compiled engine
+    # could resolve: default routing delegates them to the Python step.
+    assert not rust_engine_step.should_use_rust_engine_step(
+        RuntimeConfig(), SimpleNamespace(system="mock", backend="vllm", version="1.0.0")
+    )
+
+
+def test_power_probe_memoizes_per_database_identity(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+    database = _power_probe_database(tmp_path, with_power=True)
+
+    calls = []
+    real_scan = rust_engine_step._scan_for_power_columns
+    monkeypatch.setattr(
+        rust_engine_step,
+        "_scan_for_power_columns",
+        lambda db: calls.append(db) or real_scan(db),
+    )
+    assert rust_engine_step._database_has_power_data(database)
+    assert rust_engine_step._database_has_power_data(database)
+    assert len(calls) == 1
+
+
 def _dense_model() -> SimpleNamespace:
     return SimpleNamespace(
         model_path="Test/Dense",
