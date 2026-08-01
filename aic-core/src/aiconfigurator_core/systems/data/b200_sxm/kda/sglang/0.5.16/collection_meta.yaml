@@ -8,10 +8,13 @@ runtime:
   version: 0.5.16
 tables:
   kda_perf:
-    # NOTE: collected 2026-07-28, BEFORE the kda_fused_decode collector
-    # branch landed — the generation rows are the Triton packed pair even
-    # for the 12-head shard. The module table below carries the fused
-    # serving truth for B200; a kernel-lane fused recollection is optional.
+    # 2026-07-28 base collection predates the kda_fused_decode collector
+    # branch. 2026-08-02: appended the 11 kda_fused_decode generation rows
+    # (12-head shard, 6.75 us @bs1) from a generation-phase recollection in
+    # the current kimi-k3 image (sha256:6d9594a4); re-measured Triton rows
+    # were discarded to keep the original rows' provenance — only the new
+    # kernel_source was added (keys disjoint). The SDK per-key fused
+    # routing now engages on b200 like b300.
     status: complete
   # Module-level linear-attention rows (whole KimiK3DeltaAttention layer,
   # collector/sglang/collect_kda_module.py; experimental producer, no SDK
