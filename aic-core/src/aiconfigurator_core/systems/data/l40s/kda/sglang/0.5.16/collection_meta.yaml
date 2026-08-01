@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang
+  image_digest: sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b
+tables:
+  kda_perf:
+    collector_ref: 39a950b248a40317e0cba88e73ec4b702ac8936c
+    collector_hash: sha256:fb71f4634b10bd3a001016d83360f890c78d9190f0f39967a7c9c3efa34d40bf
+    case_plan_hash: sha256:a85d5a9691084f3e76986e676b8ee088c06ee22a3db5fcc023c432a8b00f56a2
+    collected_at: '2026-08-01'
+    rows: 1096
+    # SM89: kda_fused_decode is gated to SM90+ (JIT ptxas rejects sm_89), so the
+    # 12-head shard decodes via the Triton pair — serving-truth for Ada. All 52
+    # context error cells are the by-design int32 conv-guard raises.
+    status: complete
