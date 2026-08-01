@@ -445,3 +445,18 @@ low-fidelity fallback rows for mla_bmm_perf... from trtllm", i.e. the
 absorb BMMs are priced from another backend's table. mla_bmm's generator
 sweeps a global head grid with no model axis, so K3-exact coverage needs
 a generator extension — a mechanism change parked for owner approval.
+
+**2026-08-02 vllm precision items executed + one new finding:**
+- mla_bmm: base grids gained the 96-family heads; NEW vllm mla_bmm
+  collector + b200 table (636 rows, bf16 torch.bmm per NVIDIA dispatch) —
+  the trtllm-fallback warning is gone; sglang b200 table gained the
+  96-family rows (+424). Other systems queued.
+- NEW FINDING (open, needs owner decision): the vllm DSPARK draft
+  checkpoint (Inferact/Kimi-K3-DSpark) has DIFFERENT geometry from
+  sglang's RadixArk draft — 64q/64kv MLA-style heads (qk_nope 128 +
+  rope 64, v 128), inter 14336, 5 layers with target_layer_ids
+  [2,23,47,71,89] — while the SDK's DRAFT_* constants encode the RadixArk
+  GQA shape (64q/16kv/64hd) for BOTH backends. vllm DSPARK draft ops and
+  draft-KV bytes are therefore mispriced (5 draft layers, small but
+  real). Fix = backend-conditional draft geometry in models/kimi_k3.py
+  (SDK scope).
