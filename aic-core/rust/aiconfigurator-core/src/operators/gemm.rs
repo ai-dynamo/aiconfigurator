@@ -15,11 +15,12 @@
 //! `latency_floor = query_gemm(..., DatabaseMode.SOL)` — not at 0.
 
 use serde::{Deserialize, Serialize};
-use crate::common::enums::{DatabaseMode, GemmQuantMode};
+use crate::common::enums::{DatabaseMode, GemmQuantMode, TransferKind};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::moe::policy_fingerprint;
 use crate::operators::util_empirical::{self, UtilGrid, ZeroAwareDeltaLookup};
-use crate::perf_database::gemm::{gemm_sol_latency_ms, normalize_fp8_static_quant};
+use crate::perf_database::gemm::{gemm_quant_by_name, gemm_sol_latency_ms, normalize_fp8_static_quant};
 use crate::perf_database::PerfDatabase;
 
 /// GEMM operation: a dense matrix multiply of shape `M=x, N=n, K=k`.
@@ -151,10 +152,119 @@ fn query_gemm_table(
     }
 }
 
-/// `SOL(query)/util` over the quant's own collected `(m, n, k)` grid.
-/// Mirrors Python `_query_gemm_table::get_empirical` (grid depth 3; the SOL
-/// uses the ORIGINAL quant, numerically identical to the fp8_static->fp8
-/// table quant since the profiles match).
+/// Per-quant achieved-util LEVEL `e(q)` for GEMM, keyed by the
+/// `(memory, compute)` profile. Mirrors `_GEMM_QUANT_UTIL_LEVEL`
+/// (`operations/gemm.py`); consumed ONLY by the cross-profile relation of
+/// the quant-transfer ladder, and only as the ratio `e(query)/e(ref)`.
+/// Derivation method + LOO evidence documented on the Python table.
+const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+    (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
+    (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
+    (0.5, 1.0, 0.45),    // w4a16 / int4_wo                [inferred]
+    (1.0, 2.0, 0.45),    // w8a8 / fp8(_block/_ootb), sq   [data 0.28-0.55]
+    (0.5, 2.0, 0.35),    // w4a8                           [inferred]
+    (1.0, 4.0, 0.30),    // w8a4                           [inferred]
+    (0.5, 4.0, 0.30),    // w4a4                           [inferred ≈ nvfp4]
+    (0.5625, 4.0, 0.30), // w4a4 / nvfp4                   [data 0.21-0.36]
+];
+/// Unlisted profile: mid-range relative level (Python `_GEMM_QUANT_UTIL_DEFAULT`).
+const GEMM_QUANT_UTIL_DEFAULT: f64 = 0.45;
+
+/// Achieved-util level `e(q)` for a GEMM quant, by `(memory, compute)`
+/// profile (mirrors `_gemm_quant_util_level`, `operations/gemm.py`).
+fn gemm_quant_util_level(quant: GemmQuantMode) -> f64 {
+    let mapping = quant.mapping();
+    GEMM_QUANT_UTIL_LEVEL
+        .iter()
+        .find(|(memory, compute, _)| *memory == mapping.memory && *compute == mapping.compute)
+        .map(|(_, _, level)| *level)
+        .unwrap_or(GEMM_QUANT_UTIL_DEFAULT)
+}
+
+/// Collected quants with a DIFFERENT `(memory, compute)` profile than the
+/// query, ordered lexicographically by `(|Δcompute|, |Δmemory|)` — GEMM uses
+/// the compute-first metric (Python `xprofile_quant_order(...,
+/// prefer_same_compute=True)`): the COMPUTE factor (activation precision)
+/// determines the dense kernel's compute family (a weight-only quant runs
+/// bf16 MMA after fused dequant), so a same-compute reference must always
+/// beat a cross-compute one — under plain L1 a weight-only quant such as
+/// (0.5625, 1) TIES between bfloat16 and fp8 and the reference would be a
+/// file-order lottery. Stable sort keeps file order on full ties.
+fn xprofile_gemm_quants(query: GemmQuantMode, table_quants: &[GemmQuantMode]) -> Vec<GemmQuantMode> {
+    let qp = query.mapping();
+    let mut refs: Vec<GemmQuantMode> = table_quants
+        .iter()
+        .copied()
+        .filter(|q| {
+            let mapping = q.mapping();
+            *q != query && !(mapping.memory == qp.memory && mapping.compute == qp.compute)
+        })
+        .collect();
+    let dist = |q: GemmQuantMode| {
+        let mapping = q.mapping();
+        (
+            (mapping.compute - qp.compute).abs(),
+            (mapping.memory - qp.memory).abs(),
+        )
+    };
+    refs.sort_by(|a, b| dist(*a).partial_cmp(&dist(*b)).expect("finite profile distances"));
+    refs
+}
+
+/// Distinct quant names of the loaded GEMM table in first-seen (file row)
+/// order, parsed to the enum. A typed table miss yields an empty list —
+/// mirroring Python, where the ladder's table accesses happen inside
+/// `grid_from_reference`'s typed-miss catch.
+fn gemm_table_quants(db: &PerfDatabase) -> Result<Vec<GemmQuantMode>, AicError> {
+    match db.gemm.available_quants() {
+        Ok(names) => Ok(names.iter().filter_map(|n| gemm_quant_by_name(n)).collect()),
+        Err(err) if err.is_missing_perf_data() => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
+}
+
+/// A borrowed util grid over `source_quant`'s whole `(m, n, k)` table, built
+/// with `sol_quant`'s SOL (ReferenceCandidate contract: QUERY quant for the
+/// same-profile relation — numerically identical SOL — REFERENCE quant for
+/// cross-profile). `None` on a typed data miss or an empty sample set check
+/// left to the caller.
+fn gemm_reference_grid(
+    db: &PerfDatabase,
+    source_quant: GemmQuantMode,
+    sol_quant: GemmQuantMode,
+    provenance: &'static str,
+    key: &str,
+) -> Result<Option<std::sync::Arc<UtilGrid>>, AicError> {
+    let spec = &db.system_spec;
+    db.util_grids.get_or_try_build(key, || {
+        let sol = |c: &[f64]| gemm_sol_latency_ms(spec, sol_quant, c[0], c[1], c[2]);
+        match db.gemm.gemm_points(source_quant) {
+            Ok(points) => {
+                let mut grid = UtilGrid::new(util_empirical::build_samples(points, sol));
+                grid.reference_provenance = Some(provenance);
+                Ok(Some(grid))
+            }
+            Err(err) if err.is_missing_perf_data() => Ok(None),
+            Err(err) => Err(err),
+        }
+    })
+}
+
+/// `SOL(query)/util` over the quant's own collected `(m, n, k)` grid, with
+/// the quant-transfer ladder behind an own-data miss. Mirrors Python
+/// `_query_gemm_table::get_empirical` + `util_empirical.quant_transfer_grid`
+/// (grid depth 3; the own-grid SOL uses the ORIGINAL quant, numerically
+/// identical to the fp8_static->fp8 table quant since the profiles match):
+///
+/// 1. own-quant grid — inherently cross-shape (depth-3 over every collected
+///    `(m, n, k)`), so GEMM's **xshape relation class is structurally
+///    empty** and no xshape step exists;
+/// 2. **xquant** — FIRST same-profile sibling in file order (Python pools
+///    one whole-table candidate per sibling with constant features; the
+///    stable nearest-candidate argmin selects the first). Not retried on an
+///    empty grid — parity with the single pooled selection;
+/// 3. **xprofile** — compute-first nearest-profile walk, first quant with a
+///    non-empty grid wins, util rescaled by `e(query)/e(ref)`.
 fn gemm_empirical(
     db: &PerfDatabase,
     quant: GemmQuantMode,
@@ -164,20 +274,72 @@ fn gemm_empirical(
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let sol = |c: &[f64]| gemm_sol_latency_ms(spec, quant, c[0], c[1], c[2]);
-    let key = format!("gemm:{}", normalize_fp8_static_quant(quant).name());
-    let grid = db.util_grids.get_or_try_build(&key, || {
+    let tqm = normalize_fp8_static_quant(quant);
+    let key = format!("gemm:{}", tqm.name());
+    let mut grid = db.util_grids.get_or_try_build(&key, || {
         match db.gemm.gemm_points(quant) {
             Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
-            // Typed coverage miss -> no grid (estimate() raises the
-            // empirical miss); schema/load errors propagate.
+            // Typed coverage miss -> no grid (the ladder below, then
+            // estimate(), takes over); schema/load errors propagate.
             Err(err) if err.is_missing_perf_data() => Ok(None),
             Err(err) => Err(err),
         }
     })?;
+
+    let mut util_scale = 1.0;
+    if grid.as_deref().is_none_or(UtilGrid::is_empty) {
+        let policy = db.transfer_policy;
+        let table_quants = gemm_table_quants(db)?;
+        let fingerprint = policy_fingerprint(policy);
+
+        if policy.contains(TransferKind::XQuant) {
+            let qp = tqm.mapping();
+            if let Some(ref_q) = table_quants.iter().copied().find(|q| {
+                let mapping = q.mapping();
+                *q != tqm && mapping.memory == qp.memory && mapping.compute == qp.compute
+            }) {
+                let key = format!(
+                    "gemm_xquant:{}:policy={}:ref={}",
+                    tqm.name(),
+                    fingerprint,
+                    ref_q.name()
+                );
+                if let Some(reference) = gemm_reference_grid(db, ref_q, tqm, "xquant", &key)? {
+                    grid = Some(reference);
+                }
+            }
+        }
+
+        if grid.as_deref().is_none_or(UtilGrid::is_empty) && policy.contains(TransferKind::XProfile)
+        {
+            for ref_q in xprofile_gemm_quants(tqm, &table_quants) {
+                let key = format!(
+                    "gemm_xprofile:{}:policy={}:ref={}",
+                    tqm.name(),
+                    fingerprint,
+                    ref_q.name()
+                );
+                if let Some(reference) = gemm_reference_grid(db, ref_q, ref_q, "xprofile", &key)? {
+                    if !reference.is_empty() {
+                        grid = Some(reference);
+                        util_scale = gemm_quant_util_level(tqm) / gemm_quant_util_level(ref_q);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     let query = [m as f64, n as f64, k as f64];
-    let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
-    // Own-shape util fired (Python estimate()'s default provenance).
-    db.note_provenance(util_empirical::ProvenanceTier::Empirical);
+    let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), util_scale)?;
+    // Relation fired = the reference grid's transfer kind (xquant/xprofile),
+    // or own-quant "empirical" when no borrow happened.
+    db.note_provenance(
+        grid.as_deref()
+            .and_then(|g| g.reference_provenance)
+            .and_then(util_empirical::ProvenanceTier::from_tag)
+            .unwrap_or(util_empirical::ProvenanceTier::Empirical),
+    );
     Ok(latency)
 }
 
@@ -392,15 +554,100 @@ mod tests {
         }
     }
 
-    /// HYBRID on a quant with NO collected table (int4_wo on b200/vllm) must
-    /// surface the terminal EmpiricalNotImplemented miss, never a fabricated
-    /// value (mirrors the Python contract).
+    /// HYBRID on a quant with NO collected table under a policy WITHOUT
+    /// XProfile must surface the terminal EmpiricalNotImplemented miss, never
+    /// a fabricated value (mirrors the Python contract: cross-profile
+    /// borrowing is policy-gated, never implicit). int4_wo (0.5, 1) has no
+    /// same-profile sibling anywhere, so "balanced" finds nothing.
     #[test]
-    fn gemm_hybrid_missing_quant_raises_empirical_not_implemented() {
-        let mut db = b200_vllm_db();
-        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+    fn gemm_hybrid_missing_quant_raises_when_policy_forbids_transfer() {
+        let balanced = crate::common::enums::TransferPolicy {
+            xshape: true,
+            xquant: true,
+            xprofile: false,
+            xop: false,
+        };
+        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, balanced);
         let result = query_gemm_table(&db, GemmQuantMode::Int4Wo, 64, 64, 64);
         assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
+    }
+
+    /// Under the default (all-on) policy the same query resolves via the
+    /// xprofile borrow. Python oracle (shared layer OFF, HYBRID):
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
+    ///     shared_layer=False)
+    /// float(GEMM._query_gemm_table(db, 64, 64, 64, GEMMQuantMode.int4_wo))
+    /// # -> 0.0007006913814463733, provenance {"xprofile"}
+    /// ```
+    ///
+    /// The b200/vllm file order is [nvfp4, bfloat16, fp8, fp8_block]; the
+    /// compute-first ordering must borrow bfloat16 (Δcompute=0), not the
+    /// file-order-first nvfp4.
+    #[test]
+    fn gemm_hybrid_missing_quant_borrows_xprofile_under_default_policy() {
+        let mut db = b200_vllm_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let (latency, source) =
+            query_gemm_table(&db, GemmQuantMode::Int4Wo, 64, 64, 64).expect("xprofile borrow");
+        assert!(
+            (latency - 0.0007006913814463733).abs() < 1e-9,
+            "expected python oracle, got {latency}"
+        );
+        assert_eq!(source, Source::Empirical);
+        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XProfile);
+    }
+
+    fn h200_vllm_db() -> PerfDatabase {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        PerfDatabase::load(&systems_root, "h200_sxm", "vllm", "0.19.0").expect("db must load")
+    }
+
+    /// Quant-transfer ladder oracles on h200/vllm/0.19.0 (collected quants in
+    /// file order: [fp8, bfloat16, fp8_block]). Python oracle generation:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("h200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
+    ///     shared_layer=False)
+    /// float(GEMM._query_gemm_table(db, m, 4096, 4096, quant))
+    /// ```
+    ///
+    /// - sq (1, 2): xquant borrow from fp8 (first same-profile in file
+    ///   order; identical SOL, no rescale).
+    /// - nvfp4 (0.5625, 4): xprofile borrow, compute-first walk lands on fp8
+    ///   (Δcompute=2 beats bfloat16's 3), rescaled by e(nvfp4)/e(fp8).
+    /// - int4_wo (0.5, 1): xprofile borrow from bfloat16 (Δcompute=0), NOT
+    ///   the file-order-first fp8 — under plain L1 the two TIE at 1.5 and a
+    ///   regression to L1/file-order selection changes this value.
+    /// Regenerate if the shipped GEMM tables or the util math change.
+    #[test]
+    fn gemm_quant_transfer_ladder_matches_python_oracles() {
+        let mut db = h200_vllm_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let cases = [
+            (GemmQuantMode::Sq, 512u32, 0.01826755536927117, util_empirical::ProvenanceTier::XQuant),
+            (GemmQuantMode::Sq, 8192, 0.21285422643025717, util_empirical::ProvenanceTier::XQuant),
+            (GemmQuantMode::Nvfp4, 512, 0.013700666526953379, util_empirical::ProvenanceTier::XProfile),
+            (GemmQuantMode::Nvfp4, 8192, 0.1596406698226929, util_empirical::ProvenanceTier::XProfile),
+            (GemmQuantMode::Int4Wo, 512, 0.036529976276703825, util_empirical::ProvenanceTier::XProfile),
+            (GemmQuantMode::Int4Wo, 8192, 0.5714972813924153, util_empirical::ProvenanceTier::XProfile),
+        ];
+        for (quant, m, expected, tier) in cases {
+            db.reset_provenance();
+            let (latency, source) =
+                query_gemm_table(&db, quant, m, 4096, 4096).expect("ladder query");
+            assert!(
+                (latency - expected).abs() < 1e-9,
+                "({quant:?}, m={m}): expected {expected}, got {latency}"
+            );
+            assert_eq!(source, Source::Empirical, "({quant:?}, m={m}): wrong source");
+            assert_eq!(db.worst_provenance(), tier, "({quant:?}, m={m}): wrong tier");
+        }
     }
 
     #[test]

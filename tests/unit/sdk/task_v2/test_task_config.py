@@ -1724,6 +1724,62 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
             make("HYBRID", disabled).validate()
 
 
+def test_validate_gemm_quant_transfer_reachable_in_hybrid():
+    """GEMM now has the same transfer ladder as MoE (shared quant-transfer
+    primitive), so the gate mirrors it: nvfp4 GEMM (profile (0.5625, 4)) has
+    no Hopper data and no same-profile sibling, but is XPROFILE-reachable in
+    HYBRID from the collected bf16/fp8 tables. SILICON and non-XPROFILE
+    policies keep rejecting — the gate admits exactly what the resolved
+    policy + DB contents make reachable at query time."""
+
+    def make(mode, policy=None):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+        t.gemm_quant_mode = common.GEMMQuantMode.nvfp4  # not collected on Hopper
+        return t
+
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'nvfp4'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()  # default policy (all on) -> XPROFILE reachable -> no raise
+    make("HYBRID", "xprofile").validate()  # XPROFILE explicitly enabled -> no raise
+
+    # No same-profile sibling for (0.5625, 4): XQUANT alone must not admit it,
+    # and neither may weaker policies — the query ladder would reject at run time.
+    for disabled in ("off", "conservative", "balanced", "xquant"):
+        with pytest.raises(ValueError, match="Unsupported gemm quant mode 'nvfp4'"):
+            make("HYBRID", disabled).validate()
+
+
+def test_validate_gemm_xprofile_requires_listed_level_profile(monkeypatch):
+    """The gate deliberately refuses XPROFILE admission for a profile missing
+    from the GEMM util-LEVEL table (the runtime ladder would fall back to a
+    default level, but the gate enforces the enum-line + level-line
+    add-a-quant recipe — the one intentional way it is stricter)."""
+    from aiconfigurator.sdk.operations import gemm as gemm_ops
+
+    trimmed = {p: lv for p, lv in gemm_ops._GEMM_QUANT_UTIL_LEVEL.items() if p != (9 / 16, 4)}
+    monkeypatch.setattr(gemm_ops, "_GEMM_QUANT_UTIL_LEVEL", trimmed)
+
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        backend_version="1.3.0rc10",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.nvfp4
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'nvfp4'"):
+        t.validate()
+
+
 def test_validate_skips_db_check_when_database_unavailable():
     """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
     t = Task(

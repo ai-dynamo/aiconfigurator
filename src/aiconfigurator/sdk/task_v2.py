@@ -1330,19 +1330,24 @@ class Task:
 
         # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
         # tables for), not a backend-capability list. In SILICON that equals what we
-        # can model. In HYBRID/EMPIRICAL the MoE util-empirical path can synthesize a
-        # quant from a collected quant that shares its (memory, compute) profile
-        # (XQUANT cross-quant transfer, see operations/moe.py) -- only MoE implements
-        # this, so only MoE relaxes. Truly-unreachable quants (no same-profile data)
-        # still fail early here rather than crashing late in the sweep.
-        # Admission via the XQUANT cross-quant transfer only holds if (a) we're in a
-        # non-SILICON mode AND (b) the resolved transfer policy actually enables XQUANT.
-        # Otherwise operations/moe.py rejects the quant at query time by policy, so
-        # validate must not pre-admit it (e.g. transfer_policy="off"/"conservative").
-        xquant_enabled = self.database_mode not in (
+        # can model. In HYBRID/EMPIRICAL the util-empirical path (GEMM and MoE; the
+        # shared quant-transfer primitive in operations/util_empirical.py) can
+        # synthesize a quant from a collected sibling: XQUANT borrows within the
+        # same (memory, compute) profile, XPROFILE borrows across profiles rescaled
+        # by the op's util-LEVEL ratio. This gate mirrors exactly what the resolved
+        # policy + DB contents make reachable at query time — truly-unreachable
+        # quants still fail early here rather than crashing late in the sweep.
+        # Admission only holds if (a) we're in a non-SILICON mode AND (b) the
+        # resolved transfer policy actually enables that relation. Otherwise the
+        # query path rejects the quant at run time by policy, so validate must not
+        # pre-admit it (e.g. transfer_policy="off"/"conservative").
+        _non_silicon = self.database_mode not in (
             None,
             common.DatabaseMode.SILICON.name,
-        ) and common.TransferKind.XQUANT in common.resolve_transfer_policy(self.transfer_policy)
+        )
+        _policy = common.resolve_transfer_policy(self.transfer_policy)
+        xquant_enabled = _non_silicon and common.TransferKind.XQUANT in _policy
+        xprofile_enabled = _non_silicon and common.TransferKind.XPROFILE in _policy
 
         def _profile_reachable(mode: Any, supported_names: list) -> bool:
             enum_cls = type(mode)
@@ -1357,6 +1362,36 @@ class Task:
                     return True
             return False
 
+        def _xprofile_reachable(op: str, mode: Any, supported_names: list) -> bool:
+            """XPROFILE admission: the op's util-LEVEL table must list the query
+            profile (the runtime default fallback is deliberately NOT admitted —
+            the one intentional way this gate is stricter than the ladder: it
+            enforces the enum-line + level-line add-a-quant recipe), and the DB
+            must carry at least one quant of a DIFFERENT profile to borrow from
+            (any collected quant is a viable nearest-profile reference)."""
+            from aiconfigurator.sdk.operations import gemm as gemm_ops
+            from aiconfigurator.sdk.operations import moe as moe_ops
+
+            level_known = {
+                "gemm": gemm_ops.xprofile_util_level_known,
+                "moe": moe_ops.xprofile_util_level_known,
+                "wideep_context_moe": moe_ops.xprofile_util_level_known,
+                "wideep_generation_moe": moe_ops.xprofile_util_level_known,
+            }.get(op)
+            if level_known is None or not level_known(mode):
+                return False
+            enum_cls = type(mode)
+            val = getattr(mode, "value", None)
+            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
+            for nm in supported_names:
+                try:
+                    other = enum_cls[nm].value
+                except (KeyError, AttributeError):
+                    continue
+                if (getattr(other, "memory", None), getattr(other, "compute", None)) != qp:
+                    return True
+            return False
+
         def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
                 return
@@ -1367,14 +1402,19 @@ class Task:
             if name in modes:
                 return
             # Modes that normalize to a different table name for perf queries
-            # (nvfp4_wo -> bfloat16, w4a16_mxfp4_cutlass -> w4a16_mxfp4) are
-            # accepted when the target table mode is supported.
-            validation_aliases = {"nvfp4_wo": "bfloat16", "w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            # (w4a16_mxfp4_cutlass -> w4a16_mxfp4, see operations/moe.py) are
+            # accepted when the target table mode is supported. Data-less quants
+            # are NOT aliased to a collected table — they are admitted (or not)
+            # through the transfer reachability checks below, mirroring the
+            # query-time ladder.
+            validation_aliases = {"w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
             alias = validation_aliases.get(name)
             if alias and alias in modes:
                 return
             if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
-                return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
+                return  # XQUANT-reachable in HYBRID/EMPIRICAL (same-profile data)
+            if profile_transfer and xprofile_enabled and _xprofile_reachable(op, mode, modes):
+                return  # XPROFILE-reachable (calibrated level + any other-profile data)
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
                 f"Unsupported {op} quant mode {name!r} for system={system!r}, "
@@ -1382,8 +1422,10 @@ class Task:
                 f"Supported {op} modes: {sorted(modes)}"
             )
 
-        # GEMM is always validated (applies to all worker shapes).
-        _check("gemm", self._role_attr(role, "gemm_quant_mode"))
+        # GEMM is always validated (applies to all worker shapes). It has the
+        # same transfer ladder as MoE (shared primitive), so the same
+        # HYBRID/EMPIRICAL relaxation applies.
+        _check("gemm", self._role_attr(role, "gemm_quant_mode"), profile_transfer=True)
 
         # MoE — only when model is MoE.
         if is_moe:
