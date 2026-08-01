@@ -55,6 +55,20 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.MOE,
     ),
     OpEntry(
+        op="mla_bmm_gen_pre",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_pre_test_cases",
+        run_func="run_mla_gen_pre",
+        perf_filename=PerfFile.MLA_BMM,
+    ),
+    OpEntry(
+        op="mla_bmm_gen_post",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_post_test_cases",
+        run_func="run_mla_gen_post",
+        perf_filename=PerfFile.MLA_BMM,
+    ),
+    OpEntry(
         op="mla_context_module",
         module="collector.vllm.collect_mla_module",
         get_func="get_mla_context_module_test_cases",

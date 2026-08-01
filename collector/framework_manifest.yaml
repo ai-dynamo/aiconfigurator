@@ -56,8 +56,10 @@ frameworks:
       # per-model pin (recorded image-routing gap). Pre-existing 0.24.0 moe
       # rows are untouched; K3 rows merge into the 0.24.0 table per the
       # owner decision, carrying their honest runtime version column.
-      # Re-verify at the next tag bump (tag has already drifted to
-      # sha256:d61e062d).
+      # Re-verify at the next tag bump. (2026-08-02 audit: the tag's amd64
+      # image is IDENTICAL to this pin — 0.1.dev19262+gb6bbf29dd, no
+      # deep_gemm; the earlier "drift to sha256:d61e062d" observation was
+      # the manifest list's arm64 entry, not a new build.)
       moe:
         version: "0.1.dev19262"
         images:

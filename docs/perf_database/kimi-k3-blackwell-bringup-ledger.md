@@ -407,8 +407,11 @@ serving MoE path then splits by deployment tier:
    The Day-0 deep-dive's "SiTU wired into TRTLLM-Gen" is not reachable for
    K3 at this pin.
 
-Image drift: the `vllm/vllm-openai:kimi-k3` tag now points to
-sha256:d61e062d (newer than the e90e2603 pin).
+Image drift: RETRACTED 2026-08-02 — the "drift to sha256:d61e062d" was
+the manifest list's arm64 entry; the tag's amd64 image is byte-identical
+to the e90e2603 pin (0.1.dev19262+gb6bbf29dd, still no deep_gemm). The
+pin is current; the vllm MegaMoE W4A8 lane stays blocked on an upstream
+image that ships deep_gemm.
 
 **Owner decisions (2026-08-01):**
 - Keep the vllm pin at e90e2603 for now — the W4A16 Marlin lane is
