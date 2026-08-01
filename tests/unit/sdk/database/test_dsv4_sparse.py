@@ -827,3 +827,22 @@ def test_shipped_dsv4_module_tables_are_rank_local():
             if len(tps) > 1 and heads_constant and not product_constant:
                 offenders.append(f"{path.relative_to(data_root)}: {model} {sorted(pairs)}")
     assert not offenders, "stale NATIVE-semantics DSV4 module rows shipped:\n" + "\n".join(offenders)
+
+
+def test_load_dsv4_kind_module_data_requires_tp_size_column(tmp_path):
+    """A module file with no parseable tp_size column must fail loudly: every
+    row would collapse to tp=1, the stale-NATIVE fingerprint could never
+    trigger, and native = num_heads * tp_size would be silently wrong."""
+    header_no_tp = (
+        "framework,version,device,op_name,kernel_source,model,architecture,"
+        "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,"
+        "step,compress_ratio,latency"
+    )
+    row = (
+        f"SGLang,test,NVIDIA H20-3e,dsv4_hca_generation_module,"
+        f"compressed_flashmla,{_FLASH_MODEL},DeepseekV4ForCausalLM,"
+        f"bfloat16,fp8_e4m3,fp8_block,64,1,1,1023,128,0.1000"
+    )
+    path = _write_csv(tmp_path / "hca_gen_no_tp.txt", header_no_tp, [row])
+    with pytest.raises(ValueError, match="tp_size"):
+        load_generation_dsv4_kind_module_data(path)

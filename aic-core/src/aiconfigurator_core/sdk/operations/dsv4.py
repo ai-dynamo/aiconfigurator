@@ -1925,14 +1925,29 @@ def _validate_dsv4_local_head_semantics(rows, file_path):
     same model would otherwise blur both patterns and mask the stale rows.
     """
     observed: dict[tuple[str, str], set[tuple[int, int]]] = {}
+    saw_tp_size = False
     for row in rows:
         try:
             heads = int(row["num_heads"])
-            tp = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
+        try:
+            tp = max(1, int(row["tp_size"]))
+            saw_tp_size = True
+        except (TypeError, ValueError, KeyError):
+            tp = 1
         group = (str(row.get("model", "")), str(row.get("version", "")))
         observed.setdefault(group, set()).add((heads, tp))
+
+    if observed and not saw_tp_size:
+        # Without tp_size every row collapses to tp=1 and the stale fingerprint
+        # below can never trigger — a stale file would load silently with wrong
+        # (native, local) coordinates. The #1429 convention makes tp_size a
+        # mandatory column, so fail like the Rust loader does.
+        raise ValueError(
+            f"DSV4 module file {file_path} carries no parseable tp_size column; the #1429 "
+            f"convention requires tp_size in every row (native = num_heads * tp_size)."
+        )
 
     for (model, version), pairs in observed.items():
         tps = {tp for _, tp in pairs}

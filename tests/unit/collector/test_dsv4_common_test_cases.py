@@ -116,3 +116,36 @@ def test_dsv4_cases_skip_unrelated_model_filter(monkeypatch):
 
     assert common_test_cases.get_dsv4_csa_context_test_cases() == []
     assert common_test_cases.get_dsv4_hca_attn_test_cases() == []
+
+
+def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch):
+    """The sglang registry's topk-calib getter (deepseekv4_sparse_modules)
+    applies the same canonical-calib restriction as the shared case_generator
+    getter — otherwise a full/raw run would schedule a second model's calib
+    case and silently overwrite the geometry-free calib table."""
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[3] / "collector" / "sglang" / "deepseekv4_sparse_modules.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+    wanted = {
+        "_dsv4_sparse_kernel_cases",
+        "get_dsv4_topk_calib_test_cases",
+        "get_dsv4_paged_mqa_logits_test_cases",
+    }
+    ns = {
+        "_dsv4_context_derived_shapes": lambda _m: [(0, 1, 1)],
+        "_dsv4_generation_derived_shapes": lambda _m: [(0, 1, 1)],
+    }
+    body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    assert {n.name for n in body} == wanted
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(src), "exec"), ns)
+
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    # full/raw: sparse kernels expand both default models, calib only canonical
+    assert {c[0] for c in ns["get_dsv4_paged_mqa_logits_test_cases"]()} == {_FLASH_FP8, _PRO_FP8}
+    assert {c[0] for c in ns["get_dsv4_topk_calib_test_cases"]()} == {_FLASH_FP8}
+    # targeted non-canonical model: calib case is dropped (logged upstream)
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
+    assert ns["get_dsv4_topk_calib_test_cases"]() == []
