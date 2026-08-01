@@ -226,8 +226,8 @@ fn gemm_table_quants(db: &PerfDatabase) -> Result<Vec<GemmQuantMode>, AicError> 
 /// A borrowed util grid over `source_quant`'s whole `(m, n, k)` table, built
 /// with `sol_quant`'s SOL (ReferenceCandidate contract: QUERY quant for the
 /// same-profile relation — numerically identical SOL — REFERENCE quant for
-/// cross-profile). `None` on a typed data miss or an empty sample set check
-/// left to the caller.
+/// cross-profile). `None` on a typed data miss; emptiness is the caller's
+/// check.
 fn gemm_reference_grid(
     db: &PerfDatabase,
     source_quant: GemmQuantMode,

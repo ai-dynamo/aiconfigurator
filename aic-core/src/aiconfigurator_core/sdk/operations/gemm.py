@@ -552,9 +552,8 @@ class GEMM(Operation):
                     _gemm_quant_util_level,
                     depth=3,
                     selection_key=(id(wrapper), policy),
-                    # Dense kernel compute family ≡ activation precision: a
-                    # weight-only quant (compute=1) must borrow bfloat16's
-                    # curve, never tie-break into fp8 (see xprofile_quant_order).
+                    # weight-only must borrow bf16, never tie-break into fp8
+                    # (rationale on xprofile_quant_order)
                     prefer_same_compute=True,
                 )
                 if ref_prov:

@@ -243,8 +243,8 @@ impl GemmTable {
     /// Python's dict-insertion iteration over the gemm data. The
     /// quant-transfer ladder's tie-breaks depend on this order; the
     /// alphabetical `BTreeMap` iteration must NOT be used for it.
-    pub fn available_quants(&self) -> Result<Vec<String>, AicError> {
-        Ok(self.load_gemm()?.quant_order.clone())
+    pub fn available_quants(&self) -> Result<&[String], AicError> {
+        Ok(&self.load_gemm()?.quant_order)
     }
 
     fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {

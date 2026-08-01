@@ -362,20 +362,18 @@ def grid_from_reference(
 #
 #     latency(query) = SOL_query / (util_borrowed * e(profile_query)/e(profile_ref))
 #
-# where the correction ratio is IDENTICALLY 1 within a profile (both lookups
-# hit the same level-table row), so "xshape" (same quant, another slice) and
-# "xquant" (same (memory, compute) profile, another quant) are the ratio-1
-# degenerations of the cross-profile borrow — three confidence labels over one
-# mechanism, not three mechanisms:
+# The correction ratio is IDENTICALLY 1 within a (memory, compute) profile
+# (both lookups hit the same level-table row), so the labels are confidence
+# bands over one mechanism, not three mechanisms:
 #
-# - xshape:   same quant  -> trust follows from the kernel identity.
+# - xshape:   same quant, another slice -> trust follows from kernel identity.
 # - xquant:   same profile -> trust follows from SOL-coefficient identity
 #             (no calibrated constant involved; the level table is not read).
 # - xprofile: cross profile -> trust rests on the calibrated per-profile
-#             util LEVEL ratio. Last resort, lowest confidence.
+#             util-LEVEL ratio. Last resort, lowest confidence.
 #
 # Reference preference is lexicographic (relation rank, profile distance,
-# slice-feature distance), realised as the historical tier flow below so MoE's
+# slice-feature distance), realised as the historical tier flow so MoE's
 # established selection semantics (and its Rust parity oracles) are preserved
 # bit-for-bit: xshape/xquant candidates are POOLED and resolved by nearest
 # slice features; xprofile walks quants nearest-profile-first (stable ties =
@@ -441,36 +439,29 @@ def quant_transfer_grid(
     *,
     prefer_same_compute: bool = False,
 ):
-    """Resolve a borrowed util grid for a quant with no own-slice data.
+    """Resolve a borrowed util grid for a quant with no own-slice data
+    (semantics in the block comment above).
 
-    Parameters:
-    - ``op_tag``: cache-key prefix (``"moe"``, ``"gemm"``, ...).
-    - ``slice_key``: tuple identifying the query slice (system/backend/
-      version/quant/shape/...), folded into every grid cache key.
-    - ``query_features``: coords for nearest-candidate matching within the
-      pooled xshape/xquant tier (ops without categorical slice axes pass a
-      constant, making the pooled selection degrade to first-in-table-order).
-    - ``policy``: the resolved frozenset of ``common.TransferKind``.
-    - ``table``: the op's quant-keyed data mapping (usually a
-      ``LoadedOpData``). Membership/getitem may raise the typed
-      ``PerfDataNotAvailableError`` — accessed only inside guarded regions,
-      preserving each op's existing miss semantics. Plain iteration yields
-      quants in file first-seen order (empty when not loaded).
-    - ``collect(ref_quant, sol_quant, provenance) -> list[ReferenceCandidate]``:
-      op-specific candidate enumeration. Called only for quants present in
-      ``table``. ``sol_quant`` follows the ReferenceCandidate contract: the
-      QUERY quant for same-profile relations (coefficients identical), the
-      REFERENCE quant for cross-profile (util = that kernel's true
-      efficiency, rescaled by the level ratio). An op whose relation class is
-      structurally empty returns ``[]`` (e.g. GEMM for ``"xshape"``).
-    - ``util_level(quant) -> float``: the op's per-profile achieved-util
-      LEVEL e(q); consumed ONLY as the xprofile ratio e(query)/e(ref).
+    ``slice_key`` identifies the query slice inside every grid cache key
+    (prefixed by ``op_tag``). ``query_features`` are the coords for
+    nearest-candidate matching in the pooled xshape/xquant selection — ops
+    without categorical slice axes pass a constant, degrading it to
+    first-in-table-order. ``table`` is the op's quant-keyed data mapping
+    (usually a ``LoadedOpData``): membership/getitem may raise the typed
+    ``PerfDataNotAvailableError`` and is accessed only inside guarded
+    regions; plain iteration yields quants in file first-seen order.
+    ``collect(ref_quant, sol_quant, provenance)`` enumerates a quant's
+    :class:`ReferenceCandidate` list — ``sol_quant`` is the QUERY quant for
+    same-profile relations and the REFERENCE quant for cross-profile; a
+    structurally empty relation class returns ``[]`` (e.g. GEMM for
+    ``"xshape"``). ``util_level(quant)`` is the op's per-profile level
+    e(q), consumed only as the xprofile ratio.
 
-    Returns ``(grid, util_scale, provenance)`` — ``grid`` may be ``None`` or
+    Returns ``(grid, util_scale, provenance)``: ``grid`` may be ``None`` or
     empty (the caller's :func:`estimate` then raises the typed empirical
     miss), ``util_scale`` is 1.0 except for a cross-profile borrow, and
-    ``provenance`` is the relation label of the reference that produced the
-    samples (``None`` when nothing usable was found).
+    ``provenance`` is the relation label that produced the samples (``None``
+    when nothing usable was found).
     """
     from aiconfigurator_core.sdk import common
 

@@ -1349,18 +1349,32 @@ class Task:
         xquant_enabled = _non_silicon and common.TransferKind.XQUANT in _policy
         xprofile_enabled = _non_silicon and common.TransferKind.XPROFILE in _policy
 
-        def _profile_reachable(mode: Any, supported_names: list) -> bool:
-            enum_cls = type(mode)
+        from aiconfigurator.sdk.operations import gemm as gemm_ops
+        from aiconfigurator.sdk.operations import moe as moe_ops
+
+        _xprofile_level_known = {
+            "gemm": gemm_ops.xprofile_util_level_known,
+            "moe": moe_ops.xprofile_util_level_known,
+            "wideep_context_moe": moe_ops.xprofile_util_level_known,
+            "wideep_generation_moe": moe_ops.xprofile_util_level_known,
+        }
+
+        def _mode_profile(mode: Any) -> tuple:
             val = getattr(mode, "value", None)
-            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
+            return (getattr(val, "memory", None), getattr(val, "compute", None))
+
+        def _supported_profiles(mode: Any, supported_names: list) -> list[tuple]:
+            enum_cls = type(mode)
+            out = []
             for nm in supported_names:
                 try:
-                    other = enum_cls[nm].value
+                    out.append(_mode_profile(enum_cls[nm]))
                 except (KeyError, AttributeError):
                     continue
-                if (getattr(other, "memory", None), getattr(other, "compute", None)) == qp:
-                    return True
-            return False
+            return out
+
+        def _profile_reachable(mode: Any, supported_names: list) -> bool:
+            return _mode_profile(mode) in _supported_profiles(mode, supported_names)
 
         def _xprofile_reachable(op: str, mode: Any, supported_names: list) -> bool:
             """XPROFILE admission: the op's util-LEVEL table must list the query
@@ -1369,28 +1383,11 @@ class Task:
             enforces the enum-line + level-line add-a-quant recipe), and the DB
             must carry at least one quant of a DIFFERENT profile to borrow from
             (any collected quant is a viable nearest-profile reference)."""
-            from aiconfigurator.sdk.operations import gemm as gemm_ops
-            from aiconfigurator.sdk.operations import moe as moe_ops
-
-            level_known = {
-                "gemm": gemm_ops.xprofile_util_level_known,
-                "moe": moe_ops.xprofile_util_level_known,
-                "wideep_context_moe": moe_ops.xprofile_util_level_known,
-                "wideep_generation_moe": moe_ops.xprofile_util_level_known,
-            }.get(op)
+            level_known = _xprofile_level_known.get(op)
             if level_known is None or not level_known(mode):
                 return False
-            enum_cls = type(mode)
-            val = getattr(mode, "value", None)
-            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
-            for nm in supported_names:
-                try:
-                    other = enum_cls[nm].value
-                except (KeyError, AttributeError):
-                    continue
-                if (getattr(other, "memory", None), getattr(other, "compute", None)) != qp:
-                    return True
-            return False
+            qp = _mode_profile(mode)
+            return any(p != qp for p in _supported_profiles(mode, supported_names))
 
         def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
