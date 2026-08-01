@@ -416,6 +416,21 @@ sha256:d61e062d (newer than the e90e2603 pin).
   image, and merge rows incrementally into the vllm 0.24.0 moe table
   (rows keep their honest runtime version column; meta annotates).
 - Lane order after that: B200 `linear_attn_module` (single GPU) → vllm K3
-  MLA precise-case activation (after the preview-mla.py vs stock-kernel
-  audit) → sglang MegaMoE module lane (8-GPU torchrun, first host that
-  qualifies).
+  MLA precise-case work → sglang MegaMoE module lane (8-GPU torchrun,
+  first host that qualifies).
+
+**vllm K3 MLA precise-case audit outcome (2026-08-01):** do NOT activate
+`mla_*_module` for vllm — the SDK's K3 vllm path consumes the ATTENTION
+(GQA) tables (`ops.ContextAttention`/`GenerationAttention` at the
+per-rank 12q/12kv/128 shard) plus `MLABmm` from the mla_bmm tables, not
+the MLA module tables (models/kimi_k3.py vllm branches); module rows
+would have no consumer. The preview's custom MLA core does use vllm's
+standard backend selector (models/kimi_k3/nvidia/mla.py:259-312 —
+get_attn_backend/get_mla_prefill_backend), so attention-table pricing is
+structurally right. The REAL precision gaps for the vllm column are:
+(1) attention-table exact hits at the K3 shard geometries, and (2) the
+vllm mla_bmm lane — every K3 prediction currently logs "Loading
+low-fidelity fallback rows for mla_bmm_perf... from trtllm", i.e. the
+absorb BMMs are priced from another backend's table. mla_bmm's generator
+sweeps a global head grid with no model axis, so K3-exact coverage needs
+a generator extension — a mechanism change parked for owner approval.
