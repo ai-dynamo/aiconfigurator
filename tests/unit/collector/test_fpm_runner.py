@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -708,7 +711,10 @@ def test_run_collection_stages_no_explicit_scheduler_or_case_manifest(monkeypatc
 
     assert errors == []
     assert events.count("execute") == 1
-    assert events.count("cleanup") == 1
+    # One verified delete BEFORE apply (workload names are deterministic, so a
+    # fresh checkpoint proves nothing about the cluster) and one after.
+    assert events.count("cleanup") == 2
+    assert events.index("cleanup") < events.index("apply")
     assert set(staged_names) == {"run.sh", "run_with_etcd.sh", "preflight.py"}
     assert "cases.json" not in staged_names
     assert "fpm_scheduler.py" not in staged_names
@@ -893,8 +899,15 @@ def test_cleanup_failure_marks_passed_cell_retryable(monkeypatch, tmp_path):
         def collect(self, _pods, *, require_benchmark=True):
             pass
 
+        cleanup_calls = 0
+
         def cleanup(self):
-            raise RuntimeError("owned pod remains")
+            # The pre-apply verified delete must succeed (a failure there
+            # fails the cell before any work); only the post-run teardown
+            # raises, which is the state this test pins.
+            FakeResource.cleanup_calls += 1
+            if FakeResource.cleanup_calls > 1:
+                raise RuntimeError("owned pod remains")
 
     monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
     monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
@@ -1112,3 +1125,258 @@ def test_copy_result_file_skips_compression_for_small_files(tmp_path):
     runner._copy_result_file("pod-0", "benchmark.json", _expected_meta(payload), tmp_path / "raw")
     assert exec_calls == [], "small files must not pay the in-pod gzip round-trips"
     assert (tmp_path / "raw" / "benchmark.json").read_bytes() == payload
+
+
+def _running_cell_fixture(tmp_path, plan, cell):
+    artifact_root = tmp_path / "artifacts"
+    cell_dir = artifact_root / plan.sha256[:16] / "smoke" / "cells" / cell.cell_id
+    raw = cell_dir / "raw" / "pod-0"
+    raw.mkdir(parents=True)
+    _write_provenance(
+        raw / "collector-provenance.json",
+        cell_id=cell.cell_id,
+        plan_sha256=plan.sha256,
+        attempt_id="attempt-1",
+    )
+    (raw / "benchmark.json").write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
+    (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: cell\n")
+    (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint_path = checkpoint_dir / "fpm_forward_smoke.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {cell.cell_id: {"status": "running", "attempt_id": "attempt-1"}},
+            }
+        )
+    )
+    return artifact_root, checkpoint_dir, checkpoint_path
+
+
+def test_running_recovery_verifies_teardown_of_the_abandoned_workload(monkeypatch, tmp_path):
+    """A persistent status=running means the finally block never ran, so the
+    workload may still be alive holding GPUs; recovery must drive a verified
+    delete before the entry can flip to passed (after which the cell is
+    skipped forever and nothing else would)."""
+
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root, checkpoint_dir, checkpoint_path = _running_cell_fixture(tmp_path, plan, cell)
+
+    cleanups = []
+
+    class FakeResource:
+        def __init__(self, manifest, _cell_dir):
+            self.manifest = manifest
+
+        def cleanup(self):
+            cleanups.append(str(self.manifest))
+
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+
+    def reject_rerun(*_args, **_kwargs):
+        raise AssertionError("a recovered running cell must not rerun on the cluster")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", reject_rerun)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert errors == []
+    assert len(cleanups) == 1
+    record = json.loads(checkpoint_path.read_text())["cells"][cell.cell_id]
+    assert record["status"] == "passed"
+    assert record["artifact_recovery"]["original_status"] == "running"
+
+
+def test_running_entry_with_failed_teardown_reruns_instead_of_passing(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root, checkpoint_dir, checkpoint_path = _running_cell_fixture(tmp_path, plan, cell)
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            pass
+
+        def cleanup(self):
+            raise RuntimeError("kubectl unreachable")
+
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    render_calls = []
+    monkeypatch.setattr(fpm_runner, "_render_cell", lambda *args, **kwargs: render_calls.append(args))
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    # Recovery was refused, the cell reran (and failed on the same unreachable
+    # cluster) — it must never silently become a passed entry.
+    assert render_calls
+    record = json.loads(checkpoint_path.read_text())["cells"][cell.cell_id]
+    assert record["status"] == "failed"
+    assert record["cleanup_error"] == "kubectl unreachable"
+    assert [error["classification"] for error in errors] == [
+        "campaign_cell_failed",
+        "resource_cleanup_failed",
+    ]
+
+
+def test_sigterm_is_routed_through_the_interrupt_path():
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(KeyboardInterrupt), fpm_runner._sigterm_as_interrupt():
+        os.kill(os.getpid(), signal.SIGTERM)
+        for _ in range(10_000):
+            time.sleep(0.001)
+        raise AssertionError("SIGTERM was not converted to KeyboardInterrupt")
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_terminate_active_commands_unblocks_run_command():
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fpm_runner._run_command, ["sleep", "30"], check=False)
+        deadline = time.monotonic() + 10
+        while fpm_runner.terminate_active_commands() == 0:
+            if time.monotonic() > deadline:
+                raise AssertionError("the command never registered as terminable")
+            time.sleep(0.01)
+        completed = future.result(timeout=10)
+    assert completed.returncode != 0
+
+
+def test_run_with_etcd_starts_leader_etcd_before_preflight():
+    """The follower readiness probe budget only covers pod-exec skew when the
+    leader's etcd starts before the unbounded vLLM/torch preflight import."""
+
+    script = (Path(fpm_runner.__file__).resolve().parent / "runtime" / "run_with_etcd.sh").read_text()
+    assert script.index("etcd_pid=$!") < script.index('python3 "${workdir}/preflight.py"')
+    assert "time.monotonic() + 120" in script
+
+
+def test_run_command_kills_child_on_interrupt():
+    """A KeyboardInterrupt landing while the main thread is blocked in the
+    child wait must kill the child (Popen.__exit__ would otherwise block
+    forever on a hung kubectl that is no longer reachable via the registry)."""
+
+    def _raise(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, _raise)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.2)
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            fpm_runner._run_command(["bash", "-c", "sleep 30 & exec sleep 30"], check=False)
+        assert time.monotonic() - start < 15
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_run_command_timeout_does_not_drain_orphaned_pipe_holders():
+    """tsh kubectl re-execs a pipe-sharing grandchild that survives SIGKILL on
+    the wrapper; the timeout path must not drain pipes it cannot close (the
+    background sleep here plays the orphan holding stdout open)."""
+
+    start = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        fpm_runner._run_command(["bash", "-c", "sleep 30 & exec sleep 30"], check=False, timeout=1)
+    assert time.monotonic() - start < 15
+
+
+def test_pre_apply_cleanup_failure_blocks_apply(monkeypatch, tmp_path):
+    """The unconditional pre-apply verified delete must fail CLOSED: if the
+    stale-workload delete cannot be verified, apply() must never run (applying
+    would adopt the possibly-live workload)."""
+
+    cell = _cell()
+    plan = _plan(cell)
+
+    def render_cell(*args, **kwargs):
+        cell_dir = args[2]
+        (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: cell\n")
+        (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+
+    applied = []
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            pass
+
+        def cleanup(self):
+            raise RuntimeError("delete verification failed")
+
+        def apply(self):
+            applied.append(True)
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(tmp_path / "artifacts"),
+        resume=False,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert applied == []
+    record = json.loads((checkpoint_dir / "fpm_forward_smoke.json").read_text())["cells"][cell.cell_id]
+    assert record["status"] == "failed"
+    assert "delete verification failed" in record["error"]
+    assert errors
+
+
+def test_running_entry_without_manifest_reruns_instead_of_passing(monkeypatch, tmp_path):
+    """No manifest means the abandoned workload's teardown cannot be verified;
+    the running entry must fall through to a rerun, never flip to passed."""
+
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root, checkpoint_dir, checkpoint_path = _running_cell_fixture(tmp_path, plan, cell)
+    cell_dir = artifact_root / plan.sha256[:16] / "smoke" / "cells" / cell.cell_id
+    (cell_dir / "k8s_deploy.yaml").unlink()
+    (cell_dir / "run.sh").unlink()
+
+    render_calls = []
+    monkeypatch.setattr(fpm_runner, "_render_cell", lambda *args, **kwargs: render_calls.append(args))
+
+    run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=True,
+        cell_limit=1,
+    )
+
+    assert render_calls
+    record = json.loads(checkpoint_path.read_text())["cells"][cell.cell_id]
+    assert record["status"] == "failed"

@@ -14,11 +14,14 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import threading
 import time
 import uuid
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -130,20 +133,71 @@ def _kubectl_command() -> list[str]:
     raise RuntimeError("neither kubectl nor tsh is available")
 
 
+# Live kubectl children, registered so an interrupt can terminate them: a
+# worker thread blocked in a subprocess wait cannot be interrupted by the main
+# thread's signal, so without this a detached campaign stopped with SIGINT or
+# SIGTERM would sit in ThreadPoolExecutor joins for up to the full exec
+# timeout before salvage/teardown could start.
+_ACTIVE_COMMANDS: set[subprocess.Popen[str]] = set()
+_ACTIVE_COMMANDS_LOCK = threading.Lock()
+
+
+def terminate_active_commands() -> int:
+    """TERM every live kubectl child; returns how many were signalled."""
+
+    with _ACTIVE_COMMANDS_LOCK:
+        processes = list(_ACTIVE_COMMANDS)
+    for process in processes:
+        with suppress(OSError):
+            process.terminate()
+    return len(processes)
+
+
 def _run_command(
     args: list[str],
     *,
     check: bool = True,
     timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    def _stop(process: subprocess.Popen[str]) -> None:
+        # Never wait on pipes here and never rely on SIGKILL alone: `tsh
+        # kubectl` re-execs itself as a pipe-sharing grandchild that SIGKILL
+        # on the wrapper cannot reach (an unbounded drain would then hang on
+        # the orphan's open pipe forever), while terminate() IS forwarded.
+        # Signal politely, give the wrapper a moment, then kill and reap the
+        # direct child only.
+        process.terminate()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+        process.kill()
+        process.wait()
+
+    with subprocess.Popen(
         args,
-        check=check,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
         env=_command_env(),
-    )
+    ) as process:
+        with _ACTIVE_COMMANDS_LOCK:
+            _ACTIVE_COMMANDS.add(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            _stop(process)
+            raise subprocess.TimeoutExpired(args, timeout or 0, output=error.output, stderr=error.stderr) from None
+        except BaseException:
+            # Mirror subprocess.run: never abandon a live child (a hung
+            # kubectl would otherwise block Popen.__exit__'s untimed wait
+            # forever, unreachable after the registry discard below).
+            _stop(process)
+            raise
+        finally:
+            with _ACTIVE_COMMANDS_LOCK:
+                _ACTIVE_COMMANDS.discard(process)
+    if check and process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, args, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 class KubernetesCellRunner:
@@ -538,7 +592,8 @@ class KubernetesCellRunner:
         logs_dir = self.cell_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         failures = []
-        with ThreadPoolExecutor(max_workers=len(pods)) as pool:
+        pool = ThreadPoolExecutor(max_workers=len(pods))
+        try:
             futures = {pool.submit(self._run_pod, pod, timeout_seconds): pod for pod in pods}
             for future in as_completed(futures):
                 pod = futures[future]
@@ -550,6 +605,15 @@ class KubernetesCellRunner:
                     continue
                 (logs_dir / f"{pod}.run.stdout.log").write_text(completed.stdout)
                 (logs_dir / f"{pod}.run.stderr.log").write_text(completed.stderr)
+        except BaseException:
+            # An interrupt lands here while worker threads sit in kubectl
+            # waits they cannot be signalled out of; kill the children first
+            # so the pool join below returns promptly and salvage/teardown
+            # can start.
+            terminate_active_commands()
+            raise
+        finally:
+            pool.shutdown(wait=True)
         if failures:
             raise RuntimeError(f"generated FPM run.sh failed: {failures}")
 
@@ -1043,7 +1107,10 @@ def _recover_completed_attempt(
     follows in ``run_collection`` owns the metadata of every passed record.
     Entries carrying ``cleanup_error`` are never recovered, whatever their
     status: their Kubernetes teardown was not verified, and only a rerun
-    re-applies and re-deletes the leaked resource.
+    re-applies and re-deletes the leaked resource. ``running`` entries carry
+    the same unverified-teardown hazard implicitly (the status is only
+    overwritten after cleanup runs), so recovering one requires a verified
+    delete of the abandoned workload first.
     """
 
     status = entry.get("status")
@@ -1067,6 +1134,31 @@ def _recover_completed_attempt(
         )
         return None
 
+    if status == "running":
+        # A persistent "running" status means the attempt's finally block
+        # never ran: its Kubernetes teardown is unverified by construction
+        # (the checkpoint is only rewritten AFTER cleanup), and once this
+        # entry flips to passed the cell is skipped forever, so no later
+        # rerun would re-drive the delete. Verify the teardown now or refuse
+        # recovery — the un-recovered cell then reruns, and the rerun's
+        # unconditional pre-apply cleanup owns the leak.
+        manifest = cell_dir / "k8s_deploy.yaml"
+        if not manifest.exists():
+            logger.info(
+                "FPM cell %s (status=running) has no manifest to verify teardown against; not recovering",
+                cell.cell_id,
+            )
+            return None
+        try:
+            KubernetesCellRunner(manifest, cell_dir).cleanup()
+        except Exception as error:
+            logger.warning(
+                "FPM cell %s recovery refused: teardown of the abandoned workload failed: %s",
+                cell.cell_id,
+                error,
+            )
+            return None
+
     recovered = dict(entry)
     original_error = {key: recovered.pop(key) for key in ("error_type", "error") if key in recovered}
     recovered.update(
@@ -1084,6 +1176,34 @@ def _recover_completed_attempt(
     return recovered
 
 
+@contextmanager
+def _sigterm_as_interrupt():
+    """Route SIGTERM through the same salvage -> interrupted-checkpoint ->
+    verified-cleanup path as Ctrl-C. Detached campaigns are stopped with plain
+    ``kill``; the default handler would skip every finally block and leave a
+    live workload behind a checkpoint stuck at status=running. No-op off the
+    main thread, where signal handlers cannot be installed (e.g. tests driving
+    the runner from a worker thread)."""
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handle(signum: int, frame: object) -> None:
+        # Raise only — no work in signal context. Acquiring the (non-reentrant)
+        # command-registry lock here could deadlock against the main thread's
+        # own critical section. Child termination is owned by the exception
+        # paths: _run_command kills its child on any abandonment, and
+        # execute() terminates all registered children before joining workers.
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, _handle)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def run_collection(
     plan: FPMCollectionPlan,
     *,
@@ -1098,6 +1218,32 @@ def run_collection(
 ) -> list[dict[str, object]]:
     """Render and run every cell, always tearing down owned resources."""
 
+    with _sigterm_as_interrupt():
+        return _run_collection_impl(
+            plan,
+            generator_overrides=generator_overrides,
+            checkpoint_dir=checkpoint_dir,
+            artifact_root=artifact_root,
+            resume=resume,
+            retry_failed=retry_failed,
+            smoke=smoke,
+            cell_limit=cell_limit,
+            database_root=database_root,
+        )
+
+
+def _run_collection_impl(
+    plan: FPMCollectionPlan,
+    *,
+    generator_overrides: dict[str, Any],
+    checkpoint_dir: str,
+    artifact_root: str,
+    resume: bool,
+    retry_failed: bool,
+    smoke: bool = False,
+    cell_limit: int | None = None,
+    database_root: str | None = None,
+) -> list[dict[str, object]]:
     root = Path(artifact_root).expanduser().resolve() / plan.sha256[:16]
     if smoke:
         root /= "smoke"
@@ -1204,13 +1350,15 @@ def run_collection(
             if not manifest.exists() or not run_script.exists():
                 raise RuntimeError("Generator FPM target did not emit k8s_deploy.yaml and run.sh")
             resource = KubernetesCellRunner(manifest, cell_dir)
-            if previous:
-                # A prior attempt may have left the same-named workload alive
-                # (cleanup timeout, killed collector host). apply() would adopt
-                # those pods and let the stale engine write into this attempt's
-                # freshly wiped /results, so drive a verified ignore-not-found
-                # delete before re-applying.
-                resource.cleanup()
+            # A prior invocation may have left the same-named workload alive
+            # (cleanup timeout, killed collector host) even when THIS
+            # checkpoint has no record of the cell: workload names derive
+            # deterministically from the cell_id, so a fresh checkpoint dir
+            # proves nothing about the cluster. apply() would adopt such pods
+            # and let the stale engine write into this attempt's freshly wiped
+            # /results, so always drive a verified ignore-not-found delete
+            # before applying.
+            resource.cleanup()
             resource.apply()
             pods = resource.wait_ready(_expected_nodes(manifest))
             resource.stage(
