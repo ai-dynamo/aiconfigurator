@@ -163,6 +163,7 @@ pub mod mhc;
 pub mod mla;
 pub mod moe;
 mod moe_index;
+pub mod moe_a2a;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
@@ -179,6 +180,7 @@ pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
+pub use moe_a2a::MoeA2aTable;
 pub use state_space::StateSpaceTable;
 pub use wideep::WideEpTable;
 pub use wideep_mla::WideEpMlaTable;
@@ -198,6 +200,7 @@ pub struct PerfTables {
     pub attention: AttentionTable,
     pub mla: MlaTable,
     pub moe: MoeTable,
+    pub moe_a2a: MoeA2aTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
     pub dsv4: Dsv4Table,
@@ -347,6 +350,7 @@ impl PerfDatabase {
             ),
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
+            moe_a2a: MoeA2aTable::with_sources(data_root.clone(), perf_db_sources),
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
                 nccl_root,

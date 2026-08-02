@@ -573,6 +573,7 @@ pub enum PerfDataFilename {
     Dsv4CsaAttnModule,
     Dsv4CsaTopkCalib,
     Dsv4MegamoeModule,
+    MoeA2a,
 }
 
 impl PerfDataFilename {
@@ -617,6 +618,7 @@ impl PerfDataFilename {
             Self::Dsv4CsaAttnModule => "dsv4_csa_attn_module_perf.parquet",
             Self::Dsv4CsaTopkCalib => "dsv4_csa_topk_calib_perf.parquet",
             Self::Dsv4MegamoeModule => "dsv4_megamoe_module_perf.parquet",
+            Self::MoeA2a => "moe_a2a_perf.parquet",
         }
     }
 }
