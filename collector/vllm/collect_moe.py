@@ -626,7 +626,37 @@ def run_moe_torch(
                     parameter.zero_()
 
         quant_method = routed_experts.quant_method
-        quant_method.process_weights_after_loading(routed_experts)
+        # API-compat shim for stock v0.24.0 Marlin weight prep under EP:
+        # prepare_moe_fp4_layer_for_marlin sizes its repack loop and shape
+        # assert from moe_config.num_experts (GLOBAL), while create_weights
+        # shards the expert dimension locally (marlin_utils_fp4.py:460-481
+        # @v0.24.0: e=moe_config.num_experts vs w13 created with the local
+        # count). The preview build preps EP-local weights fine (972 EP
+        # rows collected there). Present the local count during weight prep
+        # only, then restore the global count — routing needs it. Metadata
+        # presentation only; the invoked kernels are unchanged.
+        _mc = getattr(routed_experts, "moe_config", None)
+        _local_e = getattr(routed_experts, "num_experts", None)
+        _swap = (
+            situ_marlin_approx
+            and _mc is not None
+            and _local_e is not None
+            and _mc.num_experts != _local_e
+        )
+        if _swap:
+            _global_e = _mc.num_experts
+            try:
+                _mc.num_experts = _local_e
+            except AttributeError:
+                object.__setattr__(_mc, "num_experts", _local_e)
+        try:
+            quant_method.process_weights_after_loading(routed_experts)
+        finally:
+            if _swap:
+                try:
+                    _mc.num_experts = _global_e
+                except AttributeError:
+                    object.__setattr__(_mc, "num_experts", _global_e)
 
         selected_backend = None
         for backend_attr in (
