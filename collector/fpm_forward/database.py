@@ -249,6 +249,14 @@ def write_formal_database(
     with _publication_lock(lock_path):
         merged = []
         if parquet_path.exists():
+            # The metadata sidecar is the commit record of the last successful
+            # publication: refuse to merge onto a parquet whose bytes it does
+            # not vouch for (partial write, manual edit, or a foreign file).
+            if not metadata_path.exists():
+                raise ValueError(f"existing FPM database has no commit record; refusing to merge: {parquet_path}")
+            committed = json.loads(metadata_path.read_text())
+            if committed.get("parquet_sha256") != _sha256(parquet_path):
+                raise ValueError(f"existing FPM database does not match its commit record: {parquet_path}")
             table = pq.read_table(parquet_path)
             required = {
                 "total_prefill_tokens",
