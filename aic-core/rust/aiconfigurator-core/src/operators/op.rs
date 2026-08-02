@@ -21,8 +21,9 @@ use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source, TrtllmWideEpMoEDispatchOp,
-    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+    EpMoeOp, MoeAllToAllOp, MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source,
+    TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
+    WideEpMoeOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -157,9 +158,21 @@ pub enum Op {
     /// layers — Python `KDAKernel` (a `GDNKernel` subclass with a distinct
     /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
     /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
-    /// `Dsv4MegaMoe`); the new serialized variant bumped
-    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5.
+    /// `Dsv4MegaMoe`); the new serialized variant carried main's
+    /// `ENGINE_SPEC_SCHEMA_VERSION` bump.
     Kda(KdaOp),
+    /// Unified large-EP MoE all-to-all comm phase (Python
+    /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
+    /// and every phase; the op's `phase` / `comm_backend` fields select the
+    /// slice. Measured-SILICON-only; see `operators/moe_a2a.rs`.
+    ///
+    /// APPENDED after `Kda` — same positional-index rule as above.
+    MoeAllToAll(MoeAllToAllOp),
+    /// Unified large-EP MoE expert compute (Python
+    /// `operations.moe_comm.EPMoE`) — one variant for both inference phases;
+    /// the op's `inference_phase` field selects the slice.
+    /// Measured-SILICON-only; see `operators/ep_moe.rs`.
+    EpMoe(EpMoeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -241,6 +254,8 @@ impl Op {
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
             Op::Kda(o) => &o.name,
+            Op::MoeAllToAll(o) => &o.name,
+            Op::EpMoe(o) => &o.name,
         }
     }
 
@@ -423,6 +438,13 @@ impl Op {
             // Like Gdn: the op derives its phase coordinates internally
             // (verify divides the (nextn+1)-scaled batch by draft_tokens).
             Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
+            // Both large-EP ops take Python's `x` (moe_comm.py:657, :1291) —
+            // the same per-rank token count every other compute/comm op gets.
+            // The per-op token rescaling (`// attention_tp_size` for the comm
+            // side, `* attention_dp_size` for the compute side) happens INSIDE
+            // each `query`, exactly where Python does it.
+            Op::MoeAllToAll(op) => op.query(db, ctx.num_tokens),
+            Op::EpMoe(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

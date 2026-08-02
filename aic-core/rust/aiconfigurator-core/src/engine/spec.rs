@@ -164,10 +164,11 @@ mod tests {
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp,
+        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp,
         GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
-        MlaModuleOp, MoEDispatchOp, MoeOp, NcclOp, P2POp, TrtllmWideEpMoEDispatchOp,
-        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp,
+        TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
+        WideEpMoeOp,
     };
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
@@ -580,6 +581,49 @@ mod tests {
         }
     }
 
+    /// Large-EP comm phase with every optional field set to a NON-default
+    /// value, so the round-trip would notice a `#[serde(default)]` swallowing
+    /// a carried field.
+    fn moe_all_to_all() -> MoeAllToAllOp {
+        MoeAllToAllOp {
+            name: "moe_dispatch".into(),
+            scale_factor: 61.0,
+            phase: "dispatch".into(),
+            comm_backend: "deepep_ht".into(),
+            comm_dtype: "fp8_block".into(),
+            hidden_size: 7168,
+            topk: 8,
+            num_experts: 256,
+            moe_ep_size: 16,
+            node_num: 2,
+            sms: 24,
+            attention_tp_size: 2,
+        }
+    }
+
+    /// Large-EP expert compute. `num_slots` / `kernel_source` are `Some(...)`
+    /// here on purpose — the `None` (Python-default) case is what production
+    /// emits, and both encodings must survive the wire.
+    fn ep_moe() -> EpMoeOp {
+        EpMoeOp {
+            name: "moe".into(),
+            scale_factor: 61.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_ep_size: 16,
+            quant_mode: MoeQuantMode::Fp8Block,
+            workload_distribution: "power_law_1.2".into(),
+            attention_dp_size: 8,
+            inference_phase: "context".into(),
+            num_slots: Some(288),
+            kernel_source: Some("deepep_moe".into()),
+            is_gated: true,
+            enable_eplb: true,
+        }
+    }
+
     fn overlap() -> OverlapOp {
         // Recursive: nested children on both groups.
         OverlapOp {
@@ -643,8 +687,11 @@ mod tests {
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
-            // Appended at the very end (schema_version 5: Kda variant).
+            // Appended in wire order: Kda (main's Kimi-K3 bump), then the
+            // large-EP pair appended after it by this PR's re-bump.
             OpSpec::Kda(kda()),
+            OpSpec::MoeAllToAll(moe_all_to_all()),
+            OpSpec::EpMoe(ep_moe()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -684,7 +731,9 @@ mod tests {
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
                 | OpSpec::Dsv4MegaMoe(_)
-                | OpSpec::Kda(_) => {}
+                | OpSpec::Kda(_)
+                | OpSpec::MoeAllToAll(_)
+                | OpSpec::EpMoe(_) => {}
             }
         }
         ops
