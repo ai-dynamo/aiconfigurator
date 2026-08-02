@@ -541,3 +541,13 @@ stock v0.24.0 digest image): 60730461 moe K3 filter @ h100,h200
 the Hopper EP>1 crash the sglang kernel has; Blackwell collected EP up
 to 128 cleanly) + 60730462 mla_bmm @ h100,h200 (clears trtllm
 fallback).
+
+Wave-3 COMPLETE same day (verified + ingested at b01050dc5): h100/h200
+vllm K3 moe +972 rows each with FULL EP 1..128 — vllm's marlin_moe_wna16
+does NOT have the Hopper EP>1 crash that blocks the sglang 0.5.14
+marlin lane (kernel-stack difference, useful upstream data point);
+h100/h200 mla_bmm 636 rows each, zero failures. Hopper vllm PP probe
+now prices from silicon: h100 69.5 / h200 117.8 tok/s/gpu @32 GPUs.
+K3 vllm data coverage is now identical in scope to sglang across all
+eight systems (kda + K3 moe + mla_bmm); sglang's only remaining hole is
+the Hopper ep2..8 moe cells (real serving crash, honest gap).
