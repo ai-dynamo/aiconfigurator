@@ -3,6 +3,15 @@
 
 # Flat V2 task schema: one key per Task field, no mode/config/worker_config nesting.
 # `exps` lists which experiments to run (in order); each other top-level key is an experiment.
+#
+# These experiments are a LARGE-EP (ex-wideEP) exploration on gb200/trtllm, so
+# every one of them pins its search space to the multi-node ladder. Without the
+# pins each task would sweep the union of the fused (small-EP) and large-EP
+# ladders — the auto-exploration default, correct for a user who wants both
+# regimes compared, but roughly double the work for a file whose whole point is
+# the large-EP regime. `*_tp_candidates` / `*_pp_candidates` are left unpinned
+# because the fused and large-EP ladders agree on them ([1,2,4,8] and [1]), so
+# the union changes nothing there.
 
 exps:
 - gb200_wideep_agg
@@ -22,6 +31,29 @@ gb200_wideep_agg:
   nextn_accepted: 0.85
   model_path: nvidia/DeepSeek-V3.1-NVFP4
   system_name: gb200
+  agg_num_gpu_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_dp_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_moe_tp_candidates:
+  - 1
+  agg_moe_ep_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
 gb200_wideep_eplb_agg:
   isl: 4000
   serving_mode: agg
@@ -36,6 +68,29 @@ gb200_wideep_eplb_agg:
   enable_eplb: true
   gemm_quant_mode: nvfp4
   moe_quant_mode: nvfp4
+  agg_num_gpu_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_dp_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_moe_tp_candidates:
+  - 1
+  agg_moe_ep_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
 gb200_wideep_eplb_slots288_agg:
   isl: 4000
   serving_mode: agg
@@ -51,6 +106,29 @@ gb200_wideep_eplb_slots288_agg:
   enable_eplb: true
   gemm_quant_mode: nvfp4
   moe_quant_mode: nvfp4
+  agg_num_gpu_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_dp_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  agg_moe_tp_candidates:
+  - 1
+  agg_moe_ep_candidates:
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
 gb200_wideep_disagg:
   isl: 4000
   serving_mode: disagg
@@ -64,6 +142,43 @@ gb200_wideep_disagg:
   decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
   prefill_system_name: gb200
   decode_system_name: gb200
+  prefill_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_moe_tp_candidates:
+  - 1
+  decode_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
   max_gpu_per_replica: 512
 gb200_wideep_eplb_disagg:
   isl: 4000
@@ -84,6 +199,43 @@ gb200_wideep_eplb_disagg:
   prefill_moe_quant_mode: nvfp4
   decode_gemm_quant_mode: nvfp4
   decode_moe_quant_mode: nvfp4
+  prefill_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_moe_tp_candidates:
+  - 1
+  decode_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
   max_gpu_per_replica: 512
 gb200_wideep_eplb_slots288_disagg:
   isl: 4000
@@ -105,4 +257,41 @@ gb200_wideep_eplb_slots288_disagg:
   prefill_moe_quant_mode: nvfp4
   decode_gemm_quant_mode: nvfp4
   decode_moe_quant_mode: nvfp4
+  prefill_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  prefill_moe_tp_candidates:
+  - 1
+  prefill_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  decode_num_gpu_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_dp_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  decode_moe_tp_candidates:
+  - 1
+  decode_moe_ep_candidates:
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
   max_gpu_per_replica: 512
