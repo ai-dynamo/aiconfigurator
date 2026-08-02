@@ -26,9 +26,14 @@ pytestmark = pytest.mark.unit
 def _pinned_git_revision(monkeypatch):
     """Keep plan-identity tests hermetic: no git binary or checkout required
     (CI test containers ship without git), and plan hashes must not depend on
-    the ambient repository HEAD."""
+    the ambient repository HEAD. Yields the real function for the tests that
+    exercise revision derivation itself."""
 
-    monkeypatch.setattr("collector.fpm_forward.planner._git_revision", lambda: "test-revision")
+    from collector.fpm_forward import planner as planner_module
+
+    real = planner_module._git_revision
+    monkeypatch.setattr(planner_module, "_git_revision", lambda: "test-revision")
+    yield real
 
 
 def _write_provenance(path, *, cell_id: str, plan_sha256: str = "plan-sha", attempt_id: str = "attempt"):
@@ -327,7 +332,7 @@ def test_memory_admission_keeps_unknown_estimates_for_runtime_verification(monke
     assert {decision.disposition for decision in plan.topology_memory_admission} == {"unknown"}
 
 
-def test_memory_admission_drops_only_the_rejected_dtype_cells(monkeypatch):
+def test_memory_admission_drops_only_the_rejected_dtype_cells(monkeypatch, caplog):
     class Estimate:
         def __init__(self, *, admitted: bool):
             self.breakdown = {
@@ -358,6 +363,79 @@ def test_memory_admission_drops_only_the_rejected_dtype_cells(monkeypatch):
         for estimate in decision.estimates
         if estimate.disposition == "rejected"
     } == {"bfloat16"}
+    # Per-dtype drops must be counted, never silent (collector rules: the
+    # memory filter's drops are logged; whole-topology logging alone would
+    # hide these).
+    assert "fpm_forward: dropped 3/6 (topology, kv_dtype) cell groups (memory budget" in caplog.text
+
+
+def test_plan_identity_ignores_memory_estimator_error_text(monkeypatch):
+    """Estimator failure diagnostics vary across runs and hosts (transient
+    network errors, host paths); hashing them would spuriously invalidate
+    resume for identical plans. Only dispositions belong to the identity."""
+
+    kwargs = {
+        "backend": "vllm",
+        "model_path": "nvidia/GLM-5.2-NVFP4",
+        "model_architecture": "GlmMoeDsaForCausalLM",
+        "system": "b200_sxm",
+        "selected_ops": {"dsa_context_module", "dsa_generation_module"},
+        "options": FPMCollectionOptions.from_args(_args()),
+    }
+
+    def failing(message):
+        def from_request(*_args, **_kwargs):
+            raise RuntimeError(message)
+
+        return from_request
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        failing("connection timed out to huggingface.co"),
+    )
+    first = build_collection_plan(**kwargs)
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        failing("HTTP Error 503: Service Unavailable under /Users/someone"),
+    )
+    second = build_collection_plan(**kwargs)
+
+    assert first.sha256 == second.sha256
+    # The human-readable plan still carries the full diagnostic.
+    assert "connection timed out to huggingface.co" in json.dumps(first.to_dict())
+
+
+def test_git_revision_folds_dirty_tracked_state_into_identity(_pinned_git_revision, monkeypatch):
+    """Uncommitted tracked edits change collector behavior without moving
+    HEAD; the revision must distinguish them, resume identically for an
+    unchanged tree, and ignore untracked noise (artifact dirs)."""
+
+    from collector.fpm_forward import planner as fpm_planner
+
+    real_git_revision = _pinned_git_revision
+    outputs = {
+        ("rev-parse", "HEAD"): "abc123\n",
+        ("status", "--porcelain", "--untracked-files=no"): "",
+        ("diff-index", "--no-ext-diff", "--full-index", "-p", "HEAD"): "",
+    }
+
+    def fake_run(args, **_kwargs):
+        return SimpleNamespace(stdout=outputs[tuple(args[1:])], returncode=0)
+
+    monkeypatch.setattr(fpm_planner.subprocess, "run", fake_run)
+
+    assert real_git_revision() == "abc123"
+
+    outputs[("status", "--porcelain", "--untracked-files=no")] = " M collector/fpm_forward/runner.py\n"
+    outputs[("diff-index", "--no-ext-diff", "--full-index", "-p", "HEAD")] = "-a\n+b\n"
+    dirty = real_git_revision()
+    assert dirty.startswith("abc123-dirty-")
+    assert real_git_revision() == dirty
+
+    outputs[("diff-index", "--no-ext-diff", "--full-index", "-p", "HEAD")] = "-a\n+c\n"
+    changed = real_git_revision()
+    assert changed.startswith("abc123-dirty-")
+    assert changed != dirty
 
 
 def test_minimax_m3_keeps_family_dtype_and_parallel_capabilities():

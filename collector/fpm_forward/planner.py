@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,8 @@ from .memory_admission import TopologyMemoryDecision, filter_memory_infeasible_t
 from .topology import enumerate_fpm_topologies, topology_strategy
 from .types import ParallelTopology
 
+logger = logging.getLogger(__name__)
+
 
 def _canonical_hash(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -26,22 +29,63 @@ def _canonical_hash(payload: object) -> str:
 
 def _git_revision() -> str:
     root = Path(__file__).resolve().parents[2]
-    try:
+
+    def _git(*args: str) -> str:
         completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *args],
             cwd=root,
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
         )
+        return completed.stdout
+
+    try:
+        head = _git("rev-parse", "HEAD").strip()
+        # Uncommitted tracked changes alter collector behavior without moving
+        # HEAD; fold their digest into the revision so plan identity — and
+        # with it checkpoint resume — distinguishes measurements taken under
+        # different working trees. An unchanged dirty tree keeps resuming.
+        # Untracked files are excluded: campaign artifact and checkpoint dirs
+        # live inside the checkout and would spuriously invalidate every
+        # resume.
+        status = _git("status", "--porcelain", "--untracked-files=no")
+        if not status.strip():
+            return head
+        # Plumbing diff-index, not porcelain diff: external diff drivers
+        # (diff.external / .gitattributes diff=lfs|parquet in this very repo)
+        # embed per-invocation temp paths that would change the digest on
+        # every call, and host diff config (mnemonicPrefix, abbrev) would make
+        # it host-dependent. --full-index keeps binary edits distinguishable
+        # via full blob hashes without dumping content.
+        diff = _git("diff-index", "--no-ext-diff", "--full-index", "-p", "HEAD")
+        dirty_digest = hashlib.sha256((status + diff).encode()).hexdigest()[:12]
+        return f"{head}-dirty-{dirty_digest}"
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         detail = getattr(error, "stderr", "") or str(error)
         raise ValueError(
-            "FPM plan identity requires the collector source revision, but 'git rev-parse HEAD' "
+            "FPM plan identity requires the collector source revision, but git "
             f"failed under {root}: {detail.strip()}. Run the collector from a git checkout"
         ) from error
-    return completed.stdout.strip()
+
+
+def _hash_stable_admission(decision: TopologyMemoryDecision) -> dict[str, object]:
+    """Admission facts for the plan hash: dispositions and envelopes only.
+
+    The free-text ``reason`` fields embed exception text (transient network
+    errors, host-dependent paths) that varies across runs and hosts without
+    changing behavior; hashing them would spuriously invalidate resume — and
+    move the artifact root — for a plan whose actual cell population is
+    identical. The full reasons stay in the persisted collection-plan.json.
+    """
+
+    payload = decision.to_dict()
+    payload.pop("reason", None)
+    for estimate in payload.get("estimates", []):
+        if isinstance(estimate, dict):
+            estimate.pop("reason", None)
+    return payload
 
 
 def _canonical_mapping(payload: dict[str, Any], *, field_name: str) -> str:
@@ -345,6 +389,26 @@ def build_collection_plan(
         for estimate in decision.estimates
         if estimate.disposition != "rejected"
     }
+    # An admitted topology can still lose individual KV dtypes to the memory
+    # budget; those cells silently vanish from the plan unless counted here
+    # (the memory filter itself only logs fully rejected topologies).
+    kept_topologies = set(topologies)
+    dropped_dtype_pairs = [
+        (decision.topology, estimate.kv_cache_dtype)
+        for decision in topology_memory_admission
+        if decision.topology in kept_topologies
+        for estimate in decision.estimates
+        if estimate.disposition == "rejected"
+    ]
+    if dropped_dtype_pairs:
+        details = "; ".join(f"{topology.to_dict()}/kv={dtype}" for topology, dtype in dropped_dtype_pairs)
+        logger.warning(
+            "fpm_forward: dropped %d/%d (topology, kv_dtype) cell groups (memory budget, system=%s): %s",
+            len(dropped_dtype_pairs),
+            len(kept_topologies) * len(capability.dtype.kv_cache_dtypes),
+            system,
+            details,
+        )
     cells = tuple(
         FPMCell(
             cell_id=_cell_id(
@@ -386,7 +450,7 @@ def build_collection_plan(
         "capability": capability.to_dict(),
         "dtype_profile": capability.dtype.to_dict(),
         "point_generation": "dynamo_native_self_benchmark",
-        "topology_memory_admission": [decision.to_dict() for decision in topology_memory_admission],
+        "topology_memory_admission": [_hash_stable_admission(decision) for decision in topology_memory_admission],
         "topologies": [topology.to_dict() for topology in topologies],
         "policies": [policy.to_dict() for policy in policies],
         "cells": [cell.to_dict() for cell in cells],
