@@ -23,21 +23,26 @@ Both assumptions break in practice:
 Two layers, deliberately separated
 ----------------------------------
 
-:class:`PipelineLayout` -- **where the work lives**: the layer partition, op
-placement, per-stage compute times, and the per-hop link cost. Pure geometry
-plus cost lookup, no scheduling policy. This is model and hardware knowledge,
-and it is the piece every consumer needs, including a request-level
-discrete-event simulator (the Dynamo Mocker) driving the compiled engine.
+:class:`PipelineLayout` -- **where the work lives**: it owns the *rules*
+(which op belongs to which stage, how many layers each stage gets) and derives
+per-stage compute times and the per-hop link cost from them. Pure geometry
+plus cost lookup, no scheduling policy.
 
 :class:`PipelineSteadyState` -- **how the pipe runs**: microbatch count, P2P
-overlap, cycle time, and the closed-form ``balance_factor`` / ``fill_factor``
-that AIC's mean-field step model collapses onto scalars.
+overlap, cycle time, and the closed-form ``balance_factor`` / ``fill_factor``.
 
-The split matters because those scalars are *surrogates* for what an
-event-driven simulator computes natively. A simulator that models stage
-occupancy directly must consume :class:`PipelineLayout` and derive its own
-bubbles -- applying ``fill_factor`` on top would charge for the same bubble
-twice. AIC needs the closed form only because it has no simulator.
+The split keeps the rules in one place so that a second derivation from them
+(slicing the op list per stage, say) cannot drift from ``stage_times``. It
+also keeps the two kinds of claim apart: the layout is a statement about the
+model, while the factors are a steady-state *collapse* that holds only
+because AIC evaluates one step shape and assumes every stage sees it. Anything
+that models per-stage occupancy directly derives those effects itself and must
+not also apply the scalars.
+
+Scope: this is wired into ``run_agg``. The compiled-engine path the Dynamo
+planner and Mocker use (``ForwardPassPerfModel`` -> ``forward_pass_time_ms``
+-> ``rank_latency_ms``) does not enter ``run_agg`` and is still ideal-PP; see
+the known-gaps section of ``docs/PIPELINE_PARALLEL_MODELING.md``.
 
 This all lives in **orchestration**, above the op layer: it consumes the
 per-op latency breakdown the step model already produces. No op query math
@@ -180,10 +185,10 @@ class PipelineLayout:
 class PipelineSteadyState:
     """Closed-form steady-state collapse of a pipeline's occupancy.
 
-    Produces the two scalars AIC's mean-field step model needs. An
-    event-driven simulator should NOT use these -- it consumes
-    :class:`PipelineLayout` and derives the same effects from simulated
-    occupancy. Applying both double-counts the bubble.
+    Produces the two scalars AIC's mean-field step model needs. They are valid
+    only under that model's assumption that one step shape describes every
+    stage. A consumer that models per-stage occupancy directly derives the same
+    effects from its own simulation and must not apply these on top.
 
     Args:
         layout: Stage geometry and per-stage costs.

@@ -92,23 +92,33 @@ efficiency     = balance_factor * fill_factor
 
 ### 3.3 Why the split
 
-`balance_factor` and `fill_factor` are **surrogates** for what an event-driven
-simulator computes natively. A request-level simulator (the Dynamo Mocker,
-which embeds the compiled engine for per-iteration cost estimates) models
-stage occupancy directly: imbalance, starvation, and heterogeneous
-prefill/decode microbatches blocking each other all *emerge* from the
-simulation. Such a consumer must take `PipelineLayout` and derive its own
-bubbles — applying `fill_factor` on top would charge for the same bubble
-twice.
+`PipelineLayout` owns the **rules** — which op belongs to which stage, and how
+many layers each stage gets. `stage_times` is one derivation from those rules;
+slicing the op list per stage would be another. Keeping the rules in one place
+is what stops two derivations from drifting.
 
-AIC needs the closed form only because it has no simulator. Keeping the shared
-primitive free of that assumption is what lets both live on one source of
-truth for partitioning and per-stage cost, instead of drifting apart.
+`balance_factor` and `fill_factor` are a different kind of thing: a
+steady-state *collapse*, valid only because AIC evaluates one step shape and
+assumes every stage sees it. Anything that models per-stage occupancy directly
+would derive those effects itself and must not also apply the scalars.
 
-There is a validation payoff too: a simulator's occupancy result and
-`balance_factor` should agree in the steady-state limit (high concurrency,
-homogeneous requests). Disagreement means one of the two is wrong, and unlike
-a silicon comparison this check is not confounded by perf-database error.
+Note what the current embedder contract actually is, because it constrains
+where PP belongs. `ForwardPassPerfModel::estimate_forward_pass_time_ms` takes
+per-**attention-DP**-rank `ForwardPassMetrics` and returns one iteration time,
+reducing with `max` over ranks. There is no stage axis anywhere in it: a PP
+worker reports a single forward pass, and the caller expects the estimate to
+already include every intra-worker parallelism effect. **PP is AIC's
+responsibility to model, not the caller's.**
+
+That makes the placement obvious by symmetry:
+
+```
+Engine::forward_pass_time_ms:  max over attention-DP ranks   # DP runs in lockstep
+pipeline cycle:                max over PP stages           # slowest stage sets the pace
+```
+
+Same reduction, different axis. PP belongs next to the DP `max` inside
+`rank_latency_ms` — collapsed into the answer, not exported outward. See §6.
 
 **Op placement** follows the naming contract the model classes already
 require (see the `GPTModel` docstring: *"attn layer name needs to be
@@ -194,14 +204,36 @@ layering already used for AFD pipeline modeling.
 - **`fill_factor` is linear** (`min(1, M/pp)`). The real curve is likely
   steeper once scheduler and synchronization overhead are included; it needs
   silicon calibration.
-- **`PipelineLayout` is not exported to native embedders yet.** The compiled
-  engine's per-iteration surface (`prefill_latency_ms`, `decode_latency_ms`,
-  `mixed_step_latency`) returns whole-model forward-pass latency with no stage
-  dimension, and `pp_size` reaches only the `P2P` op on the Rust side. A
-  simulator that wants to model pipeline occupancy needs a stage-indexed cost
-  oracle (`stage_latency_ms(stage_idx, ctx_tokens, decode_tokens)`) plus the
-  partition and per-hop cost. The Python layout is shaped for that; the FFI is
-  future work.
+- **This change covers `run_agg` only — the compiled-engine path is still
+  ideal-PP.** The Dynamo planner and Mocker reach AIC through
+  `ForwardPassPerfModel` → `Engine::forward_pass_time_ms` →
+  `rank_latency_ms`, which never enters `run_agg`. On that path `pp_size`
+  still reaches only the `P2P` op, so a PP worker's iteration time is the
+  whole model's with no stage reduction. Fixing it means applying the same
+  `max`-over-stages inside `rank_latency_ms`, which is a Rust change against a
+  literal port (`SessionEstimator::rank_latency_ms`) and therefore its own PR
+  under `.claude/rules/rust-core/parity.md`.
+
+- **The FPM online correction silently absorbs the PP error.**
+  `tune_with_fpms` learns `median(observed_ms / native_ms)` per region, where
+  `native_ms` is the whole-model estimate above. The only guard on an
+  observation is finite-and-positive — **the factor is unbounded in
+  magnitude** — and the region key is built purely from scheduler counts
+  (`sum_prefill_tokens`, `num_decode_requests`, `sum_decode_kv_tokens`), so
+  `pp_size` is not a feature. Consequences depend on what the engine's
+  telemetry reports as `wall_time`, which is emitter-side and not determined
+  here:
+
+  - whole-iteration wall time ⇒ `observed ≈ native`, correction ≈ 1, and PP's
+    throughput benefit is simply absent from the model;
+  - per-stage wall time ⇒ the correction learns ≈ `1/pp_size` and the model
+    becomes right for the wrong reason: a fitted constant standing in for a
+    structural effect, correct at the calibrated point and wrong as soon as
+    `pp_size` or the stage imbalance changes.
+
+  Either way a structural error is laundered through a fitted factor with no
+  warning. This is a second reason to make `rank_latency_ms` pipeline-aware
+  rather than leaving the correction layer to paper over it.
 - **Chunked prefill × PP is not modeled.** Adjacent chunks of one request have
   a RAW dependency on the KV they write, so they cannot occupy the pipe
   simultaneously — a single request doing chunked prefill gets no PP benefit,

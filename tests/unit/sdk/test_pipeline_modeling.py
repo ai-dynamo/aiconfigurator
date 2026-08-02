@@ -6,12 +6,12 @@
 Covers ``aiconfigurator_core.sdk.pipeline``, which is split in two:
 
 ``PipelineLayout`` -- where the work lives (partition, op placement, per-stage
-times, per-hop link cost). Shared by every consumer, including an event-driven
-simulator that derives its own bubbles.
+times, per-hop link cost). Owns the rules, so a second derivation from them
+cannot drift.
 
 ``PipelineSteadyState`` -- how the pipe runs (cycle time, ``balance_factor``,
-``fill_factor``). AIC's mean-field closed form; a simulator must not apply
-these on top of its own occupancy modeling.
+``fill_factor``). AIC's mean-field closed form, valid only under the assumption
+that one step shape describes every stage.
 
 Also pins the ``pp_size == 1`` identity that keeps single-stage results
 bit-identical to the pre-existing model.
@@ -222,11 +222,12 @@ def test_rejects_nonpositive_microbatches():
 
 
 def test_layout_carries_no_scheduling_policy():
-    """The shared primitive must not expose occupancy-derived quantities.
+    """The rules must not carry the steady-state collapse.
 
-    An event-driven consumer takes stage times and derives its own bubbles;
-    if these leaked onto the layout it could apply AIC's closed-form penalty
-    on top of its own simulation and charge for the same bubble twice.
+    ``PipelineLayout`` states where work lives; the factors are only valid
+    under the mean-field assumption that one step shape describes every stage.
+    Letting occupancy leak onto the layout would make the rules unusable by any
+    derivation that does not share that assumption.
     """
     layout = PipelineLayout(pp_size=8)
     for occupancy_attr in ("fill_factor", "balance_factor", "efficiency", "cycle_time", "num_microbatches"):
