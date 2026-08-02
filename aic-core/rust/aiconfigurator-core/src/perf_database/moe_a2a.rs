@@ -266,7 +266,7 @@ fn load_moe_a2a_grids(
             a2a_sources
                 .first()
                 .map(|s| s.path().display().to_string())
-                .unwrap_or_default()
+                .unwrap_or_else(|| "<no moe_a2a sources>".to_string())
         )));
     }
     let mut dtypes_by_phase: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
@@ -926,6 +926,62 @@ mod tests {
         writer.close().unwrap();
     }
 
+    /// Write a synthetic legacy trtllm-alltoall parquet whose `kernel_source`
+    /// column is OPTIONAL, so a row can carry a NULL cell (the case Python's
+    /// `row.get(...)` default does NOT cover). Rows are `(kernel_source,
+    /// moe_ep_size, latency_ms)` at a fixed (op_name=`alltoall_dispatch`,
+    /// moe_dtype=`fp8`, hidden=7168, topk=8, experts=256, num_tokens=64)
+    /// coordinate.
+    fn write_trtllm_alltoall_nullable_ks_parquet(
+        path: &Path,
+        rows: &[(Option<&'static str>, i64, f64)],
+    ) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message alltoall {
+                    REQUIRED BYTE_ARRAY op_name (UTF8);
+                    OPTIONAL BYTE_ARRAY kernel_source (UTF8);
+                    REQUIRED BYTE_ARRAY moe_dtype (UTF8);
+                    REQUIRED INT64 num_tokens;
+                    REQUIRED INT64 hidden_size;
+                    REQUIRED INT64 topk;
+                    REQUIRED INT64 num_experts;
+                    REQUIRED INT64 moe_ep_size;
+                    REQUIRED DOUBLE latency;
+                }",
+            )
+            .unwrap(),
+        );
+        let file = File::create(path).unwrap();
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .unwrap();
+        let mut rg = writer.next_row_group().unwrap();
+        let n = rows.len();
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("alltoall_dispatch"); n]);
+        // Optional column: only the non-null values are written, with a
+        // definition level of 1 (present) / 0 (null) per row.
+        let values: Vec<ByteArray> = rows
+            .iter()
+            .filter_map(|r| r.0.map(ByteArray::from))
+            .collect();
+        let def_levels: Vec<i16> = rows.iter().map(|r| i16::from(r.0.is_some())).collect();
+        let mut col = rg.next_column().unwrap().unwrap();
+        col.typed::<ByteArrayType>()
+            .write_batch(&values, Some(&def_levels), None)
+            .unwrap();
+        col.close().unwrap();
+        write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("fp8"); n]);
+        write_column::<Int64Type>(&mut rg, &vec![64_i64; n]);
+        write_column::<Int64Type>(&mut rg, &vec![7168_i64; n]);
+        write_column::<Int64Type>(&mut rg, &vec![8_i64; n]);
+        write_column::<Int64Type>(&mut rg, &vec![256_i64; n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        write_column::<DoubleType>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
     fn approx(got: f64, want: f64) {
         assert!(
             (got - want).abs() <= 1e-12 * want.abs().max(1.0),
@@ -1126,9 +1182,26 @@ mod tests {
                     3.5,
                 ),
                 ("NVLinkOneSided", "alltoall_dispatch", "fp8", 2, 64, 4.5),
-                // Unmapped: dropped, not stored under some default.
-                ("MnnvlThreeSided", "alltoall_dispatch", "nvfp4", 16, 64, 9.0),
-                ("NVLinkTwoSided", "alltoall_something", "nvfp4", 16, 64, 9.0),
+                // Unmapped: dropped, not stored under some default. Both sit
+                // on their OWN (bfloat16, ep=8 -> node=2) coordinate so a
+                // leaked row is directly observable rather than masked by the
+                // keep-first value of a coordinate that is already asserted.
+                (
+                    "MnnvlThreeSided",
+                    "alltoall_dispatch",
+                    "bfloat16",
+                    8,
+                    64,
+                    9.0,
+                ),
+                (
+                    "NVLinkTwoSided",
+                    "alltoall_something",
+                    "bfloat16",
+                    8,
+                    64,
+                    9.0,
+                ),
             ],
             None,
         );
@@ -1153,8 +1226,48 @@ mod tests {
         approx(q("nvlink_two_sided", "combine", "fp4", 16, 4).unwrap(), 3.5);
         // ep=2 -> max(1, 0) = 1 node.
         approx(q("nvlink_one_sided", "dispatch", "fp8", 2, 1).unwrap(), 4.5);
-        // The unmapped kernel_source row must not have landed anywhere.
-        assert!(q("nvlink_two_sided", "dispatch", "nvfp4", 16, 4).unwrap() != 9.0);
+        // Neither unmapped row landed anywhere: their (bfloat16, ep=8 ->
+        // node=2) coordinate is absent from every phase of BOTH backends.
+        for phase in ["prepare", "dispatch", "combine"] {
+            assert!(
+                q("nvlink_two_sided", phase, "bfloat16", 8, 2).is_err(),
+                "an unmapped row leaked into nvlink_two_sided/{phase}"
+            );
+            assert!(
+                q("nvlink_one_sided", phase, "bfloat16", 8, 2).is_err(),
+                "an unmapped row leaked into nvlink_one_sided/{phase}"
+            );
+        }
+        // ...and an unmapped op_name is not passed through as a phase either.
+        assert!(q("nvlink_two_sided", "alltoall_something", "bfloat16", 8, 2).is_err());
+    }
+
+    /// A present-but-NULL `kernel_source` cell maps to no comm backend, so the
+    /// row is DROPPED. Python's `row.get("kernel_source", "NVLinkTwoSided")`
+    /// defaults only when the COLUMN is absent; `_read_perf_rows` turns a null
+    /// cell into `""`, which matches no backend. This is the one place the
+    /// unified adapter deliberately diverges from
+    /// `wideep.rs::load_alltoall_parquet`, which treats a null cell as the
+    /// two-sided default.
+    #[test]
+    fn legacy_trtllm_alltoall_null_kernel_source_row_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_trtllm_alltoall_nullable_ks_parquet(
+            &tmp.path().join("trtllm_alltoall_perf.parquet"),
+            &[(Some("NVLinkTwoSided"), 16, 1.5), (None, 32, 9.0)],
+        );
+        let table = MoeA2aTable::new(tmp.path().to_path_buf());
+        let q = |backend: &str, ep: u32, node: u32| {
+            table.query(backend, "dispatch", "fp8", ep, node, 7168, 8, 256, 64, 0)
+        };
+        // The named row still loads (ep=16 -> node_num = 4).
+        approx(q("nvlink_two_sided", 16, 4).unwrap(), 1.5);
+        // The NULL-kernel row (ep=32 -> node_num = 8) reached NEITHER backend.
+        assert!(
+            q("nvlink_two_sided", 32, 8).is_err(),
+            "a null kernel_source cell must not default to NVLinkTwoSided"
+        );
+        assert!(q("nvlink_one_sided", 32, 8).is_err());
     }
 
     /// An explicit `num_nodes` column wins over the `max(1, ep // 4)` default.
