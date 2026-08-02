@@ -188,8 +188,6 @@ impl FpmForwardOp {
         cell: &FpmForwardCell,
         coords: &[f64],
     ) -> Result<PerformanceResult, AicError> {
-        ensure_sol_supported(&self.sol_ops)?;
-
         // Per-axis inclusive bounding-box gate BEFORE perf_interp: whole-model
         // latency has no principled boundary-hold semantics.
         let (axes, domain, index): (&[&str], &[(u32, u32)], _) = match self.phase {
@@ -220,11 +218,32 @@ impl FpmForwardOp {
         }
         let index = index.ok_or_else(|| self.no_rows_err(cell))?;
 
+        // SOL support is checked LAZILY, mirroring Python: exact hits and
+        // in-curve lerps never invoke the roofline (Python's SOL view answers
+        // every op family; `_oplevel_sol_fn` is only called on transfer/hold
+        // paths). A family the Rust SOL port does not cover yet (DSA / MSA /
+        // MLA modules — e.g. GLM-5.2's DSA attention) therefore only fails
+        // the sol-dependent resolution paths, and the error names the op.
+        let sol_failure: std::cell::RefCell<Option<AicError>> = std::cell::RefCell::new(None);
         let sol = |sol_coords: &[f64]| -> f64 {
-            sol_total(&self.sol_ops, self.phase, db, sol_coords).unwrap_or(f64::NAN)
+            match sol_total(&self.sol_ops, self.phase, db, sol_coords) {
+                Ok(v) => v,
+                Err(err) => {
+                    let mut slot = sol_failure.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some(err);
+                    }
+                    f64::NAN
+                }
+            }
         };
         let cfg = interp_config(self.phase, &sol);
-        let latency = index.resolve(&cfg, coords)?;
+        let latency = index.resolve(&cfg, coords).map_err(|err| {
+            match sol_failure.borrow_mut().take() {
+                Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
+                None => err,
+            }
+        })?;
         if !latency.is_finite() || latency <= 0.0 {
             return Err(data_err(format!(
                 "FPM {} interpolation produced an invalid latency ({latency}) at {coords:?}.",
@@ -273,78 +292,6 @@ fn interp_config<'a>(phase: FpmPhase, sol: &'a dyn Fn(&[f64]) -> f64) -> OpInter
 // ---------------------------------------------------------------------------
 // SOL roofline: the op-level model queried in SOL mode
 // ---------------------------------------------------------------------------
-
-/// Guard: every `sol_ops` member must have a SOL-mode implementation below.
-/// Errors (loudly, before any interpolation) on families the FPM SOL port
-/// does not cover yet, naming the op.
-pub(crate) fn ensure_sol_supported(sol_ops: &[Op]) -> Result<(), AicError> {
-    for op in sol_ops {
-        match op {
-            Op::Gemm(_)
-            | Op::Embedding(_)
-            | Op::Elementwise(_)
-            | Op::ContextAttention(_)
-            | Op::GenerationAttention(_)
-            | Op::Moe(_)
-            | Op::MoeDispatch(_)
-            | Op::CustomAllReduce(_)
-            | Op::Nccl(_)
-            | Op::P2P(_) => {}
-            Op::Overlap(inner) => {
-                ensure_sol_supported(&inner.group_a)?;
-                ensure_sol_supported(&inner.group_b)?;
-            }
-            Op::Fallback(inner) => {
-                ensure_sol_supported(std::slice::from_ref(&inner.primary))?;
-                ensure_sol_supported(&inner.fallback)?;
-            }
-            other => {
-                return Err(AicError::UnsupportedModel(format!(
-                    "forward_model='fpm' SOL roofline has no Rust implementation for op \
-                     {:?} ({}); use forward_model='op_level' or extend operators/fpm_sol.rs",
-                    variant_name(other),
-                    other.name()
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn variant_name(op: &Op) -> &'static str {
-    match op {
-        Op::FpmForward(_) => "FpmForward",
-        Op::Gemm(_) => "Gemm",
-        Op::Embedding(_) => "Embedding",
-        Op::Elementwise(_) => "Elementwise",
-        Op::ContextAttention(_) => "ContextAttention",
-        Op::GenerationAttention(_) => "GenerationAttention",
-        Op::EncoderAttention(_) => "EncoderAttention",
-        Op::ContextMla(_) => "ContextMla",
-        Op::GenerationMla(_) => "GenerationMla",
-        Op::MlaModuleContext(_) => "MlaModuleContext",
-        Op::MlaModuleGeneration(_) => "MlaModuleGeneration",
-        Op::MlaBmm(_) => "MlaBmm",
-        Op::Moe(_) => "Moe",
-        Op::MoeDispatch(_) => "MoeDispatch",
-        Op::CustomAllReduce(_) => "CustomAllReduce",
-        Op::Nccl(_) => "Nccl",
-        Op::P2P(_) => "P2P",
-        Op::Vision(_) => "Vision",
-        Op::DsaContext(_) => "DsaContext",
-        Op::DsaGeneration(_) => "DsaGeneration",
-        Op::Dsv4Context(_) => "Dsv4Context",
-        Op::Dsv4Generation(_) => "Dsv4Generation",
-        Op::Mhc(_) => "Mhc",
-        Op::Mamba2(_) => "Mamba2",
-        Op::Gdn(_) => "Gdn",
-        Op::WideEpContextMla(_) => "WideEpContextMla",
-        Op::WideEpGenerationMla(_) => "WideEpGenerationMla",
-        Op::WideEpMoe(_) => "WideEpMoe",
-        Op::Overlap(_) => "Overlap",
-        Op::Fallback(_) => "Fallback",
-    }
-}
 
 /// Whole-model SOL at the given FPM coordinates, mirroring Python
 /// `_oplevel_sol_fn` exactly:
@@ -508,8 +455,12 @@ mod tests {
         assert!(err.to_string().contains("decode-only"), "{err}");
     }
 
+    /// SOL support is lazy (mirrors Python, whose SOL view answers every op
+    /// family): an unported family (e.g. GLM-5.2's DSA modules) must NOT
+    /// block exact hits or in-curve lerps — only sol-dependent resolution
+    /// paths fail, naming the unported op.
     #[test]
-    fn unsupported_sol_family_errors_loudly() {
+    fn unsupported_sol_family_is_lazy() {
         let tmp = tempfile::tempdir().unwrap();
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
@@ -521,7 +472,15 @@ mod tests {
             is_pre: true,
             quant_mode: crate::common::enums::GemmQuantMode::Bfloat16,
         })];
-        let err = o.query(&db, &ctx(8, 512, 0)).unwrap_err();
+        // Exact hit (8, 4096) -> 7.0: never invokes the roofline.
+        let r = o.query(&db, &ctx(8, 512, 0)).unwrap();
+        assert_eq!(r.latency_ms, 7.0);
+        // In-curve lerp on the own site: RAW linear, no roofline either.
+        assert!(o.query(&db, &ctx(8, 256, 0)).is_ok());
+        // Uncollected batch -> site transfer NEEDS the roofline -> structured
+        // miss naming the unported op (not a panic, not a silent number).
+        let err = o.query(&db, &ctx(12, 512, 0)).unwrap_err();
+        assert!(err.to_string().contains("SOL roofline unavailable"), "{err}");
         assert!(err.to_string().contains("no Rust implementation"), "{err}");
     }
 }

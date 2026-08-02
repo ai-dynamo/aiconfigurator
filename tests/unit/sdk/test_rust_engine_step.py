@@ -392,3 +392,64 @@ def test_non_silicon_database_mode_falls_back_to_python_step():
     assert should_use_rust_engine_step(rc, _DB(_Mode.SILICON))
     assert not should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
     assert should_use_rust_engine_step(rc)  # no database context -> unchanged
+
+
+@pytest.mark.unit
+def test_rust_perf_db_misses_translate_to_perf_data_not_available():
+    """The PyO3 boundary collapses every Rust error into ValueError; the
+    perf-DB miss class (prefix "perf database error: ") must re-surface as
+    PerfDataNotAvailableError so sweep.py can mark the point unanswerable
+    instead of aborting the whole parallel config. Other ValueErrors pass
+    through untouched."""
+    from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+    from aiconfigurator_core.sdk.rust_engine_step import _reraise_engine_error
+
+    miss = ValueError(
+        "perf database error: FPM decode query total_kv_read_tokens=4013448 is outside the collected domain"
+    )
+    with pytest.raises(PerfDataNotAvailableError):
+        _reraise_engine_error(miss)
+
+    genuine = ValueError("invalid engine config: isl must be greater than 0")
+    with pytest.raises(ValueError) as excinfo:
+        _reraise_engine_error(genuine)
+    assert not isinstance(excinfo.value, PerfDataNotAvailableError)
+
+
+@pytest.mark.unit
+def test_engine_handle_cache_key_distinguishes_raw_quant_identity():
+    """FPM cell identity keys on the five RAW quant enum names, including
+    comm_quant_mode; the collapsed DataType strings under-key it (fp8 vs
+    fp8_ootb -> "fp8", no comm axis at all)."""
+    from types import SimpleNamespace
+
+    from aiconfigurator_core.sdk.rust_engine_step import _engine_config_json
+
+    def make(comm, gemm):
+        config = SimpleNamespace(
+            tp_size=4,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            attention_dp_size=1,
+            cp_size=None,
+            gemm_quant_mode=SimpleNamespace(name=gemm, value=None),
+            moe_quant_mode=SimpleNamespace(name="nvfp4", value=None),
+            fmha_quant_mode=SimpleNamespace(name="bfloat16", value=None),
+            comm_quant_mode=SimpleNamespace(name=comm, value=None),
+            kvcache_quant_mode=SimpleNamespace(name="fp8", value=None),
+        )
+        model = SimpleNamespace(
+            config=config,
+            model_path="org/model-a",
+            architecture="X",
+            forward_model="fpm",
+            _nextn=None,
+            _nextn_accepted=None,
+        )
+        database = SimpleNamespace(system="b200_sxm", backend="vllm", version="0.25.1", systems_root="/tmp/x")
+        return _engine_config_json(model, database)
+
+    assert make("half", "fp8") != make("int8", "fp8")
+    assert make("half", "fp8") != make("half", "fp8_ootb")
+    assert make("half", "fp8") == make("half", "fp8")

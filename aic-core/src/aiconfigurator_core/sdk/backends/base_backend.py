@@ -1095,6 +1095,11 @@ class BaseBackend:
                     isl=isl,
                     osl=1,
                     prefix=prefix,
+                    # Inherit the caller's resolved route: a fresh config
+                    # defaults to None and would re-resolve from the env var,
+                    # letting an explicitly-forced "python" FPM step run its
+                    # component statics on the Rust engine.
+                    engine_step_backend=runtime_config.engine_step_backend,
                     seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
                 ),
                 mode="static_ctx",
@@ -1118,6 +1123,7 @@ class BaseBackend:
                     beam_width=1,
                     isl=isl + osl // 2,
                     osl=2,
+                    engine_step_backend=runtime_config.engine_step_backend,
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 ),
                 mode="static_gen",
@@ -1180,6 +1186,7 @@ class BaseBackend:
                 beam_width=1,
                 isl=isl + osl // 2,
                 osl=2,
+                engine_step_backend=runtime_config.engine_step_backend,
                 gen_seq_imbalance_correction_scale=gen_scale,
             ),
             mode="static_gen",

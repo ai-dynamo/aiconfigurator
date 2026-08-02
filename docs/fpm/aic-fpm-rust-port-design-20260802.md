@@ -240,3 +240,48 @@ Rust step (pre-existing SILICON-only routing), the `src/fpm/`
    commit — the wire changes atomically)
 4. runtime FPM branches + Python gate lift
 5. parity suites + real-DB grid run + report
+
+## Post-review addenda (2026-08-02 adversarial review, 18 findings)
+
+Fixes applied on top of the initial port:
+
+- **Error taxonomy at the sweep layer**: the PyO3 boundary keeps the uniform
+  ValueError contract, but `rust_engine_step`'s `estimate_*_with_rust`
+  wrappers now re-raise `AicError::PerfDatabase`-class messages (prefix
+  `"perf database error: "`) as `PerfDataNotAvailableError` — the type
+  sweep.py branches on to mark points unanswerable. Without this, every FPM
+  miss on the Rust route aborted the whole parallel config.
+- **Lazy SOL support**: the roofline-support check moved from query time into
+  the sol closure. Exact hits and in-curve lerps never invoke SOL (mirrors
+  Python); only sol-dependent transfer/hold paths fail for unported families,
+  with the op named in the error.
+- **Engine-handle cache key** carries the five RAW quant enum names
+  (including comm) — `_quant_to_dtype`'s collapsed strings under-keyed
+  FPM-distinct identities (fp8 vs fp8_ootb, no comm axis).
+- **`Engine::build` FPM scan is recursive** (Overlap/Fallback nesting).
+- **rank_latency_ms FPM branch queries iteration totals** via `query_totals`
+  (no per-request-average rounding).
+- Loader: null int identity cells normalize to `""` like `_norm_identity`;
+  sidecar `row_count`/`schema_version` accept integral JSON floats (Python
+  `==` semantics); row_count precedence matches Python (checked before
+  per-row validation). FPM step packing uses saturating adds.
+- The Python FPM mixed/genonly component statics inherit the caller's
+  `engine_step_backend` (a fresh RuntimeConfig re-resolved from the env var).
+
+Documented, deliberate divergences (accepted, not bugs):
+
+- **SOL coverage**: `fpm_sol.rs` covers the vLLM MoE/dense families (Gemm,
+  Embedding, Elementwise, Context/GenerationAttention, Moe, MoeDispatch,
+  CustomAllReduce, Nccl, P2P, Overlap/Fallback). DSA (GLM-5.2), MSA
+  (MiniMax-M3), and MLA-module families are NOT ported: exact-hit and
+  in-curve queries work; transfer/hold paths miss with a structured error.
+  Porting those SOLs is a tracked follow-up.
+- **MiniMax-M3 cannot compile to a Rust FPM spec at all**: `_to_opspec` has
+  no MSA converter, so `compile_engine` fails loudly (`OpConversionError`);
+  M3 + fpm must use `engine_step_backend="python"` until MSA lands.
+- **OnceLock caches load errors for the process lifetime** (crate-wide table
+  convention); Python retries failed loads on the next query.
+- **Neighbor tie-break on EXACT log2-distance ties** may pick different
+  sites: Python iterates sites in parquet-row insertion order, Rust in
+  BTreeMap key order. Python's own order is collector-output-dependent, so
+  this is not a stable contract on either side; measure-zero event.

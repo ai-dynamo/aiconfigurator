@@ -257,7 +257,7 @@ fn validate_sidecar(metadata_path: &Path, parquet_path: &Path) -> Result<Option<
             metadata_path.display()
         )));
     }
-    if metadata.get("schema_version").and_then(|v| v.as_u64()) != Some(FPM_FORWARD_SCHEMA_VERSION) {
+    if json_uint(metadata.get("schema_version")) != Some(FPM_FORWARD_SCHEMA_VERSION) {
         return Err(structural(format!(
             "unsupported FPM schema_version={:?} (expected {FPM_FORWARD_SCHEMA_VERSION}): {}",
             metadata.get("schema_version"),
@@ -282,7 +282,18 @@ fn validate_sidecar(metadata_path: &Path, parquet_path: &Path) -> Result<Option<
             parquet_path.parent().unwrap_or(parquet_path).display()
         )));
     }
-    Ok(metadata.get("row_count").and_then(|v| v.as_u64()))
+    Ok(json_uint(metadata.get("row_count")))
+}
+
+/// Python `metadata.get(k) != n` compares by VALUE: a JSON `5.0` equals the
+/// int 5. Accept integral floats the way Python does; anything else is None.
+fn json_uint(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    if let Some(v) = value.as_u64() {
+        return Some(v);
+    }
+    let f = value.as_f64()?;
+    (f.fract() == 0.0 && f >= 0.0 && f <= u64::MAX as f64).then_some(f as u64)
 }
 
 /// One parsed row. String identity fields are pre-normalized (null -> "");
@@ -349,6 +360,28 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
     }
     let latency_col = reader.col("latency_ms")?;
 
+    // Python checks the sidecar row_count against the FULL row list before any
+    // per-row validation (`load_fpm_forward_data`: read_table -> row_count ->
+    // empty -> per-row loop); mirror that error precedence with a cheap count
+    // pass so a wrong-count pair reports the count, not the first bad row.
+    let actual_row_count = reader.rows()?.count() as u64;
+    match sidecar_row_count {
+        Some(expected) if expected == actual_row_count => {}
+        other => {
+            return Err(structural(format!(
+                "FPM row_count mismatch: sidecar={} actual={actual_row_count}: {}",
+                other.map_or("None".to_string(), |v| v.to_string()),
+                parquet_path.display()
+            )));
+        }
+    }
+    if actual_row_count == 0 {
+        return Err(structural(format!(
+            "FPM database contains no rows: {}",
+            parquet_path.display()
+        )));
+    }
+
     let mut rows: Vec<FpmRow> = Vec::new();
     for (index, row) in reader.rows()?.enumerate() {
         let row = row?;
@@ -356,7 +389,17 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
             // Null identity cells normalize to "" (Python _norm_identity).
             Ok(row.str_optional(Some(str_idx[name]))?.unwrap_or("").to_string())
         };
+        // Workload coordinates: required, loud on null/overflow.
         let get_int = |name: &str| -> Result<u32, AicError> { row.u32(int_idx[name]) };
+        // Identity ints (tp/pp/dp/moe_tp/moe_ep/cp) are only ever COMPARED as
+        // strings; Python `_norm_identity(row.get(col))` maps a null cell to
+        // "" and the row simply becomes an unmatchable cell — it must not
+        // fail the whole load.
+        let get_int_identity = |name: &str| -> Result<String, AicError> {
+            Ok(row
+                .u32_optional(Some(int_idx[name]))?
+                .map_or_else(String::new, |v| v.to_string()))
+        };
 
         let workload_kind = get_str("workload_kind")?;
         if workload_kind != "prefill" && workload_kind != "decode" {
@@ -413,7 +456,7 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
                 if str_idx.contains_key(name) {
                     get_str(name)
                 } else {
-                    get_int(name).map(|v| v.to_string())
+                    get_int_identity(name)
                 }
             })
             .collect::<Result<_, _>>()?;
@@ -459,28 +502,6 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
             total_kv_read_tokens,
             latency_ms,
         });
-    }
-
-    if let Some(expected) = sidecar_row_count {
-        if expected != rows.len() as u64 {
-            return Err(structural(format!(
-                "FPM row_count mismatch: sidecar={expected} actual={}: {}",
-                rows.len(),
-                parquet_path.display()
-            )));
-        }
-    } else {
-        return Err(structural(format!(
-            "FPM row_count mismatch: sidecar=None actual={}: {}",
-            rows.len(),
-            parquet_path.display()
-        )));
-    }
-    if rows.is_empty() {
-        return Err(structural(format!(
-            "FPM database contains no rows: {}",
-            parquet_path.display()
-        )));
     }
 
     // Duplicate physical row keys are collector bugs, not last-wins merges.
@@ -968,6 +989,32 @@ pub(crate) mod tests {
         write_pair(tmp.path(), &rows);
         let err = loaded_table(tmp.path()).cells().unwrap_err();
         assert!(err.to_string().contains("duplicate physical row key"), "{err}");
+    }
+
+    /// Python compares sidecar numbers by VALUE (`5.0 == 5`); a writer that
+    /// went through float-typed JSON must not be rejected.
+    #[test]
+    fn sidecar_integral_floats_are_accepted() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair_with(tmp.path(), &default_rows(), |m| {
+            m.insert("schema_version".into(), serde_json::Value::from(5.0));
+            m.insert("row_count".into(), serde_json::Value::from(9.0));
+        });
+        assert!(loaded_table(tmp.path()).cells().is_ok());
+    }
+
+    /// Python checks row_count BEFORE per-row validation; a pair that is both
+    /// short-counted and carries a bad row must report the count mismatch.
+    #[test]
+    fn row_count_mismatch_preempts_row_gates() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut rows = default_rows();
+        rows[5].latency_ms = -1.0; // bad row AND wrong sidecar count
+        write_pair_with(tmp.path(), &rows, |m| {
+            m.insert("row_count".into(), serde_json::Value::from(3));
+        });
+        let err = loaded_table(tmp.path()).cells().unwrap_err();
+        assert!(err.to_string().contains("row_count mismatch"), "{err}");
     }
 
     #[test]

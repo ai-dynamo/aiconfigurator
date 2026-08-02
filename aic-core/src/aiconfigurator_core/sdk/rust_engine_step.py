@@ -246,6 +246,26 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     return True
 
 
+# The PyO3 boundary collapses every Rust error into ValueError (py.rs::
+# aic_to_py — the uniform-ValueError contract). But the perf-DB miss class
+# ("not collected" / out-of-domain / no cell match / interp miss) is
+# semantically Python's PerfDataNotAvailableError, and callers above this
+# layer branch on that TYPE: sweep.py marks such points unanswerable and
+# skips them, where a genuine ValueError aborts the parallel config. All
+# `AicError::PerfDatabase` messages carry this display prefix; re-raise them
+# as the class the Python route raises for the same conditions, so both
+# routes expose ONE error taxonomy to the sweep.
+_RUST_PERF_MISS_PREFIX = "perf database error: "
+
+
+def _reraise_engine_error(exc: ValueError) -> None:
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
+    if str(exc).startswith(_RUST_PERF_MISS_PREFIX):
+        raise PerfDataNotAvailableError(str(exc)) from exc
+    raise exc
+
+
 def estimate_static_latency_breakdown_with_rust(
     model: Any,
     database: Any,
@@ -266,17 +286,20 @@ def estimate_static_latency_breakdown_with_rust(
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
-    context_latency_ms, generation_latency_ms, _ = handle.run_static(
-        batch_size=int(runtime_config.batch_size),
-        isl=int(runtime_config.isl),
-        osl=int(runtime_config.osl),
-        prefix=int(runtime_config.prefix or 0),
-        beam_width=int(runtime_config.beam_width or 1),
-        seq_imbalance_correction_scale=float(runtime_config.seq_imbalance_correction_scale or 1.0),
-        gen_seq_imbalance_correction_scale=float(runtime_config.gen_seq_imbalance_correction_scale or 1.0),
-        mode=engine_mode,
-        stride=int(stride),
-    )
+    try:
+        context_latency_ms, generation_latency_ms, _ = handle.run_static(
+            batch_size=int(runtime_config.batch_size),
+            isl=int(runtime_config.isl),
+            osl=int(runtime_config.osl),
+            prefix=int(runtime_config.prefix or 0),
+            beam_width=int(runtime_config.beam_width or 1),
+            seq_imbalance_correction_scale=float(runtime_config.seq_imbalance_correction_scale or 1.0),
+            gen_seq_imbalance_correction_scale=float(runtime_config.gen_seq_imbalance_correction_scale or 1.0),
+            mode=engine_mode,
+            stride=int(stride),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
 
     if latency_correction_scale != 1.0:
         context_latency_ms *= latency_correction_scale
@@ -310,13 +333,16 @@ def estimate_mixed_step_latency_with_rust(
     pre-math.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.mixed_step_latency(
-        int(ctx_tokens),
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        int(prefix or 0),
-    )
+    try:
+        return handle.mixed_step_latency(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix or 0),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
 
 
 def estimate_decode_step_latency_with_rust(
@@ -335,7 +361,10 @@ def estimate_decode_step_latency_with_rust(
     length internally, so the raw args pass straight through.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+    try:
+        return handle.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+    except ValueError as exc:
+        _reraise_engine_error(exc)
 
 
 # Memo of compiled ``EngineHandle`` objects, keyed by the engine identity
@@ -440,9 +469,30 @@ def _engine_config_json(model: Any, database: Any) -> str:
         # Same identity built against different systems roots reads different
         # perf trees; the root is part of the engine identity.
         "systems_root": str(getattr(database, "systems_root", "") or ""),
+        # RAW enum names, not the collapsed Rust DataType strings above:
+        # `_quant_to_dtype` merges members the compiled spec distinguishes
+        # (fp8 vs fp8_ootb, int8 vs sq -> "int8") and covers no comm mode at
+        # all, yet the FPM cell identity keys on all five raw names
+        # (`FPMForwardOp._match_identity`). Two builds differing only there
+        # must not share a handle. Op-level engines over-key harmlessly.
+        "quant_names": [
+            _raw_quant_name(getattr(model_config, "gemm_quant_mode", None)),
+            _raw_quant_name(getattr(model_config, "moe_quant_mode", None)),
+            _raw_quant_name(getattr(model_config, "fmha_quant_mode", None)),
+            _raw_quant_name(getattr(model_config, "comm_quant_mode", None)),
+            _raw_quant_name(getattr(model_config, "kvcache_quant_mode", None)),
+        ],
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _raw_quant_name(value: Any) -> str | None:
+    """Uncollapsed quant identity: the enum member name (`_norm_identity`'s
+    Enum branch), or the string form for already-normalized values."""
+    if value is None:
+        return None
+    return str(getattr(value, "name", value))
 
 
 def _backend_name(value: Any) -> str:
