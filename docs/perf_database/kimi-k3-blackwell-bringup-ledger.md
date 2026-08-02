@@ -506,3 +506,13 @@ sharding is constructed locally by the shim), so GPU count affects
 wall-clock only, not the numbers. Every Blackwell system now carries
 vllm kda + K3 moe + mla_bmm; the vllm trtllm-fallback for MLA BMMs is
 cleared on b200/b300/gb200/gb300.
+
+2026-08-02 addendum (owner reopened vllm kda scope beyond Blackwell):
+h100/h200/l40s/rtx wave-1 kda artifacts ingested at 88fbf9a9a — vllm kda
+now covers all EIGHT systems; SM89/SM120 lifted from `unverified_sms`
+(only SM80 remains, no probe hardware). The 2026-08-01 "sglang only"
+kda scope row above is superseded. NOTE for CI: 5 pre-existing collector
+unit-test failures on the branch (mla_bmm 400->600 case-count pin from
+the 96-family grid extension, GLM model-set pins in sglang mla_module
+tests, sm90 attention population pin 147->151) predate this ingest and
+need their pins refreshed before the PR goes ready.
