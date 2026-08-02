@@ -830,8 +830,10 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
     pre_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_pre")
     post_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_post")
 
-    assert len(pre_cases) == 400
-    assert len(post_cases) == 448
+    # 600/672 since the Kimi-K3 96-head family (96/48/24/12) joined the
+    # base head_counts grid alongside the DeepSeek 128-family (2026-08-02).
+    assert len(pre_cases) == 600
+    assert len(post_cases) == 672
     assert pre_cases[0] == MLABMMCommonTestCase(
         num_tokens=1,
         num_heads=128,
