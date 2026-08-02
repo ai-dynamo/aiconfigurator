@@ -516,3 +516,28 @@ unit-test failures on the branch (mla_bmm 400->600 case-count pin from
 the 96-family grid extension, GLM model-set pins in sglang mla_module
 tests, sm90 attention population pin 147->151) predate this ingest and
 need their pins refreshed before the PR goes ready.
+
+## PP scale-out data audit + Hopper vllm wave-3 — 2026-08-02
+
+Owner question: with 16/32-GPU workers (tp/ep<=8 per node, PP across
+nodes), is the DATA sufficient? Audit answer: PP itself needs no
+collection (ops.P2P is analytic: inter_node_bw + p2p_latency); per-rank
+op shapes do not change with pp. Task-API probe with
+agg_num_gpu_candidates=[16,32] + pp[2,4,8] priced successfully from
+existing silicon: b200 sglang 452 tok/s/gpu (32 GPUs, tp2 pp4 dp4
+moe_ep4), h200 sglang 132 (moe_tp8 route — Hopper K3 moe ep 2..8 rows
+are missing because 0.5.14 marlin EP>1 crashes on Hopper, the honest
+serving gap), h100 sglang 73.5, b200 vllm 157. Also: gb200 fits at 8
+GPUs once pp is enabled (tp2 pp4 = per-stage MLA KV; pp=1 OOMs by ~2
+GiB) — the support-matrix FAILs on gb200/b200 are the pp=1 search-space
+pin (agg_pp_candidates [1], should_enable_pp never set) plus the
+worker<=8 domain cap, not data. SDK follow-ups (not this PR): open pp
+search for capacity-bound models, worker>8 domain, 93%pp rounding.
+
+Hard gap: Hopper vllm K3 moe rows = 0 (Blackwell-first scope cut).
+Wave-3 submitted (REF=campaign/rc20-restore, AIC_REVISION=04036a56c,
+stock v0.24.0 digest image): 60730461 moe K3 filter @ h100,h200
+(situ-as-silu Marlin lane — watch whether vllm's marlin_moe_wna16 hits
+the Hopper EP>1 crash the sglang kernel has; Blackwell collected EP up
+to 128 cleanly) + 60730462 mla_bmm @ h100,h200 (clears trtllm
+fallback).
