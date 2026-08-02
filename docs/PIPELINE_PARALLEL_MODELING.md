@@ -207,7 +207,7 @@ numbers are comparable, not just ratios. Decode-dominated workload
 (isl=256, osl=512), 8 GPUs held constant across every `(tp, pp)`, chunked
 prefill off, aiperf closed-loop.
 
-### 6.1 PP is a pure loss at constant GPU count
+### 6.1 Scope: this run cannot show PP winning, by construction
 
 Measured output throughput, as a ratio to `tp8/pp1`:
 
@@ -219,15 +219,36 @@ Measured output throughput, as a ratio to `tp8/pp1`:
 | 64 | 0.53 | 0.56 | 0.36 |
 | 128 | 0.38 | 0.54 | 0.40 |
 
-No configuration beats `pp=1`. This is the expected shape for weight-bound
-decode: holding total GPUs fixed, per-GPU weight bytes are unchanged by PP
-(`tp*pp` is constant), so pipelining buys nothing and the P2P hops plus the
-smaller per-stage batch cost real time. It is evidence for keeping PP out of
-the automatic search until the gaps below are closed.
+No configuration beats `pp=1` — as expected. **PP's payoff is crossing nodes**,
+and this run is single-node. Holding total GPUs fixed inside one NVLink domain,
+per-GPU weight bytes are unchanged by PP (`tp*pp` constant), so pipelining buys
+nothing while the P2P hops and the smaller per-stage batch cost real time.
+
+The regime PP exists for is the one where TP would have to span the slow
+fabric. On this spec (`num_gpus_per_node=8`, `inter_node_bw` 50 GB/s vs
+`intra_node_bw` 450 GB/s), TP all-reduces every layer across that 9x cliff
+while PP crosses it once per stage boundary with a single activation tensor.
+AIC predicts the difference clearly (Qwen3-32B, isl=256/osl=512, C=64):
+
+| GPUs | TP-only | best PP config | ratio |
+|---|---|---|---|
+| 16 (2 nodes) | tp16/pp1: 1714 tok/s | tp8/pp2: 7073 | **4.1x** |
+| 32 (4 nodes) | tp32/pp1: 1735 tok/s | tp8/pp4: 9275 | **5.4x** |
+
+So treat §6.2 and §6.3 as **error-mode stress tests of the model**, not as
+evidence about whether PP is worth deploying. Single-node PP is the regime that
+maximally exposes the model's failure modes precisely because there is no real
+gain for them to hide behind.
 
 The `pp=1` baseline predicts within −8% to +11% on throughput and within 8% on
 TPOT at every concurrency, so the discrepancies below are PP-specific and not
 a perf-database problem.
+
+**Both remaining gaps over-predict**, which is the dangerous direction for the
+cross-node case too: if the §6.3 saturation effect generalises, the 4–5x above
+is optimistic and AIC would over-recommend pipeline depth. Neither gap has been
+measured cross-node — that needs multi-node hardware this campaign did not
+have.
 
 ### 6.2 The "always full pipe" default is the largest single error
 
@@ -320,7 +341,11 @@ fitted to it.
   touching every model's `P2P` construction plus the Rust mirror, so it is left
   to its own change. Measured impact on Qwen3-32B at `pp=8`: 0.67% of a decode
   step, 2.2% of a prefill step, in the conservative direction.
-- **PP is still excluded from the automatic search.** `build_disagg_parallel_lists`
-  takes `should_enable_pp` (default `False`) and no caller passes `True`, so PP
-  is reachable only via an explicit `--pp`. Turning it on should wait until the
-  gaps above are calibrated.
+- **PP is excluded from the automatic search, and that is costly.**
+  `build_disagg_parallel_lists` takes `should_enable_pp` (default `False`) and
+  no caller passes `True`, so PP is reachable only via an explicit `--pp`. For
+  any deployment that must span nodes this is not a conservative default but a
+  wrong answer: at 16 GPUs the search can only offer `tp16/pp1` (1714 tok/s)
+  when `tp8/pp2` is worth 7073 — a 4x miss on a real sizing decision (§6.1).
+  The fix is gated on the gaps above, since enabling a search dimension the
+  model over-predicts would make it pick pipelines that are too deep.
