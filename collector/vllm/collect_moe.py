@@ -7,15 +7,17 @@ Shared MoE cases come from YAML. Every quantization mode is built through
 ``FusedMoE`` so vLLM owns routing, TP/EP sharding, weight post-processing, and
 backend selection exactly as it does for model execution.
 
-Runtime: the moe family is pinned to the vLLM kimi-k3 preview build
-(0.1.dev19262 — see frameworks.vllm.families.moe in framework_manifest.yaml;
-K3's SITU activation does not exist in stock 0.24.0, which would silently
-dispatch a different kernel). The 0.24-era APIs this module uses were
-verified importable and behavior-compatible on the preview build; the
-version-specific dispatch citations below name the build they were read at.
+Runtime: stock vLLM v0.24.0 (owner decision 2026-08-02, reverting the
+2026-08-01 family-wide preview pin — a temporary build must not own a
+family default). K3 SITU cases are probe-guarded here (SITU does not
+exist in stock 0.24.0; a situ case on this runtime raises a classified
+error instead of silently benchmarking a different activation kernel).
+Collecting the K3 moe lane on the kimi-k3 preview build (0.1.dev19262)
+requires a manifest-level mechanism for temporary builds — pending owner
+decision; see frameworks.vllm comment in framework_manifest.yaml.
 """
 
-__compat__ = "vllm==0.1.dev19262"
+__compat__ = "vllm==0.24.0"
 
 import json
 import os
@@ -517,6 +519,32 @@ def run_moe_torch(
     # one physical rank, but requested logical sizes determine local weights
     # and the rank-0 expert map exactly as in a multi-rank model.
     logical_parallel_size = moe_ep_size if moe_ep_size > 1 else moe_tp_size
+
+    # SITU activation (Kimi-K3) exists only on the kimi-k3 preview build:
+    # stock v0.24.0 FusedMoE has no activation_situ_* parameters and no situ
+    # activation path (upstream v0.24.0 activation.py; preview
+    # compressed_tensors_moe_w4a4_mxfp4.py:58-71 dispatches SITU ->
+    # MarlinExperts). Probe the constructor instead of predicting: pass the
+    # betas only where the runtime accepts them, and raise a classified
+    # error if a situ case lands on a runtime without the parameter — a
+    # silu-kernel row labelled situ would be silently wrong data.
+    situ_kwargs = {}
+    if runtime_config["activation"] == "situ":
+        from inspect import signature as _sig
+
+        if "activation_situ_beta" not in _sig(FusedMoE.__init__).parameters:
+            raise RuntimeError(
+                "activation=situ requires the vLLM kimi-k3 preview build "
+                "(0.1.dev19262): this runtime's FusedMoE has no "
+                "activation_situ_beta parameter, so the case would silently "
+                "run a different activation kernel. The K3 moe lane needs "
+                "the preview image (see frameworks.vllm in "
+                "framework_manifest.yaml)."
+            )
+        situ_kwargs = {
+            "activation_situ_beta": runtime_config["activation_situ_beta"],
+            "activation_situ_linear_beta": runtime_config["activation_situ_linear_beta"],
+        }
     with set_current_vllm_config(vllm_config):
         moe_module = FusedMoE(
             num_experts=num_experts,
@@ -541,10 +569,9 @@ def run_moe_torch(
             apply_router_weight_on_input=runtime_config["apply_router_weight_on_input"],
             has_bias=runtime_config["has_bias"],
             activation=runtime_config["activation"],
-            activation_situ_beta=runtime_config["activation_situ_beta"],
-            activation_situ_linear_beta=runtime_config["activation_situ_linear_beta"],
             router_logits_dtype=router_logits_dtype,
             apply_routed_scale_to_output=runtime_config["apply_routed_scale_to_output"],
+            **situ_kwargs,
         )
         moe_module.to(device)
         moe_module.eval()

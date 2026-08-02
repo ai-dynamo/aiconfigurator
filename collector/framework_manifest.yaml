@@ -46,24 +46,27 @@ frameworks:
         version: "0.1.dev19262"
         images:
           default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
-      # K3-driven pin (owner decision 2026-08-01): stock v0.24.0 has no SITU
-      # activation (upstream v0.24.0 activation.py), so a Kimi-K3
-      # compressed-tensors mxfp4 case there would dispatch CUTLASS W4A4 +
-      # silu — a different kernel than K3 serving (SITU -> MarlinExperts
-      # weight-only, compressed_tensors_moe_w4a4_mxfp4.py:58-71 @ preview).
-      # The preview build is a superset of the stock moe paths, so non-K3
-      # vllm moe collections remain valid here; the family schema has no
-      # per-model pin (recorded image-routing gap). Pre-existing 0.24.0 moe
-      # rows are untouched; K3 rows merge into the 0.24.0 table per the
-      # owner decision, carrying their honest runtime version column.
-      # Re-verify at the next tag bump. (2026-08-02 audit: the tag's amd64
-      # image is IDENTICAL to this pin — 0.1.dev19262+gb6bbf29dd, no
-      # deep_gemm; the earlier "drift to sha256:d61e062d" observation was
-      # the manifest list's arm64 entry, not a new build.)
-      moe:
-        version: "0.1.dev19262"
-        images:
-          default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
+      # moe: NO family pin (owner decision 2026-08-02, reverting the
+      # 2026-08-01 family-wide preview pin — a temporary preview build must
+      # not own a family default; a family pin here hijacks image selection
+      # for every model). vllm moe collects on the stock v0.24.0 default
+      # image. K3 SITU cases raise a classified error there (stock has no
+      # SITU activation — upstream v0.24.0 activation.py); collecting them
+      # requires the kda preview image above (same digest, version
+      # 0.1.dev19262 — sorts BELOW 0.24.0 in PEP 440, never "latest"),
+      # via a temporary-build lane mechanism that is PENDING an owner
+      # decision (the registry policy forbids version routes here, and the
+      # family schema has no per-model pin — the recorded image-routing
+      # gap). Already-collected K3 rows (b200/b300) stay merged in the
+      # 0.24.0 moe table with their honest runtime version column (owner
+      # decision 2026-08-01). Fold the lane back into the default when
+      # upstream ships SITU in a stock release.
+      # (2026-08-02 audit note kept for the preview image: the kimi-k3
+      # tag's amd64 image is IDENTICAL to the pin digest —
+      # 0.1.dev19262+gb6bbf29dd, no deep_gemm; the earlier "drift to
+      # sha256:d61e062d" observation was the manifest list's arm64 entry,
+      # not a new build. On aarch64 hosts (gb200/gb300) resolve the arm64
+      # entry of the same tag and re-verify the version string before use.)
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"
