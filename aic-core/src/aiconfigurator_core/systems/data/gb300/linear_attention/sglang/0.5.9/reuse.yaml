@@ -3,13 +3,8 @@
 
 schema_version: 1
 reuse:
-- table: generation_attention_perf
-  from_version: 1.3.0rc10
-  reason: 'per-op dedup: every row key is covered by newer-version primaries; pruned
-    2026-08-02'
-  approved_by: tianhaox
-- table: context_attention_perf
-  from_version: 1.3.0rc10
+- table: gdn_perf
+  from_version: 0.5.10
   reason: 'wave-2 loose prune: <10% unique interior grid rows, interpolation-covered;
     pruned 2026-08-02'
   approved_by: tianhaox
