@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,6 +82,33 @@ def test_default_routing_delegates_power_carrying_databases(monkeypatch, tmp_pat
     assert not rust_engine_step.should_use_rust_engine_step(
         RuntimeConfig(), SimpleNamespace(system="mock", backend="vllm", version="1.0.0")
     )
+
+
+def test_engine_handle_cache_is_a_bounded_lru(monkeypatch) -> None:
+    """Every handle pins a Rust-side perf-DB load, so the memo must evict:
+    least-recently-USED goes first, and negative entries obey the same cap."""
+    monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE", OrderedDict())
+    monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE_MAX", 2)
+    cache = rust_engine_step._ENGINE_HANDLE_CACHE
+
+    rust_engine_step._engine_handle_cache_put("a", "handle-a")
+    rust_engine_step._engine_handle_cache_put("b", "handle-b")
+    cache.move_to_end("a")  # simulate a cache hit on "a" (what _cached_engine_handle does)
+    rust_engine_step._engine_handle_cache_put("c", rust_engine_step.RustEngineUnsupportedError("nope"))
+
+    assert list(cache) == ["a", "c"]  # "b" was least-recently-used
+
+    rust_engine_step._engine_handle_cache_clear()
+    assert not cache
+
+
+def test_clear_all_op_caches_drops_engine_handles(monkeypatch) -> None:
+    from aiconfigurator.sdk.operations import clear_all_op_caches
+
+    rust_engine_step._engine_handle_cache_put("some-engine-identity", "handle")
+    assert rust_engine_step._ENGINE_HANDLE_CACHE
+    clear_all_op_caches()
+    assert not rust_engine_step._ENGINE_HANDLE_CACHE
 
 
 def test_power_probe_memoizes_per_database_identity(monkeypatch, tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import OrderedDict
 from importlib import resources as pkg_resources
 from pathlib import Path
 from typing import Any
@@ -525,19 +526,38 @@ def estimate_decode_step_latency_with_rust(
     return latency_ms
 
 
-# Memo of compiled ``EngineHandle`` objects, keyed by the engine identity
+# LRU memo of compiled ``EngineHandle`` objects, keyed by the engine identity
 # (model_path + system + backend + version + parallelism + quant + nextn +
 # kv_block_size). ``compile_engine`` rebuilds the model and loads the perf DB,
 # which is expensive; the engine-step helpers are called many times per sweep,
 # so each unique config must compile + load its DB exactly once. The key is
 # ``_engine_config_json``, so two runtime points that differ only in
 # batch/isl/osl share one handle.
-_ENGINE_HANDLE_CACHE: dict[str, Any] = {}
+#
+# The memo is BOUNDED: every handle pins its own Rust-side perf-DB load, so an
+# unbounded dict grows monotonically with the number of engine identities a
+# long-lived process touches (a sweep visits one parallel config at a time and
+# a webapp compares a handful, so a small LRU never thrashes; eviction only
+# costs the ~100ms-scale recompile on a later re-visit). Negative entries
+# (``RustEngineUnsupportedError``) live under the same policy.
+_ENGINE_HANDLE_CACHE: OrderedDict[str, Any] = OrderedDict()
+_ENGINE_HANDLE_CACHE_MAX = 32
 
 
 def _engine_handle_cache_clear() -> None:
-    """Reset the compiled-engine handle memo (used by parity harnesses)."""
+    """Drop every cached ``EngineHandle`` (and negative entry), releasing the
+    Rust-side perf DBs they pin. Used by parity harnesses and by
+    ``operations.clear_all_op_caches`` (the long-running-webapp eviction
+    lever)."""
     _ENGINE_HANDLE_CACHE.clear()
+
+
+def _engine_handle_cache_put(key: str, value: Any) -> None:
+    """Insert into the handle LRU, evicting least-recently-used overflow."""
+    _ENGINE_HANDLE_CACHE[key] = value
+    _ENGINE_HANDLE_CACHE.move_to_end(key)
+    while len(_ENGINE_HANDLE_CACHE) > _ENGINE_HANDLE_CACHE_MAX:
+        _ENGINE_HANDLE_CACHE.popitem(last=False)
 
 
 def _cached_engine_handle(model: Any, database: Any) -> Any:
@@ -567,11 +587,12 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
         except (AttributeError, TypeError):
             pass  # slotted/frozen model objects: recompute per call
     handle = _ENGINE_HANDLE_CACHE.get(key)
-    if isinstance(handle, RustEngineUnsupportedError):
-        # Compilation already failed for this engine identity; re-raise the
-        # cached error instead of re-walking the op graph every step.
-        raise handle
     if handle is not None:
+        _ENGINE_HANDLE_CACHE.move_to_end(key)
+        if isinstance(handle, RustEngineUnsupportedError):
+            # Compilation already failed for this engine identity; re-raise the
+            # cached error instead of re-walking the op graph every step.
+            raise handle
         return handle
 
     _configure_default_data_roots()
@@ -597,11 +618,11 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
         )
     except OpConversionError as exc:
         unsupported = RustEngineUnsupportedError(str(exc))
-        _ENGINE_HANDLE_CACHE[key] = unsupported
+        _engine_handle_cache_put(key, unsupported)
         raise unsupported from exc
     spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
     handle = EngineHandle(spec_bytes, systems_path=systems_path)
-    _ENGINE_HANDLE_CACHE[key] = handle
+    _engine_handle_cache_put(key, handle)
     return handle
 
 
