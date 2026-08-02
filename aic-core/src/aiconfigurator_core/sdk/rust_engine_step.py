@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from collections import OrderedDict
 from importlib import resources as pkg_resources
 from pathlib import Path
@@ -539,9 +540,28 @@ def estimate_decode_step_latency_with_rust(
 # long-lived process touches (a sweep visits one parallel config at a time and
 # a webapp compares a handful, so a small LRU never thrashes; eviction only
 # costs the ~100ms-scale recompile on a later re-visit). Negative entries
-# (``RustEngineUnsupportedError``) live under the same policy.
+# (``_CachedUnsupported``) live under the same policy.
 _ENGINE_HANDLE_CACHE: OrderedDict[str, Any] = OrderedDict()
 _ENGINE_HANDLE_CACHE_MAX = 32
+# One lock serializes lookup+recency, insertion+eviction, and clearing:
+# ``clear_all_op_caches`` may run on a webapp thread while another thread is
+# mid-step, and an unserialized get()/move_to_end() pair would KeyError when a
+# clear lands between them. Uncontended acquisition is tens of ns against the
+# ~20us step budget (perf gate re-run green).
+_ENGINE_HANDLE_CACHE_LOCK = threading.Lock()
+
+
+class _CachedUnsupported:
+    """Message-only negative cache entry. Caching the raised
+    ``RustEngineUnsupportedError`` instance instead would pin ``model`` /
+    ``database`` via ``__cause__``/``__traceback__`` and grow the traceback on
+    every cache-hit re-raise; each hit constructs a fresh exception from the
+    message instead."""
+
+    __slots__ = ("message",)
+
+    def __init__(self, message: str) -> None:
+        self.message = message
 
 
 def _engine_handle_cache_clear() -> None:
@@ -549,15 +569,26 @@ def _engine_handle_cache_clear() -> None:
     Rust-side perf DBs they pin. Used by parity harnesses and by
     ``operations.clear_all_op_caches`` (the long-running-webapp eviction
     lever)."""
-    _ENGINE_HANDLE_CACHE.clear()
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        _ENGINE_HANDLE_CACHE.clear()
+
+
+def _engine_handle_cache_get(key: str) -> Any:
+    """Look up a handle (or negative entry), refreshing its LRU recency."""
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        entry = _ENGINE_HANDLE_CACHE.get(key)
+        if entry is not None:
+            _ENGINE_HANDLE_CACHE.move_to_end(key)
+        return entry
 
 
 def _engine_handle_cache_put(key: str, value: Any) -> None:
     """Insert into the handle LRU, evicting least-recently-used overflow."""
-    _ENGINE_HANDLE_CACHE[key] = value
-    _ENGINE_HANDLE_CACHE.move_to_end(key)
-    while len(_ENGINE_HANDLE_CACHE) > _ENGINE_HANDLE_CACHE_MAX:
-        _ENGINE_HANDLE_CACHE.popitem(last=False)
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        _ENGINE_HANDLE_CACHE[key] = value
+        _ENGINE_HANDLE_CACHE.move_to_end(key)
+        while len(_ENGINE_HANDLE_CACHE) > _ENGINE_HANDLE_CACHE_MAX:
+            _ENGINE_HANDLE_CACHE.popitem(last=False)
 
 
 def _cached_engine_handle(model: Any, database: Any) -> Any:
@@ -586,14 +617,13 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
             model._aic_engine_identity_memo = (database, key)
         except (AttributeError, TypeError):
             pass  # slotted/frozen model objects: recompute per call
-    handle = _ENGINE_HANDLE_CACHE.get(key)
-    if handle is not None:
-        _ENGINE_HANDLE_CACHE.move_to_end(key)
-        if isinstance(handle, RustEngineUnsupportedError):
-            # Compilation already failed for this engine identity; re-raise the
-            # cached error instead of re-walking the op graph every step.
-            raise handle
-        return handle
+    entry = _engine_handle_cache_get(key)
+    if isinstance(entry, _CachedUnsupported):
+        # Compilation already failed for this engine identity; raise a fresh
+        # error from the cached message instead of re-walking the op graph.
+        raise RustEngineUnsupportedError(entry.message)
+    if entry is not None:
+        return entry
 
     _configure_default_data_roots()
     # Lazy import: ``sdk.engine`` imports from this module at top level
@@ -617,9 +647,8 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
             database=database,
         )
     except OpConversionError as exc:
-        unsupported = RustEngineUnsupportedError(str(exc))
-        _engine_handle_cache_put(key, unsupported)
-        raise unsupported from exc
+        _engine_handle_cache_put(key, _CachedUnsupported(str(exc)))
+        raise RustEngineUnsupportedError(str(exc)) from exc
     spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
     handle = EngineHandle(spec_bytes, systems_path=systems_path)
     _engine_handle_cache_put(key, handle)

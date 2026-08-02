@@ -102,8 +102,9 @@ checkpointed, so the next shard resumes from where the last stopped.
 
 Also cap library threads — the scan parallelizes at the process level, so
 per-worker BLAS/rayon threads are pure oversubscription and the main
-arena-bloat driver. **The runner now sets these caps itself** (`cmd_scan`
-defaults all five to `1` via `setdefault`; an explicit export still wins):
+arena-bloat driver. **The runner now sets these caps itself** (all five
+default to `1` at module import, before pandas/numpy load and before any
+worker starts; an explicit export still wins):
 
 ```bash
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \

@@ -84,29 +84,87 @@ def test_default_routing_delegates_power_carrying_databases(monkeypatch, tmp_pat
     )
 
 
-def test_engine_handle_cache_is_a_bounded_lru(monkeypatch) -> None:
-    """Every handle pins a Rust-side perf-DB load, so the memo must evict:
-    least-recently-USED goes first, and negative entries obey the same cap."""
+@pytest.fixture
+def _handle_cache_harness(monkeypatch):
+    """Drive ``_cached_engine_handle`` end-to-end with the compile tail
+    stubbed at its import sources: models compile to sentinel handles (or an
+    ``OpConversionError`` when ``model.fail``), so cache-hit recency, negative
+    entries, and eviction are exercised through the production code path."""
+    import aiconfigurator_core
+    from aiconfigurator_core.sdk import engine as core_engine
+
     monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE", OrderedDict())
     monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE_MAX", 2)
-    cache = rust_engine_step._ENGINE_HANDLE_CACHE
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda: None)
+    monkeypatch.setattr(rust_engine_step, "_engine_config_json", lambda model, database: model.key)
 
-    rust_engine_step._engine_handle_cache_put("a", "handle-a")
-    rust_engine_step._engine_handle_cache_put("b", "handle-b")
-    cache.move_to_end("a")  # simulate a cache hit on "a" (what _cached_engine_handle does)
-    rust_engine_step._engine_handle_cache_put("c", rust_engine_step.RustEngineUnsupportedError("nope"))
+    compiles: list[str] = []
 
-    assert list(cache) == ["a", "c"]  # "b" was least-recently-used
+    def fake_build(model, **kwargs):
+        if getattr(model, "fail", False):
+            raise core_engine.OpConversionError(f"cannot express {model.key}")
+        compiles.append(model.key)
+        return "{}"
 
-    rust_engine_step._engine_handle_cache_clear()
-    assert not cache
+    class _FakeHandle:
+        def __init__(self, spec_bytes, systems_path=None) -> None:
+            self.spec_bytes = spec_bytes
+
+    monkeypatch.setattr(core_engine, "build_engine_spec_json", fake_build)
+    monkeypatch.setattr(core_engine, "EngineHandle", _FakeHandle)
+    monkeypatch.setattr(aiconfigurator_core, "engine_spec_bincode_from_json", lambda spec: b"")
+
+    def model(key: str, *, fail: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(key=key, model_path=key, _nextn=None, fail=fail)
+
+    database = SimpleNamespace(system="test-system", backend="vllm", version="1.0.0")
+    return model, database, compiles
 
 
-def test_clear_all_op_caches_drops_engine_handles(monkeypatch) -> None:
+def test_cached_engine_handle_hits_and_evicts_least_recently_used(_handle_cache_harness) -> None:
+    """Cache-hit recency and LRU eviction, through ``_cached_engine_handle``:
+    a hit refreshes recency, so inserting past the cap evicts the least
+    recently USED identity (recompiled on re-visit), not insertion order."""
+    model, database, compiles = _handle_cache_harness
+
+    m_a, m_b, m_c = model("a"), model("b"), model("c")
+    handle_a = rust_engine_step._cached_engine_handle(m_a, database)
+    rust_engine_step._cached_engine_handle(m_b, database)
+    assert rust_engine_step._cached_engine_handle(m_a, database) is handle_a  # hit refreshes "a"
+    assert compiles == ["a", "b"]
+
+    rust_engine_step._cached_engine_handle(m_c, database)  # cap 2: evicts "b"
+    rust_engine_step._cached_engine_handle(m_a, database)  # still cached
+    rust_engine_step._cached_engine_handle(m_b, database)  # evicted -> recompiles
+    assert compiles == ["a", "b", "c", "b"]
+
+
+def test_cached_engine_handle_negative_entries_raise_fresh_errors(_handle_cache_harness) -> None:
+    """An unsupported graph is remembered without re-walking it, but each hit
+    raises a FRESH ``RustEngineUnsupportedError`` — caching the raised
+    instance would pin model/database via ``__cause__`` and grow its traceback
+    on every re-raise."""
+    model, database, compiles = _handle_cache_harness
+
+    bad = model("bad", fail=True)
+    with pytest.raises(rust_engine_step.RustEngineUnsupportedError) as first:
+        rust_engine_step._cached_engine_handle(bad, database)
+    with pytest.raises(rust_engine_step.RustEngineUnsupportedError) as second:
+        rust_engine_step._cached_engine_handle(bad, database)
+
+    assert str(first.value) == str(second.value) == "cannot express bad"
+    assert first.value is not second.value
+    assert second.value.__cause__ is None  # cache hit: no pinned compile context
+    assert compiles == []  # the op graph was walked once, never re-walked
+
+
+def test_clear_all_op_caches_drops_engine_handles(_handle_cache_harness) -> None:
     from aiconfigurator.sdk.operations import clear_all_op_caches
 
-    rust_engine_step._engine_handle_cache_put("some-engine-identity", "handle")
+    model, database, compiles = _handle_cache_harness
+    rust_engine_step._cached_engine_handle(model("a"), database)
     assert rust_engine_step._ENGINE_HANDLE_CACHE
+
     clear_all_op_caches()
     assert not rust_engine_step._ENGINE_HANDLE_CACHE
 
