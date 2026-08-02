@@ -19,17 +19,3 @@ tables:
     # 4b8a7542-image provenance (phases now span two builds of the branch;
     # both report 0.5.16).
     status: complete
-  # Module-level linear-attention rows (whole KimiK3DeltaAttention layer,
-  # collector/sglang/collect_kda_module.py; experimental producer, no SDK
-  # consumer yet). Complete for the in-scope phases (context + generation,
-  # 4 shard geometries, 435 rows); verify (DSPARK) deliberately out of
-  # scope. Collected 2026-08-01 on 1xB200 SM100 from
-  # lmsysorg/sglang@sha256:6d9594a4 (tag drifted again vs the 4b8a7542
-  # kda_perf image and the 81a9c006 b300 module image — re-verify on
-  # bumps). Classified failures: 52 int32 conv-guard raises, 4 OOM at the
-  # largest context cells (183 GB card), h96 generation bs=1024 (Triton
-  # invalid argument). The b300 12-head 262144-token illegal-address band
-  # (FIXME(kernel-limit) in the collector) did NOT reproduce on
-  # SM100/this build — all four geometries completed without a fatal.
-  linear_attn_module_perf:
-    status: complete

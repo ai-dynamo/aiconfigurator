@@ -575,3 +575,17 @@ UNBLOCKED via nightly images — but running it means a pin bump, which
 per the standing owner decision triggers the full kda dispatch
 re-audit (nightly = merged K3, routing may differ from the preview
 branch); also needs 8-GPU Blackwell EP. Scheduling is an owner call.
+
+OWNER DECISION 2026-08-02 (scope cut): the experimental module-level KDA
+lane is REMOVED from this PR entirely — collector
+(collect_kda_module.py), PerfFile.LINEAR_ATTN_MODULE, unit test, design
+doc, and both linear_attn_module_perf tables (b200/b300, 435 rows each,
+meta entries stripped; loaders re-verified). Rationale: zero consumers
+(the SDK PerfDataFilename enum never included the file — get_database
+cannot even load it), the lane's diagnostic value is already banked in
+the kernel tables (fused-dispatch generation replacement, projection-
+delta validation) and in this ledger, and the PR is too large. The one
+open item it leaves — the kda_onorm ~0.2 ms/step double-count on the
+fused decode shard — is now tracked as issue #1463 (with recovery
+pointers to the branch history for every deleted artifact). W4A8
+MegaMoE follow-up is issue #1462.
