@@ -49,18 +49,18 @@ frameworks:
       # moe: NO family pin (owner decision 2026-08-02, reverting the
       # 2026-08-01 family-wide preview pin — a temporary preview build must
       # not own a family default; a family pin here hijacks image selection
-      # for every model). vllm moe collects on the stock v0.24.0 default
-      # image. K3 SITU cases raise a classified error there (stock has no
-      # SITU activation — upstream v0.24.0 activation.py); collecting them
-      # requires the kda preview image above (same digest, version
-      # 0.1.dev19262 — sorts BELOW 0.24.0 in PEP 440, never "latest"),
-      # via a temporary-build lane mechanism that is PENDING an owner
-      # decision (the registry policy forbids version routes here, and the
-      # family schema has no per-model pin — the recorded image-routing
-      # gap). Already-collected K3 rows (b200/b300) stay merged in the
-      # 0.24.0 moe table with their honest runtime version column (owner
-      # decision 2026-08-01). Fold the lane back into the default when
-      # upstream ships SITU in a stock release.
+      # for every model). ALL vllm moe collection — including K3 — runs on
+      # the stock v0.24.0 default image: K3 SITU cases use the
+      # owner-approved situ-as-silu Marlin approximation in collect_moe
+      # (serving truth is MarlinExperts W4A16 on every SM — the preview's
+      # CUTLASS whitelist rejects SITU; stock's device-only gate is forced
+      # off so Blackwell doesn't drift into CUTLASS W4A4, a kernel K3
+      # serving never runs; rows are marked kernel_source *_situ_as_silu,
+      # epilogue delta <~3%). Already-collected K3 rows (b200/b300,
+      # preview-native situ) stay merged in the 0.24.0 moe table with
+      # their honest runtime version column. Retire the approximation when
+      # upstream wires SITU into a quantized-activation kernel (kernel
+      # class flips) — re-audit at every tag bump.
       # (2026-08-02 audit note kept for the preview image: the kimi-k3
       # tag's amd64 image is IDENTICAL to the pin digest —
       # 0.1.dev19262+gb6bbf29dd, no deep_gemm; the earlier "drift to

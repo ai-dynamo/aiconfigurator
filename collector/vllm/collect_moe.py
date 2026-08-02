@@ -9,16 +9,22 @@ backend selection exactly as it does for model execution.
 
 Runtime: stock vLLM v0.24.0 (owner decision 2026-08-02, reverting the
 2026-08-01 family-wide preview pin — a temporary build must not own a
-family default). K3 SITU cases are probe-guarded here (SITU does not
-exist in stock 0.24.0; a situ case on this runtime raises a classified
-error instead of silently benchmarking a different activation kernel).
-Collecting the K3 moe lane on the kimi-k3 preview build (0.1.dev19262)
-requires a manifest-level mechanism for temporary builds — pending owner
-decision; see frameworks.vllm comment in framework_manifest.yaml.
+family default). K3 SITU cases collect on stock via the owner-approved
+situ-as-silu Marlin approximation (2026-08-02): serving truth for the
+ct-mxfp4+situ checkpoint is MarlinExperts W4A16 on every SM (the preview
+build's CUTLASS activation whitelist rejects SITU), so the collector
+forces the same Marlin selection on stock, runs the elementwise epilogue
+as silu (<~3% of the op), and marks the rows' kernel_source with
+`_situ_as_silu`. On the preview build itself the betas pass through
+natively. Re-verify at every version bump: when upstream wires SITU into
+a quantized-activation kernel (the preview already carries an unwired
+trtllm-gen SITU mapping), the serving kernel class changes and this
+approximation must be retired.
 """
 
 __compat__ = "vllm==0.24.0"
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -520,32 +526,56 @@ def run_moe_torch(
     # and the rank-0 expert map exactly as in a multi-rank model.
     logical_parallel_size = moe_ep_size if moe_ep_size > 1 else moe_tp_size
 
-    # SITU activation (Kimi-K3) exists only on the kimi-k3 preview build:
-    # stock v0.24.0 FusedMoE has no activation_situ_* parameters and no situ
-    # activation path (upstream v0.24.0 activation.py; preview
-    # compressed_tensors_moe_w4a4_mxfp4.py:58-71 dispatches SITU ->
-    # MarlinExperts). Probe the constructor instead of predicting: pass the
-    # betas only where the runtime accepts them, and raise a classified
-    # error if a situ case lands on a runtime without the parameter — a
-    # silu-kernel row labelled situ would be silently wrong data.
+    # SITU activation (Kimi-K3) exists only on the kimi-k3 preview build
+    # (stock v0.24.0 has no situ path — upstream v0.24.0 activation.py).
+    # Probe the constructor instead of predicting: on the preview build,
+    # pass the betas through. On stock, apply the owner-approved
+    # approximation (2026-08-02): serving truth for (ct-mxfp4, situ) is
+    # MarlinExperts weight-only W4A16 — the preview rejects SITU in its
+    # CUTLASS activation whitelist and falls to Marlin
+    # (compressed_tensors_moe_w4a4_mxfp4.py:58-71 @0.1.dev19262). Stock's
+    # device-only gate would instead send this checkpoint to CUTLASS W4A4
+    # on Blackwell (cutlass_moe.py:693-699 @v0.24.0) — a kernel K3 serving
+    # never runs — so the CUTLASS gate is forced off to reproduce the
+    # serving selection, and the epilogue runs as silu (silu_and_mul vs
+    # situ_and_mul is an elementwise tail, <~3% of the op). The
+    # approximation is recorded in kernel_source (`_situ_as_silu` suffix)
+    # and hard-checked below: it is only valid if Marlin actually ran.
     situ_kwargs = {}
+    situ_marlin_approx = False
     if runtime_config["activation"] == "situ":
         from inspect import signature as _sig
 
-        if "activation_situ_beta" not in _sig(FusedMoE.__init__).parameters:
-            raise RuntimeError(
-                "activation=situ requires the vLLM kimi-k3 preview build "
-                "(0.1.dev19262): this runtime's FusedMoE has no "
-                "activation_situ_beta parameter, so the case would silently "
-                "run a different activation kernel. The K3 moe lane needs "
-                "the preview image (see frameworks.vllm in "
-                "framework_manifest.yaml)."
-            )
-        situ_kwargs = {
-            "activation_situ_beta": runtime_config["activation_situ_beta"],
-            "activation_situ_linear_beta": runtime_config["activation_situ_linear_beta"],
-        }
-    with set_current_vllm_config(vllm_config):
+        if "activation_situ_beta" in _sig(FusedMoE.__init__).parameters:
+            situ_kwargs = {
+                "activation_situ_beta": runtime_config["activation_situ_beta"],
+                "activation_situ_linear_beta": runtime_config["activation_situ_linear_beta"],
+            }
+        else:
+            runtime_config["activation"] = "silu"
+            situ_marlin_approx = True
+
+    @contextlib.contextmanager
+    def _serving_truth_marlin_selection():
+        """Force the Marlin selection K3 serving makes for situ checkpoints.
+
+        On Hopper this is a no-op (stock's device gate already excludes
+        CUTLASS mxfp4 below SM100)."""
+        if not situ_marlin_approx:
+            yield
+            return
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
+
+        orig = CutlassExpertsMxfp4.__dict__["_supports_current_device"]
+        CutlassExpertsMxfp4._supports_current_device = staticmethod(lambda: False)
+        try:
+            yield
+        finally:
+            CutlassExpertsMxfp4._supports_current_device = orig
+
+    with set_current_vllm_config(vllm_config), _serving_truth_marlin_selection():
         moe_module = FusedMoE(
             num_experts=num_experts,
             top_k=topk,
@@ -644,6 +674,17 @@ def run_moe_torch(
             print(f"vLLM MoE experts: wrapper={wrapper_name} leaf={experts_name}")
             source = f"vllm_{method_name}_{backend_name}_{experts_name}".lower()
             source = source.replace(" ", "_").replace("-", "_")
+            if situ_marlin_approx:
+                # The situ->silu approximation is only valid on the Marlin
+                # path serving actually selects; anything else is wrong data.
+                if "marlin" not in experts_name.lower():
+                    raise RuntimeError(
+                        f"situ-as-silu approximation requires MarlinExperts "
+                        f"(serving truth for ct-mxfp4+situ), but the runtime "
+                        f"selected {experts_name} despite the forced CUTLASS "
+                        f"gate — refusing to record mislabeled rows."
+                    )
+                source += "_situ_as_silu"
 
             num_iter = 5 if distributed == "power_law" else 1
             logits_dtype = router_logits_dtype or torch.bfloat16
