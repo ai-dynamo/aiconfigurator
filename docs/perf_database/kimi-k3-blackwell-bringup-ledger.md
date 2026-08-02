@@ -551,3 +551,27 @@ now prices from silicon: h100 69.5 / h200 117.8 tok/s/gpu @32 GPUs.
 K3 vllm data coverage is now identical in scope to sglang across all
 eight systems (kda + K3 moe + mla_bmm); sglang's only remaining hole is
 the Hopper ep2..8 moe cells (real serving crash, honest gap).
+
+## vLLM upstream W4A8 status check — 2026-08-02 (GitHub research)
+
+K3 merged to vllm main Jul 29-30 (#50089 + #50000; original #49999
+closed for conflicts); NO tagged release contains it (v0.26.1rc0 cut
+Jul 27, pre-merge). The MegaMoE W4A8 blocker is GONE on main: DeepGEMM
+is vendored into the official image at build time
+(vllm.third_party.deep_gemm, #41516) and the K3 merge pinned a
+SITU-capable vllm-project/DeepGEMM fork (fp8_fp4_mega_moe kernels;
+ep_gather fix #50458 Jul 31) — `--moe-backend deep_gemm_mega_moe`
+should run on nightly images (nightly-* tags Jul 31 onward). The
+kimi-k3 tag itself is unchanged (e90e2603, Jul 27). CUTLASS W4A4 SITU
+whitelist still NOT extended → single-node path remains Marlin W4A16;
+our w4a16_mxfp4 lane stays serving-true. New on main: FlashInfer
+trtllm-gen mxfp4xmxfp8 SITU experts exist behind a flashinfer
+capability check, but whether the compressed-tensors scheme can route
+into them is undetermined (compressed_tensors_moe_w4a4_mxfp4.py still
+hardcodes Cutlass/Marlin).
+
+Implication: the deferred vllm MegaMoE W4A8 module lane is now
+UNBLOCKED via nightly images — but running it means a pin bump, which
+per the standing owner decision triggers the full kda dispatch
+re-audit (nightly = merged K3, routing may differ from the preview
+branch); also needs 8-GPU Blackwell EP. Scheduling is an owner call.
