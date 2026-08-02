@@ -306,9 +306,7 @@ def ep_candidates(db):
                 (c for c in range(half, half + 5) if int(c * 2 * 0.8) != 2 * int(c * 0.8)),
                 half,
             )
-            out["eplb_context"].append(
-                (coord, order_x, {**base, "attention_dp_size": 2, "enable_eplb": True})
-            )
+            out["eplb_context"].append((coord, order_x, {**base, "attention_dp_size": 2, "enable_eplb": True}))
         else:
             out["eplb_generation"].append((coord, eplb_x, {**base, "enable_eplb": True}))
 
