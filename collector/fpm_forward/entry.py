@@ -104,6 +104,8 @@ def _load_generator_overrides(args: argparse.Namespace) -> dict[str, Any]:
         k8s["k8s_image_pull_secret"] = args.image_pull_secret
     if args.model_cache:
         parts = args.model_cache.split(":")
+        if len(parts) > 3 or not parts[0]:
+            raise ValueError("--model-cache must be NAME[:MOUNT[:SUBPATH]] with a non-empty PVC name")
         k8s["k8s_pvc_name"] = parts[0]
         if len(parts) > 1 and parts[1]:
             k8s["k8s_pvc_mount_path"] = parts[1]

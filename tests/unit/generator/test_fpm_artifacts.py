@@ -1052,6 +1052,9 @@ def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_scr
     assert 'wait "$headless_pid"' in script
     assert "/dev/tcp/${master_addr}/2379" in script
     assert "Headless engine exited after leader teardown; reporting success" in script
+    assert "trap 'kill -TERM \"$headless_pid\" 2>/dev/null || true' TERM INT" in script
+    assert "FPM completion barrier disabled by error" in script
+    assert "FPM result checker failed with unexpected status" in script
 
 
 def test_fpm_multinode_efa_resource_matches_per_node_gpu_count():
@@ -1294,6 +1297,18 @@ while True:
 def test_fpm_rejects_passthrough_of_generator_owned_orchestration_flags(flag):
     params = _params()
     params["params"]["agg"]["extra_cli_args"].append(flag)
+
+    with pytest.raises(ValueError, match="owns orchestration option"):
+        _render(params)
+
+
+@pytest.mark.parametrize("spelling", ["--master_port", "--data_parallel_size_local=2", "--node_rank"])
+def test_fpm_rejects_underscore_spellings_of_owned_orchestration_flags(spelling):
+    """vLLM's FlexibleArgumentParser treats underscore and dash spellings as
+    the same option, so the guard must normalize before matching."""
+
+    params = _params()
+    params["params"]["agg"]["extra_cli_args"].append(spelling)
 
     with pytest.raises(ValueError, match="owns orchestration option"):
         _render(params)

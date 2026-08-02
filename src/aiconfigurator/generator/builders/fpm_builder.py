@@ -134,8 +134,13 @@ def _extract_extra_cli_args(param_values: dict[str, Any] | None) -> list[str]:
 
 def _reject_owned_orchestration_args(args: list[str]) -> None:
     for token in args:
+        # vLLM's FlexibleArgumentParser accepts underscore and dash spellings
+        # of the same option, so normalize before matching the owned set.
+        head = token.split("=", 1)[0]
+        if head.startswith("--"):
+            head = "--" + head[2:].replace("_", "-")
         for flag in _FPM_OWNED_ORCHESTRATION_FLAGS:
-            if token == flag or token.startswith(f"{flag}="):
+            if head == flag:
                 raise ValueError(f"FPM owns orchestration option {flag}; do not pass it through extra_cli_args")
 
 
@@ -468,6 +473,10 @@ def _render_run_script(
             "      # a real failure.",
             '      "${engine_command[@]}" --headless &',
             "      headless_pid=$!",
+            "      # Forward pod-termination signals: the follower path runs before",
+            "      # the main cleanup trap is installed, and a backgrounded engine",
+            "      # would otherwise outlive the shell until the grace-period KILL.",
+            "      trap 'kill -TERM \"$headless_pid\" 2>/dev/null || true' TERM INT",
             "      set +e",
             '      wait "$headless_pid"',
             "      headless_status=$?",
@@ -635,6 +644,13 @@ def _render_run_script(
             "  if (( result_status == 20 )); then",
             "    exit 1",
             "  fi",
+            "  if (( result_status != 10 )); then",
+            "    # 10 is the checker's only keep-waiting signal; any other status",
+            "    # (python traceback, exec failure, OOM-kill) is checker breakage",
+            "    # and must fail now instead of burning the whole wait deadline.",
+            '    echo "FPM result checker failed with unexpected status ${result_status}" >&2',
+            "    exit 1",
+            "  fi",
             '  if ! kill -0 "$engine_pid" 2>/dev/null; then',
             "    set +e",
             '    wait "$engine_pid"',
@@ -671,22 +687,29 @@ def _render_run_script(
             "expected = int(sys.argv[1])",
             "port = int(sys.argv[2])",
             "timeout_seconds = float(sys.argv[3])",
-            "server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
-            "server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)",
-            'server.bind(("0.0.0.0", port))',
-            "server.listen(max(expected, 1))",
-            "server.settimeout(2.0)",
             "seen = set()",
-            "deadline = time.monotonic() + timeout_seconds",
-            "while len(seen) < expected and time.monotonic() < deadline:",
-            "    try:",
-            "        conn, _ = server.accept()",
-            "    except socket.timeout:",
-            "        continue",
-            "    with conn:",
-            "        data = conn.recv(64)",
-            "    if data:",
-            '        seen.add(data.decode("utf-8", "replace").strip())',
+            "try:",
+            "    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+            "    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)",
+            '    server.bind(("0.0.0.0", port))',
+            "    server.listen(max(expected, 1))",
+            "    server.settimeout(2.0)",
+            "    deadline = time.monotonic() + timeout_seconds",
+            "    while len(seen) < expected and time.monotonic() < deadline:",
+            "        try:",
+            "            conn, _ = server.accept()",
+            "        except socket.timeout:",
+            "            continue",
+            "        with conn:",
+            "            conn.settimeout(5.0)",
+            "            try:",
+            "                data = conn.recv(64)",
+            "            except OSError:",
+            "                continue",
+            "        if data:",
+            '            seen.add(data.decode("utf-8", "replace").strip())',
+            "except Exception as error:",
+            '    print(f"FPM completion barrier disabled by error: {error!r}", file=sys.stderr)',
             "if len(seen) < expected:",
             "    print(",
             '        f"FPM completion barrier timed out: {len(seen)}/{expected} followers reported",',

@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -221,6 +222,10 @@ def write_formal_database(
     if len(versions) != 1 or not next(iter(versions)):
         raise ValueError(f"FPM rows must contain one non-empty runtime backend_version, got {sorted(versions)!r}")
     version = next(iter(versions))
+    # backend_version comes from pod-reported provenance: reject anything that
+    # is not a plain version token before it becomes a path component.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version):
+        raise ValueError(f"pod-reported backend_version {version!r} is not a safe database directory name")
     curated_root = systems_root is None
     if systems_root is None:
         systems_root = _curated_systems_root()

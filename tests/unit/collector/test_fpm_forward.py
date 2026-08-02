@@ -1030,6 +1030,36 @@ def test_fmha_resolves_per_kv_dtype_against_joint_evidence(monkeypatch):
     }
 
 
+def test_formal_database_rejects_path_bearing_backend_versions(tmp_path):
+    """backend_version comes from pod provenance; a path-bearing value must
+    never become a directory component under the database root."""
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    for row in rows:
+        row["backend_version"] = "0.24.0/../../evil"
+
+    with pytest.raises(ValueError, match="not a safe database directory name"):
+        write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+
+
+def test_generator_overrides_reject_malformed_model_cache():
+    from collector.fpm_forward.entry import _load_generator_overrides
+
+    args = argparse.Namespace(
+        generator_config=None,
+        generator_set=None,
+        generator_dynamo_version=None,
+        generated_config_version=None,
+        namespace=None,
+        transport=None,
+        image_pull_secret=None,
+        model_cache="pvc:mount:sub:extra",
+    )
+    with pytest.raises(ValueError, match="NAME\\[:MOUNT\\[:SUBPATH\\]\\]"):
+        _load_generator_overrides(args)
+
+
 def test_formal_database_refuses_new_version_dirs_in_curated_tree(tmp_path, monkeypatch):
     """A pod-reported version without a curated directory must not materialize
     one: the SDK treats any populated version dir as a declared database."""
