@@ -493,3 +493,16 @@ pipeline per image x op family):
   K3 vllm prediction on those systems currently prices absorb BMMs from
   the trtllm fallback).
 Stock v0.24.0 digest verified multi-arch (arm64+amd64) before submission.
+
+Wave-2 COMPLETE same day (all six jobs finished in ~15 min wall,
+verified by content, ingested at 21a03ecd8): gb300 kda 1203 rows;
+gb200/gb300 K3 moe +972 rows each — first campaign run of the stock
+situ-as-silu Marlin lane + EP-local shim, same 3 classified moe_tp=32
+tile-limit failures as b200/b300; b300/gb200/gb300 mla_bmm 636 rows
+each, zero failures. GPU allocation note: kda/mla_bmm jobs ran gres=gpu:1
+and moe jobs gres=gpu:4 (gb tray) — all three op families are
+single-device benchmarks (moe_tp/moe_ep are shard-geometry axes, EP
+sharding is constructed locally by the shim), so GPU count affects
+wall-clock only, not the numbers. Every Blackwell system now carries
+vllm kda + K3 moe + mla_bmm; the vllm trtllm-fallback for MLA BMMs is
+cleared on b200/b300/gb200/gb300.
