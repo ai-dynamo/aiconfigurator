@@ -20,8 +20,9 @@ use crate::common::error::AicError;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
     Dsv4ModuleOp,
-    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-    GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp, GenerationAttentionOp,
+    GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeAllToAllOp,
+    MoeOp,
     MsaModuleOp, TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
@@ -155,6 +156,18 @@ pub enum Op {
     /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
     /// variants mid-enum.
     Dsv4MegaMoe(Dsv4MegaMoeOp),
+    /// Unified large-EP MoE all-to-all comm phase (Python
+    /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
+    /// and every phase; the op's `phase` / `comm_backend` fields select the
+    /// slice. Measured-SILICON-only; see `operators/moe_a2a.rs`.
+    ///
+    /// APPENDED after `Dsv4MegaMoe` — same positional-index rule as above.
+    MoeAllToAll(MoeAllToAllOp),
+    /// Unified large-EP MoE expert compute (Python
+    /// `operations.moe_comm.EPMoE`) — one variant for both inference phases;
+    /// the op's `inference_phase` field selects the slice.
+    /// Measured-SILICON-only; see `operators/ep_moe.rs`.
+    EpMoe(EpMoeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -235,6 +248,8 @@ impl Op {
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
+            Op::MoeAllToAll(o) => &o.name,
+            Op::EpMoe(o) => &o.name,
         }
     }
 
@@ -392,6 +407,13 @@ impl Op {
             // same `x`); the megamoe table is indexed by local-rank tokens
             // and the op must NOT re-multiply by attention_dp_size.
             Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
+            // Both large-EP ops take Python's `x` (moe_comm.py:657, :1291) —
+            // the same per-rank token count every other compute/comm op gets.
+            // The per-op token rescaling (`// attention_tp_size` for the comm
+            // side, `* attention_dp_size` for the compute side) happens INSIDE
+            // each `query`, exactly where Python does it.
+            Op::MoeAllToAll(op) => op.query(db, ctx.num_tokens),
+            Op::EpMoe(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

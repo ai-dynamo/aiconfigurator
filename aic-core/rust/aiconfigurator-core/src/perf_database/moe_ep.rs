@@ -356,6 +356,33 @@ impl MoeEpTable {
         query_token_curve(curve, f64::from(num_tokens), &sol)
     }
 
+    /// Distinct `kernel_source` keys present in the loaded table, in sorted
+    /// (BTreeMap) order; EMPTY when the table failed to load with a typed
+    /// data miss. Mirrors the `if ep_data:` guard of Python
+    /// `EPMoE._resolve_kernel_source` (moe_comm.py:1143-1151) — an
+    /// unloaded/empty store is falsy there and the caller keeps its
+    /// architecture-preferred kernel. NOTE: Python's `list(ep_data.keys())`
+    /// yields dict insertion (file row) order; sorted order is observable
+    /// only when several kernels coexist AND the preferred one is absent
+    /// (every shipped table collects exactly one kernel). Same accessor and
+    /// same caveat as [`super::WideEpMoeTable::available_kernels`].
+    pub fn available_kernels(&self) -> Result<Vec<String>, AicError> {
+        let grids = match self.load() {
+            Ok(grids) => grids,
+            Err(err) if err.is_missing_perf_data() => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let mut names: Vec<String> = Vec::new();
+        for key in grids.by_keys.keys() {
+            // `MoeEpKey` sorts by kernel_source first, so consecutive dedup
+            // suffices.
+            if names.last().map(String::as_str) != Some(key.kernel_source.as_str()) {
+                names.push(key.kernel_source.clone());
+            }
+        }
+        Ok(names)
+    }
+
     fn load(&self) -> Result<&MoeEpGrids, AicError> {
         let cell = self.grids.get_or_init(|| {
             load_moe_ep_grids(
