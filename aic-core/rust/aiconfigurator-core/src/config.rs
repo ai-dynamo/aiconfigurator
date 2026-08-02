@@ -21,7 +21,8 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // only distinguishable by this version — `EngineSpec::from_bincode` reads and
 // checks it before decoding the op lists. Bump whenever an `OpSpec` field
 // changes; keep in lockstep with `sdk/engine.py::ENGINE_SPEC_SCHEMA_VERSION`.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 2;
+// v3: added the `Op::FpmForward` whole-model variant (forward_model="fpm").
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 3;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

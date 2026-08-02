@@ -323,6 +323,7 @@ fn gemm_engine_config<'a>(sol: &'a dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'a> 
             max_site_distance: Some(2.0),
             require_curve_coverage: true,
             k_tail: 3,
+            own_curve_coverage_fallback: false,
         },
         sol_fn: sol,
         value_transform: ValueTransform::Raw,

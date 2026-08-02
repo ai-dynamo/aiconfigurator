@@ -53,6 +53,7 @@ pub mod attention;
 pub mod communication;
 pub mod dsa;
 pub mod dsv4;
+pub mod fpm_forward;
 pub mod gemm;
 mod interpolation;
 pub mod mhc;
@@ -69,6 +70,7 @@ pub use attention::AttentionTable;
 pub use communication::CommunicationTable;
 pub use dsa::DsaTable;
 pub use dsv4::{AttnKind, Dsv4Table};
+pub use fpm_forward::FpmForwardTable;
 pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
@@ -102,6 +104,7 @@ pub struct PerfDatabase {
     pub wideep_mla: WideEpMlaTable,
     pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+    pub fpm_forward: FpmForwardTable,
 }
 
 impl PerfDatabase {
@@ -191,6 +194,9 @@ impl PerfDatabase {
                 version,
                 perf_db_sources,
             ),
+            // Deliberately NOT shared-layer aware: FPM whole-model data is
+            // valid only for its exact backend/version (fpm_forward.rs).
+            fpm_forward: FpmForwardTable::new(data_root.clone(), version),
             system_spec: spec,
             data_root,
         })

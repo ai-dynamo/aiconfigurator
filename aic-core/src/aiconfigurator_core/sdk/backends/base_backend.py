@@ -419,9 +419,7 @@ class BaseBackend:
         context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
-        # FPM models compile to no Rust op variant yet; force the Python phases
-        # (which handle the single whole-model op naturally).
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
+        if should_use_rust_engine_step(runtime_config, database):
             rust_runtime_config = runtime_config
             if img_ctx_tokens:
                 rust_runtime_config = copy.copy(runtime_config)
@@ -932,11 +930,13 @@ class BaseBackend:
         caller stores them under the "mix_step" key of the run_agg
         per-ops summary.
         """
-        if model.forward_model == "fpm":
+        if model.forward_model == "fpm" and not should_use_rust_engine_step(runtime_config, database):
             # The 3-pass split below recognizes granular attention op NAMES
             # ("context_attention"/"generation_attention"); a whole-model op
             # matches neither and would be mis-accounted. FPM must take the
-            # explicit pure-prefill + pure-decode branch instead.
+            # explicit pure-prefill + pure-decode branch instead. On the Rust
+            # route, Engine::mixed_step_latency carries the same marginal
+            # composition internally (fpm_mixed_step_latency).
             return self._get_fpm_mix_step_latency(
                 model, database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix
             )
@@ -1156,7 +1156,7 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
+        if should_use_rust_engine_step(runtime_config, database):
             latency_ms = estimate_decode_step_latency_with_rust(
                 model,
                 database,
