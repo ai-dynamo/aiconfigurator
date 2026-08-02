@@ -1081,3 +1081,214 @@ def test_formal_database_refuses_new_version_dirs_in_curated_tree(tmp_path, monk
     explicit = tmp_path / "explicit"
     parquet2, _metadata2 = write_formal_database(plan, rows, systems_root=explicit)
     assert parquet2.is_file()
+
+
+def _args_cell(workload_kind: str) -> FPMCell:
+    return FPMCell(
+        cell_id=f"fpm-args-{workload_kind}",
+        workload_kind=workload_kind,
+        topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
+        parallel_strategy="tep",
+        gemm_quant_mode="nvfp4",
+        moe_quant_mode="nvfp4",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
+    )
+
+
+def _args_plan():
+    return SimpleNamespace(
+        sha256="plan-sha",
+        model_path="org/model",
+        system="b200_sxm",
+        backend="vllm",
+        options=SimpleNamespace(
+            warmup_iterations=5,
+            vllm_max_model_len=-1,
+            prefill_sampling=PrefillSamplingProfile.build(max_isl=8192, max_batch_size=None),
+        ),
+    )
+
+
+def _cell_cli_args(workload_kind: str) -> list[str]:
+    from collector.fpm_forward.runner import _cell_generator_overrides
+
+    merged = _cell_generator_overrides(_args_plan(), _args_cell(workload_kind), {})
+    return merged["params"]["agg"]["extra_cli_args"]
+
+
+def test_decode_cells_disable_prefix_caching_and_keep_overlap():
+    """Decode measures a production-shaped steady step; both flags follow.
+
+    Prefix caching on makes ``Request.__init__`` hash the whole prompt through
+    the block hasher, and every decode point admits batch_size synthetic
+    requests carrying the point's full context, so the sha256 work runs inside
+    the measured step: 26.5 ms -> 121 ms at (batch 256, 2.1M KV) on M2.7
+    tp4+EP. Synchronous scheduling additionally serialises scheduler CPU work
+    that production overlaps: async 26.5 ms (1.03x of the 25.8 ms measured on
+    real traffic) versus sync 31.3 ms (1.21x).
+    """
+    args = _cell_cli_args("decode")
+
+    assert "--no-enable-prefix-caching" in args
+    assert "--no-async-scheduling" not in args
+
+
+def test_prefill_cells_keep_prefix_caching_for_seeded_kv_reads():
+    """Prefill must NOT disable prefix caching.
+
+    Points with total_kv_read_tokens > 0 stage their context through the fake
+    prefix cache, and ``_bench_cached_kv_read_tokens`` reads
+    ``Request.block_hashes`` -- only populated while prefix caching installs a
+    block hasher. Disabling it fails every cached-prefill point's seed
+    validation. Prefill is insensitive to both flags anyway (100-108 ms across
+    all four combinations at 8192 new tokens).
+    """
+    args = _cell_cli_args("prefill")
+
+    assert "--no-enable-prefix-caching" not in args
+    assert "--no-async-scheduling" in args
+
+
+def _decode_cell_with_coordinate_collision(tmp_path, *, clamp_first):
+    """Two decode plan points that measure the same physical coordinate.
+
+    Under the steady-state decode policy a context-clamped point (requested
+    ctx=1, measured at ctx=2) lands on the coordinate the native ctx=2 point
+    already samples.
+    """
+    topology = ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1)
+    cell = FPMCell(
+        cell_id="fpm-test-decode",
+        workload_kind="decode",
+        topology=topology,
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
+        parallel_strategy="single",
+        gemm_quant_mode="nvfp4",
+        moe_quant_mode="nvfp4",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
+    )
+    plan = SimpleNamespace(
+        sha256="plan-sha",
+        aic_revision="revision",
+        model_path="org/model",
+        system="b200_sxm",
+        backend="vllm",
+        options=SimpleNamespace(warmup_iterations=0),
+        capability=SimpleNamespace(
+            support_level="exact",
+            template_id="aic_exact:dsa_module",
+            template_version=1,
+            aic_database_version="0.24.0",
+        ),
+    )
+    if clamp_first == "both":
+        reason_pairs = (["capture", "context_clamped"], ["capture", "context_clamped"])
+    elif clamp_first:
+        reason_pairs = (["capture", "context_clamped"], ["capture"])
+    else:
+        reason_pairs = (["capture"], ["capture"])
+    points = []
+    for benchmark_id, (reasons, wall) in enumerate(zip(reason_pairs, (0.0070, 0.0068), strict=True), start=1):
+        points.append(
+            (
+                {
+                    "point_type": "decode",
+                    "benchmark_id": benchmark_id,
+                    "total_prefill_tokens": 0,
+                    "total_kv_read_tokens": 2,
+                    "batch_size": 1,
+                    "expected_cudagraph_mode": "FULL",
+                    "expected_capture_size": 1,
+                    "padding_tokens": 0,
+                    "sample_reasons": reasons,
+                },
+                {
+                    "counter_id": benchmark_id,
+                    "dp_rank": 0,
+                    "wall_time": wall,
+                    "scheduled_requests": {
+                        "num_prefill_requests": 0,
+                        "sum_prefill_tokens": 0,
+                        "sum_prefill_kv_tokens": 0,
+                        "num_decode_requests": 1,
+                        "sum_decode_kv_tokens": 2,
+                    },
+                },
+            )
+        )
+    cell_dir = tmp_path / "cell"
+    output = cell_dir / "raw" / "pod-0" / "benchmark.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_provenance(output.parent / "collector-provenance.json", cell_id=cell.cell_id)
+    output.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "artifact_type": "rank",
+                "status": "complete",
+                "valid": True,
+                "usable": True,
+                "timing_valid": True,
+                "stop_reason": None,
+                "error": None,
+                "run_id": "run",
+                "grid_digest": "grid",
+                "config": {"mode": "decode"},
+                "coverage": {"expected_points": 2, "completed_points": 2, "skipped_points": 0},
+                "dp": {"rank": 0, "size": 1},
+                "results": [{"point": point, "fpms": [fpm]} for point, fpm in points],
+                "iteration_groups": [
+                    {
+                        "benchmark_id": point["benchmark_id"],
+                        "point": point,
+                        "expected_dp_ranks": [0],
+                        "complete": True,
+                        "wall_time": fpm["wall_time"],
+                        "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+                    }
+                    for point, fpm in points
+                ],
+                "skipped_points": [],
+                "missing_phases": [],
+                "timing": {
+                    "benchmark_elapsed_seconds": 1.0,
+                    "measured_iteration_seconds": 0.0138,
+                },
+            }
+        )
+    )
+    return plan, cell, cell_dir
+
+
+def test_native_aggregation_drops_clamped_duplicate_of_native_coordinate(tmp_path):
+    plan, cell, cell_dir = _decode_cell_with_coordinate_collision(tmp_path, clamp_first=True)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+    assert len(rows) == 1
+    assert rows[0]["latency_ms"] == pytest.approx(6.8)
+    assert rows[0]["batch_size"] == 1
+    assert rows[0]["total_kv_read_tokens"] == 2
+
+    write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+
+
+def test_native_aggregation_keeps_first_when_all_duplicates_are_clamped(tmp_path):
+    plan, cell, cell_dir = _decode_cell_with_coordinate_collision(tmp_path, clamp_first="both")
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+    assert len(rows) == 1
+    assert rows[0]["latency_ms"] == pytest.approx(7.0)
+
+
+def test_native_aggregation_rejects_native_coordinate_collision(tmp_path):
+    plan, cell, cell_dir = _decode_cell_with_coordinate_collision(tmp_path, clamp_first=False)
+
+    with pytest.raises(ValueError, match="unclamped samples share one key"):
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")

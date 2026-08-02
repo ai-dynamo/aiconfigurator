@@ -43,9 +43,29 @@ _FPM_VLLM_RUNTIME_ARGS = (
     "mp",
     "--distributed-timeout-seconds",
     "1800",
-    "--no-async-scheduling",
     "--no-enable-log-requests",
 )
+# Prefill and decode cells need opposite engine policies.
+#
+# Prefill keeps vLLM's defaults (prefix caching on, synchronous scheduling):
+# points with total_kv_read_tokens > 0 are staged through the fake prefix
+# cache, and `_bench_cached_kv_read_tokens` reads `Request.block_hashes`,
+# which only exists while prefix caching builds a block hasher. Disabling it
+# would fail every cached-prefill point's seed validation. Prefill is also
+# insensitive to both flags (measured 100-108 ms across all four combinations
+# at 8192 new tokens, M2.7 tp4+EP).
+_FPM_VLLM_PREFILL_ARGS = ("--no-async-scheduling",)
+# Decode inverts both:
+#   * prefix caching off -- `Request.__init__` hashes the whole prompt through
+#     the block hasher, and every decode point admits batch_size synthetic
+#     requests carrying the point's full context, so that sha256 work runs
+#     inside the measured step. The cost tracks total context tokens rather
+#     than batch: 26.5 ms -> 121 ms at (batch 256, 2.1M KV) on M2.7 tp4+EP.
+#   * async scheduling on -- the steady-state second step models a production
+#     decode iteration, and production overlaps scheduler CPU work with the
+#     GPU. Against real traffic at (256, 2.1M KV): async 26.5 ms (1.03x of the
+#     25.8 ms measured), sync 31.3 ms (1.21x).
+_FPM_VLLM_DECODE_ARGS = ("--no-enable-prefix-caching",)
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"
@@ -717,14 +737,6 @@ def _cell_generator_overrides(
                     "2",
                 ]
             )
-    if cell.workload_kind == "decode":
-        # Decode points read each request's own synthetic KV and never
-        # exercise shared-prefix reuse, so prefix caching only adds
-        # block-hash bookkeeping between points; pin it off for a stable
-        # decode measurement. PREFILL CELLS MUST KEEP IT ON: the runtime's
-        # _bench_prefill_kv_read_points collapses the prefill kv-read axis
-        # to [0] when prefix caching is disabled.
-        scheduler_args.append("--no-enable-prefix-caching")
     model_args = []
     architecture = getattr(getattr(plan, "capability", None), "architecture", None)
     if architecture == "GlmMoeDsaForCausalLM":
@@ -779,7 +791,8 @@ def _cell_generator_overrides(
     merged.setdefault("K8sConfig", {})["extra_env"] = list(resolved_env.values())
 
     policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
-    resolved_args = [*_FPM_VLLM_RUNTIME_ARGS, *model_args, *policy_args]
+    workload_args = _FPM_VLLM_DECODE_ARGS if cell.workload_kind == "decode" else _FPM_VLLM_PREFILL_ARGS
+    resolved_args = [*_FPM_VLLM_RUNTIME_ARGS, *workload_args, *model_args, *policy_args]
     has_benchmark_timeout = any(
         str(argument) == "--benchmark-timeout" or str(argument).startswith("--benchmark-timeout=")
         for argument in resolved_args
