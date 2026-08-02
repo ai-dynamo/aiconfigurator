@@ -159,10 +159,12 @@ REGISTRY: list[OpEntry] = [
         run_func="run_kda_torch",
         perf_filename=PerfFile.KDA,
         # Kimi-K3 KDA kernels exist only on the vLLM kimi-k3 branch preview
-        # image; verified on Hopper (SM90), B200 (SM100) and B300 (SM103 —
-        # 2026-08-02 full-grid run, 1203 rows incl. flashkda_fwd and
-        # fused_kda_decode, 4 classified cell failures).
-        unverified_sms=(80, 89, 120),
+        # image; verified on Hopper (SM90), Ada (SM89 — full grid, 1145
+        # rows, chunk/Triton fallback lanes, no FlashKDA/fused-decode
+        # below SM90), B200 (SM100), B300/GB200/GB300 (SM100/103) and RTX
+        # PRO 6000 (SM120 — full grid, 1203 rows, all six kernel paths).
+        # Only SM80 (no probe hardware) remains unverified.
+        unverified_sms=(80,),
     ),
 ]
 
