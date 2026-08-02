@@ -17,6 +17,7 @@ from aiconfigurator_core.sdk.config import RuntimeConfig
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
+from aiconfigurator_core.sdk.pipeline import PipelineSchedule, warn_on_unclassified_ops
 from aiconfigurator_core.sdk.rust_engine_step import (
     RustEngineUnsupportedError,
     estimate_decode_step_latency_with_rust,
@@ -103,6 +104,28 @@ class BaseBackend:
         if steps_to_finish_ctx >= decode_iterations:
             return max(1, int(b // (steps_to_finish_ctx / decode_iterations)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
+
+    def _pipeline_schedule(self, model, **kwargs) -> PipelineSchedule:
+        """Build the PP schedule for this run.
+
+        Subclasses override to encode engine-specific layer partitioning or
+        microbatch policy. The default is the even split with the remainder on
+        the leading stages (vLLM ``get_pp_indices`` / TRT-LLM) and a pipe that
+        is exactly full.
+
+        ``num_microbatches=None`` reproduces the historical assumption that
+        there are always ``pp_size`` microbatches in flight. Callers that know
+        better (chunked-prefill scheduling, low concurrency) pass an explicit
+        count via ``pipeline_microbatches``.
+        """
+        pp_size = int(model.config.pp_size or 1)
+        schedule = PipelineSchedule(
+            pp_size=pp_size,
+            num_microbatches=kwargs.get("pipeline_microbatches"),
+        )
+        if pp_size > 1:
+            warn_on_unclassified_ops(model.generation_ops, model._num_layers)
+        return schedule
 
     def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
         """GPU batching efficiency factor for a mixed prefill/decode forward pass.
@@ -1413,6 +1436,8 @@ class BaseBackend:
             # 1.0 but record different scheduling metadata, so they must not
             # share a cache entry.
             decode_tokens_per_iteration if speculative_scheduling else None,
+            # Pipeline fill varies independently of (isl, osl, b, ctx_tokens).
+            kwargs.get("pipeline_microbatches"),
         )
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
@@ -1494,6 +1519,29 @@ class BaseBackend:
             per_ops_data["genonly_step"] = genonly_per_ops
             per_ops_source["genonly_step"] = genonly_per_ops_src
 
+        # ---- Pipeline parallelism -------------------------------------
+        # A step's latency above is the WHOLE model (``_num_layers`` is never
+        # divided by pp_size). Under PP that work is spread over pp stages and
+        # a microbatch's real traversal time is ``pp * cycle``, where the cycle
+        # is set by the FATTEST stage -- not the average. Inflating the step
+        # latency by 1/balance converts it to that traversal time, after which
+        # ttft/tpot/throughput below all follow consistently and the existing
+        # ``* pp_size`` throughput scaling stays correct.
+        # balance == 1.0 exactly when pp_size == 1, so single-stage results are
+        # unchanged. Pipe starvation is a throughput-only effect and is applied
+        # with the scale factor further down, not here.
+        pp_schedule = self._pipeline_schedule(model, **kwargs)
+        _mix_balance = pp_schedule.balance_factor(mix_per_ops, model._num_layers)
+        _genonly_balance = pp_schedule.balance_factor(genonly_per_ops, model._num_layers)
+        mix_step_latency_ms /= _mix_balance
+        genonly_step_latency_ms /= _genonly_balance
+        if pp_schedule.pp_size > 1:
+            logger.debug(
+                f"pp={pp_schedule.pp_size} partition={pp_schedule.layer_partition(model._num_layers)} "
+                f"mix_balance={_mix_balance:.4f} genonly_balance={_genonly_balance:.4f} "
+                f"fill={pp_schedule.fill_factor():.4f}"
+            )
+
         # TTFT: per-request prefill time * queuing factor, plus encoder latency.
         # _mix_step_efficiency reduces mix_step_latency_ms based on the fraction of
         # decode tokens in the step. For TTFT we need the pure prefill cost (no decode
@@ -1548,9 +1596,12 @@ class BaseBackend:
             num_ctx_requests = 1
             num_gen_requests = 1
 
-        # correct output_throughput and concurrency for attention dp (global batch)
+        # correct output_throughput and concurrency for attention dp (global batch).
+        # Stage imbalance is already folded into the inflated step latencies above;
+        # fill_factor is the throughput-only penalty for a pipe that has fewer
+        # in-flight microbatches than stages (it does not slow a single microbatch).
         scale_factor = model.config.pp_size * model.config.attention_dp_size
-        output_throughput = output_throughput * scale_factor
+        output_throughput = output_throughput * scale_factor * pp_schedule.fill_factor()
         concurrency = b * scale_factor
 
         request_rate = output_throughput / (osl - 1) if osl > 1 else 0.0
