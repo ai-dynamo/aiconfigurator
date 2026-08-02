@@ -199,11 +199,84 @@ layering already used for AFD pipeline modeling.
 
 ---
 
-## 6. Known gaps
+## 6. Silicon validation
 
-- **`fill_factor` is linear** (`min(1, M/pp)`). The real curve is likely
-  steeper once scheduler and synchronization overhead are included; it needs
-  silicon calibration.
+Qwen3-32B (bf16, dummy weights), 8× H20-3e, TRT-LLM 1.3.0rc20 against the
+`h20e_sxm` perf DB collected on the same stack and version — so absolute
+numbers are comparable, not just ratios. Decode-dominated workload
+(isl=256, osl=512), 8 GPUs held constant across every `(tp, pp)`, chunked
+prefill off, aiperf closed-loop.
+
+### 6.1 PP is a pure loss at constant GPU count
+
+Measured output throughput, as a ratio to `tp8/pp1`:
+
+| concurrency | tp4/pp2 | tp2/pp4 | tp1/pp8 |
+|---|---|---|---|
+| 1 | 0.62 | 0.43 | 0.28 |
+| 8 | 0.60 | 0.42 | 0.28 |
+| 32 | 0.62 | 0.45 | 0.33 |
+| 64 | 0.53 | 0.56 | 0.36 |
+| 128 | 0.38 | 0.54 | 0.40 |
+
+No configuration beats `pp=1`. This is the expected shape for weight-bound
+decode: holding total GPUs fixed, per-GPU weight bytes are unchanged by PP
+(`tp*pp` is constant), so pipelining buys nothing and the P2P hops plus the
+smaller per-stage batch cost real time. It is evidence for keeping PP out of
+the automatic search until the gaps below are closed.
+
+The `pp=1` baseline predicts within −8% to +11% on throughput and within 8% on
+TPOT at every concurrency, so the discrepancies below are PP-specific and not
+a perf-database problem.
+
+### 6.2 The "always full pipe" default is the largest single error
+
+With `C` concurrent requests and `pp` stages, at most `min(pp, C)` microbatches
+can be in flight. The default assumes `pp`. Driving `num_microbatches` from the
+real concurrency instead:
+
+| C | tp/pp | measured | AIC full pipe | AIC `M=min(pp,C)` |
+|---|---|---|---|---|
+| 1 | 4/2 | 106.9 | 260.4 (+144%) | 130.2 (+22%) |
+| 1 | 2/4 | 73.4 | 317.6 (+333%) | 79.4 (+8%) |
+| 1 | 1/8 | 48.0 | 357.6 (**+645%**) | 44.7 (−7%) |
+
+This is what `fill_factor` is for, and it works — but nothing sets it today.
+See gap 1.
+
+### 6.3 A concurrency-dependent PP gap remains unexplained
+
+For `C >= pp`, where `min(pp, C) == pp` and the fill correction is inert, AIC
+still over-predicts, and the error grows with concurrency:
+
+| C | pp=2 | pp=4 | pp=8 |
+|---|---|---|---|
+| 8 | +44% | +26% | +7% |
+| 32 | +64% | +56% | +25% |
+| 64 | +100% | +45% | +42% |
+| 128 | +173% | +82% | +73% |
+
+Stage imbalance does not explain it: toggling the factors from §3 moves these
+by about 1 point. The measured behaviour is also **non-monotonic in `pp`** —
+at C=128 the pp=2 ITL is 49.8 ms against pp=4's 32.8 ms, and pp=2 throughput
+*falls* between C=64 and C=128 (2576 → 2413 tok/s) while ITL doubles. That
+saturation signature points at engine-side scheduling rather than a smooth
+pipeline bubble, and needs its own investigation before any coefficient is
+fitted to it.
+
+## 7. Known gaps
+
+- **Nothing sets `num_microbatches`, and the default is wrong.** `run_agg`
+  treats `concurrency = batch_size * pp_size` as an *output*, so the pipe is
+  full by construction and `fill_factor` is always 1.0. A caller that wants a
+  concurrency below `pp_size` cannot express it — the reported concurrency
+  silently rounds up to a multiple of `pp_size`. §6.2 measures the cost: up to
+  +645% at C=1. `pipeline_microbatches` is the hook; wiring it means letting
+  the sweep/SLA layer treat concurrency as a target rather than a derived
+  value, which is a convention change worth deciding explicitly.
+- **`fill_factor` is linear** (`min(1, M/pp)`), and §6.3 shows a
+  concurrency-dependent gap it does not capture. Do not fit a coefficient to
+  that gap until the non-monotonic saturation behaviour is understood.
 - **This change covers `run_agg` only — the compiled-engine path is still
   ideal-PP.** The Dynamo planner and Mocker reach AIC through
   `ForwardPassPerfModel` → `Engine::forward_pass_time_ms` →
