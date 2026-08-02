@@ -337,6 +337,22 @@ def test_uncovered_tuple_of_the_same_task_builds_the_fused_graph(synth_systems, 
 
 
 # ---------------------------------------------------------------------------
+# guard: a str-typed moe_quant_mode is a caller bug, not "no coverage"
+# ---------------------------------------------------------------------------
+
+
+def test_str_moe_quant_mode_raises_type_error(synth_systems, synth_model_path):
+    """The compute-coverage probe keys the moe_ep table on ``MoEQuantMode``
+    members; a str (a caller bypassing ``_resolve_quant_str``) would miss every
+    key and silently disable large-EP exploration — raise loudly instead."""
+    t = _synth_task(synth_model_path, "sglang")
+    t.moe_quant_mode = "bfloat16"
+    t._large_ep_coverage_cache.clear()
+    with pytest.raises(TypeError, match="MoEQuantMode"):
+        t._large_ep_coverage("agg")
+
+
+# ---------------------------------------------------------------------------
 # fixtures only: nothing was added to the source tree to make this pass
 # ---------------------------------------------------------------------------
 

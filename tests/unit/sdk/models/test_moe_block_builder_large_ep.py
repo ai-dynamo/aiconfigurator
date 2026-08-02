@@ -603,6 +603,7 @@ class TestA3RouterVariants:
             backend_name=backend_name,
             inference_phase=phase,
             model_family=model_family,
+            gpus_per_node=8,
         )
 
     @pytest.mark.parametrize("family", ["DEEPSEEK", "DEEPSEEKV32"])
@@ -726,6 +727,7 @@ class TestVllmG2Seed:
                 scale_factor=10,
                 backend_name="vllm",
                 inference_phase=phase,
+                gpus_per_node=8,
             )
             # Generic family: the router stays (G2 — no DeepSeek variant fires).
             assert _names(built) == [
@@ -780,6 +782,7 @@ class TestDeepEPAttentionTpTokenScaling:
             scale_factor=10,
             backend_name="vllm",
             inference_phase=phase,
+            gpus_per_node=8,
         )
         router, dispatch, _moe, combine = built
         assert router._name == f"{phase}_router_gemm"
