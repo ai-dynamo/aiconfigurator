@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .native_artifact import validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
 
@@ -225,7 +227,77 @@ def _sha256(path: Path) -> str:
 
 
 def _curated_systems_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "src" / "aiconfigurator" / "systems" / "data"
+    """The data tree the SDK's default systems path actually reads.
+
+    Resolved through the same package the SDK's ``--systems-paths default``
+    resolves to (``aiconfigurator_core``), so default publications land where
+    the fpm forward-model consumer looks regardless of how the package is
+    installed. In a repo checkout this is the aic-core tree (which
+    src/aiconfigurator/systems symlinks to); in an installed environment it is
+    the site-packages tree the SDK reads.
+    """
+    from importlib import resources
+
+    return Path(os.fspath(resources.files("aiconfigurator_core") / "systems" / "data"))
+
+
+# The SDK's reuse/partial markers declare a version without holding measured
+# data; a version dir counts as measured evidence only when it holds at least
+# one real perf file beyond these (mirrors perf_database's marker set).
+_CURATED_VERSION_MARKER_FILES = frozenset(
+    {"reuse.yaml", "SHARED_LAYER_REUSE.txt", "collection_meta.yaml", "INCOMPLETE.txt"}
+)
+
+
+def _family_version_dir_is_partial(version_dir: Path) -> bool:
+    """Mirror the SDK's partial veto (_database_version_dir_is_declared): a
+    version dir mid-collection — any table with status partial, or the legacy
+    INCOMPLETE marker — is undeclared to version discovery no matter how many
+    perf files it holds, so it must not count as curated evidence either. An
+    unreadable collection_meta.yaml fails closed: declaredness cannot be
+    proven from it."""
+    if (version_dir / "INCOMPLETE.txt").is_file():
+        return True
+    meta_path = version_dir / "collection_meta.yaml"
+    if not meta_path.is_file():
+        return False
+    try:
+        meta = yaml.safe_load(meta_path.read_text())
+    except Exception:
+        return True
+    tables = meta.get("tables") if isinstance(meta, dict) else None
+    if not isinstance(tables, dict):
+        return False
+    return any(isinstance(table, dict) and table.get("status") == "partial" for table in tables.values())
+
+
+def _version_has_curated_measurements(systems_root: Path, system: str, backend: str, version: str) -> bool:
+    """True when an existing curated family dir holds measured data for version.
+
+    The SDK's version discovery treats ANY populated version directory under
+    the curated tree as a declared database version, so materializing
+    <system>/<backend>/<version> for a version nothing else declares would
+    make get_latest_database_version return a dataless version and poison
+    every later default-version resolution for this system. Evidence therefore
+    mirrors the SDK's own declaredness: dot-prefixed dirs are invisible to
+    discovery, marker files declare without measuring, and partial
+    (mid-collection) dirs are vetoed outright — so marker-only and
+    partial-only versions stay excluded from default-version resolution
+    exactly as they were before an FPM publication.
+    """
+    system_dir = systems_root / system
+    if not system_dir.is_dir():
+        return False
+    for family_dir in system_dir.iterdir():
+        if family_dir.name.startswith("."):
+            continue
+        candidate = family_dir / backend / version
+        if not candidate.is_dir() or _family_version_dir_is_partial(candidate):
+            continue
+        for entry in candidate.iterdir():
+            if entry.is_file() and not entry.name.startswith(".") and entry.name not in _CURATED_VERSION_MARKER_FILES:
+                return True
+    return False
 
 
 @contextmanager
@@ -273,19 +345,27 @@ def write_formal_database(
     curated_root = systems_root is None
     if systems_root is None:
         systems_root = _curated_systems_root()
+    # The FPM parquet's agreed consumer location is <system>/<backend>/<version>
+    # (the fpm forward-model loader reads exactly this path); the guard below
+    # keeps that from introducing versions the curated tree does not measure.
     destination = systems_root / plan.system / plan.backend / version
-    if curated_root and not destination.is_dir():
-        # The SDK's version discovery treats ANY populated directory under the
-        # curated tree as a declared database version, so materializing a new
-        # directory that holds only FPM files would make
-        # get_latest_database_version return a dataless version and poison
-        # every later default-version resolution for this system.
+    if curated_root and not _version_has_curated_measurements(systems_root, plan.system, plan.backend, version):
         raise ValueError(
-            f"pod-reported backend_version {version!r} has no curated AIC database directory at "
-            f"{destination}; publish against a curated version or pass --fpm-database-root to "
-            "write into an explicit tree"
+            f"pod-reported backend_version {version!r} is not a curated AIC database version for "
+            f"{plan.system}/{plan.backend}: no <family>/{plan.backend}/{version} directory with "
+            f"measured data exists under {systems_root / plan.system}. Publish against a curated "
+            "version or pass --fpm-database-root to write into an explicit tree"
         )
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        if not curated_root:
+            raise
+        raise ValueError(
+            f"cannot create the default curated FPM publication directory {destination}: {error}. "
+            "The tree the SDK reads by default is not writable here; pass --fpm-database-root to "
+            "publish into an explicit tree"
+        ) from error
     parquet_path = destination / "fpm_forward_perf.parquet"
     metadata_path = destination / "fpm_forward_perf.metadata.json"
 

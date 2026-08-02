@@ -1060,9 +1060,12 @@ def test_generator_overrides_reject_malformed_model_cache():
         _load_generator_overrides(args)
 
 
-def test_formal_database_refuses_new_version_dirs_in_curated_tree(tmp_path, monkeypatch):
-    """A pod-reported version without a curated directory must not materialize
-    one: the SDK treats any populated version dir as a declared database."""
+def test_formal_database_requires_family_measured_version_in_curated_tree(tmp_path, monkeypatch):
+    """Default publication targets <system>/<backend>/<version> (the fpm
+    forward-model consumer's path), but only for versions the curated tree
+    already measures under a family dir: the SDK treats any populated version
+    dir as a declared database, so an undeclared (or marker-only) version must
+    not be materialized."""
 
     from collector.fpm_forward import database as fpm_database
 
@@ -1071,16 +1074,58 @@ def test_formal_database_refuses_new_version_dirs_in_curated_tree(tmp_path, monk
     curated = tmp_path / "curated"
     monkeypatch.setattr(fpm_database, "_curated_systems_root", lambda: curated)
 
-    with pytest.raises(ValueError, match="no curated AIC database directory"):
+    # Nothing declares the version anywhere in the curated tree.
+    with pytest.raises(ValueError, match="not a curated AIC database version"):
         write_formal_database(plan, rows, systems_root=None)
 
-    (curated / plan.system / plan.backend / "0.24.0").mkdir(parents=True)
+    # Evidence under a dot-prefixed dir is invisible to SDK version discovery
+    # and must not count.
+    hidden = curated / plan.system / ".backup" / plan.backend / "0.24.0"
+    hidden.mkdir(parents=True)
+    (hidden / "attention_perf.parquet").write_bytes(b"stub")
+    with pytest.raises(ValueError, match="not a curated AIC database version"):
+        write_formal_database(plan, rows, systems_root=None)
+
+    # A marker-only family dir declares the version but holds no measured
+    # data; publishing would flip a marker-only version into a "has data"
+    # version and change op-level default-version resolution.
+    family_dir = curated / plan.system / "attention" / plan.backend / "0.24.0"
+    family_dir.mkdir(parents=True)
+    (family_dir / "reuse.yaml").write_text("reuse: []\n")
+    with pytest.raises(ValueError, match="not a curated AIC database version"):
+        write_formal_database(plan, rows, systems_root=None)
+
+    # Measured files in a mid-collection (partial) dir are vetoed too: the SDK
+    # treats a partial version dir as undeclared regardless of its perf files,
+    # so publishing would newly declare the version to version discovery.
+    (family_dir / "attention_perf.parquet").write_bytes(b"stub")
+    (family_dir / "collection_meta.yaml").write_text("tables:\n  attention:\n    status: partial\n")
+    with pytest.raises(ValueError, match="not a curated AIC database version"):
+        write_formal_database(plan, rows, systems_root=None)
+
+    # A completed collection admits the version; publication creates the
+    # two-level consumer path next to the family layout.
+    (family_dir / "collection_meta.yaml").write_text("tables:\n  attention:\n    status: complete\n")
     parquet, _metadata = write_formal_database(plan, rows, systems_root=None)
     assert parquet.is_file()
+    assert parquet == curated / plan.system / plan.backend / "0.24.0" / "fpm_forward_perf.parquet"
 
     explicit = tmp_path / "explicit"
     parquet2, _metadata2 = write_formal_database(plan, rows, systems_root=explicit)
     assert parquet2.is_file()
+
+
+def test_curated_systems_root_resolves_to_the_sdk_default_tree():
+    """The default publication root must be the tree the SDK's
+    --systems-paths default actually reads (the aiconfigurator_core package
+    data), not a repo-relative guess."""
+
+    from collector.fpm_forward.database import _curated_systems_root
+
+    root = _curated_systems_root()
+    assert root.parts[-2:] == ("systems", "data")
+    assert "aiconfigurator_core" in root.parts
+    assert root.is_dir()
 
 
 def _args_cell(workload_kind: str) -> FPMCell:
