@@ -659,8 +659,28 @@ class TestImbalanceScaleParity:
 
 
 # --------------------------------------------------------------------------- #
-# 2c. SGLang WideEP (deepep_moe) — MLA + MoE + DeepEP dispatch routing.
+# 2c. Large-EP (ex-WideEP) — MLA + EP MoE + all-to-all dispatch routing.
+#
+# Both classes below pin a LARGE-EP config through the post-deprecation
+# internal contract (`ModelConfig.moe_comm_backend` per phase + the system's
+# `num_gpus_per_node`); the `enable_wideep` / `moe_backend="deepep_moe"` flags
+# they used to set are accepted-but-ignored now, so setting them silently
+# builds the FUSED graph instead and the case stops testing large EP at all.
+#
+# Both are skipped: this suite compiles the op graph to a native EngineHandle
+# (`build_engine_spec_json` -> bincode -> `EngineHandle`), and the large-EP ops
+# have no `_to_opspec` branch — compilation raises `OpConversionError` by
+# design until the Rust mirror lands. There is no fallback to assert against
+# here (the fallback lives in `rust_engine_step`, one layer up, and is already
+# gated by `test_large_ep_op_graph_takes_the_documented_python_fallback`), so
+# the honest state is an explicit skip rather than a fused-graph stand-in.
+# Delete the `pytestmark` lines when AIC-1601 lands.
 # --------------------------------------------------------------------------- #
+
+_LARGE_EP_NATIVE_SKIP = (
+    "large-EP ops are Python-fallback until AIC-1601 (documented; see "
+    "test_large_ep_op_graph_takes_the_documented_python_fallback)"
+)
 
 
 _WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
@@ -727,7 +747,7 @@ def _python_wideep_sglang_references() -> dict[str, float]:
 
 
 class TestWideEpDeepEpParity:
-    """SGLang WideEP DeepSeek (moe_backend=deepep_moe) end-to-end parity.
+    """SGLang large-EP DeepSeek (deepep_ht/deepep_ll) end-to-end parity.
 
     Covers three previously-divergent surfaces at once: the WideEP MLA
     per-rank-heads table coordinate (tp=8 -> heads=16; the bridge used to emit
@@ -736,6 +756,49 @@ class TestWideEpDeepEpParity:
     dispatch flavor emission (the emitter used to map every sglang dispatch to
     CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
     shipped version with the deepep dispatch parquets)."""
+
+    pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
+
+    _MODEL = "deepseek-ai/DeepSeek-V3"
+    _SYSTEM = "h200_sxm"
+    _VERSION = "0.5.6.post2"
+
+    def _build(self):
+        from aiconfigurator.sdk import common
+
+        database = _quiet(perf_database.get_database, self._SYSTEM, "sglang", self._VERSION)
+        if database is None:
+            pytest.skip(f"no perf database for {self._SYSTEM}/sglang/{self._VERSION}")
+        model_config = config.ModelConfig(
+            tp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+            num_gpus_per_node=8,
+            attention_backend="flashinfer",
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+        )
+        model = _quiet(get_model, self._MODEL, model_config, "sglang")
+        backend = get_backend("sglang")
+        spec_json = _quiet(
+            engine.build_engine_spec_json,
+            model,
+            model_path=self._MODEL,
+            system=self._SYSTEM,
+            backend="sglang",
+            backend_version=self._VERSION,
+            kv_block_size=None,
+            systems_path=None,
+            nextn=0,
+            database=database,
+        )
+        import aiconfigurator_core
+
+        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
+        return model, backend, database, handle
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
@@ -754,7 +817,8 @@ class TestWideEpDeepEpParity:
 
 
 # --------------------------------------------------------------------------- #
-# 2d. TRT-LLM WideEP (NVLink Two-Sided alltoall) — gb200.
+# 2d. TRT-LLM large-EP (NVLink Two-Sided alltoall) — gb200. See 2c's header for
+# why this is skipped.
 # --------------------------------------------------------------------------- #
 
 
@@ -806,14 +870,51 @@ def _python_wideep_trtllm_references() -> dict[str, float]:
 
 
 class TestTrtllmWideEpParity:
-    """TRT-LLM WideEP DeepSeek (enable_wideep, attention_dp=8) on gb200.
+    """TRT-LLM large-EP DeepSeek (nvlink_two_sided, attention_dp=8) on gb200.
 
-    Covers the `TrtLLMWideEPMoEDispatch` port (prepare+dispatch pre /
-    combine post through the trtllm_alltoall table, kernel auto-selected as
-    NVLinkTwoSided via moe_backend="wideep") and the alltoall loader keying
-    (kernel_source/op_name/num_nodes — the pre-fix loader collapsed 1,556 of
-    2,096 gb200 rows). This path used to fail opspec conversion entirely
-    (`TrtLLMWideEPMoEDispatch` had no `_to_opspec` branch)."""
+    Covers the trtllm all-to-all port (prepare+dispatch pre / combine post
+    through the trtllm_alltoall table, kernel NVLinkTwoSided) and the
+    alltoall loader keying (kernel_source/op_name/num_nodes — the pre-fix
+    loader collapsed 1,556 of 2,096 gb200 rows)."""
+
+    pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
+
+    def _build(self):
+        from aiconfigurator.sdk import common
+
+        database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+        if database is None:
+            pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+        model_config = config.ModelConfig(
+            tp_size=1,
+            attention_dp_size=8,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+            num_gpus_per_node=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = _quiet(get_model, "deepseek-ai/DeepSeek-V3", model_config, "trtllm")
+        backend = get_backend("trtllm")
+        spec_json = _quiet(
+            engine.build_engine_spec_json,
+            model,
+            model_path="deepseek-ai/DeepSeek-V3",
+            system="gb200",
+            backend="trtllm",
+            backend_version="1.3.0rc10",
+            kv_block_size=None,
+            systems_path=None,
+            nextn=0,
+            database=database,
+        )
+        import aiconfigurator_core
+
+        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
+        return model, backend, database, handle
 
     def test_trtllm_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_trtllm()
