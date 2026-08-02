@@ -56,6 +56,7 @@ from aiconfigurator_core.sdk.operations import (
     ElementWise,
     Embedding,
     EncoderAttention,
+    EPMoE,
     FallbackOp,
     GDNKernel,
     GenerationAttention,
@@ -67,6 +68,7 @@ from aiconfigurator_core.sdk.operations import (
     MLABmm,
     MLAModule,
     MoE,
+    MoEAllToAll,
     MoEDispatch,
     OverlapOp,
     TrtLLMWideEPMoE,
@@ -620,6 +622,54 @@ def _wideep_moe_dispatch(op: TrtLLMWideEPMoEDispatch) -> dict:
     }
 
 
+def _moe_all_to_all(op: MoEAllToAll) -> dict:
+    """Unified large-EP all-to-all comm phase (Python `MoEAllToAll`). Field
+    names match the Rust `MoeAllToAllOp` (operators/moe_a2a.rs); the crate has
+    no deny_unknown_fields, so a key drift here would silently fall back to
+    the serde default — the key-set tripwire in test_rust_engine_step.py pins
+    the exact set."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "phase": op._phase,
+        "comm_backend": op._comm_backend,
+        "comm_dtype": op._comm_dtype,
+        "hidden_size": op._hidden_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_ep_size": op._moe_ep_size,
+        "node_num": op._node_num,
+        "sms": op._sms,
+        "attention_tp_size": op._attention_tp_size,
+    }
+
+
+def _ep_moe(op: EPMoE) -> dict:
+    """Unified large-EP expert compute (Python `EPMoE`). Field names match the
+    Rust `EpMoeOp` (operators/ep_moe.rs). `kernel_source` crosses the wire
+    verbatim (null when unpinned — the production case): the Rust op ports
+    every `_resolve_kernel_source` leg and resolves at query time, so nothing
+    is pre-baked here. `num_slots` is the ctor-resolved value (Python already
+    collapsed None -> num_experts)."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "hidden_size": op._hidden_size,
+        "inter_size": op._inter_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_ep_size": op._moe_ep_size,
+        "quant_mode": _quant_name(op._quant_mode),
+        "workload_distribution": op._workload_distribution,
+        "attention_dp_size": op._attention_dp_size,
+        "inference_phase": op._inference_phase,
+        "num_slots": op._num_slots,
+        "kernel_source": op._kernel_source,
+        "is_gated": bool(op._is_gated),
+        "enable_eplb": bool(op._enable_eplb),
+    }
+
+
 def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> dict:
     """Convert one Python ``Operation`` to its externally-tagged ``OpSpec`` dict.
 
@@ -684,6 +734,15 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
     # `Operation` subclass (not a MoEDispatch), but keep the guard explicit.
     if isinstance(op, TrtLLMWideEPMoEDispatch):
         return {"WideEpMoeDispatch": _wideep_moe_dispatch(op)}
+
+    # Unified large-EP ops (AIC-1601): one Python class per table, the phase
+    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::EpMoe` are
+    # APPENDED after `Dsv4MegaMoe` (bincode enum indices are positional;
+    # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
+    if isinstance(op, MoEAllToAll):
+        return {"MoeAllToAll": _moe_all_to_all(op)}
+    if isinstance(op, EPMoE):
+        return {"EpMoe": _ep_moe(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):
