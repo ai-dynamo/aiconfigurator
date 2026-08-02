@@ -462,3 +462,34 @@ a generator extension — a mechanism change parked for owner approval.
   (SDK scope). OWNER DECISION 2026-08-02: WON'T-FIX — the draft is 5
   layers vs the 93-layer target, percent-level error accepted; this note
   stays as the known-inaccuracy record for the vllm DSPARK column.
+
+## vLLM wave-2 — 2026-08-02
+
+Wave-1 vllm kda artifacts (pipelines 60591225/60591349/60591439) pulled
+and verified by content: h100/h200/gb200 full + l40s/b300/rtx probe runs,
+each 1203 rows (l40s 1145 — SM89 lane substitution: chunk_kda_with_fused_gate
+prefill, no fused_kda_decode), zero bad latencies, zero duplicate keys,
+device/version labels correct. The identical deterministic failure
+spectrum on all six systems: 20 context cells at the causal_conv1d int32
+token-offset overflow guard + 1 generation Triton bs=1024 grid limit.
+`collector/vllm/collect_kda.py` is byte-identical between the collection
+revision (72b6c0eeb) and current head, so these artifacts ARE current-code
+data — no recollection needed.
+
+Ingested: gb200 kda (b8f9ef27f, loader + KDAKernel spot queries verified).
+Held local per the Blackwell-first deferral: h100/h200 (Hopper out of PR
+scope), l40s/rtx (SM89/120 stay in vllm `unverified_sms`; probe evidence
+archived).
+
+Submitted (REF=campaign/rc20-restore, AIC_REVISION=b8f9ef27f, one
+pipeline per image x op family):
+- 60709585 vllm kda @ gb300 (preview image e90e2603) — last missing
+  Blackwell kda system.
+- 60709588 vllm moe, AIC_MODEL_FILTER=moonshotai/Kimi-K3 @ gb200,gb300
+  (STOCK v0.24.0 digest-pinned image — first campaign run of the
+  situ-as-silu Marlin lane + EP-local shim, 8555ac6a4/3004f56ca).
+- 60709589 vllm mla_bmm_gen_pre,mla_bmm_gen_post @ b300_sxm,gb200,gb300
+  (stock image; clears the "other systems queued" mla_bmm item — every
+  K3 vllm prediction on those systems currently prices absorb BMMs from
+  the trtllm fallback).
+Stock v0.24.0 digest verified multi-arch (arm64+amd64) before submission.
