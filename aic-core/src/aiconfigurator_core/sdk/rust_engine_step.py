@@ -376,7 +376,12 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     import aiconfigurator_core
     from aiconfigurator_core.sdk.engine import EngineHandle, build_engine_spec_json
 
-    systems_path = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    # The Rust engine must read the SAME systems tree the Python ``database``
+    # resolved to — the database's own winning root, not the env var, which is
+    # pinned by the first ``_configure_default_data_roots`` call and goes stale
+    # when ``set_systems_paths`` later changes the search order (e.g. an
+    # fpm_forward pair in a non-default root).
+    systems_path = str(getattr(database, "systems_root", "") or "") or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     nextn = getattr(model, "_nextn", None)
     spec_json = build_engine_spec_json(
         model,
@@ -427,6 +432,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
         "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
+        # An op_level and an fpm model with identical parallel/quant configs
+        # compile to DIFFERENT engines (granular op list vs one whole-model op
+        # per phase); without this key they would share a cached handle and
+        # silently answer with the other mode's engine.
+        "forward_model": getattr(model, "forward_model", "op_level"),
+        # Same identity built against different systems roots reads different
+        # perf trees; the root is part of the engine identity.
+        "systems_root": str(getattr(database, "systems_root", "") or ""),
         "extra": {},
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))

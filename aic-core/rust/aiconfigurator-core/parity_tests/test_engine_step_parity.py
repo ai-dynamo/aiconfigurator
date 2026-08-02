@@ -1063,38 +1063,47 @@ def _fpm_write_pair(data_dir) -> None:
         "fmha_quant_mode": "bfloat16",
         "comm_quant_mode": "half",
         "kv_cache_dtype": "fp8",
-        "tp": 2, "pp": 1, "dp": 1, "moe_tp": 1, "moe_ep": 2, "cp": 1,
+        "tp": 2,
+        "pp": 1,
+        "dp": 1,
+        "moe_tp": 1,
+        "moe_ep": 2,
+        "cp": 1,
     }
     rows = []
     for kind, batch, prefill, kv, lat in _FPM_ROWS:
-        rows.append({
-            "cell_id": f"fpm-{kind}-{batch}-{prefill}-{kv}",
-            "model_path": _FPM_MODEL,
-            "system": "b200_sxm",
-            "backend": "vllm",
-            "backend_version": _FPM_VERSION,
-            "weight_quantization": "fp8_block",
-            **identity,
-            "backend_axis": "baseline",
-            "backend_policy": "baseline_auto",
-            "workload_kind": kind,
-            "batch_size": batch,
-            "total_prefill_tokens": prefill,
-            "total_kv_read_tokens": kv,
-            "partition_policy": "balanced_v1",
-            "latency_ms": lat,
-        })
+        rows.append(
+            {
+                "cell_id": f"fpm-{kind}-{batch}-{prefill}-{kv}",
+                "model_path": _FPM_MODEL,
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
+                "weight_quantization": "fp8_block",
+                **identity,
+                "backend_axis": "baseline",
+                "backend_policy": "baseline_auto",
+                "workload_kind": kind,
+                "batch_size": batch,
+                "total_prefill_tokens": prefill,
+                "total_kv_read_tokens": kv,
+                "partition_policy": "balanced_v1",
+                "latency_ms": lat,
+            }
+        )
     parquet_path = data_dir / "fpm_forward_perf.parquet"
     pq.write_table(pa.Table.from_pylist(rows), parquet_path)
     digest = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
     (data_dir / "fpm_forward_perf.metadata.json").write_text(
-        _json.dumps({
-            "schema_name": "aic_fpm_forward_perf",
-            "schema_version": 5,
-            "coordinate_system": "iteration_totals_balanced_v1",
-            "parquet_sha256": digest,
-            "row_count": len(rows),
-        })
+        _json.dumps(
+            {
+                "schema_name": "aic_fpm_forward_perf",
+                "schema_version": 5,
+                "coordinate_system": "iteration_totals_balanced_v1",
+                "parquet_sha256": digest,
+                "row_count": len(rows),
+            }
+        )
     )
 
 
@@ -1129,10 +1138,17 @@ class TestRustEngineStepFpmParity:
         from aiconfigurator.sdk.config_builders import build_model_config
 
         cfg = build_model_config(
-            tp_size=2, pp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=2,
-            gemm_quant_mode="fp8_block", moe_quant_mode="fp8_block",
-            kvcache_quant_mode="fp8", fmha_quant_mode="bfloat16",
-            comm_quant_mode="half", forward_model="fpm",
+            tp_size=2,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            gemm_quant_mode="fp8_block",
+            moe_quant_mode="fp8_block",
+            kvcache_quant_mode="fp8",
+            fmha_quant_mode="bfloat16",
+            comm_quant_mode="half",
+            forward_model="fpm",
         )
         model = get_model(_FPM_MODEL, cfg, "vllm")
         database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
@@ -1144,11 +1160,7 @@ class TestRustEngineStepFpmParity:
 
         def thunk():
             summary = backend.run_static(model, database, rc, mode=mode)
-            d = (
-                summary.get_context_latency_dict()
-                if mode == "static_ctx"
-                else summary.get_generation_latency_dict()
-            )
+            d = summary.get_context_latency_dict() if mode == "static_ctx" else summary.get_generation_latency_dict()
             return sum(d.values())
 
         return _safe_value(thunk)
@@ -1197,14 +1209,14 @@ class TestRustEngineStepFpmParity:
     @pytest.mark.parametrize(
         ("mode", "batch", "isl", "osl", "prefix"),
         [
-            ("static_ctx", 1, 1024, 1, 0),      # exact prefill hit
-            ("static_ctx", 1, 2048, 1, 1024),   # exact cached-prefill hit
-            ("static_ctx", 2, 1500, 1, 0),      # in-curve lerp
-            ("static_ctx", 3, 1024, 1, 0),      # uncollected batch -> transfer (SOL)
-            ("static_gen", 1, 1024, 2, 0),      # exact decode hit (kv = isl+1)
-            ("static_gen", 4, 1024, 2, 0),      # exact decode hit at B=4
-            ("static_gen", 2, 1024, 2, 0),      # uncollected batch -> transfer (SOL)
-            ("static_gen", 4, 9_000_000, 2, 0), # out of domain -> both error
+            ("static_ctx", 1, 1024, 1, 0),  # exact prefill hit
+            ("static_ctx", 1, 2048, 1, 1024),  # exact cached-prefill hit
+            ("static_ctx", 2, 1500, 1, 0),  # in-curve lerp
+            ("static_ctx", 3, 1024, 1, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 1, 1024, 2, 0),  # exact decode hit (kv = isl+1)
+            ("static_gen", 4, 1024, 2, 0),  # exact decode hit at B=4
+            ("static_gen", 2, 1024, 2, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 4, 9_000_000, 2, 0),  # out of domain -> both error
         ],
     )
     def test_fpm_static_parity(self, fpm_systems_root, monkeypatch, mode, batch, isl, osl, prefix):
@@ -1218,8 +1230,8 @@ class TestRustEngineStepFpmParity:
         ("ctx_tokens", "gen_tokens", "isl", "osl"),
         [
             (1024, 4, 1024, 2),  # mixed: prefill chunk + marginal decode
-            (512, 4, 1024, 2),   # partial chunk (chunk_scale > 1)
-            (0, 4, 1024, 2),     # gen-only keeps full decode
+            (512, 4, 1024, 2),  # partial chunk (chunk_scale > 1)
+            (0, 4, 1024, 2),  # gen-only keeps full decode
             (1024, 0, 1024, 2),  # prefill-only chunk
         ],
     )
@@ -1231,9 +1243,7 @@ class TestRustEngineStepFpmParity:
             rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=0)
             rc.engine_step_backend = eng
             return _safe_value(
-                lambda: backend._get_mix_step_latency(
-                    model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0
-                )[0]
+                lambda: backend._get_mix_step_latency(model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0)[0]
             )
 
         self._assert_pair(run("python"), run("rust"), f"mixed ctx={ctx_tokens} gen={gen_tokens}")
@@ -1245,8 +1255,6 @@ class TestRustEngineStepFpmParity:
         def run(eng):
             rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2, prefix=0)
             rc.engine_step_backend = eng
-            return _safe_value(
-                lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0]
-            )
+            return _safe_value(lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0])
 
         self._assert_pair(run("python"), run("rust"), "genonly gen=4")
