@@ -272,6 +272,14 @@ weights. Converted `sgl-project/*-FP8` checkpoints can still collect
 
 ## TP and Head-Axis Convention (unified by #1429)
 
+> #1458 generalized this section into the repo-wide pin — including the MLA
+> module `[native][local]` migration (native from the model pin, not
+> `num_heads * tp_size`), the computation-completeness exception that keeps
+> GQA and the MLA kernel tables local-only, and the DSA
+> one-native-per-architecture guardrail. See
+> [head-axis-keying.md](head-axis-keying.md); the DSV4 specifics below remain
+> authoritative for this family.
+
 Every persisted DSV4 module row carries two head-related columns whose
 semantics are pinned by issue #1429:
 

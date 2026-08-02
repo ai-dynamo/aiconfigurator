@@ -236,7 +236,7 @@ def _generation_mla(op: GenerationMLA) -> dict:
 
 
 def _mla_module(op: MLAModule) -> dict:
-    return {
+    spec = {
         "name": op._name,
         "scale_factor": op._scale_factor,
         "num_heads": op._num_heads,
@@ -244,6 +244,11 @@ def _mla_module(op: MLAModule) -> dict:
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
     }
+    # Emitted only when set: keeps specs from legacy builders byte-identical
+    # (the Rust field is #[serde(default, skip_serializing_if)], #1458).
+    if op._native_num_heads is not None:
+        spec["native_num_heads"] = op._native_num_heads
+    return spec
 
 
 def _mla_bmm(op: MLABmm) -> dict:

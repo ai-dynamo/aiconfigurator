@@ -274,6 +274,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
+            native_num_heads: Some(128),
         }
     }
 
