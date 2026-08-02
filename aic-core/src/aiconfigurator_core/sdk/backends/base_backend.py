@@ -17,7 +17,7 @@ from aiconfigurator_core.sdk.config import RuntimeConfig
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
-from aiconfigurator_core.sdk.pipeline import PipelineSchedule, warn_on_unclassified_ops
+from aiconfigurator_core.sdk.pipeline import PipelineLayout, PipelineSteadyState, warn_on_unclassified_ops
 from aiconfigurator_core.sdk.rust_engine_step import (
     RustEngineUnsupportedError,
     estimate_decode_step_latency_with_rust,
@@ -105,27 +105,36 @@ class BaseBackend:
             return max(1, int(b // (steps_to_finish_ctx / decode_iterations)))
         return max(1, b - int(np.ceil(ctx_tokens / isl)))
 
-    def _pipeline_schedule(self, model, **kwargs) -> PipelineSchedule:
-        """Build the PP schedule for this run.
+    def _pipeline_layout(self, model) -> PipelineLayout:
+        """Where this model's ops land across PP stages.
 
-        Subclasses override to encode engine-specific layer partitioning or
-        microbatch policy. The default is the even split with the remainder on
-        the leading stages (vLLM ``get_pp_indices`` / TRT-LLM) and a pipe that
-        is exactly full.
+        Subclasses override to encode an engine-specific layer partition. The
+        default is the even split with the remainder on the leading stages
+        (vLLM ``get_pp_indices`` / TRT-LLM).
 
+        This is the shared primitive: it carries no scheduling policy, so an
+        event-driven consumer (the Dynamo Mocker) can use it to get per-stage
+        costs and derive its own bubbles, rather than inheriting AIC's
+        closed-form ones.
+        """
+        pp_size = int(model.config.pp_size or 1)
+        if pp_size > 1:
+            warn_on_unclassified_ops(model.generation_ops, model._num_layers)
+        return PipelineLayout(pp_size=pp_size)
+
+    def _pipeline_steady_state(self, model, **kwargs) -> PipelineSteadyState:
+        """How full the pipe runs, for the mean-field step model.
+
+        Subclasses override to encode an engine-specific microbatch policy.
         ``num_microbatches=None`` reproduces the historical assumption that
         there are always ``pp_size`` microbatches in flight. Callers that know
         better (chunked-prefill scheduling, low concurrency) pass an explicit
         count via ``pipeline_microbatches``.
         """
-        pp_size = int(model.config.pp_size or 1)
-        schedule = PipelineSchedule(
-            pp_size=pp_size,
+        return PipelineSteadyState(
+            layout=self._pipeline_layout(model),
             num_microbatches=kwargs.get("pipeline_microbatches"),
         )
-        if pp_size > 1:
-            warn_on_unclassified_ops(model.generation_ops, model._num_layers)
-        return schedule
 
     def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
         """GPU batching efficiency factor for a mixed prefill/decode forward pass.
@@ -1530,16 +1539,16 @@ class BaseBackend:
         # balance == 1.0 exactly when pp_size == 1, so single-stage results are
         # unchanged. Pipe starvation is a throughput-only effect and is applied
         # with the scale factor further down, not here.
-        pp_schedule = self._pipeline_schedule(model, **kwargs)
-        _mix_balance = pp_schedule.balance_factor(mix_per_ops, model._num_layers)
-        _genonly_balance = pp_schedule.balance_factor(genonly_per_ops, model._num_layers)
+        pp_pipe = self._pipeline_steady_state(model, **kwargs)
+        _mix_balance = pp_pipe.balance_factor(mix_per_ops, model._num_layers)
+        _genonly_balance = pp_pipe.balance_factor(genonly_per_ops, model._num_layers)
         mix_step_latency_ms /= _mix_balance
         genonly_step_latency_ms /= _genonly_balance
-        if pp_schedule.pp_size > 1:
+        if pp_pipe.pp_size > 1:
             logger.debug(
-                f"pp={pp_schedule.pp_size} partition={pp_schedule.layer_partition(model._num_layers)} "
+                f"pp={pp_pipe.pp_size} partition={pp_pipe.layer_partition(model._num_layers)} "
                 f"mix_balance={_mix_balance:.4f} genonly_balance={_genonly_balance:.4f} "
-                f"fill={pp_schedule.fill_factor():.4f}"
+                f"fill={pp_pipe.fill_factor():.4f}"
             )
 
         # TTFT: per-request prefill time * queuing factor, plus encoder latency.
@@ -1601,7 +1610,7 @@ class BaseBackend:
         # fill_factor is the throughput-only penalty for a pipe that has fewer
         # in-flight microbatches than stages (it does not slow a single microbatch).
         scale_factor = model.config.pp_size * model.config.attention_dp_size
-        output_throughput = output_throughput * scale_factor * pp_schedule.fill_factor()
+        output_throughput = output_throughput * scale_factor * pp_pipe.fill_factor()
         concurrency = b * scale_factor
 
         request_rate = output_throughput / (osl - 1) if osl > 1 else 0.0
