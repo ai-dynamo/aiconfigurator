@@ -22,8 +22,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-python3 "${workdir}/preflight.py"
-
+# etcd is a static binary with no dependency on the preflight audit, and the
+# followers' readiness probe races the LEADER's preflight when etcd starts
+# after it: preflight imports vLLM/torch, whose cold-vs-warm page-cache delta
+# across nodes is unbounded. Start etcd first so the probe budget only has to
+# cover pod-exec skew.
 if [[ "${node_rank}" == "0" ]]; then
   data_dir=/tmp/fpm-forward-etcd
   rm -rf "${data_dir}"
@@ -36,13 +39,15 @@ if [[ "${node_rank}" == "0" ]]; then
   etcd_pid=$!
 fi
 
+python3 "${workdir}/preflight.py"
+
 python3 - "${leader_address}" <<'PY'
 import socket
 import sys
 import time
 
 host = sys.argv[1]
-deadline = time.monotonic() + 30
+deadline = time.monotonic() + 120
 while time.monotonic() < deadline:
     try:
         with socket.create_connection((host, 2379), timeout=1):
