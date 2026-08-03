@@ -25,7 +25,9 @@ SOURCE_TEXT = SOURCE_PATH.read_text()
 
 # The frozen moe_ep CSV header: the five helper.log_perf prefix columns plus the
 # payload owned by this collector, in the order load_moe_ep_data keys them
-# (aic-core .../sdk/operations/moe_comm.py::load_moe_ep_data).
+# (aic-core .../sdk/operations/moe_comm.py::load_moe_ep_data). The SDK-side
+# twin is tests/unit/sdk/database/test_collector_schema_contract.py::
+# MOE_EP_HEADER.
 MOE_EP_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"

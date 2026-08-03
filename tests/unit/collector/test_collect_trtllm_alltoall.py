@@ -29,7 +29,8 @@ SOURCE_TEXT = SOURCE_PATH.read_text()
 # tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER pins for the
 # sglang DeepEP writer: both collectors share _build_moe_a2a_row and both
 # tables are read by load_moe_a2a_data (aic-core .../sdk/operations/
-# moe_comm.py ~:378-395).
+# moe_comm.py ~:378-395). The SDK-side twin is
+# tests/unit/sdk/database/test_collector_schema_contract.py::MOE_A2A_HEADER.
 MOE_A2A_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "comm_backend,phase,comm_dtype,ep_size,node_num,hidden_size,topk,num_experts,"

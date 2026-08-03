@@ -29,7 +29,8 @@ SOURCE_TEXT = SOURCE_PATH.read_text()
 # (tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER): the five
 # helper.log_perf prefix columns plus the payload owned by this collector, in
 # the order load_moe_ep_data keys them (aic-core
-# .../sdk/operations/moe_comm.py::load_moe_ep_data).
+# .../sdk/operations/moe_comm.py::load_moe_ep_data). The SDK-side twin is
+# tests/unit/sdk/database/test_collector_schema_contract.py::MOE_EP_HEADER.
 MOE_EP_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
@@ -176,6 +177,20 @@ def test_pre_hopper_sm_expands_to_zero_with_an_explained_drop(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "0 cases from 117 moe recipes" in out
     assert "-> 16 recipes kept) x 0 quant mode(s) x 3 EPLB configs = 0 expanded" in out
+
+
+def test_sm90_42_case_reconciliation_is_log_pinned(monkeypatch, capsys):
+    # The SM90 twin of the SM80/SM120 capsys pins: the 42-case population must
+    # reconcile arithmetically in the getter's logged drop accounting, not
+    # just in the returned count (117 recipes -> 16 kept x 1 mode x 3 EPLB
+    # configs = 48, minus 6 slot-alignment drops, zero kernel-limit drops).
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
+    cases = _getter(90)()
+    out = capsys.readouterr().out
+    assert len(cases) == 42
+    assert "moe_ep: 42 cases from 117 moe recipes" in out
+    assert "-> 16 recipes kept) x 1 quant mode(s) x 3 EPLB configs" in out
+    assert "= 48 expanded - 6 num_slots%ep!=0 - 0 SM120 nvfp4 kernel limits" in out
 
 
 def test_sm120_nvfp4_kernel_limit_drops_are_counted(monkeypatch, capsys):
