@@ -304,8 +304,6 @@ __all__ = [
 ]
 
 
-NATIVE_HEADS = 64
-
 _DSV4_CUDA_PAGE_SIZE = 256
 _DSV4_SWA_WINDOW_SIZE = 128
 _DSV4_SWA_TO_FULL_SCALE = 10
@@ -1214,6 +1212,28 @@ def _bench_cuda_events(
     }
 
 
+def _resolve_local_heads(*, native_heads: int, module_heads: int | None, tp_size: int) -> int:
+    """Resolve the rank-LOCAL head count persisted as ``num_heads`` (#1429).
+
+    The unified convention persists the head count this rank's module actually
+    runs with; consumers derive the model-native count as
+    ``num_heads * tp_size``.  Local is derived from the HF config's
+    ``num_attention_heads``, which stays native under ``_tp_load_model_patch``
+    (the patch shards via ``_TP``/``_ATTN_TP_SIZE`` and never rewrites the
+    config).  ``attention_module.n_heads`` may report the native or the
+    rank-local count depending on the sglang version, so it is only
+    cross-checked, never persisted — a value matching neither is a geometry
+    surprise worth failing the case over.
+    """
+    local_heads = max(1, int(native_heads) // tp_size)
+    if module_heads is not None and int(module_heads) not in (int(native_heads), local_heads):
+        raise RuntimeError(
+            f"DSV4 attention head geometry mismatch: module n_heads={int(module_heads)} is neither "
+            f"config-native {int(native_heads)} nor rank-local {local_heads} (tp_size={tp_size})"
+        )
+    return local_heads
+
+
 def _log_result(
     *,
     output_path: str | None,
@@ -1232,7 +1252,7 @@ def _log_result(
     gemm_type: str = "bfloat16",
     tp_size: int = 1,
     step: int | None = None,
-    num_heads: int | None = None,
+    num_heads: int,
 ) -> None:
     # V4-Flash output layout: ONE CSV per (attn_kind, mode) — 3 kinds x 2
     # modes = 6 files total, regardless of how many (tp_size, gemm_type)
@@ -1257,7 +1277,8 @@ def _log_result(
                 "mla_dtype": "bfloat16",
                 "kv_cache_dtype": kv_cache_dtype,
                 "gemm_type": gemm_type,
-                "num_heads": num_heads if num_heads is not None else max(1, NATIVE_HEADS // tp_size),
+                # Rank-LOCAL by the unified #1429 convention (native = num_heads * tp_size).
+                "num_heads": num_heads,
                 "batch_size": batch_size,
                 "isl": seq_len if is_prefill else 1,
                 "tp_size": tp_size,
@@ -1379,8 +1400,11 @@ def run_dsv4_mla_module(
     actual_ratio = getattr(attention_module, "compress_ratio", None)
     if actual_ratio != compress_ratio:
         raise RuntimeError(f"target layer compress_ratio mismatch: expected {compress_ratio}, got {actual_ratio}")
-    native_attention_heads = int(getattr(attention_module, "n_heads", NATIVE_HEADS))
-    local_attention_heads = max(1, native_attention_heads // tp_size)
+    local_attention_heads = _resolve_local_heads(
+        native_heads=int(model_runner.model_config.hf_config.num_attention_heads),
+        module_heads=getattr(attention_module, "n_heads", None),
+        tp_size=tp_size,
+    )
 
     print(
         f"[dsv4-collector] layer={layer_id}, attn_kind={attn_kind}, "

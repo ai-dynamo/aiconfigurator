@@ -11,6 +11,7 @@ from codeowners_match import parse_codeowners, resolve_owners
 
 ROOT = Path(__file__).resolve().parents[2]
 MAINTAINERS = "@ai-dynamo/maintainers-aiconfigurator"
+DEVOPS = "@ai-dynamo/devops"
 AREA_TEAMS = {
     "@ai-dynamo/aiconfigurator-runtime",
     "@ai-dynamo/aiconfigurator-generators",
@@ -66,3 +67,7 @@ def test_representative_routing_contract() -> None:
         "@ai-dynamo/aiconfigurator-infra",
         MAINTAINERS,
     }
+    assert _owners("CODEOWNERS") == {DEVOPS}
+    assert _owners("aic-core/rust/aiconfigurator-core/deny.toml") == {DEVOPS}
+    assert _owners("src/aiconfigurator/generator/deny.toml") == {DEVOPS}
+    assert _owners("tools/support_matrix/deny.toml") == {DEVOPS}

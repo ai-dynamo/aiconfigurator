@@ -157,7 +157,7 @@ def collect_generator_params(
         workers_dict["encode_workers"] = int(encode_workers if encode_workers is not None else 1)
         workers_dict["encode_gpus_per_worker"] = coerce_int(encode_params.get("gpus_per_worker"))
 
-    return {
+    result = {
         "ServiceConfig": service_payload,
         "K8sConfig": k8s_payload,
         "DynConfig": dict(dyn_cfg),
@@ -168,6 +168,9 @@ def collect_generator_params(
         "NodeConfig": {"num_gpus_per_node": int(num_gpus_per_node)},
         "params": role_params,
     }
+    if generator_dynamo_version:
+        result["generator_dynamo_version"] = generator_dynamo_version
+    return result
 
 
 def generate_config_from_yaml(

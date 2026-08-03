@@ -71,7 +71,7 @@ class TRTLLMBackend(BaseBackend):
         # enqueued after the last prefill finishes. Empirical correction.
         return max(1, num_mix_steps - 3)
 
-    def get_default_free_gpu_memory_fraction(self) -> float | None:
+    def get_default_free_gpu_memory_fraction(self, backend_version: str | None = None) -> float | None:
         return TRTLLM_DEFAULT_FREE_GPU_MEMORY_FRACTION
 
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:

@@ -8,7 +8,12 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import (
+    attention_modules_excluded_from_quant,
+    attention_projection_exclusions,
+    mtp_scale_factor,
+    quant_exclude_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,30 +49,12 @@ def _dsa_full_layer_fraction(raw_config: dict, num_layers: int) -> float:
 
 def _quant_exclude_patterns(raw_config: dict) -> list:
     """All module-exclusion globs a ModelOpt/HF quant config can carry."""
-    quant_config = raw_config.get("quantization_config")
-    quant_config = quant_config if isinstance(quant_config, dict) else {}
-
-    hf_quant_config = raw_config.get("hf_quant_config")
-    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
-    hf_quant = hf_quant_config.get("quantization")
-    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
-
-    return [
-        *list(quant_config.get("modules_to_not_convert") or []),
-        *list(quant_config.get("exclude_modules") or []),
-        *list(quant_config.get("ignore") or []),
-        *list(hf_quant.get("exclude_modules") or []),
-        *list(hf_quant.get("ignore") or []),
-    ]
+    return quant_exclude_patterns(raw_config)
 
 
 def _dsa_attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     """Return whether a GLM/DSA checkpoint keeps DSA attention projections unquantized."""
-    # Match either a full projection name (e.g. "self_attn.q_a_proj") or a
-    # layer-prefixed glob the ModelOpt exporter emits (e.g.
-    # "model.layers.10.self_attn*"). The latter is how nvidia/GLM-5-NVFP4
-    # excludes DSA attention from NVFP4; the full-name-only check missed it.
-    return any("self_attn" in str(pattern) for pattern in _quant_exclude_patterns(raw_config))
+    return attention_modules_excluded_from_quant(raw_config)
 
 
 def _shared_experts_excluded_from_quant(raw_config: dict) -> bool:
@@ -83,6 +70,30 @@ def _dsa_gemm_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -
     if isinstance(extra_params, dict):
         return extra_params.get("dsa_gemm_quant_mode", fallback)
     return fallback
+
+
+def _dsa_attention_quant_modes(
+    extra_params: object, fallback: common.GEMMQuantMode
+) -> tuple[dict, common.GEMMQuantMode]:
+    """Per-projection quant modes and the single module perf key.
+
+    An explicit ``dsa_gemm_quant_mode`` override applies to every projection
+    (back-compat). Otherwise groups named in ``dsa_attn_quant_exclusions``
+    run BF16 and the rest keep the global mode. Module perf rows carry ONE
+    gemm_type; for mixed checkpoints no row matches exactly, so the key
+    follows o_proj — the largest projection by bytes and FLOPs.
+    """
+    explicit = None
+    exclusions: frozenset = frozenset()
+    if isinstance(extra_params, dict):
+        explicit = extra_params.get("dsa_gemm_quant_mode")
+        exclusions = extra_params.get("dsa_attn_quant_exclusions") or frozenset()
+    if explicit is not None:
+        modes = dict.fromkeys(("q", "kv", "o", "indexer"), explicit)
+        return modes, explicit
+    modes = {g: common.GEMMQuantMode.bfloat16 if g in exclusions else fallback for g in ("q", "kv", "o", "indexer")}
+    distinct = set(modes.values())
+    return modes, (distinct.pop() if len(distinct) == 1 else modes["o"])
 
 
 def _dsa_shared_expert_quant_mode(extra_params: object, fallback: common.GEMMQuantMode) -> common.GEMMQuantMode:
@@ -126,13 +137,18 @@ class DeepSeekV32Model(BaseModel):
             model_config,
         )
         extra_params = dict(model_info["extra_params"])
-        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _dsa_attention_modules_excluded_from_quant(
-            model_info.get("raw_config", {})
-        ):
-            extra_params.setdefault("dsa_gemm_quant_mode", common.GEMMQuantMode.bfloat16)
-        if model_info["architecture"] == "GlmMoeDsaForCausalLM" and _shared_experts_excluded_from_quant(
-            model_info.get("raw_config", {})
-        ):
+        # Checkpoint-driven, not architecture-gated: vLLM honors ModelOpt
+        # exclude_modules wildcards for any architecture (hf_quant_config.json
+        # is read in transformers_utils/config.py:726; excluded prefixes fall
+        # back to the unquantized path via ModelOptNvFp4Config.is_layer_excluded
+        # -> is_layer_skipped, modelopt.py:150-161 @0.24.0). Exclusions are
+        # PER-PROJECTION: DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but
+        # quantizes o_proj; GLM-5 NVFP4 excludes the whole self_attn block.
+        extra_params.setdefault(
+            "dsa_attn_quant_exclusions",
+            attention_projection_exclusions(model_info.get("raw_config", {})),
+        )
+        if _shared_experts_excluded_from_quant(model_info.get("raw_config", {})):
             extra_params.setdefault("dsa_shared_expert_quant_mode", common.GEMMQuantMode.bfloat16)
         # GLM-5.2 shares one DSA topk index across ``index_topk_freq`` layers
         # (GLM-5 / DeepSeek-V3.2 omit it => 1). The DSA modules amortize the
@@ -199,7 +215,7 @@ class DeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
+        dsa_attn_quant_modes, dsa_gemm_quant_mode = _dsa_attention_quant_modes(self.extra_params, gemm_quant_mode)
         workload_distribution = (
             self.config.workload_distribution + f"_{self._power_law_alpha}"
             if self.config.workload_distribution == "power_law"
@@ -222,6 +238,7 @@ class DeepSeekV32Model(BaseModel):
                     cp_size=self.config.cp_size,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
                 ops.GEMM(
@@ -320,6 +337,7 @@ class DeepSeekV32Model(BaseModel):
                     architecture=self.architecture,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",
@@ -474,7 +492,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
+        dsa_attn_quant_modes, dsa_gemm_quant_mode = _dsa_attention_quant_modes(self.extra_params, gemm_quant_mode)
 
         eplb_enabled = self.config.enable_eplb
         if self.config.workload_distribution == "power_law":
@@ -530,6 +548,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     cp_size=self.config.cp_size,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ops.GEMM(
@@ -623,6 +642,7 @@ class TrtllmWideEPDeepSeekV32Model(BaseModel):
                     architecture=self.architecture,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
             ]
@@ -733,7 +753,7 @@ class WideEPDeepSeekV32Model(BaseModel):
         moe_quant_mode = self.config.moe_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        dsa_gemm_quant_mode = _dsa_gemm_quant_mode(self.extra_params, gemm_quant_mode)
+        dsa_attn_quant_modes, dsa_gemm_quant_mode = _dsa_attention_quant_modes(self.extra_params, gemm_quant_mode)
         moe_backend = self.config.moe_backend
         sms = self.config.sms
 
@@ -778,6 +798,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     cp_size=self.config.cp_size,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 *(
                     [
@@ -865,6 +886,7 @@ class WideEPDeepSeekV32Model(BaseModel):
                     architecture=self.architecture,
                     index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                     dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.GEMM(
                     "generation_gate_ffn1_gemm",

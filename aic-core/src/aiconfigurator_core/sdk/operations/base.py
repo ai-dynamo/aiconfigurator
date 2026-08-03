@@ -80,7 +80,7 @@ def _resolve_perf_data_path(perf_file: str) -> str:
 #   tools/perf_database/migrate_family_layout.py  (KNOWN_BACKEND_DIRS)
 #   tools/sanity_check/create_charts.py           (_KNOWN_BACKEND_DIRS)
 #   aic-core/rust/aiconfigurator-core/src/perf_database/mod.rs (KNOWN_BACKEND_DIRS)
-# (tools/perf_database/audit_kernel_source.py's _LEGACY_BACKEND_DIRS is a
+# (tools/perf_database/check_kernel_source.py's _LEGACY_BACKEND_DIRS is a
 # deliberate 3-entry variant — consumer backends only, no comm pseudo-backends.)
 _KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
 

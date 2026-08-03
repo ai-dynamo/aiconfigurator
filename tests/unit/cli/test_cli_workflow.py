@@ -71,6 +71,31 @@ class TestCLILogLevelResolution:
 class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
+    @patch("aiconfigurator.cli.main._run_recommend")
+    def test_cli_recommend_resolves_nextn_before_dispatch(self, mock_run_recommend, cli_parser, monkeypatch):
+        monkeypatch.setattr("aiconfigurator.cli.main.resolve_nextn_auto", lambda _model_path: 2)
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "deepseek-ai/DeepSeek-V3",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--nextn",
+                "auto",
+                "--nextn-accepted",
+                "0.7",
+            ]
+        )
+
+        cli_main(args)
+
+        assert args.nextn == 2
+        assert args.nextn_accepted == 0.7
+        mock_run_recommend.assert_called_once_with(args)
+
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
     def test_cli_main_success_flow(self, mock_build_default, mock_execute, sample_cli_args_with_save_dir):
@@ -87,6 +112,7 @@ class TestCLIIntegration:
             {"agg": mock_results_df},
             mock_best_throughputs,
             {"agg": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
+            {},
         )
 
         with patch("aiconfigurator.cli.main.save_results") as mock_save:
@@ -169,6 +195,7 @@ class TestCLIIntegration:
             {"my_exp": mock_results_df},
             mock_best_throughputs,
             {"my_exp": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
+            {},
         )
 
         args = cli_args_factory(
@@ -203,7 +230,7 @@ class TestCLIIntegration:
     @patch("aiconfigurator.cli.main._execute_tasks")
     def test_cli_main_build_dispatch(self, mock_execute, mode, build_patch, cli_args_factory, mock_exp_yaml_path):
         """Main should dispatch to the correct builder based on CLI mode."""
-        mock_execute.return_value = ("agg", {}, {}, {}, {})
+        mock_execute.return_value = ("agg", {"agg": True}, {}, {}, {}, {})
         mock_task_config = MagicMock(name="TaskConfig")
 
         with patch(build_patch) as mock_builder:
@@ -340,10 +367,15 @@ class TestCLIIntegration:
             "No configuration satisfied the TTFT/TPOT constraints."
         )
 
-        with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exc_info:
-            _execute_tasks({"agg": mock_task_config}, mode="default", strict_sla=True)
+        with caplog.at_level(logging.WARNING):
+            result = _execute_tasks({"agg": mock_task_config}, mode="default", strict_sla=True)
 
-        assert exc_info.value.code == 1
+        assert len(result) == 6
+        chosen_exp, best_configs, _, _, _, outcomes = result
+        assert chosen_exp == "none"
+        assert not best_configs
+        assert "agg" in outcomes
+        assert isinstance(outcomes["agg"].error, NoFeasibleConfigError)
         assert "Experiment agg found no SLA-feasible configuration" in caplog.text
         assert "No successful experiment runs to compare." in caplog.text
         assert "Traceback" not in caplog.text
@@ -366,7 +398,7 @@ exp_with_db_mode:
 
         mock_task_config = MagicMock(name="TaskConfig")
         mock_build_exp.return_value = {"exp_with_db_mode": mock_task_config}
-        mock_execute.return_value = ("exp_with_db_mode", {}, {}, {}, {})
+        mock_execute.return_value = ("exp_with_db_mode", {"exp_with_db_mode": True}, {}, {}, {}, {})
 
         parser = argparse.ArgumentParser()
         configure_parser(parser)
@@ -388,7 +420,7 @@ exp_with_db_mode:
     ):
         """The shared --engine-step-backend flag should apply to exp mode."""
         mock_build_exp.return_value = {"my_exp": MagicMock(name="TaskConfig")}
-        mock_execute.return_value = ("my_exp", {}, {}, {}, {})
+        mock_execute.return_value = ("my_exp", {"my_exp": True}, {}, {}, {}, {})
 
         args = cli_args_factory(
             mode="exp",

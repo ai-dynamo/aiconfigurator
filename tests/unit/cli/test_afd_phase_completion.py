@@ -103,7 +103,7 @@ def _build_afd_session_with_phase_metrics(
         database=FakeDatabase(),
         backend=SimpleNamespace(
             name=SimpleNamespace(value="test-backend"),
-            get_default_free_gpu_memory_fraction=lambda: 0.9,
+            get_default_free_gpu_memory_fraction=lambda *_a, **_k: 0.9,
         ),
         afd_config=afd_config,
     )

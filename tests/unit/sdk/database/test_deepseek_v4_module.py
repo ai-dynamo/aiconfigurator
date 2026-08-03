@@ -57,13 +57,17 @@ def _write_mhc_perf(path, rows: list[str]) -> str:
     return str(path)
 
 
-def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _context_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = 128, local_heads: int = 16
+) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
             common.KVCacheQuantMode.fp8: {
                 common.GEMMQuantMode.fp8_block: {
                     native_heads: {
-                        compress_ratio: attn_dict,
+                        local_heads: {
+                            compress_ratio: attn_dict,
+                        },
                     },
                 },
             },
@@ -71,12 +75,16 @@ def _context_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads
     }
 
 
-def _generation_deepseek_v4_data(compress_ratio: int, attn_dict: dict, native_heads: int = 128) -> dict:
+def _generation_deepseek_v4_data(
+    compress_ratio: int, attn_dict: dict, native_heads: int = 128, local_heads: int = 16
+) -> dict:
     return {
         common.KVCacheQuantMode.fp8: {
             common.GEMMQuantMode.fp8_block: {
                 native_heads: {
-                    compress_ratio: attn_dict,
+                    local_heads: {
+                        compress_ratio: attn_dict,
+                    },
                 },
             },
         },
@@ -260,9 +268,9 @@ class TestDeepSeekV4AttentionModule:
         instead of the legacy raw-linear downward extrapolation (which halved
         the latency straight through the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
-        # SCHEME A silicon data is {head}{cr}{b}{s_total} — no tp level. The shared
-        # The shared grid fixture is {tp}{b}{s_total};
-        # strip the tp wrapper so it lands as {b}{s_total} under {head}{cr}.
+        # Silicon data is {native}{local}{cr}{b}{s_total}. The shared grid
+        # fixture is {tp}{b}{s_total}; strip the tp wrapper so it lands as
+        # {b}{s_total} under {native}{local}{cr}.
         mock_grid = _dsv4_generation_sampled_grid()[8]
         db._generation_deepseek_v4_attention_module_data = LoadedOpData(
             _generation_deepseek_v4_data(4, mock_grid),
@@ -383,7 +391,7 @@ class TestDeepSeekV4AttentionModule:
         }
         db = mutable_comprehensive_perf_db
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, attn_dict, native_heads=16),
+            _context_deepseek_v4_data(4, attn_dict),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",
         )
@@ -451,22 +459,22 @@ class TestDeepSeekV4AttentionModule:
         )
 
     def test_context_silicon_resolves_rank_local_head_bucket(self, mutable_comprehensive_perf_db):
-        # SCHEME A: the head axis is the rank-local head count (native // tp), in
-        # line with the universal attention convention (per-rank heads, no tp
-        # axis). A Pro query at tp=8 (native 128 -> num_heads=16) must resolve the
-        # 16-head bucket, not a smaller local-head bucket. cr=4 / prefix=0 ->
+        # Head identity is [native][local]: a Pro query at tp=8 (native 128 ->
+        # num_heads=16) must resolve the local-16 bucket inside the native-128
+        # bucket, not a smaller local-head bucket. cr=4 / prefix=0 ->
         # c4_len=64 <= index_topk, so the topK DELTA is 0 and the raw latency is
-        # returned unchanged. Data is prefix-resolved: {head}{cr}{prefix}{s}{b}.
+        # returned unchanged. Data is prefix-resolved:
+        # {native}{local}{cr}{prefix}{s}{b}.
         db = mutable_comprehensive_perf_db
         data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(11.0)}}},
-            native_heads=8,
+            local_heads=8,
         )
         pro_data = _context_deepseek_v4_data(
             4,
             {0: {256: {2: _deepseek_v4_value(22.0)}}},
-            native_heads=16,
+            local_heads=16,
         )
         _deep_merge_dsv4_dicts(data, pro_data)
         db._context_deepseek_v4_attention_module_data = LoadedOpData(
@@ -573,7 +581,6 @@ class TestDeepSeekV4AttentionModule:
                     0: {54: {1: _deepseek_v4_value(2.0)}},
                     8192: {54: {1: _deepseek_v4_value(5.0)}},
                 },
-                native_heads=16,
             ),
             common.PerfDataFilename.dsv4_csa_context_module,
             "models",

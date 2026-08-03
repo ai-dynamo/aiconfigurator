@@ -300,11 +300,21 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod._build_module_test_cases("dsa", "context")
         model_paths = {case[6] for case in cases}
-        assert "deepseek-ai/DeepSeek-V3.2" in model_paths
+        # #1378 canonicalization: one DSA collection per (architecture,
+        # DSA-gemm-type) group on the longest-context checkpoint, reused for the
+        # consumer-equivalent rest. GLM-5/5.1/5.2 share identical DSA geometry
+        # (index_n_heads=32, index_head_dim=128, index_topk=2048, heads/dims/lora
+        # all equal) so GLM-5.2 (bf16) and GLM-5.2-FP8 (fp8_block) are canonical;
+        # GLM-5/5.1 and every NVFP4 checkpoint (which shares the bf16 DSA key)
+        # are reused, not collected.
+        assert model_paths == {
+            "deepseek-ai/DeepSeek-V3.2",
+            "zai-org/GLM-5.2",
+            "zai-org/GLM-5.2-FP8",
+        }
         assert "zai-org/GLM-5" not in model_paths
-        assert "zai-org/GLM-5-FP8" in model_paths
-        assert "nvidia/GLM-5.2-NVFP4" in model_paths
-        assert "nvidia/GLM-5-NVFP4" not in model_paths
+        assert "zai-org/GLM-5-FP8" not in model_paths
+        assert not any("NVFP4" in model_path for model_path in model_paths)
 
     def test_mla_includes_v3_family(self):
         mod = _import_module()
@@ -327,7 +337,9 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
         model_paths = {case[6] for case in cases}
-        assert "zai-org/GLM-5" in model_paths
+        # bf16 canonical is the longest-context GLM (GLM-5.2); GLM-5/5.1 reuse it.
+        assert "zai-org/GLM-5.2" in model_paths
+        assert "zai-org/GLM-5" not in model_paths
         assert not any("NVFP4" in model_path for model_path in model_paths)
 
     def test_targeted_quantized_artifact_keeps_requested_checkpoint(self, monkeypatch):
@@ -366,7 +378,10 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod.get_dsa_context_module_skip_indexer_test_cases()
         assert cases
-        assert {case[6] for case in cases} == {"nvidia/GLM-5.2-NVFP4"}
+        # Only GLM-5.2 has index_topk_freq>1 (=4), so the skip-indexer op is
+        # collected on the GLM-5.2 canonicals (bf16 + fp8_block); GLM-5/5.1
+        # (freq=1) have no skip layers and NVFP4 reuses the bf16 key.
+        assert {case[6] for case in cases} == {"zai-org/GLM-5.2", "zai-org/GLM-5.2-FP8"}
 
     def test_glm_sparse_selector_preserves_targeted_artifact(self, monkeypatch):
         _import_module()

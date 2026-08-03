@@ -39,8 +39,10 @@ Resolution order (the whole engine in four steps)
    measured efficiency and letting physics carry the growth is the honest
    answer at any distance, so there is no distance cap.
 4. **nothing to anchor on** -> genuine miss: raise. (Empty table / empty
-   branch, or no site within ``max_site_distance``.) The engine never
-   fabricates a value from nothing.
+   branch, or no site within ``max_site_distance`` for an interior-hole or
+   scale-down query — the gate is waived for a query beyond the scale-up
+   frontier, which resolves via step 2's nearest-site transfer.) The engine
+   never fabricates a value from nothing.
 
 Invariants (deliberately NOT knobs)
 -----------------------------------
@@ -123,7 +125,16 @@ class ScatteredSites:
     #: How many nearest sites to blend (inverse-distance, util space) when the
     #: query site is not collected. 1 = single nearest.
     nn_sites: int = 4
-    #: Log-space distance gate: no site within this radius -> genuine miss.
+    #: Log-space distance gate: no site within this radius -> genuine miss for
+    #: interior holes and the scale-down direction. The gate is waived along
+    #: exactly ONE overflowing site axis for a query beyond the collected
+    #: frontier in the scale-up direction (strictly above the coverage-eligible
+    #: candidates' maximum on that axis, not below their minimum on any axis,
+    #: and still within this gate on the remaining axes): the admissible
+    #: frontier sites anchor the ordinary util transfer — the same
+    #: unbounded-extrapolation trust as the m curve axis and Grid out-of-range
+    #: (big-vocab LM heads, e.g. vocab/tp past the collected n range).
+    #: Simultaneous multi-axis overflow (a sparse stub table) stays a miss.
     #: None = always accept the nearest site.
     max_site_distance: float | None = None
     #: Only consider sites whose curve range covers the query coordinate (a
@@ -214,7 +225,12 @@ def gemm_config(sol_fn: Callable[[float, float, float], float]) -> OpInterpConfi
     max_site_distance = 2.0 octaves joint (n,k) distance (~4x per dimension):
     util transfers well between comparable shapes (and SOL re-applies the exact
     m*n*k scaling), but a shape with no collected neighbour within ~4x has no
-    efficiency basis -> structured miss. Tune with the site-holdout LOO."""
+    efficiency basis -> structured miss. Exception: the gate is waived for a
+    shape beyond the collected frontier in the scale-up direction (e.g. a
+    big-vocab LM head at tp1, n = vocab > every collected n) — the ungated
+    nearest sites anchor the transfer. Tune the gate with the site-holdout
+    LOO; validate the waiver with a frontier-holdout LOO (hold out the
+    largest-n sites)."""
     return OpInterpConfig(
         axes=("m", "n", "k"),
         resolver=ScatteredSites(site_axes=("n", "k"), curve_axis="m", max_site_distance=2.0),

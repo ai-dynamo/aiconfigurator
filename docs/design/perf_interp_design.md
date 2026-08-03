@@ -53,7 +53,7 @@ adding a config, not a code path.
 
 | Resolver | Table shape | Handling |
 |---|---|---|
-| `ScatteredSites(site_axes, curve_axis)` | GEMM: scattered `(n,k)` sites, each owning an m-curve | exact site answers from its **own** curve; an uncollected shape borrows **util** from the nearest collected shapes (log-space IDW, filtered to sites whose curve covers the query m, 2.0-octave miss gate) |
+| `ScatteredSites(site_axes, curve_axis)` | GEMM: scattered `(n,k)` sites, each owning an m-curve | exact site answers from its **own** curve; an uncollected shape borrows **util** from the nearest collected shapes (log-space IDW, filtered to sites whose curve covers the query m, 2.0-octave miss gate). The gate is **waived along exactly one overflowing axis** for a query beyond the collected frontier in the scale-up direction (issue #1415, big-vocab LM heads: `n = vocab/tp` past every collected `n`): admissibility is computed over the coverage-eligible candidates — the query must exceed their maximum on exactly one axis, sit at/above their minimum on every axis, and still pass the 2.0-octave gate on the remaining axes; the admissible frontier sites anchor the ordinary IDW util transfer and `SOL(query)` carries the growth. Interior holes, scale-down / mixed-direction queries, and simultaneous multi-axis overflow (a sparse stub table, e.g. an `fp8_block` table collected only at `n,k<=128`) keep the miss. |
 | `Grid()` | everything else, 1..N axes | per level: exact key collapses; otherwise bracket + blend; a ragged branch is dropped -- and when only one branch survives, its value is **SOL-ratio-corrected along the dropped axis** (util held), never clamped; past the staircase frontier = ordinary out-of-range util-hold |
 
 The engine is N-axis: context DSA/CSA carries a past-KV axis
@@ -116,6 +116,16 @@ Data: h100_sxm sglang 0.5.10 / vllm 0.19.0, gb200 sglang 0.5.10.
 | context DSA, 4-axis leaf holdout, interior / frontier | 5.4% / 10.8% | 27% / 52% (0 misses; the s-grid is sparse around the top-k knee, and holding out a knee anchor is worst-case -- the signed knee fold below shows no systematic bias) |
 | CSA (gb200) plain crossing vs regime-aware | **1.72% vs 1.92%** | 4.3% / 4.3% |
 | CSA knee-just-above, signed | plain **+0.57%** vs regime −2.94% | — |
+| GEMM **frontier-holdout** (scale-up waiver; drop all sites with `n > 8192`, predict measured `n = 65536` points through the waived path, ≥3 octaves — h200 vllm 0.24.0 / h100 trtllm 1.3.0rc15 / b200 sglang 0.5.10) | 10.1% / 8.9% / 15.1% | 83% / 51% / 112% |
+
+The frontier-holdout tail is dominated by skinny `k <= 256` shapes whose
+anchor util sits on the rising part of the saturation curve (signed error is
+systematically **positive** — the hold overestimates latency, the safe
+direction); at real LM-head dimensions (`k >= 2048`) the signed median is
++7~10%. On B60 against PR #1413's newly measured `n = 65536` rows, the
+Llama-3.1-8B LM-head shape itself lands at 3.6–4.3% (bf16) / 10–11% (fp8).
+Median-vs-IDW anchoring A/B'd equal (within 0.6% median), so the waiver
+reuses the ordinary IDW transfer path.
 
 Notable robustness result: 1705 ragged queries across four op families on the
 raw (un-expanded) tables produced **zero crashes and zero Qhull errors** —

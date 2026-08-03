@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build copied-PR platform wheels
+
+on:
+  push:
+    branches:
+      # copy-pr-bot is the approval boundary for privileged pull-request builds.
+      - "pull-request/*"
+    paths:
+      - ".github/actions/build-platform-wheel/**"
+      - ".github/workflows/build-platform-wheels-copied-pr.yml"
+      - ".github/workflows/build-platform-wheels.yml"
+      - "docker/Dockerfile"
+      - "LICENSE"
+      - "pyproject.toml"
+      - "README.md"
+      - "aic-core/**"
+      - "src/**"
+      - "tools/build_legacy_monolith_fixture.py"
+      - "tools/stage_wheels_in_artifactory.sh"
+      - "tools/verify_installed_package_layers.py"
+      - "tools/verify_release_wheels.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build copied-PR platform wheels
+    uses: ./.github/workflows/build-platform-wheels.yml
+    secrets: inherit
