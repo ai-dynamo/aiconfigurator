@@ -1098,6 +1098,12 @@ def _round_robin_adjust_per_rank(counts_2d, remaining, is_valid, pick_local_inde
     """Adjust local expert counts one rank at a time in round-robin order."""
     import torch
 
+    # Integer redistribution can require tens of thousands of single-step updates for
+    # large MoE token counts. Keep counts on CPU to avoid per-iteration GPU syncs
+    # when torch.set_default_device(cuda) is active in collector workers.
+    device = counts_2d.device
+    counts_2d = counts_2d.cpu()
+
     while remaining > 0:
         progressed = False
         for rank_idx in range(counts_2d.size(0)):
@@ -1114,7 +1120,7 @@ def _round_robin_adjust_per_rank(counts_2d, remaining, is_valid, pick_local_inde
                 break
         if not progressed:
             break
-    return counts_2d
+    return counts_2d.to(device)
 
 
 def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
@@ -1145,12 +1151,12 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
     target_sum = num_tokens * topk
     original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
     target_distribution = original_distribution * target_sum
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64).cpu()
 
     # Clamp to upper bound: each expert can be selected at most num_tokens times
     # (since each token can select an expert at most once)
     upper_bound = num_tokens
-    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
+    overflow = int((num_tokens_per_expert - upper_bound).clamp(min=0).sum().item())
     num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
     experts_per_rank = num_experts // ep
 
@@ -1197,20 +1203,8 @@ def _generate_power_law_distribution(num_tokens, num_experts, topk, ep, alpha):
         assert sorted_tokens[0] >= sorted_tokens[-1], "Power law distribution pattern disrupted"
 
     # Find EP rank with max load and swap to rank 0
-    with torch.no_grad():
-        conv1d = torch.nn.Conv1d(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=num_experts // ep,
-            stride=num_experts // ep,
-            padding=0,
-            bias=False,
-        )
-        conv1d_weights = torch.tensor([1 for _ in range(num_experts // ep)])
-        conv1d.weight.copy_(conv1d_weights)
-
-    res = conv1d(num_tokens_per_expert.unsqueeze(0).unsqueeze(0).float())
-    max_ep_idx = torch.argmax(res).item()
+    rank_sums = num_tokens_per_expert.view(ep, experts_per_rank).sum(dim=1)
+    max_ep_idx = int(rank_sums.argmax().item())
 
     if max_ep_idx != 0:
         ep_group_size = num_experts // ep
@@ -1270,18 +1264,18 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
     target_sum = num_tokens * topk
     original_distribution = num_tokens_per_expert / num_tokens_per_expert.sum()
     target_distribution = original_distribution * target_sum
-    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64)
+    num_tokens_per_expert = torch.round(target_distribution).to(torch.int64).cpu()
 
     # Clamp to upper bound: each expert can be selected at most num_tokens times
     # (since each token can select an expert at most once)
     upper_bound = num_tokens
-    overflow = (num_tokens_per_expert - upper_bound).clamp(min=0).sum().item()
+    overflow = int((num_tokens_per_expert - upper_bound).clamp(min=0).sum().item())
     num_tokens_per_expert = num_tokens_per_expert.clamp(max=upper_bound)
 
     # Redistribute overflow to experts that haven't reached the bound
     if overflow > 0:
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
-        for i in range(int(overflow)):
+        for _ in range(overflow):
             # Find an expert that hasn't reached the bound
             for j in range(len(sorted_indices)):
                 expert_idx = sorted_indices[-(j + 1)]  # Start from smallest
@@ -1290,14 +1284,14 @@ def _generate_power_law_distribution_with_eplb(num_tokens, num_experts, topk, ep
                     break
 
     # Adjust to match exact target sum (respecting upper bound)
-    current_sum = num_tokens_per_expert.sum().item()
+    current_sum = int(num_tokens_per_expert.sum().item())
     delta = target_sum - current_sum
     if delta != 0:
         sorted_indices = torch.argsort(num_tokens_per_expert, descending=True)
         if delta > 0:
             # Add to experts that haven't reached the bound
             added = 0
-            for i in range(int(delta) * len(sorted_indices)):  # Extra iterations for safety
+            for i in range(delta * len(sorted_indices)):  # Extra iterations for safety
                 if added >= delta:
                     break
                 expert_idx = sorted_indices[-(i % len(sorted_indices)) - 1]  # Start from smallest

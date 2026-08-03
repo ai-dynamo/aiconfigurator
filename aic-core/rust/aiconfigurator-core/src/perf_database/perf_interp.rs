@@ -14,7 +14,8 @@
 //!                             the dropped axis). ScatteredSites: site curve
 //!                             eval; unknown site -> nearest-site transfer in
 //!                             util space (log2 IDW, curve-coverage filter,
-//!                             distance gate).
+//!                             distance gate; the gate is waived for a site
+//!                             beyond the scale-up frontier).
 //! 3. beyond the range      -> hold the boundary util (k_tail-median anchor),
 //!                             latency = SOL(query) / util
 //! 4. nothing to anchor on  -> Err (structured miss; never fabricate)
@@ -55,6 +56,25 @@ impl Node {
                     map.entry(path[0])
                         .or_insert_with(Node::branch)
                         .insert(&path[1..], value);
+                }
+            }
+            Node::Leaf(_) => panic!("insert into a leaf"),
+        }
+    }
+
+    /// First-wins leaf insert: keeps an existing leaf untouched. Loaders use
+    /// this when merging priority-ordered shared-layer sources (the first
+    /// source that has a coordinate wins; `insert` would let later, lower-
+    /// priority sources overwrite it).
+    pub fn insert_first_wins(&mut self, path: &[u32], value: f64) {
+        match self {
+            Node::Branch(map) => {
+                if path.len() == 1 {
+                    map.entry(path[0]).or_insert(Node::Leaf(value));
+                } else {
+                    map.entry(path[0])
+                        .or_insert_with(Node::branch)
+                        .insert_first_wins(&path[1..], value);
                 }
             }
             Node::Leaf(_) => panic!("insert into a leaf"),
@@ -564,14 +584,25 @@ impl SiteIndex {
         // tie-break reproduces the previous *stable* sort's order on equal
         // distances (sites are pushed in ascending-index order), so the selected
         // set and its ordering are identical.
-        if let Some(gate) = max_site_distance {
-            ranked.retain(|&(d, _)| d <= *gate);
-            if ranked.is_empty() {
-                return Err(miss(cfg, coords, "no site within max_site_distance"));
-            }
-        }
         let cmp =
             |a: &(f64, usize), b: &(f64, usize)| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1));
+        if let Some(gate) = max_site_distance {
+            if ranked.iter().any(|&(d, _)| d <= *gate) {
+                ranked.retain(|&(d, _)| d <= *gate);
+            } else {
+                // The gate is waived for a query site beyond the collected
+                // frontier in the scale-up direction (big-vocab LM heads at
+                // low tp): anchors are the coverage-eligible sites that still
+                // pass the gate on the non-overflow axes, and SOL(query)
+                // carries the growth. Interior holes, scale-down / mixed
+                // queries, and sparse-stub multi-axis overflow keep the miss.
+                let q_site: Vec<f64> = site_axes.iter().map(|&p| coords[p]).collect();
+                match self.frontier_waiver_anchors(&ranked, &q_site, &q_log, *gate) {
+                    Some(admissible) => ranked = admissible,
+                    None => return Err(miss(cfg, coords, "no site within max_site_distance")),
+                }
+            }
+        }
         let k = (*nn_sites).min(ranked.len());
         if k < ranked.len() {
             ranked.select_nth_unstable_by(k, cmp);
@@ -608,6 +639,77 @@ impl SiteIndex {
             return Err(miss(cfg, coords, "non-positive SOL at query"));
         }
         Ok(sol_q / (u_acc / wsum))
+    }
+
+    /// Anchor set for a scale-up frontier query, or None (gate miss stands).
+    ///
+    /// The distance gate is waived ONLY for the intended frontier overflow,
+    /// and everything is computed over `candidates` (the coverage-eligible
+    /// `(full distance, site index)` buffer from `resolve`) so admissibility
+    /// and the anchors actually used cannot diverge:
+    ///
+    /// - exactly ONE site axis overflows (strictly above the candidates'
+    ///   maximum). Simultaneous multi-axis overflow means the table is a
+    ///   sparse stub for this shape (e.g. an fp8_block table collected at
+    ///   n,k<=128 queried with a real logits GEMM) — holding a launch-bound
+    ///   stub's util across many octaves fabricates arbitrarily wrong
+    ///   latencies, so it stays a miss;
+    /// - no axis sits below the candidates' minimum (scale-down never
+    ///   transfers);
+    /// - the NON-overflow axes still pass the gate (residual log2 distance),
+    ///   so anchors are genuine frontier neighbours of the query and the
+    ///   transfer is scale-up along the overflow axis only.
+    ///
+    /// On the overflow axis every anchor is below the query by construction;
+    /// the caller's inverse-distance weighting then favours the largest
+    /// collected sites, and SOL(query) carries the growth (the same trust as
+    /// the m curve axis and the grid out-of-range hold).
+    fn frontier_waiver_anchors(
+        &self,
+        candidates: &[(f64, usize)],
+        q_site: &[f64],
+        q_log: &[f64],
+        gate: f64,
+    ) -> Option<Vec<(f64, usize)>> {
+        let axes = q_site.len();
+        let mut overflow: Vec<usize> = Vec::new();
+        for a in 0..axes {
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            for &(_, i) in candidates {
+                let key = &self.site_logs[i].0;
+                lo = lo.min(key[a]);
+                hi = hi.max(key[a]);
+            }
+            if q_site[a] < lo as f64 {
+                return None;
+            }
+            if q_site[a] > hi as f64 {
+                overflow.push(a);
+            }
+        }
+        if overflow.len() != 1 {
+            return None;
+        }
+        let resid_dist = |i: usize| -> f64 {
+            (0..axes)
+                .filter(|a| !overflow.contains(a))
+                .map(|a| {
+                    let d = self.site_logs[i].1[a] - q_log[a];
+                    d * d
+                })
+                .sum::<f64>()
+                .sqrt()
+        };
+        let admissible: Vec<(f64, usize)> = candidates
+            .iter()
+            .copied()
+            .filter(|&(_, i)| resid_dist(i) <= gate)
+            .collect();
+        if admissible.is_empty() {
+            None
+        } else {
+            Some(admissible)
+        }
     }
 
     /// Evaluate one site's curve at coordinate `q`.
@@ -678,6 +780,18 @@ impl SiteIndex {
             to_space(vt, lat_lo) + (to_space(vt, lat_hi) - to_space(vt, lat_lo)) * w,
         ))
     }
+}
+
+/// Flatten a nested table into `(coords, latency_ms)` points with `f64`
+/// coordinates — the input shape of the operator-layer util-calibration
+/// grids (`operators::util_empirical::build_samples`, mirroring Python's
+/// `iter_grid` over a nested dict slice).
+pub(crate) fn node_points(node: &Node) -> Vec<(Vec<f64>, f64)> {
+    let mut out = Vec::new();
+    walk_leaves(node, &mut Vec::new(), &mut out);
+    out.into_iter()
+        .map(|(coords, latency)| (coords.into_iter().map(|c| c as f64).collect(), latency))
+        .collect()
 }
 
 fn walk_leaves(node: &Node, prefix: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, f64)>) {
@@ -933,6 +1047,93 @@ mod tests {
         let cfg = gemm_cfg(&gemm_lat);
         // (64, 64): > 2 octaves from every collected site -> miss, not a guess.
         assert!(query(&cfg, &t, &[64.0, 64.0, 64.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_scale_up_beyond_frontier_holds_util() {
+        // Gemma-4-26B-A4B tp1 LM head (issue #1415): (n=262144, k=2816) is
+        // ~2.005 octaves from the nearest collected site — past the distance
+        // gate — but beyond the frontier in the scale-up direction, so the
+        // engine holds the frontier util instead of missing. util==1 fixture
+        // -> the hold is exact.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(65536u32, 2560u32), (65536, 3072), (4096, 2816)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        approx(
+            query(&cfg, &t, &[32.0, 262144.0, 2816.0]).unwrap(),
+            gemm_lat(&[32.0, 262144.0, 2816.0]),
+        );
+    }
+
+    #[test]
+    fn gemm_interior_hole_beyond_gate_still_misses() {
+        // (8192, 8192) is dominated by the collected (65536, 65536) corner but
+        // >2 octaves from every site — a sparse interior hole, not a frontier
+        // query. The gate must still refuse to guess.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(256u32, 256u32), (65536, 65536)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 8192.0, 8192.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_incomparable_notch_inside_bounding_box_still_misses() {
+        // (4096, 4096) sits in the notch between (256, 65536) and (65536,
+        // 256): no site dominates it, yet it exceeds the collected maximum on
+        // NO axis — an interior hole in the Pareto staircase, not a scale-up
+        // frontier query. The waiver must not fire; the gate stands.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            for &(n, k) in &[(256u32, 65536u32), (65536, 256)] {
+                t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 4096.0, 4096.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_sparse_stub_multi_axis_overflow_still_misses() {
+        // Real-table regression (PR #1419 review): an fp8_block-like stub
+        // collected only at n,k in 32..128 queried with a real logits GEMM
+        // (m=1, n=151936, k=5120) — BOTH site axes past the collected
+        // maximum. Simultaneous multi-axis overflow must stay a miss.
+        let mut t = Node::branch();
+        for m in [1u32, 2, 4] {
+            for n in [32u32, 64, 128] {
+                for k in [32u32, 64, 128] {
+                    t.insert(&[m, n, k], gemm_lat(&[m as f64, n as f64, k as f64]));
+                }
+            }
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[1.0, 151936.0, 5120.0]).is_err());
+    }
+
+    #[test]
+    fn gemm_waiver_admissibility_computed_over_coverage_candidates() {
+        // PR #1419 review: site (1, 1) covers only m<=2, site (64, 64) covers
+        // m=16..64. Query (m=32, n=1024, k=1) used to pass a GLOBAL frontier
+        // check while the only coverage-eligible anchor (64, 64) required a
+        // k=64 -> k=1 scale-DOWN transfer. Admissibility over the coverage
+        // candidates puts k=1 below the minimum -> miss.
+        let mut t = Node::branch();
+        for m in [1u32, 2] {
+            t.insert(&[m, 1, 1], gemm_lat(&[m as f64, 1.0, 1.0]));
+        }
+        for m in [16u32, 32, 64] {
+            t.insert(&[m, 64, 64], gemm_lat(&[m as f64, 64.0, 64.0]));
+        }
+        let cfg = gemm_cfg(&gemm_lat);
+        assert!(query(&cfg, &t, &[32.0, 1024.0, 1.0]).is_err());
     }
 
     #[test]

@@ -102,7 +102,7 @@ Example: `data/h200_sxm/attention/trtllm/1.3.0rc10/context_attention_perf.parque
   deprecated, warning logged), so tools and the GitLab auto-collect pipeline do
   not have to cut over the same day.
 - Path-aware consumers to sweep in the same PR: loader discovery,
-  `tools/perf_database/audit_kernel_source.py`, `tools/perf_database/parquet_diff.py`,
+  `tools/perf_database/check_kernel_source.py`, `tools/perf_database/parquet_diff.py`,
   `tools/support_matrix/*`, chart tooling, collector finalize output paths.
   The GitLab auto-collect pipeline is updated in lockstep; in-flight data PRs
   rebase after the move.
@@ -212,6 +212,13 @@ tables:
   so the attempted-set attestation is collection-time only.
 - "Missing provenance" = a parquet table present with no matching `tables`
   entry. CI fails closed on it (§8); the loader's strict mode refuses it (§7).
+- **Legacy tier** (a later amendment): data collected before V3 carries a
+  backfilled sidecar with `provenance: legacy` — `runtime: {framework,
+  version}` only, per-table `status` (complete unless it had `INCOMPLETE.txt`),
+  no hashes. The tier makes the §8 sidecar-coverage gate and the §12.3 support
+  bar total over the whole tree while staying honest about unknown identity.
+  Strict mode (PR 4) treats `legacy` as warn-not-fail for one release. New
+  collections always write full provenance; the legacy tier only shrinks.
 - Transient run artifacts (`collection_summary_*.json`, `errors_*.json`) remain
   uncommitted but are retained as CI artifacts on data PRs (§9).
 
@@ -324,12 +331,12 @@ The loader's source ordering (§7) in one list:
 
 Guardrails:
 
-- **Provenance surfacing:** the loader reports, per table, which versions
-  supplied rows and via which channel (`primary | declared_reuse | fallback`),
-  so the support-matrix health classifier can tell "natively collected" from "riding
-  on a declaration" without re-deriving anything.
+- **Provenance surfacing:** the loader reports, per table, the admitted
+  sources with channel tags (`primary | declared_reuse | fallback |
+  cross_backend`), so the support-matrix health classifier can tell "natively
+  collected" from "riding on a declaration" without re-deriving anything.
 - **CI audit:** a `reuse.yaml` pointing at data that does not exist, or any
-  fill pattern outside these three channels, fails the PR — that is the
+  fill pattern outside these channels, fails the PR — that is the
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
@@ -340,9 +347,10 @@ In increasing order of semantic weight:
 
 1. **Dual-layout discovery** — family tree first, legacy layout as deprecated
    fallback for one transition window.
-2. **Effective-source provenance** — per table, expose which versions supplied
-   rows and via which path (`primary | declared_reuse | fallback`), consumed by
-   support-matrix health and diagnostics.
+2. **Effective-source provenance** — `PerfDatabase.data_provenance`: per table,
+   the admitted sources with channel tags (`primary | declared_reuse | fallback |
+   cross_backend`), consumed by support-matrix health. Granularity is
+   admitted sources, not per-row attribution. *(Shipped in PR 4.)*
 3. **Reuse rules** — implement §6 ordering. `get_database(system, backend,
    version)` keeps `version` as the *requested* framework version; per-op
    resolution happens inside.
@@ -379,8 +387,17 @@ changed:
     systems: [h200_sxm, b200_sxm, gb200]   # systems holding data at the old pin
     action: recollect
 unchanged:
-  - {framework: sglang, family: moe, ...}
+  - {framework: sglang, family: moe, tables: [...], systems: [...]}
 ```
+
+Contract notes (locked during implementation): `unchanged` entries carry exactly
+`{framework, family, tables, systems}` — no vacuous `reasons`/`action`. The
+`case_plan` reason is computed from the family's case-INPUT files (base-ops
+and model-case YAML plus the case-generation modules) hashed at each revision
+— GPU-free and deterministic at any rev — while `collection_meta.yaml`'s
+`case_plan_hash` remains the collection-time attestation of the expanded case
+set. A base revision predating V3 metadata exits with code 3 ("cannot compute
+against a pre-V3 baseline"); CI maps it to a neutral skip.
 
 This file is the single input consumed by the evidence resolver (§9), the CI
 gate, and the support-matrix healer — same manifest in, same
@@ -388,7 +405,7 @@ requirements out.
 
 ### CI audit (fail-closed surface)
 
-One audit tool (sibling of `audit_kernel_source.py`), run on every PR touching
+One audit tool (sibling of `check_kernel_source.py`), run on every PR touching
 `data/`, `collector/`, or the manifest. Hard failures:
 
 - a parquet table without a matching provenance entry;
@@ -401,10 +418,21 @@ The CI audit is the primary gate; loader strict mode is the backstop.
 
 ## 9. Evidence policy
 
-Policy-as-code: `collector/evidence_policy.yaml` plus a pure-function resolver
-`tools/perf_database/evidence_check.py --manifest changed_ops.yaml` → required
-evidence list. Deterministic: CI and the healer get identical answers from
-identical manifests.
+Policy-as-code: `collector/evidence_policy.yaml` (thresholds; an authored
+`system_generations` map covering the whole fleet — SM103 Ultra folded into
+blackwell as a policy decision — and one evidence representative per
+generation) plus the pure-function resolver `tools/perf_database/evidence_check.py
+--manifest changed_ops.yaml` → required evidence, filtered to the SM
+generations the change actually touches (an unmapped system fails closed).
+Deterministic: CI and the healer get identical answers from identical
+manifests. Exception WAIVERS (`evidence_exceptions.yaml`, approver + expiry)
+are applied by the evidence-gate CI check, not the resolver — expiry needs a clock,
+which would break the resolver's purity. *(Policy and resolver shipped in PR 4;
+the enforcing CI gate — the required check that validates submitted evidence
+and waivers against these requirements and blocks under-evidenced data PRs —
+is a separate tracked deliverable. Until it lands, the audit workflow uploads
+the changed-op manifest as an informational artifact and enforcement is by
+human review against the resolver's output.)*
 
 | Change | Required evidence |
 |---|---|

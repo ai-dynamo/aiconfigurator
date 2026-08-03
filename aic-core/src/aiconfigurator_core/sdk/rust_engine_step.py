@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 
 
+class RustEngineUnsupportedError(RuntimeError):
+    """The model's op graph cannot be expressed as a compiled ``EngineSpec``
+    (``engine.OpConversionError``). Python CAN compute these configs, so the
+    ``base_backend`` gates catch this and fall back to the Python step
+    (parity by delegation) instead of crashing the sweep. Distinct from
+    perf-data misses, which must stay error-symmetric on both engines."""
+
+
 class RustForwardPassPerfModel:
     """Facade over the compiled Rust forward-pass perf model (PR #1152).
 
@@ -221,29 +229,66 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
+# Database modes the compiled engine answers itself. SILICON plus the
+# util-space empirical layer (HYBRID / EMPIRICAL, mirroring
+# `sdk/operations/util_empirical.py`); the SOL diagnostic modes stay on the
+# Python step.
+_RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL"}
+
+
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route to the compiled engine only when it can give the SAME answer.
 
-    The compiled engine implements the SILICON path only (no util_empirical
-    layer), so HYBRID/EMPIRICAL databases must stay on the Python step:
-    wherever silicon data misses, Python fills in empirically while the
-    compiled engine would fail the config -- delegating keeps the two
-    backends answer-identical instead of capability-divergent (parity by
-    delegation; the empirical-layer port is tracked in issue #1333).
+    The compiled engine implements the SILICON path and the util-space
+    empirical layer (HYBRID / EMPIRICAL). The SOL/SOL_FULL diagnostic modes
+    stay on the Python step -- delegating keeps the two backends
+    answer-identical instead of capability-divergent.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
     if str(backend or "python").lower() != "rust":
         return False
     if database is not None:
         mode = getattr(database, "get_default_database_mode", lambda: None)()
-        if mode is not None and getattr(mode, "name", str(mode)) != "SILICON":
+        if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
             logger.debug(
                 "engine-step backend 'rust' requested but database_mode=%s; "
-                "using the python step (compiled engine is SILICON-only).",
+                "using the python step (compiled engine implements SILICON/HYBRID/EMPIRICAL only).",
                 getattr(mode, "name", mode),
             )
             return False
     return True
+
+
+def _note_rust_provenance(handle: Any) -> None:
+    """Forward the compiled engine's per-call empirical provenance tier into
+    Python's capture (``util_empirical.note_provenance``).
+
+    ``EngineHandle.last_provenance()`` returns the worst tier fired during the
+    engine call just made (``None`` for a pure-silicon answer). Forwarding it
+    keeps ``capture_provenance()`` consumers — the support matrix's
+    HYBRID_PASS tier labelling — working unchanged when the engine step is
+    rust-routed. ``note_provenance`` is a no-op outside an active capture, so
+    this costs one getattr-free call per step. Only the worst tier crosses the
+    FFI (not the full tag set); ``worst_provenance`` over the captured tags is
+    unaffected because max(worst) == worst(all).
+    """
+    tier = handle.last_provenance()
+    if tier is not None and tier != "silicon":
+        # Deferred import: keep module import light and cycle-free
+        # (sdk.engine imports this module at top level).
+        from aiconfigurator_core.sdk.operations import util_empirical
+
+        util_empirical.note_provenance(tier)
+
+
+def _scale_or_one(value: Any) -> float:
+    """Imbalance-scale forwarding: default to ``1.0`` only for ``None``.
+
+    The Python engine path multiplies by the raw scale, so an explicit
+    ``0.0`` must pass through unchanged — a truthiness fallback (``or 1.0``)
+    would silently clobber it into ``1.0``.
+    """
+    return 1.0 if value is None else float(value)
 
 
 def estimate_static_latency_breakdown_with_rust(
@@ -272,11 +317,12 @@ def estimate_static_latency_breakdown_with_rust(
         osl=int(runtime_config.osl),
         prefix=int(runtime_config.prefix or 0),
         beam_width=int(runtime_config.beam_width or 1),
-        seq_imbalance_correction_scale=float(runtime_config.seq_imbalance_correction_scale or 1.0),
-        gen_seq_imbalance_correction_scale=float(runtime_config.gen_seq_imbalance_correction_scale or 1.0),
+        seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
         mode=engine_mode,
         stride=int(stride),
     )
+    _note_rust_provenance(handle)
 
     if latency_correction_scale != 1.0:
         context_latency_ms *= latency_correction_scale
@@ -298,25 +344,67 @@ def estimate_mixed_step_latency_with_rust(
     isl: int,
     osl: int,
     prefix: int,
+    seq_imbalance_correction_scale: float = 1.0,
+    gen_seq_imbalance_correction_scale: float = 1.0,
 ) -> float:
     """Estimate one mixed prefill/decode engine step through the compiled engine.
 
     Delegates to ``EngineHandle.mixed_step_latency``. The Rust
-    ``Engine::mixed_step_latency`` (``engine/runtime.rs:280``) reproduces the
-    full FPM packing the old ctypes bridge did inline — the
-    ``ceil(ctx_tokens / isl)`` prefill-request count, the cached-prefix
-    subtraction, the ``(nextn + 1)`` decode multiplier, and the kv-token
-    packing — so the raw step args pass straight through with no Python-side
-    pre-math.
+    ``Engine::mixed_step_latency`` is a literal mirror of Python's
+    ``_get_mix_step_latency`` three-pass composition (combined non-attention,
+    context attention / ceil(isl/ctx), decode attention with the ``(nextn+1)``
+    batch), so the raw step args plus the runtime imbalance scales pass
+    straight through with no Python-side pre-math.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.mixed_step_latency(
+    latency_ms = handle.mixed_step_latency(
         int(ctx_tokens),
         int(gen_tokens),
         int(isl),
         int(osl),
         int(prefix or 0),
+        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
+    _note_rust_provenance(handle)
+    return latency_ms
+
+
+def estimate_mixed_step_breakdown_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    ctx_tokens: int,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+    prefix: int,
+    seq_imbalance_correction_scale: float = 1.0,
+    gen_seq_imbalance_correction_scale: float = 1.0,
+) -> dict[str, float]:
+    """Estimate one mixed step and retain its three execution components.
+
+    Same three-pass composition as ``estimate_mixed_step_latency_with_rust``
+    (``total`` is the identical sum), reported per pass so the agg speculative
+    scheduler can consume the shared/context-attention/decode-attention split.
+    """
+    handle = _cached_engine_handle(model, database)
+    total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
+        int(ctx_tokens),
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        int(prefix or 0),
+        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+    )
+    _note_rust_provenance(handle)
+    return {
+        "total": float(total),
+        "shared_non_attention": float(shared_non_attention),
+        "context_attention": float(context_attention),
+        "decode_attention": float(decode_attention),
+    }
 
 
 def estimate_decode_step_latency_with_rust(
@@ -326,16 +414,25 @@ def estimate_decode_step_latency_with_rust(
     gen_tokens: int,
     isl: int,
     osl: int,
+    gen_seq_imbalance_correction_scale: float = 1.0,
 ) -> float:
     """Estimate one decode-only engine step through the compiled engine.
 
     Delegates to ``EngineHandle.decode_step_latency``. The Rust
-    ``Engine::decode_step_latency`` (``engine/runtime.rs:342``) applies the
-    ``(nextn + 1)`` decode-batch scaling and the ``s = isl + osl/2`` sequence
-    length internally, so the raw args pass straight through.
+    ``Engine::decode_step_latency`` mirrors Python's
+    ``_get_genonly_step_latency``: one step over the full generation op list
+    at ``s = isl + osl//2 + 1`` with the ``(nextn + 1)`` decode-batch scaling
+    applied internally, so the raw args pass straight through.
     """
     handle = _cached_engine_handle(model, database)
-    return handle.decode_step_latency(int(gen_tokens), int(isl), int(osl))
+    latency_ms = handle.decode_step_latency(
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+    )
+    _note_rust_provenance(handle)
+    return latency_ms
 
 
 # Memo of compiled ``EngineHandle`` objects, keyed by the engine identity
@@ -364,8 +461,26 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     ``AICONFIGURATOR_SYSTEMS_PATH`` so it resolves to the same systems tree the
     Python ``database`` came from.
     """
-    key = _engine_config_json(model, database)
+    # The identity JSON is a hot-path cost: the engine-step helpers call this
+    # per step and `_engine_config_json` runs ~2-3us of getattr + json.dumps
+    # (which the perf regression gate measures against a ~20us step). The
+    # identity is immutable for a given (model, database) pair, so memoize the
+    # computed key on the model object and only recompute when the database
+    # object changes.
+    memo = getattr(model, "_aic_engine_identity_memo", None)
+    if memo is not None and memo[0] is database:
+        key = memo[1]
+    else:
+        key = _engine_config_json(model, database)
+        try:
+            model._aic_engine_identity_memo = (database, key)
+        except (AttributeError, TypeError):
+            pass  # slotted/frozen model objects: recompute per call
     handle = _ENGINE_HANDLE_CACHE.get(key)
+    if isinstance(handle, RustEngineUnsupportedError):
+        # Compilation already failed for this engine identity; re-raise the
+        # cached error instead of re-walking the op graph every step.
+        raise handle
     if handle is not None:
         return handle
 
@@ -374,22 +489,26 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     # (``_quant_to_dtype`` / ``_moe_quant_to_dtype``), so a top-level import
     # here would be a circular import.
     import aiconfigurator_core
-    from aiconfigurator_core.sdk.engine import EngineHandle, build_engine_spec_json
+    from aiconfigurator_core.sdk.engine import EngineHandle, OpConversionError, build_engine_spec_json
 
     systems_path = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     nextn = getattr(model, "_nextn", None)
-    spec_json = build_engine_spec_json(
-        model,
-        model_path=getattr(model, "model_path", getattr(model, "model_name", "")),
-        system=database.system,
-        backend=_backend_name(database.backend),
-        backend_version=getattr(database, "version", None),
-        kv_block_size=None,
-        systems_path=systems_path,
-        nextn=int(nextn) if nextn is not None else 0,
-        nextn_accepted=getattr(model, "_nextn_accepted", None),
-        database=database,
-    )
+    try:
+        spec_json = build_engine_spec_json(
+            model,
+            model_path=getattr(model, "model_path", getattr(model, "model_name", "")),
+            system=database.system,
+            backend=_backend_name(database.backend),
+            backend_version=getattr(database, "version", None),
+            kv_block_size=None,
+            systems_path=systems_path,
+            nextn=int(nextn) if nextn is not None else 0,
+            database=database,
+        )
+    except OpConversionError as exc:
+        unsupported = RustEngineUnsupportedError(str(exc))
+        _ENGINE_HANDLE_CACHE[key] = unsupported
+        raise unsupported from exc
     spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
     handle = EngineHandle(spec_bytes, systems_path=systems_path)
     _ENGINE_HANDLE_CACHE[key] = handle
@@ -398,14 +517,9 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
 
 def _engine_config_json(model: Any, database: Any) -> str:
     model_config = model.config
-    # Forward MTP speculative-decoding params (`nextn` draft length, `nextn_accepted`
-    # average accepted draft tokens per step) so the Rust model builders can
-    # compute the same `_mtp_scale_factor` Python applies. MTP is never
-    # auto-enabled; both values come from the user's explicit config and are
-    # stored on the model object via `BaseModel._nextn` / `_nextn_accepted`. Rust
-    # treats `nextn=None` or `nextn=0` as MTP-disabled (scale=1.0).
+    # Forward only the MTP draft length. The aic-core layer models iteration compute cost;
+    # accepted-token progress belongs to the upper prediction layer.
     nextn = getattr(model, "_nextn", None)
-    nextn_accepted = getattr(model, "_nextn_accepted", None)
     config = {
         "schema_version": 1,
         "model_name": getattr(model, "model_path", getattr(model, "model_name", "")),
@@ -426,10 +540,72 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
-        "nextn_accepted": (float(nextn_accepted) if nextn_accepted is not None else None),
-        "extra": {},
+        # Mode + transfer policy are part of the engine identity: a HYBRID or
+        # EMPIRICAL view of the same model/system must not reuse a SILICON
+        # handle (the compiled engine bakes the mode into its query dispatch).
+        "database_mode": _database_mode_key(database),
+        "transfer_policy": _transfer_policy_key(database),
+        # Cache-identity widening. The dtype fields above collapse distinct
+        # quant modes onto one wire string (`sq`/`int8_wo` -> "int8",
+        # `fp8_ootb` -> "fp8", four 4-bit modes -> "int4", the DSv4 MoE modes
+        # -> None), and several ModelConfig fields shape the compiled op list
+        # without appearing in the identity at all. Two models differing only
+        # in those would otherwise share one cached handle and silently return
+        # each other's latencies. `extra` participates in the JSON key, so
+        # carrying the RAW enum names + the op-shaping fields here
+        # disambiguates the memo without touching the wire schema.
+        # Rust `EngineConfig.extra` is `BTreeMap<String, String>`, so the
+        # identity payload is one JSON-encoded STRING value (deserializable
+        # if this dict ever crosses the wire, and a stable cache key today).
+        "extra": {
+            "identity": json.dumps(
+                {
+                    "raw_quant_modes": {
+                        "gemm": _raw_quant_name(getattr(model_config, "gemm_quant_mode", None)),
+                        "moe": _raw_quant_name(getattr(model_config, "moe_quant_mode", None)),
+                        "fmha": _raw_quant_name(getattr(model_config, "fmha_quant_mode", None)),
+                        "kvcache": _raw_quant_name(getattr(model_config, "kvcache_quant_mode", None)),
+                        "comm": _raw_quant_name(getattr(model_config, "comm_quant_mode", None)),
+                    },
+                    "model_config": {
+                        "cp_style": getattr(model_config, "cp_style", None),
+                        "workload_distribution": getattr(model_config, "workload_distribution", None),
+                        "overwrite_num_layers": getattr(model_config, "overwrite_num_layers", None),
+                        "sms": getattr(model_config, "sms", None),
+                        "moe_backend": getattr(model_config, "moe_backend", None),
+                        "attention_backend": getattr(model_config, "attention_backend", None),
+                        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
+                        "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
+                        "wideep_num_slots": getattr(model_config, "wideep_num_slots", None),
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
     }
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+def _database_mode_key(database: Any) -> str:
+    mode = getattr(database, "get_default_database_mode", lambda: None)()
+    return getattr(mode, "name", str(mode)) if mode is not None else "SILICON"
+
+
+def _transfer_policy_key(database: Any) -> list[str] | None:
+    policy = getattr(database, "transfer_policy", None)
+    if policy is None:
+        return None
+    return sorted(getattr(kind, "value", str(kind)) for kind in policy)
+
+
+def _raw_quant_name(value: Any) -> str | None:
+    """Un-collapsed quant identity for the handle-cache key: the Python enum
+    member name (e.g. ``sq``, ``fp8_ootb``, ``w4afp8``) rather than the lossy
+    wire ``DataType`` string."""
+    if value is None:
+        return None
+    return getattr(value, "name", str(value))
 
 
 def _backend_name(value: Any) -> str:
@@ -475,7 +651,13 @@ def _moe_quant_to_dtype(value: Any) -> str | None:
     value_name = getattr(getattr(value, "value", None), "name", None)
     if value_name:
         name = value_name.lower()
-    if name in {"w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+    if name in {
+        "w4afp8",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+        "w4a8_mxfp4_mxfp8_trtllm",
+        "w4a16_mxfp4_cutlass",
+    }:
         return name
     return _quant_to_dtype(value)
 

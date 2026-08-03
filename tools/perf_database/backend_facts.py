@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Bootstrap and audit `collector/op_backend_facts.yaml`.
+Bootstrap and check `collector/op_backend_facts.yaml`.
 
 The registry records, for every (op table, framework, version, system,
 fact-axis slice), which backend(s) the op actually runs on. The perf tables
@@ -21,7 +21,7 @@ This tool has exactly two jobs:
     to seed the file, and afterwards only to draft entries for a new
     framework version/system from freshly collected data — the diff is then
     reviewed like any hand edit.
-  - `--check`: audit the committed registry against the perf database labels.
+  - `--check`: verify the committed registry against the perf database labels.
     Drift means either the data is mislabeled or the registry is stale; both
     must be resolved explicitly. Exits non-zero on drift.
 
@@ -34,7 +34,7 @@ to investigate, not to average away.
 
 Usage:
     python3 tools/perf_database/backend_facts.py                # bootstrap/draft
-    python3 tools/perf_database/backend_facts.py --check        # drift audit
+    python3 tools/perf_database/backend_facts.py --check        # drift check
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from audit_kernel_source import _iter_data_files
+from check_kernel_source import _iter_data_files
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ def render_yaml(by_op: dict[str, list[dict]], axes_by_op: dict[str, list[str]], 
         "# tools/perf_database/backend_facts.py (2026-07-11). From then on it is",
         "# maintained deliberately: a collector-upgrade PR that changes backend",
         "# dispatch updates the affected entries (the tool can draft them from",
-        "# freshly collected data; review the diff like a hand edit). Audit with:",
+        "# freshly collected data; review the diff like a hand edit). Check with:",
         "#",
         "#   python3 tools/perf_database/backend_facts.py --check",
         "#",
@@ -381,14 +381,18 @@ def check(registry_path: Path, by_op: dict[str, list[dict]], axes_by_op: dict[st
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-root", type=Path, default=Path("src/aiconfigurator/systems/data"))
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=Path("aic-core/src/aiconfigurator_core/systems/data"),
+    )
     parser.add_argument("--registry", type=Path, default=Path("collector/op_backend_facts.yaml"))
     parser.add_argument("--backend-map", type=Path, default=Path("collector/kernel_source_backends.yaml"))
     parser.add_argument("--catalog", type=Path, default=Path("collector/op_backend_catalog.yaml"))
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Audit the committed registry against the perf database instead of writing it.",
+        help="Check the committed registry against the perf database instead of writing it.",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()

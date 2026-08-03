@@ -396,7 +396,7 @@ class TestForwardModelRewrite:
             models.get_model("Qwen/Qwen3-VL-2B-Instruct", cfg, "vllm")
 
     def test_mtp_rejected(self):
-        cfg = _model_config(forward_model="fpm", nextn=1, nextn_accepted=0.8)
+        cfg = _model_config(forward_model="fpm", nextn=1)
         with pytest.raises(NotImplementedError, match="MTP"):
             models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
 

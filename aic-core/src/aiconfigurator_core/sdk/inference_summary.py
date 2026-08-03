@@ -5,6 +5,7 @@ import logging
 
 import pandas as pd
 
+from aiconfigurator_core.sdk.common import ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,9 @@ class InferenceSummary:
         self._generation_power_avg = 0.0
         self._e2e_power_avg = 0.0
 
-        # summary dataframe
+        # summary dataframe (built lazily from _deferred_row when available)
         self._summary_df = None
+        self._deferred_row: tuple[list, list] | None = None  # (data, columns)
 
         # cached result dict for efficient batch operations
         self._result_dict = None
@@ -90,6 +92,8 @@ class InferenceSummary:
         # per-ops data source breakdown, parallel to _per_ops_data: same key
         # structure but values are "silicon" / "empirical" / "sol" / "mixed" strings.
         self._per_ops_source: dict | None = None
+        # Raw forward-pass estimates used by the agg analytic scheduler.
+        self._step_estimates: dict | None = None
 
         # Capacity probing context. Populated by set_memory_and_check_oom
         # (capacity) and by backends running static-mode estimation (kv per seq).
@@ -99,6 +103,9 @@ class InferenceSummary:
         self._free_gpu_memory_fraction: float | None = None
         self._kv_cache_reserved_fraction: float = 0.0
         self._kv_cache_tolerance: float = 0.0
+        # of_free (TRT-LLM) vs of_total (vLLM/SGLang) budget semantics; consumed
+        # by the estimate detail report so its displayed max batch matches the gate.
+        self._fraction_of_free: bool = True
         self._kv_bytes_per_seq: float | None = None
         self._kv_seq_len_used: int | None = None
 
@@ -109,6 +116,7 @@ class InferenceSummary:
         free_gpu_memory_fraction: float | None = None,
         kv_cache_reserved_fraction: float = 0.0,
         kv_cache_tolerance: float = 0.0,
+        fraction_of_free: bool = True,
     ) -> None:
         """
         Set memory and check oom.
@@ -119,6 +127,12 @@ class InferenceSummary:
 
         When *free_gpu_memory_fraction* is not ``None``, also performs the
         KV cache budget check using the same *memory_dict*.
+
+        *fraction_of_free* selects the budget semantics: ``True`` applies the
+        fraction to the free pool after non-KV allocations (TRT-LLM
+        ``free_gpu_memory_fraction``); ``False`` applies it to TOTAL device
+        memory before subtracting non-KV (vLLM ``gpu_memory_utilization`` /
+        SGLang ``mem_fraction_static``).
         """
         self._memory = memory_dict
         self._is_oom = self._memory["total"] >= (mem_capacity / (1 << 30))
@@ -127,12 +141,14 @@ class InferenceSummary:
         self._free_gpu_memory_fraction = free_gpu_memory_fraction
         self._kv_cache_reserved_fraction = kv_cache_reserved_fraction
         self._kv_cache_tolerance = kv_cache_tolerance
+        self._fraction_of_free = fraction_of_free
         if free_gpu_memory_fraction is not None:
             self._check_and_set_kv_cache_oom(
                 mem_capacity,
                 free_gpu_memory_fraction,
                 kv_cache_reserved_fraction,
                 kv_cache_tolerance,
+                fraction_of_free,
             )
 
     def _check_and_set_kv_cache_oom(
@@ -141,26 +157,32 @@ class InferenceSummary:
         free_gpu_memory_fraction: float,
         kv_cache_reserved_fraction: float,
         kv_cache_tolerance: float,
+        fraction_of_free: bool = True,
     ) -> None:
         """Check whether the KV cache exceeds the fraction-based memory budget.
 
         Uses ``self._memory`` (set by :meth:`set_memory_and_check_oom`).
 
-        Equivalent to the inflation formula
-        ``kv / (frac*(1-res)*(1-tol)) + non_kv >= capacity`` rewritten as
-        ``kv > (capacity - non_kv) * frac * (1-res) * (1-tol)``.
+        Budget math is delegated to :func:`memory.kv_cache_budget_bytes` so the
+        estimate and the sweep share one formula (closes TODO(#1208)):
+        ``of_free`` (TRT-LLM) gives ``(capacity - non_kv) * frac * scale``;
+        ``of_total`` (vLLM/SGLang) gives ``capacity * frac * scale - non_kv``.
         """
         self._is_kv_cache_oom = False
         if self._is_oom:
             return
+        from aiconfigurator_core.sdk.memory import kv_cache_budget_bytes
+
         mem_cap_gib = mem_capacity / (1 << 30)
         kv_gib = self._memory.get("kvcache", 0.0)
         non_kv_gib = self._memory["total"] - kv_gib
-        kv_budget = (
-            (mem_cap_gib - non_kv_gib)
-            * free_gpu_memory_fraction
-            * (1 - kv_cache_reserved_fraction)
-            * (1 - kv_cache_tolerance)
+        kv_budget = kv_cache_budget_bytes(
+            capacity=mem_cap_gib,
+            non_kv=non_kv_gib,
+            fraction=free_gpu_memory_fraction,
+            of_free=fraction_of_free,
+            reserved=kv_cache_reserved_fraction,
+            tolerance=kv_cache_tolerance,
         )
         self._is_kv_cache_oom = kv_gib > kv_budget
 
@@ -312,6 +334,30 @@ class InferenceSummary:
         """Get end-to-end average power (watts)."""
         return self._e2e_power_avg
 
+    def get_power_data_coverage(self) -> float:
+        """Return latency-weighted power-data coverage as a ratio in ``[0, 1]``.
+
+        An operation is covered when it has positive recorded energy. Weighting
+        by operation latency prevents numerous tiny covered operations from
+        masking an uncovered operation that dominates end-to-end execution.
+        """
+        latency_groups = (
+            (self._encoder_latency_dict, self._encoder_energy_wms_dict),
+            (self._context_latency_dict, self._context_energy_wms_dict),
+            (self._generation_latency_dict, self._generation_energy_wms_dict),
+        )
+        total_latency = sum(sum(latencies.values()) for latencies, _energies in latency_groups)
+        if total_latency <= 0:
+            return 0.0
+
+        latency_with_energy = sum(
+            latency
+            for latencies, energies in latency_groups
+            for op_name, latency in latencies.items()
+            if energies.get(op_name, 0.0) > 0
+        )
+        return min(max(latency_with_energy / total_latency, 0.0), 1.0)
+
     def has_sufficient_power_data(self, threshold: float = 0.9) -> bool:
         """
         Check if power data coverage is sufficient for reliable power estimation.
@@ -322,33 +368,7 @@ class InferenceSummary:
         Returns:
             bool: True if latency with non-zero energy >= threshold * total latency
         """
-        # Calculate total latency
-        total_latency = (
-            sum(self._encoder_latency_dict.values())
-            + sum(self._context_latency_dict.values())
-            + sum(self._generation_latency_dict.values())
-        )
-
-        if total_latency == 0:
-            return False
-
-        # Calculate latency from operations with non-zero energy
-        latency_with_energy = 0.0
-        for op_name, latency in self._encoder_latency_dict.items():
-            if self._encoder_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        for op_name, latency in self._context_latency_dict.items():
-            if self._context_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        for op_name, latency in self._generation_latency_dict.items():
-            if self._generation_energy_wms_dict.get(op_name, 0.0) > 0:
-                latency_with_energy += latency
-
-        # Check if coverage meets threshold
-        coverage_ratio = latency_with_energy / total_latency
-        return coverage_ratio >= threshold
+        return self.get_power_data_coverage() >= threshold
 
     def check_oom(self) -> bool:
         """
@@ -410,7 +430,10 @@ class InferenceSummary:
             self._generation_latency_dict
         )
 
-        assert self._summary_df is not None, "summary df is not set"
+        # run_static defers DataFrame construction; materialize before use so
+        # this works regardless of whether get_summary_df() was called first.
+        summary_df = self.get_summary_df()
+        assert summary_df is not None, "summary df is not set"
 
         # summary string for display
         perf_info = "Performance Summary:\n"
@@ -421,8 +444,7 @@ class InferenceSummary:
         if generation_latency != 0:
             perf_info += f"generation latency:{generation_latency:>19.5f} ms\n"
             perf_info += (
-                f"throughput {self._summary_df.loc[0, 'tokens/s']:.2f} tokens/s, tpot "
-                f"{self._summary_df.loc[0, 'tpot']:.3f} ms\n"
+                f"throughput {summary_df.loc[0, 'tokens/s']:.2f} tokens/s, tpot {summary_df.loc[0, 'tpot']:.3f} ms\n"
             )
         encoder_info = "Encoder breakdown:\n" + encoder_latency_string if encoder_latency != 0 else ""
         context_info = "Context breakdown:\n" + context_latency_string
@@ -440,10 +462,23 @@ class InferenceSummary:
         """
         self._summary_df = summary_df
 
+    def set_deferred_row(self, data: list, columns: list) -> None:
+        """Store raw row data for lazy DataFrame construction."""
+        self._deferred_row = (data, columns)
+
     def get_summary_df(self) -> pd.DataFrame:
+        """Get summary dataframe, building it lazily on first access.
+
+        run_agg and run_static defer DataFrame construction so the sweep
+        hot path avoids the overhead. Callers that need the DataFrame
+        (disagg concat, CLI display, save) trigger construction here.
         """
-        Get summary dataframe.
-        """
+        if self._summary_df is None:
+            if self._deferred_row is not None:
+                data, columns = self._deferred_row
+                self._summary_df = pd.DataFrame(data, columns=columns).round(3)
+            elif self._result_dict is not None:
+                self._summary_df = pd.DataFrame([self._result_dict], columns=ColumnsAgg).round(3)
         if self._summary_df is None:
             logger.warning("WARNING: summary df is not set")
         return self._summary_df
@@ -463,6 +498,14 @@ class InferenceSummary:
     def get_per_ops_source(self) -> dict | None:
         """Get per-operation data-source breakdown, parallel to per_ops_data."""
         return self._per_ops_source
+
+    def set_step_estimates(self, step_estimates: dict) -> None:
+        """Set raw per-iteration estimates used by aggregate scheduling."""
+        self._step_estimates = step_estimates
+
+    def get_step_estimates(self) -> dict | None:
+        """Get raw aggregate step estimates and scheduling metadata."""
+        return self._step_estimates
 
     def set_encoder_source_dict(self, encoder_source_dict: dict) -> None:
         """Set the per-op data source dict for the encoder phase."""
@@ -519,10 +562,17 @@ class InferenceSummary:
     def get_result_dict(self) -> dict | None:
         """
         Get the result as a dict. Returns cached dict if available,
-        otherwise extracts from the first row of the summary DataFrame.
+        otherwise extracts from the deferred row or summary DataFrame.
         """
         if self._result_dict is not None:
             return self._result_dict
+
+        # Fallback: build from deferred row (run_static lazy path)
+        if self._deferred_row is not None:
+            data, columns = self._deferred_row
+            if data and columns:
+                self._result_dict = dict(zip(columns, data[0], strict=False))
+                return self._result_dict
 
         # Fallback: create from DataFrame if not cached
         if self._summary_df is not None and len(self._summary_df) > 0:

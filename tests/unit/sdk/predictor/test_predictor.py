@@ -89,7 +89,9 @@ def test_analytic_predictor_predict_disagg_worker_prefill_uses_static_ctx():
         role="prefill",
     )
 
-    backend.run_static.assert_called_once_with(model, database, rt, "static_ctx", 32, 1.0)
+    backend.run_static.assert_called_once_with(
+        model, database, rt, "static_ctx", 32, 1.0, free_gpu_memory_fraction=None
+    )
     backend.run_agg.assert_not_called()
 
 
@@ -106,7 +108,9 @@ def test_analytic_predictor_predict_disagg_worker_decode_uses_static_gen():
         stride=64,
     )
 
-    backend.run_static.assert_called_once_with(model, database, rt, "static_gen", 64, 1.25)
+    backend.run_static.assert_called_once_with(
+        model, database, rt, "static_gen", 64, 1.25, free_gpu_memory_fraction=None
+    )
 
 
 def test_predict_functions_default_to_analytic_predictor():

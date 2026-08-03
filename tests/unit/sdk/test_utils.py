@@ -1139,6 +1139,27 @@ class TestParseCompressedTensorsQuant:
         algo, _ = parse_compressed_tensors_quant(self._make_quant_config(8, "float"))
         assert algo == "fp8"
 
+    @pytest.mark.parametrize(
+        ("strategy", "block_structure"),
+        [
+            pytest.param("block", None, id="block-strategy"),
+            pytest.param("group", [128, 128], id="block-structure"),
+        ],
+    )
+    def test_block_fp8_base_algo(self, strategy, block_structure):
+        """Either compressed-tensors block signal selects block-scaled FP8."""
+        from aiconfigurator.sdk.utils import parse_compressed_tensors_quant
+
+        cfg = self._make_quant_config(8, "float")
+        cfg["config_groups"]["group_0"]["weights"].update(
+            {
+                "strategy": strategy,
+                "block_structure": block_structure,
+            }
+        )
+        algo, _ = parse_compressed_tensors_quant(cfg)
+        assert algo == "fp8_block"
+
     # --- ignored_categories detection ---
 
     def test_no_ignore_empty_set(self):
@@ -1241,6 +1262,45 @@ class TestParseCompressedTensorsQuant:
         overrides = _infer_quant_modes_from_raw_config(raw_config)
         assert overrides.get("gemm_quant_mode") == common.GEMMQuantMode.int4_wo
         assert overrides.get("moe_quant_mode") == common.MoEQuantMode.int4_wo
+
+    def test_redhat_dsv4_maps_block_fp8_attention_and_fp4_experts(self):
+        """The real RedHatAI DSV4 quant layout maps attention and experts independently."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.models import _infer_quant_modes_from_raw_config
+
+        fp8_weights = {
+            "num_bits": 8,
+            "type": "float",
+            "strategy": "block",
+            "block_structure": [128, 128],
+        }
+        raw_config = {
+            "architecture": "DeepseekV4ForCausalLM",
+            "expert_dtype": "fp4",
+            "quant_algo": "compressed-tensors",
+            "quantization_config": {
+                "config_groups": {
+                    "group_0": {
+                        "targets": ["re:.*attn.*(fused_wqa_wkv|wq_b|wo_a|wo_b)$"],
+                        "weights": fp8_weights,
+                    },
+                    "group_1": {
+                        "targets": ["re:.*ffn.*(gate|up|down)_proj$"],
+                        "weights": {
+                            "num_bits": 4,
+                            "type": "float",
+                            "strategy": "tensor_group",
+                        },
+                    },
+                },
+                "ignore": [],
+            },
+        }
+
+        overrides = _infer_quant_modes_from_raw_config(raw_config)
+        assert overrides["gemm_quant_mode"] == common.GEMMQuantMode.fp8_block
+        assert overrides["moe_quant_mode"] == common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        assert overrides["kvcache_quant_mode"] == common.KVCacheQuantMode.fp8
 
     def test_modelopt_mixed_precision_config_groups_map_sdk_modes(self):
         """ModelOpt MIXED_PRECISION config groups map FP8 dense layers and NVFP4 routed experts."""

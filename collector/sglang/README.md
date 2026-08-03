@@ -94,9 +94,14 @@ NCCL/distributed initialization conflicts.
 
 ## General Configuration
 
-All scripts save results to the same output directory. Modify `output_path` in each script to your desired location:
+Direct scripts save staging results to one output directory. Keep that staging
+directory outside the packaged perf-data tree; `collect.py` finalizes accepted
+files as parquet, and each file is then published to the family selected by
+`collector/op_backend_catalog.yaml`.
+
+Modify `output_path` in each direct script to your desired staging location:
 ```python
-output_path = "/aiconfigurator/src/aiconfigurator/systems/data/h100_sxm/sglang/0.5.14/"
+output_path = "/aiconfigurator/collector_output/h100_sxm/sglang/0.5.14/"
 ```
 
 

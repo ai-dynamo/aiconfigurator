@@ -62,7 +62,7 @@ class MOEModel(BaseModel):
         super().__init__(*args)
 
         # MTP scale factor: throughput boost / compute overhead
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         # make sure the paralel width is same (cp is an independent attention
         # dimension that also contributes to the width the MoE must match)
@@ -395,7 +395,7 @@ class SGLangEPMOEModel(BaseModel):
         super().__init__(*args)
 
         # MTP scale factor: throughput boost / compute overhead
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._nextn_accepted, self._num_layers)
+        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         # make sure the parallel width is same (cp is an independent attention
         # dimension that also contributes to the width the MoE must match)

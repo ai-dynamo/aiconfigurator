@@ -146,14 +146,13 @@ class TestMOEParallelismResolution:
                 moe_tp_size=1,
                 moe_ep_size=8,
                 nextn=nextn,
-                nextn_accepted=0.85,
             )
             return get_model("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", mc, backend_name="trtllm")
 
         baseline = build(0)
         mtp = build(1)
         assert baseline._mtp_scale_factor == 1.0
-        assert 0.0 < mtp._mtp_scale_factor < 1.0
+        assert mtp._mtp_scale_factor > 1.0
 
         baseline_context = {op._name: op._scale_factor for op in baseline.context_ops}
         mtp_context = {op._name: op._scale_factor for op in mtp.context_ops}
@@ -449,7 +448,6 @@ class TestHFModelSupport:
             moe_tp_size=1,
             moe_ep_size=1,
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = get_model(hf_id, model_config, backend_name="trtllm")
         assert model.model_family == "DEEPSEEKV4"
@@ -473,7 +471,6 @@ class TestHFModelSupport:
             moe_ep_size=8,
             attention_dp_size=1,
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         seq_len = 4096
@@ -508,7 +505,6 @@ class TestHFModelSupport:
             moe_ep_size=4,
             attention_dp_size=1,
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         local_inter_size = model._moe_inter_size // model_config.tp_size
@@ -539,7 +535,6 @@ class TestHFModelSupport:
             moe_backend="megamoe",
             workload_distribution="uniform",
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
 
@@ -563,7 +558,6 @@ class TestHFModelSupport:
             attention_dp_size=8,
             moe_backend="deepep_moe",
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="sglang")
 
@@ -826,7 +820,6 @@ class TestGetKvcacheMaxTokens:
             moe_ep_size=8,
             attention_dp_size=1,
             nextn=1,
-            nextn_accepted=0.85,
         )
         model = models.get_model("sgl-project/DeepSeek-V4-Pro-FP8", model_config, backend_name="trtllm")
         window = model.extra_params.sliding_window
@@ -1398,3 +1391,252 @@ class TestDSAAttentionQuantExclusion:
 
     def test_empty_config_returns_false(self):
         assert self._excluded({}) is False
+
+
+class TestMLAModuleQueryKeys:
+    """DeepSeek/Kimi MLA-module perf-row keys must reflect the model and checkpoint.
+
+    Regression for two DSV3-shaped hardcodes on the KIMIK25 path
+    (ai-dynamo/aiconfigurator#1396): the MLAModule head count was the literal
+    ``128 // tp`` (Kimi K2.5 has 64 heads), and the module's gemm key used the
+    global gemm_quant_mode (nvfp4) although every NVFP4 DeepSeek/Kimi release
+    keeps attention projections in BF16 (quantization ignore/exclude lists) —
+    together selecting perf rows for kernels serving never runs.
+    """
+
+    @staticmethod
+    def _generation_mla_module(hf_id: str, tp_size: int, dp_size: int, **moe_kw):
+        model_config = config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            attention_dp_size=dp_size,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            **moe_kw,
+        )
+        model = models.get_model(hf_id, model_config, backend_name="vllm")
+        for op in model.generation_ops:
+            if getattr(op, "_name", "") == "generation_mla_block":
+                return op._primary
+        raise AssertionError("generation_mla_block not found")
+
+    def test_kimik25_uses_model_head_count(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=1, dp_size=4, moe_tp_size=1, moe_ep_size=4
+        )
+        assert module._num_heads == 64
+
+    def test_kimik25_tp_shards_model_head_count(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+        )
+        assert module._num_heads == 16
+
+    def test_kimik25_attention_excluded_uses_bf16_gemm_key(self):
+        module = self._generation_mla_module(
+            "nvidia/Kimi-K2.5-NVFP4", tp_size=1, dp_size=4, moe_tp_size=1, moe_ep_size=4
+        )
+        assert module._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+
+    def test_kimik25_context_module_uses_same_keys(self):
+        # coderabbit: the context_mla_block key changed too — cover it.
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = models.get_model("nvidia/Kimi-K2.5-NVFP4", model_config, backend_name="vllm")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_mla_block":
+                assert op._primary._num_heads == 64
+                assert op._primary._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+                return
+        raise AssertionError("context_mla_block not found")
+
+    def test_v31_nvfp4_mixed_exclusion_bypasses_module_row(self):
+        # DeepSeek-V3.1-NVFP4 excludes q/kv but keeps o_proj NVFP4: no
+        # single-gemm_type module row matches that identity, so the model must
+        # emit the granular per-projection ops directly (an all-NVFP4 module
+        # profile measures kernels the checkpoint never runs). The granular
+        # GEMMs carry the split dtypes.
+        model_config = config.ModelConfig(
+            tp_size=4,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=4,
+            moe_ep_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = models.get_model("nvidia/DeepSeek-V3.1-NVFP4", model_config, backend_name="vllm")
+        names = {getattr(op, "_name", "") for op in model.generation_ops}
+        assert "generation_mla_block" not in names  # no module-profile primary
+        by_name = {getattr(op, "_name", ""): op for op in model.generation_ops}
+        assert by_name["generation_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
+
+    def test_deepseek_v3_keeps_global_gemm_key_and_heads(self):
+        # Official DeepSeek FP8 checkpoints quantize attention too (empty ignore
+        # list): the module key must stay on the configured global mode.
+        module = self._generation_mla_module(
+            "deepseek-ai/DeepSeek-V3", tp_size=4, dp_size=1, moe_tp_size=4, moe_ep_size=1
+        )
+        assert module._num_heads == 32
+        assert module._gemm_quant_mode == common.GEMMQuantMode.nvfp4
+
+    def test_kimik25_attention_weights_counted_at_bf16(self):
+        """Attention fallback GEMM weights follow the checkpoint dtype and the
+        model head count. Kimi-K2.5-NVFP4 keeps attention in BF16; per rank at
+        tp1: (q_a+kv_a 15.1M replicated + q_b 18.9M + kv_b 8.4M + o 58.7M)
+        x 61 layers x 2 bytes = 11.49 GiB (matches the vLLM load ledger)."""
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        model = models.get_model("nvidia/Kimi-K2.5-NVFP4", model_config, backend_name="vllm")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_mla_block":
+                assert op.get_weights() / (1 << 30) == pytest.approx(11.49, abs=0.05)
+                return
+        raise AssertionError("context_mla_block not found")
+
+
+class TestDSV32NVFP4AttentionExclusion:
+    """The DSA attention/shared-expert dtype exclusion is checkpoint-driven,
+    not GLM-gated: nvidia/DeepSeek-V3.2-NVFP4 excludes every self_attn*
+    (including the indexer) exactly like the GLM-5 NVFP4 releases, and vLLM
+    honors ModelOpt exclude_modules wildcards for any architecture."""
+
+    @staticmethod
+    def _build(hf_id: str):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        )
+        return models.get_model(hf_id, model_config, backend_name="vllm")
+
+    def test_dsv32_nvfp4_records_per_projection_exclusions(self):
+        # V3.2-NVFP4 excludes q/kv/indexer but KEEPS o_proj quantized.
+        model = self._build("nvidia/DeepSeek-V3.2-NVFP4")
+        assert model.extra_params.get("dsa_attn_quant_exclusions") == frozenset({"q", "kv", "indexer"})
+
+    def test_dsv32_nvfp4_dsa_weights_are_mixed_dtype(self):
+        # Per-layer per-rank at tp1: q(48.76M)+kv(20.90M)+indexer(13.04M) in
+        # BF16 + o(117.44M) in NVFP4 = 231.5e6 B/layer x 61 = 13.15 GiB.
+        model = self._build("nvidia/DeepSeek-V3.2-NVFP4")
+        for op in model.context_ops:
+            if getattr(op, "_name", "") == "context_attention":
+                assert op.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
+                return
+        raise AssertionError("context_attention not found")
+
+    def test_dsv32_official_keeps_global_mode(self):
+        # deepseek-ai/DeepSeek-V3.2 quantizes attention (empty ignore list):
+        # nothing excluded, weights follow the configured global mode.
+        model = self._build("deepseek-ai/DeepSeek-V3.2")
+        assert model.extra_params.get("dsa_attn_quant_exclusions") == frozenset()
+
+
+class TestAttentionProjectionExclusions:
+    """Per-projection exclusion parsing (V3.1/V3.2 exclude q/kv but not o_proj)."""
+
+    @staticmethod
+    def _excl(patterns):
+        from aiconfigurator.sdk.models.helpers import attention_projection_exclusions
+
+        return attention_projection_exclusions({"quantization_config": {"ignore": patterns}})
+
+    def test_whole_block_glob_covers_all_groups(self):
+        assert self._excl(["model.layers.3.self_attn*"]) == frozenset({"q", "kv", "o", "indexer"})
+
+    def test_projection_named_patterns_split_groups(self):
+        got = self._excl(
+            [
+                "model.layers.0.self_attn.q_a_proj",
+                "model.layers.0.self_attn.kv_b_proj",
+                "model.layers.0.self_attn.indexer*",
+            ]
+        )
+        assert got == frozenset({"q", "kv", "indexer"})
+
+    def test_o_proj_only(self):
+        assert self._excl(["model.layers.0.self_attn.o_proj"]) == frozenset({"o"})
+
+    def test_empty(self):
+        assert self._excl([]) == frozenset()
+
+
+class TestBundledModelConfigsOffline:
+    """Bundled configs must load without network (P2: DefaultHFModels registration)."""
+
+    def test_dsv32_nvfp4_loads_from_bundle(self, monkeypatch):
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        cfg = sdk_utils.get_model_config_from_model_path("nvidia/DeepSeek-V3.2-NVFP4")
+        raw = cfg["raw_config"]
+        assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
+
+class TestWideEPAttentionExclusions:
+    """TRT-LLM WideEP must inherit the checkpoint's per-projection attention
+    dtypes (reviewer finding: exclusions were not threaded, so q/kv projection
+    perf rows and weights used global NVFP4 — ~5.7 GiB/rank undercount)."""
+
+    @staticmethod
+    def _wideep_ops(hf_id: str):
+        model_config = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=4,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            enable_wideep=True,
+        )
+        model = models.get_model(hf_id, model_config, backend_name="trtllm")
+        return {getattr(op, "_name", ""): op for op in model.context_ops + model.generation_ops}
+
+    def test_v31_nvfp4_wideep_projection_dtypes_split(self):
+        by_name = self._wideep_ops("nvidia/DeepSeek-V3.1-NVFP4")
+        # q/kv excluded from quantization -> BF16 rows and byte widths.
+        assert by_name["context_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["context_kv_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        assert by_name["generation_q_b_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+        # o_proj stays NVFP4 on V3.1.
+        assert by_name["context_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
+        assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
+        # fused q_a+kv_a downscale: BF16 iff both groups excluded.
+        assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16

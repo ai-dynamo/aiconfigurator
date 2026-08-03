@@ -30,7 +30,7 @@ Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 
 from __future__ import annotations
 
-import copy
+import dataclasses
 import functools
 import logging
 from typing import Any
@@ -49,6 +49,7 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,7 @@ def _sweep_one_parallel_agg(
     free_gpu_memory_fraction: float | None,
     max_seq_len: int | None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> tuple[pd.DataFrame, bool, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
@@ -287,6 +289,14 @@ def _sweep_one_parallel_agg(
     b_list = [b for b in _DEFAULT_AGG_BATCH_SCHEDULE if b <= max_batch_size]
     ctx_tokens_list = _agg_ctx_tokens_list(isl, ctx_stride, enable_chunked_prefill)
 
+    # The capped-gen dedup below assumes the non-speculative schedule
+    # (decode_iterations == osl). With speculative progress the boundary is
+    # fractional and backend schedulers (e.g. vLLM's b - ceil(ctx/isl) decode
+    # requests) still distinguish batches this generic key would merge, so the
+    # heuristic is disabled and every guard-passing point is evaluated.
+    _progress = speculative_profile.tokens_per_iteration if speculative_profile else 1.0
+    dedup_gen_slices = _progress == 1.0
+
     results_dict_list: list[dict] = []
     results_per_ops_source: list[dict | None] = []
     capped_b: list[int] = []
@@ -302,20 +312,19 @@ def _sweep_one_parallel_agg(
                 break
 
             # Skip equivalent gen_tokens slices to avoid recomputing the same point.
-            balance_score = isl * b / ctx_tokens / osl
-            if balance_score > 1:
-                gen_tokens = b // balance_score
-                if gen_tokens > 1 and gen_tokens in capped_b:
-                    continue
-                capped_b.append(gen_tokens)
+            if dedup_gen_slices:
+                balance_score = isl * b / ctx_tokens / osl
+                if balance_score > 1:
+                    gen_tokens = b // balance_score
+                    if gen_tokens > 1 and gen_tokens in capped_b:
+                        continue
+                    capped_b.append(gen_tokens)
 
-            # Deep-copy the full runtime_config (mirrors the disagg path below) so
-            # every field is preserved per batch point. Explicit field-by-field
-            # construction silently dropped multimodal fields (image_height/width,
-            # num_images_per_request, num_image_tokens), zeroing the image encoder
-            # workload in agg while disagg stayed correct (NVBug 6401839).
-            point_rt = copy.deepcopy(runtime_config)
-            point_rt.batch_size = b
+            # dataclasses.replace shallow-copies all fields (including multimodal
+            # fields like image_height/width that field-by-field construction
+            # silently dropped -- NVBug 6401839) and overrides only the named
+            # ones. Safe because the sweep never mutates list-valued fields.
+            point_rt = dataclasses.replace(runtime_config, batch_size=b)
 
             backend_kwargs: dict[str, Any] = {}
             if max_seq_len is not None:
@@ -330,6 +339,7 @@ def _sweep_one_parallel_agg(
                 runtime_config=point_rt,
                 ctx_tokens=ctx_tokens,
                 predictor=predictor,
+                speculative_profile=speculative_profile,
                 **backend_kwargs,
             )
 
@@ -370,6 +380,7 @@ def sweep_agg(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -428,13 +439,15 @@ def sweep_agg(
             cp_size,
         )
         try:
-            point_model_config = copy.deepcopy(model_config)
-            point_model_config.tp_size = tp_size
-            point_model_config.pp_size = pp_size
-            point_model_config.moe_tp_size = moe_tp_size
-            point_model_config.moe_ep_size = moe_ep_size
-            point_model_config.attention_dp_size = dp_size
-            point_model_config.cp_size = cp_size
+            point_model_config = dataclasses.replace(
+                model_config,
+                tp_size=tp_size,
+                pp_size=pp_size,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                attention_dp_size=dp_size,
+                cp_size=cp_size,
+            )
 
             # Build backend + model ONCE per parallel choice so the backend's
             # internal _agg_cache survives across the tpot sweep below.
@@ -459,16 +472,11 @@ def sweep_agg(
                     )
                     continue
                 for ttft_c, tpot_c in pairs:
-                    rt = copy.deepcopy(runtime_config)
-                    rt.ttft = ttft_c
-                    rt.tpot = tpot_c
-                    runtime_configs_to_evaluate.append(rt)
+                    runtime_configs_to_evaluate.append(dataclasses.replace(runtime_config, ttft=ttft_c, tpot=tpot_c))
             else:
                 tpot_list = runtime_config.tpot if isinstance(runtime_config.tpot, list) else [runtime_config.tpot]
                 for tpot_v in tpot_list:
-                    rt = copy.deepcopy(runtime_config)
-                    rt.tpot = tpot_v
-                    runtime_configs_to_evaluate.append(rt)
+                    runtime_configs_to_evaluate.append(dataclasses.replace(runtime_config, tpot=tpot_v))
 
             if not runtime_configs_to_evaluate:
                 continue
@@ -486,6 +494,7 @@ def sweep_agg(
                     free_gpu_memory_fraction=free_gpu_memory_fraction,
                     max_seq_len=max_seq_len,
                     predictor=predictor,
+                    speculative_profile=speculative_profile,
                 )
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
@@ -550,6 +559,8 @@ def _get_disagg_worker_candidates(
     backend_name: str,
     latency_correction: float,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Enumerate (parallel, batch_size) worker candidates for a disagg role.
 
@@ -558,7 +569,7 @@ def _get_disagg_worker_candidates(
     ``DisaggInferenceSession.get_worker_candidates``.
     """
     backend = get_backend(backend_name)
-    summary_df = pd.DataFrame(columns=common.ColumnsStatic)
+    result_rows: list[pd.DataFrame] = []
     exceptions: list[Exception] = []
     all_configs_oom = True
 
@@ -575,19 +586,20 @@ def _get_disagg_worker_candidates(
             cp_size,
         )
         try:
-            point_mc = copy.deepcopy(model_config)
-            point_mc.tp_size = tp_size
-            point_mc.pp_size = pp_size
-            point_mc.moe_tp_size = moe_tp_size
-            point_mc.moe_ep_size = moe_ep_size
-            point_mc.attention_dp_size = dp_size
-            point_mc.cp_size = cp_size
+            point_mc = dataclasses.replace(
+                model_config,
+                tp_size=tp_size,
+                pp_size=pp_size,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                attention_dp_size=dp_size,
+                cp_size=cp_size,
+            )
 
             model = get_model(model_path=model_path, model_config=point_mc, backend_name=backend_name)
 
             for b in b_list:
-                point_rt = copy.deepcopy(runtime_config)
-                point_rt.batch_size = b
+                point_rt = dataclasses.replace(runtime_config, batch_size=b)
                 summary = predict_disagg_worker(
                     model=model,
                     backend=backend,
@@ -596,15 +608,20 @@ def _get_disagg_worker_candidates(
                     role=role,  # type: ignore[arg-type]
                     latency_correction=latency_correction,
                     predictor=predictor,
+                    speculative_profile=speculative_profile,
+                    free_gpu_memory_fraction=free_gpu_memory_fraction,
                 )
-                if not summary.check_oom():
+                if not summary.check_oom() and not summary.check_kv_cache_oom():
                     all_configs_oom = False
-                    summary_df = pd.concat(
-                        [summary_df, summary.get_summary_df()],
-                        axis=0,
-                        ignore_index=True,
-                    )
+                    result_rows.append(summary.get_summary_df())
                 else:
+                    # Larger b will always OOM. check_kv_cache_oom covers the
+                    # fraction-based budget (e.g. vLLM only manages
+                    # gpu_memory_utilization of total memory): a worker whose
+                    # KV for batch b cannot actually be allocated must not
+                    # enter the candidate pool, or the search selects
+                    # deployments whose projected concurrency is physically
+                    # unreachable (#1396).
                     break
         except Exception as e:
             logger.warning(
@@ -620,7 +637,7 @@ def _get_disagg_worker_candidates(
             exceptions.append(e)
             continue
 
-    if summary_df.empty:
+    if not result_rows:
         if exceptions:
             raise RuntimeError(
                 f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
@@ -633,7 +650,7 @@ def _get_disagg_worker_candidates(
         raise NoFeasibleConfigError(
             f"sweep_disagg/{role}: no parallel configuration met TTFT/TPOT or request-latency constraints."
         )
-    return summary_df
+    return pd.concat(result_rows, axis=0, ignore_index=True)
 
 
 def _find_best_disagg_under_constraint(
@@ -765,6 +782,8 @@ def sweep_disagg(
     rate_matching_decode_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
     predictor: Any = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Sweep prefill_parallel x decode_parallel x batches x workers with rate matching.
 
@@ -839,6 +858,8 @@ def sweep_disagg(
         backend_name=prefill_backend_name,
         latency_correction=prefill_latency_correction,
         predictor=predictor,
+        speculative_profile=speculative_profile,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
     decode_summary_df = _get_disagg_worker_candidates(
         model_path=model_path,
@@ -851,6 +872,8 @@ def sweep_disagg(
         backend_name=decode_backend_name,
         latency_correction=decode_latency_correction,
         predictor=predictor,
+        speculative_profile=speculative_profile,
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
     )
 
     if len(prefill_summary_df) == 0 or len(decode_summary_df) == 0:

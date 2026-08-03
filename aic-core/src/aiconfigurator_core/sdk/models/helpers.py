@@ -36,6 +36,78 @@ _MOE_MODEL_FAMILIES = {
 }
 
 
+def quant_exclude_patterns(raw_config: dict) -> list:
+    """All module-exclusion globs a ModelOpt/HF quant config can carry.
+
+    Reads both declaration formats kept on ``raw_config`` by
+    ``get_model_config_from_model_path``: the checkpoint's own
+    ``quantization_config`` (compressed-tensors ``ignore`` /
+    ``modules_to_not_convert`` / ``exclude_modules``) and the retained
+    ``hf_quant_config`` (ModelOpt ``exclude_modules`` / ``ignore``).
+    """
+    quant_config = raw_config.get("quantization_config")
+    quant_config = quant_config if isinstance(quant_config, dict) else {}
+
+    hf_quant_config = raw_config.get("hf_quant_config")
+    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
+    hf_quant = hf_quant_config.get("quantization")
+    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
+
+    return [
+        *list(quant_config.get("modules_to_not_convert") or []),
+        *list(quant_config.get("exclude_modules") or []),
+        *list(quant_config.get("ignore") or []),
+        *list(hf_quant.get("exclude_modules") or []),
+        *list(hf_quant.get("ignore") or []),
+    ]
+
+
+# Attention projection groups an exclusion pattern can cover. Exclusion
+# granularity is a per-checkpoint fact: Kimi-K2.5-NVFP4 and R1-0528-FP4
+# exclude the whole block (``self_attn*``), while DeepSeek-V3.1/V3.2-NVFP4
+# exclude only q/kv projections (V3.2 also the indexer) and KEEP o_proj
+# quantized; DeepSeek's native FP8 checkpoints exclude nothing.
+ATTENTION_PROJECTION_GROUPS = ("q", "kv", "o", "indexer")
+
+# substrings -> group; checked only when the whole-block glob did not match
+_PROJECTION_GROUP_MARKERS = {
+    "q": ("q_a_proj", "q_b_proj", "q_proj"),
+    "kv": ("kv_a_proj", "kv_b_proj", "kv_proj", "k_proj", "v_proj"),
+    "o": ("o_proj",),
+    "indexer": ("indexer",),
+}
+
+
+def attention_projection_exclusions(raw_config: dict) -> frozenset:
+    """Which attention projection groups the checkpoint keeps unquantized.
+
+    Returns a subset of :data:`ATTENTION_PROJECTION_GROUPS`. A pattern naming
+    the whole block (``self_attn*`` / ``re:.*self_attn.*``) covers every
+    group; otherwise groups are matched per projection name.
+    """
+    excluded: set = set()
+    for pattern in quant_exclude_patterns(raw_config):
+        p = str(pattern)
+        if "self_attn" in p and not any(m in p for markers in _PROJECTION_GROUP_MARKERS.values() for m in markers):
+            # whole-block glob (e.g. "model.layers.N.self_attn*", "re:.*self_attn.*")
+            return frozenset(ATTENTION_PROJECTION_GROUPS)
+        for group, markers in _PROJECTION_GROUP_MARKERS.items():
+            if any(m in p for m in markers):
+                excluded.add(group)
+    return frozenset(excluded)
+
+
+def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
+    """Whether the checkpoint keeps ANY self-attention projection unquantized.
+
+    Coarse boolean retained for callers that only need "is anything excluded";
+    per-projection consumers (weights accounting, per-GEMM perf keys) must use
+    :func:`attention_projection_exclusions` — V3.1/V3.2-NVFP4 exclude q/kv but
+    keep o_proj quantized, so one boolean cannot describe the block.
+    """
+    return bool(attention_projection_exclusions(raw_config))
+
+
 def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
     backend / wideep combination.
@@ -275,6 +347,10 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
     elif kv_cache_algo is not None:
         raise ValueError(f"Unsupported kv cache algorithm: {kv_cache_algo}")
 
+    # DSV4 sparse attention requires FP8 KV cache across all backends.
+    if architecture == "DeepseekV4ForCausalLM":
+        overrides["kvcache_quant_mode"] = common.KVCacheQuantMode.fp8
+
     # FMHA quant mode
     if quant_algo is not None and (quant_algo in ("fp8", "fp8_block", "nvfp4") or kv_cache_algo in ("fp8",)):
         overrides["fmha_quant_mode"] = common.FMHAQuantMode.fp8
@@ -354,9 +430,18 @@ def _apply_model_quant_defaults(
         )
 
 
-# Native (FP4 routed-expert) DeepSeek-V4 checkpoints. The sgl-project *-FP8
-# requant artifacts are deliberately absent: their MoE runs fp8_block.
-_DSV4_NATIVE_MODEL_PATHS = ("deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash")
+def _is_dsv4_fp4_expert_model(model_path: str) -> bool:
+    """True for DeepSeek-V4 checkpoints with native FP4 routed experts.
+
+    Checks ``expert_dtype == "fp4"`` in the HF config rather than hardcoded
+    paths, so third-party requant artifacts (e.g. RedHatAI NVFP4-FP8) are
+    recognized. FP8-only requants (sgl-project) have no ``expert_dtype`` and
+    return False.
+    """
+    info = _get_model_info(model_path)
+    if info.get("architecture") != "DeepseekV4ForCausalLM":
+        return False
+    return str(info.get("raw_config", {}).get("expert_dtype") or "").lower() == "fp4"
 
 
 def resolve_dsv4_moe_arch_mode(
@@ -365,21 +450,21 @@ def resolve_dsv4_moe_arch_mode(
     backend_name: str | None,
     moe_backend: str | None = None,
 ) -> common.MoEQuantMode | None:
-    """Arch-specific MoE quant mode for native DeepSeek-V4 checkpoints on sglang.
+    """Arch-specific MoE quant mode for FP4-expert DeepSeek-V4 checkpoints on sglang.
 
-    SGLang serves the native V4 checkpoints through arch-specific MoE kernels,
+    SGLang serves FP4-expert V4 checkpoints through arch-specific MoE kernels,
     and the perf DB files those rows under dedicated quant modes (loader
     routing in ``operations/moe.py``): Blackwell -> ``w4a8_mxfp4_mxfp8_trtllm``
     (kernel_source ``sglang_mxfp4_flashinfer_trtllm_moe``), Hopper ->
     ``w4a16_mxfp4_cutlass`` (``sglang_flashinfer_cutlass_moe``). Returns the
     remapped mode, or None when the rule does not apply (non-sglang backends,
-    megamoe, requant artifacts, other systems). Mirrors ``task_v2``'s HF-base
-    resolution (legacy V1 dsv4pro-moe-arch); an explicit user mode must win,
-    so callers only apply this when moe_quant_mode was not explicitly set.
+    megamoe, FP8-only requant artifacts, other systems). An explicit user mode
+    must win, so callers only apply this when moe_quant_mode was not explicitly
+    set.
     """
     if backend_name != "sglang" or moe_backend == "megamoe":
         return None
-    if model_path not in _DSV4_NATIVE_MODEL_PATHS:
+    if not _is_dsv4_fp4_expert_model(model_path):
         return None
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system, is_hopper_system
 
@@ -515,18 +600,13 @@ def check_is_moe(model_path: str, model_info: dict | None = None) -> bool:
     return False
 
 
-def mtp_scale_factor(nextn: int, nextn_accepted: float | None, num_layers: int) -> float:
-    """Per-output-token generation scale for MTP speculative decoding.
+def mtp_scale_factor(nextn: int, num_layers: int) -> float:
+    """Per-iteration compute scale for MTP speculative decoding.
 
-    ``nextn`` is the draft length (cost side: the model runs ``num_layers + nextn``
-    layers' worth of compute per decode step). ``nextn_accepted`` is the average number
-    of draft tokens actually accepted per step (benefit side: each step yields
-    ``1 + nextn_accepted`` output tokens). Returns 1.0 when MTP is disabled.
+    A decode iteration evaluates ``num_layers + nextn`` layers' worth of work.
+    Accepted-token progress is deliberately excluded: it is a workload-level
+    assumption applied by the upper prediction layer.
     """
     if nextn <= 0:
         return 1.0
-    if nextn_accepted is None:
-        raise ValueError("nextn_accepted (average accepted draft tokens per step) is required when nextn > 0")
-    if not 0 <= nextn_accepted <= nextn:
-        raise ValueError(f"nextn_accepted ({nextn_accepted}) must be within [0, nextn={nextn}]")
-    return (nextn + num_layers) / num_layers / (1 + nextn_accepted)
+    return (nextn + num_layers) / num_layers

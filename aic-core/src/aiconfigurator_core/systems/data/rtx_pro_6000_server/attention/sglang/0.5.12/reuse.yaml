@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: context_attention_perf
+  from_version: 0.5.14
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl
+- table: generation_attention_perf
+  from_version: 0.5.14
+  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
+  approved_by: yimingl

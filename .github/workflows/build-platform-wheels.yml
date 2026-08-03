@@ -1,0 +1,226 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build platform wheels
+
+on:
+  push:
+    branches:
+      - main
+      - "release/*"
+  workflow_call:
+
+concurrency:
+  group: platform-wheels-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/pull-request/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheels (${{ matrix.platform_name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_name: manylinux_2_28_x86_64
+            runner: prod-aiconfigurator-default-amd64-v1
+            build_method: docker
+            python_architecture: x64
+            platform: linux/amd64
+            wheel_base: quay.io/pypa/manylinux_2_28_x86_64
+            upload_upper: true
+          - platform_name: manylinux_2_28_aarch64
+            runner: prod-aiconfigurator-default-arm64-v1
+            build_method: docker
+            python_architecture: arm64
+            platform: linux/arm64
+            wheel_base: quay.io/pypa/manylinux_2_28_aarch64
+            upload_upper: false
+          - platform_name: macosx_arm64
+            runner: prod-aiconfigurator-default-macos-arm64-v1
+            build_method: native-macos
+            python_architecture: arm64
+            platform: ""
+            wheel_base: ""
+            upload_upper: false
+
+    steps:
+      - name: Verify macOS runner prerequisites
+        if: matrix.build_method == 'native-macos'
+        shell: bash
+        run: |
+          test "$(uname -m)" = "arm64"
+          sw_vers
+          xcode-select --print-path
+          git lfs version
+          rustup --version
+          test -d /Users/runner/hostedtoolcache
+          test -w /Users/runner/hostedtoolcache
+
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Build and verify wheel set
+        uses: ./.github/actions/build-platform-wheel
+        with:
+          build_method: ${{ matrix.build_method }}
+          python_architecture: ${{ matrix.python_architecture }}
+          platform: ${{ matrix.platform }}
+          wheel_base: ${{ matrix.wheel_base }}
+
+      - name: Report disabled copied-PR Artifactory staging
+        if: >-
+          matrix.upload_upper &&
+          startsWith(github.ref, 'refs/heads/pull-request/') &&
+          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Copied-PR Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true when staging is ready."
+          {
+            echo "### Copied pull-request Artifactory staging"
+            echo
+            echo '- Status: skipped because `PLATFORM_WHEEL_STAGING_ENABLED` is not `true`.'
+            echo '- Follow-up: [#1432](https://github.com/ai-dynamo/aiconfigurator/issues/1432).'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Report disabled post-merge Artifactory staging
+        if: >-
+          matrix.upload_upper &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) &&
+          vars.PLATFORM_WHEEL_STAGING_ENABLED != 'true'
+        shell: bash
+        run: |
+          echo "::notice title=Post-merge Artifactory staging disabled::Set PLATFORM_WHEEL_STAGING_ENABLED=true when post-merge publication is ready."
+          {
+            echo "### Post-merge Artifactory staging"
+            echo
+            echo '- Status: skipped because `PLATFORM_WHEEL_STAGING_ENABLED` is not `true`.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Resolve copied pull-request staging path
+        id: pr-staging
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        shell: bash
+        run: |
+          pr_number="${GITHUB_REF_NAME#pull-request/}"
+          if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected a copy-pr-bot branch named pull-request/<number>, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          echo "subpath=PR/${pr_number}/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+
+      - name: Stage copied pull-request wheels in Artifactory
+        if: >-
+          vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
+          startsWith(github.ref, 'refs/heads/pull-request/')
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: ${{ steps.pr-staging.outputs.subpath }}
+          UPLOAD_UPPER: ${{ matrix.upload_upper }}
+        shell: bash
+        run: bash tools/stage_wheels_in_artifactory.sh
+
+      - name: Stage post-merge wheels in Artifactory
+        if: >-
+          vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: post-merge/${{ github.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+          UPLOAD_UPPER: ${{ matrix.upload_upper }}
+        shell: bash
+        run: bash tools/stage_wheels_in_artifactory.sh
+
+  finalize-pr:
+    name: Finalize copied pull-request wheel set
+    needs: build
+    if: >-
+      success() &&
+      vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
+      startsWith(github.ref, 'refs/heads/pull-request/')
+    runs-on: prod-aiconfigurator-default-amd64-v1
+    permissions:
+      contents: read
+    steps:
+      - name: Mark the validated matrix complete
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_PR_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="${GITHUB_REF_NAME#pull-request/}"
+          if [[ ! "${pr_number}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Expected a copy-pr-bot branch named pull-request/<number>, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          ARTIFACTORY_SUBPATH="PR/${pr_number}/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
+          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
+          : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
+          if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
+            echo "::error::ARTIFACTORY_URL must use HTTPS"
+            exit 1
+          fi
+
+          target="${ARTIFACTORY_URL%/}/${ARTIFACTORY_PYPI_REPO_NAME}/${ARTIFACTORY_SUBPATH}/_COMPLETE.json"
+          payload="{\"status\":\"complete\",\"repository\":\"${GITHUB_REPOSITORY}\",\"run_id\":\"${GITHUB_RUN_ID}\",\"run_attempt\":\"${GITHUB_RUN_ATTEMPT}\"}"
+          curl --fail-with-body --show-error --silent \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --request PUT --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
+            --data-binary "${payload}" \
+            "${target}"
+          echo "Completed ${ARTIFACTORY_SUBPATH}/"
+
+  finalize-post-merge:
+    name: Finalize post-merge wheel set
+    needs: build
+    if: >-
+      success() &&
+      vars.PLATFORM_WHEEL_STAGING_ENABLED == 'true' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: prod-aiconfigurator-default-amd64-v1
+    permissions:
+      contents: read
+    steps:
+      - name: Mark the validated matrix complete
+        env:
+          ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
+          ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
+          ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
+          ARTIFACTORY_SUBPATH: post-merge/${{ github.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ARTIFACTORY_URL:?ARTIFACTORY_URL is not configured}"
+          : "${ARTIFACTORY_TOKEN:?ARTIFACTORY_TOKEN is not configured}"
+          : "${ARTIFACTORY_PYPI_REPO_NAME:?ARTIFACTORY_PYPI_REPO_NAME is not configured}"
+          if [[ "${ARTIFACTORY_URL}" != https://* ]]; then
+            echo "::error::ARTIFACTORY_URL must use HTTPS"
+            exit 1
+          fi
+
+          target="${ARTIFACTORY_URL%/}/${ARTIFACTORY_PYPI_REPO_NAME}/${ARTIFACTORY_SUBPATH}/_COMPLETE.json"
+          payload="{\"status\":\"complete\",\"repository\":\"${GITHUB_REPOSITORY}\",\"run_id\":\"${GITHUB_RUN_ID}\",\"run_attempt\":\"${GITHUB_RUN_ATTEMPT}\"}"
+          curl --fail-with-body --show-error --silent \
+            --connect-timeout 30 --max-time 300 \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --request PUT --header "Content-Type: application/json" \
+            --header "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
+            --data-binary "${payload}" \
+            "${target}"
+          echo "Completed ${ARTIFACTORY_SUBPATH}/"

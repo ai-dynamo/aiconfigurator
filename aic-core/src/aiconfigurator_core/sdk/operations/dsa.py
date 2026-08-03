@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -123,6 +123,40 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 }
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
+
+
+def dsa_block_weights_bytes(
+    architecture: str,
+    local_heads: int,
+    projection_quant_modes: dict,
+) -> float:
+    """Per-layer DSA attention block weight bytes for one rank.
+
+    ``projection_quant_modes`` maps the projection groups ``q``/``kv``/``o``/
+    ``indexer`` to their GEMMQuantMode — per-checkpoint fact (e.g.
+    DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but quantizes o_proj).
+    q_a / kv_a(+mqa, incl. the indexer K projection) and the indexer
+    projections are replicated across TP (single latent / single index);
+    q_b, the absorbed kv_b (W_UK/W_UV) and o_proj shard by heads
+    (``local_heads`` is already per-rank).
+    """
+    dims = DSA_MODEL_DIMS.get(architecture) or DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE]
+    h = dims["hidden_size"]
+    q_lora = dims["q_lora_rank"]
+    kv_lora = dims["kv_lora_rank"]
+    qk = dims["qk_nope_head_dim"] + dims["qk_rope_head_dim"]
+    v = dims["v_head_dim"]
+    idx = dims["index_head_dim"] * dims["index_n_heads"]
+
+    def _b(group: str) -> float:
+        return projection_quant_modes[group].value.memory
+
+    q_params = h * q_lora + q_lora * local_heads * qk
+    kv_params = h * (kv_lora + dims["qk_rope_head_dim"]) + kv_lora * local_heads * (dims["qk_nope_head_dim"] + v)
+    o_params = local_heads * v * h
+    indexer_params = q_lora * idx + h * dims["index_n_heads"]
+    return q_params * _b("q") + kv_params * _b("kv") + o_params * _b("o") + indexer_params * _b("indexer")
+
 
 # DSA sparse sub-kernel (mqa / topk / dsa_attn) data-file prefix per architecture.
 # GLM-5 and DeepSeek-V3.2 share the same DSA kernels (only shapes/heads differ),
@@ -236,6 +270,7 @@ class ContextDSAModule(Operation):
         cp_size: int = 1,
         index_topk_freq: int = 1,
         dsa_full_layer_fraction: float | None = None,
+        attn_projection_quant_modes: dict | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -255,7 +290,8 @@ class ContextDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        self._weights = 0.0
+        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -277,8 +313,9 @@ class ContextDSAModule(Operation):
 
         key = cls._cache_key(database)
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, database.backend, database.version)
-        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_context_module.value)
+        primary_path = resolve_op_data_path(
+            system_data_root, database.backend, database.version, PerfDataFilename.dsa_context_module.value
+        )
         sources = database._build_op_sources(PerfDataFilename.dsa_context_module, primary_path, system_data_root)
         if key not in cls._data_cache:
             cls._data_cache[key] = LoadedOpData(
@@ -919,10 +956,26 @@ class ContextDSAModule(Operation):
 
         import pandas as pd
 
-        data_dir = os.path.join(
-            database.systems_root, database.system_spec["data_dir"], database.backend, database.version
-        )
         fp = _dsa_sparse_file_prefix(architecture)
+        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+        # Resolve the version DIR once (family dir first, else legacy) via a
+        # representative filename, then apply the existing prefix-read logic
+        # within that dir -- the other glm5_*/dsv32_* siblings live alongside it.
+        # The three sparse tables are collected as independent ops, so anchor on
+        # whichever sibling exists first: a dir may hold topk/dsa_attn without
+        # mqa, and anchoring on mqa alone would fall back to the legacy dir and
+        # silently drop the present siblings.
+        candidates = [
+            resolve_op_data_path(
+                system_data_root,
+                database.backend,
+                database.version,
+                f"{fp}_{table}_module_perf.parquet",
+            )
+            for table in ("mqa_logits", "topk", "dsa_attn")
+        ]
+        anchor = next((path for path in candidates if os.path.exists(path)), candidates[0])
+        data_dir = os.path.dirname(anchor)
         # Grids keyed by batch_size -> {(isl, step): latency}. Keeping every
         # collected bs lets _query_cp look up the sparse deltas at the REAL
         # batch (real measured bs=b latency), instead of scaling a bs=1 value
@@ -1030,6 +1083,7 @@ class GenerationDSAModule(Operation):
         architecture: str = "DeepseekV32ForCausalLM",
         index_topk_freq: int = 1,
         dsa_full_layer_fraction: float | None = None,
+        attn_projection_quant_modes: dict | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -1042,7 +1096,8 @@ class GenerationDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        self._weights = 0.0
+        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1063,8 +1118,9 @@ class GenerationDSAModule(Operation):
 
         key = cls._cache_key(database)
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        data_dir = os.path.join(system_data_root, database.backend, database.version)
-        primary_path = os.path.join(data_dir, PerfDataFilename.dsa_generation_module.value)
+        primary_path = resolve_op_data_path(
+            system_data_root, database.backend, database.version, PerfDataFilename.dsa_generation_module.value
+        )
         sources = database._build_op_sources(PerfDataFilename.dsa_generation_module, primary_path, system_data_root)
         if key not in cls._data_cache:
             cls._data_cache[key] = LoadedOpData(

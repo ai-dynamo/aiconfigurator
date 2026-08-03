@@ -93,6 +93,18 @@ def task_config_to_generator_config(
 
     overrides = copy.deepcopy(generator_overrides or {})
 
+    # Encoder parallelism is deployment-relevant only when the task models an
+    # image workload (same gate as the BenchConfig seeding below); text-only
+    # tasks must not grow multimodal engine flags.
+    _num_images = getattr(task_config, "num_images_per_request", None)
+    encoder_dp: bool | None = None
+    if (
+        (getattr(task_config, "image_height", 0) or 0) > 0
+        and (getattr(task_config, "image_width", 0) or 0) > 0
+        and (_num_images is None or _num_images > 0)
+    ):
+        encoder_dp = bool(getattr(task_config, "enable_encoder_dp", True))
+
     def _build_worker_params(prefix: str, extra_overrides: dict | None) -> tuple[dict, int]:
         workers = _safe_int(_series_val(result_df, f"{prefix}workers", 1), 1)
         tp = _safe_int(_series_val(result_df, f"{prefix}tp", 1), 1)
@@ -126,6 +138,8 @@ def task_config_to_generator_config(
             worker_payload["memory"] = memory
         if quant.get("kvcache_quant_mode"):
             worker_payload["kv_cache_dtype"] = quant["kvcache_quant_mode"]
+        if encoder_dp is not None:
+            worker_payload["enable_encoder_dp"] = encoder_dp
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)
@@ -188,14 +202,18 @@ def task_config_to_generator_config(
     worker_overrides = overrides.get("Workers", {})
     worker_count_overrides = overrides.get("WorkerCounts") or overrides.get("WorkerConfig") or {}
 
+    # Recommend mode sets total_gpus to the escalation budget, not the actual
+    # recommendation.  Prefer the per-row total_gpus_needed when present.
+    effective_total_gpus = _safe_int(_series_val(result_df, "total_gpus_needed", None), None) or task_config.total_gpus
+
     if task_config.serving_mode == "agg":
         agg_params, agg_workers = _build_worker_params("", worker_overrides.get("agg"))
-        if task_config.total_gpus:
+        if effective_total_gpus:
             tp = agg_params.get("tensor_parallel_size", 1)
             pp = agg_params.get("pipeline_parallel_size", 1)
             dp = agg_params.get("data_parallel_size", 1)
             gpus_per_replica = tp * pp * dp
-            agg_workers = task_config.total_gpus // gpus_per_replica
+            agg_workers = effective_total_gpus // gpus_per_replica
         prefill_params, prefill_workers = None, 0
         decode_params, decode_workers = None, 0
     else:
@@ -203,8 +221,8 @@ def task_config_to_generator_config(
         prefill_params, prefill_workers = _build_worker_params("(p)", worker_overrides.get("prefill"))
         decode_params, decode_workers = _build_worker_params("(d)", worker_overrides.get("decode"))
 
-        # Scale disagg workers based on total_gpus (similar to agg mode)
-        if task_config.total_gpus and prefill_params and decode_params:
+        # Scale disagg workers based on total GPU count (similar to agg mode)
+        if effective_total_gpus and prefill_params and decode_params:
             p_tp = prefill_params.get("tensor_parallel_size", 1)
             p_pp = prefill_params.get("pipeline_parallel_size", 1)
             p_dp = prefill_params.get("data_parallel_size", 1)
@@ -219,7 +237,7 @@ def task_config_to_generator_config(
             # For simplicity, assume 1:1 prefill:decode ratio per replica
             gpus_per_replica = (prefill_workers * prefill_gpus_per_worker) + (decode_workers * decode_gpus_per_worker)
             if gpus_per_replica > 0:
-                replicas = task_config.total_gpus // gpus_per_replica
+                replicas = effective_total_gpus // gpus_per_replica
                 prefill_workers = replicas * prefill_workers
                 decode_workers = replicas * decode_workers
 

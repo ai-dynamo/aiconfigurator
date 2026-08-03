@@ -325,7 +325,9 @@ def test_build_model_config_agg_uses_resolved_quant():
     mc = t.build_model_config(role="agg")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
     assert mc.nextn == t.nextn == 2
-    assert mc.nextn_accepted == t.nextn_accepted == 1.2
+    assert not hasattr(mc, "nextn_accepted")
+    assert t.nextn_accepted == 1.2
+    assert t.build_speculative_profile().expected_accepted_tokens == 1.2
 
 
 def test_sweep_agg_kwargs_shape():
@@ -618,7 +620,7 @@ def test_nextn_never_auto_enabled(caplog):
 
 
 def test_nextn_auto_resolves_depth_from_checkpoint():
-    """nextn='auto' takes the draft DEPTH from num_nextn_predict_layers; the
+    """nextn='auto' takes the draft depth from num_nextn_predict_layers; the
     acceptance value is still required -- it is never inferred."""
     import pytest as _pytest
 
@@ -771,6 +773,56 @@ def test_dsv4_native_sglang_moe_remap():
     assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
     # FP8 requant artifacts keep their own (fp8_block-family) resolution.
     assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+
+def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
+    """Third-party FP4-expert DSV4 checkpoints (e.g. RedHatAI) get the sglang
+    MoE remap based on expert_dtype rather than hardcoded model paths.
+    Hopper -> w4a16_mxfp4_cutlass; Blackwell -> w4a8_mxfp4_mxfp8_trtllm."""
+    hopper = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert hopper.moe_quant_mode == common.MoEQuantMode.w4a16_mxfp4_cutlass
+    blackwell = Task(
+        serving_mode="agg",
+        model_path="RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        system_name="b200_sxm",
+        backend_name="sglang",
+    )
+    assert blackwell.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+    # FP8-only requants (no expert_dtype=fp4) are NOT remapped.
+    fp8_requant = Task(
+        serving_mode="agg",
+        model_path="sgl-project/DeepSeek-V4-Flash-FP8",
+        system_name="h200_sxm",
+        backend_name="sglang",
+    )
+    assert fp8_requant.moe_quant_mode not in (
+        common.MoEQuantMode.w4a16_mxfp4_cutlass,
+        common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8",
+        "sgl-project/DeepSeek-V4-Flash-FP8",
+        "deepseek-ai/DeepSeek-V4-Flash",
+    ],
+)
+def test_dsv4_fp8_kvcache_enforced(model_path):
+    """All DSV4 models use FP8 KV cache, regardless of HF config."""
+    t = Task(
+        serving_mode="agg",
+        model_path=model_path,
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
 
 
 def test_pareto_sweep_controls_tpot_grid():
@@ -1767,3 +1819,27 @@ def test_to_yaml_round_trips_through_from_yaml():
     assert t2.model_path == t1.model_path
     assert t2.gemm_quant_mode == t1.gemm_quant_mode
     assert t2.agg_tp_candidates == t1.agg_tp_candidates
+
+
+def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
+    """V3.1-NVFP4 (BF16 q/kv + NVFP4 o_proj) bypasses the profiled MLA-module
+    row, so fmha availability must be judged on the GRANULAR context-mla table:
+    b200/trtllm has an fp8 fmha slice only in the module table, and keeping the
+    checkpoint-inferred fp8 would make every context query miss (reviewer
+    regression: the b200/trtllm support-matrix entry failed end-to-end)."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="nvidia/DeepSeek-V3.1-NVFP4",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            isl=128,
+            osl=64,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)

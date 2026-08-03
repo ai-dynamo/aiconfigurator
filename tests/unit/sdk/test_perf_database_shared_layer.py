@@ -369,22 +369,33 @@ def test_cross_backend_inheritance(env: Path) -> None:
 
 
 def test_fallback_emits_warning(env: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """Loading `tier=shared_fallback` rows in HYBRID mode emits a single WARNING per
-    sibling source so the user knows latency predictions for those shapes are
-    framework-implicit (kernel_source=default).
+    """Loading `tier=shared_fallback` rows via CROSS-BACKEND fill (design §6.4)
+    in HYBRID mode emits a single WARNING per sibling source so the user knows
+    latency predictions for those shapes are framework-implicit
+    (kernel_source=default).
+
+    Post-AIC-1503 the warning is specific to the `cross_backend` channel: a
+    same-backend older version (design §6.2 `fallback` / §6.3 `declared_reuse`)
+    is still the active backend's OWN measurement, not a framework-implicit
+    substitute, so it never emits this warning (see
+    ``test_reuse_ordering.py`` for that channel's coverage). This test's
+    sibling is therefore a *different* backend (vllm), not an older version of
+    the active one.
     """
     active_csv = _backend_csv(env)
     active_csv.parent.mkdir(parents=True, exist_ok=True)
     active_csv.write_text(_GEMM_HEADER)
 
-    _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "default", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm"])])
+    _write_gemm_csv(_backend_csv(env, backend="vllm", version="0.5"), [("vllm", "default", 1024, 4096, 4096, 0.7)])
+    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm", "vllm"])])
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database"):
         db = _build_db(env)  # HYBRID mode
-    assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
-    fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
-    assert len(fallback_warnings) == 1
+        # The lazy GEMM.load_data (triggered by _gemm_lookup) emits the
+        # warning, so it must run while capture is active.
+        assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
+        fallback_warnings = [r for r in caplog.records if "low-fidelity fallback" in r.getMessage()]
+        assert len(fallback_warnings) == 1
 
 
 def test_same_framework_outranks_other_framework(env: Path) -> None:
@@ -529,3 +540,42 @@ def test_get_database_view_shared_layer_override(env: Path) -> None:
         assert _gemm_lookup(view, 1024, 4096, 4096) is None
     finally:
         databases_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Module-level loaders honor the first-source-wins contract (design §6.1)
+# ---------------------------------------------------------------------------
+
+_MLA_MODULE_HEADER = (
+    "framework,version,device,op_name,kernel_source,model,architecture,"
+    "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
+)
+
+
+def _mla_module_row(version: str, batch_size: int, latency: float) -> str:
+    return (
+        f"VLLM,{version},NVIDIA B200,mla_generation_module,FLASHINFER_MLA,deepseek-ai/DeepSeek-V3,"
+        f"DeepseekV3ForCausalLM,bfloat16,fp8,bfloat16,64,{batch_size},1,1,8192,{latency}\n"
+    )
+
+
+def test_mla_module_loader_first_source_wins(tmp_path: Path) -> None:
+    """Regression for the sibling-shadowing bug: module loaders used direct
+    assignment (last-wins), so a stale earlier-version source loaded after the
+    primary silently overrode the primary's rows at shared keys — refreshed
+    0.24.0 MLA data was diluted by 0.19.0 rows. The loader must keep the
+    first (highest-priority) source's value and only fill gaps from siblings.
+    """
+    from aiconfigurator_core.sdk.operations.mla import load_generation_mla_module_data
+
+    primary = tmp_path / "primary_mla_generation_module_perf.txt"
+    sibling = tmp_path / "sibling_mla_generation_module_perf.txt"
+    primary.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.24.0", 16, 0.0977))
+    sibling.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.19.0", 16, 0.1443) + _mla_module_row("0.19.0", 32, 0.2))
+
+    data = load_generation_mla_module_data([(str(primary), None), (str(sibling), None)])
+    kv = common.KVCacheQuantMode.fp8
+    gemm = common.GEMMQuantMode.bfloat16
+    # s key = isl + step = 1 + 8192
+    assert data[kv][gemm][64][16][8193]["latency"] == 0.0977  # primary wins at the shared key
+    assert data[kv][gemm][64][32][8193]["latency"] == 0.2  # sibling still fills the gap
