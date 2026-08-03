@@ -51,7 +51,7 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert "moe" in plan.selected_ops
     assert "mla_context" in plan.selected_ops
     assert "wideep_mla_context" not in plan.selected_ops
-    assert "wideep_moe" not in plan.selected_ops
+    assert "moe_ep" not in plan.selected_ops
     assert "trtllm_moe_wideep" not in plan.selected_ops
 
 
@@ -1099,7 +1099,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" not in payload["ops"]
+    assert "moe_ep" not in payload["ops"]
 
 
 def test_vllm_024_schedules_consumed_dsv4_modules_only():

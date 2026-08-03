@@ -152,8 +152,9 @@ collector.vllm.collect_moe:
 
 # --- wideep -----------------------------------------------------------
 collector.wideep.sglang.collect_deepep_moe:
-  # No collector/case_generator.py import in this module — cases are
-  # self-contained (get_wideep_moe_test_cases is defined locally).
+  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model /
+  # moe_model_allows_quantization.
+  - collector/cases/base_ops/moe.yaml
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
   # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model.

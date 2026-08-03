@@ -148,7 +148,7 @@ WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}
     ("installed_version", "requested_ops", "workload", "version"),
     [
         ("0.5.14+cu130", set(), "default", "0.5.14"),
-        ("0.5.10", {"wideep_moe"}, "wideep", "0.5.10"),
+        ("0.5.10", {"moe_ep"}, "wideep", "0.5.10"),
     ],
 )
 def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requested_ops, workload, version):
@@ -162,8 +162,8 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
         ("0.5.13", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14rc1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14.post1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
-        ("0.5.14", {"wideep_moe"}, r"WideEP collector requires exactly 0\.5\.10"),
-        ("0.5.14", {"gemm", "wideep_moe"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
+        ("0.5.14", {"moe_ep"}, r"WideEP collector requires exactly 0\.5\.10"),
+        ("0.5.14", {"gemm", "moe_ep"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
     ],
 )
 def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, requested_ops, match):
@@ -190,11 +190,11 @@ def test_wideep_registry_entries_are_separate_from_stock_backend_registries():
 
     assert "wideep_mla_context" not in sglang_modules
     assert "wideep_mla_generation" not in sglang_modules
-    assert "wideep_moe" not in sglang_modules
+    assert "moe_ep" not in sglang_modules
     assert "trtllm_moe_wideep" not in trtllm_modules
     assert "wideep_mla_context" not in wideep_sglang_modules
     assert "wideep_mla_generation" not in wideep_sglang_modules
-    assert wideep_sglang_modules["wideep_moe"].startswith("collector.wideep.sglang.")
+    assert wideep_sglang_modules["moe_ep"].startswith("collector.wideep.sglang.")
     assert wideep_trtllm_modules["trtllm_moe_wideep"].startswith("collector.wideep.trtllm.")
 
 
@@ -374,8 +374,8 @@ frameworks:
         require_collector_runtime(
             "sglang",
             "0.5.14",
-            requested_ops={"gemm", "wideep_moe"},
-            wideep_ops={"wideep_moe"},
+            requested_ops={"gemm", "moe_ep"},
+            wideep_ops={"moe_ep"},
             path=tmp_path / "framework_manifest.yaml",
         )
     message = str(excinfo.value)

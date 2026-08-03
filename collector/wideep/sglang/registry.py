@@ -12,10 +12,10 @@ from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
     OpEntry(
-        op="wideep_moe",
+        op="moe_ep",
         module="collector.wideep.sglang.collect_deepep_moe",
-        get_func="get_wideep_moe_test_cases",
-        run_func="run_wideep_moe",
-        perf_filename=PerfFile.WIDEEP_MOE,
+        get_func="get_moe_ep_test_cases",
+        run_func="run_moe_ep",
+        perf_filename=PerfFile.MOE_EP,
     ),
 ]

@@ -460,7 +460,7 @@ This collects the stock SGLang ops, including:
 - MoE (Mixture of Experts) operations
 - Normal attention operations
 
-The retained `wideep_moe` op remains pinned to its separate SGLang 0.5.10 image
+The retained `moe_ep` op remains pinned to its separate SGLang 0.5.10 image
 and is not part of the stock model plans. Request it explicitly in a separate
 run. WideEP MLA is not registered because its legacy wrapper now reaches the
 stock 0.5.14-only module implementation.
