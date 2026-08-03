@@ -208,8 +208,8 @@ def _tokens_list():
     return [int(tok) for tok in raw.replace(",", " ").split()]
 
 
-def _verify_axis_coverage(output_path, sms_list, tokens):
-    """Assert every shape present in the perf CSV carries the full (sms, token) grid.
+def _verify_axis_coverage(output_path, sms_list, tokens, cases):
+    """Assert every planned shape carries the full ``(sms, token)`` grid.
 
     Nothing downstream can see these axes. ``get_deepep_normal_test_cases`` returns
     shape dicts, so ``provenance.case_plan_hash`` is byte-identical whether one sms
@@ -219,38 +219,39 @@ def _verify_axis_coverage(output_path, sms_list, tokens):
     ``status: complete`` table with one sixth of the rows and a matching case-plan
     hash. This function is the only layer that knows what was asked for.
 
-    Checked per shape, so shapes legitimately absent from the CSV -- skipped for
-    ``num_experts % num_ranks`` or dropped on a buffer-allocation failure, both of
-    which the worker logs -- do not raise here. Whole-shape loss is accounted for by
-    the caller against the orchestrator's own succeeded/failed tally; this is about
-    an axis being short *within* the shapes that did run.
+    Coverage is checked against exact pairs rather than independent marginal sets:
+    observing ``sms=4`` and ``token=64`` in different rows does not prove that the
+    requested ``(4, 64)`` point was collected. Every planned shape must also appear;
+    a skipped or failed shape is a partial campaign and must block completion.
     """
     import csv
 
-    want_sms, want_tokens = set(sms_list), set(tokens)
-    seen: dict[tuple[int, int, int], tuple[set[int], set[int]]] = {}
+    want_pairs = {(int(sms), int(num_token)) for sms in sms_list for num_token in tokens}
+    expected_shapes = {(int(case["hidden_size"]), int(case["num_experts"]), int(case["topk"])) for case in cases}
+    seen: dict[tuple[int, int, int], set[tuple[int, int]]] = {}
     with open(output_path, newline="") as handle:
         for row in csv.DictReader(handle):
             key = (int(row["hidden_size"]), int(row["num_experts"]), int(row["num_topk"]))
-            got_sms, got_tokens = seen.setdefault(key, (set(), set()))
-            got_sms.add(int(row["dispatch_sms"]))
-            got_tokens.add(int(row["num_token"]))
+            seen.setdefault(key, set()).add((int(row["dispatch_sms"]), int(row["num_token"])))
 
     if not seen:
         raise RuntimeError(f"DeepEP normal collection wrote no data rows to {output_path}")
 
-    short = [
-        f"hidden={hidden} experts={num_experts} topk={num_topk}: "
-        f"missing sms={sorted(want_sms - got_sms)} tokens={sorted(want_tokens - got_tokens)}"
-        for (hidden, num_experts, num_topk), (got_sms, got_tokens) in sorted(seen.items())
-        if (want_sms - got_sms) or (want_tokens - got_tokens)
-    ]
+    short = []
+    for hidden, num_experts, num_topk in sorted(expected_shapes):
+        shape = (hidden, num_experts, num_topk)
+        if shape not in seen:
+            short.append(f"hidden={hidden} experts={num_experts} topk={num_topk}: missing all {len(want_pairs)} pairs")
+            continue
+        missing_pairs = sorted(want_pairs - seen[shape])
+        if missing_pairs:
+            short.append(f"hidden={hidden} experts={num_experts} topk={num_topk}: missing pairs={missing_pairs}")
     if short:
         raise RuntimeError(
-            "DeepEP normal collection under-covers the swept axes; refusing to hand a partial table "
+            "DeepEP normal collection under-covers the requested grid; refusing to hand a partial table "
             "to finalization, which would attest it as complete:\n  " + "\n  ".join(short)
         )
-    return len(seen)
+    return len(expected_shapes)
 
 
 def _iter_moe_configs():
@@ -651,22 +652,11 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
     if not Path(output_path).exists():
         raise RuntimeError(f"DeepEP normal collection produced no output at {output_path}")
 
-    covered_shapes = _verify_axis_coverage(output_path, sms_list, tokens)
+    covered_shapes = _verify_axis_coverage(output_path, sms_list, tokens, cases)
     print(
         f"[deepep_normal] axis coverage verified: {covered_shapes} shapes x {len(sms_list)} sms x {len(tokens)} tokens",
         flush=True,
     )
-    if covered_shapes < len(cases):
-        # Whole-shape loss, which `_verify_axis_coverage` deliberately does not
-        # police. Not fatal -- a shape can be skipped for `num_experts % num_ranks`
-        # or dropped on buffer allocation, both logged by the worker -- but it must
-        # be visible next to the "complete" message, because provenance will not
-        # show it.
-        print(
-            f"[deepep_normal] WARNING: {len(cases) - covered_shapes} of {len(cases)} shapes produced "
-            "no rows (skipped or failed); see the per-shape SKIP/FAILED lines above",
-            flush=True,
-        )
     print(f"[deepep_normal] collection complete: {output_path}", flush=True)
     return {"succeeded": succeeded, "failed": failed}
 
