@@ -39,6 +39,21 @@ Emission order (D5): rows are emitted ascending on every non-token key axis
 case sweep, and ``combine`` before ``dispatch`` within a case — so the
 consumer's nested store is built in ascending insertion order at every level
 and Rust-sorted vs Python-insertion-order iteration cannot diverge.
+
+Deliberate deviations from the source scripts, beyond the dropped correctness
+cross-products documented on each bench function:
+
+* **Per-case reseeding.** ``run_ht_case``/``run_ll_case`` call
+  ``torch.manual_seed(rank)`` (and ``random.seed(rank)``) at the top of every
+  case; the sources seed once per process
+  (``test_internode.py:381``, ``test_low_latency.py:34``). Cases here are
+  emitted rows rather than steps of one script run, so each row's synthetic
+  routing must be reproducible from its own case identity instead of from how
+  many cases happened to run before it. The cost is that consecutive cases
+  sharing a shape see the same routing draw.
+* **No power column.** See :func:`_power_columns`.
+* **Buffer lifetime.** HT and LL DeepEP Buffers are never co-resident; see
+  the run loop in :func:`main`.
 """
 
 from __future__ import annotations
@@ -50,6 +65,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -65,7 +81,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from collector import provenance
 from collector.framework_manifest import get_collector_runtime
-from collector.helper import finalize_perf_files, log_perf, power_monitoring_only
+from collector.helper import finalize_perf_files, log_perf
 from collector.registry_types import PerfFile
 
 MODULE_NAME = "collector.wideep.sglang.collect_moe_a2a"
@@ -104,6 +120,10 @@ HT_RDMA_BUFFER_SIZE = 128
 #: Group-limited routing: DeepSeek-style node-group top-k, ``min(nodes, 4)``
 #: (``deepep/test_internode.py:461-463``).
 HT_MAX_TOPK_GROUPS = 4
+
+#: LL warmup iterations before the profiled region, matching
+#: ``deepep/utils.py:bench``'s ``num_warmups`` default.
+LL_WARMUP_ITERS = 50
 
 #: Classified failure log. Rank-scoped: every rank records its own view of a
 #: failed case, and the output dir is typically shared storage, so a single
@@ -451,25 +471,29 @@ def _build_moe_a2a_row(
     }
 
 
-def _measure_power_enabled() -> bool:
-    value = os.environ.get("COLLECTOR_MEASURE_POWER")
-    return False if value is None else value.lower() in ("true", "1", "yes")
+def _power_columns() -> None:
+    """D7: this table emits NO power column, and that is a measurement fact.
 
+    ``None`` is the loader's supported absent case
+    (``has_power = "power" in rows[0]``) — never a fabricated 0.0, never a
+    present-but-null column (which would crash ``float(row.get("power", 0.0))``).
 
-def _power_columns(power_stats) -> dict | None:
-    """D7: power only where it was measured, and never as a fabricated 0.0.
+    Why absent rather than sampled: there is no region whose wall-clock power
+    average corresponds to a single emitted row's workload. An HT row's
+    latency is one winning config extracted from a kineto profile of a
+    116-configuration tuning sweep, and an LL row's latency is one phase of a
+    combined dispatch+combine round trip. Sampling NVML across either region
+    would hand the loader ``energy = power x latency`` computed from two
+    different workloads. And because ``helper.log_perf`` writes the header
+    from the first row while HT and LL share one file, power cannot be
+    emitted for one family only.
 
-    ``None`` means "emit no power column at all" — the loader's supported
-    absent case (``has_power = "power" in rows[0]``). NaN means the sampler
-    ran but produced nothing: unknown, which is not the same fact as zero
-    watts. A present-but-null column would crash the loader
-    (``float(row.get("power", 0.0))`` on ``None``), so it is never emitted.
+    Adding real power here means per-phase, dedicated timed re-runs of the
+    winning configuration under the sampler — a change to the measurement
+    method that must be designed and validated on hardware, not bolted on
+    blind.
     """
-    if not _measure_power_enabled():
-        return None
-    if power_stats and power_stats.get("power") is not None:
-        return power_stats
-    return {"power": float("nan"), "power_limit": float("nan")}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +684,12 @@ def run_ht_case(
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
 
+    # Settle the ranks before anything is measured: the layout work above is
+    # not uniform across ranks, and residual launch skew shows up inside the
+    # first profiled dispatches (deepep/test_internode.py:123-124).
+    group.barrier()
+    time.sleep(1)
+
     base_config = deep_ep.Config(case.sms, 8, nvl_buffer_size, 16, HT_RDMA_BUFFER_SIZE)
     layout_args = {
         "num_tokens_per_rank": num_tokens_per_rank,
@@ -843,6 +873,15 @@ def run_ll_case(*, buffer, group, case: MoeA2ACase, identity: DistIdentity) -> d
         )
         buffer.low_latency_combine(simulated_gemm_x, topk_idx, topk_weights, inner_handle, return_recv_hook=False)
 
+    # Warm up before profiling. test_low_latency.py reaches its reported
+    # measurement only after utils.bench's 50 warmup + 50 timed iterations
+    # (:227) and a full return_recv_hook=True bench_kineto pass (:236); the
+    # port must be at least as warm as the rows it has to stay comparable
+    # with.
+    for _ in range(LL_WARMUP_ITERS):
+        round_trip()
+    torch.cuda.synchronize()
+
     group.barrier()
     dispatch_t, combine_t = bench_kineto(
         round_trip,
@@ -998,7 +1037,6 @@ def _emit_case_rows(
     perf_path: str,
     version: str,
     device_name: str,
-    power_stats,
 ) -> None:
     """Emit the case's two rows, ``combine`` before ``dispatch`` (D5).
 
@@ -1028,7 +1066,7 @@ def _emit_case_rows(
             op_name=OP_NAME,
             kernel_source=KERNEL_SOURCE,
             perf_filename=perf_path,
-            power_stats=_power_columns(power_stats),
+            power_stats=_power_columns(),
         )
 
 
@@ -1143,40 +1181,47 @@ def main(argv: list[str] | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
     device_name = torch.cuda.get_device_name(torch.device("cuda", identity.local_rank))
-    power_device = torch.device("cuda", torch.cuda.current_device())
 
     ht_buffer = None
     ll_buffer = None
     current_sms = None
     failure_count = 0
+    ll_cases = [case for case in cases if case.comm_backend == COMM_BACKEND_LL]
     try:
-        ll_cases = [case for case in cases if case.comm_backend == COMM_BACKEND_LL]
-        if ll_cases:
-            ll_buffer = create_ll_buffer(
-                group,
-                identity=identity,
-                cases=ll_cases,
-                allow_mnnvl=args.allow_mnnvl,
-                disable_nvlink=args.disable_nvlink,
-            )
-
         for case in cases:
-            if case.comm_backend == COMM_BACKEND_HT and case.sms != current_sms:
+            if case.comm_backend == COMM_BACKEND_HT:
+                # One Buffer per SM budget; the plan is sms-major so each is
+                # created once.
+                if case.sms != current_sms:
+                    if ht_buffer is not None:
+                        ht_buffer.destroy()
+                    ht_buffer = create_ht_buffer(group, case.sms)
+                    current_sms = case.sms
+            elif ll_buffer is None:
+                # First LL case, i.e. every HT case is done (the plan sorts
+                # deepep_ht before deepep_ll). DeepEP Buffers with
+                # low_latency_mode=True and =False are never co-resident on
+                # one group in the source scripts — test_internode.py:368/401
+                # allocates them in mutually exclusive branches — and holding
+                # both would double the resident RDMA/NVL allocation.
                 if ht_buffer is not None:
                     ht_buffer.destroy()
-                ht_buffer = create_ht_buffer(group, case.sms)
-                current_sms = case.sms
+                    ht_buffer = None
+                ll_buffer = create_ll_buffer(
+                    group,
+                    identity=identity,
+                    cases=ll_cases,
+                    allow_mnnvl=args.allow_mnnvl,
+                    disable_nvlink=args.disable_nvlink,
+                )
 
             failed = 0
             timings = None
-            power_stats = None
             try:
-                with power_monitoring_only(power_device) as power_monitor:
-                    if case.comm_backend == COMM_BACKEND_HT:
-                        timings = run_ht_case(buffer=ht_buffer, group=group, case=case, identity=identity)
-                    else:
-                        timings = run_ll_case(buffer=ll_buffer, group=group, case=case, identity=identity)
-                    power_stats = power_monitor.stop_sampling() if power_monitor is not None else None
+                if case.comm_backend == COMM_BACKEND_HT:
+                    timings = run_ht_case(buffer=ht_buffer, group=group, case=case, identity=identity)
+                else:
+                    timings = run_ll_case(buffer=ll_buffer, group=group, case=case, identity=identity)
             except Exception as error:
                 failed = 1
                 record_failure(output_dir, case, error, identity)
@@ -1197,7 +1242,6 @@ def main(argv: list[str] | None = None) -> None:
                     perf_path=perf_path,
                     version=runtime_meta["version"],
                     device_name=device_name,
-                    power_stats=power_stats,
                 )
     finally:
         if ht_buffer is not None:
