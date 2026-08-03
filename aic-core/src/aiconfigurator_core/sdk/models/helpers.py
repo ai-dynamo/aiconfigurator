@@ -122,10 +122,12 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
         return "deepseek_v4_context_module", "deepseek_v4_generation_module"
     if model_family == "DEEPSEEKV32":
         return "dsa_context_module", "dsa_generation_module"
-    if model_family == "KIMIK3":
+    if model_family == "KIMIK3" and backend_name != "vllm":
         # Kimi-K3 full-attention layers are DeepSeek-geometry MLA (NoPE + output
         # gate are shape-neutral); KDA linear-attention layers query the kda op
-        # table directly (not an attention support-matrix key).
+        # table directly (not an attention support-matrix key). The vLLM path
+        # prices MLA through the plain attention tables (MLA-as-attention, see
+        # models/kimi_k3.py) so it falls through to the GQA keys below.
         return "context_mla", "generation_mla"
     if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
         if enable_wideep:

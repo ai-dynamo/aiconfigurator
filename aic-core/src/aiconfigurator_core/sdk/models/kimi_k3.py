@@ -34,12 +34,24 @@ class KimiK3Model(BaseModel):
     draft is not made of target-shaped layers).
     """
 
-    # DSPARK draft model (RadixArk/Kimi-K3-DSpark) fixed geometry.
+    # DSPARK draft model fixed geometry — sglang lane
+    # (RadixArk/Kimi-K3-DSpark: 5-layer dense GQA, model_type qwen3).
     DRAFT_NUM_LAYERS = 5
     DRAFT_NUM_HEADS = 64
     DRAFT_NUM_KV_HEADS = 16
     DRAFT_HEAD_DIM = 64
     DRAFT_INTER_SIZE = 14336
+    # DSPARK draft model fixed geometry — vllm lane
+    # (Inferact/Kimi-K3-DSpark: 5-layer dense, MLA-style attention with
+    # latent projections; output gate disabled; same layer count and FFN
+    # width as the RadixArk draft, so DRAFT_NUM_LAYERS/DRAFT_INTER_SIZE
+    # are shared).
+    VLLM_DRAFT_NUM_HEADS = 64
+    VLLM_DRAFT_Q_LORA_RANK = 1536
+    VLLM_DRAFT_KV_LORA_RANK = 512
+    VLLM_DRAFT_QK_NOPE_DIM = 128
+    VLLM_DRAFT_QK_ROPE_DIM = 64
+    VLLM_DRAFT_V_DIM = 128
 
     # KDA state slots per request (sglang mamba radix cache, extra_buffer
     # strategy). Governs the per-request constant state-pool cost.
@@ -50,7 +62,7 @@ class KimiK3Model(BaseModel):
     # GLOBAL radix checkpoint cache pool with its own budget/LRU (optionally
     # INT8-compressed, 4x denser), which does not scale with concurrency
     # (see the Day-0 cache write-ups referenced in
-    # docs/perf_database/linear-attention-module-design.md). The flat 5x is
+    # docs/perf_database/kimi-k3-blackwell-bringup-ledger.md). The flat 5x is
     # acceptable because the KDA term is secondary for K3's target
     # workloads: at TP8 one slot is ~54 MB/rank (5x = 270 MB/request) vs
     # ~1.8 GB/request of MLA KV at 128k context — it only dominates for
@@ -470,21 +482,54 @@ class KimiK3Model(BaseModel):
             ]
         )
 
-        # --- DSPARK draft model: 5 dense GQA layers at hidden 7168 ---
+        # --- DSPARK draft model: 5 dense layers at hidden 7168 ---
+        # Backend-conditional geometry (the two published draft checkpoints
+        # differ): sglang serves RadixArk/Kimi-K3-DSpark (GQA 64q/16kv/hd64),
+        # vllm serves Inferact/Kimi-K3-DSpark (MLA-style 64q/64kv,
+        # qk_nope 128 + rope 64, v 128, q_lora 1536 / kv_lora 512). The vllm
+        # draft is priced through the same MLA-as-attention convention as the
+        # main vllm MLA layers above; its output gate is disabled in the
+        # checkpoint, so no gate ops.
         if spec:
-            n_q = self.DRAFT_NUM_HEADS
-            n_kv = self.DRAFT_NUM_KV_HEADS
-            hd = self.DRAFT_HEAD_DIM
             inter = self.DRAFT_INTER_SIZE
             dc = self.DRAFT_NUM_LAYERS
             # Draft forwards gamma = nextn tokens per step while the op batch is
             # scaled by (nextn + 1): scale counts by nextn / (nextn + 1).
             dsf = self._nextn / draft_tokens
-            qkv_out = (n_q * hd + 2 * n_kv * hd) // tp
-            self.generation_ops.extend(
-                [
-                    ops.Embedding("draft_embedding", 1 * dsf, self._vocab_size // tp, h, 0.3),
-                    ops.ElementWise("draft_norm", 2 * dc * dsf, 2 * h, 2 * h, 0.8),
+            if is_vllm:
+                n_q = self.VLLM_DRAFT_NUM_HEADS
+                qk_dim = self.VLLM_DRAFT_QK_NOPE_DIM + self.VLLM_DRAFT_QK_ROPE_DIM
+                v_dim = self.VLLM_DRAFT_V_DIM
+                latent = self.VLLM_DRAFT_KV_LORA_RANK + self.VLLM_DRAFT_QK_ROPE_DIM
+                attn_and_proj = [
+                    # fused latent downscale (q_lora + kv_lora + rope), replicated
+                    ops.GEMM(
+                        "draft_downscale_gemm",
+                        dc * dsf,
+                        self.VLLM_DRAFT_Q_LORA_RANK + latent,
+                        h,
+                        gemm_q,
+                    ),
+                    ops.GEMM("draft_q_b_gemm", dc * dsf, n_q * qk_dim // tp, self.VLLM_DRAFT_Q_LORA_RANK, gemm_q),
+                    ops.GenerationAttention(
+                        "draft_attention",
+                        dc * dsf,
+                        n_q // tp,
+                        n_q // tp,
+                        kvcache_q,
+                        head_size=v_dim,
+                    ),
+                    ops.GEMM("draft_proj_gemm", dc * dsf, h, n_q * v_dim // tp, gemm_q, low_precision_input=True),
+                ]
+                # Latent draft KV (TP-replicated) is written by the downscale
+                # GEMM above; the committed-token projection reuses it.
+                kv_proj = ops.GEMM("draft_kv_proj_gemm", dc * per_step, latent, h, gemm_q)
+            else:
+                n_q = self.DRAFT_NUM_HEADS
+                n_kv = self.DRAFT_NUM_KV_HEADS
+                hd = self.DRAFT_HEAD_DIM
+                qkv_out = (n_q * hd + 2 * n_kv * hd) // tp
+                attn_and_proj = [
                     ops.GEMM("draft_qkv_gemm", dc * dsf, qkv_out, h, gemm_q),
                     ops.GenerationAttention(
                         "draft_attention",
@@ -495,12 +540,19 @@ class KimiK3Model(BaseModel):
                         head_size=hd,
                     ),
                     ops.GEMM("draft_proj_gemm", dc * dsf, h, n_q * hd // tp, gemm_q, low_precision_input=True),
+                ]
+                # target-hidden -> draft context-KV projection (per committed token)
+                kv_proj = ops.GEMM("draft_kv_proj_gemm", dc * per_step, 2 * n_kv * hd // tp, h, gemm_q)
+            self.generation_ops.extend(
+                [
+                    ops.Embedding("draft_embedding", 1 * dsf, self._vocab_size // tp, h, 0.3),
+                    ops.ElementWise("draft_norm", 2 * dc * dsf, 2 * h, 2 * h, 0.8),
+                    *attn_and_proj,
                     ops.GEMM("draft_gate_up_gemm", dc * dsf, 2 * inter // tp, h, gemm_q),
                     ops.ElementWise("draft_act_gate", dc * dsf, 2 * inter // tp, inter // tp, 0.8),
                     ops.GEMM("draft_down_gemm", dc * dsf, h, inter // tp, gemm_q, low_precision_input=True),
                     ops.CustomAllReduce("draft_ar", 2 * dc * dsf, h, tp),
-                    # target-hidden -> draft context-KV projection (per committed token)
-                    ops.GEMM("draft_kv_proj_gemm", dc * per_step, 2 * n_kv * hd // tp, h, gemm_q),
+                    kv_proj,
                     # draft base logits once per step
                     ops.GEMM(
                         "draft_logits_gemm",
@@ -658,9 +710,13 @@ class KimiK3Model(BaseModel):
         n_mla = cfg.layer_types.count("full_attention")
         elements = n_mla * (cfg.kv_lora_rank + cfg.qk_rope_head_dim)
         if self._nextn > 0:
-            tp = self.config.tp_size
-            draft_kv_heads = max(1, self.DRAFT_NUM_KV_HEADS // tp)
-            elements += self.DRAFT_NUM_LAYERS * 2 * draft_kv_heads * self.DRAFT_HEAD_DIM
+            if self._backend_name == "vllm":
+                # Inferact draft is MLA-style: latent KV, TP-replicated.
+                elements += self.DRAFT_NUM_LAYERS * (self.VLLM_DRAFT_KV_LORA_RANK + self.VLLM_DRAFT_QK_ROPE_DIM)
+            else:
+                tp = self.config.tp_size
+                draft_kv_heads = max(1, self.DRAFT_NUM_KV_HEADS // tp)
+                elements += self.DRAFT_NUM_LAYERS * 2 * draft_kv_heads * self.DRAFT_HEAD_DIM
         return elements
 
     def _kda_state_bytes_per_request(self) -> float:

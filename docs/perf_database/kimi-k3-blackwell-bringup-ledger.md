@@ -615,3 +615,20 @@ deltas are +18% vs the dummy-weight E2E step (expected-fast per the
 documented MoE routing-collapse artifact) and +4.7% vs the sglang
 Day-0 blog's real-weight bs1 operating point (step 19.8 vs implied
 18.9 ms) — the blog is the meaningful external anchor.
+
+Fresh-context PR review (2026-08-03, background agent, full diff vs
+rules): verdict structurally sound. Fixed same day: attention_op_keys
+was backend-blind for KIMIK3 (vllm now falls through to the GQA keys —
+it validates/resolves against the tables it actually queries); vllm
+DSPARK draft geometry upgraded from the RadixArk approximation to the
+real Inferact MLA-style geometry (latent projections + latent KV,
+priced via the same MLA-as-attention convention as the main layers;
+the former WON'T-FIX is closed). Remaining findings parked as
+fast-follows: 96-family mla_bmm rows unreachable by the pow2 query
+(needs owner decision: exact-first routing vs comment fix), SM89 vllm
+kda rows fall to SOL (no reverse alias), tp16/32 nearest-shard
+unscaled fallback, vllm mla_bmm dtype filter belongs in YAML override,
+resolve_kimi_k3_moe_arch_mode should match config not path string,
+underived 232/128 literals in the gate GEMV chain, dead
+sol_latency_ms in Rust, no-op tensors.clear() in vllm collect_kda,
+zero-expanding trtllm quant lane needs a comment.
