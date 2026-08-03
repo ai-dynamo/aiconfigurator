@@ -675,6 +675,14 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "MiniMaxM3SparseForConditionalGeneration": "text_config",
 }
 
+# Architectures whose speculative decoding is DSPARK-style: ``nextn`` is the
+# speculative BLOCK SIZE served by a standalone trained draft model (block
+# proposal, verified at width nextn+1), NOT a chained target-shaped MTP
+# module. Their checkpoints carry no num_nextn_predict_layers, so
+# nextn="auto" cannot enable speculation and the MTP mismatch warning does
+# not apply (see Task._resolve_model_identity).
+DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
+
 """
 All reduce strategy for trtllm custom allreduce
 """
