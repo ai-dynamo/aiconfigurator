@@ -23,9 +23,9 @@ use crate::operators::{
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeAllToAllOp,
     MoeOp,
-    MsaModuleOp, TrtllmWideEpMoEDispatchOp,
+    MsaModuleOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
-    WideEpGenerationMlaOp, WideEpMoeOp,
+    WideEpGenerationMlaOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -128,14 +128,6 @@ pub enum Op {
     /// SGLang WideEP generation MLA — replaces `GenerationMlaOp` in the
     /// `WideEPDeepSeekModel` variant.
     WideEpGenerationMla(WideEpGenerationMlaOp),
-    /// TensorRT-LLM WideEP MoE compute. Used by the
-    /// `TrtllmWideEPDeepSeekModel` variant; dispatch / combine cost is
-    /// modeled separately by `WideEpMoeDispatch`.
-    WideEpMoe(WideEpMoeOp),
-    /// TensorRT-LLM WideEP All2All dispatch (prepare+dispatch / combine).
-    /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
-    /// subclass, NOT a `MoEDispatch` flavor.
-    WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -243,8 +235,6 @@ impl Op {
             Op::Gdn(o) => &o.name,
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
-            Op::WideEpMoe(o) => &o.name,
-            Op::WideEpMoeDispatch(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
@@ -329,8 +319,6 @@ impl Op {
             Op::Gdn(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
-            Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
-            Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
                 // independently, then `max(group_a_total, group_b_total)` is

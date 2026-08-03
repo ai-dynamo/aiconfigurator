@@ -39,6 +39,18 @@ EXEMPT: dict[str, str] = {
     # Dead class: no model instantiates it (Mamba2Kernel is the live op and
     # converts). Remove the class or this entry together.
     "Mamba2": "dead code — never instantiated; Mamba2Kernel is the live op",
+    # Retained Python op classes kept purely as L0/L1 equivalence oracles for
+    # the large-EP redesign; no model emits them any more.
+    "TrtLLMWideEPMoE": (
+        "legacy oracle for L0/L1 equivalence tests; no model emits it "
+        "(deleted in PR 2); Rust bridge retired in PR 2.5 — removal tracked "
+        "for PR 3 data migration"
+    ),
+    "TrtLLMWideEPMoEDispatch": (
+        "legacy oracle for L0/L1 equivalence tests; no model emits it "
+        "(deleted in PR 2); Rust bridge retired in PR 2.5 — removal tracked "
+        "for PR 3 data migration"
+    ),
 }
 
 

@@ -34,7 +34,6 @@ pub mod overlap;
 pub mod util_empirical;
 pub mod vision;
 pub mod wideep_mla;
-pub mod wideep_moe;
 
 pub use attention::{ContextAttentionOp, EncoderAttentionOp, GenerationAttentionOp};
 pub use base::{PerformanceResult, Source};
@@ -50,9 +49,8 @@ pub use mhc::MhcModuleOp;
 pub use mla::{ContextMlaOp, GenerationMlaOp, MlaBmmOp, MlaModuleOp};
 pub use moe::MoeOp;
 pub use moe_a2a::MoeAllToAllOp;
-pub use moe_dispatch::{DispatchFlavor, MoEDispatchOp, TrtllmWideEpMoEDispatchOp};
+pub use moe_dispatch::{DispatchFlavor, MoEDispatchOp};
 pub use msa::MsaModuleOp;
 pub use op::{FallbackOp, Op, OverlapOp, RuntimeContext};
 pub use vision::VisionEncoderOp;
 pub use wideep_mla::{WideEpContextMlaOp, WideEpGenerationMlaOp};
-pub use wideep_moe::WideEpMoeOp;
