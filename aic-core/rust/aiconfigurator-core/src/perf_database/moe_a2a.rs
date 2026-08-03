@@ -327,9 +327,11 @@ fn legacy_deepep_key(
 /// Python's exists-but-empty semantic (`_read_filtered_rows` yields `None`
 /// only when EVERY path is missing).
 ///
-/// Column handling is copied from `wideep.rs::load_deepep_normal_parquet`,
-/// which reads the same file: the four component columns are read
-/// optionally and default to 0.0. Python indexes them directly
+/// Column handling follows the retired `wideep.rs::load_deepep_normal_parquet`
+/// convention (that loader is gone; the surviving reference for this file is
+/// Python `operations/moe_comm.py::_adapt_legacy_deepep_normal`): the four
+/// component columns are read optionally and default to 0.0. Python indexes
+/// them directly
 /// (`float(row[column])`), so an absent column is a hard `KeyError` there;
 /// every shipped file carries all four, so the two agree on real data.
 fn adapt_legacy_deepep_normal(
@@ -394,7 +396,9 @@ fn adapt_legacy_deepep_normal(
 /// `_adapt_legacy_deepep_ll`: the LL table never had the four-way
 /// transmit/notify split — only per-phase averages — and carries no SM
 /// budget, so every leaf keys at `sms = 0`. Same optional-column handling as
-/// `wideep.rs::load_deepep_ll_parquet` (see [`adapt_legacy_deepep_normal`]).
+/// the retired `wideep.rs::load_deepep_ll_parquet` — see
+/// [`adapt_legacy_deepep_normal`] and Python
+/// `operations/moe_comm.py::_adapt_legacy_deepep_ll`.
 fn adapt_legacy_deepep_ll(sources: &[PerfSource], by_keys: &mut A2aGrid) -> Result<bool, AicError> {
     let mut any_source = false;
     for source in sources {
@@ -777,8 +781,10 @@ mod tests {
     /// Write a synthetic legacy DeepEP-normal parquet. Rows are
     /// `(node_num, dispatch_sms, num_token, dispatch_transmit_us,
     /// dispatch_notify_us, combine_transmit_us, combine_notify_us)`; shape
-    /// fixed at (hidden=7168, topk=8, experts=256). Column set copied from
-    /// `perf_database/wideep.rs`'s writer (the loader for the same file).
+    /// fixed at (hidden=7168, topk=8, experts=256). Column set is the one
+    /// Python `operations/moe_comm.py::_adapt_legacy_deepep_normal` consumes
+    /// (it was previously mirrored by `perf_database/wideep.rs`'s writer,
+    /// retired with that loader).
     fn write_deepep_normal_parquet(path: &Path, rows: &[(i64, i64, i64, f64, f64, f64, f64)]) {
         let schema = Arc::new(
             parse_message_type(
@@ -1247,8 +1253,8 @@ mod tests {
     /// defaults only when the COLUMN is absent; `_read_perf_rows` turns a null
     /// cell into `""`, which matches no backend. This is the one place the
     /// unified adapter deliberately diverges from
-    /// `wideep.rs::load_alltoall_parquet`, which treats a null cell as the
-    /// two-sided default.
+    /// `trtllm_alltoall.rs::load_alltoall_parquet`, which treats a null cell
+    /// as the two-sided default.
     #[test]
     fn legacy_trtllm_alltoall_null_kernel_source_row_is_dropped() {
         let tmp = tempfile::tempdir().unwrap();

@@ -293,6 +293,12 @@ impl MoeOp {
         // int(num_tokens * 0.8) if enable_eplb and is_context else
         // num_tokens`). The EMPIRICAL closures receive RAW tokens
         // (moe.py:637-647, 803-813), so the correction must not leak there.
+        //
+        // Unreachable from model-emitted specs since PR 2 (enable_eplb flows
+        // to EpMoe); retained for wire-compat with the Python MoE op. PR 3's
+        // data migration decides its fate. If you make this reachable again,
+        // restore a fixture-backed test (the deleted
+        // `moe_eplb_correction_scoped_to_silicon_only` pattern).
         let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
             (num_tokens as f64 * 0.8) as u32
         } else {
