@@ -281,7 +281,12 @@ class DisaggInferenceSession:
             prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
             decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
-        return pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
+        summary_dict[common.ESTIMATED_COLUMN] = bool(
+            prefill_dict.get(common.ESTIMATED_COLUMN) or decode_dict.get(common.ESTIMATED_COLUMN)
+        )
+        summary_df = pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
+        summary_df[common.ESTIMATED_COLUMN] = bool(summary_dict.get(common.ESTIMATED_COLUMN))
+        return summary_df
 
     def run_disagg(
         self,
@@ -344,10 +349,14 @@ class DisaggInferenceSession:
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
+        prefill_summary_df = prefill_summary.get_summary_df().copy()
+        prefill_summary_df[common.ESTIMATED_COLUMN] = prefill_summary.has_estimated_source()
+        decode_summary_df = decode_summary.get_summary_df().copy()
+        decode_summary_df[common.ESTIMATED_COLUMN] = decode_summary.has_estimated_source()
         disagg_summary_df = self._get_disagg_summary_df(
-            prefill_summary.get_summary_df(),
+            prefill_summary_df,
             prefill_num_worker,
-            decode_summary.get_summary_df(),
+            decode_summary_df,
             decode_num_worker,
         )
 
@@ -798,6 +807,9 @@ class DisaggInferenceSession:
                             prefill_degradation_factor=rate_matching_prefill_degradation_factor,
                             decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
+                        disagg_dict[common.ESTIMATED_COLUMN] = bool(
+                            prefill_worker.get(common.ESTIMATED_COLUMN) or decode_worker.get(common.ESTIMATED_COLUMN)
+                        )
                         category_results.append(disagg_dict)
 
                 if category_results:
@@ -811,7 +823,12 @@ class DisaggInferenceSession:
                 logger.debug("No disagg summary found after applying constraints.")
                 return None
 
+            # ``columns=ColumnsDisagg`` intentionally drops out-of-band metadata,
+            # so reattach the prefill/decode OR captured by the shared composer.
             disagg_summary_df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
+            disagg_summary_df[common.ESTIMATED_COLUMN] = [
+                bool(result.get(common.ESTIMATED_COLUMN)) for result in all_category_results
+            ]
             disagg_summary_df = (
                 disagg_summary_df.sort_values(by=["tokens/s/gpu"], ascending=[False])
                 .head(return_top_k)

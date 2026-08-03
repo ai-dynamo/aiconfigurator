@@ -105,7 +105,7 @@ def _make_summary(row: dict, runtime_config: RuntimeConfig) -> InferenceSummary:
     return s
 
 
-def _build_mock_backend():
+def _build_mock_backend(*, estimated_mode: str | None = None):
     """
     Return a mock backend whose ``run_static`` produces a deterministic
     InferenceSummary.  The ``tp`` column value comes from the model's
@@ -134,11 +134,13 @@ def _build_mock_backend():
             summary.set_encoder_source_dict({"encoder_attention": "mixed"})
             summary.set_context_latency_dict({"context_attention": 1.0})
             summary.set_context_energy_wms_dict({"context_attention": 200.0})
-            summary.set_context_source_dict({"context_attention": "silicon"})
+            context_source = "estimated" if estimated_mode == mode else "silicon"
+            summary.set_context_source_dict({"context_attention": context_source})
         elif mode == "static_gen":
             summary.set_generation_latency_dict({"generation_attention": 2.0})
             summary.set_generation_energy_wms_dict({"generation_attention": 300.0})
-            summary.set_generation_source_dict({"generation_attention": "empirical"})
+            generation_source = "estimated" if estimated_mode == mode else "empirical"
+            summary.set_generation_source_dict({"generation_attention": generation_source})
         return summary
 
     backend.run_static = _run_static
@@ -248,6 +250,49 @@ class TestRequireSameTPFiltering:
         }
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
         assert result.get_power_data_coverage() == 1.0
+
+    @pytest.mark.parametrize("estimated_role", ["prefill", "decode"])
+    def test_run_disagg_preserves_estimated_flag(self, runtime_config, model_config, estimated_role):
+        session = DisaggInferenceSession(
+            prefill_database=MagicMock(),
+            prefill_backend=_build_mock_backend(estimated_mode="static_ctx" if estimated_role == "prefill" else None),
+            decode_database=MagicMock(),
+            decode_backend=_build_mock_backend(estimated_mode="static_gen" if estimated_role == "decode" else None),
+        )
+
+        result = session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+        )
+
+        assert bool(result.get_summary_df().iloc[0][common.ESTIMATED_COLUMN])
+
+    @pytest.mark.parametrize("estimated_role", ["prefill", "decode"])
+    def test_constrained_disagg_preserves_estimated_flag(self, runtime_config, model_config, estimated_role):
+        session = DisaggInferenceSession(
+            prefill_database=MagicMock(),
+            prefill_backend=_build_mock_backend(estimated_mode="static_ctx" if estimated_role == "prefill" else None),
+            decode_database=MagicMock(),
+            decode_backend=_build_mock_backend(estimated_mode="static_gen" if estimated_role == "decode" else None),
+        )
+
+        result = _run(
+            session,
+            runtime_config,
+            model_config,
+            prefill_cfgs=[(1, 1, 1, 1, 1, 1)],
+            decode_cfgs=[(1, 1, 1, 1, 1, 1)],
+            require_same_tp=False,
+        )
+
+        assert result is not None
+        assert result.get_summary_df()[common.ESTIMATED_COLUMN].all()
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""
