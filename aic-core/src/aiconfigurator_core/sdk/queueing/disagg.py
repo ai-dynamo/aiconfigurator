@@ -380,7 +380,12 @@ def _run_tandem(
         q = prefill.queues[widx]
         budget = prefill_eng.max_num_batched_tokens
         arrived = [r for r in q if r.pool_arrival_ms <= start_ms]
-        cap = spec.prefill_inflight_cap or len(arrived)
+        # per-pass batch cap: kappa (router admission) AND the engine's own
+        # max_batch_size — a ctx worker deployed at bs4 co-schedules at most
+        # 4 prompts per pass regardless of the token budget (measured: cc
+        # 48k window, kappa-only brackets missed by +34/-? while bs-capped
+        # engine-batched admission tracks the live GNE scheduler)
+        cap = min(spec.prefill_inflight_cap or len(arrived), prefill_eng.max_num_seqs)
         batch_count = 0
         batch_isl = 0
         batch_prefix = 0
