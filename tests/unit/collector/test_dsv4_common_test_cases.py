@@ -30,11 +30,13 @@ def test_dsv4_context_structural_manifest_owns_model_position_admission():
     assert manifest == ((0, (16, 8, 1)), (8, (8, 1)))
 
 
-def test_dsv4_no_filter_expands_flash_and_pro_modules_calib_stays_canonical(monkeypatch):
+def test_dsv4_no_filter_expands_flash_and_pro_modules_calib_stays_canonical(monkeypatch, capsys):
     """Full/raw plans expand BOTH default artifacts for module/sparse ops —
     their tables key model geometry ([native][local] / native heads) since
-    #1423/#1431 — while topk calib stays pinned to the single canonical model
-    because its persisted keys carry no geometry (#1429 follow-up)."""
+    #1423/#1431 — while topk calib stays on the single canonical model as a
+    collection-cost policy (since #1460 the consumers key the DELTA per
+    native geometry, so this is no longer a correctness gate), with the
+    default-plan drop logged."""
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
@@ -45,19 +47,20 @@ def test_dsv4_no_filter_expands_flash_and_pro_modules_calib_stays_canonical(monk
         [_FLASH_FP8, "paged_mqa_logits"],
         [_PRO_FP8, "paged_mqa_logits"],
     ]
+    capsys.readouterr()
     assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_FLASH_FP8, "topk"]]
+    assert "default calibration stays on" in capsys.readouterr().out
 
 
-def test_dsv4_targeted_noncanonical_model_drops_calib_with_logged_reason(monkeypatch, capsys):
-    """A targeted run for a non-canonical model schedules its module cases but
-    zero calib cases, and the drop is logged — the calib table can hold only
-    the canonical model's rows."""
+def test_dsv4_targeted_model_collects_its_own_calib(monkeypatch):
+    """A targeted run collects the selected model's own calibration — since
+    #1460 the consumers key the DELTA per native geometry, so Pro calibration
+    lands in its own bucket instead of overwriting Flash (#1468)."""
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
     monkeypatch.setattr(sys, "argv", ["pytest"])
 
     assert common_test_cases.get_dsv4_csa_context_test_cases()
-    assert common_test_cases.get_dsv4_topk_calib_test_cases() == []
-    assert "calib keys carry no model geometry" in capsys.readouterr().out
+    assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_PRO, "topk"]]
 
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", _FLASH_FP8)
     assert common_test_cases.get_dsv4_topk_calib_test_cases() == [[_FLASH_FP8, "topk"]]
@@ -120,9 +123,9 @@ def test_dsv4_cases_skip_unrelated_model_filter(monkeypatch):
 
 def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch, capsys):
     """The sglang registry's topk-calib getter (deepseekv4_sparse_modules)
-    applies the same canonical-calib restriction as the shared case_generator
-    getter — otherwise a full/raw run would schedule a second model's calib
-    case and silently overwrite the geometry-free calib table."""
+    applies the same calib model policy as the shared case_generator getter:
+    default plans stay canonical (cost policy, logged), targeted runs collect
+    the selected model's own calibration (#1460 per-native calib keys)."""
     import ast
     from pathlib import Path
 
@@ -143,11 +146,12 @@ def test_sglang_sparse_modules_topk_calib_uses_canonical_model(monkeypatch, caps
 
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     monkeypatch.setattr(sys, "argv", ["pytest"])
-    # full/raw: sparse kernels expand both default models, calib only canonical
+    # full/raw: sparse kernels expand both default models, calib only
+    # canonical (cost policy), with the default-plan drop logged
     assert {c[0] for c in ns["get_dsv4_paged_mqa_logits_test_cases"]()} == {_FLASH_FP8, _PRO_FP8}
-    assert {c[0] for c in ns["get_dsv4_topk_calib_test_cases"]()} == {_FLASH_FP8}
-    # targeted non-canonical model: calib case is dropped, with the reason logged
-    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
     capsys.readouterr()
-    assert ns["get_dsv4_topk_calib_test_cases"]() == []
-    assert "calib keys carry no model geometry" in capsys.readouterr().out
+    assert {c[0] for c in ns["get_dsv4_topk_calib_test_cases"]()} == {_FLASH_FP8}
+    assert "default calibration stays on" in capsys.readouterr().out
+    # targeted run: the selected model collects its own calibration (#1460)
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", _PRO)
+    assert ns["get_dsv4_topk_calib_test_cases"]() == [[_PRO, "topk", 1]]
