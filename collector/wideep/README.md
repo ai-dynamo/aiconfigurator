@@ -13,8 +13,6 @@ runtime independently from the non-WideEP framework entry.
 
 Layout:
 
-- `sglang/collect_mla_module.py`: legacy WideEP MLA wrappers (not registered
-  while stock SGLang and the WideEP image use different releases).
 - `sglang/collect_deepep_moe.py`: SGLang DeepEP MoE entrypoint.
 - `sglang/deepep/`: multi-node DeepEP log collection and extraction scripts.
 - `trtllm/collect_moe_compute.py`: TensorRT-LLM WideEP MoE compute entrypoint.
