@@ -182,6 +182,25 @@ def _normalize_sms(raw: object) -> int:
     return 0 if math.isnan(value) else int(value)
 
 
+def _row_power(row: dict) -> float:
+    """Normalize the optional ``power`` cell to watts; null/NaN/absent -> 0.0.
+
+    A present-but-null power cell means "not measured", exactly like an absent
+    column — but ``float(row.get("power", 0.0))`` raised ``ValueError`` on it:
+    parquet nulls read back as ``""`` through ``_read_perf_rows``, and a NaN
+    cell would silently poison ``energy``. ``log_perf`` freezes the CSV header
+    from the first row, so within one collection run power columns are
+    all-or-nothing per file and this cell is unreachable; null cells arrive
+    through merged/legacy files, which every ``power`` read in this module
+    must tolerate (same treatment as ``sms`` above).
+    """
+    raw = row.get("power")
+    if raw is None or raw == "":
+        return 0.0
+    value = float(raw)
+    return 0.0 if math.isnan(value) else value
+
+
 def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_columns: dict) -> None:
     """Adapt legacy sglang DeepEP rows (normal or ll table) into ``data``.
 
@@ -196,7 +215,7 @@ def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_co
     for row in rows:
         node_num = int(row["node_num"])
         sms = int(row["dispatch_sms"]) if comm_backend == "deepep_ht" else 0
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         for phase, columns in phase_columns.items():
             latency_us = 0.0
             for column in columns:
@@ -290,7 +309,7 @@ def _adapt_legacy_trtllm_alltoall(data: defaultdict, rows) -> None:
         ep_size = int(row["moe_ep_size"])
         node_num = int(row["num_nodes"]) if "num_nodes" in row else max(1, ep_size // 4)
         latency = float(row["latency"])  # already ms — see docstring
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         key = (
             comm_backend,
             phase,
@@ -391,7 +410,7 @@ def load_moe_a2a_data(
             int(row["num_tokens"]),
         )
         latency = float(row["latency"]) / 1000.0  # collector records us; leaves are ms
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         energy = power * latency  # watt-milliseconds
 
         # The first new-schema occurrence of a key overwrites any
@@ -748,7 +767,7 @@ def _adapt_legacy_sglang_wideep_moe(data: defaultdict, rows, *, inference_phase:
     """
     for row in rows:
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         num_experts = int(row["num_experts"])
         key = (
             "deepep_moe",
@@ -789,7 +808,7 @@ def _adapt_legacy_trtllm_wideep_moe(data: defaultdict, rows) -> None:
     """
     for row in rows:
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         base_key = (
             row.get("kernel_source", "moe_torch_flow"),
             common.MoEQuantMode[row["moe_dtype"]],
@@ -908,7 +927,7 @@ def load_moe_ep_data(
             int(row["num_tokens"]),
         )
         latency = float(row["latency"])  # already ms (spec §4.2) — stored raw
-        power = float(row.get("power", 0.0))
+        power = _row_power(row)
         energy = power * latency  # watt-milliseconds
 
         # The first new-schema occurrence of a key overwrites any
