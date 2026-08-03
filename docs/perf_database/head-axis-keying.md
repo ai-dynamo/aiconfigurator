@@ -26,14 +26,14 @@ On top of that, three keying tiers:
 | GQA attention | local-only | — (key has local q/kv heads, head_dim, window) |
 | MLA kernel (`context/generation_mla`, `mla_bmm`) | local-only | — (see below) |
 | WideEP MLA | local-only | — (DSV3-only by model dispatch) |
-| MLA module | **[native][local]** | `model` column via `_MLA_MODULE_NATIVE_HEADS` |
-| DSV4 modules | **[native][local]** (#1431) | `num_heads * tp_size` (genuine tp chains) |
+| MLA module | **`[native][local]`** | `model` column via `_MLA_MODULE_NATIVE_HEADS` |
+| DSV4 modules | **`[native][local]`** (`#1431`) | `num_heads * tp_size` (genuine tp chains) |
 | DSA modules | `[architecture][local]` | guardrail pins one native per arch |
 | MiniMax MSA | no table (SOL + DSA xop util borrow) | — |
 
 ## Native derivation differs per family
 
-#1431's DSV4 rows carry genuine tp sweeps, so `native = num_heads * tp_size`
+`#1431`'s DSV4 rows carry genuine tp sweeps, so `native = num_heads * tp_size`
 holds. The MLA module tables do not: they are single-GPU rank-local head
 sweeps (`tp_size` hardcoded 1 by the trtllm/vllm module collectors), where the
 product degenerates to the swept value. Their native identity lives only in

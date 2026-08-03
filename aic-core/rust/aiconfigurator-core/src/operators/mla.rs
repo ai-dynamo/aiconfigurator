@@ -149,8 +149,11 @@ pub struct MlaModuleOp {
     pub fmha_quant_mode: FmhaQuantMode,
     pub gemm_quant_mode: GemmQuantMode,
     /// Model-native identity for the `[native][local]` module table (#1458).
-    /// `None` = legacy single-native resolution; absent in older specs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `None` = legacy single-native resolution; `serde(default)` covers JSON
+    /// specs predating the field. NO `skip_serializing_if`: bincode decodes
+    /// positionally, so an omitted field would desync every op decoded after
+    /// it — the layout change is gated by the ENGINE_SPEC_SCHEMA_VERSION bump.
+    #[serde(default)]
     pub native_num_heads: Option<u32>,
 }
 

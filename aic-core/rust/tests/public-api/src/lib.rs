@@ -79,7 +79,8 @@ mod tests {
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
         assert_eq!(ENGINE_CONFIG_SCHEMA_VERSION, 1);
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 4);
+        // v5: MlaModuleOp gained native_num_heads (#1458).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 5);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

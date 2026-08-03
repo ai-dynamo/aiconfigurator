@@ -289,9 +289,12 @@ semantics are pinned by issue #1429:
   never rewrites); module attributes are only cross-checked because their
   meaning flips between native and rank-local across framework versions.
 - `tp_size` is **mandatory**, so the model-native head identity is always
-  derivable as `num_heads * tp_size`. Persisting local and deriving native
-  (rather than the reverse) matches every other module table family (DSA,
-  MLA, MiniMax) and what post-#1131 collectors already write.
+  derivable as `num_heads * tp_size`. That derivation is a DSV4 property —
+  its rows carry genuine tp sweeps. Persisting rank-local heads matches every
+  other module table family, but the MLA module tables resolve native from an
+  explicit model pin instead: their rows are single-GPU head sweeps where
+  `tp_size` is provenance (#1458, see
+  [head-axis-keying.md](head-axis-keying.md)).
 
 Loaders key the module tables on **both** axes, `[native][local]`: native is
 the model identity (Flash 64 vs Pro 128 — the `architecture` column cannot
