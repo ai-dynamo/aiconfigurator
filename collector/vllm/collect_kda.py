@@ -45,10 +45,6 @@ __compat__ = "vllm==0.1.dev19262"
 
 import gc
 import os
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 import torch
 
@@ -194,7 +190,6 @@ def run_kda_context_benchmark(
     for batch_size in batch_size_list:
         for seq_len in seq_len_list:
             nt = batch_size * seq_len
-            tensors = {}
             try:
                 if nt * proj >= 2**31:
                     raise ValueError(
@@ -207,7 +202,6 @@ def run_kda_context_benchmark(
                 q_cs, k_cs, v_cs = conv_state.split([proj] * 3, dim=-2)
                 mixed = torch.randn(nt, 3 * proj, dtype=dtype, device=device)
                 q_in, k_in, v_in = mixed.transpose(0, 1).split([proj] * 3, dim=0)
-                tensors.update(locals())
 
                 common = {
                     "phase": "context",
@@ -319,7 +313,11 @@ def run_kda_context_benchmark(
                 print(f"  Error at batch_size={batch_size}, seq_len={seq_len}: {e}")
                 continue
             finally:
-                tensors.clear()
+                # Drop the per-iteration tensor references before empty_cache
+                # (same pattern as the sglang kda collector's finally blocks).
+                cu = idx = has_init = conv_state = q_cs = k_cs = v_cs = None
+                mixed = q_in = k_in = v_in = q = k = v = raw_g = raw_beta = None
+                a_log = dt_bias = init_state = None
                 _cleanup("context")
 
     summary = f"ok={ok} error={err} skip=0"

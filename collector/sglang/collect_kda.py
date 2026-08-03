@@ -8,37 +8,33 @@ Kimi-K3's linear-attention layers run KDA, a gated delta-rule attention with
 a per-key (full-rank) gate. SGLang serves it through its vendored Triton FLA
 kernels (the default `--linear-attn-backend triton` on all SMs; the CuTe /
 FlashInfer fast paths are SM100-only and fall back to Triton elsewhere —
-kda_backend.py:119-157 @ kimi-k3 branch).
+kda_backend.py @ kimi-k3 branch).
 
-Context (prefill/extend) phase (kda_backend.forward_extend:555-677):
+Context (prefill/extend) phase (kda_backend.forward_extend):
     - causal_conv1d_fn x3: separate Q, K, V causal convolutions
       (kernel_source "causal_conv1d_fn_qkv3": one row = the 3-call sequence)
     - chunk_kda: chunked delta-rule scan with raw per-K gates
 
-Generation (decode) phase (kda_backend.forward_decode:393-553):
+Generation (decode) phase (kda_backend.forward_decode):
     - causal_conv1d_update: packed single-step conv over 3P channels
     - fused_recurrent_kda_packed_decode: packed KDA recurrence (T=1)
+    - "kda_fused_decode" where serving's attempt-and-verify covered() probe
+      accepts the shard (see _fused_decode_module below)
 
 Verify (speculative target-verify) phase (kda_backend._forward_target_verify):
-    SM-dispatched like serving (_can_run_dspark_cutedsl_mtp,
-    kda_backend.py:858-938 @ kimi-k3 branch):
+    SM-dispatched like serving (_can_run_dspark_cutedsl_mtp):
     - SM100 + cutlass + draft width 2..8 + 128-dim symmetric bf16 heads:
       "fused_kda_decode_mtp_dspark" — the CuTeDSL fused conv+chain-verify
       recurrence kernel (one row covers the whole verify step). Serving folds
       gated RMSNorm into the kernel only on the TP8 12-head shard
-      (_prepare_fused_decode is compiled for seg = 12*128,
-      models/kimi_k3.py:1522-1560); the collector mirrors that per-shard.
+      (_prepare_fused_decode @ models/kimi_k3.py); the collector mirrors that
+      per-shard.
     - otherwise, the Triton pair the serving fallback runs:
       - causal_conv1d_update over batch*draft_tokens rows (approximates the
         windowed verify conv; the serving path adds per-draft-token conv-window
         checkpointing bookkeeping on top of the same kernel)
       - fused_sigmoid_gating_delta_rule_update (is_kda=True, chain verify,
         disable_state_update + intermediate state caching)
-
-TODO(kda-fused-decode): serving additionally has a fully-fused decode kernel
-(sglang.kernels.ops.attention.kda_fused_decode) engaged via attempt-and-verify
-when `covered()` accepts the shapes (compiled for the TP8 12-head shard). It is
-not collected yet, so decode rows are slightly pessimistic where it engages.
 
 The in_proj/out_proj/gate GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique KDA ops.

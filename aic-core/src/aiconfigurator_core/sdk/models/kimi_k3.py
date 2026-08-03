@@ -54,19 +54,12 @@ class KimiK3Model(BaseModel):
     VLLM_DRAFT_V_DIM = 128
 
     # KDA state slots per request (sglang mamba radix cache, extra_buffer
-    # strategy). Governs the per-request constant state-pool cost.
-    #
-    # DELIBERATELY a flat proxy (owner decision 2026-07-31: annotate, don't
-    # model the split). Serving actually charges this in two parts — 1-2
-    # ACTIVE slots per running request (live state + snapshot buffer) plus a
-    # GLOBAL radix checkpoint cache pool with its own budget/LRU (optionally
-    # INT8-compressed, 4x denser), which does not scale with concurrency
-    # (see the Day-0 cache write-ups referenced in
-    # docs/perf_database/kimi-k3-blackwell-bringup-ledger.md). The flat 5x is
-    # acceptable because the KDA term is secondary for K3's target
-    # workloads: at TP8 one slot is ~54 MB/rank (5x = 270 MB/request) vs
-    # ~1.8 GB/request of MLA KV at 128k context — it only dominates for
-    # short-context high-concurrency mixes, where it over-charges.
+    # strategy) — a deliberate flat proxy for serving's 1-2 active slots plus
+    # a global radix checkpoint pool; the owner decision (2026-07-31:
+    # annotate, don't model the split) is documented on
+    # get_kvcache_bytes_per_sequence. Magnitude: at TP8 one slot is ~54
+    # MB/rank (5x = 270 MB/request) vs ~1.8 GB/request of MLA KV at 128k
+    # context — over-charges only short-context high-concurrency mixes.
     KDA_STATE_SLOTS_PER_REQUEST = 5
 
     @classmethod

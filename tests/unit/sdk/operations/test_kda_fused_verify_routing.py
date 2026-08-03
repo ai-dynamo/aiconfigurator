@@ -132,21 +132,7 @@ def test_fused_decode_shard_routes_per_model_key():
     assert float(_query_gen(db, "causal_conv1d_update", other_shard)) == pytest.approx(0.1)
 
 
-def test_fused_decode_sol_is_conv_plus_packed_recurrence():
-    empty = _StubDatabase({})
-    empty._kda_data = {}
-    fused = _query_gen(empty, "kda_fused_decode")
-    conv = _query_gen(empty, "causal_conv1d_update")
-    recurrence = _query_gen(empty, "fused_recurrent_kda_packed_decode")
-    assert fused.source == "sol"
-    assert float(fused) == pytest.approx(float(conv) + float(recurrence))
-
-
-def test_fused_sol_byte_model_is_the_sum_of_conv_and_recurrence():
-    empty = _StubDatabase({})
-    empty._kda_data = {}  # not loaded -> pure SOL path
-    fused = _query(empty, "fused_kda_decode_mtp_dspark")
-    conv = _query(empty, "causal_conv1d_update")
-    recurrence = _query(empty, "fused_sigmoid_gating_delta_rule_update")
-    assert fused.source == "sol"
-    assert float(fused) == pytest.approx(float(conv) + float(recurrence))
+# The fused-kernel SOL byte models (fused == conv + recurrence, decode and
+# DSPARK verify) are pinned once, in the Rust twin's tests (operators/mamba.rs:
+# kda_fused_decode_sol_is_conv_plus_packed_recurrence,
+# kda_fused_verify_sol_is_conv_plus_recurrence).
