@@ -248,6 +248,27 @@ def test_new_schema_absent_power_column_defaults_to_zero(tmp_path):
     assert leaf["energy"] == 0.0
 
 
+def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
+    # A power column that exists but is null on some rows (a merged file, or a
+    # writer that only measured part of the sweep) must load cleanly: null and
+    # NaN mean "not measured", exactly like an absent column. This used to
+    # raise ValueError (parquet null -> "" -> float("")).
+    rows = [
+        _row(NEW_ROW, power=None),
+        _row(NEW_ROW, num_tokens=256, power=400.0),
+    ]
+    path = _write_parquet(tmp_path, rows, "moe_ep_perf.parquet")
+
+    data = load_moe_ep_data([(path, None)])
+
+    null_leaf = _leaf(data, NEW_KEY)
+    assert null_leaf["latency"] == 0.25  # the row still contributes latency
+    assert null_leaf["power"] == 0.0
+    assert null_leaf["energy"] == 0.0
+    measured_leaf = _leaf(data, (*NEW_KEY[:-1], 256))
+    assert measured_leaf["power"] == 400.0  # measured rows keep their power
+
+
 def test_missing_file_returns_none(tmp_path):
     assert load_moe_ep_data([(str(tmp_path / "moe_ep_perf.parquet"), None)]) is None
 

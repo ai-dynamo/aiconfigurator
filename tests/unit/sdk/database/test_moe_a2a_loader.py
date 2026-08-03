@@ -123,6 +123,25 @@ def test_absent_sms_and_power_columns_default_to_zero(tmp_path):
     assert leaf["energy"] == 0.0
 
 
+def test_present_but_null_power_cells_load_as_no_power(tmp_path):
+    # Same guard as the moe_ep twin: a power column that exists but is null on
+    # some rows must load cleanly, null/NaN meaning "not measured" exactly
+    # like an absent column (parquet null -> "" used to raise ValueError).
+    rows = [
+        _row(power=None),
+        _row(num_tokens=256, latency=300.0, power=400.0),
+    ]
+    path = _write_parquet(tmp_path, rows)
+
+    data = load_moe_a2a_data([(path, None)])
+
+    by_tokens = data["deepep_ht"]["dispatch"]["fp8"][16][2][7168][8][256][24]
+    assert by_tokens[128]["latency"] == pytest.approx(0.150)  # latency survives
+    assert by_tokens[128]["power"] == 0.0
+    assert by_tokens[128]["energy"] == 0.0
+    assert by_tokens[256]["power"] == 400.0  # measured rows keep their power
+
+
 def test_two_shapes_coexist(tmp_path):
     rows = [
         _row(),
