@@ -366,7 +366,8 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
             by_keys
                 .entry(key)
                 .or_default()
-                .insert(row.u32(num_tokens_col)?, row.f64(latency_col)?);
+                .entry(row.u32(num_tokens_col)?)
+                .or_insert(row.f64(latency_col)?);
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -430,12 +431,13 @@ mod tests {
     }
 
     #[test]
-    fn wideep_moe_duplicate_key_last_row_wins() {
+    fn wideep_moe_duplicate_key_first_row_wins() {
         // rtx_pro_6000_server/trtllm/1.3.0rc10/wideep_moe_perf.parquet carries
         // 270 duplicate coordinates with differing latencies. Python's
-        // `load_wideep_moe_compute_data` direct-assigns (last row wins); this
-        // key's first occurrence is 0.11578880548477173, its last is
-        // 0.11609599590301514 — the loaded grid must hold the LAST value.
+        // `load_wideep_moe_compute_data` now guards with skip-on-key-conflict
+        // (first wins — shared-layer contract, design §6.1); this key's first
+        // occurrence is 0.11578880548477173, its last is
+        // 0.11609599590301514 — the loaded grid must hold the FIRST value.
         let root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems/data/rtx_pro_6000_server/trtllm/1.3.0rc10");
@@ -457,9 +459,9 @@ mod tests {
             )
             .expect("WideEP MoE compute query must succeed");
         assert!(
-            (latency - 0.116_095_995_903_015_14).abs() < 1e-9,
-            "duplicate key must resolve last-wins (Python parity): got {latency}, \
-             first-wins would give 0.11578880548477173"
+            (latency - 0.115_788_805_484_771_73).abs() < 1e-9,
+            "duplicate key must resolve first-wins (Python parity): got {latency}, \
+             last-wins would give 0.11609599590301514"
         );
     }
 }

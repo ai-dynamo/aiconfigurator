@@ -526,6 +526,7 @@ DefaultHFModels = {
     "nvidia/Kimi-K2.5-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
+    "nvidia/DeepSeek-V3.2-NVFP4",
     "zai-org/GLM-5",
     "zai-org/GLM-5-FP8",
     "nvidia/GLM-5-NVFP4",

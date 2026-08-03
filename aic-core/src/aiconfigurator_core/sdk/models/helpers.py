@@ -37,6 +37,78 @@ _MOE_MODEL_FAMILIES = {
 }
 
 
+def quant_exclude_patterns(raw_config: dict) -> list:
+    """All module-exclusion globs a ModelOpt/HF quant config can carry.
+
+    Reads both declaration formats kept on ``raw_config`` by
+    ``get_model_config_from_model_path``: the checkpoint's own
+    ``quantization_config`` (compressed-tensors ``ignore`` /
+    ``modules_to_not_convert`` / ``exclude_modules``) and the retained
+    ``hf_quant_config`` (ModelOpt ``exclude_modules`` / ``ignore``).
+    """
+    quant_config = raw_config.get("quantization_config")
+    quant_config = quant_config if isinstance(quant_config, dict) else {}
+
+    hf_quant_config = raw_config.get("hf_quant_config")
+    hf_quant_config = hf_quant_config if isinstance(hf_quant_config, dict) else {}
+    hf_quant = hf_quant_config.get("quantization")
+    hf_quant = hf_quant if isinstance(hf_quant, dict) else {}
+
+    return [
+        *list(quant_config.get("modules_to_not_convert") or []),
+        *list(quant_config.get("exclude_modules") or []),
+        *list(quant_config.get("ignore") or []),
+        *list(hf_quant.get("exclude_modules") or []),
+        *list(hf_quant.get("ignore") or []),
+    ]
+
+
+# Attention projection groups an exclusion pattern can cover. Exclusion
+# granularity is a per-checkpoint fact: Kimi-K2.5-NVFP4 and R1-0528-FP4
+# exclude the whole block (``self_attn*``), while DeepSeek-V3.1/V3.2-NVFP4
+# exclude only q/kv projections (V3.2 also the indexer) and KEEP o_proj
+# quantized; DeepSeek's native FP8 checkpoints exclude nothing.
+ATTENTION_PROJECTION_GROUPS = ("q", "kv", "o", "indexer")
+
+# substrings -> group; checked only when the whole-block glob did not match
+_PROJECTION_GROUP_MARKERS = {
+    "q": ("q_a_proj", "q_b_proj", "q_proj"),
+    "kv": ("kv_a_proj", "kv_b_proj", "kv_proj", "k_proj", "v_proj"),
+    "o": ("o_proj",),
+    "indexer": ("indexer",),
+}
+
+
+def attention_projection_exclusions(raw_config: dict) -> frozenset:
+    """Which attention projection groups the checkpoint keeps unquantized.
+
+    Returns a subset of :data:`ATTENTION_PROJECTION_GROUPS`. A pattern naming
+    the whole block (``self_attn*`` / ``re:.*self_attn.*``) covers every
+    group; otherwise groups are matched per projection name.
+    """
+    excluded: set = set()
+    for pattern in quant_exclude_patterns(raw_config):
+        p = str(pattern)
+        if "self_attn" in p and not any(m in p for markers in _PROJECTION_GROUP_MARKERS.values() for m in markers):
+            # whole-block glob (e.g. "model.layers.N.self_attn*", "re:.*self_attn.*")
+            return frozenset(ATTENTION_PROJECTION_GROUPS)
+        for group, markers in _PROJECTION_GROUP_MARKERS.items():
+            if any(m in p for m in markers):
+                excluded.add(group)
+    return frozenset(excluded)
+
+
+def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
+    """Whether the checkpoint keeps ANY self-attention projection unquantized.
+
+    Coarse boolean retained for callers that only need "is anything excluded";
+    per-projection consumers (weights accounting, per-GEMM perf keys) must use
+    :func:`attention_projection_exclusions` — V3.1/V3.2-NVFP4 exclude q/kv but
+    keep o_proj quantized, so one boolean cannot describe the block.
+    """
+    return bool(attention_projection_exclusions(raw_config))
+
+
 def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
     backend / wideep combination.

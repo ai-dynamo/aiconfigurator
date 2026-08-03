@@ -206,6 +206,13 @@ def create_vllm_config(
     device_config = DeviceConfig()
     load_config = LoadConfig()
     compilation_config = CompilationConfig()
+    # Module-level benchmarks run eagerly (no torch.compile), so without this
+    # every CustomOp (rotary, activations, ...) falls back to its native
+    # decomposed implementation — a batch-independent per-call overhead the
+    # serving engine does not pay (inductor fuses these under compilation).
+    # Enable the CUDA custom ops so eager module forwards match engine
+    # execution. See enable_engine_fused_ops() for the IR-op counterpart.
+    compilation_config.custom_ops = ["all"]
 
     if add_mock_model_methods:
         # Add mock methods to satisfy backends that need them
@@ -489,6 +496,70 @@ def create_kv_cache_and_block_mappings(
         history_slot_mapping = torch.empty(0, dtype=torch.long, device=device)
 
     return kv_cache, history_slot_mapping
+
+
+@functools.cache  # only run once per process
+def enable_engine_fused_ops() -> None:
+    """Route IR ops to the fused CUDA kernels a serving worker would run.
+
+    Module-level collectors execute vLLM modeling code eagerly, and no IR-op
+    priority is ever installed outside a real worker, so ``rms_norm`` /
+    ``fused_add_rms_norm`` dispatch to their *native* implementations — an
+    eager ``mean/pow/rsqrt/mul`` kernel chain costing tens of µs per call
+    ("Priority not set for op rms_norm, using native implementation" in every
+    collector log). A serving engine never pays this: under its default
+    compilation config inductor fuses the native implementation into single
+    triton kernels (torch.compile), and in eager/piecewise regions it runs
+    the ``vllm_c`` CUDA kernels. The unfused chain inflates small/medium-batch
+    module latencies by ~25-35% (measured on B200, MLA generation module,
+    heads64/kv8192/fp8: bs1 109.5→78.6 µs, bs16 143.7→95.2 µs, bs64
+    198.6→147.9 µs after this change, matching in-engine per-layer cost
+    within ~10%; see ai-dynamo/aiconfigurator#1396).
+
+    Why not ``torch.compile`` + CUDA graph instead? Outside a serving worker
+    every norm path — including ``forward_native`` — routes through the IR
+    torch custom op (``_ENABLE_TORCH_WRAP = True`` module default,
+    vllm/ir/op.py:50 @0.22.0), which is opaque to dynamo/inductor: compiling
+    through it fuses nothing (B200/vLLM 0.22 glue microbench, CUDA-graph
+    replay with kernel listing: native-eager 74.1 us, compile-through-wrap
+    64.6 us with the aten mean/pow/rsqrt chain intact; vllm_c-eager 21.0 us).
+    The engine escapes this two ways: worker init applies
+    ``ir_enable_torch_wrap`` (v1/worker/worker_base.py:94), and under
+    VLLM_COMPILE+inductor the wrapped op nodes are fused by vLLM's custom
+    lowerings into neighboring GEMMs (serving-trace kernel
+    ``triton_red_fused_..._fused_qkv_a_proj_rms_norm``); wrap-off is the
+    documented way to let dynamo trace the impl inline
+    (config/compilation.py:492-498 @0.22.0). Replicating that here —
+    ``vllm.ir.set_default_torch_wrap(False)`` + ``torch.compile`` — does
+    fuse fully (glue 8.0 us, module 87.7 us/layer) but OVERSHOOTS the
+    engine, whose fused glue is not free (norm+quant fused kernels, paged
+    rope): at the bs16 reference point the engine costs 107 us/layer,
+    vllm_c-eager 95-97 us (-10%), wrap-off-compile 87.7 us (-18%), the
+    native chain +37%. vllm_c-eager is therefore the closer surrogate and
+    needs no per-shape compile during sweeps. Installs it as the
+    process-lifetime default: ``IrOp.set_priority`` is a scoped context
+    manager, ``set_default`` is the permanent API (vllm/ir/op.py @0.24.0).
+
+    Raises on vLLM builds without the IR-op registry or the ``vllm_c``
+    provider — a silent fallback to the native chain would benchmark a kernel
+    path serving never runs and poison the database.
+    """
+    # Imports stay function-scoped on purpose: kernel-level collectors that
+    # never touch this helper must keep importing utils on vLLM builds
+    # without the IR-op registry; module-level benchmarks fail HERE, loudly.
+    import vllm.ir.ops as ir_ops
+    import vllm.kernels.vllm_c  # noqa: F401 — import registers the 'vllm_c' impls
+
+    ir_ops.rms_norm.set_default(["vllm_c"])
+    ir_ops.fused_add_rms_norm.set_default(["vllm_c"])
+    # Assert the provider that will actually run (collector dispatch rule:
+    # persisted rows must describe the invocation that executed). set_default
+    # validates support, but verify the resolved priority explicitly so a
+    # future dispatch change cannot silently fall back to the native chain.
+    for op in (ir_ops.rms_norm, ir_ops.fused_add_rms_norm):
+        selected = [impl.provider for impl in op._priority_impls]
+        if selected[:1] != ["vllm_c"]:
+            raise RuntimeError(f"fused-op dispatch for {op.name} resolved to {selected}, expected vllm_c first")
 
 
 @functools.cache  # only run once per process

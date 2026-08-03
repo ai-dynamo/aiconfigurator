@@ -65,6 +65,7 @@ CORE_SDK_LEAF_MODULES = [
     "perf_interp.engine",
     "performance_result",
     "rust_engine_step",
+    "step_estimate",
     "system_spec",
     "utils",
 ]

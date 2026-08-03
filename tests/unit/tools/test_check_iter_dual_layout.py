@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "perf_database"))
-from audit_kernel_source import _iter_data_files
+from check_kernel_source import _iter_data_files
 
 pytestmark = pytest.mark.unit
 
