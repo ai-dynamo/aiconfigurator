@@ -350,13 +350,6 @@ impl KdaOp {
         }
     }
 
-    /// Mirrors Python `KDAKernel._query_kda_table::get_sol`. `f64`
-    /// coordinates because the perf_interp engine evaluates SOL at
-    /// blended/snapped anchor points.
-    fn sol_latency_ms(&self, db: &PerfDatabase, batch_size: f64, seq_len: f64) -> f64 {
-        self.sol_latency_ms_with(db, &self.kernel_source, batch_size, seq_len)
-    }
-
     /// `sol_latency_ms` with an explicit kernel source, so the fused-verify
     /// reroute in `query` prices SOL anchors with the routed kernel's byte
     /// model (Python's `get_sol` closure reads the rebound `kernel_source`).

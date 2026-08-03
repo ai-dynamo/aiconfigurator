@@ -190,8 +190,11 @@ class KimiK3Model(BaseModel):
                     # fused q/k/v/gate projection: 4 * P // tp
                     ops.GEMM("context_kda_qkvg_gemm", c, 4 * p_local, h, gemm_q),
                     # merged [f_a | beta] skinny GEMM + f_b up-projection
-                    ops.GEMM("context_kda_bfa_gemm", c, 232, h, gemm_q),
-                    ops.GEMM("context_kda_fb_gemm", c, p_local, 128, gemm_q),
+                    # beta (per v-head) + f_a low-rank down (head_dim); the full-rank
+                    # onorm gate is fused into the qkvg GEMM above (fla kda.py
+                    # projections; b_proj=num_heads, f_proj[0]=head_dim).
+                    ops.GEMM("context_kda_bfa_gemm", c, cfg.kda_num_heads + cfg.kda_head_dim, h, gemm_q),
+                    ops.GEMM("context_kda_fb_gemm", c, p_local, cfg.kda_head_dim, gemm_q),
                     ops.KDAKernel(
                         "context_kda_conv1d",
                         c,
@@ -394,8 +397,11 @@ class KimiK3Model(BaseModel):
                 [
                     ops.ElementWise("generation_kda_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_kda_qkvg_gemm", c, 4 * p_local, h, gemm_q),
-                    ops.GEMM("generation_kda_bfa_gemm", c, 232, h, gemm_q),
-                    ops.GEMM("generation_kda_fb_gemm", c, p_local, 128, gemm_q),
+                    # beta (per v-head) + f_a low-rank down (head_dim); the full-rank
+                    # onorm gate is fused into the qkvg GEMM above (fla kda.py
+                    # projections; b_proj=num_heads, f_proj[0]=head_dim).
+                    ops.GEMM("generation_kda_bfa_gemm", c, cfg.kda_num_heads + cfg.kda_head_dim, h, gemm_q),
+                    ops.GEMM("generation_kda_fb_gemm", c, p_local, cfg.kda_head_dim, gemm_q),
                     *kda_kernels,
                     # on vLLM NOSPEC the gated RMSNorm is fused into
                     # fused_kda_decode; keep it for all other paths.
@@ -417,11 +423,11 @@ class KimiK3Model(BaseModel):
                     ops.ElementWise("generation_mla_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
                     ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
-                    # The mla_bmm table only carries power-of-two head slices
-                    # (DeepSeek geometry); K3's 96 heads shard to 12/24/48/96
-                    # local heads. The bmm is per-head batched, so query the
-                    # next power-of-two slice and scale the count by the head
-                    # ratio.
+                    # Query the next power-of-two head slice with a count
+                    # ratio (bmm is per-head batched). The 96-family exact
+                    # rows collected on b200 sglang are NOT consumed yet —
+                    # exact-first routing needs data-presence fallback on
+                    # every other system (fast-follow, see bring-up ledger).
                     *(
                         [
                             ops.GenerationAttention(
