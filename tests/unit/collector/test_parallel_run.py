@@ -8,6 +8,8 @@ Covers:
 - Regular exceptions (worker stays alive, error recorded)
 - Mixed failure modes
 - Sentinel balance under repeated restarts (the core bug-fix scenario)
+- Lost progress tick: worker dies after recording done but before its
+  progress_value tick (the 99/100 hang, H20 2026-07-19)
 """
 
 import json
@@ -77,6 +79,52 @@ def _task_fn(label, behavior, device):
     elif behavior == "oom":
         raise sys.modules["torch"].OutOfMemoryError(f"simulated: {label}")
     # "normal": return silently
+
+
+def _worker_dying_after_done(
+    queue,
+    device_id,
+    func,
+    progress_value,
+    lock,
+    error_queue=None,
+    done_tasks=None,
+    failed_tasks=None,
+    module_name="unknown",
+    current_task_ids=None,
+    consumed_sentinel=None,
+):
+    """Scripted stand-in for ``collect.worker`` reproducing the 2026-07-19
+    H20 death window: the task SUCCEEDS and lands in ``done_tasks``, but the
+    process is hard-killed before the finally-block ``progress_value`` tick
+    (TRT-LLM C++ teardown SIGABRT). Two flavors, selected by task-id prefix:
+
+    - ``poison-keepid``: dies before clearing ``current_task_ids`` — the
+      parent's crash handler sees an active task that is already done.
+    - ``poison-cleared``: dies after clearing it — the parent's crash
+      handler sees nothing at all (the exact 99/100 hang).
+
+    Non-poison tasks complete through the same sequence as the real worker's
+    success path. Module-level so fork'd workers can resolve it.
+    """
+    while True:
+        task_info = queue.get()
+        if task_info is None:
+            if current_task_ids is not None:
+                current_task_ids[device_id] = None
+            if consumed_sentinel is not None:
+                consumed_sentinel[device_id] = True
+            break
+        task_id = task_info["id"]
+        current_task_ids[device_id] = task_id
+        done_tasks[task_id] = True  # synchronous manager RPC, like the real worker
+        if task_id.startswith("poison-keepid"):
+            os.kill(os.getpid(), signal.SIGKILL)
+        current_task_ids[device_id] = None
+        if task_id.startswith("poison"):
+            os.kill(os.getpid(), signal.SIGKILL)
+        with lock:
+            progress_value.value += 1
 
 
 class _GroupedCase:
@@ -469,6 +517,43 @@ class TestSignalCrashRecovery:
         failed = _load_failed_ids(tmp_path, "sigabrt_restart_mix")
         assert {"b", "c", "e", "f"} == done  # exit_restart + normal = passed
         assert {"a", "d"} == failed  # sigabrt = failed
+
+
+class TestLostProgressTickRecovery:
+    """A worker that dies AFTER recording done but BEFORE its progress tick
+    must neither hang the run nor get its task re-marked as failed.
+
+    Hardware origin: H20 2026-07-19 — TRT-LLM C++ teardown SIGABRT landed in
+    exactly this window twice, leaving both DSA context runs at 99/100 with
+    a complete checkpoint and every GPU idle (one wasted ~7.4h stalled).
+    The parent loop must exit on its own done/failed ledger, not on
+    worker-side progress_value ticks.
+    """
+
+    @pytest.mark.parametrize("poison_id", ["poison-cleared", "poison-keepid"])
+    def test_death_between_done_and_progress_tick(self, tmp_path, monkeypatch, poison_id):
+        monkeypatch.setattr(_collect_mod, "worker", _worker_dying_after_done)
+        module_name = f"lost_tick_{poison_id}"
+        tasks = _tasks([(poison_id, "normal"), ("t1", "normal"), ("t2", "normal")])
+
+        # On regression this scenario HANGS rather than fails — bound it.
+        def _on_alarm(signum, frame):
+            raise TimeoutError("parallel_run hung: lost progress tick not recovered")
+
+        previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(60)
+        try:
+            errors = _run(tasks, 1, tmp_path, module_name=module_name)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+        # The poisoned task completed before the kill: it must be recorded
+        # done and must NOT be double-recorded as failed by the crash handler.
+        assert _load_done_ids(tmp_path, module_name) == {poison_id, "t1", "t2"}
+        assert _load_failed_ids(tmp_path, module_name) == set()
+        # The worker death itself is still surfaced as a crash observation.
+        assert len(_crash_errors(errors)) >= 1
 
 
 class TestResumeIntegrity:

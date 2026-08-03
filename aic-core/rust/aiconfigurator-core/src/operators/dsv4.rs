@@ -259,6 +259,7 @@ impl Dsv4ModuleOp {
             batch_size,
             s,
             self.num_heads,
+            self.native_heads,
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
@@ -309,6 +310,7 @@ impl Dsv4ModuleOp {
         let points = match db.dsv4.context_points(
             self.attn_kind,
             self.num_heads,
+            self.native_heads,
             kv,
             fmha,
             gemm,
@@ -330,11 +332,12 @@ impl Dsv4ModuleOp {
         // (key_tag, quants, num_heads, cr, depth); `architecture` stands in
         // for Python's `id(node)` identity component (the Rust slice keys it).
         let key_stem = format!(
-            "{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}",
             self.architecture,
             fmha.name(),
             kv.name(),
             gemm.name(),
+            self.native_heads,
             self.num_heads,
             cr
         );
@@ -586,12 +589,12 @@ impl Dsv4ModuleOp {
     /// `self.fmha_quant_mode` stays on the op for the context path.
     fn generation_silicon(&self, db: &PerfDatabase, batch_size: u32, s: u32) -> Result<f64, AicError> {
         db.dsv4.query_generation(
-
             &db.system_spec,
             self.attn_kind,
             batch_size,
             s,
             self.num_heads,
+            self.native_heads,
             self.kv_cache_dtype,
             self.gemm_quant_mode,
             &self.architecture,
@@ -634,17 +637,18 @@ impl Dsv4ModuleOp {
         // (derived from kv above); `architecture` stands in for Python's
         // `id(node)` identity component.
         let key = format!(
-            "dsv4_gen_attn:{}:{}:{}:{}:{}",
+            "dsv4_gen_attn:{}:{}:{}:{}:{}:{}",
             self.architecture,
             kv.name(),
             gemm.name(),
+            self.native_heads,
             self.num_heads,
             cr
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
             match db
                 .dsv4
-                .generation_points(self.attn_kind, self.num_heads, kv, gemm)
+                .generation_points(self.attn_kind, self.num_heads, self.native_heads, kv, gemm)
             {
                 Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
                 // Typed coverage miss -> no grid (estimate() raises the

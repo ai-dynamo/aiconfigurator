@@ -235,8 +235,8 @@ def get_attention_head_configs(
 
     if phase not in {"context", "generation"}:
         raise ValueError(f"Unknown attention phase: {phase}")
-    if backend not in {None, "sglang"}:
-        raise ValueError("backend is only accepted for the SGLang-specific attention collector")
+    if backend not in {None, "sglang", "trtllm"}:
+        raise ValueError("backend is only accepted for the SGLang and TRT-LLM attention collectors")
     if backend == "sglang" and sm_version is None:
         raise ValueError("SGLang attention collection requires an explicit SM version")
 
@@ -279,6 +279,8 @@ def get_attention_head_configs(
                 kernel_source=kernel_source,
                 architecture=str(profile["architecture"]) if profile.get("architecture") else None,
             )
+        elif backend == "trtllm":
+            config = dataclasses.replace(config, kernel_source=kernel_source)
         # Source is recorded by the collector for provenance. The SDK keeps
         # its historical query key and does not consume this distinction.
         population_key = (num_heads, num_kv_heads, head_dim, window_size, kernel_source)
@@ -356,6 +358,24 @@ def get_attention_head_configs(
             if kernel_source is None:
                 raise ValueError(f"No SGLang 0.5.14 attention backend mapping for SM{sm_version}")
             kernel_source = str(kernel_source)
+        elif backend == "trtllm":
+            # Mirrors TRT-LLM 1.3.0rc20 serving backend selection: dense
+            # attention runs TorchLlmArgs.attn_backend, default "TRTLLM"
+            # (llmapi/llm_args.py:4544-4546), unless the model class overrides
+            # it via get_model_defaults — a model-level, SM-independent
+            # override, hence a plain string key rather than sglang_backends'
+            # SM map. Example: Gemma4 forces "FLASHINFER" on every SM for its
+            # per-layer head_dim 256/512 hybrid attention
+            # (models/modeling_gemma4.py:942-952).
+            raw_backend = profile.get("trtllm_attn_backend")
+            kernel_source = "TRTLLM" if raw_backend is None else str(raw_backend).upper()
+            if kernel_source not in {"TRTLLM", "FLASHINFER"}:
+                raise ValueError(
+                    f"Unsupported trtllm_attn_backend {raw_backend!r}: the TRT-LLM dense-attention "
+                    "collector mirrors get_attention_backend dispatch "
+                    "(attention_backend/utils.py:27-53@1.3.0rc20), which serves dense models with "
+                    "TRTLLM or FLASHINFER only"
+                )
 
         head_dims = _profile_int_values(
             profile,
@@ -756,9 +776,10 @@ def get_mla_module_model_specs(
             )
         )
 
-    if backend == "vllm" and apply_model_filter and model_path_filter is None:
-        # vLLM 0.24 builds every module with the case's explicit precision and
-        # head count, so checkpoint aliases no longer change the invocation.
+    if backend in {"trtllm", "vllm"} and apply_model_filter and model_path_filter is None:
+        # TRT-LLM and vLLM build every module with the case's explicit
+        # precision and head count, so checkpoint aliases no longer change the
+        # consumer-visible identity.
         # MLA has one architecture-less consumer table (the perf rows carry no
         # lora/rope geometry key, so distinct-geometry models could not be
         # represented anyway); DSA is keyed by architecture. Stable first-wins
@@ -779,7 +800,7 @@ def get_mla_module_model_specs(
             canonical = canonical_specs[key]
             print(
                 f"mla_module: collapsed {len(dropped_paths)} declared spec(s) into canonical "
-                f"{canonical.model_path!r} for {key[0]} (architecture-less consumer table): "
+                f"{canonical.model_path!r} for {key[0]} (consumer identity {key!r}): "
                 f"{', '.join(dropped_paths)}"
             )
 
@@ -2130,14 +2151,24 @@ def _dsv4_config() -> dict:
         default_model_paths = supported_model_paths
     if not default_model_paths:
         raise RuntimeError("model_case_values.dsv4 needs at least one default model path")
-    if len(default_model_paths) != 1:
+
+    # Module tables key [native][local] since #1423/#1431, so several default
+    # models are legal as long as their geometries differ. The topk-calib
+    # table keys still carry no model geometry, so calibration is pinned to
+    # exactly one canonical artifact.
+    calib_model_paths = config.get("calib_model_paths")
+    if calib_model_paths is None:
+        calib_model_paths = [default_model_paths[0]]
+    calib_model_paths = _dedupe_strs(calib_model_paths)
+    if len(calib_model_paths) != 1:
         raise ValueError(
-            "DeepSeek-V4 module keys cannot distinguish models; "
-            "dsv4.default_model_paths must contain one canonical path"
+            "DeepSeek-V4 topk-calib keys carry no model geometry; "
+            "dsv4.calib_model_paths must contain exactly one canonical path"
         )
 
     config["default_model_paths"] = default_model_paths
-    config["supported_model_paths"] = _dedupe_strs([*supported_model_paths, *default_model_paths])
+    config["calib_model_paths"] = calib_model_paths
+    config["supported_model_paths"] = _dedupe_strs([*supported_model_paths, *default_model_paths, *calib_model_paths])
     return config
 
 
@@ -2147,6 +2178,7 @@ def _dsv4_attention_kinds() -> tuple[str, ...]:
 
 _DSV4_CONFIG = _dsv4_config()
 _DSV4_DEFAULT_MODELS = tuple(_as_str_list(_DSV4_CONFIG["default_model_paths"], field_name="dsv4.default_model_paths"))
+_DSV4_CALIB_MODELS = tuple(_as_str_list(_DSV4_CONFIG["calib_model_paths"], field_name="dsv4.calib_model_paths"))
 _DSV4_SUPPORTED_MODELS = tuple(
     _as_str_list(_DSV4_CONFIG["supported_model_paths"], field_name="dsv4.supported_model_paths")
 )
@@ -2191,6 +2223,25 @@ def _selected_dsv4_models() -> tuple[str, ...]:
     if filt in _DSV4_SUPPORTED_MODELS or os.path.isdir(filt):
         return (filt,)
     return ()
+
+
+def _selected_dsv4_calib_models() -> tuple[str, ...]:
+    """Models the topk-calib op may run for.
+
+    Calib rows persist without model geometry (``_TOPK_CALIB_KEYS`` is
+    ``(step, isl, batch_size, score_mode)``), so one shared table can hold
+    exactly one model's calibration — the canonical artifact declared in
+    ``dsv4.calib_model_paths``. Any other selected model drops its calib case
+    here, with the count logged (declared coverage fact, not a runtime skip)."""
+    selected = _selected_dsv4_models()
+    calib = tuple(m for m in selected if m in _DSV4_CALIB_MODELS)
+    dropped = [m for m in selected if m not in _DSV4_CALIB_MODELS]
+    if dropped:
+        print(
+            f"[dsv4-test-cases] dsv4_csa_topk_calib: dropped {len(dropped)} model(s) {dropped} "
+            f"(calib keys carry no model geometry; calibration stays on {_DSV4_CALIB_MODELS[0]})"
+        )
+    return calib
 
 
 def _has_native_fp4_experts() -> bool:
@@ -2361,8 +2412,12 @@ def get_dsv4_topk_calib_test_cases():
     The grid matches the CSA module data 1:1: the worker reads the
     already-collected ``dsv4_csa_*_module_perf.txt`` and benches exactly those
     ``(prefix, isl, batch_size)`` shapes — no separate grid is generated here.
+
+    Only the canonical calib model is eligible (``_selected_dsv4_calib_models``):
+    the calib table keys carry no model geometry, so a second model's rows
+    would silently overwrite the first's.
     """
-    return [[model_path, "topk"] for model_path in _selected_dsv4_models()]
+    return [[model_path, "topk"] for model_path in _selected_dsv4_calib_models()]
 
 
 DSV4_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")

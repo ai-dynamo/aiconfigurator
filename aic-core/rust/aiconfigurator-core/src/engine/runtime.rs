@@ -361,11 +361,12 @@ impl Engine {
     /// ```
     ///
     /// Note the Python conventions this deliberately preserves (they differed
-    /// from the pre-rewrite FPM packing): pass 1 uses the RAW `ctx + gen`
-    /// token count (no `(nextn+1)` inflation — the MTP multiplier applies only
-    /// to the pass-3 decode batch via `_run_generation_phase`), the cached
-    /// prefix multiplier is `floor(ctx/isl)` (not ceil), and the pass-3 kv
-    /// position carries `_run_generation_phase`'s `+1`.
+    /// from the pre-rewrite FPM packing): pass 1 uses
+    /// `ctx + gen * (nextn + 1)` tokens (the speculative-progress model —
+    /// every decode request verifies one target plus all drafts in the
+    /// combined pass, mirroring Python `run_mixed`'s `decode_query_tokens`),
+    /// the cached prefix multiplier is `floor(ctx/isl)` (not ceil), and the
+    /// pass-3 kv position carries `_run_generation_phase`'s `+1`.
     ///
     /// The imbalance-correction scales mirror the `RuntimeConfig` fields
     /// Python threads into each pass (`base_backend.py:950-1043`).
@@ -379,17 +380,50 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<f64, AicError> {
+        Ok(self.mixed_step_breakdown(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        )?[0])
+    }
+
+    /// Return ``[total, shared_non_attention, context_attention,
+    /// decode_attention]`` for one mixed engine iteration — the three passes
+    /// of the `_get_mix_step_latency` composition reported separately: pass 1
+    /// is the shared non-attention work, pass 2 the context-attention slice
+    /// (already divided by `ceil(isl/ctx)`), pass 3 the decode-attention
+    /// slice. [`Engine::mixed_step_latency`] is their sum; the agg
+    /// speculative scheduler consumes the components.
+    pub fn mixed_step_breakdown(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<[f64; 4], AicError> {
         if ctx_tokens == 0 && gen_tokens == 0 {
-            return Ok(0.0);
+            return Ok([0.0; 4]);
         }
         // Python divides by `isl` (`floor(ctx/isl)`, `ceil(ctx/isl)`) without
         // a guard — callers always pass isl >= 1. Clamp to avoid a Rust
         // div-by-zero panic on degenerate input Python would crash on.
         let isl = isl.max(1);
-        let mut total = 0.0_f64;
 
         // ---- Pass 1: combined non-attention work ----
-        let combined = ctx_tokens + gen_tokens;
+        // Speculative progress model: every decode request verifies one
+        // target token plus all scheduled drafts, so the combined pass sees
+        // `gen * (nextn + 1)` decode tokens (mirrors Python `run_mixed`'s
+        // `decode_query_tokens`). Acceptance does not reduce this
+        // current-iteration work.
+        let decode_query_tokens = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
+        let combined = ctx_tokens + decode_query_tokens;
         let prefix1 = prefix * (ctx_tokens / isl); // prefix * floor(ctx/isl)
         if prefix1 >= combined {
             return Err(AicError::InvalidEngineConfig(format!(
@@ -397,7 +431,7 @@ impl Engine {
                 combined as i64 - prefix1 as i64
             )));
         }
-        total += run_context_ops(
+        let shared_non_attention = run_context_ops(
             &self.context_ops,
             &self.db,
             1,
@@ -411,6 +445,7 @@ impl Engine {
         // Python: batch = ceil(ctx/isl), effective_isl = isl - prefix, then
         // latency["context_attention"] / ceil(isl/ctx). With ctx_tokens == 0
         // Python's `np.ceil(isl/0)` is +inf and the division yields 0 — skip.
+        let mut context_attention = 0.0_f64;
         if ctx_tokens > 0 {
             if prefix >= isl {
                 return Err(AicError::InvalidEngineConfig(format!(
@@ -429,16 +464,17 @@ impl Engine {
                 seq_imbalance_correction_scale,
                 ContextOpFilter::OnlyContextAttention,
             )?;
-            total += attn / scale2;
+            context_attention = attn / scale2;
         }
 
         // ---- Pass 3: decode attention ----
+        let mut decode_attention = 0.0_f64;
         if gen_tokens > 0 {
             let bs = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
             // `_run_generation_phase` queries at s = isl_pass3 + i + 1 with
             // isl_pass3 = isl + osl//2 and a single step (osl=2, i=0).
             let s = isl + osl / 2 + 1;
-            total += run_generation_ops_step(
+            decode_attention = run_generation_ops_step(
                 &self.generation_ops,
                 &self.db,
                 bs,
@@ -448,7 +484,12 @@ impl Engine {
             )?;
         }
 
-        Ok(total)
+        Ok([
+            shared_non_attention + context_attention + decode_attention,
+            shared_non_attention,
+            context_attention,
+            decode_attention,
+        ])
     }
 
     /// One generation-only step latency. LITERAL mirror of Python
@@ -816,6 +857,9 @@ mod tests {
         let engine = build_engine(None);
         let ms = engine.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
         assert!(ms > 0.0 && ms.is_finite(), "mixed-step latency must be > 0, got {ms}");
+        let breakdown = engine.mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        assert_eq!(breakdown[0], breakdown[1] + breakdown[2] + breakdown[3]);
+        assert_eq!(ms, breakdown[0]);
     }
 
     /// Lock the one piece of orchestration that lives ONLY in the Engine: the

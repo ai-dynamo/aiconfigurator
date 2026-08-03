@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-__compat__ = "trtllm>=1.2.0rc6"
+# 1.3.0rc20: the TorchBind run_moe call is padded for the grown C++ schema
+# (see _SlotLoraPaddedRunner) — that padding is invalid on older runtimes.
+__compat__ = "trtllm>=1.3.0rc20"
 
 """
 WideEPMoE compute-only collector (excluding AlltoAll communication).
@@ -73,6 +75,59 @@ aic_debug = int(os.getenv("AIC_MOE_DEBUG", "0"))
 # AIC_ACCURATE_WIDEEP_SIM=1 (default): Accurate mode - DP split + rank0 filter
 # AIC_ACCURATE_WIDEEP_SIM=0: Simple mode - all tokens directly
 aic_accurate_wideep_sim = os.getenv("AIC_ACCURATE_WIDEEP_SIM", "1") == "1"
+
+
+class _SlotLoraPaddedRunner:
+    """Pad the trailing TorchBind ``run_moe`` args dropped by 1.3.0rc20.
+
+    The C++ ``FusedMoeRunner::runMoe`` grew seven trailing optionals — the
+    slot-level routed-expert LoRA inputs and ``token_to_slot``
+    (cpp/tensorrt_llm/thop/moeOp.cpp:415-421@v1.3.0rc20, all defaulting to
+    ``nullopt`` = feature off) — but TorchBind schemas do not honor C++
+    defaults and the wheel's own ``moe_op_cutlass.compute_moe`` still
+    assembles the pre-growth 37-argument call, so every invocation fails
+    with "missing value for argument '_37'". Serving never hits this path
+    (CutlassFusedMoE serves through ``torch.ops.trtllm.fused_moe``). Padding
+    ``None`` reproduces the C++ defaults exactly: same kernel, LoRA off.
+    Re-verify on the next version bump — if upstream fixes their call
+    assembly, this pad must be removed (the arity mismatch fails loudly).
+    """
+
+    _TRAILING_OPTIONALS = 7
+
+    def __init__(self, fused_moe_runner):
+        self._fused_moe_runner = fused_moe_runner
+
+    def __getattr__(self, name):
+        return getattr(self._fused_moe_runner, name)
+
+    def run_moe(self, *args):
+        return self._fused_moe_runner.run_moe(*args, *([None] * self._TRAILING_OPTIONALS))
+
+
+_original_cutlass_compute_moe = CutlassMoEOp.compute_moe
+
+
+def _cutlass_compute_moe_with_slot_lora_pad(self, *args, **kwargs):
+    runner = getattr(self.moe_runner, "fused_moe_runner", None)
+    if runner is not None and not isinstance(runner, _SlotLoraPaddedRunner):
+        self.moe_runner.fused_moe_runner = _SlotLoraPaddedRunner(runner)
+    return _original_cutlass_compute_moe(self, *args, **kwargs)
+
+
+def _install_slot_lora_pad_patch():
+    """Idempotently wrap CutlassMoEOp.compute_moe with the slot-LoRA pad shim.
+
+    Applied at RUN time from run_wideep_moe_compute, not at import time:
+    collect.py imports collector modules before validating their __compat__
+    pin, so an import-time patch would already be live on a pre-rc20 runtime
+    when the CompatibilityError fires — and any other collector in the same
+    process using CutlassMoEOp would then feed run_moe the 7 trailing
+    optionals its runtime does not accept.
+    """
+    if CutlassMoEOp.compute_moe is not _cutlass_compute_moe_with_slot_lora_pad:
+        CutlassMoEOp.compute_moe = _cutlass_compute_moe_with_slot_lora_pad
+
 
 moe_tune_path = os.path.join(THIS_DIR, "wideep_moe_compute_tuned_cache_path")
 
@@ -543,7 +598,15 @@ def get_wideep_moe_compute_all_test_cases():
     - Only for DeepSeek-V3 model with power_law distribution
     """
     moe_list = []
-    if get_sm_version() > 86 and get_sm_version() < 100:
+    if get_sm_version() >= 90:
+        # min_sm 90 mirrors the moe_trtllm fp8_block axis floor
+        # (base_ops/moe.yaml min_sm: 90; hardware-observed on L40S 2026-07-21:
+        # SM89 gate100 failed 100/100 in the DeepGEMM compiler). SM100+ stays
+        # QUEUED even though this WideEP runner's grouped GEMM is
+        # DeepGEMM-JIT-backed and the rc20 compiler accepts exactly SM90 —
+        # that is a framework gap, so the case must fail classified at the
+        # cited runtime raise in run_wideep_moe_compute, not vanish here
+        # (layer_permissions.md: execute or raise).
         moe_list += ["fp8_block"]
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]  # SM100+ uses nvfp4
@@ -572,20 +635,27 @@ def get_wideep_moe_compute_all_test_cases():
         eplb_configs = [
             (False, num_experts),  # EPLB OFF
             (True, num_experts),  # EPLB ON, baseline slots
-            (True, 288),  # EPLB ON, 288 slots
         ]
+        # EPLB ON with the fixed 288-slot production layout. Expert
+        # replication requires num_slots >= num_experts (helper.py
+        # compute_expert_replication identity), so this configuration only
+        # exists for models with <= 288 experts — e.g. Kimi-K2.5's 384
+        # experts cannot be laid out on 288 slots.
+        if num_experts <= 288:
+            eplb_configs.append((True, 288))
 
         for moe_type in moe_list:
             for use_eplb, num_slots in eplb_configs:
-                if moe_type == "nvfp4" and use_eplb and get_sm_version() == 120:
-                    continue
                 # Skip if num_slots is not divisible by ep_size
                 if num_slots % ep_size != 0:
                     continue
-                if moe_type == "nvfp4" and get_sm_version() >= 120 and num_slots // ep_size < common_moe_testcase.topk:
-                    # TRT-LLM 1.3.0rc5 SM120 nvfp4 crashes when a WideEP rank owns
-                    # fewer slots than top-k routed experts.
-                    continue
+                # The two rc5-era SM120 nvfp4 skips that lived here (nvfp4+eplb,
+                # and rank-owns-fewer-slots-than-topk) no longer reproduce:
+                # hardware-verified on RTX PRO 6000 (SM120) 1.3.0rc20 2026-07-26,
+                # both combos run clean and emit finite perf rows through
+                # wideep_compute_cutlass. They were also silent generation-time
+                # filters, which layer_permissions.md forbids — future
+                # regressions should fail at runtime and be recorded instead.
 
                 test_cases.append(
                     [
@@ -648,6 +718,21 @@ def run_wideep_moe_compute(
             - Router and MoE both use full num_tokens
             This is simpler but less accurate for WideEP simulation.
     """
+    # FIXME(kernel-limit): this runner's fp8_block grouped GEMM is
+    # DeepGEMM-JIT-backed even under the CUTLASS runner
+    # (CutlassFp8BlockScaleGemmRunner::moeGemm -> grouped_gemm_dispatch ->
+    # deep_gemm::jit::Compiler), and the rc20 compiler accepts exactly SM90
+    # ("DeepGEMM only supports Hopper (SM90) architectures",
+    # deep_gemm/compiler.cuh:330@1.3.0rc20). Cases stay queued on other SMs
+    # and fail here classified (layer_permissions.md: execute or raise).
+    # Re-verify on the next framework version bump.
+    if moe_type == "fp8_block" and get_sm_version() != 90:
+        raise ValueError(
+            f"WideEP fp8_block grouped GEMM is DeepGEMM-backed and SM90-only in "
+            f"trtllm 1.3.0rc20 (deep_gemm/compiler.cuh:330); got SM{get_sm_version()}"
+        )
+
+    _install_slot_lora_pad_patch()
     # Default num_slots to num_experts (no redundancy)
     if num_slots is None:
         num_slots = num_experts
@@ -773,7 +858,17 @@ def run_wideep_moe_compute(
     cleanup_empty_json_files(moe_tune_path)
     inter_local = inter_size // moe_tp_size
     slots_local = num_slots // moe_ep_size
-    cache_path = f"{moe_tune_path}/wideep_compute_{moe_kernel}_{moe_type}_{hidden_size}_{inter_local}_{slots_local}"
+    # The tuned-tactic cache MUST be SM-scoped: tactic indices are positions
+    # in the runner's per-arch config table, and replaying another arch's
+    # indices overruns the table (hardware-observed on RTX PRO 6000
+    # 2026-07-19: SM100-tuned indices up to 40+ into SM120's size-8 table →
+    # "vector::_M_range_check" in FusedMoeRunner.run_moe, 93/100 gate
+    # failures). Pre-fix cache files without the sm prefix are dead — their
+    # tuning SM is not recorded, so they are never trusted again.
+    cache_path = (
+        f"{moe_tune_path}/wideep_compute_sm{get_sm_version()}_"
+        f"{moe_kernel}_{moe_type}_{hidden_size}_{inter_local}_{slots_local}"
+    )
     existing_files = glob.glob(f"{cache_path}*")
     cache_loaded = False
     if existing_files:

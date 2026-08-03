@@ -62,7 +62,13 @@ from collector.case_generator import (
 )
 from collector.helper import benchmark_with_power, log_perf
 from collector.registry_types import PerfFile
-from collector.vllm.utils import BatchSpec, create_common_attn_metadata, create_vllm_config, setup_distributed
+from collector.vllm.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+    enable_engine_fused_ops,
+    setup_distributed,
+)
 
 __compat__ = "vllm==0.24.0"
 
@@ -138,6 +144,7 @@ def _patched_config_dir(model_id: str, *, compress_ratio: int):
 def _init_cuda(device: str) -> None:
     setup_distributed(device)
     torch.cuda.set_device(device)
+    enable_engine_fused_ops()
     init_workspace_manager(torch.device(device))
 
 
@@ -492,7 +499,17 @@ def _bench_attention_shape(
         if cache_spec is None:
             raise RuntimeError(f"DSV4 {attn_kind} layer did not register a KV-cache spec")
         architecture = hf_config.architectures[0] if hf_config.architectures else ARCHITECTURE
+        # Persisted ``num_heads`` is rank-LOCAL (unified #1429 convention);
+        # consumers derive native as ``num_heads * tp_size``. vllm's own
+        # ``n_local_heads`` is that count — cross-check it against the config
+        # so a TP-simulation regression cannot mislabel rows.
         local_num_heads = int(attn_module.n_local_heads)
+        expected_local = max(1, int(hf_config.num_attention_heads) // tp_size)
+        if local_num_heads != expected_local:
+            raise RuntimeError(
+                f"DSV4 attention head geometry mismatch: module n_local_heads={local_num_heads} != "
+                f"config num_attention_heads // tp_size = {expected_local} (tp_size={tp_size})"
+            )
         num_tokens = batch_size * seq_len if is_context else batch_size
         hidden_states = torch.full(
             (num_tokens, hf_config.hidden_size),

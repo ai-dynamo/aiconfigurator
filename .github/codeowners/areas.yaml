@@ -54,6 +54,9 @@ areas:
       - CODE_OF_CONDUCT.md
       - CONTRIBUTING.md
       - LICENSE
+  - label: devops
+    github_team: "@ai-dynamo/devops"
+    path_globs: []
 
 shared:
   # Preserve the existing policy: maintainers co-own every runtime,
@@ -117,13 +120,15 @@ shared:
   # Preserve the existing cross-area documentation exception.
   - glob: docs/dynamo_deployment_guide.md
     owners: [runtime, infra, docs]
-  # Ownership policy changes require infra and maintainer review (docs area
-  # is the maintainers team), mirroring the previous hand-written policy.
+  # Ownership policy changes require DevOps review.
   - glob: CODEOWNERS
-    owners: [infra, docs]
+    owners: [devops]
 
 classify:
   keyword_rules:
     - match: generator
       area: generators
-  filetype_rules: []
+  # Cargo license policy changes require DevOps review at any depth.
+  filetype_rules:
+    - pattern: deny.toml
+      coowner: devops

@@ -163,6 +163,60 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         assert point_rt.batch_size == 1
 
 
+def test_sweep_agg_disables_gen_dedup_for_speculative_schedules(monkeypatch):
+    """The capped-gen dedup key assumes the non-speculative schedule; under
+    fractional decode iterations it merges batches whose real backend
+    schedules differ (e.g. vLLM runs b - ceil(ctx/isl) decode requests, which
+    distinguishes b=5 from the batch its capped key collides with). With an
+    active profile every guard-passing point must therefore be evaluated,
+    while an inactive profile must reproduce the legacy point set exactly."""
+    from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
+
+    def _run(profile):
+        points: list[tuple[int, int]] = []
+
+        def _record(*, runtime_config, ctx_tokens, **_kwargs):
+            points.append((runtime_config.batch_size, ctx_tokens))
+            summary = MagicMock()
+            summary.check_oom.return_value = False
+            summary.check_kv_cache_oom.return_value = False
+            summary.get_result_dict.return_value = {"ttft": 1.0, "tpot": 1.0}
+            summary.get_per_ops_source.return_value = {}
+            return summary
+
+        monkeypatch.setattr(sweep, "predict_agg_worker", _record)
+        sweep._sweep_one_parallel_agg(
+            model=MagicMock(),
+            backend=MagicMock(),
+            database=MagicMock(),
+            runtime_config=config.RuntimeConfig(isl=1024, osl=4, ttft=1e9, tpot=1e9),
+            top_k=0,
+            max_batch_size=64,
+            ctx_stride=512,
+            enable_chunked_prefill=False,
+            free_gpu_memory_fraction=None,
+            max_seq_len=None,
+            speculative_profile=profile,
+        )
+        return points
+
+    baseline = _run(None)
+    inactive = _run(SpeculativeDecodingProfile(0.0))
+    speculative = _run(SpeculativeDecodingProfile(1.0))  # progress = 2.0
+
+    assert inactive == baseline
+    # No dedup under speculation: the baseline's evaluated points are a strict
+    # subset (dedup only ever removes points, and at osl=4 it removes some).
+    assert set(baseline) < set(speculative)
+    # Hand-checked point the legacy key drops: at isl=ctx_tokens=1024, b=6
+    # gives balance 6/4 = 1.5 -> capped gen 6//1.5 = 4, colliding with b=5's
+    # group (5//1.25 = 4), so the baseline dedups it away; with speculation
+    # active it must be evaluated.
+    assert (6, 1024) not in baseline
+    assert (6, 1024) in speculative
+    assert len(speculative) == len(set(speculative))
+
+
 # ---------------------------------------------------------------------------
 # sweep_disagg validation
 # ---------------------------------------------------------------------------

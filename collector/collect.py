@@ -729,15 +729,29 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             "timestamp": datetime.now().isoformat(),
         }
 
+    # Parent-side exactly-once ledger of finished task IDs. The monitoring
+    # loop's exit condition MUST NOT depend on worker-side progress_value
+    # ticks: a worker records done_tasks/failed_tasks and bumps
+    # progress_value as separate manager RPCs, so a hard kill between them
+    # (hardware-observed on H20 2026-07-19: TRT-LLM C++ teardown SIGABRT
+    # right after the task completed) loses the tick forever — the run then
+    # sat at 99/100 with a complete checkpoint and every GPU idle. Every
+    # task that reaches done_tasks or failed_tasks lands here exactly once
+    # via sync_done_to_checkpoint, so `len(accounted)` is the authoritative
+    # completion count; progress_value remains for worker-side GC cadence.
+    accounted = set()
+
     def sync_done_to_checkpoint():
         for task_id in list(done_tasks.keys()):
             resume_tracker.mark_passed(task_id)
+            accounted.add(task_id)
             try:
                 del done_tasks[task_id]
             except KeyError:
                 pass
         for task_id in list(failed_tasks.keys()):
             resume_tracker.mark_failed(task_id)
+            accounted.add(task_id)
             try:
                 del failed_tasks[task_id]
             except KeyError:
@@ -777,8 +791,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 try:
                     func(*task_params, device=device)
                     resume_tracker.mark_passed(task_id)
+                    accounted.add(task_id)
                 except Exception as e:
                     resume_tracker.mark_failed(task_id)
+                    accounted.add(task_id)
                     error_info = {
                         "module": module_name,
                         "device_id": 0,
@@ -801,7 +817,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 resume_tracker.flush()
             resume_tracker.flush(force=True)
 
-        while progress_value.value < len(task_infos):
+        while len(accounted) < len(task_infos):
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
@@ -814,14 +830,14 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 pbar.set_postfix({"errors": len(errors)})
                 last_error_count = len(errors)
 
-            if progress_value.value == last_progress:
+            if len(accounted) == last_progress:
                 stall_count += 1
                 if stall_count > STALL_THRESHOLD:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
+                    logger.warning(f"Progress stalled at {len(accounted)}/{len(task_infos)}")
                     stall_count = 0
             else:
                 stall_count = 0
-                last_progress = progress_value.value
+                last_progress = len(accounted)
 
             # Check process health — only restart if there is still work
             # remaining.  Workers that consumed a None sentinel or finished
@@ -848,8 +864,17 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                             f"errors: {len(process_stats[i]['errors'])})"
                         )
 
-                    # Mark active task as failed if the process died while running it
-                    if active_task_id is not None and active_task_id not in done_tasks:
+                    # Mark active task as failed if the process died while
+                    # running it. The `accounted` guard covers the window
+                    # where the worker recorded done but died before its
+                    # progress tick and the sync already drained done_tasks:
+                    # without it the parent would re-mark a passed task as
+                    # failed (mislabel) on top of double-counting it.
+                    if (
+                        active_task_id is not None
+                        and active_task_id not in done_tasks
+                        and active_task_id not in accounted
+                    ):
                         try:
                             failed_tasks[active_task_id] = True
                         except Exception:
@@ -874,13 +899,52 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         processes[i] = None
                         continue
 
-                    remaining = len(task_infos) - progress_value.value
+                    remaining = len(task_infos) - len(accounted)
                     if remaining > 0:
                         processes[i] = start_process(i)
                     else:
                         processes[i] = None
 
-            current = progress_value.value
+            # Escape hatch: every worker slot is permanently gone (restart
+            # limit, consumed sentinel, or no remaining work to justify a
+            # restart) while tasks are still unaccounted — e.g. a worker was
+            # SIGKILLed after queue.get() but before it recorded anything in
+            # done_tasks/current_task_ids. Without this the monitor loop
+            # would spin at 0.5s forever with nothing able to make progress.
+            # Record the orphaned ids as failures so the summary and resume
+            # checkpoint stay complete, then stop the loop.
+            if all(p is None for p in processes) and len(accounted) < len(task_infos):
+                while not error_queue.empty():
+                    error = error_queue.get()
+                    errors.append(error)
+                    process_stats[error["device_id"]]["errors"].append(error["task_id"])
+                sync_done_to_checkpoint()
+                orphaned = [info["id"] for info in task_infos if info["id"] not in accounted]
+                if orphaned:
+                    logger.error(
+                        f"All workers exited with {len(orphaned)} task(s) unaccounted; "
+                        f"recording them as failed (orphaned by worker death) and stopping the monitor loop."
+                    )
+                    for task_id in orphaned:
+                        errors.append(
+                            {
+                                "module": module_name,
+                                "device_id": None,
+                                "task_id": task_id,
+                                "task_params": None,
+                                "error_type": "WorkerOrphanedTask",
+                                "error_message": "all workers exited before this task was accounted",
+                                "classification": "unexpected",
+                                "group": None,
+                                "traceback": "",
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+                        failed_tasks[task_id] = True
+                    sync_done_to_checkpoint()
+                break
+
+            current = len(accounted)
             if current > pbar.n:
                 pbar.update(current - pbar.n)
 
