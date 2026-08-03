@@ -1,3 +1,5 @@
+> **DEPRECATED — superseded by `collector/wideep/sglang/collect_moe_a2a.py`.** The standalone `moe_a2a` collector runs the same DeepEP HT and low-latency benchmarks as a Collector-V3 citizen: it emits the unified `moe_a2a_perf` table directly at measurement time with live identity columns (`node_num` from `WORLD_SIZE // --gpus-per-node`, device from torch, version cross-checked against the `wideep_sglang` manifest pin) and writes a real `collection_meta.yaml` sidecar. The scripts below and `extract_data.py` derive those same columns from module-level constants and log filenames (`extract_data.py:14-21`), which is why they are being retired. They remain here only until the new collector is hardware-validated; **do not add new data to the shipped tables via `extract_data.py`.**
+
 Guidance for collecting deepep data in normal and low-latency modes.
 
 Notes:

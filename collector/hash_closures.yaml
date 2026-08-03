@@ -185,6 +185,13 @@ collector.wideep.sglang.collect_deepep_normal:
   - collector/wideep/sglang/deepep/test_intranode.py
   - collector/wideep/sglang/deepep/test_low_latency.py
   - collector/wideep/sglang/deepep/utils.py
+collector.wideep.sglang.collect_moe_a2a:
+  # moe_a2a (standalone multi-node): the workload grid it reads plus the
+  # declared model shapes it correlates against. The DeepEP benchmark
+  # internals (kineto timing, tuning sweeps) are vendored INTO the module, so
+  # the deprecated deepep/ scripts are deliberately not in this closure.
+  - collector/cases/base_ops/moe_a2a.yaml
+  - collector/cases/base_ops/moe.yaml
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
   # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
