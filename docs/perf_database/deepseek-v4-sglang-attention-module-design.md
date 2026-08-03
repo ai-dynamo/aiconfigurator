@@ -314,6 +314,15 @@ consumer contract — vllm writes both `num_heads` (native) and
 `local_num_heads` there explicitly, and all sglang rows are tp=1 where the
 two readings coincide.
 
+The CSA topK DELTA calibration is additionally selector-geometry-specific:
+Flash runs `index_topk=512`, Pro `index_topk=1024`, so a Flash-collected
+DELTA must never be subtracted from a Pro query. The consumers key the DELTA
+by the calibration row's native `num_heads` and apply it only on an exact
+native match (#1460 review / #1468). Coverage limitation: the shipped
+calibration is Flash-only today, so **Pro CSA latencies stay uncorrected**
+for the collector's degenerate-topk inflation (a one-time warning is logged)
+until Pro calibration is collected.
+
 SGLang may zero-pad Q back to the native 64-head shape inside the FlashMLA
 backend, but that padding is an implementation detail of the module
 execution. This convention keeps DeepSeek-V4 consistent with the other

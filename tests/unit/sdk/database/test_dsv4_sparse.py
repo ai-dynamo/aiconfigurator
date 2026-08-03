@@ -846,3 +846,54 @@ def test_load_dsv4_kind_module_data_requires_tp_size_column(tmp_path):
     path = _write_csv(tmp_path / "hca_gen_no_tp.txt", header_no_tp, [row])
     with pytest.raises(ValueError, match="tp_size"):
         load_generation_dsv4_kind_module_data(path)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #1460 review fixes: mixed unparseable tp_size; per-native topk calib
+# ───────────────────────────────────────────────────────────────────────
+
+
+def test_load_dsv4_module_rejects_mixed_unparseable_tp_size(tmp_path):
+    """A row with an empty tp_size among rows that carry one must fail: the
+    silent tp=1 fallback would derive native = num_heads and file the row in a
+    wrong native bucket (#1460 review)."""
+    rows = [
+        _ctx_row(attn_kind="csa", cr=4, bs=1, isl=8192, tp=2, lat=14.0, model=_PRO_MODEL),
+    ]
+    # Same schema, tp_size cell left empty.
+    broken = rows[0].rsplit(",", 3)
+    broken_row = ",".join([broken[0].rsplit(",", 1)[0], "", broken[1], broken[2], broken[3]])
+    path = _write_csv(tmp_path / "csa_ctx_mixed_tp.txt", _CTX_HEADER, rows + [broken_row])
+    with pytest.raises(ValueError, match="without a parseable"):
+        load_context_dsv4_kind_module_data(path)
+
+
+def test_topk_calib_keys_by_native_and_never_borrows(tmp_path):
+    """DELTA calibration nests per native and only the matching identity
+    consumes it — Pro (128) must not borrow Flash (64) deltas (#1460 review)."""
+    from types import SimpleNamespace
+
+    from aiconfigurator.sdk.operations.dsv4 import (
+        _build_topk_calib_from_rows,
+        _dsv4_topk_calib_for_native,
+        _dsv4_topk_delta_ms,
+    )
+
+    by_native = {
+        64: {
+            0: {512: {8: {"v1_flat": {"latency": 0.30}, "v1_top_last": {"latency": 0.18}}}},
+        }
+    }
+    calib = _build_topk_calib_from_rows(by_native)
+    assert set(calib.keys()) == {64}
+    db = SimpleNamespace(system="b200_sxm", backend="sglang", version="0.5.14")
+
+    flash = _dsv4_topk_calib_for_native(calib, 64, db)
+    assert flash is not None
+    assert _dsv4_topk_delta_ms(flash.get("v1"), 0, 512, 8) == pytest.approx(0.12)
+
+    pro = _dsv4_topk_calib_for_native(calib, 128, db)
+    assert pro is None  # logged no-op, never a borrowed correction
+    assert _dsv4_topk_delta_ms((pro or {}).get("v1"), 0, 512, 8) == 0.0
+
+    assert _dsv4_topk_calib_for_native(None, 64, db) is None
