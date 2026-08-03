@@ -148,6 +148,7 @@ class TestCLIIntegration:
             {"afd": MagicMock(name="ResultsDF")},
             {"afd": 123.4},
             {"afd": {"ttft": 100.0, "tpot": 10.0, "request_latency": 1000.0}},
+            {},
         )
 
         args = cli_args_factory(
