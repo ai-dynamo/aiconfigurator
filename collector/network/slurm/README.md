@@ -93,3 +93,69 @@ bash submit_moe_a2a.sh
 # Custom worlds / kernel families
 bash submit_moe_a2a.sh --gpu-list 8,16 --modes deepep_ht
 ```
+
+Configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT` and `PARTITION`
+via environment variables; `--gpus-per-node` must divide every entry of
+`--gpu-list` (the collector derives `node_num = WORLD_SIZE // gpus_per_node`
+and raises on a non-integral node count).
+
+## 4.1 Per-job output directories
+
+Each world size runs as its own Slurm job writing to its own
+`results/moe_a2a_<N>gpu/` directory: the collector finalizes
+`moe_a2a_perf.parquet` and attests a world-specific `collection_meta.yaml`
+per run, so jobs must not share one output file across worlds (within a job,
+all cases append to that job's single staging CSV via `helper.log_perf`'s
+lockfile). The trtllm alltoall launcher (section 3) uses the same per-job
+layout under `results/moe_a2a_<kernel-source>.<N>gpu/`.
+
+## 4.2 MASTER_PORT collision on co-scheduled jobs
+
+Every job exports a fixed `MASTER_PORT=29500` on its own head node. Worlds
+that occupy whole nodes cannot collide, but if two jobs are packed onto a
+shared node (e.g. `--gpus-per-node` smaller than the physical GPU count, or
+other torch-distributed jobs on the same machine) and both elect that node as
+rank-0 host, the second rendezvous fails to bind. Symptoms: a job stuck in
+`init_process_group` or dying with "address already in use". Workaround:
+serialize the submissions or edit the exported port per job in
+`submit_moe_a2a.sh`.
+
+## 4.3 Publishing across jobs
+
+The launcher deliberately produces one `(parquet, sidecar)` pair per world
+size, but the SDK consumes ONE `moe_a2a_perf.parquet` per
+`(system, backend, version)` directory in the family tree:
+
+```
+aic-core/src/aiconfigurator_core/systems/data/<system>/comm/sglang/<version>/moe_a2a_perf.parquet
+aic-core/src/aiconfigurator_core/systems/data/<system>/comm/sglang/<version>/collection_meta.yaml
+```
+
+(`moe_a2a_perf` maps to the `comm` family in
+`collector/op_backend_catalog.yaml`; `wideep_sglang` publishes under its
+`data_backend`, `sglang`, at the manifest-pinned version. The trtllm
+alltoall results publish the same way under `comm/trtllm/<version>/`.)
+
+**There is no automated cross-job merge tool today** — be honest about this
+gap when publishing. `tools/perf_database/migrate_family_layout.py` only
+relocates existing tables into the family layout, and `collect.py`'s sidecar
+handling merges *different* table stems written into one directory: for the
+same stem (`moe_a2a_perf` from every world) a later entry would replace the
+earlier one, not combine them. The working procedure is manual:
+
+1. Verify every per-job sidecar first: identical `runtime` block, identical
+   `collector_ref`/`collector_hash` (same commit, same image). Jobs collected
+   from different commits or images must not be merged into one attestation.
+2. Concatenate the per-job parquets row-wise into one `moe_a2a_perf.parquet`
+   (worlds are disjoint on the `ep_size`/`node_num` key axes, so plain
+   concatenation cannot collide).
+3. Regenerate ONE sidecar entry for the merged table: `rows` = the merged row
+   count; `status` = `complete` only if every per-job sidecar was complete
+   (otherwise `partial`); `case_plan_hash` =
+   `provenance.case_plan_hash(sorted(union of per-world case-id lists))`,
+   where each world's ids are reproduced GPU-free from the collector commit
+   the sidecars pin (`build_case_plan` + `case_plan_ids` with that world's
+   `ep_size`/`node_num` — the same functions the run used).
+4. Never copy a parquet without its sidecar, and never merge fresh provenance
+   into a `provenance: legacy` directory — publish to a fresh runtime
+   directory or migrate every table in that directory together.
