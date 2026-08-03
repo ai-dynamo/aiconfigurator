@@ -589,3 +589,13 @@ open item it leaves — the kda_onorm ~0.2 ms/step double-count on the
 fused decode shard — is now tracked as issue #1463 (with recovery
 pointers to the branch history for every deleted artifact). W4A8
 MegaMoE follow-up is issue #1462.
+
+rtx K3 moe DONE 2026-08-03 (the last deferred sglang data item): 551
+w4a16_mxfp4 marlin rows merged (114,211 -> 114,762), collected on 8x
+RTX PRO 6000 via the comm-op computelab routing (pipeline 60790079, 70
+min wall vs the abandoned 1-GPU dlcluster run that burned 5 windows on
+failure replay — lesson: high-failure grids go straight to 8-GPU).
+SM120 confirmed as the FOURTH marlin EP>1 IMA family (2,527 cells vs
+h100 2,537 / h200 2,587). The 1-GPU job was canceled after the 8-GPU
+artifact verified. Upstream sglang issue for the marlin EP>1 crash is
+still unfiled — now reproducible on four system families.
