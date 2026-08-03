@@ -600,3 +600,14 @@ SM120 confirmed as the FOURTH marlin EP>1 IMA family (2,527 cells vs
 h100 2,537 / h200 2,587). The 1-GPU job was canceled after the 8-GPU
 artifact verified. Upstream sglang issue for the marlin EP>1 crash is
 still unfiled — now reproducible on four system families.
+
+RE-BASELINE ITEM (2026-08-03, opened while refreshing the PR body): the
+b300 TP8 isl1024 DSPARK reference step is now 19.8 ms at current head
+vs the 17.7 ms recorded on 2026-08-02 (which sat ~5% above the
+uniform-corrected 16.8 ms E2E). The no-spec number moved as expected
+with the shared-expert fix (14.37 -> 13.94 ms), but the spec step grew
+~2 ms — prime suspect is upstream #1410 ("model speculative progress
+in agg scheduling"), merged from main on 2026-08-03, which changes agg
+step semantics under speculation. Needs a bisect across the merge
+before re-asserting any E2E step-delta claim; the PR body now quotes
+current-head numbers and flags the claim as being re-baselined.
