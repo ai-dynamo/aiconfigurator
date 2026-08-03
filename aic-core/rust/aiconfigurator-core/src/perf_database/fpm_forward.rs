@@ -320,6 +320,21 @@ struct FpmRow {
     latency_ms: f64,
 }
 
+impl FpmRow {
+    /// The logical cell key: which table slot this row lands in. The
+    /// coordinate-collision check and the grouping loop MUST use the same
+    /// key, or a colliding row could slip past the check and silently
+    /// last-win in the grouped cell — hence one shared constructor.
+    fn cell_key(&self) -> Vec<String> {
+        let mut key = Vec::with_capacity(3 + self.match_identity.len());
+        key.push(self.model_path.clone());
+        key.push(self.backend_axis.clone());
+        key.push(self.backend_policy.clone());
+        key.extend(self.match_identity.iter().cloned());
+        key
+    }
+}
+
 fn load_pair(
     parquet_path: &Path,
     system: &str,
@@ -552,13 +567,8 @@ fn load_pair(
     let mut seen_coords: std::collections::BTreeSet<(Vec<String>, &str, u32, u32, u32)> =
         std::collections::BTreeSet::new();
     for (index, row) in rows.iter().enumerate() {
-        let mut cell_key = Vec::with_capacity(3 + row.match_identity.len());
-        cell_key.push(row.model_path.clone());
-        cell_key.push(row.backend_axis.clone());
-        cell_key.push(row.backend_policy.clone());
-        cell_key.extend(row.match_identity.iter().cloned());
         if !seen_coords.insert((
-            cell_key,
+            row.cell_key(),
             row.workload_kind.as_str(),
             row.batch_size,
             row.total_prefill_tokens,
@@ -579,12 +589,7 @@ fn load_pair(
     }
     let mut cells: BTreeMap<Vec<String>, Building> = BTreeMap::new();
     for row in &rows {
-        let mut cell_key = Vec::with_capacity(3 + row.match_identity.len());
-        cell_key.push(row.model_path.clone());
-        cell_key.push(row.backend_axis.clone());
-        cell_key.push(row.backend_policy.clone());
-        cell_key.extend(row.match_identity.iter().cloned());
-        let building = cells.entry(cell_key).or_insert_with(|| Building {
+        let building = cells.entry(row.cell_key()).or_insert_with(|| Building {
             cell: FpmForwardCell {
                 model_path: row.model_path.clone(),
                 backend_axis: row.backend_axis.clone(),
