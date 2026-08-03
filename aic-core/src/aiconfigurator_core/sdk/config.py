@@ -40,7 +40,9 @@ class ModelConfig:
     # model builder falvors
     sms: int = 20
     moe_backend: str = None  # SGLang MoE backend: deepep_moe, megamoe, or None
-    attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
+    # None / "auto" follows the reviewed framework default; explicit values are
+    # preserved and must have exact performance coverage.
+    attention_backend: str | None = None
     enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None

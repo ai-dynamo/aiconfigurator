@@ -105,7 +105,7 @@ def task_config_to_generator_config(
     ):
         encoder_dp = bool(getattr(task_config, "enable_encoder_dp", True))
 
-    def _build_worker_params(prefix: str, extra_overrides: dict | None) -> tuple[dict, int]:
+    def _build_worker_params(prefix: str, role: str, extra_overrides: dict | None) -> tuple[dict, int]:
         workers = _safe_int(_series_val(result_df, f"{prefix}workers", 1), 1)
         tp = _safe_int(_series_val(result_df, f"{prefix}tp", 1), 1)
         pp = _safe_int(_series_val(result_df, f"{prefix}pp", 1), 1)
@@ -140,6 +140,12 @@ def task_config_to_generator_config(
             worker_payload["kv_cache_dtype"] = quant["kvcache_quant_mode"]
         if encoder_dp is not None:
             worker_payload["enable_encoder_dp"] = encoder_dp
+
+        resolve_deployment_backend = getattr(task_config, "get_deployment_attention_backend", None)
+        if callable(resolve_deployment_backend):
+            attention_backend = resolve_deployment_backend(role=role)
+            if attention_backend is not None:
+                worker_payload["attention_backend"] = attention_backend
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)
@@ -207,7 +213,7 @@ def task_config_to_generator_config(
     effective_total_gpus = _safe_int(_series_val(result_df, "total_gpus_needed", None), None) or task_config.total_gpus
 
     if task_config.serving_mode == "agg":
-        agg_params, agg_workers = _build_worker_params("", worker_overrides.get("agg"))
+        agg_params, agg_workers = _build_worker_params("", "agg", worker_overrides.get("agg"))
         if effective_total_gpus:
             tp = agg_params.get("tensor_parallel_size", 1)
             pp = agg_params.get("pipeline_parallel_size", 1)
@@ -218,8 +224,8 @@ def task_config_to_generator_config(
         decode_params, decode_workers = None, 0
     else:
         agg_params, agg_workers = None, 0
-        prefill_params, prefill_workers = _build_worker_params("(p)", worker_overrides.get("prefill"))
-        decode_params, decode_workers = _build_worker_params("(d)", worker_overrides.get("decode"))
+        prefill_params, prefill_workers = _build_worker_params("(p)", "prefill", worker_overrides.get("prefill"))
+        decode_params, decode_workers = _build_worker_params("(d)", "decode", worker_overrides.get("decode"))
 
         # Scale disagg workers based on total GPU count (similar to agg mode)
         if effective_total_gpus and prefill_params and decode_params:

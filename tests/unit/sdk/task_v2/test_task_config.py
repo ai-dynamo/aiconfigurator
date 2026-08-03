@@ -271,6 +271,41 @@ def test_attention_backend_and_wideep_num_slots_reach_model_config():
     assert mc.wideep_num_slots == 288
 
 
+@pytest.mark.parametrize(
+    ("system_name", "expected_backend"),
+    [("h200_sxm", "fa3"), ("b200_sxm", "trtllm_mla")],
+)
+def test_unspecified_wideep_attention_backend_tracks_sglang_default(system_name, expected_backend):
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name=system_name,
+        backend_name="sglang",
+        backend_version="0.5.10",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+
+    assert t.build_model_config(role="agg").attention_backend == expected_backend
+    assert t.get_deployment_attention_backend(role="agg") == expected_backend
+
+
+def test_explicit_wideep_attention_backend_is_preserved_on_blackwell():
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="b200_sxm",
+        backend_name="sglang",
+        backend_version="0.5.10",
+        enable_wideep=True,
+        attention_backend="flashinfer",
+        total_gpus=64,
+    )
+
+    assert t.build_model_config(role="agg").attention_backend == "flashinfer"
+    assert t.get_deployment_attention_backend(role="agg") == "flashinfer"
+
+
 def test_invalid_attention_backend_rejected():
     t = Task(
         serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", attention_backend="torch"
