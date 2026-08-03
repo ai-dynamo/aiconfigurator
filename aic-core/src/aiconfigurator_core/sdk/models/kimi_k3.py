@@ -140,13 +140,6 @@ class KimiK3Model(BaseModel):
             "full": cfg.layer_types.count("full_attention"),
         }
 
-    def _bmm_heads_pow2(self, tp: int) -> int:
-        heads = self._num_heads // tp
-        p = 1
-        while p < heads:
-            p *= 2
-        return p
-
     def _mla_dims(self, cfg: common.KimiK3Config) -> dict[str, int]:
         n = self._num_heads
         return {
@@ -423,11 +416,12 @@ class KimiK3Model(BaseModel):
                     ops.ElementWise("generation_mla_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
                     ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
-                    # Query the next power-of-two head slice with a count
-                    # ratio (bmm is per-head batched). The 96-family exact
-                    # rows collected on b200 sglang are NOT consumed yet —
-                    # exact-first routing needs data-presence fallback on
-                    # every other system (fast-follow, see bring-up ledger).
+                    # The absorb BMMs are priced per exact local head count
+                    # (96-family for K3). The mla_bmm query routes
+                    # exact-first: systems without exact rows (only b200
+                    # sglang carries them today) fall back to the next-pow2
+                    # DeepSeek slice scaled by the head ratio — see
+                    # operations/mla.py::MLABmm._query_mla_bmm_table.
                     *(
                         [
                             ops.GenerationAttention(
@@ -443,8 +437,8 @@ class KimiK3Model(BaseModel):
                         else [
                             ops.MLABmm(
                                 "generation_bmm_pre",
-                                c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
-                                self._bmm_heads_pow2(tp),
+                                c,
+                                self._num_heads // tp,
                                 mla_bmm_q,
                                 if_pre=True,
                             ),
@@ -456,8 +450,8 @@ class KimiK3Model(BaseModel):
                             ),
                             ops.MLABmm(
                                 "generation_bmm_post",
-                                c * (self._num_heads // tp) / self._bmm_heads_pow2(tp),
-                                self._bmm_heads_pow2(tp),
+                                c,
+                                self._num_heads // tp,
                                 mla_bmm_q,
                                 if_pre=False,
                             ),

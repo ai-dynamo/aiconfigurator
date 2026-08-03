@@ -415,6 +415,29 @@ impl MlaTable {
         non_empty_points(node, "MLA BMM", &self.data_root)
     }
 
+    /// Whether the `(quant, op_name, num_heads)` BMM slice has rows —
+    /// data-presence probe for the exact-head-first routing
+    /// (`operators/mla.rs::resolve_bmm_slice_heads`). No bfloat16 quant
+    /// fallback here; the caller resolves the quant via
+    /// [`Self::bmm_selected_quant`] first. Errs only when the whole BMM
+    /// table failed to load.
+    pub fn bmm_has_heads(
+        &self,
+        quant: GemmQuantMode,
+        is_pre: bool,
+        num_heads: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load_bmm()?;
+        let key = BmmKey {
+            bmm_quant: quant.name().to_string(),
+            pre_or_post: if is_pre { "mla_gen_pre" } else { "mla_gen_post" }.to_string(),
+        };
+        Ok(grids
+            .by_keys
+            .get(&key)
+            .is_some_and(|by_heads| by_heads.contains_key(&num_heads)))
+    }
+
     /// Collected `(num_heads, seq, batch) -> latency` points of the
     /// module-level context MLA `(fmha, kv, gemm)` slice. Typed miss when
     /// absent/empty.

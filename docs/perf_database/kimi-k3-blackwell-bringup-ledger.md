@@ -625,10 +625,30 @@ real Inferact MLA-style geometry (latent projections + latent KV,
 priced via the same MLA-as-attention convention as the main layers;
 the former WON'T-FIX is closed). Remaining findings parked as
 fast-follows: 96-family mla_bmm rows unreachable by the pow2 query
-(needs owner decision: exact-first routing vs comment fix), SM89 vllm
+(RESOLVED 2026-08-03, see below), SM89 vllm
 kda rows fall to SOL (no reverse alias), tp16/32 nearest-shard
 unscaled fallback, vllm mla_bmm dtype filter belongs in YAML override,
 resolve_kimi_k3_moe_arch_mode should match config not path string,
 underived 232/128 literals in the gate GEMV chain, dead
 sol_latency_ms in Rust, no-op tensors.clear() in vllm collect_kda,
 zero-expanding trtllm quant lane needs a comment.
+
+96-family mla_bmm rows RESOLVED 2026-08-03 (owner picked exact-first
+routing): KimiK3Model now passes the exact local head count (96/48/24/12)
+to MLABmm at count scale 1.0, and the mla_bmm query layer routes
+exact-head-first with a data-presence fallback — when the exact slice has
+no rows it reroutes to the next-pow2 DeepSeek slice scaled linearly by the
+head ratio, arithmetically reproducing the old pow2+count-ratio modeling
+(Python MLABmm._query_mla_bmm_table + Rust
+operators/mla.rs::resolve_bmm_slice_heads, twin-commented). Effect: b200
+sglang (the only system with exact rows today, +424) prices the absorb
+BMMs from measured 96-family rows — the tp8 12-head shard is ~34% slower
+than the old 16-head*0.75 linear scaling at small tokens (launch-overhead
+regime the ratio model idealized away): agg tp8pp2 spec bs1 tpot 3.381 ->
+3.391 ms, ttft unchanged. Every other system is numerically unchanged
+(b300 agg spec bs1 tpot 3.296 ms bit-identical). Python-vs-Rust: b300
+support-matrix --compare-engine-step-backends green; b200 verified by
+running both engine-step backends directly (identical tpot/ttft) because
+the b200 support-matrix cell fails on a PRE-EXISTING K3 memory-fit issue
+(tp8 w4a8 weights exceed the 180 GiB modeled capacity; unrelated to this
+change, fails identically on the parent commit).

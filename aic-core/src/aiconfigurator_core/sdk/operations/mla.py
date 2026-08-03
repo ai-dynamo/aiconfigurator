@@ -501,6 +501,40 @@ class MLABmm(Operation):
     # ------------------------------------------------------------------
 
     @classmethod
+    def _resolve_slice_heads(
+        cls,
+        database: PerfDatabase,
+        quant_mode: common.GEMMQuantMode,
+        op_name: str,
+        num_heads: int,
+    ) -> int:
+        """Head slice the mla_bmm table queries run against.
+
+        Exact-head-first: return ``num_heads`` when the table has rows for
+        the exact requested head count, else the next power of two — the
+        DeepSeek grid every dataset carries (exact rows for non-pow2 shards,
+        e.g. Kimi-K3's 96/48/24/12, exist only where re-collected). Callers
+        scale the slice's result by ``num_heads / slice_heads``. A missing
+        table/slice also resolves to the pow2 fallback so downstream misses
+        keep the legacy error shape. Rust twin:
+        ``operators/mla.rs::resolve_bmm_slice_heads``.
+        """
+        pow2 = 1
+        while pow2 < num_heads:
+            pow2 *= 2
+        if pow2 == num_heads:
+            return num_heads
+        try:
+            cls.load_data(database)
+            wrapper = database._mla_bmm_data
+            wrapper.raise_if_not_loaded()
+            qm = quant_mode if quant_mode in wrapper else common.GEMMQuantMode.bfloat16
+            util_empirical.require_data_slice(wrapper, qm, op_name, num_heads)
+        except PerfDataNotAvailableError:
+            return pow2
+        return num_heads
+
+    @classmethod
     def _query_mla_bmm_table(
         cls,
         database: PerfDatabase,
@@ -510,7 +544,7 @@ class MLABmm(Operation):
         if_pre: bool = True,
         database_mode: common.DatabaseMode | None = None,
     ):
-        """Query MLA BMM table. Verbatim port of the legacy body."""
+        """Query MLA BMM table (legacy body + exact-head-first routing)."""
 
         def get_sol(
             num_tokens: int, num_heads: int, quant_mode: common.GEMMQuantMode, if_pre: bool
@@ -555,8 +589,20 @@ class MLABmm(Operation):
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
         elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol(num_tokens, num_heads, quant_mode, if_pre)
-        elif database_mode == common.DatabaseMode.EMPIRICAL:
-            emp_latency = get_empirical(num_tokens, num_heads, quant_mode, if_pre)
+
+        # Exact-head-first routing with a data-presence fallback: query the
+        # exact head slice at scale 1.0 when it has rows, otherwise the
+        # next-pow2 DeepSeek slice scaled linearly by the head ratio (BMM is
+        # per-head batched; reproduces the legacy count-ratio modeling for
+        # Kimi-K3's 96-family shards). The SOL modes above are exactly
+        # linear in num_heads and need no routing. Rust twin:
+        # ``operators/mla.rs::query_mla_bmm_table``.
+        op_name = "mla_gen_pre" if if_pre else "mla_gen_post"
+        slice_heads = cls._resolve_slice_heads(database, quant_mode, op_name, num_heads)
+        head_scale = num_heads / slice_heads
+
+        if database_mode == common.DatabaseMode.EMPIRICAL:
+            emp_latency = get_empirical(num_tokens, slice_heads, quant_mode, if_pre) * head_scale
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
 
         cls.load_data(database)
@@ -568,8 +614,8 @@ class MLABmm(Operation):
             mla_bmm_dict = util_empirical.require_data_slice(
                 data_wrapper,
                 quant_mode_lookup,
-                "mla_gen_pre" if if_pre else "mla_gen_post",
-                num_heads,
+                op_name,
+                slice_heads,
             )
             # 1-D tokens curve on the raw table: RAW lerp in range (BMM is
             # ~linear in tokens); boundary util-hold beyond it via the BMM SOL
@@ -577,16 +623,16 @@ class MLABmm(Operation):
             config = perf_interp.OpInterpConfig(
                 axes=("num_tokens",),
                 resolver=perf_interp.Grid(),
-                sol_fn=lambda t: get_sol(t, num_heads, quant_mode, if_pre)[0],
+                sol_fn=lambda t: get_sol(t, slice_heads, quant_mode, if_pre)[0],
             )
             result = perf_interp.query(config, mla_bmm_dict, num_tokens)
             lat = perf_interp.get_value(result, "latency")
             energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat, energy=energy)
+            return database._interp_pr(lat * head_scale, energy=energy * head_scale)
 
         return database._query_silicon_or_hybrid(
             get_silicon=get_silicon,
-            get_empirical=lambda: get_empirical(num_tokens, num_heads, quant_mode, if_pre),
+            get_empirical=lambda: get_empirical(num_tokens, slice_heads, quant_mode, if_pre) * head_scale,
             database_mode=database_mode,
             error_msg=f"Failed to query mla bmm data for {num_tokens=}, {num_heads=}, {quant_mode=}, {if_pre=}",
         )
