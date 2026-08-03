@@ -2,12 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
-  framework: sglang
+  framework: wideep_sglang
   version: 0.5.12
+  image: lmsysorg/sglang:v0.5.12-cu130
+  image_digest: sha256:42194170546745092e74cd5f81ad32a7c6e944c7111fe7bf13588152277ff356
 tables:
   wideep_deepep_ll_perf:
+    collector_ref: 0c746cba24a60cd8be5c0c3394b1db2bbf41e3e1
+    collector_hash: sha256:e3640ed2fd11e2ed9d0a3ddef7b728538644993195002ef97f4b78dd4ec0dea3
+    case_plan_hash: sha256:a7599805a212525cad5bbf9f8fc14fcf5b44fcb240a4de837cdcd471c8c9cd86
+    collected_at: '2026-07-31'
+    rows: 176
     status: complete
   wideep_deepep_normal_perf:
-    status: complete
+    collector_ref: 0c746cba24a60cd8be5c0c3394b1db2bbf41e3e1
+    collector_hash: sha256:d15aef6f47b9d5c1b29b050de97d4c995e9d52f56e46d52587eb837ed145e2cb
+    case_plan_hash: sha256:c2e2d8872d3633b87afff889110f2965200645e3bc1b72e877b9e62596f701a9
+    collected_at: '2026-07-31'
+    rows: 2484
+    status: partial
