@@ -488,7 +488,7 @@ def quant_transfer_grid(
         return cands
 
     grid = grid_from_reference(
-        (f"{op_tag}_xshape", *slice_key),
+        (f"{op_tag}_pooled", *slice_key),  # pooled xshape+xquant selection
         query_features,
         _pooled_candidates,
         depth=depth,

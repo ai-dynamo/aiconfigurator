@@ -72,6 +72,12 @@ at the zero-calibration relations.
   way the gate is stricter than the ladder (which has a default level): it
   enforces the enum-line + level-line recipe instead of silently admitting a
   quant nobody calibrated.
+- **`fp8_static` is excluded from transfer admission**: it is a composite
+  mode (fp8 base minus `compute_scale`/`scale_matrix`), and the overhead
+  tables have no ladder — profile-reachability could admit it wherever plain
+  fp8 data exists while `query_compute_scale` still dies at run time. Its
+  admission stays purely data-driven (in `supported_quant_mode` iff all
+  three tables exist).
 - Dead `"nvfp4_wo": "bfloat16"` validation alias removed (no such enum
   member; normalize-to-bf16 was reviewed out of #1392 — it substitutes the
   reference's SOL for the query's, losing the w4 memory-side benefit). The

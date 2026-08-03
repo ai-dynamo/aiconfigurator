@@ -27,6 +27,14 @@ def _sol(db, m, n, k, quant):
     return float(db.query_gemm(m, n, k, quant, database_mode=common.DatabaseMode.SOL))
 
 
+def _assert_dataless(db, quant):
+    """Guard the fixture premise: ``quant`` must have no collected GEMM table
+    (otherwise the ladder tests below stop exercising the borrow and pass for
+    the wrong reason)."""
+    with pytest.raises(PerfDataNotAvailableError):
+        db.query_gemm(16, 256, 512, quant, database_mode=common.DatabaseMode.SILICON)
+
+
 def test_xquant_borrows_same_profile_sibling(comprehensive_perf_db):
     """sq (1,2) has no data; fp8 (1,2) does. Same profile => identical SOL
     coefficients => the borrowed estimate at a collected point equals fp8's
@@ -50,6 +58,7 @@ def test_xprofile_weight_only_borrows_bf16_not_fp8(comprehensive_perf_db):
     db = comprehensive_perf_db
     m, n, k = 16, 256, 512
     quant = common.GEMMQuantMode.int4_wo
+    _assert_dataless(db, quant)
 
     with util_empirical.capture_provenance() as tags:
         borrowed = float(db.query_gemm(m, n, k, quant, database_mode=common.DatabaseMode.HYBRID))
@@ -76,6 +85,7 @@ def test_xprofile_is_policy_gated(comprehensive_perf_db):
     """balanced (XSHAPE+XQUANT) finds nothing for (0.5, 1) — no same-profile
     sibling — and must raise the typed empirical miss, not silently borrow."""
     db = comprehensive_perf_db
+    _assert_dataless(db, common.GEMMQuantMode.int4_wo)
     db.set_transfer_policy("balanced")
     try:
         with pytest.raises(EmpiricalNotImplementedError):

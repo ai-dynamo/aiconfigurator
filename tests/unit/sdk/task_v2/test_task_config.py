@@ -1757,6 +1757,24 @@ def test_validate_gemm_quant_transfer_reachable_in_hybrid():
             make("HYBRID", disabled).validate()
 
 
+def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
+    """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
+    the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
+    profile transfer on combos without quantize data — validate keeps failing
+    fast instead of the sweep dying late in query_compute_scale."""
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="b200_sxm",
+        backend_name="vllm",
+        backend_version="0.19.0",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.fp8_static
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
+        t.validate()
+
+
 def test_validate_gemm_xprofile_requires_listed_level_profile(monkeypatch):
     """The gate deliberately refuses XPROFILE admission for a profile missing
     from the GEMM util-LEVEL table (the runtime ladder would fall back to a

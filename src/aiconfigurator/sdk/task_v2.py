@@ -1408,9 +1408,15 @@ class Task:
             alias = validation_aliases.get(name)
             if alias and alias in modes:
                 return
-            if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
+            # fp8_static is a COMPOSITE mode: its base GEMM is transferable, but
+            # it also requires compute_scale/scale_matrix overhead tables that
+            # have no transfer ladder (by design). Its admission stays purely
+            # data-driven (fp8_static in modes iff all three tables exist, see
+            # _gemm_key_names).
+            transfer_ok = profile_transfer and mode is not common.GEMMQuantMode.fp8_static
+            if transfer_ok and xquant_enabled and _profile_reachable(mode, modes):
                 return  # XQUANT-reachable in HYBRID/EMPIRICAL (same-profile data)
-            if profile_transfer and xprofile_enabled and _xprofile_reachable(op, mode, modes):
+            if transfer_ok and xprofile_enabled and _xprofile_reachable(op, mode, modes):
                 return  # XPROFILE-reachable (calibrated level + any other-profile data)
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
