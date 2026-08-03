@@ -93,6 +93,8 @@ pub struct FpmForwardCell {
 
 pub struct FpmForwardTable {
     parquet_path: PathBuf,
+    system: String,
+    backend: String,
     version: String,
     /// `Ok(None)` = parquet absent ("not collected"); errors are structural.
     cells: OnceLock<Result<Option<Vec<FpmForwardCell>>, AicError>>,
@@ -109,11 +111,14 @@ fn clone_err(err: &AicError) -> AicError {
 }
 
 impl FpmForwardTable {
-    /// No I/O. `version` is the backend version directory name, enforced
-    /// against every row's `backend_version`.
-    pub fn new(data_root: PathBuf, version: &str) -> Self {
+    /// No I/O. `system`/`backend`/`version` are the resolved database
+    /// identity, enforced against every row (a misplaced pair — e.g. an h200
+    /// parquet copied into a b200 tree — must fail loudly, not merge).
+    pub fn new(data_root: PathBuf, system: &str, backend: &str, version: &str) -> Self {
         Self {
             parquet_path: data_root.join(FPM_FORWARD_BASENAME),
+            system: system.to_string(),
+            backend: backend.to_string(),
             version: version.to_string(),
             cells: OnceLock::new(),
         }
@@ -129,7 +134,7 @@ impl FpmForwardTable {
     pub fn cells(&self) -> Result<&[FpmForwardCell], AicError> {
         let loaded = self
             .cells
-            .get_or_init(|| load_pair(&self.parquet_path, &self.version));
+            .get_or_init(|| load_pair(&self.parquet_path, &self.system, &self.backend, &self.version));
         match loaded {
             Ok(Some(cells)) => Ok(cells),
             Ok(None) => Err(AicError::PerfDatabase(format!(
@@ -315,7 +320,12 @@ struct FpmRow {
     latency_ms: f64,
 }
 
-fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForwardCell>>, AicError> {
+fn load_pair(
+    parquet_path: &Path,
+    system: &str,
+    backend: &str,
+    version: &str,
+) -> Result<Option<Vec<FpmForwardCell>>, AicError> {
     if !parquet_path.exists() {
         return Ok(None);
     }
@@ -423,6 +433,23 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
                  database version directory {version:?}"
             )));
         }
+        // `system`/`backend` are part of the physical row key but NOT the
+        // cell key: a misplaced pair would merge into the same cells and
+        // silently serve wrong latencies. Pin them like the version.
+        let row_system = get_str("system")?;
+        if row_system != system {
+            return Err(structural(format!(
+                "FPM row {index} system={row_system:?} does not match the database \
+                 system {system:?}"
+            )));
+        }
+        let row_backend = get_str("backend")?;
+        if row_backend != backend {
+            return Err(structural(format!(
+                "FPM row {index} backend={row_backend:?} does not match the database \
+                 backend {backend:?}"
+            )));
+        }
         let latency_ms = row.f64(latency_col)?;
         if !latency_ms.is_finite() || latency_ms <= 0.0 {
             return Err(structural(format!(
@@ -513,6 +540,35 @@ fn load_pair(parquet_path: &Path, version: &str) -> Result<Option<Vec<FpmForward
             return Err(structural(format!(
                 "FPM database contains a duplicate physical row key: {:?}",
                 row.row_key
+            )));
+        }
+    }
+    // The physical row key includes cell_id/weight_quantization, which the
+    // cell key does not: two rows differing only there pass the duplicate
+    // check yet target the SAME table slot. Producing such rows is the
+    // collector's bug to prevent (aggregate_cell dedups; the formal writer
+    // keeps per-cell identities disjoint) — but a hand-merged pair must fail
+    // loudly here instead of silently last-winning.
+    let mut seen_coords: std::collections::BTreeSet<(Vec<String>, &str, u32, u32, u32)> =
+        std::collections::BTreeSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        let mut cell_key = Vec::with_capacity(3 + row.match_identity.len());
+        cell_key.push(row.model_path.clone());
+        cell_key.push(row.backend_axis.clone());
+        cell_key.push(row.backend_policy.clone());
+        cell_key.extend(row.match_identity.iter().cloned());
+        if !seen_coords.insert((
+            cell_key,
+            row.workload_kind.as_str(),
+            row.batch_size,
+            row.total_prefill_tokens,
+            row.total_kv_read_tokens,
+        )) {
+            return Err(structural(format!(
+                "FPM row {index} collides with an earlier row at the same cell coordinates \
+                 (phase={:?}, batch_size={}, total_prefill_tokens={}, total_kv_read_tokens={}); \
+                 refusing to silently overwrite latencies.",
+                row.workload_kind, row.batch_size, row.total_prefill_tokens, row.total_kv_read_tokens
             )));
         }
     }
@@ -654,6 +710,10 @@ pub(crate) mod tests {
         pub backend_version: &'static str,
         pub partition_policy: &'static str,
         pub tp: u32,
+        /// Overrides the coordinate-derived cell_id (collision tests).
+        pub cell_id: Option<&'static str>,
+        pub system: &'static str,
+        pub backend: &'static str,
     }
 
     impl Default for RowSpec {
@@ -670,6 +730,9 @@ pub(crate) mod tests {
                 backend_version: "0.25.1",
                 partition_policy: FPM_FORWARD_PARTITION_POLICY,
                 tp: 4,
+                cell_id: None,
+                system: "b200_sxm",
+                backend: "vllm",
             }
         }
     }
@@ -763,14 +826,16 @@ pub(crate) mod tests {
         };
         let str_batches: Vec<Vec<ByteArray>> = vec![
             str_col(&|r| {
-                format!(
-                    "fpm-{}-{}-{}-{}",
-                    r.workload_kind, r.batch_size, r.total_prefill_tokens, r.total_kv_read_tokens
-                )
+                r.cell_id.map(str::to_string).unwrap_or_else(|| {
+                    format!(
+                        "fpm-{}-{}-{}-{}",
+                        r.workload_kind, r.batch_size, r.total_prefill_tokens, r.total_kv_read_tokens
+                    )
+                })
             }),
             str_col(&|r| r.model_path.to_string()),
-            str_col(&|_| "b200_sxm".to_string()),
-            str_col(&|_| "vllm".to_string()),
+            str_col(&|r| r.system.to_string()),
+            str_col(&|r| r.backend.to_string()),
             str_col(&|r| r.backend_version.to_string()),
             str_col(&|r| identity(r)[0].clone()),
         ];
@@ -854,7 +919,7 @@ pub(crate) mod tests {
     }
 
     fn loaded_table(dir: &Path) -> FpmForwardTable {
-        FpmForwardTable::new(dir.to_path_buf(), "0.25.1")
+        FpmForwardTable::new(dir.to_path_buf(), "b200_sxm", "vllm", "0.25.1")
     }
 
     #[test]
@@ -950,7 +1015,10 @@ pub(crate) mod tests {
                 "does not match the database version directory",
             ),
             (Box::new(|r: &mut RowSpec| r.latency_ms = 0.0), "non-positive latency_ms"),
-            (Box::new(|r: &mut RowSpec| r.latency_ms = f64::NAN), "latency_ms"),
+            (
+                Box::new(|r: &mut RowSpec| r.latency_ms = f64::NAN),
+                "non-finite/non-positive latency_ms",
+            ),
             (
                 Box::new(|r: &mut RowSpec| {
                     r.workload_kind = "prefill";
@@ -1017,6 +1085,47 @@ pub(crate) mod tests {
         });
         let err = loaded_table(tmp.path()).cells().unwrap_err();
         assert!(err.to_string().contains("row_count mismatch"), "{err}");
+    }
+
+    /// system/backend are in the physical row key but NOT the cell key: a
+    /// misplaced pair must fail loudly, not merge into the same cells.
+    #[test]
+    fn misplaced_system_or_backend_fails_loudly() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut rows = default_rows();
+        rows[0].system = "gb200_nvl72";
+        write_pair(tmp.path(), &rows);
+        let err = loaded_table(tmp.path()).cells().unwrap_err();
+        assert!(err.to_string().contains("does not match the database system"), "{err}");
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut rows = default_rows();
+        rows[0].backend = "sglang";
+        write_pair(tmp.path(), &rows);
+        let err = loaded_table(tmp.path()).cells().unwrap_err();
+        assert!(err.to_string().contains("does not match the database backend"), "{err}");
+    }
+
+    /// Same cell identity + same coordinates but a different cell_id passes
+    /// the physical-row-key duplicate check yet targets the SAME table slot;
+    /// the loader must refuse instead of silently last-winning.
+    #[test]
+    fn coordinate_collision_within_cell_fails_loudly() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut rows = default_rows();
+        let mut clash = RowSpec {
+            workload_kind: rows[6].workload_kind,
+            batch_size: rows[6].batch_size,
+            total_prefill_tokens: rows[6].total_prefill_tokens,
+            total_kv_read_tokens: rows[6].total_kv_read_tokens,
+            ..RowSpec::default()
+        };
+        clash.cell_id = Some("fpm-another-attempt");
+        clash.latency_ms = 99.0;
+        rows.push(clash);
+        write_pair(tmp.path(), &rows);
+        let err = loaded_table(tmp.path()).cells().unwrap_err();
+        assert!(err.to_string().contains("collides with an earlier row"), "{err}");
     }
 
     #[test]

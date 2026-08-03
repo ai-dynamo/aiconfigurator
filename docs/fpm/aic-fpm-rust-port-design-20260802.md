@@ -196,9 +196,14 @@ phases prefill/decode. Whole-model ops must never reach the name-filtered
   temp systems root — new pattern there; static/mixed/agg/disagg surfaces,
   `PARITY_RTOL = 0.01`, error-symmetry).
 - **Real-DB grid parity** (acceptance run, this campaign): script sweeping
-  every collected grid point of `database_merged` (20 topologies, 65,461 rows)
-  through both engines — expectation bit-exact on exact hits — plus randomized
-  in-domain off-grid probes; report max deviation.
+  every collected grid point of `database_merged` (20 cells / 10 topologies,
+  65,461 rows) through both engines — expectation bit-exact on exact hits —
+  plus randomized in-domain off-grid probes; report max deviation.
+  **Observed (final run, campaign `validation/rust_parity/`)**: 36,986 grid
+  points (the rows whose coordinates are exactly representable as runtime
+  configs, i.e. `B | P` and `B | KV`) — max relative error **0.0** (bit-exact);
+  238 in-domain off-grid probes — **0.0**; 30 mixed + 10 genonly steps —
+  **0.0**; 2 out-of-domain probes errored symmetrically on both engines.
 
 ## Consciously mirrored invariants
 

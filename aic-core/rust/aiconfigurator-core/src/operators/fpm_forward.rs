@@ -355,6 +355,8 @@ mod tests {
         .expect("fixture db");
         db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
             dir.to_path_buf(),
+            "b200_sxm",
+            "vllm",
             "0.25.1",
         ));
         db

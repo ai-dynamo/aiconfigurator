@@ -369,7 +369,7 @@ impl PerfDatabase {
             ),
             // Deliberately NOT shared-layer aware: FPM whole-model data is
             // valid only for its exact backend/version (fpm_forward.rs).
-            fpm_forward: FpmForwardTable::new(data_root.clone(), version),
+            fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
             data_root,
         };

@@ -103,10 +103,11 @@ Loader obligations (mirroring the writer's semantics):
 
 New code lives in the modeling core (`aic-core/src/aiconfigurator_core/sdk/`):
 
-1. `PerfDataFilename.fpm_forward = "fpm_forward_perf.parquet"` (`common.py:968`).
-2. A loader in `perf_database.py` producing per-cell tables + derived domains, with the §2
-   validations. Cells are keyed by the identity columns; the sidecar is validated once per
-   directory.
+1. `PerfDataFilename.fpm_forward = "fpm_forward_perf.parquet"` (`common.py`).
+2. A loader (`load_fpm_forward_data`, shipped in `operations/fpm_forward.py` — NOT in
+   `perf_database.py`; the op owns its data end to end) producing per-cell tables +
+   derived domains, with the §2 validations. Cells are keyed by the identity columns;
+   the sidecar is validated once per pair.
 3. `FPMForwardOp(phase)` in `operations/` (subclass of `Operation`,
    `operations/base.py:114`). `query()` mapping from the existing phase-loop kwargs
    (`base_backend.py:303-388`):
@@ -119,9 +120,10 @@ New code lives in the modeling core (`aic-core/src/aiconfigurator_core/sdk/`):
      real GLM-5.2 data — start with log-token axes like the attention configs);
    - `perf_interp` requires a whole-model `sol_fn` even without extrapolation: in-domain
      ragged-bracket recovery and ScatteredSites cross-site transfer both rescale by SOL
-     ratios. V1 ships a crude per-rank roofline built from the ORIGINAL op lists at rewrite
-     time (dense-FLOPs + attention-pair term for prefill; weight bytes + KV bytes for
-     decode) — only per-axis scaling trends matter, constants cancel in the ratios;
+     ratios. SHIPPED as `_oplevel_sol_fn`: the ORIGINAL op-level lists (captured at rewrite
+     time) queried on a `DatabaseMode.SOL` database view — each op's analytic max(compute,
+     mem) with the real physics, superseding the "crude per-rank roofline" sketched in
+     earlier drafts;
    - domain check happens **before** `perf_interp` (its boundary util-hold semantics are
      wrong for whole-model latency; out-of-domain must error, not hold);
    - energy: 0.0 (documented convention, §1.4).
@@ -138,9 +140,11 @@ Cell selection maps model/runtime identity onto row identity:
 - `system/backend/version` — from the `PerfDatabase` instance;
 - `gemm/moe/fmha/comm/kvcache` quant modes, `tp/pp/dp/moe_tp/moe_ep/cp` — from `ModelConfig`
   (names align one-to-one with row columns);
-- backend policy — V1 requires the `baseline_auto` profile
-  (`moe_backend=None, attention_backend=None, enable_wideep=False, enable_eplb=False`);
-  a ModelConfig that deviates fails with a clear unsupported-policy error;
+- backend policy — V1 supports only cells collected under `backend_axis == "baseline"`;
+  the SHIPPED `_select_cell` filters on that axis (it does not inspect
+  `moe_backend`/`attention_backend`/`enable_wideep`/`enable_eplb` directly), so a deviating
+  config surfaces as a no-matching-cell / ambiguity `PerfDataNotAvailableError` rather than
+  a dedicated unsupported-policy error;
 - `model_path` — see Open decision D1.
 
 ### M2 — Rust `FpmForward` op + schema bump

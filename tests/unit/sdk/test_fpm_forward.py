@@ -342,6 +342,32 @@ class TestFPMForwardLoaderValidation:
         with pytest.raises(ValueError, match="backend_version"):
             self._query(fake_db(rows))
 
+    def test_misplaced_system_or_backend_fails_loudly(self, fake_db):
+        # system/backend are in the physical row key but NOT the cell key: a
+        # pair copied into the wrong tree would merge into the same cells and
+        # silently serve wrong latencies. Pin them like backend_version.
+        rows = _default_rows()
+        rows[0]["system"] = "gb200_nvl72"
+        with pytest.raises(ValueError, match="does not match the database system"):
+            self._query(fake_db(rows))
+        rows = _default_rows()
+        rows[0]["backend"] = "sglang"
+        with pytest.raises(ValueError, match="does not match the database backend"):
+            self._query(fake_db(rows))
+
+    def test_coordinate_collision_within_cell_fails_loudly(self, fake_db):
+        # Same cell identity + same (phase, batch, tokens) but a different
+        # cell_id passes the physical-row-key duplicate check yet targets the
+        # SAME table slot. Silent last-wins would serve arbitrary latencies;
+        # the loader must refuse (producing such rows is a collector bug).
+        rows = _default_rows()
+        clash = dict(rows[-1])
+        clash["cell_id"] = "fpm-test-another-attempt"
+        clash["latency_ms"] = clash["latency_ms"] * 2.0
+        rows.append(clash)
+        with pytest.raises(ValueError, match="collides with an earlier row"):
+            self._query(fake_db(rows))
+
     @pytest.mark.parametrize("bad_latency", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
     def test_non_finite_or_non_positive_latency(self, fake_db, bad_latency):
         rows = _default_rows()

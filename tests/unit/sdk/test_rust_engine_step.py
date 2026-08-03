@@ -614,7 +614,10 @@ def test_rust_perf_db_misses_translate_to_perf_data_not_available():
     genuine = ValueError("invalid engine config: isl must be greater than 0")
     with pytest.raises(ValueError) as excinfo:
         _reraise_engine_error(genuine)
-    assert not isinstance(excinfo.value, PerfDataNotAvailableError)
+    # PerfDataNotAvailableError subclasses RuntimeError, so pytest.raises
+    # (ValueError) alone can never catch a translated error — assert the
+    # exact object passed through untouched instead.
+    assert excinfo.value is genuine
 
 
 @pytest.mark.unit
