@@ -103,6 +103,17 @@ class KimiK3Model(BaseModel):
                 "shard it; DCP (decode context parallel) is likewise not modeled."
             )
 
+        # KDA heads shard evenly across attention TP; a non-divisor (or tp >
+        # heads) would silently truncate nk_local to a shard geometry that has
+        # no collector row (rows exist for 96/48/24/12 only) — fail loudly
+        # instead of mispricing (review fix).
+        if cfg.kda_num_heads % self.config.tp_size != 0:
+            raise ValueError(
+                f"Kimi-K3 KDA heads ({cfg.kda_num_heads}) are not divisible by "
+                f"tp_size ({self.config.tp_size}); per-rank KDA shard would be "
+                "truncated and has no collected kernel rows."
+            )
+
         self._build_context_ops()
         self._build_generation_ops()
 
@@ -523,7 +534,11 @@ class KimiK3Model(BaseModel):
         latent = cfg.routed_expert_hidden_size or h
         num_dense = cfg.first_k_dense_replace
         num_moe = self._num_layers - num_dense
-        shared_inter = cfg.num_shared_experts * cfg.moe_inter_size * 2  # 2*3072=6144 total width
+        # Total shared-expert intermediate width: 2 experts x 3072 = 6144. The
+        # gate/up factor is applied at the GEMM sites below (2 * shared_inter),
+        # so it must NOT be baked in here (review fix: a stray *2 inflated the
+        # shared FFN ~2x).
+        shared_inter = cfg.num_shared_experts * cfg.moe_inter_size
 
         ops_list = [ops.ElementWise(f"{prefix}_ffn_norm", self._num_layers, 2 * h, 2 * h, 0.8)]
 

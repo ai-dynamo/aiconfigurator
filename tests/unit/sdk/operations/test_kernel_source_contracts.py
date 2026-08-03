@@ -82,7 +82,8 @@ def test_kimi_k3_moe_remaps_to_w4a8_on_blackwell_only():
     # Mxfp4MoEMethod default precision); Hopper keeps the checkpoint's plain
     # W4A16 marlin lane, so the resolver stays silent there.
     for system in ("b200_sxm", "b300_sxm", "gb200", "gb300"):
-        assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang") is common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        mode = resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang")
+        assert mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8
     for system in ("h200_sxm", "h100_sxm"):
         assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang") is None
     assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "b300_sxm", "vllm") is None

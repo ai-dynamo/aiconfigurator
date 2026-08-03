@@ -40,7 +40,12 @@ def test_kda_context_raises_on_conv_int32_offset_overflow():
 
 def test_kda_case_phases_cover_context_generation_verify():
     # The registry getter must emit all three phases for every declared shape;
-    # verify rows carry the draft-token width in the seq_len slot.
-    source = SOURCE_PATH.read_text(encoding="utf-8")
-    for phase in ("context", "generation", "verify"):
-        assert f'"{phase}"' in source
+    # verify rows carry the draft-token width in the seq_len slot. The backend
+    # getter is a field-order adapter over the shared spec generator (which is
+    # importable without torch), so assert against the actual emitted specs
+    # instead of grepping the module source (review fix: the phase strings
+    # also appear in the docstring, so a source grep could never fail).
+    from collector.case_generator import get_common_kda_test_cases
+
+    phases = {case.phase for case in get_common_kda_test_cases()}
+    assert phases == {"context", "generation", "verify"}

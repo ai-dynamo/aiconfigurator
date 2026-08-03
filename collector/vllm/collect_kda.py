@@ -146,6 +146,19 @@ def _resolve_prefill_kernel(dtype: torch.dtype):
     return "chunk_kda_with_fused_gate", None
 
 
+def _format_failures(failures: list[str], limit: int = 8) -> str:
+    """Compact per-cell failure evidence for the strict-completeness raise.
+
+    The full list is on stdout; the raised message carries the first ``limit``
+    cells so the classified failure record is traceable to shapes without
+    ballooning the errors json."""
+    if not failures:
+        return "<none>"
+    shown = "; ".join(failures[:limit])
+    extra = len(failures) - limit
+    return shown + (f"; ... and {extra} more (see worker stdout)" if extra > 0 else "")
+
+
 def run_kda_context_benchmark(
     d_model,
     d_conv,
@@ -176,6 +189,7 @@ def run_kda_context_benchmark(
     conv_weight = torch.randn(3 * proj, cw, dtype=torch.float32, device=device)
     q_w, k_w, v_w = conv_weight.split([proj] * 3, dim=0)
     ok = err = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         for seq_len in seq_len_list:
@@ -301,6 +315,7 @@ def run_kda_context_benchmark(
                 ok += 1
             except Exception as e:
                 err += 1
+                failures.append(f"batch_size={batch_size} seq_len={seq_len}: {type(e).__name__}: {e}")
                 print(f"  Error at batch_size={batch_size}, seq_len={seq_len}: {e}")
                 continue
             finally:
@@ -310,7 +325,10 @@ def run_kda_context_benchmark(
     summary = f"ok={ok} error={err} skip=0"
     print(f"KDA context summary: {summary}")
     if err or ok == 0:
-        raise RuntimeError(f"vLLM KDA context collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"vLLM KDA context collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def run_kda_generation_benchmark(
@@ -346,6 +364,7 @@ def run_kda_generation_benchmark(
     fused_weight = conv_weight.reshape(3, dim, cw).transpose(1, 2).contiguous()
     norm_weight = torch.randn(hd, dtype=torch.float32, device=device)
     ok = err = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         try:
@@ -465,6 +484,7 @@ def run_kda_generation_benchmark(
             ok += 1
         except Exception as e:
             err += 1
+            failures.append(f"batch_size={batch_size}: {type(e).__name__}: {e}")
             print(f"  Error at batch_size={batch_size}: {e}")
             continue
         finally:
@@ -473,7 +493,10 @@ def run_kda_generation_benchmark(
     summary = f"ok={ok} error={err} skip=0"
     print(f"KDA generation summary: {summary}")
     if err or ok == 0:
-        raise RuntimeError(f"vLLM KDA generation collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"vLLM KDA generation collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def run_kda_verify_benchmark(
@@ -506,6 +529,7 @@ def run_kda_verify_benchmark(
 
     conv_weight = torch.randn(3 * dim, cw, dtype=torch.float32, device=device)
     ok = err = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         for ns in draft_token_list:
@@ -609,6 +633,7 @@ def run_kda_verify_benchmark(
                 ok += 1
             except Exception as e:
                 err += 1
+                failures.append(f"batch_size={batch_size} draft_tokens={ns}: {type(e).__name__}: {e}")
                 print(f"  Error at batch_size={batch_size}, draft_tokens={ns}: {e}")
                 continue
             finally:
@@ -617,7 +642,10 @@ def run_kda_verify_benchmark(
     summary = f"ok={ok} error={err} skip=0"
     print(f"KDA verify summary: {summary}")
     if err or ok == 0:
-        raise RuntimeError(f"vLLM KDA verify collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"vLLM KDA verify collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def run_kda_torch(

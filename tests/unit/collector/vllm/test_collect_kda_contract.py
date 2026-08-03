@@ -25,5 +25,14 @@ def test_kda_dispatch_mirrors_serving():
     source = SOURCE_PATH.read_text(encoding="utf-8")
     assert "is_flashkda_supported" in source
     assert "is_fused_kda_decode_supported" in source
-    for phase in ("context", "generation", "verify"):
-        assert f'"{phase}"' in source
+
+
+def test_kda_case_phases_cover_context_generation_verify():
+    # The backend getter is a field-order adapter over the shared spec
+    # generator (importable without torch), so assert against the actual
+    # emitted specs instead of grepping the module source (review fix: the
+    # phase strings also appear in the docstring, so a grep could never fail).
+    from collector.case_generator import get_common_kda_test_cases
+
+    phases = {case.phase for case in get_common_kda_test_cases()}
+    assert phases == {"context", "generation", "verify"}

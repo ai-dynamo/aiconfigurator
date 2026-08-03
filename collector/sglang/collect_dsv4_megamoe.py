@@ -77,6 +77,12 @@ DEFAULT_MODEL_CONFIGS = {
     # activation_clamp=_K3_MEGA_SITU_SENTINEL_CLAMP) @ kimi-k3 branch).
     "kimi_k3": {
         "model": "moonshotai/Kimi-K3",
+        # SiTU sentinel: the patched deep_gemm mega kernel selects the K3
+        # SiTU path iff activation_clamp == 0.03125 (see comment above).
+        # Resolved as the default in main(); an explicit conflicting
+        # --activation-clamp raises rather than silently collecting the
+        # wrong kernel path under the kimi_k3 label.
+        "activation_clamp": 0.03125,
         "hidden_size": 3584,
         "inter_size": 3072,
         "routed_num_experts": 896,
@@ -700,7 +706,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--pre-dispatch", choices=["sglang_jit", "copy"], default="sglang_jit")
-    parser.add_argument("--activation-clamp", type=float, default=10.0)
+    parser.add_argument(
+        "--activation-clamp", type=float, default=None
+    )  # None -> model-config default (10.0 unless declared)
     parser.add_argument("--fast-math", type=int, choices=[0, 1], default=1)
     parser.add_argument("--num-warmup", type=int, default=5)
     parser.add_argument("--num-iterations", type=int, default=20)
@@ -715,6 +723,15 @@ def main() -> None:
     gpus_per_node = args.gpus_per_node or _default_gpus_per_node(args.system_name)
     dist_info = init_distributed(gpus_per_node)
     model_config = DEFAULT_MODEL_CONFIGS[args.model_config]
+    config_clamp = float(model_config.get("activation_clamp", 10.0))
+    if args.activation_clamp is None:
+        args.activation_clamp = config_clamp
+    elif args.activation_clamp != config_clamp and "activation_clamp" in model_config:
+        raise ValueError(
+            f"--activation-clamp {args.activation_clamp} conflicts with the "
+            f"{args.model_config!r} kernel-path sentinel {config_clamp} — the mega "
+            "kernel would silently run the wrong activation path under this label."
+        )
     ep_size = dist_info.world_size
     cases = build_cases(args, ep_size)
 

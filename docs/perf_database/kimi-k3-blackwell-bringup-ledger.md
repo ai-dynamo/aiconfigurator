@@ -77,7 +77,8 @@ sglang (kimi-k3 branch @ 0.5.16), for K3/KimiLinear architectures:
   (`_prepare_fused_decode` is compiled for seg = 12*128,
   models/kimi_k3.py:1522-1560). → collector grew a dispatch branch mirroring
   exactly this probe, one row per point, `kernel_source
-  "fused_kda_decode_mtp_dspark"`, per-shard onorm.
+  "fused_kda_decode_mtp_dspark"`, with the output gated RMSNorm ("onorm"
+  in the kernel's argument naming) folded per-shard exactly as serving does.
 
 vllm (kimi-k3 preview): the collector already resolves dispatch through the
 framework's own probes and needed **no changes**: `is_flashkda_supported` →

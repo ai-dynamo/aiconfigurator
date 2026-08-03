@@ -140,6 +140,19 @@ def _cleanup(tag: str):
         raise RuntimeError(f"SGLang KDA {tag} cleanup failed: {'; '.join(cleanup_errors)}")
 
 
+def _format_failures(failures: list[str], limit: int = 8) -> str:
+    """Compact per-cell failure evidence for the strict-completeness raise.
+
+    The full list is on stdout; the raised message carries the first ``limit``
+    cells so the classified failure record is traceable to shapes without
+    ballooning the errors json."""
+    if not failures:
+        return "<none>"
+    shown = "; ".join(failures[:limit])
+    extra = len(failures) - limit
+    return shown + (f"; ... and {extra} more (see worker stdout)" if extra > 0 else "")
+
+
 def run_kda_context_benchmark(
     d_model: int,
     d_conv: int,
@@ -172,6 +185,7 @@ def run_kda_context_benchmark(
     q_conv_weight, k_conv_weight, v_conv_weight = conv_weight.split([proj_size] * 3, dim=0)
     successful_points = 0
     failed_points = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         for seq_len in seq_len_list:
@@ -316,6 +330,7 @@ def run_kda_context_benchmark(
 
             except Exception as e:
                 failed_points += 1
+                failures.append(f"batch_size={batch_size} seq_len={seq_len}: {type(e).__name__}: {e}")
                 print(f"  Error at batch_size={batch_size}, seq_len={seq_len}: {e}")
                 continue
             finally:
@@ -326,7 +341,10 @@ def run_kda_context_benchmark(
     summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"KDA context summary: {summary}")
     if failed_points or successful_points == 0:
-        raise RuntimeError(f"SGLang KDA context collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"SGLang KDA context collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def _fused_decode_module():
@@ -373,6 +391,7 @@ def run_kda_generation_benchmark(
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
     successful_points = 0
     failed_points = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         if aic_debug:
@@ -548,6 +567,7 @@ def run_kda_generation_benchmark(
 
         except Exception as e:
             failed_points += 1
+            failures.append(f"batch_size={batch_size}: {type(e).__name__}: {e}")
             print(f"  Error at batch_size={batch_size}: {e}")
             continue
         finally:
@@ -558,7 +578,10 @@ def run_kda_generation_benchmark(
     summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"KDA generation summary: {summary}")
     if failed_points or successful_points == 0:
-        raise RuntimeError(f"SGLang KDA generation collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"SGLang KDA generation collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def _resolve_verify_kernel(head_k_dim: int, head_v_dim: int, draft_tokens: int):
@@ -622,6 +645,7 @@ def run_kda_verify_benchmark(
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
     successful_points = 0
     failed_points = 0
+    failures: list[str] = []
 
     for batch_size in batch_size_list:
         for draft_tokens in draft_token_list:
@@ -841,6 +865,7 @@ def run_kda_verify_benchmark(
 
             except Exception as e:
                 failed_points += 1
+                failures.append(f"batch_size={batch_size} draft_tokens={draft_tokens}: {type(e).__name__}: {e}")
                 print(f"  Error at batch_size={batch_size}, draft_tokens={draft_tokens}: {e}")
                 continue
             finally:
@@ -851,7 +876,10 @@ def run_kda_verify_benchmark(
     summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"KDA verify summary: {summary}")
     if failed_points or successful_points == 0:
-        raise RuntimeError(f"SGLang KDA verify collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"SGLang KDA verify collection failed strict completeness: {summary}; "
+            f"failed cells: {_format_failures(failures)}"
+        )
 
 
 def run_kda_torch(

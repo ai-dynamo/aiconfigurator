@@ -637,12 +637,7 @@ def run_moe_torch(
         # presentation only; the invoked kernels are unchanged.
         _mc = getattr(routed_experts, "moe_config", None)
         _local_e = getattr(routed_experts, "num_experts", None)
-        _swap = (
-            situ_marlin_approx
-            and _mc is not None
-            and _local_e is not None
-            and _mc.num_experts != _local_e
-        )
+        _swap = situ_marlin_approx and _mc is not None and _local_e is not None and _mc.num_experts != _local_e
         if _swap:
             _global_e = _mc.num_experts
             try:

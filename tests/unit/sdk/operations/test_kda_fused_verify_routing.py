@@ -96,7 +96,7 @@ def test_vllm_verify_kernel_is_never_rerouted():
 
 def _generation_grid(latency):
     entry = {"latency": latency, "power": 0.0, "energy": 0.0}
-    return {MODEL_KEY: {b: entry for b in (1, 4, 16, 64)}}
+    return {MODEL_KEY: dict.fromkeys((1, 4, 16, 64), entry)}
 
 
 def _query_gen(db, kernel_source, shard=None):
