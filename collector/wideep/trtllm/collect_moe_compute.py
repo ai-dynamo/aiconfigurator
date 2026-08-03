@@ -814,12 +814,14 @@ def get_moe_ep_test_cases():
     # of the recipe product order.
     test_cases.sort(key=lambda case: (case[10], case[0], case[8], case[12], case[13], case[14]))
 
+    kept_recipes = len(recipes) - dropped_not_declared - dropped_not_power_law - dropped_not_ep
+    expanded = kept_recipes * len(moe_list) * 3
     print(
-        f"moe_ep: {len(test_cases)} cases from {len(recipes)} moe recipes x "
-        f"{len(moe_list)} quant mode(s) x 3 EPLB configs "
+        f"moe_ep: {len(test_cases)} cases from {len(recipes)} moe recipes "
         f"(dropped: {dropped_not_declared} not declared wideep, "
-        f"{dropped_not_power_law} not power_law, {dropped_not_ep} not tp=1/ep>1; "
-        f"after expansion: {dropped_slot_alignment} num_slots%ep!=0)"
+        f"{dropped_not_power_law} not power_law, {dropped_not_ep} not tp=1/ep>1 "
+        f"-> {kept_recipes} recipes kept) x {len(moe_list)} quant mode(s) x 3 EPLB configs "
+        f"= {expanded} expanded - {dropped_slot_alignment} num_slots%ep!=0"
     )
     return test_cases
 

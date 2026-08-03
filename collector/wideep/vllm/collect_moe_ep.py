@@ -113,6 +113,21 @@ def _moe_ep_perf_path(output_path, perf_filename) -> str:
     return os.path.join(directory, str(perf_filename))
 
 
+def _global_num_tokens(num_tokens: int, moe_ep_size: int) -> int:
+    """The GLOBAL token count for one per-rank token point.
+
+    The single source for the family's token accounting, mirroring the sglang
+    twin exactly (``collect_deepep_moe.py``: ``num_token * simulated_ep_size``
+    sizes the hidden states, feeds ``power_law_deepep_prefill`` /
+    ``power_law_deepep_decode`` AND is the persisted ``num_tokens`` column).
+    Both the bench input and the persisted key MUST use this one expression —
+    feeding the per-rank count into the distribution generators would land
+    rows on keys shared with sglang rows that benchmarked an ep-fold larger
+    token population.
+    """
+    return int(num_tokens) * int(moe_ep_size)
+
+
 def _build_moe_ep_row(
     *,
     moe_dtype: str,
@@ -196,11 +211,14 @@ def _collect_phase_rows(
 ) -> list[tuple[dict, dict | None]]:
     """Run one phase sweep through ``bench`` and build the persisted rows.
 
-    ``bench(inference_phase, num_tokens, distributed, power_law_alpha)`` must
-    execute the fused-experts benchmark for one per-rank token point and
-    return ``(latency_ms, power_stats_or_None)``. Injected so the row/
-    population contract is unit-testable without vllm or a GPU; the collection
-    entrypoint passes :func:`_make_fused_experts_bench`'s callable.
+    ``bench(inference_phase, global_num_tokens, distributed, power_law_alpha)``
+    must execute the fused-experts benchmark for one token point and return
+    ``(latency_ms, power_stats_or_None)``. The bench receives the GLOBAL token
+    count — the exact value persisted in the row's ``num_tokens`` column, both
+    computed once here through :func:`_global_num_tokens` so the benchmarked
+    population and the key can never diverge. Injected so the row/population
+    contract is unit-testable without vllm or a GPU; the collection entrypoint
+    passes :func:`_make_fused_experts_bench`'s callable.
 
     Execute-or-raise: a failing token point raises ``MoeEpBenchmarkError``
     with the case parameters — never a silent skip.
@@ -210,13 +228,15 @@ def _collect_phase_rows(
         num_tokens = case["num_tokens"]
         distributed = case["distributed"]
         power_law_alpha = case["power_law_alpha"]
+        global_tokens = _global_num_tokens(num_tokens, moe_ep_size)
         try:
-            latency_ms, power_stats = bench(inference_phase, num_tokens, distributed, power_law_alpha)
+            latency_ms, power_stats = bench(inference_phase, global_tokens, distributed, power_law_alpha)
         except MoeEpBenchmarkError:
             raise
         except Exception as e:
             raise MoeEpBenchmarkError(
                 f"moe_ep {inference_phase} case failed (num_tokens={num_tokens}, "
+                f"global_num_tokens={global_tokens}, "
                 f"distribution={distributed}, alpha={power_law_alpha}, "
                 f"moe_ep_size={moe_ep_size}, num_experts={num_experts}): {e}"
             ) from e
@@ -227,7 +247,7 @@ def _collect_phase_rows(
                     moe_dtype=MOE_EP_QUANT_MODE,
                     distribution=distribution_str,
                     inference_phase=inference_phase,
-                    num_tokens=num_tokens * moe_ep_size,
+                    num_tokens=global_tokens,
                     hidden_size=hidden_size,
                     inter_size=inter_size,
                     topk=topk,
@@ -357,36 +377,70 @@ def _make_fused_experts_bench(
         device=device,
     )
 
-    def _routing(inference_phase: str, num_tokens: int, distributed: str, power_law_alpha):
-        """Rank-local (topk_ids, topk_weights) for one token point."""
-        if distributed == "uniform":
-            topk_ids = (
-                torch.arange(num_tokens * topk, device=device, dtype=torch.int32).reshape(num_tokens, topk)
-                % num_local_experts
-            )
-            topk_weights = torch.full((num_tokens, topk), 1.0 / topk, dtype=torch.float32, device=device)
-            return topk_ids, topk_weights
-        if inference_phase == "context":
-            topk_idx, topk_weights, _ = power_law_deepep_prefill(
-                num_tokens, num_experts, topk, moe_ep_size, power_law_alpha
-            )
-            # Non-local expert selections arrive as -1 with zero weight — the
-            # exact shape vllm's EP expert_map produces for fused_experts,
-            # which skips out-of-range ids during alignment.
-            return topk_idx.to(device=device, dtype=torch.int32), topk_weights.to(device=device)
-        tokens_per_expert = power_law_deepep_decode(num_tokens, num_experts, topk, moe_ep_size, power_law_alpha)
-        topk_ids = torch.repeat_interleave(
-            torch.arange(num_local_experts, dtype=torch.int64), tokens_per_expert.to(torch.int64)
-        )[: num_tokens * topk]
-        if topk_ids.numel() < num_tokens * topk:
-            topk_ids = torch.nn.functional.pad(topk_ids, (0, num_tokens * topk - topk_ids.numel()))
-        topk_ids = topk_ids.reshape(num_tokens, topk).to(device=device, dtype=torch.int32)
-        topk_weights = torch.full((num_tokens, topk), 1.0 / topk, dtype=torch.float32, device=device)
+    def _counts_to_topk_ids(tokens_per_local_expert, global_num_tokens: int):
+        """Spread per-local-expert token counts over a [global, topk] id grid.
+
+        Only the rank-local selections are active; every other slot is -1
+        with zero weight — the same rank-local masking shape the sglang twin
+        drives through its dispatch-output tensors.
+        """
+        flat = torch.repeat_interleave(
+            torch.arange(num_local_experts, dtype=torch.int64), tokens_per_local_expert.to(torch.int64)
+        )[: global_num_tokens * topk]
+        if flat.numel() < global_num_tokens * topk:
+            flat = torch.nn.functional.pad(flat, (0, global_num_tokens * topk - flat.numel()), value=-1)
+        topk_ids = flat.reshape(global_num_tokens, topk).to(device=device, dtype=torch.int32)
+        topk_weights = torch.where(
+            topk_ids >= 0,
+            torch.full_like(topk_ids, 1.0 / topk, dtype=torch.float32),
+            torch.zeros((), dtype=torch.float32, device=device),
+        )
         return topk_ids, topk_weights
 
-    def bench(inference_phase: str, num_tokens: int, distributed: str, power_law_alpha):
-        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
-        topk_ids, topk_weights = _routing(inference_phase, num_tokens, distributed, power_law_alpha)
+    def _routing(inference_phase: str, global_num_tokens: int, distributed: str, power_law_alpha):
+        """Rank-local (topk_ids, topk_weights) over the GLOBAL token count.
+
+        Token accounting mirrors the sglang twin exactly: the distribution
+        generators and the routing grid are sized with the GLOBAL count
+        (``collect_deepep_moe.py`` feeds ``num_token * simulated_ep_size``
+        into ``power_law_deepep_prefill``/``power_law_deepep_decode`` and its
+        uniform arithmetic), never the per-rank count.
+
+        Non-local expert selections are -1 with zero weight. ENROLLMENT-TIME
+        VERIFICATION ITEM (D3, see the module docstring): confirm against the
+        pinned vllm source that ``fused_experts`` skips out-of-range ids
+        during alignment (the shape vllm's EP ``expert_map`` produces) — this
+        is the behavior this routing relies on and it is UNVERIFIED here, no
+        vllm runtime being pinned yet.
+        """
+        if distributed == "uniform":
+            # Mirrors the sglang uniform arithmetic: global_tokens * topk
+            # selections spread evenly over ALL experts; this rank computes
+            # its num_local_experts share.
+            tokens_per_local_expert = global_num_tokens * topk // num_experts
+            counts = torch.full((num_local_experts,), tokens_per_local_expert, dtype=torch.int64)
+            if tokens_per_local_expert == 0:
+                # Fewer routed selections than experts: the first
+                # per-rank-tokens x topk local experts get one token each —
+                # the sglang decode fallback's arithmetic
+                # (masked_m[: num_token * top_k] = 1, num_token per-rank).
+                counts[: max(global_num_tokens * topk // moe_ep_size, 1)] = 1
+            return _counts_to_topk_ids(counts, global_num_tokens)
+        if inference_phase == "context":
+            topk_idx, topk_weights, _ = power_law_deepep_prefill(
+                global_num_tokens, num_experts, topk, moe_ep_size, power_law_alpha
+            )
+            return topk_idx.to(device=device, dtype=torch.int32), topk_weights.to(device=device)
+        tokens_per_local_expert = power_law_deepep_decode(
+            global_num_tokens, num_experts, topk, moe_ep_size, power_law_alpha
+        )
+        return _counts_to_topk_ids(tokens_per_local_expert, global_num_tokens)
+
+    def bench(inference_phase: str, global_num_tokens: int, distributed: str, power_law_alpha):
+        # `global_num_tokens` arrives pre-globalized from _collect_phase_rows
+        # (_global_num_tokens) — the same value persisted in the row.
+        hidden_states = torch.randn(global_num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
+        topk_ids, topk_weights = _routing(inference_phase, global_num_tokens, distributed, power_law_alpha)
 
         def kernel_func():
             fused_experts(
