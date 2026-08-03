@@ -601,13 +601,17 @@ h100 2,537 / h200 2,587). The 1-GPU job was canceled after the 8-GPU
 artifact verified. Upstream sglang issue for the marlin EP>1 crash is
 still unfiled — now reproducible on four system families.
 
-RE-BASELINE ITEM (2026-08-03, opened while refreshing the PR body): the
-b300 TP8 isl1024 DSPARK reference step is now 19.8 ms at current head
-vs the 17.7 ms recorded on 2026-08-02 (which sat ~5% above the
-uniform-corrected 16.8 ms E2E). The no-spec number moved as expected
-with the shared-expert fix (14.37 -> 13.94 ms), but the spec step grew
-~2 ms — prime suspect is upstream #1410 ("model speculative progress
-in agg scheduling"), merged from main on 2026-08-03, which changes agg
-step semantics under speculation. Needs a bisect across the merge
-before re-asserting any E2E step-delta claim; the PR body now quotes
-current-head numbers and flags the claim as being re-baselined.
+RE-BASELINE ITEM — RESOLVED same day (2026-08-03): there was no step
+regression. The 2026-08-02 body line "implied spec step (17.7 ms)" was
+an arithmetic slip — 2.94 ms x 6 with accepted=6, but the progress
+convention is tokens/step = 1 + accepted, so the true old step was
+2.94 x 7 = 20.6 ms. With correct arithmetic every reference number
+moved exactly by the shared-expert-width fix (-3..4%): no-spec 14.37
+-> 13.94, acc6 tpot 2.94 -> 2.83, acc7 404.3 tok/s/user, spec step
+20.6 -> 19.8. Upstream #1410 was exonerated by direct experiment
+(revert + python engine pinned: numbers identical). Consequently the
+old "~5% above the 16.8 ms E2E" claim dies with the slip: the honest
+deltas are +18% vs the dummy-weight E2E step (expected-fast per the
+documented MoE routing-collapse artifact) and +4.7% vs the sglang
+Day-0 blog's real-weight bs1 operating point (step 19.8 vs implied
+18.9 ms) — the blog is the meaningful external anchor.
