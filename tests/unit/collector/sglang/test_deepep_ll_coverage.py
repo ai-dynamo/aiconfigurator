@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coverage certification for the DeepEP normal-mode collector."""
+"""Plan and coverage certification for the DeepEP low-latency collector."""
 
 import csv
 
 import pytest
 
-from collector.wideep.sglang import collect_deepep_normal
-from collector.wideep.sglang.collect_deepep_normal import _validate_expert_partition, _verify_axis_coverage
+from collector.wideep.sglang import collect_deepep_ll
+from collector.wideep.sglang.collect_deepep_ll import _validate_expert_partition, _verify_token_coverage
 
 pytestmark = pytest.mark.unit
 
@@ -18,18 +18,16 @@ _FIELDNAMES = (
     "num_token",
     "num_topk",
     "num_experts",
-    "dispatch_sms",
-    "dispatch_transmit_us",
+    "dispatch_avg_t_us",
 )
 _CASES = [
     {"hidden_size": 2048, "num_experts": 128, "topk": 8},
     {"hidden_size": 7168, "num_experts": 256, "topk": 8},
 ]
-_SMS = [4, 20]
 _TOKENS = [1, 64]
 
 
-def _rows(cases, sms_list=_SMS, tokens=_TOKENS):
+def _rows(cases, tokens=_TOKENS):
     return [
         {
             "node_num": 1,
@@ -37,11 +35,9 @@ def _rows(cases, sms_list=_SMS, tokens=_TOKENS):
             "num_token": num_token,
             "num_topk": case["topk"],
             "num_experts": case["num_experts"],
-            "dispatch_sms": sms,
-            "dispatch_transmit_us": 42.0,
+            "dispatch_avg_t_us": 42.0,
         }
         for case in cases
-        for sms in sms_list
         for num_token in tokens
     ]
 
@@ -53,59 +49,49 @@ def _write_perf_csv(path, rows):
         writer.writerows(rows)
 
 
-def test_full_pair_grid_passes_and_counts_planned_shapes(tmp_path):
-    path = tmp_path / "wideep_deepep_normal_perf.txt"
+def test_full_token_sweep_passes_and_counts_planned_shapes(tmp_path):
+    path = tmp_path / "wideep_deepep_ll_perf.txt"
     _write_perf_csv(path, _rows(_CASES))
 
-    assert _verify_axis_coverage(path, _SMS, _TOKENS, _CASES) == len(_CASES)
+    assert _verify_token_coverage(path, _TOKENS, _CASES) == len(_CASES)
 
 
-def test_missing_pair_is_rejected_even_when_both_marginal_sets_are_complete(tmp_path):
-    path = tmp_path / "wideep_deepep_normal_perf.txt"
+def test_missing_token_is_rejected(tmp_path):
+    path = tmp_path / "wideep_deepep_ll_perf.txt"
     rows = _rows(_CASES)
-    rows.remove(
-        {
-            "node_num": 1,
-            "hidden_size": 2048,
-            "num_token": 64,
-            "num_topk": 8,
-            "num_experts": 128,
-            "dispatch_sms": 4,
-            "dispatch_transmit_us": 42.0,
-        }
-    )
+    rows.pop(1)
     _write_perf_csv(path, rows)
 
-    with pytest.raises(RuntimeError, match=r"missing pairs=\[\(4, 64\)\]"):
-        _verify_axis_coverage(path, _SMS, _TOKENS, _CASES)
+    with pytest.raises(RuntimeError, match=r"hidden=2048.*missing tokens=\[64\]"):
+        _verify_token_coverage(path, _TOKENS, _CASES)
 
 
 def test_whole_missing_shape_blocks_completion(tmp_path):
-    path = tmp_path / "wideep_deepep_normal_perf.txt"
+    path = tmp_path / "wideep_deepep_ll_perf.txt"
     _write_perf_csv(path, _rows([_CASES[0]]))
 
-    with pytest.raises(RuntimeError, match=r"hidden=7168.*missing all 4 pairs"):
-        _verify_axis_coverage(path, _SMS, _TOKENS, _CASES)
+    with pytest.raises(RuntimeError, match=r"hidden=7168.*missing all 2 tokens"):
+        _verify_token_coverage(path, _TOKENS, _CASES)
 
 
 def test_header_only_output_is_rejected(tmp_path):
-    path = tmp_path / "wideep_deepep_normal_perf.txt"
+    path = tmp_path / "wideep_deepep_ll_perf.txt"
     _write_perf_csv(path, [])
 
     with pytest.raises(RuntimeError, match="wrote no data rows"):
-        _verify_axis_coverage(path, _SMS, _TOKENS, _CASES)
+        _verify_token_coverage(path, _TOKENS, _CASES)
 
 
 def test_public_plan_does_not_filter_framework_kernel_limits(monkeypatch):
     shapes = [
-        (8192, 512, 22),  # known DeepEP 1.2.1 normal-mode TMA/top-k limits
-        (4100, 128, 8),  # not divisible by the FP8 cast's preferred width
+        (8192, 512, 22),  # above the known DeepEP 1.2.1 low-latency top-k cap
+        (4100, 128, 8),  # outside the known hidden specializations/divisibility
         (2048, 128, 8),
         (2048, 128, 8),  # duplicate config must still be deduplicated
     ]
-    monkeypatch.setattr(collect_deepep_normal, "_iter_moe_configs", lambda: iter(shapes))
+    monkeypatch.setattr(collect_deepep_ll, "_iter_moe_configs", lambda: iter(shapes))
 
-    assert collect_deepep_normal.get_deepep_normal_test_cases() == [
+    assert collect_deepep_ll.get_deepep_ll_test_cases() == [
         {"hidden_size": 2048, "num_experts": 128, "topk": 8},
         {"hidden_size": 4100, "num_experts": 128, "topk": 8},
         {"hidden_size": 8192, "num_experts": 512, "topk": 22},

@@ -43,23 +43,6 @@ __compat__ = ">=0.5.0"
 # Token sweep: powers of two up to 1024.
 DEEPEP_LL_TOKENS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
-# DeepEP per-token FP8 cast requires the hidden dimension to be 128-divisible.
-HIDDEN_DIVISOR = 128
-
-# DeepEP low-latency kernels are template-specialized on hidden size: the
-# `SWITCH_HIDDEN` macro (DeepEP csrc/kernels/launch.cuh) only instantiates a
-# fixed set, and any other hidden hits `EP_HOST_ASSERT(false and "Unsupported
-# hidden")` inside the dispatch kernel (mid-collective, unrecoverable). Pre-filter
-# to the supported set. Override for a different build via the
-# DEEPEP_LL_HIDDEN_ALLOWLIST env var (comma-separated ints, or "all" to disable).
-DEEPEP_LL_SUPPORTED_HIDDEN = (2048, 2560, 4096, 5120, 6144, 7168, 8192)
-
-# DeepEP low-latency dispatch caps top-k: internode_ll.cu defines
-# `kNumMaxTopK = 11`, and a larger top-k trips
-# `EP_HOST_ASSERT(num_topk <= kNumMaxTopK)` (which also leaves NVSHMEM state dirty
-# for later shapes). Override for a different build via DEEPEP_LL_MAX_TOPK.
-DEEPEP_LL_MAX_TOPK = int(os.environ.get("DEEPEP_LL_MAX_TOPK", "11"))
-
 # `num_max_dispatch_tokens_per_rank` is the receive-buffer slot capacity, which
 # SGLang pins to a constant independent of the batch size
 # (SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK, default 128). Sizing it to the
@@ -86,15 +69,6 @@ def _ensure_low_latency_qp_depth(max_tokens: int) -> None:
     current = os.environ.get("NVSHMEM_QP_DEPTH")
     if current is None or int(current) < min_qp_depth:
         os.environ["NVSHMEM_QP_DEPTH"] = str(min_qp_depth)
-
-
-def _hidden_allowlist():
-    raw = os.environ.get("DEEPEP_LL_HIDDEN_ALLOWLIST", "").strip()
-    if not raw:
-        return set(DEEPEP_LL_SUPPORTED_HIDDEN)
-    if raw.lower() == "all":
-        return None  # disable the filter
-    return {int(tok) for tok in raw.replace(",", " ").split()}
 
 
 def _iter_moe_configs():
@@ -139,30 +113,53 @@ def get_deepep_ll_test_cases():
     """Return unique structural ``(hidden_size, num_experts, topk)`` MoE combos.
 
     Tokens are swept internally by the benchmark, so each case is one structural
-    shape. Shapes DeepEP cannot run are pruned with evidence:
-
-    * ``hidden % 128 != 0`` -- ``per_token_cast_to_fp8`` asserts a 128-divisible
-      hidden dimension (collector/wideep/sglang/deepep/utils.py).
-    * ``hidden`` not in the DeepEP ``SWITCH_HIDDEN`` allowlist -- the LL kernels
-      are template-specialized per hidden size (see DEEPEP_LL_SUPPORTED_HIDDEN).
-    * ``topk > kNumMaxTopK`` (see DEEPEP_LL_MAX_TOPK) -- the LL dispatch kernel
-      asserts on larger top-k.
-    * missing ``topk`` -- dense / non-MoE configs.
+    shape. The public plan intentionally includes every discovered MoE shape.
+    Framework kernel limitations are observed as per-case failures at runtime,
+    rather than silently changing the plan.
     """
-    allow = _hidden_allowlist()
-    combos = set()
-    for hidden, num_experts, topk in _iter_moe_configs():
-        if hidden % HIDDEN_DIVISOR != 0:
-            continue
-        if allow is not None and hidden not in allow:
-            continue
-        if topk > DEEPEP_LL_MAX_TOPK:
-            continue
-        combos.add((hidden, num_experts, topk))
+    combos = set(_iter_moe_configs())
     return [
         {"hidden_size": hidden, "num_experts": num_experts, "topk": topk}
         for hidden, num_experts, topk in sorted(combos)
     ]
+
+
+def _verify_token_coverage(output_path, tokens, cases):
+    """Assert every successful shape wrote every requested token point."""
+    import csv
+
+    wanted = {int(num_token) for num_token in tokens}
+    expected_shapes = {(int(case["hidden_size"]), int(case["num_experts"]), int(case["topk"])) for case in cases}
+    seen: dict[tuple[int, int, int], set[int]] = {}
+    with open(output_path, newline="") as handle:
+        for row in csv.DictReader(handle):
+            key = (int(row["hidden_size"]), int(row["num_experts"]), int(row["num_topk"]))
+            seen.setdefault(key, set()).add(int(row["num_token"]))
+
+    if not seen:
+        raise RuntimeError(f"DeepEP LL collection wrote no data rows to {output_path}")
+
+    short = []
+    for hidden, num_experts, num_topk in sorted(expected_shapes):
+        shape = (hidden, num_experts, num_topk)
+        if shape not in seen:
+            short.append(f"hidden={hidden} experts={num_experts} topk={num_topk}: missing all {len(wanted)} tokens")
+            continue
+        missing = sorted(wanted - seen[shape])
+        if missing:
+            short.append(f"hidden={hidden} experts={num_experts} topk={num_topk}: missing tokens={missing}")
+    if short:
+        raise RuntimeError("DeepEP LL collection under-covers the requested token sweep:\n  " + "\n  ".join(short))
+    return len(expected_shapes)
+
+
+def _validate_expert_partition(hidden: int, num_experts: int, num_topk: int, num_ranks: int) -> None:
+    """Fail a queued shape whose experts cannot be partitioned across ranks."""
+    if num_experts % num_ranks != 0:
+        raise RuntimeError(
+            f"DeepEP LL requires num_experts divisible by num_ranks; "
+            f"hidden={hidden} experts={num_experts} topk={num_topk} ranks={num_ranks}"
+        )
 
 
 def _free_port() -> int:
@@ -254,17 +251,11 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
         hidden = int(case["hidden_size"])
         num_experts = int(case["num_experts"])
         num_topk = int(case["topk"])
-        if num_experts % num_ranks != 0:
-            if rank == 0:
-                print(
-                    f"[deepep_ll] skip hidden={hidden} experts={num_experts} topk={num_topk}: "
-                    f"num_experts not divisible by num_ranks={num_ranks}",
-                    flush=True,
-                )
-            continue
+        _validate_expert_partition(hidden, num_experts, num_topk, num_ranks)
 
-        # Buffer allocation can OOM for large shapes; that fails symmetrically
-        # before any collective, so we can skip the shape and keep the group intact.
+        # Buffer allocation failure is a failed case. The parent isolates every
+        # shape in its own spawn, so raising records the exact case and leaves the
+        # following shape a fresh process group.
         max_capacity = _dispatch_capacity(max(tokens))
         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(max_capacity, hidden, num_ranks, num_experts)
         if rank == 0:
@@ -286,12 +277,11 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
         except Exception:
             if rank == 0:
                 print(
-                    f"[deepep_ll] SKIP (buffer alloc) hidden={hidden} experts={num_experts} "
+                    f"[deepep_ll] FAILED (buffer alloc) hidden={hidden} experts={num_experts} "
                     f"topk={num_topk}:\n{traceback.format_exc()}",
                     flush=True,
                 )
-            dist.barrier()
-            continue
+            raise
 
         # A failure inside the benchmark leaves the process group in an undefined
         # state (a half-finished collective), so we cannot safely continue: log the
@@ -303,6 +293,12 @@ def _ll_worker(local_rank, num_gpus, cases, tokens, output_path, device_name, ve
                 token_metrics: list[dict] = []
                 capacity = _dispatch_capacity(num_tokens)
                 buffer.clean_low_latency_buffer(capacity, hidden, num_experts)
+                # FIXME(kernel-limit): DeepEP 1.2.1 low-latency dispatch only
+                # instantiates selected hidden sizes (SWITCH_HIDDEN), caps top-k
+                # at 11 (internode_ll.cu kNumMaxTopK), and its FP8 cast expects a
+                # 128-divisible hidden size. These source-derived claims remain
+                # unverified for the next runtime; invoke the framework and record
+                # any affected shape as a failure instead of filtering the plan.
                 test_low_latency.test_main(
                     num_tokens,
                     hidden,
@@ -404,7 +400,7 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
     # be caught in-process, so a single mp.spawn over all shapes would lose every
     # later shape. One spawn per shape contains the blast radius; rows are flushed
     # per token, so completed work always lands on disk.
-    succeeded, failed = 0, []
+    successful_cases, failed = [], []
     for idx, case in enumerate(cases, start=1):
         os.environ["MASTER_PORT"] = str(_free_port())
         print(
@@ -419,7 +415,8 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
                 nprocs=num_gpus,
                 join=True,
             )
-            succeeded += 1
+            _verify_token_coverage(output_path, DEEPEP_LL_TOKENS, [case])
+            successful_cases.append(case)
         except Exception:
             failed.append(case)
             print(
@@ -427,12 +424,15 @@ def run_deepep_ll_fullnode(perf_filename=PerfFile.WIDEEP_DEEPEP_LL, *, device=No
                 flush=True,
             )
 
+    succeeded = len(successful_cases)
     print(f"[deepep_ll] done: {succeeded}/{len(cases)} shapes ok, {len(failed)} failed", flush=True)
     if failed:
         print(f"[deepep_ll] failed shapes: {failed}", flush=True)
 
-    if Path(output_path).exists():
-        print(f"[deepep_ll] collection complete: {output_path}", flush=True)
-    else:
+    if not Path(output_path).exists() and not failed:
         raise RuntimeError(f"DeepEP LL collection produced no output at {output_path}")
+
+    status = "complete" if not failed else "partial"
+    output = output_path if Path(output_path).exists() else "no output rows"
+    print(f"[deepep_ll] collection {status}: {output}", flush=True)
     return {"succeeded": succeeded, "failed": failed}

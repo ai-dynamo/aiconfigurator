@@ -110,68 +110,6 @@ DEEPEP_NORMAL_CHECK_MAX_TOKENS = int(os.environ.get("DEEPEP_NORMAL_CHECK_MAX_TOK
 # same point on two systems is not measured against the same traffic pattern.
 DEEPEP_NORMAL_SEED = int(os.environ.get("DEEPEP_NORMAL_SEED", "1"))
 
-# DeepEP per-token FP8 cast requires the hidden dimension to be 128-divisible
-# (deepep/utils.py per_token_cast_to_fp8).
-HIDDEN_DIVISOR = 128
-
-# Normal-mode dispatch IS bounded by hidden size. This comment previously claimed
-# the opposite ("NOT template-specialized per hidden size"); GB200 evidence
-# refuted it -- hidden 8192 fails with "unspecified launch failure" at 1 token
-# with 0.3 GB allocated, at every NVL buffer size from 2 to 16 GB.
-#
-# The bound is not a template specialization like the low-latency SWITCH_HIDDEN
-# allowlist; it is a per-warp TMA staging budget in the intranode dispatch kernel
-# (``csrc/kernels/intranode.cu``; line numbers below are v1.2.1 source, and the
-# built tree inside the image reports one line later -- grep the condition text
-# rather than trusting either number). Each warp owns a fixed slice of dynamic
-# shared memory (``constexpr int kNumTMABytesPerWarp = 8192``, in the host-side
-# ``dispatch`` launcher), the kernel puts the token payload at the base of that
-# slice and its mbarrier immediately after it, and then asserts the two fit:
-#
-#     EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and
-#                      half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp)
-#
-# ``hidden_int4 = hidden * element_size / 16`` (csrc/deep_ep.cpp) and
-# ``half_hidden_bytes = hidden_int4 / 2 * 16``, so for a 2-byte payload
-# half_hidden_bytes is exactly ``hidden`` and the condition collapses to
-# ``hidden + 8 <= 8192``. hidden 8192 overruns by 8 bytes -- the mbarrier itself.
-# ``EP_DEVICE_ASSERT`` is ``printf`` plus ``asm("trap;")``
-# (``csrc/kernels/exception.cuh``); a trap surfaces asynchronously as "unspecified
-# launch failure", which is why the symptom appears at the first ``.item()`` after
-# dispatch rather than at launch. The device printf survives: the GB200 probe log
-# carries "Assertion failed: /build/DeepEP/csrc/kernels/intranode.cu:236,
-# condition: hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <=
-# kNumTMABytesPerWarp" verbatim.
-#
-# Nothing at runtime moves this. ``kNumTMABytesPerWarp`` and ``kNumThreads`` are
-# both ``constexpr`` at the launch site, so num_sms, chunk size and NVL buffer
-# size cannot help -- matching the measured invariance. Combine is unaffected: its
-# TMA buffer is staged in fixed ``kNumStages = 8`` chunks bounded by a static
-# assert, so it carries no hidden ceiling.
-#
-# The ceiling binds the BF16 payload only (FP8 halves half_hidden_bytes, giving
-# 16352), but ``test_intranode.test_main`` always dispatches BF16 -- to establish
-# the combine handle, as the correctness reference, and as the BF16 leg of the
-# tuning loop -- so a BF16-infeasible shape is infeasible for the benchmark.
-#
-# The whole TMA block sits under ``#ifndef DISABLE_SM90_FEATURES`` and falls back
-# to ``UNROLLED_WARP_COPY``, so a build without SM90 features would not trap. This
-# filter's premise is therefore ``Buffer.is_sm90_compiled()`` being true, which is
-# why ``_normal_worker`` logs that flag: if it is ever false, the ceiling is moot
-# and the recorded dispatch metric changed meaning at the same time.
-#
-# Override only to re-test the ceiling on new hardware or a new deep_ep build.
-DEEPEP_NORMAL_TMA_BYTES_PER_WARP = 8192
-DEEPEP_NORMAL_MAX_HIDDEN = int(os.environ.get("DEEPEP_NORMAL_MAX_HIDDEN", str(DEEPEP_NORMAL_TMA_BYTES_PER_WARP - 8)))
-
-# Normal mode's own top-k ceiling, ``EP_DEVICE_ASSERT(num_topk <= 32)``, asserted
-# by both the dispatch and combine kernels in ``csrc/kernels/intranode.cu``. It
-# sits well above the largest top-k in the model set (22), so unlike low-latency --
-# capped at ``kNumMaxTopK`` 11 in deep_ep 1.2.1, which is what excludes
-# Nemotron-3-Ultra's top-k 22 from the LL sweep -- no top-k filter is needed here.
-# Asserted rather than filtered so a future model past 32 fails at case selection.
-DEEPEP_NORMAL_MAX_TOPK = 32
-
 # Intranode NVLink buffer size (bytes). Matches test_intranode.py's default.
 # Override via DEEPEP_NORMAL_NVL_BYTES for very large token counts.
 DEEPEP_NORMAL_NVL_BYTES = int(os.environ.get("DEEPEP_NORMAL_NVL_BYTES", str(int(2e9))))
@@ -296,59 +234,23 @@ def get_deepep_normal_test_cases():
     """Return unique structural ``(hidden_size, num_experts, topk)`` MoE combos.
 
     Tokens and SM counts are swept internally by the benchmark, so each case is
-    one structural shape. Shapes DeepEP cannot run are pruned with evidence:
-
-    * ``hidden % 128 != 0`` -- ``per_token_cast_to_fp8`` asserts a 128-divisible
-      hidden dimension (collector/wideep/sglang/deepep/utils.py).
-    * ``hidden > DEEPEP_NORMAL_MAX_HIDDEN`` -- the dispatch kernel's per-warp TMA
-      staging budget traps inside the kernel; see the constant for the source
-      derivation. Costs exactly one shape today, ``(8192, 512, 22)``.
-    * missing ``topk`` -- dense / non-MoE configs.
-
-    Top-k is not filtered: normal mode allows up to ``DEEPEP_NORMAL_MAX_TOPK``,
-    far above the model set, so the low-latency ``kNumMaxTopK`` cap has no analogue
-    here. A shape past that ceiling raises rather than being silently dropped.
-
-    Use ``_excluded_shapes`` for the pruned list; the sweep logs it at startup so a
-    campaign log records why a shape is absent.
+    one structural shape. The public plan intentionally includes every discovered
+    MoE shape; framework kernel limits are observed and recorded at runtime.
     """
-    combos = set()
-    for hidden, num_experts, topk in _iter_moe_configs():
-        if hidden % HIDDEN_DIVISOR != 0 or hidden > DEEPEP_NORMAL_MAX_HIDDEN:
-            continue
-        if topk > DEEPEP_NORMAL_MAX_TOPK:
-            raise RuntimeError(
-                f"MoE shape hidden={hidden} experts={num_experts} topk={topk} exceeds DeepEP's "
-                f"num_topk <= {DEEPEP_NORMAL_MAX_TOPK} device assert (intranode.cu); "
-                "normal-mode collection needs a documented top-k filter before this shape can be planned."
-            )
-        combos.add((hidden, num_experts, topk))
+    combos = set(_iter_moe_configs())
     return [
         {"hidden_size": hidden, "num_experts": num_experts, "topk": topk}
         for hidden, num_experts, topk in sorted(combos)
     ]
 
 
-def _excluded_shapes():
-    """Return ``(shape, reason)`` for every MoE shape pruned from the sweep.
-
-    Silent pruning is the same failure mode as silent under-coverage: the case list
-    feeds ``provenance.case_plan_hash``, so a shape that was never planned is
-    indistinguishable downstream from one that was forgotten. Reported in the
-    startup banner so the reason lands in the campaign log.
-    """
-    excluded = {}
-    for hidden, num_experts, topk in _iter_moe_configs():
-        shape = (hidden, num_experts, topk)
-        if hidden % HIDDEN_DIVISOR != 0:
-            excluded[shape] = f"hidden not divisible by {HIDDEN_DIVISOR} (per_token_cast_to_fp8)"
-        elif hidden > DEEPEP_NORMAL_MAX_HIDDEN:
-            excluded[shape] = (
-                f"hidden > {DEEPEP_NORMAL_MAX_HIDDEN}: dispatch traps on the per-warp TMA budget "
-                f"(kNumTMABytesPerWarp={DEEPEP_NORMAL_TMA_BYTES_PER_WARP}, "
-                "intranode.cu half_hidden_bytes assert)"
-            )
-    return sorted(excluded.items())
+def _validate_expert_partition(hidden: int, num_experts: int, num_topk: int, num_ranks: int) -> None:
+    """Fail a queued shape whose experts cannot be partitioned across ranks."""
+    if num_experts % num_ranks != 0:
+        raise RuntimeError(
+            f"DeepEP normal requires num_experts divisible by num_ranks; "
+            f"hidden={hidden} experts={num_experts} topk={num_topk} ranks={num_ranks}"
+        )
 
 
 def _free_port() -> int:
@@ -430,17 +332,10 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
         hidden = int(case["hidden_size"])
         num_experts = int(case["num_experts"])
         num_topk = int(case["topk"])
-        if num_experts % num_ranks != 0:
-            if rank == 0:
-                print(
-                    f"[deepep_normal] skip hidden={hidden} experts={num_experts} topk={num_topk}: "
-                    f"num_experts not divisible by num_ranks={num_ranks}",
-                    flush=True,
-                )
-            continue
+        _validate_expert_partition(hidden, num_experts, num_topk, num_ranks)
 
-        # Buffer allocation can OOM for large shapes; that fails symmetrically
-        # before any collective, so we can skip the shape and keep the group intact.
+        # Buffer allocation failure is a failed case. The parent isolates every
+        # shape in its own spawn, so raising preserves exact failure accounting.
         if rank == 0:
             print(
                 f"[deepep_normal] hidden={hidden} experts={num_experts} topk={num_topk} "
@@ -459,12 +354,11 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
         except Exception:
             if rank == 0:
                 print(
-                    f"[deepep_normal] SKIP (buffer alloc) hidden={hidden} experts={num_experts} "
+                    f"[deepep_normal] FAILED (buffer alloc) hidden={hidden} experts={num_experts} "
                     f"topk={num_topk}:\n{traceback.format_exc()}",
                     flush=True,
                 )
-            dist.barrier()
-            continue
+            raise
 
         # A failure inside the benchmark leaves the process group in an undefined
         # state (a half-finished collective), so we cannot safely continue: log the
@@ -501,6 +395,11 @@ def _normal_worker(local_rank, num_gpus, cases, tokens, sms_list, output_path, d
                     # (seed, rank, num_tokens) alone: reproducible across reruns and
                     # identical across systems for the same point.
                     torch.manual_seed(DEEPEP_NORMAL_SEED + rank)
+                    # FIXME(kernel-limit): DeepEP 1.2.1 normal dispatch's SM90
+                    # TMA path traps for BF16 hidden=8192 because hidden + the
+                    # mbarrier exceeds kNumTMABytesPerWarp, and intranode.cu
+                    # asserts num_topk <= 32. These claims must be reverified on
+                    # the next version bump; invoke and record failures meanwhile.
                     test_intranode.test_main(
                         args,
                         num_sms,
@@ -603,18 +502,12 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
         f"checks on for num_tokens <= {DEEPEP_NORMAL_CHECK_MAX_TOKENS}",
         flush=True,
     )
-    for (hidden, num_experts, topk), reason in _excluded_shapes():
-        print(
-            f"[deepep_normal] EXCLUDED hidden={hidden} experts={num_experts} topk={topk}: {reason}",
-            flush=True,
-        )
-
     # Isolate each shape in its own spawn job: a hard CUDA fault (e.g. illegal
     # memory access) in one shape corrupts the context for every rank and cannot
     # be caught in-process, so a single mp.spawn over all shapes would lose every
     # later shape. One spawn per shape contains the blast radius; rows are flushed
     # per (sms, token), so completed work always lands on disk.
-    succeeded, failed = 0, []
+    successful_cases, failed = [], []
     for idx, case in enumerate(cases, start=1):
         os.environ["MASTER_PORT"] = str(_free_port())
         print(
@@ -637,7 +530,8 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
                 nprocs=num_gpus,
                 join=True,
             )
-            succeeded += 1
+            _verify_axis_coverage(output_path, sms_list, tokens, [case])
+            successful_cases.append(case)
         except Exception:
             failed.append(case)
             print(
@@ -645,19 +539,24 @@ def run_deepep_normal_fullnode(perf_filename="wideep_deepep_normal_perf.txt", *,
                 flush=True,
             )
 
+    succeeded = len(successful_cases)
     print(f"[deepep_normal] done: {succeeded}/{len(cases)} shapes ok, {len(failed)} failed", flush=True)
     if failed:
         print(f"[deepep_normal] failed shapes: {failed}", flush=True)
 
-    if not Path(output_path).exists():
+    if not Path(output_path).exists() and not failed:
         raise RuntimeError(f"DeepEP normal collection produced no output at {output_path}")
 
-    covered_shapes = _verify_axis_coverage(output_path, sms_list, tokens, cases)
-    print(
-        f"[deepep_normal] axis coverage verified: {covered_shapes} shapes x {len(sms_list)} sms x {len(tokens)} tokens",
-        flush=True,
-    )
-    print(f"[deepep_normal] collection complete: {output_path}", flush=True)
+    if successful_cases:
+        covered_shapes = _verify_axis_coverage(output_path, sms_list, tokens, successful_cases)
+        print(
+            f"[deepep_normal] axis coverage verified: "
+            f"{covered_shapes} shapes x {len(sms_list)} sms x {len(tokens)} tokens",
+            flush=True,
+        )
+    status = "complete" if not failed else "partial"
+    output = output_path if Path(output_path).exists() else "no output rows"
+    print(f"[deepep_normal] collection {status}: {output}", flush=True)
     return {"succeeded": succeeded, "failed": failed}
 
 
