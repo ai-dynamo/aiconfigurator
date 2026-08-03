@@ -365,7 +365,8 @@ impl MoeEpTable {
     /// yields dict insertion (file row) order; sorted order is observable
     /// only when several kernels coexist AND the preferred one is absent
     /// (every shipped table collects exactly one kernel). Same accessor and
-    /// same caveat as [`super::WideEpMoeTable::available_kernels`].
+    /// same caveat as the retired `WideEpMoeTable::available_kernels`
+    /// (removed with the wideEP tables, AIC-1601).
     pub fn available_kernels(&self) -> Result<Vec<String>, AicError> {
         let grids = match self.load() {
             Ok(grids) => grids,

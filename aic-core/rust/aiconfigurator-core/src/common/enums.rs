@@ -548,11 +548,6 @@ pub enum PerfDataFilename {
     CustomAllreduce,
     WideepContextMla,
     WideepGenerationMla,
-    WideepContextMoe,
-    WideepGenerationMoe,
-    WideepDeepepNormal,
-    WideepDeepepLl,
-    WideepMoeCompute,
     TrtllmAlltoall,
     ComputeScale,
     ScaleMatrix,
@@ -594,11 +589,6 @@ impl PerfDataFilename {
             Self::CustomAllreduce => "custom_allreduce_perf.parquet",
             Self::WideepContextMla => "wideep_context_mla_perf.parquet",
             Self::WideepGenerationMla => "wideep_generation_mla_perf.parquet",
-            Self::WideepContextMoe => "wideep_context_moe_perf.parquet",
-            Self::WideepGenerationMoe => "wideep_generation_moe_perf.parquet",
-            Self::WideepDeepepNormal => "wideep_deepep_normal_perf.parquet",
-            Self::WideepDeepepLl => "wideep_deepep_ll_perf.parquet",
-            Self::WideepMoeCompute => "wideep_moe_perf.parquet",
             Self::TrtllmAlltoall => "trtllm_alltoall_perf.parquet",
             Self::ComputeScale => "computescale_perf.parquet",
             Self::ScaleMatrix => "scale_matrix_perf.parquet",
@@ -725,10 +715,6 @@ mod tests {
         assert_eq!(
             PerfDataFilename::CustomAllreduce.as_str(),
             "custom_allreduce_perf.parquet"
-        );
-        assert_eq!(
-            PerfDataFilename::WideepDeepepLl.as_str(),
-            "wideep_deepep_ll_perf.parquet"
         );
         assert_eq!(
             PerfDataFilename::TrtllmAlltoall.as_str(),

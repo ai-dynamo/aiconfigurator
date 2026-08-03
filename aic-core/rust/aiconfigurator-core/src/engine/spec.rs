@@ -166,9 +166,8 @@ mod tests {
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
         Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp,
         GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
-        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp,
-        TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
-        WideEpMoeOp,
+        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp, VisionEncoderOp,
+        WideEpContextMlaOp, WideEpGenerationMlaOp,
     };
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
@@ -547,40 +546,6 @@ mod tests {
         }
     }
 
-    fn wideep_moe() -> WideEpMoeOp {
-        WideEpMoeOp {
-            name: "wideep_moe".into(),
-            scale_factor: 1.0,
-            hidden_size: 7168,
-            inter_size: 2048,
-            topk: 8,
-            num_experts: 256,
-            moe_tp_size: 1,
-            moe_ep_size: 8,
-            attention_dp_size: 8,
-            quant_mode: MoeQuantMode::Fp8Block,
-            workload_distribution: "power_law_1.2_eplb".into(),
-            num_slots: 288,
-            kernel_source: "moe_torch_flow".into(),
-        }
-    }
-
-    fn wideep_moe_dispatch() -> TrtllmWideEpMoEDispatchOp {
-        TrtllmWideEpMoEDispatchOp {
-            name: "wideep_moe_dispatch".into(),
-            scale_factor: 61.0,
-            hidden_size: 7168,
-            topk: 8,
-            num_experts: 256,
-            moe_tp_size: 1,
-            moe_ep_size: 8,
-            attention_dp_size: 8,
-            pre_dispatch: true,
-            quant_mode: MoeQuantMode::Nvfp4,
-            use_low_precision_combine: false,
-        }
-    }
-
     /// Large-EP comm phase with every optional field set to a NON-default
     /// value, so the round-trip would notice a `#[serde(default)]` swallowing
     /// a carried field.
@@ -680,8 +645,6 @@ mod tests {
             OpSpec::Gdn(gdn()),
             OpSpec::WideEpContextMla(wideep_context_mla()),
             OpSpec::WideEpGenerationMla(wideep_generation_mla()),
-            OpSpec::WideEpMoe(wideep_moe()),
-            OpSpec::WideEpMoeDispatch(wideep_moe_dispatch()),
             OpSpec::Overlap(overlap()),
             OpSpec::Fallback(fallback()),
             // Appended AFTER Fallback (bincode enum indices are positional;
@@ -726,8 +689,6 @@ mod tests {
                 | OpSpec::Gdn(_)
                 | OpSpec::WideEpContextMla(_)
                 | OpSpec::WideEpGenerationMla(_)
-                | OpSpec::WideEpMoe(_)
-                | OpSpec::WideEpMoeDispatch(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
                 | OpSpec::Dsv4MegaMoe(_)
@@ -768,6 +729,43 @@ mod tests {
             transfer_policy: None,
             extra: BTreeMap::new(),
         }
+    }
+
+    /// Pin the bincode POSITIONAL variant index of the first and the two last
+    /// `Op` variants. bincode encodes an enum as a leading 4-byte LE variant
+    /// index, so inserting or removing a variant mid-enum silently reinterprets
+    /// every later variant on the wire.
+    ///
+    /// These pin bincode positional indices; if this test fails you reordered/
+    /// inserted mid-enum — append instead, or bump ENGINE_SPEC_SCHEMA_VERSION
+    /// in lockstep (config.rs + engine.py).
+    #[test]
+    fn op_variant_indices_are_pinned() {
+        const GEMM_INDEX: u32 = 0;
+        const MOE_ALL_TO_ALL_INDEX: u32 = 31;
+        const EP_MOE_INDEX: u32 = 32;
+
+        let index_of = |op: &OpSpec| -> u32 {
+            let bytes = bincode::serialize(op).expect("serialize op");
+            u32::from_le_bytes(bytes[..4].try_into().expect("4-byte variant index prefix"))
+        };
+
+        assert_eq!(index_of(&OpSpec::Gemm(gemm())), GEMM_INDEX, "first variant moved");
+        assert_eq!(
+            index_of(&OpSpec::MoeAllToAll(moe_all_to_all())),
+            MOE_ALL_TO_ALL_INDEX,
+            "MoeAllToAll index moved"
+        );
+        assert_eq!(index_of(&OpSpec::EpMoe(ep_moe())), EP_MOE_INDEX, "EpMoe index moved");
+
+        // The two last variants must stay adjacent and terminal: appending is
+        // the only safe growth direction.
+        assert_eq!(EP_MOE_INDEX, MOE_ALL_TO_ALL_INDEX + 1);
+        assert_eq!(
+            EP_MOE_INDEX as usize + 1,
+            all_op_variants().len(),
+            "all_op_variants() must cover exactly the pinned variant count"
+        );
     }
 
     #[test]

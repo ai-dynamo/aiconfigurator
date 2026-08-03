@@ -42,6 +42,18 @@ EXEMPT: dict[str, str] = {
     # forward_model="fpm" is forced onto the Python engine step in
     # base_backend (no Rust op variant yet); the Rust port lands separately.
     "FPMForwardOp": "FPM forces the Python route; Rust port is a separate PR",
+    # Retained Python op classes kept purely as L0/L1 equivalence oracles for
+    # the large-EP redesign; no model emits them any more.
+    "TrtLLMWideEPMoE": (
+        "legacy oracle for L0/L1 equivalence tests; no model emits it "
+        "(deleted in PR 2); Rust bridge retired in PR 2.5 — removal tracked "
+        "for PR 3 data migration"
+    ),
+    "TrtLLMWideEPMoEDispatch": (
+        "legacy oracle for L0/L1 equivalence tests; no model emits it "
+        "(deleted in PR 2); Rust bridge retired in PR 2.5 — removal tracked "
+        "for PR 3 data migration"
+    ),
 }
 
 

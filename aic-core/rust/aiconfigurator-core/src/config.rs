@@ -34,7 +34,12 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
 //   branch concurrently with #1460, so the merge renumbered it (same
 //   precedent as the v3/v4 collision above).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 6;
+// - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+//   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
+//   bincode enum index; large-EP is now modeled natively by the
+//   `MoeAllToAll` / `EpMoe` variants appended after `Kda`, and `EpMoeOp`
+//   carries the `enable_eplb` legacy-fidelity field.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
