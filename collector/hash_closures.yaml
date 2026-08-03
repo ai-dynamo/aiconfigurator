@@ -173,8 +173,9 @@ collector.wideep.sglang.collect_deepep_ll:
   - collector/wideep/sglang/deepep/utils.py
   - __model_cases__
 collector.wideep.sglang.collect_deepep_moe:
-  # No collector/case_generator.py import in this module — cases are
-  # self-contained (get_wideep_moe_test_cases is defined locally).
+  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model /
+  # moe_model_allows_quantization.
+  - collector/cases/base_ops/moe.yaml
   - __model_cases__
 collector.wideep.sglang.collect_deepep_normal:
   # Same self-contained shape derivation and model_configs caveat as
