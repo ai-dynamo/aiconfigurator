@@ -49,6 +49,7 @@ _MODEL_CASES_DIR = "collector/cases/models"
 STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
     {
         "collector.sglang.collect_dsv4_megamoe",
+        "collector.wideep.sglang.collect_moe_a2a",
     }
 )
 
