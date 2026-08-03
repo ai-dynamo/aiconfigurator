@@ -46,7 +46,7 @@
 //! falls back requested -> `"uniform"` -> FIRST collected distribution that
 //! carries the requested `inference_phase`, in dict-INSERTION (file row)
 //! order (`_resolve_ep_distribution`; the `dist_order` bookkeeping mirrors
-//! `wideep_moe.rs`'s `first_distribution`, extended to a per-(kernel, quant)
+//! the retired `wideep_moe.rs`'s `first_distribution`, extended to a per-(kernel, quant)
 //! ordered list because the candidates are phase-filtered); the remaining
 //! shape walk is exact. A single-token-point curve queried BELOW its only
 //! measurement is a typed miss (the singleton-underflow guard,
@@ -54,7 +54,8 @@
 //! `perf_interp` engine (1-axis Grid: RAW lerp in range, boundary util-hold
 //! beyond it) anchored on the WideEP MoE roofline SOL `get_sol_latency`
 //! (moe_comm.py:1221-1237, `num_gemms` pinned to 3) — the same
-//! `num_slots`-aware roofline as `operators/wideep_moe.rs::sol_latency_ms`.
+//! `num_slots`-aware roofline the retired
+//! `operators/wideep_moe.rs::sol_latency_ms` implemented.
 //!
 //! Phase VALIDATION (`_validate_ep_phase`'s `ValueError`) is the operator
 //! layer's job — this file is an algorithm-free accessor (the moe_a2a
@@ -65,12 +66,16 @@
 //! conventions:
 //!
 //! - the sglang adapter reads `inter_size` / `moe_tp_size` optionally with
-//!   0 / 1 defaults (copied from `wideep.rs::load_moe_parquet`, which reads
-//!   the same files); Python indexes them directly (`int(row[...])`), so an
+//!   0 / 1 defaults (the convention of the retired
+//!   `wideep.rs::load_moe_parquet`, which read the same files; the surviving
+//!   reference is Python
+//!   `operations/moe_comm.py::_adapt_legacy_sglang_wideep_moe`); Python
+//!   indexes them directly (`int(row[...])`), so an
 //!   absent column is a hard `KeyError` there — every shipped file carries
 //!   both, so the two agree on real data.
-//! - `quant` is stored as the raw `moe_dtype` string (the `wideep_moe.rs` /
-//!   `moe.rs` convention) and queried via `MoeQuantMode::name`; Python keys
+//! - `quant` is stored as the raw `moe_dtype` string (the `moe.rs`
+//!   convention, shared with the retired `wideep_moe.rs`) and queried via
+//!   `MoeQuantMode::name`; Python keys
 //!   `common.MoEQuantMode[row["moe_dtype"]]`, so a row with an invalid
 //!   moe_dtype CRASHES the Python load (KeyError) but becomes an unreachable
 //!   key here.
@@ -109,8 +114,9 @@ pub struct MoeEpKey {
 
 /// `num_tokens -> latency_ms` curves keyed by [`MoeEpKey`], plus the
 /// insertion-ordered distribution list per `(kernel_source, quant)` the
-/// fallback chain needs. Mirrors `wideep_moe.rs`'s `first_distribution`
-/// (Python dict-insertion order is file row order), extended to the FULL
+/// fallback chain needs. Mirrors the retired `wideep_moe.rs`'s
+/// `first_distribution` (Python dict-insertion order is file row order),
+/// extended to the FULL
 /// ordered list because `_resolve_ep_distribution` filters candidates by
 /// inference-phase coverage before taking the first one.
 struct MoeEpGrids {
@@ -338,8 +344,8 @@ impl MoeEpTable {
         // sol_fn=get_sol_latency)`: RAW lerp in range; beyond it the boundary
         // util is held and the roofline SOL carries the growth. The engine
         // only evaluates the SOL at integral coordinates (table keys and the
-        // integer query), so the round() is parity insurance, same as
-        // `operators/wideep_moe.rs`.
+        // integer query), so the round() is parity insurance, the same
+        // convention the retired `operators/wideep_moe.rs` used.
         let sol = |tokens: f64| {
             ep_sol_latency_ms(
                 &self.spec,
@@ -414,8 +420,8 @@ const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
 const EP_NUM_GEMMS: u64 = 3;
 
 /// WideEP MoE roofline SOL (ms) — verbatim `get_sol_latency`
-/// (moe_comm.py:1223-1237), the same math as
-/// `operators/wideep_moe.rs::sol_latency_ms` with `num_slots` (not
+/// (moe_comm.py:1223-1237), the same math the retired
+/// `operators/wideep_moe.rs::sol_latency_ms` carried, with `num_slots` (not
 /// `num_experts`) sizing the weight-read term. Python evaluates every term
 /// in (arbitrary-precision) integer floor division; u64 mirrors it exactly
 /// over the collected/queried ranges. `.max(1)` on the divisors only guards
@@ -450,8 +456,8 @@ fn ep_sol_latency_ms(
             * std::cmp::min(slots / moe_ep, total_tokens / moe_ep); // weights, num_slots-aware (:1229-1233)
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
     // moe_comm.py:1235: Python indexes `bfloat16_tc_flops` directly (KeyError
-    // if absent); every shipped system populates it — same fallback
-    // convention as `operators/wideep_moe.rs`.
+    // if absent); every shipped system populates it — the same fallback
+    // convention the retired `operators/wideep_moe.rs` used.
     let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
     let sol_math = (ops as f64) / (tc_flops * quant.mapping().compute) * 1000.0;
     // moe_comm.py:1236.
@@ -499,8 +505,10 @@ fn load_moe_ep_grids(
 /// (`_read_filtered_rows` yields `None` only when EVERY path is missing).
 ///
 /// `inter_size` / `moe_tp_size` are read optionally with 0 / 1 defaults —
-/// copied from `wideep.rs::load_moe_parquet`, which reads the same files
-/// (Python indexes them directly; see the module doc's divergence note).
+/// the convention of the retired `wideep.rs::load_moe_parquet`, which read
+/// the same files; the surviving reference is Python
+/// `operations/moe_comm.py::_adapt_legacy_sglang_wideep_moe` (which indexes
+/// them directly — see the module doc's divergence note).
 fn adapt_legacy_sglang_wideep_moe(
     sources: &[PerfSource],
     inference_phase: &str,
@@ -877,7 +885,7 @@ mod tests {
     /// `"deepepmoe"` spelling the adapter must IGNORE (it pins
     /// `"deepep_moe"`). `with_inter_and_tp = false` omits the `inter_size` /
     /// `moe_tp_size` columns entirely — the loader must then key at
-    /// inter=0 / tp=1 (the `wideep.rs` defaults).
+    /// inter=0 / tp=1 (the defaults inherited from the retired `wideep.rs`).
     fn write_legacy_sglang_parquet(
         path: &Path,
         rows: &[(&'static str, i64, i64, f64)],
@@ -1285,7 +1293,8 @@ mod tests {
     }
 
     /// An sglang legacy file without `inter_size` / `moe_tp_size` columns
-    /// keys at inter=0 / tp=1 (the `wideep.rs::load_moe_parquet` defaults).
+    /// keys at inter=0 / tp=1 (the defaults inherited from the retired
+    /// `wideep.rs::load_moe_parquet`).
     #[test]
     fn legacy_sglang_missing_inter_and_tp_columns_default() {
         let tmp = tempfile::tempdir().unwrap();
