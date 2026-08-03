@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # TensorRT-LLM MoE AlltoAll Benchmark - Submit multiple parallel jobs
-# All results append to the same output file
+# One output directory (unified moe_a2a_perf parquet + collection_meta.yaml
+# sidecar) per job; within a job, cases append one CSV via log_perf's lockfile
 #
 # Usage:
 #   bash submit_trtllm_alltoall.sh                                                # default: NVLinkTwoSided, 2,4,8,16,32,48,64,72 GPUs, 4 GPUs/node
@@ -38,13 +39,20 @@ EOF
 }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${HOME}/repo/aiconfigurator:${HOME}/repo/aiconfigurator}"
+REPO_DIR=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+
+# Default image = the collector/framework_manifest.yaml `trtllm` pin. The
+# collector gates the installed tensorrt_llm version against that pin, so a
+# stale image here fails loudly instead of collecting misattributed rows.
+# The value is duplicated because login nodes cannot be assumed to have the
+# repo's Python deps; it is kept in sync with the manifest by
+# tests/unit/collector/test_network_layout.py::test_submit_trtllm_alltoall_default_image_matches_manifest.
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:fd68e7500952100df58bb3682c4ea69b6e6723dc4d13dfc911a1bdee80ac389a}"
+CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${REPO_DIR}:${REPO_DIR}}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
 
 COLLECTOR_SCRIPT="${SCRIPT_DIR}/collect_trtllm_alltoall.py"
-OUTPUT_FILE="${SCRIPT_DIR}/results/trtllm_alltoall_perf.txt"
 
 # Defaults
 KERNEL_SOURCE="NVLinkTwoSided"
@@ -76,7 +84,7 @@ IFS=',' read -ra GPU_COUNTS <<< "${GPU_LIST}"
 echo "=========================================="
 echo "TensorRT-LLM MoE AlltoAll Benchmark [${KERNEL_SOURCE}]"
 echo "Submitting parallel jobs for: ${GPU_LIST} GPUs"
-echo "Output: ${OUTPUT_FILE}"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/"
 echo "=========================================="
 
 for NUM_GPUS in "${GPU_COUNTS[@]}"; do
@@ -90,7 +98,13 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     fi
     
     JOB_NAME="${ACCOUNT}-alltoall-${KERNEL_SOURCE}.${NUM_GPUS}gpu"
-    
+    # One output directory per job: the collector finalizes a parquet and a
+    # collection_meta.yaml sidecar per run (per world), so jobs cannot share
+    # one file. Within a job, cases append one moe_a2a_perf.txt via
+    # helper.log_perf's lockfile.
+    OUTPUT_DIR="${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.${NUM_GPUS}gpu"
+    mkdir -p "${OUTPUT_DIR}"
+
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
     
     # get full rack
@@ -116,12 +130,12 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
                     --container-image=\"${CONTAINER_IMAGE}\" \
                     --container-mounts=\"${CONTAINER_MOUNTS}\" \
                     --mpi=pmix \
-                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --output \"${OUTPUT_FILE}\""
+                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --gpus-per-node \"${TASKS_PER_NODE}\" --output-path \"${OUTPUT_DIR}\""
 done
 
 echo ""
 echo "=========================================="
 echo "All jobs submitted!"
 echo "Check status: squeue -u \$USER"
-echo "Results: ${OUTPUT_FILE}"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/moe_a2a_perf.parquet (+ collection_meta.yaml)"
 echo "=========================================="

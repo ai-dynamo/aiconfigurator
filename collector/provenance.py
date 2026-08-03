@@ -50,6 +50,7 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
     {
         "collector.sglang.collect_dsv4_megamoe",
         "collector.wideep.sglang.collect_moe_a2a",
+        "collector.network.slurm.collect_trtllm_alltoall",
     }
 )
 
