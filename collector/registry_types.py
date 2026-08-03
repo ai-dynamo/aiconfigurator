@@ -42,6 +42,11 @@ class PerfFile(str, Enum):
     WIDEEP_GENERATION_MOE = "wideep_generation_moe_perf.txt"
     WIDEEP_DEEPEP_LL = "wideep_deepep_ll_perf.txt"
     WIDEEP_DEEPEP_NORMAL = "wideep_deepep_normal_perf.txt"
+    # Model-agnostic large-scale EP tables (unified schema): a2a dispatch/combine
+    # communication and expert-parallel MoE compute. Consumer loaders live in
+    # aiconfigurator_core.sdk.operations.moe_comm (shipped with PR 1).
+    MOE_A2A = "moe_a2a_perf.txt"
+    MOE_EP = "moe_ep_perf.txt"
     MLA_CONTEXT_MODULE = "mla_context_module_perf.txt"
     MLA_GENERATION_MODULE = "mla_generation_module_perf.txt"
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"

@@ -6,6 +6,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from collector.framework_manifest import get_collector_runtime, require_collector_runtime, resolve_op_runtime
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
@@ -251,6 +252,29 @@ def test_deepep_collectors_live_under_wideep_namespace():
     assert not (COLLECTOR_ROOT / "deep_collector").exists()
     assert not (COLLECTOR_ROOT / "sglang" / "collect_wideep_deepep_moe.py").exists()
     assert not (COLLECTOR_ROOT / "trtllm" / "collect_wideep_moe_compute.py").exists()
+
+
+def test_retired_wideep_mla_shim_stays_gone():
+    # collector/wideep/sglang/collect_mla_module.py was a pure re-export shim
+    # over collector.sglang.collect_mla_module with zero importers; retired in
+    # the moe_a2a/moe_ep registration change. It must not come back, and no
+    # registry or hash-closure entry may reference it.
+    retired_module = "collector.wideep.sglang.collect_mla_module"
+    assert not (COLLECTOR_ROOT / "wideep" / "sglang" / "collect_mla_module.py").exists()
+
+    for registry in (
+        SGLANG_REGISTRY,
+        TRTLLM_REGISTRY,
+        VLLM_REGISTRY,
+        WIDEEP_SGLANG_REGISTRY,
+        WIDEEP_TRTLLM_REGISTRY,
+    ):
+        for entry in registry:
+            assert entry.module != retired_module
+            assert all(route.module != retired_module for route in entry.versions)
+
+    closures = yaml.safe_load((COLLECTOR_ROOT / "hash_closures.yaml").read_text(encoding="utf-8"))
+    assert retired_module not in closures
 
 
 def test_family_overrides_split_ops_across_runtimes(tmp_path):
