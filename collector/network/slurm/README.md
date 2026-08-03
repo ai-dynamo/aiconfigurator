@@ -47,7 +47,7 @@ sbatch -N 1 ./slurm_custom_ar_4gpu.sh
 
 # 3. TensorRT-LLM MoE AlltoAll collection (NVLink)
 
-Benchmarks MoE alltoall **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written to `results/trtllm_alltoall_perf.txt`. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_LIST`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
+Benchmarks MoE alltoall **prepare**, **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written per job in the unified `moe_a2a` schema to `results/moe_a2a_<kernel-source>.<N>gpu/moe_a2a_perf.parquet` with a `collection_meta.yaml` provenance sidecar. The default container image is the manifest `trtllm` pin. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_LIST`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
 
 ## 3.1 Parameters (edit in `submit_trtllm_alltoall.sh`)
 
@@ -76,5 +76,20 @@ bash submit_trtllm_alltoall.sh --gpu-list 4,8,16
 ## 3.3 Check results
 ```bash
 squeue -u $USER
-cat results/trtllm_alltoall_perf.txt
+ls results/moe_a2a_NVLinkTwoSided.*gpu/
+```
+
+# 4. MoE all-to-all (DeepEP HT + LL) collection
+
+Launches `collector/wideep/sglang/collect_moe_a2a.py` (unified `moe_a2a`
+schema, sglang DeepEP) across nodes; one Slurm job per world size, each with
+its own output directory and provenance sidecar. The default container image
+is the manifest `wideep_sglang` pin.
+
+```bash
+# Default: 8,16,32,48,64,72 GPUs at 4 GPUs/node (GB200)
+bash submit_moe_a2a.sh
+
+# Custom worlds / kernel families
+bash submit_moe_a2a.sh --gpu-list 8,16 --modes deepep_ht
 ```

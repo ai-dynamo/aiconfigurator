@@ -438,8 +438,13 @@ def _build_moe_a2a_row(
     sms: int,
     transmit_us: float,
     notify_us: float,
+    comm_dtype: str = COMM_DTYPE,
 ) -> dict:
     """One ``moe_a2a_perf`` row.
+
+    ``comm_dtype`` defaults to the DeepEP legs' ``"default"`` key; the trtllm
+    alltoall writer (``collector/network/slurm/collect_trtllm_alltoall.py``)
+    shares this builder and passes its per-row dtype key instead.
 
     UNITS: ``latency`` is MICROSECONDS. ``load_moe_a2a_data`` divides the
     column by 1000 to reach its milliseconds leaves
@@ -457,7 +462,7 @@ def _build_moe_a2a_row(
     return {
         "comm_backend": comm_backend,
         "phase": phase,
-        "comm_dtype": COMM_DTYPE,
+        "comm_dtype": comm_dtype,
         "ep_size": int(ep_size),
         "node_num": int(node_num),
         "hidden_size": int(shape.hidden_size),
@@ -968,12 +973,15 @@ def write_moe_a2a_sidecar(
     parquet_path: Path,
     failure_count: int,
     repo_root: Path = _REPO_ROOT,
+    module_name: str = MODULE_NAME,
 ) -> Path:
     """Write ``collection_meta.yaml`` for the finalized ``moe_a2a_perf`` table.
 
     ``status`` follows ``provenance.derive_table_status``: this module is its
     own executor, so its unresolved-failure count is the classified failures
-    recorded during the run.
+    recorded during the run. ``module_name`` selects whose hash closure is
+    attested — the trtllm alltoall writer produces the same table and shares
+    this finalizer.
     """
     import pyarrow.parquet as pq
 
@@ -985,7 +993,7 @@ def write_moe_a2a_sidecar(
     closures = provenance.load_closures(repo_root / "collector" / "hash_closures.yaml")
     table_entry = {
         "collector_ref": _git_collector_ref(repo_root),
-        "collector_hash": provenance.collector_hash(MODULE_NAME, repo_root, closures),
+        "collector_hash": provenance.collector_hash(module_name, repo_root, closures),
         "case_plan_hash": provenance.case_plan_hash(case_ids),
         "collected_at": date.today().isoformat(),
         "rows": pq.read_metadata(parquet_path).num_rows,
