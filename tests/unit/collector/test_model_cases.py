@@ -51,8 +51,11 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert "moe" in plan.selected_ops
     assert "mla_context" in plan.selected_ops
     assert "wideep_mla_context" not in plan.selected_ops
+    # The sglang plan keeps moe_ep out (separate WideEP 0.5.10 runtime); the
+    # trtllm plan activates it (same image as stock trtllm) — see
+    # tests/unit/collector/trtllm/test_collect_moe_ep.py.
     assert "moe_ep" not in plan.selected_ops
-    assert "trtllm_moe_wideep" not in plan.selected_ops
+    assert "trtllm_moe_wideep" not in plan.selected_ops  # retired op name
 
 
 def test_attention_head_configs_preserve_real_model_structures_without_cross_mixing():
@@ -1195,7 +1198,7 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_context",
         "mla_generation",
         "moe",
-        "trtllm_moe_wideep",
+        "moe_ep",
     ]
     assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
 

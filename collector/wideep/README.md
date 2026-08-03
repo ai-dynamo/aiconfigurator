@@ -13,6 +13,11 @@ runtime independently from the non-WideEP framework entry.
 
 Layout:
 
-- `sglang/collect_deepep_moe.py`: SGLang DeepEP MoE entrypoint.
+- `sglang/collect_deepep_moe.py`: SGLang DeepEP MoE entrypoint (op `moe_ep`).
 - `sglang/deepep/`: multi-node DeepEP log collection and extraction scripts.
-- `trtllm/collect_moe_compute.py`: TensorRT-LLM WideEP MoE compute entrypoint.
+- `trtllm/collect_moe_compute.py`: TensorRT-LLM WideEP MoE compute entrypoint
+  (op `moe_ep`; pins the same image as stock trtllm, so model plans activate
+  it by default for wideep-declared models).
+- `vllm/collect_moe_ep.py`: vLLM fused-experts moe_ep bench path, DORMANT —
+  no registry, no manifest entry, no hash-closures entry until a vLLM-DeepEP
+  image is pinned (plan decision D3).

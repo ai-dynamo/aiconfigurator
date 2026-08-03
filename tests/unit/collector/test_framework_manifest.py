@@ -191,11 +191,11 @@ def test_wideep_registry_entries_are_separate_from_stock_backend_registries():
     assert "wideep_mla_context" not in sglang_modules
     assert "wideep_mla_generation" not in sglang_modules
     assert "moe_ep" not in sglang_modules
-    assert "trtllm_moe_wideep" not in trtllm_modules
+    assert "moe_ep" not in trtllm_modules
     assert "wideep_mla_context" not in wideep_sglang_modules
     assert "wideep_mla_generation" not in wideep_sglang_modules
     assert wideep_sglang_modules["moe_ep"].startswith("collector.wideep.sglang.")
-    assert wideep_trtllm_modules["trtllm_moe_wideep"].startswith("collector.wideep.trtllm.")
+    assert wideep_trtllm_modules["moe_ep"].startswith("collector.wideep.trtllm.")
 
 
 def test_deepep_collectors_live_under_wideep_namespace():
