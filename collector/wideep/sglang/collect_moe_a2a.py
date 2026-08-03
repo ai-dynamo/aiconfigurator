@@ -54,6 +54,12 @@ cross-products documented on each bench function:
 * **No power column.** See :func:`_power_columns`.
 * **Buffer lifetime.** HT and LL DeepEP Buffers are never co-resident; see
   the run loop in :func:`main`.
+
+Known limitation (rank failure inside a case): a rank that fails inside a
+DeepEP collective leaves its peers blocked until the NCCL watchdog aborts the
+job. The fallback is an aborted run with NO sidecar written — never a false
+'complete'. Cross-case all_reduce(MAX) agreement keeps ranks in lockstep
+between cases; within-case desync is accepted as watchdog-terminated.
 """
 
 from __future__ import annotations
