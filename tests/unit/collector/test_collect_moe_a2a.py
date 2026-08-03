@@ -27,6 +27,8 @@ SOURCE_TEXT = SOURCE_PATH.read_text()
 # The frozen moe_a2a CSV header: helper.log_perf's five prefix columns plus
 # this collector's payload, in the order load_moe_a2a_data keys them
 # (aic-core .../sdk/operations/moe_comm.py::load_moe_a2a_data ~:378-395).
+# The SDK-side twin pinning the same literal against the real loader is
+# tests/unit/sdk/database/test_collector_schema_contract.py::MOE_A2A_HEADER.
 MOE_A2A_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "comm_backend,phase,comm_dtype,ep_size,node_num,hidden_size,topk,num_experts,"

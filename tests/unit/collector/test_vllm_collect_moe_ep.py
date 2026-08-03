@@ -26,7 +26,9 @@ SOURCE_PATH = REPO_ROOT / "collector" / "wideep" / "vllm" / "collect_moe_ep.py"
 SOURCE_TEXT = SOURCE_PATH.read_text()
 
 # The frozen moe_ep CSV header — identical to the sglang twin's literal
-# (tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER).
+# (tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER). The
+# SDK-side twin is tests/unit/sdk/database/test_collector_schema_contract.py::
+# MOE_EP_HEADER.
 MOE_EP_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
