@@ -187,6 +187,7 @@ collector.wideep.sglang.collect_deepep_normal:
   - collector/wideep/sglang/deepep/utils.py
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
-  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model.
+  # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
+  # is_wideep_moe_model.
   - collector/cases/base_ops/moe.yaml
   - __model_cases__
