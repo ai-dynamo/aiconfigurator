@@ -361,6 +361,7 @@ def benchmark_moe_layer_prefill(
     model_hidden_size,
     model_inter_size,
     model_total_experts,
+    model_topk,
     num_slots,
     moe_dtype,
 ):
@@ -373,6 +374,9 @@ def benchmark_moe_layer_prefill(
         model_hidden_size: Declared hidden_size
         model_inter_size: Declared per-expert inter_size
         model_total_experts: Declared total expert count
+        model_topk: Declared top-k — the value persisted in the row (the live
+            ``moe_layer.topk`` read is the subject of run_moe's assert, not the
+            row's source)
         num_slots: Declared expert slots (== model_total_experts on sglang)
         moe_dtype: Declared quantization label for the persisted row
     """
@@ -559,7 +563,7 @@ def benchmark_moe_layer_prefill(
                             num_tokens=num_token * simulated_ep_size,
                             hidden_size=model_hidden_size,
                             inter_size=model_inter_size,
-                            topk=topk,
+                            topk=model_topk,
                             num_experts=model_total_experts,
                             num_slots=num_slots,
                             moe_tp_size=1,
@@ -616,6 +620,7 @@ def benchmark_moe_layer_decode(
     model_hidden_size,
     model_inter_size,
     model_total_experts,
+    model_topk,
     num_slots,
     moe_dtype,
 ):
@@ -634,17 +639,31 @@ def benchmark_moe_layer_decode(
             num_token = case["num_tokens"]
             distributed = case["distributed"]
             power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+            # FIXME(kernel-limit): DeepEP's low-latency path sizes its dispatch
+            # buffers from `num_max_dispatch_tokens_per_rank` (the deep_ep
+            # `Buffer.low_latency_dispatch` / `get_low_latency_rdma_size_hint`
+            # API contract), so a rank may not receive more than
+            # num_max_dispatch_tokens_per_rank * num_ranks tokens for any one
+            # expert. 128 is the value this benchmark pins for the synthetic
+            # buffers below; it is the claimed DeepEP limit at the wideep pin
+            # (sglang 0.5.10 + DeepEP, framework_manifest.yaml wideep_sglang)
+            # and is UNVERIFIED against the framework source — sglang is not
+            # vendored here, so no file:line citation is possible from this
+            # repo. Re-check on the next wideep version bump: either probe the
+            # buffer for its real capacity or replace this with a guard that
+            # raises citing the verified source line.
             num_max_dispatch_tokens_per_rank = 128
 
+            # The declared decode batch grid tops out at 128 == the buffer
+            # bound above, so no decode case can exceed it. Raise rather than
+            # skip if that invariant ever breaks: an oversized batch would
+            # index past the synthetic dispatch buffers allocated below.
             if num_token > num_max_dispatch_tokens_per_rank:
-                # DeepEP low-latency dispatch buffers this many tokens per
-                # rank; larger decode batches are a context-phase shape.
-                rank_print(
-                    f"  moe_ep generation: dropping num_tokens={num_token} "
-                    f"(> DeepEP low-latency num_max_dispatch_tokens_per_rank "
-                    f"{num_max_dispatch_tokens_per_rank})"
+                raise MoeEpBenchmarkError(
+                    f"moe_ep generation: num_tokens={num_token} exceeds the DeepEP low-latency "
+                    f"dispatch bound num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}; "
+                    "the decode sweep and the buffer bound have drifted apart"
                 )
-                continue
 
             hidden_size = model_runner.model.config.hidden_size
 
@@ -701,6 +720,9 @@ def benchmark_moe_layer_decode(
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
             max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
             if max_masked_m > hidden_states.shape[1]:
+                # Same FIXME(kernel-limit) bound as above, expressed per expert:
+                # this skew routes more tokens to one expert than the buffer
+                # holds. One token point is dropped (logged), not the case.
                 rank_print(
                     f"  moe_ep generation: dropping num_tokens={num_token} "
                     f"(max masked_m {max_masked_m} exceeds the dispatch buffer {hidden_states.shape[1]})"
@@ -825,7 +847,7 @@ def benchmark_moe_layer_decode(
                             num_tokens=num_token * simulated_ep_size,
                             hidden_size=model_hidden_size,
                             inter_size=model_inter_size,
-                            topk=top_k,
+                            topk=model_topk,
                             num_experts=model_total_experts,
                             num_slots=num_slots,
                             moe_tp_size=1,
@@ -1049,6 +1071,7 @@ def run_moe(
         model_hidden_size=model_hidden_size,
         model_inter_size=model_inter_size,
         model_total_experts=model_total_experts,
+        model_topk=model_topk,
         num_slots=num_slots,
         moe_dtype=moe_dtype,
     )
@@ -1076,6 +1099,7 @@ def run_moe(
         model_hidden_size=model_hidden_size,
         model_inter_size=model_inter_size,
         model_total_experts=model_total_experts,
+        model_topk=model_topk,
         num_slots=num_slots,
         moe_dtype=moe_dtype,
     )

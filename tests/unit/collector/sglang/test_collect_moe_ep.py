@@ -296,6 +296,25 @@ def test_no_silent_case_skipping_in_the_benchmark_loops():
     assert "MoeEpDeclarationMismatchError" in SOURCE_TEXT
 
 
+def test_deepep_buffer_bound_is_parked_as_a_kernel_limit():
+    # layer_permissions.md: an unverified framework kernel limit lives as a
+    # FIXME(kernel-limit) note at the invocation site, so the next wideep
+    # version bump greps it and either verifies or deletes it.
+    assert "FIXME(kernel-limit)" in SOURCE_TEXT
+    assert "num_max_dispatch_tokens_per_rank" in SOURCE_TEXT
+
+
+def test_rows_persist_the_declared_topk_not_the_live_read():
+    # The declared value is the contract; the live moe_layer.topk read is only
+    # the subject of run_moe's _assert_declared("topk", ...) check.
+    # Both _build_moe_ep_row call sites (context + generation) pass the
+    # declared value; neither passes the live `topk` / `top_k` locals.
+    assert SOURCE_TEXT.count("\n                            topk=model_topk,\n") == 2
+    assert "\n                            topk=topk,\n" not in SOURCE_TEXT
+    assert "\n                            topk=top_k,\n" not in SOURCE_TEXT
+    assert '_assert_declared("topk"' in SOURCE_TEXT
+
+
 def test_perf_path_comes_from_the_registry_not_ad_hoc_filenames():
     assert "wideep_context_moe_perf.txt" not in SOURCE_TEXT
     assert "wideep_generation_moe_perf.txt" not in SOURCE_TEXT
