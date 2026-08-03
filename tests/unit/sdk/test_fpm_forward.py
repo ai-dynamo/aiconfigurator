@@ -396,7 +396,7 @@ class TestForwardModelRewrite:
             models.get_model("Qwen/Qwen3-VL-2B-Instruct", cfg, "vllm")
 
     def test_mtp_rejected(self):
-        cfg = _model_config(forward_model="fpm", nextn=1, nextn_accepted=0.8)
+        cfg = _model_config(forward_model="fpm", nextn=1)
         with pytest.raises(NotImplementedError, match="MTP"):
             models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
 
@@ -484,18 +484,26 @@ class TestFPMStaticAndMixed:
         assert energy == 0.0
         assert set(per_src.values()) == {"silicon"}
 
-    def test_genonly_mixed_call_keeps_full_decode_pass(self, fpm_session):
+    def test_genonly_step_keeps_full_decode_pass(self, fpm_session):
         # With no prefill work in the step there is no pass to ride on: the
-        # decode component must keep its full standalone latency.
+        # decode component must keep its full standalone latency. A step
+        # without prefill work is a GENONLY step now — `MixedStepInput`
+        # requires context_tokens > 0, so the gen-only contract lives behind
+        # `_get_genonly_step_latency` (the mixed entry raises instead of
+        # silently rerouting).
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
         runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
-        total, _energy, per_op, _src = backend._get_mix_step_latency(
-            model, database, runtime_config, ctx_tokens=0, gen_tokens=2, isl=isl, osl=osl, prefix=0
+        total, _energy, per_op, _src = backend._get_genonly_step_latency(
+            model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )
         assert per_op["fpm_forward_decode"] == pytest.approx(7.0)
         assert total == pytest.approx(7.0)
+        with pytest.raises(ValueError, match="context_tokens must be positive"):
+            backend._get_mix_step_latency(
+                model, database, runtime_config, ctx_tokens=0, gen_tokens=2, isl=isl, osl=osl, prefix=0
+            )
 
     def test_genonly_step_works_with_single_op(self, fpm_session):
         from aiconfigurator.sdk.config import RuntimeConfig

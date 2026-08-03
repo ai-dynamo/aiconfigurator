@@ -32,6 +32,34 @@ from collector.vllm.utils_xpu import create_vllm_config, setup_distributed, with
 
 FP8_BLOCK_SHAPE = (128, 128)
 
+# Cases whose footprint exceeds this fraction of device memory purge the
+# allocator cache after running.
+_CLEANUP_FOOTPRINT_FRACTION = 0.05
+
+# Max device-memory fraction for outside_loop_count op copies.
+_LOOP_MEM_BUDGET_FRACTION = 0.45
+
+# Cap on outside_loop_count (upper bound; may drop lower if memory budget is
+# tight for the shape). Value inherited from the CUDA collector.
+_MAX_OUTSIDE_LOOP_COUNT = 6
+
+
+def _gemm_peak_footprint_bytes(gemm_type: str, m: int, n: int, k: int, copies: int = 1) -> int:
+    """Peak GEMM case footprint (bytes): input + copies*(weight+output) bf16,
+    plus fp8_block float32 staging (n*k*4) or fp8 int8 staging (n*k).
+
+    ``copies=0`` returns just the copy-independent portion (input + staging).
+    Over-reserves for fp8 paths (weight/output sized as bf16) on purpose.
+    """
+    input_bytes = m * k * 2
+    per_copy = (n * k + m * n) * 2
+    footprint = input_bytes + per_copy * max(copies, 0)
+    if gemm_type == "fp8_block":
+        footprint += n * k * 4
+    elif gemm_type == "fp8":
+        footprint += n * k
+    return footprint
+
 
 def get_gemm_test_cases():
     gemm_list = get_gemm_type_specs("vllm_xpu")
@@ -131,7 +159,7 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="xpu:0"):
                 except TypeError:
                     maybe_post_process_fp8_weight_block(gemm, cutlass_block_fp8_supported=True)
 
-        gemm.forward(x)  # dry run to init
+        gemm.forward(x)  # noqa: F821  # dry run to init
 
         return gemm
 
@@ -146,23 +174,42 @@ def run_gemm(exit_stack, gemm_type, m, n, k, *, perf_filename, device="xpu:0"):
         vllm_config = VllmConfig()
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
-    outside_loop_count = 6
+    # Cap loop copies to fit memory; shares sizing with the cleanup gate below.
+    total_mem = get_device_module().get_device_properties(device).total_memory
+    per_copy = (n * k + m * n) * 2
+    fixed_bytes = _gemm_peak_footprint_bytes(gemm_type, m, n, k, copies=0)
+    budget = int(total_mem * _LOOP_MEM_BUDGET_FRACTION)
+    outside_loop_count = max(1, min(_MAX_OUTSIDE_LOOP_COUNT, (budget - fixed_bytes) // max(per_copy, 1)))
+
     op_list = []
-    for i in range(outside_loop_count):
-        op_list.append(create_gemm())
+    try:
+        for i in range(outside_loop_count):
+            op_list.append(create_gemm())
 
-    def kernel_func():
-        for op in op_list:
-            op.forward(x)
+        def kernel_func():
+            for op in op_list:  # noqa: F821
+                op.forward(x)  # noqa: F821
 
-    with benchmark_with_power(
-        device=device,
-        kernel_func=kernel_func,
-        num_warmups=3,
-        num_runs=6,
-        repeat_n=1,
-    ) as results:
-        pass
+        with benchmark_with_power(
+            device=device,
+            kernel_func=kernel_func,
+            num_warmups=3,
+            num_runs=6,
+            repeat_n=1,
+        ) as results:
+            pass
+    finally:
+        # Free this case before the next one runs.
+        del op_list
+        del x
+        import gc
+
+        gc.collect()
+        # Purge cache only when the case actually held enough memory to matter;
+        # small cases keep the warm allocator pool.
+        case_peak = _gemm_peak_footprint_bytes(gemm_type, m, n, k, copies=outside_loop_count)
+        if case_peak > total_mem * _CLEANUP_FOOTPRINT_FRACTION:
+            get_device_module().empty_cache()
 
     log_perf(
         item_list=[

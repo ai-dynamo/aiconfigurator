@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+ARG WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_x86_64
+
 FROM nvcr.io/nvidia/base/ubuntu:jammy-20250619 AS base
 
 WORKDIR /workspace
@@ -25,12 +27,9 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 # `manylinux_2_28_<arch>` tag. We add `uv` and a rustup toolchain so cargo can
 # fetch crates over TLS.
 #
-# TARGETARCH (amd64/arm64) selects the base per `--platform`; only the matching
-# stage builds. aarch64: `docker build --platform linux/arm64 --target build .`.
-FROM quay.io/pypa/manylinux_2_28_x86_64 AS manylinux-amd64
-FROM quay.io/pypa/manylinux_2_28_aarch64 AS manylinux-arm64
-ARG TARGETARCH
-FROM manylinux-${TARGETARCH} AS build
+# CI selects the architecture-matched PyPA image with WHEEL_BUILD_BASE. The
+# x86_64 default preserves existing local and build-test invocations.
+FROM ${WHEEL_BUILD_BASE} AS build
 WORKDIR /workspace
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -117,12 +116,23 @@ RUN "${UV_PYTHON}" tools/build_legacy_monolith_fixture.py /tmp/legacy-dist && \
     cd /tmp && /tmp/aic-pip-migration/bin/python \
         /workspace/tools/verify_installed_package_layers.py --expect full --exercise-engine
 
+# Export the verified upper and core wheels for CI staging jobs.
+FROM scratch AS wheel-out
+COPY --from=build /workspace/dist/ /
+
 FROM base AS runtime
 COPY --from=build /workspace/dist /wheelhouse
 RUN uv pip install --find-links /wheelhouse /wheelhouse/aiconfigurator-*.whl && \
     rm -rf /wheelhouse
 
 FROM runtime AS test
+
+# The perf-database tool tests shell out to git (changed_ops revision diffing,
+# migrate_* execute paths use git mv/rm/add). Test stage only — the shipped
+# runtime image stays git-free.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
 
 # Runtime already installed both payload-owning wheels. Add the upper wheel's
 # development extras before copying the test sources.

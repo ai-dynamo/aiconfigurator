@@ -38,6 +38,7 @@ from aiconfigurator.sdk.inference_summary import InferenceSummary
 from aiconfigurator.sdk.models import BaseModel
 from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.predictor import DEFAULT_PREDICTOR, Predictor
+from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 
 DisaggRole = Literal["prefill", "decode"]
 
@@ -52,6 +53,8 @@ def predict_disagg_worker(
     latency_correction: float = 1.0,
     stride: int = 32,
     predictor: Predictor | None = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
+    free_gpu_memory_fraction: float | None = None,
 ) -> InferenceSummary:
     """Predict perf for one phase of a disaggregated worker.
 
@@ -80,7 +83,13 @@ def predict_disagg_worker(
         workers, the predictor interface (and the call site) can be
         extended without touching every caller.
     """
-    return (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
+    # Forward the fraction only when set so injected Predictor
+    # implementations predating the kwarg keep working.
+    predictor_kwargs: dict[str, Any] = {}
+    if free_gpu_memory_fraction is not None:
+        predictor_kwargs["free_gpu_memory_fraction"] = free_gpu_memory_fraction
+    summary = (predictor or DEFAULT_PREDICTOR).predict_disagg_worker(
+        **predictor_kwargs,
         model=model,
         backend=backend,
         database=database,
@@ -89,6 +98,9 @@ def predict_disagg_worker(
         latency_correction=latency_correction,
         stride=stride,
     )
+    if speculative_profile is None:
+        return summary
+    return speculative_profile.project_summary(summary, role=role)
 
 
 def predict_agg_worker(
@@ -99,6 +111,7 @@ def predict_agg_worker(
     runtime_config: config.RuntimeConfig,
     ctx_tokens: int,
     predictor: Predictor | None = None,
+    speculative_profile: SpeculativeDecodingProfile | None = None,
     **backend_kwargs: Any,
 ) -> InferenceSummary:
     """Predict perf for an aggregated IFB worker.
@@ -124,7 +137,10 @@ def predict_agg_worker(
     Returns:
         InferenceSummary for the aggregated worker.
     """
-    return (predictor or DEFAULT_PREDICTOR).predict_agg_worker(
+    if speculative_profile is not None and speculative_profile.expected_accepted_tokens > 0:
+        backend_kwargs["decode_tokens_per_iteration"] = speculative_profile.tokens_per_iteration
+
+    summary = (predictor or DEFAULT_PREDICTOR).predict_agg_worker(
         model=model,
         backend=backend,
         database=database,
@@ -132,3 +148,6 @@ def predict_agg_worker(
         ctx_tokens=ctx_tokens,
         **backend_kwargs,
     )
+    if speculative_profile is None:
+        return summary
+    return speculative_profile.project_summary(summary, role="agg")

@@ -52,6 +52,7 @@ CORE_SDK_LEAF_MODULES = [
     "operations.dsv4",
     "operations.elementwise",
     "operations.embedding",
+    "operations.fpm_forward",
     "operations.gemm",
     "operations.mamba",
     "operations.mla",
@@ -64,6 +65,7 @@ CORE_SDK_LEAF_MODULES = [
     "perf_interp.engine",
     "performance_result",
     "rust_engine_step",
+    "step_estimate",
     "system_spec",
     "utils",
 ]

@@ -3,11 +3,11 @@
 
 //! DeepSeek-V4 attention module perf tables.
 //!
-//! Four primary module CSVs distinguished by `(attn_kind, mode)`:
-//! - `dsv4_csa_context_module_perf.txt` — CSA (compressed-sparse) context
-//! - `dsv4_hca_context_module_perf.txt` — HCA (hybrid-causal) context
-//! - `dsv4_csa_generation_module_perf.txt`
-//! - `dsv4_hca_generation_module_perf.txt`
+//! Four primary module parquets distinguished by `(attn_kind, mode)`:
+//! - `dsv4_csa_context_module_perf.parquet` — CSA (compressed-sparse) context
+//! - `dsv4_hca_context_module_perf.parquet` — HCA (hybrid-causal) context
+//! - `dsv4_csa_generation_module_perf.parquet`
+//! - `dsv4_hca_generation_module_perf.parquet`
 //!
 //! Each file loads from an ordered, shared-layer-aware source list (see
 //! [`PerfSource`]).
@@ -67,22 +67,22 @@ impl AttnKind {
     }
 }
 
-// head -> step -> isl -> batch -> latency
+// native -> local -> step -> isl -> batch -> latency
 //
-// NOTE: the CSV `tp_size` column is intentionally COLLAPSED at load time, NOT
-// kept as an interpolation axis. Python's loaders (`load_*_dsv4_kind_module_data`)
-// key only on `(num_heads, compress_ratio, step, isl, batch)` and never on
-// `tp_size`, so when several tp_size rows share a cell the last parquet row
-// wins (a plain dict overwrite). The collected files are gemm-then-tp-ascending,
-// so the survivor is the largest measured tp. We reproduce that by inserting in
-// file order and overwriting, dropping the tp axis entirely. The head axis here
-// is the CSV `num_heads` value {64, 128}; the query resolves the model's
-// rank-LOCAL head count against it (see `resolve_head_key`), mirroring Python's
-// `_dsv4_resolve_head_key`.
+// Head identity (mirrors Python `load_*_dsv4_kind_module_data`): the native
+// value is the row's model identity (separates Pro rows from Flash rows) and
+// the rank-LOCAL head count is the physical per-rank shape; both are key
+// axes, resolved per row by `dsv4_head_axes` across both historical
+// `num_heads` column semantics (see its doc). The old single-level layout
+// collapsed both the model identity and the tp shard into one bucket,
+// leaving an arbitrary row-order winner across rows whose latencies differ
+// 30-50%. Queries resolve the model's native count first, then its
+// rank-local count within the bucket (see `resolve_head_key`, per level).
 type ByBatch = BTreeMap<u32, f64>;
 type ByIsl = BTreeMap<u32, ByBatch>;
 type ByStep = BTreeMap<u32, ByIsl>;
-type ByNative = BTreeMap<u32, ByStep>;
+type ByLocal = BTreeMap<u32, ByStep>;
+type ByNative = BTreeMap<u32, ByLocal>;
 
 pub struct Dsv4Table {
     /// Ordered, priority-sorted sources for each of the four DSV4 module perf
@@ -115,15 +115,20 @@ struct ModuleGrids {
     by_keys: BTreeMap<ModuleKey, ByNative>,
 }
 
-/// Engine-ready tables: per (key, head), the phase-shaped `Node`
+/// Engine-ready tables: per (key, native, local), the phase-shaped `Node`
 /// (context: `[step][isl][batch]`; generation: `[batch][s_total]`).
 struct ModuleNodes {
-    by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>>,
+    by_keys: BTreeMap<ModuleKey, BTreeMap<u32, BTreeMap<u32, Node>>>,
 }
 
+/// Table key mirroring the Python loaders (PR #1337 alignment):
+/// - context modules key `[fmha][kv][gemm]` (`load_context_dsv4_kind_module_data`);
+/// - generation modules key `[kv][gemm]` only — the `mla_dtype` column is
+///   ignored at load (`load_generation_dsv4_kind_module_data`), so
+///   `fmha_quant` is the empty sentinel for generation keys.
+/// Neither keys on `architecture` (Python never reads that column).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ModuleKey {
-    architecture: String,
     fmha_quant: String,
     kv_quant: String,
     gemm_quant: String,
@@ -284,6 +289,7 @@ impl Dsv4Table {
         b: u32,
         isl: u32,
         local_heads: u32,
+        native_heads: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
@@ -295,7 +301,7 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, native_heads, local_heads)?;
 
         let dims = sol_dims
             .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
@@ -347,8 +353,8 @@ impl Dsv4Table {
         b: u32,
         sequence_tokens: u32,
         local_heads: u32,
+        native_heads: u32,
         kv_quant: KvCacheQuantMode,
-        fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         architecture: &str,
         sol_dims: Option<Dsv4SolDims>,
@@ -357,7 +363,18 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        let node = select_resolved(grids, architecture, fmha_quant, kv_quant, gemm_quant, local_heads)?;
+        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
+        // the fmha label is inert for generation (the table keys on kv dtype).
+        // Derive the SOL dtype from kv so label changes cannot move decode SOL
+        // — mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
+        // The table key carries no fmha level at all (see `ModuleKey`), so this
+        // query takes no fmha parameter.
+        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
+            FmhaQuantMode::Fp8
+        } else {
+            FmhaQuantMode::Bfloat16
+        };
+        let node = select_resolved(grids, None, kv_quant, gemm_quant, native_heads, local_heads)?;
 
         let dims = sol_dims
             .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
@@ -394,25 +411,25 @@ impl Dsv4Table {
 
     fn load_csa_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_context.get_or_init(|| {
-            load_module_parquet(&self.csa_context_sources).map(context_nodes)
+            load_module_parquet(&self.csa_context_sources, true).map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_hca_context(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_context.get_or_init(|| {
-            load_module_parquet(&self.hca_context_sources).map(context_nodes)
+            load_module_parquet(&self.hca_context_sources, true).map(context_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_csa_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.csa_generation.get_or_init(|| {
-            load_module_parquet(&self.csa_generation_sources).map(generation_nodes)
+            load_module_parquet(&self.csa_generation_sources, false).map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
     fn load_hca_generation(&self) -> Result<&ModuleNodes, AicError> {
         let cell = self.hca_generation.get_or_init(|| {
-            load_module_parquet(&self.hca_generation_sources).map(generation_nodes)
+            load_module_parquet(&self.hca_generation_sources, false).map(generation_nodes)
         });
         cell.as_ref().map_err(clone_err)
     }
@@ -508,6 +525,66 @@ impl Dsv4Table {
         }
     }
 
+    /// Collected context-module points `(prefix, s, b) -> latency` for the
+    /// operator-layer util-calibration grid (Python
+    /// `_query_context_attn_table::get_empirical`'s `_slice()`:
+    /// `require_data_slice(data, fmha, kv, gemm)` -> head resolution ->
+    /// `require_data_slice(quant_data, head, compress_ratio)`). Slices exactly
+    /// like the silicon query ([`select_resolved`]). Missing slice / empty
+    /// node is a typed miss.
+    pub fn context_points(
+        &self,
+        attn_kind: AttnKind,
+        local_heads: u32,
+        native_heads: u32,
+        kv_quant: KvCacheQuantMode,
+        fmha_quant: FmhaQuantMode,
+        gemm_quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = match attn_kind {
+            AttnKind::Csa => self.load_csa_context()?,
+            AttnKind::Hca => self.load_hca_context()?,
+        };
+        let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, native_heads, local_heads)?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 context module data empty for local_heads={local_heads}, \
+                 attn_kind={attn_kind:?}"
+            )));
+        }
+        Ok(points)
+    }
+
+    /// Collected generation-module points `(b, s_total) -> latency` for the
+    /// operator-layer util-calibration grid (Python
+    /// `_query_generation_attn_table::get_empirical`'s `_slice()`:
+    /// `require_data_slice(data, kv, gemm)` -> head resolution). The
+    /// generation table keys `[kv][gemm]` with no fmha level (PR #1337),
+    /// matching the silicon query's `select_resolved(fmha=None, ...)`.
+    pub fn generation_points(
+        &self,
+        attn_kind: AttnKind,
+        local_heads: u32,
+        native_heads: u32,
+        kv_quant: KvCacheQuantMode,
+        gemm_quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+        let grids = match attn_kind {
+            AttnKind::Csa => self.load_csa_generation()?,
+            AttnKind::Hca => self.load_hca_generation()?,
+        };
+        let node = select_resolved(grids, None, kv_quant, gemm_quant, native_heads, local_heads)?;
+        let points = perf_interp::node_points(node);
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 generation module data empty for local_heads={local_heads}, \
+                 attn_kind={attn_kind:?}"
+            )));
+        }
+        Ok(points)
+    }
+
     /// Absolute top_last topk latency at `(isl, step)` for batch `b`. CP
     /// composition only — reads the RAW top_last rows the calib loader
     /// retains alongside the DELTA pairs (Python `_csa_topk_top_last` /
@@ -542,18 +619,21 @@ impl Dsv4Table {
     }
 }
 
-/// Convert loaded grids into context-phase engine tables: per (key, head),
-/// a `[step][isl][batch]` Node (the raw nesting, step axis KEPT).
+/// Convert loaded grids into context-phase engine tables: per (key, native,
+/// local), a `[step][isl][batch]` Node (the raw nesting, step axis KEPT).
 fn context_nodes(grids: ModuleGrids) -> ModuleNodes {
-    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, BTreeMap<u32, Node>>> = BTreeMap::new();
     for (key, by_native) in grids.by_keys {
-        let per_head = by_keys.entry(key).or_default();
-        for (head, by_step) in by_native {
-            let node = per_head.entry(head).or_insert_with(Node::branch);
-            for (step, by_isl) in by_step {
-                for (isl, by_batch) in by_isl {
-                    for (bb, lat) in by_batch {
-                        node.insert(&[step, isl, bb], lat);
+        let per_native = by_keys.entry(key).or_default();
+        for (native, by_local) in by_native {
+            let per_head = per_native.entry(native).or_default();
+            for (head, by_step) in by_local {
+                let node = per_head.entry(head).or_insert_with(Node::branch);
+                for (step, by_isl) in by_step {
+                    for (isl, by_batch) in by_isl {
+                        for (bb, lat) in by_batch {
+                            node.insert(&[step, isl, bb], lat);
+                        }
                     }
                 }
             }
@@ -562,22 +642,25 @@ fn context_nodes(grids: ModuleGrids) -> ModuleNodes {
     ModuleNodes { by_keys }
 }
 
-/// Convert loaded grids into generation-phase engine tables: per (key, head),
-/// a `[batch][s_total]` Node where `s_total = isl + step`. The generation
-/// CSVs use isl=1, so s_total = 1 + step. If multiple (step, isl) pairs map
-/// to the same s_total the last write wins, mirroring Python's flat
-/// `{b: {s_total: leaf}}` dict overwrite.
+/// Convert loaded grids into generation-phase engine tables: per (key,
+/// native, local), a `[batch][s_total]` Node where `s_total = isl + step`.
+/// The generation CSVs use isl=1, so s_total = 1 + step. If multiple
+/// (step, isl) pairs map to the same s_total the last write wins, mirroring
+/// Python's flat `{b: {s_total: leaf}}` dict overwrite.
 fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
-    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, Node>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<ModuleKey, BTreeMap<u32, BTreeMap<u32, Node>>> = BTreeMap::new();
     for (key, by_native) in grids.by_keys {
-        let per_head = by_keys.entry(key).or_default();
-        for (head, by_step) in by_native {
-            let node = per_head.entry(head).or_insert_with(Node::branch);
-            for (step, by_isl) in by_step {
-                for (isl, by_batch) in by_isl {
-                    let s_total = isl + step;
-                    for (bb, lat) in by_batch {
-                        node.insert(&[bb, s_total], lat);
+        let per_native = by_keys.entry(key).or_default();
+        for (native, by_local) in by_native {
+            let per_head = per_native.entry(native).or_default();
+            for (head, by_step) in by_local {
+                let node = per_head.entry(head).or_insert_with(Node::branch);
+                for (step, by_isl) in by_step {
+                    for (isl, by_batch) in by_isl {
+                        let s_total = isl + step;
+                        for (bb, lat) in by_batch {
+                            node.insert(&[bb, s_total], lat);
+                        }
                     }
                 }
             }
@@ -700,15 +783,18 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             let latency = row.f64(latency_col)?;
             // The CP composition consumes the context (v1) selector's raw
             // top_last latencies.
+            // First-wins parity with Python `load_dsv4_sparse_op_data`
+            // (skip-on-key-conflict; shared-layer contract, design §6.1).
             if mode == "v1_top_last" {
                 top_last
                     .entry(row.u32_optional(num_heads_col)?)
                     .or_default()
                     .entry(bs)
                     .or_default()
-                    .insert((isl, step), latency);
+                    .entry((isl, step))
+                    .or_insert(latency);
             }
-            by_mode.entry((step, isl, bs)).or_default().insert(mode, latency);
+            by_mode.entry((step, isl, bs)).or_default().entry(mode).or_insert(latency);
         }
     }
     if !any_source {
@@ -766,12 +852,14 @@ fn load_sparse_kernel_parquet(sources: &[PerfSource]) -> Result<Option<SparseKer
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
+            // First-wins parity with Python `load_dsv4_sparse_op_data`
+            // (skip-on-key-conflict; shared-layer contract, design §6.1).
             by_heads
                 .entry(row.u32(num_heads_col)?)
                 .or_default()
                 .entry(row.u32(tp_size_col)?)
                 .or_insert_with(Node::branch)
-                .insert(
+                .insert_first_wins(
                     &[row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?],
                     row.f64(latency_col)?,
                 );
@@ -849,20 +937,22 @@ fn topk_delta_ms(exact: &BTreeMap<(u32, u32, u32), f64>, prefix: u32, isl: u32, 
     }
 }
 
-/// Resolve the `(quant, architecture)` key, then resolve the model's rank-LOCAL
-/// head count against the CSV head keys, returning the engine table for that
-/// head.
+/// Resolve the quant key ([fmha][kv][gemm] for context, [kv][gemm] for
+/// generation — pass `fmha = None`), then resolve the model's NATIVE head
+/// count (row identity: separates V4-Pro from V4-Flash rows) and its
+/// rank-LOCAL head count within that bucket (the physical per-rank shape),
+/// returning the engine table for that (native, local) pair. Mirrors Python
+/// `operations.dsv4._dsv4_resolve_head_axes`.
 fn select_resolved<'a>(
     grids: &'a ModuleNodes,
-    architecture: &str,
-    fmha: FmhaQuantMode,
+    fmha: Option<FmhaQuantMode>,
     kv: KvCacheQuantMode,
     gemm: GemmQuantMode,
+    native_heads: u32,
     local_heads: u32,
 ) -> Result<&'a Node, AicError> {
     let key = ModuleKey {
-        architecture: architecture.to_string(),
-        fmha_quant: fmha.name().to_string(),
+        fmha_quant: fmha.map(|f| f.name().to_string()).unwrap_or_default(),
         kv_quant: kv.name().to_string(),
         gemm_quant: gemm.name().to_string(),
     };
@@ -870,20 +960,29 @@ fn select_resolved<'a>(
         .by_keys
         .get(&key)
         .ok_or_else(|| AicError::PerfDatabase(format!("DSV4 module data missing for {key:?}")))?;
-    let head = resolve_head_key(by_native, local_heads).ok_or_else(|| {
+    let native = resolve_head_key(by_native, native_heads).ok_or_else(|| {
         AicError::PerfDatabase(format!(
-            "DSV4 module data missing for local_heads={local_heads}, {key:?} (loaded heads: {:?})",
+            "DSV4 module data missing for native_heads={native_heads}, {key:?} (loaded native keys: {:?})",
             by_native.keys().collect::<Vec<_>>()
         ))
     })?;
-    Ok(&by_native[&head])
+    let by_local = &by_native[&native];
+    let head = resolve_head_key(by_local, local_heads).ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "DSV4 module data missing for local_heads={local_heads} under native_heads={native}, {key:?} \
+             (loaded local keys: {:?})",
+            by_local.keys().collect::<Vec<_>>()
+        ))
+    })?;
+    Ok(&by_local[&head])
 }
 
-/// Resolve the model's rank-LOCAL head count against the available CSV head
-/// keys. Mirrors Python `operations.dsv4._dsv4_resolve_head_key`:
-///   1. exact match on the requested local-head value;
-///   2. if only one head key is loaded, use it (the b300 universal-sweep case);
-///   3. otherwise the nearest head key `<=` request, else the smallest key.
+/// Resolve a requested head count against the available keys of one head
+/// axis (applied per level: native, then rank-local). Mirrors Python
+/// `operations.dsv4._dsv4_resolve_head_key`:
+///   1. exact match on the requested value;
+///   2. if only one key is loaded, use it (the universal-sweep case);
+///   3. otherwise the nearest key `<=` request, else the smallest key.
 fn resolve_head_key<T>(by_native: &BTreeMap<u32, T>, local_heads: u32) -> Option<u32> {
     if by_native.is_empty() {
         return None;
@@ -974,7 +1073,7 @@ fn compressed_context_pairs(batch: i128, query_len: i128, prefix: i128, ratio: i
 /// `dims.local_o_groups` is the rank-local group count Python passes as
 /// `o_groups` (see [`Dsv4SolDims`]).
 #[allow(clippy::too_many_arguments)]
-fn dsv4_attention_sol_ms(
+pub(crate) fn dsv4_attention_sol_ms(
     spec: &SystemSpec,
     dims: &Dsv4SolDims,
     compress_ratio: i64,
@@ -1109,8 +1208,69 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// tp_size axis is collapsed with last-write-wins, so a later source overwrites
 /// an earlier one at a shared cell (mirroring Python's flat-dict overwrite). An
 /// error is returned only when no source yields rows.
-fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> {
-    let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
+///
+/// `key_on_fmha` selects the Python keying (PR #1337): context loaders key
+/// `[fmha][kv][gemm]`, generation loaders ignore the `mla_dtype` column and
+/// key `[kv][gemm]` (the fmha level of `ModuleKey` stays the empty sentinel,
+/// and duplicate rows that differed only in `mla_dtype` collapse last-wins —
+/// exactly what Python's direct-assign loader does).
+/// Resolve each (model, num_heads, tp_size) tuple to its (native, local) head
+/// identity across BOTH historical `num_heads` column semantics — mirrors
+/// Python `_dsv4_row_head_axes`:
+/// - sglang 0.5.10 files (pre-#1131 collectors) write NATIVE heads (constant
+///   per artifact across the tp sweep);
+/// - vllm 0.24.0 files (post-#1131 collectors) write rank-LOCAL heads
+///   (varying with tp; `num_heads * tp_size` constant).
+///
+/// Sniffed per (model, version) from the data itself — grouping includes the
+/// version column because the shared layer concatenates sibling-version files
+/// into one row stream, and a re-collected (local-writing) primary pooled
+/// with a stale (native-writing) sibling of the same model must not poison
+/// each other's verdicts. A group seen only at tp == 1 is unambiguous
+/// (native == local); any other single-tp case assumes LOCAL (the current
+/// collector convention).
+#[allow(clippy::type_complexity)]
+fn dsv4_head_axes(
+    observed: &BTreeMap<(String, String), BTreeSet<(u32, u32)>>,
+) -> BTreeMap<(String, String, u32, u32), (u32, u32)> {
+    let mut axes = BTreeMap::new();
+    for ((model, version), pairs) in observed {
+        let tps: BTreeSet<u32> = pairs.iter().map(|&(_, tp)| tp).collect();
+        let heads_constant = pairs.iter().map(|&(h, _)| h).collect::<BTreeSet<_>>().len() == 1;
+        let product_constant = pairs.iter().map(|&(h, tp)| h * tp).collect::<BTreeSet<_>>().len() == 1;
+        let native_semantics = if tps.len() > 1 {
+            heads_constant && !product_constant
+        } else {
+            tps.contains(&1) // tp=1: native == local, either reading works
+        };
+        for &(heads, tp) in pairs {
+            let identity = if native_semantics {
+                (heads, (heads / tp).max(1))
+            } else {
+                (heads * tp, heads)
+            };
+            axes.insert((model.clone(), version.clone(), heads, tp), identity);
+        }
+    }
+    axes
+}
+
+fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<ModuleGrids, AicError> {
+    // Pass 1: parse every row (source order preserved for first-wins) and
+    // record the (model, num_heads, tp) pairs the head-semantics sniffer needs.
+    struct RawRow {
+        key: ModuleKey,
+        model: String,
+        version: String,
+        heads: u32,
+        tp: u32,
+        step: u32,
+        isl: u32,
+        batch: u32,
+        latency: f64,
+    }
+    let mut raw_rows: Vec<RawRow> = Vec::new();
+    let mut observed: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -1119,11 +1279,13 @@ fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> 
         }
         any_source = true;
         let reader = PerfReader::open(path)?;
-        let arch_col = reader.col("architecture")?;
-        let mla_dtype_col = reader.col("mla_dtype")?;
+        let mla_dtype_col = if key_on_fmha { Some(reader.col("mla_dtype")?) } else { None };
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let gemm_type_col = reader.col("gemm_type")?;
+        let model_col = reader.col_optional("model");
+        let version_col = reader.col_optional("version");
         let num_heads_col = reader.col("num_heads")?;
+        let tp_size_col = reader.col("tp_size")?;
         let batch_size_col = reader.col("batch_size")?;
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
@@ -1136,41 +1298,71 @@ fn load_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> 
                 continue;
             }
             let key = ModuleKey {
-                architecture: row.str_owned(arch_col)?,
                 // CSV columns use sglang dtype naming; the query side builds keys
                 // from the enum `.name()` (canonical short names). Normalize on
                 // load to match Python `_dsv4_normalize_dtype`, which aliases
                 // `fp8_e4m3` -> `fp8` for `mla_dtype` (fmha) and `kv_cache_dtype`
                 // (kv). `gemm_type` is intentionally left untouched, matching
                 // Python (e.g. `fp8_block` is a real value that must pass through).
-                fmha_quant: normalize_dsv4_dtype(&row.str_owned(mla_dtype_col)?),
+                fmha_quant: match mla_dtype_col {
+                    Some(col) => normalize_dsv4_dtype(&row.str_owned(col)?),
+                    None => String::new(),
+                },
                 kv_quant: normalize_dsv4_dtype(&row.str_owned(kv_cache_dtype_col)?),
                 gemm_quant: row.str_owned(gemm_type_col)?,
             };
-            // Last-wins parity with Python `load_*_dsv4_kind_module_data`, which
-            // assigns `data[...][b][s] = {...}` per row keyed on
-            // `(num_heads, compress_ratio, step, isl, batch)` but NOT on `tp_size`,
-            // so a later row (here: a higher tp_size, since the file is
-            // gemm-then-tp-ascending) overwrites the earlier one. We drop the tp
-            // axis and let `BTreeMap::insert` overwrite; do NOT use `or_insert`.
-            by_keys
-                .entry(key)
-                .or_default()
-                .entry(row.u32(num_heads_col)?) // CSV `num_heads` column (head axis)
-                .or_default()
-                .entry(row.u32(step_col)?)
-                .or_default()
-                .entry(row.u32(isl_col)?)
-                .or_default()
-                .insert(row.u32(batch_size_col)?, row.f64(latency_col)?);
+            let model = match model_col {
+                Some(col) => row.str_owned(col)?,
+                None => String::new(),
+            };
+            let version = match version_col {
+                Some(col) => row.str_owned(col)?,
+                None => String::new(),
+            };
+            let heads = row.u32(num_heads_col)?;
+            let tp = row.u32(tp_size_col)?.max(1);
+            observed.entry((model.clone(), version.clone())).or_default().insert((heads, tp));
+            raw_rows.push(RawRow {
+                key,
+                model,
+                version,
+                heads,
+                tp,
+                step: row.u32(step_col)?,
+                isl: row.u32(isl_col)?,
+                batch: row.u32(batch_size_col)?,
+                latency: row.f64(latency_col)?,
+            });
         }
     }
-    if !any_source || by_keys.is_empty() {
+    if !any_source || raw_rows.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no DSV4 module rows loaded from {} source(s) (first: {})",
             sources.len(),
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
+    }
+
+    // Pass 2: (native, local) head identity per row + first-wins parity with
+    // Python `load_*_dsv4_kind_module_data` (skip-on-key-conflict;
+    // shared-layer contract, design §6.1).
+    let axes = dsv4_head_axes(&observed);
+    let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
+    for row in raw_rows {
+        let (native_heads, local_heads) = axes[&(row.model, row.version, row.heads, row.tp)];
+        by_keys
+            .entry(row.key)
+            .or_default()
+            .entry(native_heads)
+            .or_default()
+            .entry(local_heads)
+            .or_default()
+            .entry(row.step)
+            .or_default()
+            .entry(row.isl)
+            .or_default()
+            .entry(row.batch)
+            .or_insert(row.latency);
     }
     Ok(ModuleGrids { by_keys })
 }
@@ -1210,6 +1402,7 @@ mod tests {
                 1,
                 1024,
                 128, // local_heads
+                128, // native_heads
                 KvCacheQuantMode::Bfloat16,
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
@@ -1232,19 +1425,17 @@ mod tests {
     /// num_heads=16 / o_groups=2). Covers, per phase: exact hit, interior
     /// blend, and util-hold beyond the collected range (incl. the ragged
     /// batch row and the step=0-only prefix axis).
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
+    // NOTE: oracle minted post (native, local) head-identity rekey + first-wins
+    // shared-layer merge; regenerate from the Python engine if this fails.
     #[test]
     fn dsv4_query_matches_python_v2_engine() {
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
-            return; // git-lfs data not materialized
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         let q_ctx = |kind, b, isl, prefix| {
             table
                 .query_context(
-                    &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, isl, 16, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", prefix, None,
                 )
                 .unwrap()
@@ -1252,7 +1443,7 @@ mod tests {
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, s, 16, 128, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
                     None,
                 )
@@ -1266,44 +1457,45 @@ mod tests {
         };
         // Context CSA: exact / interior isl / interior batch / isl util-hold /
         // prefix util-hold (step axis has only the 0 anchor).
-        approx(q_ctx(AttnKind::Csa, 8, 512, 0), 0.9819);
-        approx(q_ctx(AttnKind::Csa, 8, 768, 0), 1.46555);
-        approx(q_ctx(AttnKind::Csa, 12, 512, 0), 1.4142000000000001);
-        approx(q_ctx(AttnKind::Csa, 8, 8192, 0), 20.84104587973274);
-        approx(q_ctx(AttnKind::Csa, 8, 512, 1024), 1.0928707937592828);
+        approx(q_ctx(AttnKind::Csa, 8, 512, 0), 2.4552209880967863);
+        approx(q_ctx(AttnKind::Csa, 8, 768, 0), 3.7488711534171295);
+        approx(q_ctx(AttnKind::Csa, 12, 512, 0), 3.6828314821451786);
+        approx(q_ctx(AttnKind::Csa, 8, 8192, 0), 56.7002185298143);
+        approx(q_ctx(AttnKind::Csa, 8, 512, 1024), 2.732701201869626);
         // Context HCA: exact / isl util-hold.
-        approx(q_ctx(AttnKind::Hca, 1, 128, 0), 0.0802);
-        approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 9.0088);
+        approx(q_ctx(AttnKind::Hca, 1, 128, 0), 0.1104);
+        approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 24.650714380395996);
         // Generation CSA: exact / interior s / s util-hold / ragged batch.
-        approx(q_gen(AttnKind::Csa, 16, 385), 0.1142);
-        approx(q_gen(AttnKind::Csa, 16, 200), 0.11328828125);
-        approx(q_gen(AttnKind::Csa, 16, 100000), 0.17550076017464525);
-        approx(q_gen(AttnKind::Csa, 15, 385), 0.1129625);
-        // Generation HCA: exact.
-        approx(q_gen(AttnKind::Hca, 16, 385), 0.07239999999999999);
+        // Util-hold oracle regenerated post-#1337: the generation SOL now
+        // derives its fmha dtype from the kv dtype (fp8 here), not the label.
+        approx(q_gen(AttnKind::Csa, 16, 385), 0.141233770260747);
+        approx(q_gen(AttnKind::Csa, 16, 200), 0.13999621051889455);
+        approx(q_gen(AttnKind::Csa, 16, 100000), 0.19366927296217995);
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1410099295278365);
+        // Generation HCA.
+        approx(q_gen(AttnKind::Hca, 16, 385), 0.08636927786280785);
     }
 
     /// Parity regression for the DeepSeek-V4-Pro b200_sxm/sglang/0.5.10 lookup.
-    /// The model passes rank-LOCAL `num_heads = 128 / tp(8) = 16`, which must
-    /// resolve to the CSV head key 64 (Python `_dsv4_resolve_head_key`).
+    /// The model passes native_heads=128 / rank-LOCAL num_heads=16, which must
+    /// resolve to the Pro (native 128) bucket's tp8 slice (Python
+    /// `_dsv4_resolve_head_axes`).
     /// Oracle values regenerated from the Python v2 engine (perf_interp):
     /// exact grid points return the measured leaves; the ragged
     /// `q_gen(Csa, 15, 385)` row now resolves through the engine
     /// (single-survivor SOL-ratio correction) instead of the deleted
     /// batch-scaling fallback.
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails.
+    // NOTE: oracle minted post (native, local) head-identity rekey + first-wins
+    // shared-layer merge; regenerate from the Python engine if this fails.
     #[test]
     fn dsv4_pro_head_resolution_and_ragged_generation() {
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_generation_module_perf.parquet").exists() {
-            return; // git-lfs data not materialized
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, s, 16, 128, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
                     None,
                 )
@@ -1312,7 +1504,7 @@ mod tests {
         let q_ctx = |kind, b, isl| {
             table
                 .query_context(
-                    &spec, kind, b, isl, 16, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, b, isl, 16, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
                 )
                 .unwrap()
@@ -1324,14 +1516,14 @@ mod tests {
             );
         };
         // local=16 resolves to head-64; b=16/s=385 is an exact grid point.
-        approx(q_gen(AttnKind::Csa, 16, 385), 0.1142);
-        approx(q_gen(AttnKind::Hca, 16, 385), 0.0724);
+        approx(q_gen(AttnKind::Csa, 16, 385), 0.141233770260747);
+        approx(q_gen(AttnKind::Hca, 16, 385), 0.08636927786280785);
         // RAGGED batch row: engine semantics (regenerated from Python v2;
         // the deleted batch-scaling fallback returned 0.19556 here).
-        approx(q_gen(AttnKind::Csa, 15, 385), 0.1129625);
-        // Context single-anchor lookups (exact grid points).
-        approx(q_ctx(AttnKind::Csa, 1, 128), 0.132);
-        approx(q_ctx(AttnKind::Hca, 1, 128), 0.0802);
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1410099295278365);
+        // Context single-anchor lookups.
+        approx(q_ctx(AttnKind::Csa, 1, 128), 0.1659);
+        approx(q_ctx(AttnKind::Hca, 1, 128), 0.1104);
     }
 
     #[test]
@@ -1350,10 +1542,6 @@ mod tests {
         // from `KvCacheQuantMode::Fp8.name()` = "fp8". Without load-side
         // normalization the lookup misses (Rust-only error vs Python success).
         let root = b200_sglang_root();
-        if !root.join("dsv4_csa_context_module_perf.parquet").exists() {
-            // Data files are git-lfs tracked; skip if not materialized.
-            return;
-        }
         let table = Dsv4Table::new(root);
         let spec = b200_sxm_spec();
         // (head=64, isl=512, batch=8, step=0) are measured grid points in the
@@ -1364,7 +1552,8 @@ mod tests {
                 AttnKind::Csa,
                 8,   // batch
                 512, // isl
-                64,  // local_heads (exact head key)
+                64, // local_heads (Flash tp1)
+                64, // native_heads (Flash)
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Fp8Block,
@@ -1439,6 +1628,7 @@ mod tests {
                     REQUIRED BYTE_ARRAY kv_cache_dtype (UTF8);
                     REQUIRED BYTE_ARRAY gemm_type (UTF8);
                     REQUIRED INT64 num_heads;
+                    REQUIRED INT64 tp_size;
                     REQUIRED INT64 batch_size;
                     REQUIRED INT64 isl;
                     REQUIRED INT64 step;
@@ -1458,6 +1648,7 @@ mod tests {
         write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("fp8"); n]);
         write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("fp8_block"); n]);
         write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        write_column::<Int64Type>(&mut rg, &vec![1i64; n]); // tp_size (synthetic rows: tp=1)
         write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
         write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.2).collect::<Vec<_>>());
         write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.3).collect::<Vec<_>>());
@@ -1540,6 +1731,7 @@ mod tests {
                     AttnKind::Hca,
                     1,
                     isl,
+                    64,
                     64,
                     KvCacheQuantMode::Fp8,
                     FmhaQuantMode::Bfloat16,
@@ -1742,7 +1934,7 @@ mod tests {
         let q_ctx = |table: &Dsv4Table, kind| {
             table
                 .query_context(
-                    &spec, kind, 8, 512, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, 8, 512, 64, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
                 )
                 .unwrap()
@@ -1750,7 +1942,7 @@ mod tests {
         let q_gen = |table: &Dsv4Table, kind| {
             table
                 .query_generation(
-                    &spec, kind, 16, 385, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+                    &spec, kind, 16, 385, 64, 64, KvCacheQuantMode::Fp8,
                     GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", None,
                 )
                 .unwrap()

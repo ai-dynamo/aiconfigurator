@@ -7,8 +7,10 @@
 //! `src/aiconfigurator_core/sdk/operations/fpm_forward.py`: the formal
 //! collector pair
 //!
-//!     <data_root>/fpm_forward_perf.parquet
-//!     <data_root>/fpm_forward_perf.metadata.json
+//! ```text
+//! <data_root>/fpm_forward_perf.parquet
+//! <data_root>/fpm_forward_perf.metadata.json
+//! ```
 //!
 //! is validated (sidecar schema/sha256/row_count, per-row workload checks,
 //! duplicate physical row keys) and grouped into cells keyed by

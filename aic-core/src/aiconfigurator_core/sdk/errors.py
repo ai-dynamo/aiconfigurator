@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared SDK exception types."""
+"""Shared SDK exception types and per-experiment outcome classification."""
+
+from __future__ import annotations
+
+import dataclasses
 
 
 class NoResultsError(RuntimeError):
@@ -130,3 +134,30 @@ def is_expected_cli_error(error: BaseException) -> bool:
         error,
         (NoResultsError, PerfDataNotAvailableError, EmpiricalNotImplementedError, ValueError),
     )
+
+
+def is_gpu_retriable(error: BaseException) -> bool:
+    """Return True when ``error`` might be resolved by adding more GPUs.
+
+    ``InsufficientMemoryError`` and ``KVCacheCapacityError`` are retriable:
+    more GPUs means more aggregate memory and KV-cache capacity.  All other
+    expected errors (SLA-infeasible, missing perf data, unsupported config)
+    are structural and will not be helped by more hardware.
+
+    Walks the exception chain via :func:`_chain_has`.
+    """
+    return _chain_has(error, (InsufficientMemoryError, KVCacheCapacityError))
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ExperimentOutcome:
+    """Per-experiment verdict from :func:`_execute_tasks`.
+
+    ``error is None`` means the experiment succeeded (results are in the
+    parallel ``best_configs`` / ``pareto_fronts`` dicts).  A non-None
+    ``error`` carries the original exception for caller classification
+    (e.g. :func:`is_gpu_retriable`).
+    """
+
+    experiment: str
+    error: BaseException | None = None

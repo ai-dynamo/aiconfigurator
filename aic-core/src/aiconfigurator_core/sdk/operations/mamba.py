@@ -4,14 +4,14 @@
 """Mamba2 + GDN kernels (ISSUE-09 / AIC-539).
 
 - ``Mamba2Kernel`` represents a single Mamba2 kernel (conv1d or SSM) and
-  owns ``_data_cache`` for ``mamba2_perf.txt``.
+  owns ``_data_cache`` for ``mamba2_perf.parquet``.
   ``PerfDatabase.query_mamba2`` delegates here.
 - ``GDNKernel`` represents a single Gated DeltaNet kernel for Qwen3.5
-  linear-attention layers and owns ``_data_cache`` for ``gdn_perf.txt``.
+  linear-attention layers and owns ``_data_cache`` for ``gdn_perf.parquet``.
   ``PerfDatabase.query_gdn`` delegates here.
 - ``Mamba2`` is the higher-level composite op for NemotronH-style hybrid
   models — calls ``database.query_gemm`` (for in_proj + out_proj) and
-  ``database.query_mem_op`` (for conv1d + SSM + norm). No CSV data of
+  ``database.query_mem_op`` (for conv1d + SSM + norm). No perf table of
   its own.
 
 ``Mamba2.query`` deliberately keeps its three ``database.query_mem_op``
@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ class Mamba2Kernel(Operation):
     causal_conv1d_update, selective_state_update (generation).
     Uses full (unsharded) dimensions for lookup; collector data is per-layer.
 
-    Owns ``_data_cache`` for the mamba2_perf CSV table.
+    Owns ``_data_cache`` for the packaged mamba2_perf Parquet perf table.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -107,7 +107,7 @@ class Mamba2Kernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mamba2_perf CSV, binds
+        """Idempotent. Loads the packaged mamba2_perf Parquet perf table and binds
         ``database._mamba2_data``. No extrapolation (data is keyed by
         structural config tuples, not a dense grid)."""
         import os
@@ -117,8 +117,9 @@ class Mamba2Kernel(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.mamba2.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.mamba2.value
+            )
             sources = database._build_op_sources(PerfDataFilename.mamba2, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_mamba2_data(sources), PerfDataFilename.mamba2, primary_path)
             cls._record_load()
@@ -291,7 +292,7 @@ class GDNKernel(Operation):
 
     Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
 
-    Owns ``_data_cache`` for the gdn_perf CSV table.
+    Owns ``_data_cache`` for the packaged gdn_perf Parquet perf table.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -331,7 +332,8 @@ class GDNKernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads gdn_perf CSV, binds ``database._gdn_data``."""
+        """Idempotent. Loads the packaged gdn_perf Parquet perf table and binds
+        ``database._gdn_data``."""
         import os
 
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -339,8 +341,9 @@ class GDNKernel(Operation):
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            data_dir = os.path.join(system_data_root, database.backend, database.version)
-            primary_path = os.path.join(data_dir, PerfDataFilename.gdn.value)
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.gdn.value
+            )
             sources = database._build_op_sources(PerfDataFilename.gdn, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(load_gdn_data(sources), PerfDataFilename.gdn, primary_path)
             cls._record_load()
@@ -537,7 +540,7 @@ class Mamba2(Operation):
     """
     Mamba2 operation for NemotronH hybrid models.
 
-    Composite op — no CSV data of its own. Builds the full Mamba2Mixer
+    Composite op — no perf table of its own. Builds the full Mamba2Mixer
     layer cost from:
     - in_proj GEMM (``database.query_gemm``)
     - conv1d mem_op (``database.query_mem_op`` — deliberately kept on
@@ -694,15 +697,15 @@ class Mamba2(Operation):
 
 
 # ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
+# Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
 
 
 def load_mamba2_data(mamba2_file: str):
     """
-    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.txt.
+    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.parquet.
 
-    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    Table columns: framework, version, device, op_name, kernel_source, phase,
     batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
     n_groups, chunk_size, model_name, latency (optional: power).
     All rows must have the same columns (context and generation both include
@@ -785,9 +788,9 @@ _GDN_DECODE_RECURRENCE_ALIASES = {
 
 def load_gdn_data(gdn_file: str):
     """
-    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.txt.
+    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.parquet.
 
-    CSV columns: framework, version, device, op_name, kernel_source, phase,
+    Table columns: framework, version, device, op_name, kernel_source, phase,
     batch_size, seq_len, num_tokens, d_model, d_conv, num_k_heads, head_k_dim,
     num_v_heads, head_v_dim, model_name, latency (optional: power).
     All rows must have the same columns (context and generation both include

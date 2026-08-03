@@ -176,7 +176,13 @@ fn embedding_sol(op: &EmbeddingOp, spec: &SystemSpec, x: f64) -> f64 {
 /// elementwise.py:49-66 over the folded `bytes_per_token` wire form (see the
 /// module doc for the scale_num_tokens floor approximation).
 fn elementwise_sol(op: &ElementwiseOp, spec: &SystemSpec, x: f64) -> f64 {
-    let tokens = ceil_div(x, op.seq_split.max(1) as f64);
+    // Python: `x //= scale_num_tokens` (floor) THEN `-(-x // seq_split)`
+    // (ceil). The wire op carries scale_num_tokens since schema v4, so the
+    // floor is exact (older folded-bytes specs deserialize with divisor 1).
+    let tokens = ceil_div(
+        floor_div(x, op.scale_num_tokens.max(1) as f64),
+        op.seq_split.max(1) as f64,
+    );
     mem_op_sol_ms(spec, op.bytes_per_token * tokens) * op.scale_factor
 }
 
@@ -569,14 +575,16 @@ mod tests {
             name: "add_norm".into(),
             scale_factor: 2.0,
             bytes_per_token: 8192.0,
+            scale_num_tokens: 1,
             seq_split: 1,
         };
-        // Elementwise ceil(x/seq_split) with seq_split=1 keeps 10.5 -> 11.0?
-        // NO: Python floors first via scale_num_tokens (folded into
-        // bytes_per_token on the wire) — the wire op only has the outer ceil.
+        // Elementwise FLOORS first (Python `x //= scale_num_tokens` fires
+        // even at divisor 1): 10.5 -> 10 tokens — the OPPOSITE rounding
+        // direction from Embedding. The wire op carries scale_num_tokens
+        // since schema v4, so the floor is exact.
         approx(
             elementwise_sol(&ew, &s, 10.5),
-            8192.0 * 11.0 / s.gpu.mem_bw * 1000.0 * 2.0,
+            8192.0 * 10.0 / s.gpu.mem_bw * 1000.0 * 2.0,
         );
     }
 
@@ -658,6 +666,9 @@ mod tests {
             quant_mode: MoeQuantMode::Nvfp4,
             workload_distribution: "uniform".into(),
             is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: true,
         };
         let x = 8192.0_f64;
         let tt = x * 8.0;
@@ -744,6 +755,7 @@ mod tests {
             attn_cp_size: 1,
             is_context: true,
             sms: 12,
+            scale_num_tokens: 1,
         };
         // dp=1, attn_tp = 4/1 = 4 > 1 -> allreduce only
         let volume = 8192.0 * 6144.0;
@@ -768,6 +780,7 @@ mod tests {
                 name: "e".into(),
                 scale_factor: 1.0,
                 bytes_per_token: bpt,
+                scale_num_tokens: 1,
                 seq_split: 1,
             })
         };

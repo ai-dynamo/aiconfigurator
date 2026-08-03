@@ -1,6 +1,6 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
+As mentioned in root Readme, CLI supports six modes: `default`, `recommend`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
@@ -345,6 +345,58 @@ agg_supported, disagg_supported = cli_support(
 print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ```
 
+### Recommend mode (deployment sizing)
+This mode finds the minimum number of GPUs needed to meet a performance target. It is designed as a procurement sizing tool — the output is unconstrained, suitable for driving purchasing decisions.
+
+Instead of specifying a GPU count (like `default` mode), you specify exactly one load target (request rate or concurrency) along with SLA constraints, and the system calculates the minimum GPUs required.
+
+The recommender searches both tensor-parallel and pipeline-parallel configurations to find the most efficient layout. For models too large to fit on a single node, it automatically escalates to multi-node configurations.
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend trtllm \
+    --target-request-rate 50 --ttft 2000 --tpot 30 --isl 4000 --osl 1000
+```
+
+or with a concurrency target:
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend sglang \
+    --target-concurrency 200 --ttft 2000 --tpot 30
+```
+
+**Required arguments:**
+- `--model-path` (alias `--model`): HuggingFace model path or local path containing `config.json`
+- `--system`: System name (GPU type)
+- Exactly one of the following (mutually exclusive):
+  - `--target-request-rate`: Target system request rate in req/s
+  - `--target-concurrency`: Target number of concurrent users
+
+**Optional arguments:**
+- `--backend`: Backend name (`trtllm`, `vllm`, `sglang`, `auto`). Default: `trtllm`
+- `--ttft`, `--tpot`: SLA targets in ms (default: 2000ms, 30ms)
+- `--request-latency`: End-to-end request latency target in ms
+- `--isl`, `--osl`: Input/output sequence lengths (default: 4000, 1000)
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers`
+- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`
+- All other arguments match `default` mode (quantization, prefix caching, etc.)
+
+The output includes `total_gpus_needed` and `replicas_needed` columns, showing both agg and disagg configurations ranked by fewest GPUs first.
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_recommend
+
+result = cli_recommend(
+    model_path="Qwen/Qwen3-32B",
+    system="h200_sxm",
+    target_request_rate=50.0,
+    ttft=2000,
+    tpot=30,
+)
+for mode, df in result.best_configs.items():
+    print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
+```
+
 ### Default mode
 This mode is triggered by
 ```bash
@@ -371,6 +423,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
+- `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the image flags above).
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 
@@ -397,7 +450,12 @@ The command will create two experiments for the given problem, one is `agg` and 
 
 #### Spica migration
 
-The experimental Spica smart sweeper has moved to the [Dynamo Profiler](https://github.com/ai-dynamo/dynamo/tree/main/docs/components/profiler/spica). The AIC `--thorough-sweep` and `--thorough-config` flags have been removed; run Spica through `python -m dynamo.profiler.spica`.
+The experimental Spica smart sweeper has moved to Dynamo's standalone
+[AI Simulate distribution](https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview).
+The AIC `--thorough-sweep` and `--thorough-config` flags have been removed. Install
+it from a matching Dynamo checkout with `python -m pip install ./aisimulate`, then run Spica
+through `python -m aisimulate.spica`. Runnable configurations and tools live under
+`examples/aisimulate/spica`.
 
 #### Systems Paths
 
@@ -867,6 +925,11 @@ the checkpoint declares them):
   no built-in acceptance assumption. Use a measured value from your deployment
   (e.g. the engine's reported average acceptance length minus 1).
 
+`nextn` is part of the `aic-core` operation and iteration-cost model.
+`nextn_accepted` is a workload assumption applied by the SDK predictor/sweep
+after core timing, so acceptance values can be swept without recompiling or
+rerunning the `aic-core` engine.
+
 Example:
 ```bash
 aiconfigurator cli default \
@@ -1021,7 +1084,7 @@ This is long; the basics:
     - `backend_name`: `trtllm` (default), `vllm`, or `sglang`.  
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: same meaning as in `default` mode (shared, top-level).  
     - `*_enable_wideep`: enables wide-EP for fine-grained MoE models.  
-    - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when `nextn > 0`).  
+    - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when the resolved `nextn > 0`).
     - The replica/correction knobs (`num_gpu_per_replica`, `max_*_workers`, `*_latency_correction`, ...) are covered in [Advanced Tuning](advanced_tuning.md). Typically the only thing you need to touch is the quantization.
 
 Quantization override order: explicit `*_quant_mode` fields take precedence; any mode left unset is filled from the model's HF quantization metadata.

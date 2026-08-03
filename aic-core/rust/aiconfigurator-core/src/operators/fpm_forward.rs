@@ -353,8 +353,10 @@ mod tests {
             "0.19.0",
         )
         .expect("fixture db");
-        db.fpm_forward =
-            crate::perf_database::FpmForwardTable::new(dir.to_path_buf(), "0.25.1");
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            dir.to_path_buf(),
+            "0.25.1",
+        ));
         db
     }
 

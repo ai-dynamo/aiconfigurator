@@ -12,6 +12,7 @@ the model/system/backend/version support matrix for AIConfigurator.
 import csv
 import json
 import logging
+import multiprocessing
 import os
 import shlex
 import traceback
@@ -22,6 +23,7 @@ from itertools import groupby
 from pathlib import Path
 
 import pandas as pd
+from packaging.version import Version
 from tqdm import tqdm
 
 from aiconfigurator.generator.naive import _estimate_model_weight_bytes
@@ -87,6 +89,7 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
+_DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -221,6 +224,7 @@ def _is_known_framework_incompatible_gap(
     *,
     model: str,
     system: str,
+    system_spec: dict,
     backend: str,
     version: str,
     error_message: str | None,
@@ -251,15 +255,24 @@ def _is_known_framework_incompatible_gap(
     ):
         return True
 
-    # Version-agnostic: vLLM has no consumable path for the native DeepSeek-V4
-    # w4a8_mxfp4_mxfp8 MoE label on any collected version (0.24.0 selects
-    # W4A16 on SM90 vs W4A8 on Blackwell and the SDK MoE key carries no
-    # system dimension — see the DeepseekV4ForCausalLM case yaml). Pinning
-    # this to 0.19.0 made the same deterministic gap regress to plain FAIL
-    # on newer databases.
+    # vLLM has no consumable path for the native DeepSeek-V4
+    # w4a8_mxfp4_mxfp8 MoE label before 0.24.0 or outside the SM100
+    # capability family. On supported combinations, either error is a
+    # data-path regression and must remain FAIL rather than being rescued by
+    # HYBRID. Keep this expectation capability- and minimum-version-based so
+    # future database versions fail closed if their native data regresses.
+    parsed_version = common.parse_support_matrix_version(version)
+    sm_version = (system_spec.get("gpu") or {}).get("sm_version")
+    native_dsv4_w4a8_expected = (
+        parsed_version is not None
+        and parsed_version >= _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION
+        and sm_version is not None
+        and 100 <= sm_version < 110
+    )
     if (
         backend == common.BackendName.vllm.value
         and "DeepSeek-V4" in model
+        and not native_dsv4_w4a8_expected
         and (
             "unsupported moe quant mode 'w4a8_mxfp4_mxfp8'" in normalized
             or "deepseek-v4 mhc module data not loaded" in normalized
@@ -606,9 +619,13 @@ def _compare_pareto_dfs(
 
 
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
-# Set in the parent before forking; children inherit it via copy-on-write.
+# Set in the parent before forking; children inherit via copy-on-write.
+# We explicitly use a "fork" mp context (see _run_parallel_combinations) so
+# this works on macOS too, where the default start method is "spawn".
 _worker_matrix: "SupportMatrix | None" = None
 _worker_modes_to_test: tuple[str, ...] | None = None
+
+_fork_ctx = multiprocessing.get_context("fork")
 
 
 def _process_combination_worker(
@@ -618,7 +635,7 @@ def _process_combination_worker(
     Run a single combination in a worker process. Uses the process-local SupportMatrix.
     Must be a module-level function for pickling by ProcessPoolExecutor.
     """
-    assert _worker_matrix is not None  # this only works in linux, not in windows/macos
+    assert _worker_matrix is not None
     model, system, backend, version = combo
     status_dict, error_dict, command_dict, provenance_dict = _worker_matrix.run_single_test(
         model=model,
@@ -965,7 +982,12 @@ class SupportMatrix:
                 if _is_known_hw_incompatible_gap(system=system, error_message=raw_error):
                     return STATUS_HW_INCOMPATIBLE, raw_error, "", False
                 framework_gap = _is_known_framework_incompatible_gap(
-                    model=model, system=system, backend=backend, version=version, error_message=raw_error
+                    model=model,
+                    system=system,
+                    system_spec=system_spec,
+                    backend=backend,
+                    version=version,
+                    error_message=raw_error,
                 )
                 if framework_gap:
                     # Some known framework gaps (for example Kimi INT4_WO on TRT-LLM)
@@ -1019,7 +1041,10 @@ class SupportMatrix:
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(combinations))) as executor:
+        with ProcessPoolExecutor(
+            max_workers=min(max_workers, len(combinations)),
+            mp_context=_fork_ctx,
+        ) as executor:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
                 combo = futures[future]

@@ -8,6 +8,11 @@ model_paths:
   - zai-org/GLM-5
   - zai-org/GLM-5-FP8
   - nvidia/GLM-5-NVFP4
+  - zai-org/GLM-5.1
+  - zai-org/GLM-5.1-FP8
+  - nvidia/GLM-5.1-NVFP4
+  - zai-org/GLM-5.2
+  - zai-org/GLM-5.2-FP8
   - nvidia/GLM-5.2-NVFP4
 include_base: false
 description: >
@@ -69,6 +74,96 @@ model_case_values:
         sglang:
           allowed_modes: [nvfp4]
       wideep: true
+    - model_path: zai-org/GLM-5.1
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [bfloat16]
+      wideep: true
+    - model_path: zai-org/GLM-5.1-FP8
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+      wideep: true
+    - model_path: nvidia/GLM-5.1-NVFP4
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+      wideep: true
+    - model_path: zai-org/GLM-5.2
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [bfloat16]
+      wideep: true
+    - model_path: zai-org/GLM-5.2-FP8
+      hidden_size: 6144
+      inter_size: 2048
+      topk: 8
+      num_experts: 256
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [fp8_block]
+      wideep: true
     - model_path: nvidia/GLM-5.2-NVFP4
       hidden_size: 6144
       inter_size: 2048
@@ -95,6 +190,11 @@ model_case_values:
         - zai-org/GLM-5
         - zai-org/GLM-5-FP8
         - nvidia/GLM-5-NVFP4
+        - zai-org/GLM-5.1
+        - zai-org/GLM-5.1-FP8
+        - nvidia/GLM-5.1-NVFP4
+        - zai-org/GLM-5.2
+        - zai-org/GLM-5.2-FP8
         - nvidia/GLM-5.2-NVFP4
       attention_type: dsa
       native_num_heads: 64
