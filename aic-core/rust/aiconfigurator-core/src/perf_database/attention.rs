@@ -147,6 +147,10 @@ impl AttentionTable {
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_context()?;
         let key = ContextKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -165,7 +169,6 @@ impl AttentionTable {
         // kv-head/window/head-size setup; c = [n, full_s, b].
         let spec = &self.system_spec;
         let n_kv_lookup = key.n_kv_lookup;
-        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
         let sol = move |c: &[f64]| {
             context_attention_sol_ms(
                 spec,
@@ -197,6 +200,10 @@ impl AttentionTable {
         window_size: u32,
         kv_quant: KvCacheQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = generation_attn_flops(&self.system_spec, kv_quant)?;
         let grids = self.load_generation()?;
         let key = GenerationKey {
             kv_quant: kv_quant.name().to_string(),
@@ -217,7 +224,6 @@ impl AttentionTable {
         //   s_samples[i] = s_min + (s_max - s_min) * i // (sample_cnt - 1)
         let spec = &self.system_spec;
         let n_kv_lookup = key.n_kv_lookup;
-        let attn_flops = generation_attn_flops(spec, kv_quant)?;
         let sol = move |c: &[f64]| {
             generation_attention_sol_ms(
                 spec,
@@ -254,6 +260,10 @@ impl AttentionTable {
         head_size: u32,
         fmha_quant: FmhaQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_encoder()?;
         let key = EncoderKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -268,7 +278,6 @@ impl AttentionTable {
         // only, raw elsewhere. The SOL differs from context: non-causal (no
         // /2) and no KV-cache read.
         let spec = &self.system_spec;
-        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
         let sol = move |c: &[f64]| {
             encoder_attention_sol_ms(spec, head_size, c[0], c[1], c[2], attn_flops)
         };
@@ -746,16 +755,30 @@ pub(crate) fn generation_attention_sol_ms(
 /// Decode-attention TC-FLOPS: Python derives the FMHA mode from the kv-cache
 /// dtype (`fp8` kv -> fp8 FMHA, else bf16) inside `get_sol`; resolve it
 /// strictly via `quant_tc_flops`.
+/// Decode-attention FMHA mode implied by the kv-cache dtype. fp8 KV implies
+/// an fp8-MMA decode kernel only where fp8 tensor cores exist (SM >= 89,
+/// Ada and newer); on pre-89 hardware — and on specs without `sm_version`,
+/// e.g. XPU — the kernel dequantizes KV and issues the MMA on the bf16
+/// pipeline. That is how a100's shipped fp8-kv generation data was collected
+/// in the first place, so gating here keeps that silicon usable under the
+/// strict per-dtype resolution.
+pub(crate) fn generation_attn_mode(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+) -> FmhaQuantMode {
+    let has_fp8_mma = spec.gpu.sm_version.is_some_and(|sm| sm >= 89);
+    if kv_quant == KvCacheQuantMode::Fp8 && has_fp8_mma {
+        FmhaQuantMode::Fp8
+    } else {
+        FmhaQuantMode::Bfloat16
+    }
+}
+
 pub(crate) fn generation_attn_flops(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
 ) -> Result<f64, AicError> {
-    let fmha = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8
-    } else {
-        FmhaQuantMode::Bfloat16
-    };
-    quant_tc_flops(spec, fmha.mapping())
+    quant_tc_flops(spec, generation_attn_mode(spec, kv_quant).mapping())
 }
 
 /// In-place SOL clamp for every raw row in the generation-attention grid set.

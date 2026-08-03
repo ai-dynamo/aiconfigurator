@@ -1390,6 +1390,47 @@ class TestRustTypedErrorsAcrossFfi:
         assert isinstance(excinfo.value, ValueError)
         assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
 
+    def test_silicon_missing_dtype_on_lazy_family_matches_python(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # SILICON x missing-dtype on a lazily-loading table family (nvfp4
+        # MLA-BMM: h200 has no fp4_tc_flops). Both engines must classify this
+        # as MissingSystemFlopsError, NOT as a perf-data miss — the quadrant
+        # the original pins (SILICON with all dtypes present; HYBRID
+        # missing-dtype on an eager op) left uncovered until the flops
+        # resolution was hoisted before every load/key lookup.
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(model_path="nvidia/MiniMax-M2.5-NVFP4", system_name="h200_sxm")
+        with pytest.raises(errors.MissingSystemFlopsError) as excinfo:
+            _rust_static_breakdown(case)
+        assert "missing system flops" in str(excinfo.value), str(excinfo.value)
+        assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
+        # Python classifies the same query point identically.
+        database = _case_database(case)
+        with pytest.raises(errors.MissingSystemFlopsError):
+            database.query_mla_bmm(16, 16, common.GEMMQuantMode.nvfp4, database_mode=common.DatabaseMode.SILICON)
+
+    def test_pre_sm89_fp8_kv_generation_returns_shipped_silicon(self) -> None:
+        # a100_sxm ships 2,534 measured generation-MLA rows with fp8 KV
+        # (trtllm/1.0.0): Ampere has no fp8 tensor cores — the decode kernel
+        # dequantizes KV and issues the MMA on the bf16 pipeline, which is how
+        # that data was collected at all. The sm-gated derivation
+        # (generation_attn_mode) must keep those rows queryable instead of
+        # demanding an fp8_tc_flops entry a100 must never define (the
+        # support-matrix FP8 gate is keyed on that entry's presence).
+        database = _quiet_call(perf_database.get_database, "a100_sxm", "trtllm", "1.0.0")
+        fp8_kv = database.query_generation_mla(
+            1, 65, 64, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SILICON
+        )
+        bf16_kv = database.query_generation_mla(
+            1, 65, 64, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SILICON
+        )
+        assert float(fp8_kv) > 0
+        # Same silicon exact-hit region: the two dtypes' measured values sit
+        # within a few percent of each other (dequant-to-bf16 pipeline).
+        assert abs(float(fp8_kv) - float(bf16_kv)) / float(bf16_kv) < 0.25
+
 
 class TestRustProvenanceCapture:
     """FFI provenance contract: the compiled engine records

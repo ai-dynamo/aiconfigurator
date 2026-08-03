@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::attention::generation_attn_mode;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig};
@@ -145,6 +146,11 @@ impl WideEpMlaTable {
         fmha_quant: FmhaQuantMode,
         kernel_source: &str,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
+        let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_context()?;
         let key = ContextKey {
             kernel_source: kernel_source.to_string(),
@@ -159,8 +165,6 @@ impl WideEpMlaTable {
         // reads it (memory scales by fmha.memory).
         let _ = kv_quant;
         let spec = &self.system_spec;
-        let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
-        let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
         // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`
         // (Python `get_silicon`'s lambda), prefix = 0 (samples are prefix=0).
         let sol = move |c: &[f64]| {
@@ -194,6 +198,19 @@ impl WideEpMlaTable {
         kv_quant: KvCacheQuantMode,
         kernel_source: &str,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        // The Python generation SOL takes an `fmha_quant_mode` that this
+        // query surface doesn't carry (the generation table isn't keyed by
+        // it and the operator doesn't pass it down). Derive it via the
+        // shared sm-gated rule (`generation_attn_mode`): fp8 KV -> fp8 only
+        // where fp8 tensor cores exist. Exact for every shipped WideEP
+        // configuration (fp8-KV with fp8_block fmha on Hopper+; fp8 and
+        // fp8_block share the same (memory=1, compute=2) mapping).
+        let fmha_quant = generation_attn_mode(&self.system_spec, kv_quant);
+        let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
+        let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_generation()?;
         let key = GenerationKey {
             kernel_source: kernel_source.to_string(),
@@ -207,21 +224,7 @@ impl WideEpMlaTable {
         // batch, inner axis is sequence tokens; the node is built with that
         // nesting on load.
         //
-        // The Python generation SOL takes an `fmha_quant_mode` that this
-        // query surface doesn't carry (the generation table isn't keyed by
-        // it and the operator doesn't pass it down). Derive it from the KV
-        // mode the way the non-WideEP generation SOL does: fp8 KV -> fp8,
-        // else bfloat16. This is exact for every shipped configuration —
-        // the collected WideEP data is fp8-KV with fp8_block fmha, and
-        // fp8 / fp8_block share the same (memory=1, compute=2) mapping.
-        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
-            FmhaQuantMode::Fp8
-        } else {
-            FmhaQuantMode::Bfloat16
-        };
         let spec = &self.system_spec;
-        let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
-        let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
         // Silicon sol_fn: `tp = 128 // n` then `num_head = 128 // tp`.
         let sol = move |c: &[f64]| {
             wideep_generation_mla_sol_ms(

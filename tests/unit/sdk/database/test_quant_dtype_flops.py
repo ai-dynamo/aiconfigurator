@@ -128,6 +128,40 @@ class TestEagerResolution:
         )
         assert float(result) > 0
 
+    def test_pre_sm89_fp8_kv_derives_bf16_pipeline(self, comprehensive_perf_db, monkeypatch):
+        """Ampere-class hardware has no fp8 tensor cores: the decode kernel
+        dequantizes fp8 KV and runs the MMA on the bf16 pipeline, so fp8-kv
+        generation queries must neither demand fp8_tc_flops nor price the
+        fp8 rate (a100 ships 2,534 measured fp8-kv generation-MLA rows
+        collected exactly that way)."""
+        gpu = comprehensive_perf_db.system_spec["gpu"]
+        monkeypatch.setitem(gpu, "sm_version", 80)
+        monkeypatch.delitem(gpu, "fp8_tc_flops", raising=False)
+
+        # Distinct shape from the fp8-entry test above: these PerfDatabase
+        # query methods are lru_cached, and identical args would replay the
+        # earlier fp8-pipeline result instead of re-deriving under sm=80.
+        _, sol_math, _ = comprehensive_perf_db.query_generation_attention(
+            2,
+            2048,
+            32,
+            8,
+            common.KVCacheQuantMode.fp8,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        ops = 2 * 2 * 32 * 128 * 2 * (2048 - 1)
+        assert math.isclose(sol_math, ops / gpu["bfloat16_tc_flops"] * 1000, rel_tol=1e-9)
+
+    def test_sm89_plus_fp8_kv_still_requires_fp8_entry(self, comprehensive_perf_db, monkeypatch):
+        gpu = comprehensive_perf_db.system_spec["gpu"]
+        monkeypatch.setitem(gpu, "sm_version", 90)
+        monkeypatch.delitem(gpu, "fp8_tc_flops", raising=False)
+
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            comprehensive_perf_db.query_generation_attention(
+                2, 1024, 32, 8, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SOL
+            )
+
     def test_gemm_missing_fp8_entry_rejected_in_silicon_mode(self, stub_perf_db, monkeypatch):
         """SILICON specifically: an exact table hit must not bypass the check."""
         gpu = stub_perf_db.system_spec["gpu"]

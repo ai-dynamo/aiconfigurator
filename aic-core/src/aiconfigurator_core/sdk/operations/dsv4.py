@@ -41,6 +41,7 @@ import numpy as np
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk.operations.attention import generation_attn_mode
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 
 logger = logging.getLogger(__name__)
@@ -1267,11 +1268,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         # label is inert for generation (the table keys on kv dtype).  Derive
         # the SOL dtype from kv so label changes cannot move decode SOL --
         # mirrors query_generation_mla's get_sol.
-        fmha_quant_mode = (
-            common.FMHAQuantMode.fp8
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
-            else common.FMHAQuantMode.bfloat16
-        )
+        fmha_quant_mode = generation_attn_mode(database.system_spec, kvcache_quant_mode)
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(

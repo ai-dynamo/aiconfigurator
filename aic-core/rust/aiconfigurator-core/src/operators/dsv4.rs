@@ -23,6 +23,7 @@ use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::attention::generation_attn_mode;
 use crate::perf_database::dsv4::{
     dsv4_attention_sol_ms, dsv4_dims, dsv4_sol_flops, AttnKind, Dsv4SolDims,
 };
@@ -610,11 +611,7 @@ impl Dsv4ModuleOp {
         // Python derives the decode SOL dtype from the kv-cache dtype at the
         // top of `_query_generation_attn_table` (the fmha label is inert for
         // generation; the table keys on kv dtype).
-        let fmha = if kv == KvCacheQuantMode::Fp8 {
-            FmhaQuantMode::Fp8
-        } else {
-            FmhaQuantMode::Bfloat16
-        };
+        let fmha = generation_attn_mode(spec, kv);
         let flops = dsv4_sol_flops(spec, gemm, fmha)?;
         let sol = move |c: &[f64]| {
             // c=(b, s_total); is_context=false, prefix=0.

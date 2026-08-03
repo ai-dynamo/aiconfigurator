@@ -41,6 +41,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use super::dsa::{bs_slice, lookup_2d, SparseGrid};
+use super::attention::generation_attn_mode;
 use super::gemm::quant_tc_flops;
 use super::perf_interp::{self, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
@@ -297,6 +298,10 @@ impl Dsv4Table {
         prefix: u32,
         sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
@@ -308,7 +313,6 @@ impl Dsv4Table {
         });
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
-        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         // Engine coordinates are (prefix, seq, batch); Python's sol_fn is
         // lambda p, s, b: get_sol(b, s, p).
         let sol = move |c: &[f64]| {
@@ -361,20 +365,21 @@ impl Dsv4Table {
         architecture: &str,
         sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
+        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
+        // the fmha label is inert for generation (the table keys on kv dtype).
+        // Derive the SOL dtype via the shared sm-gated rule
+        // (`generation_attn_mode`) so label changes cannot move decode SOL —
+        // mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
+        // The table key carries no fmha level at all (see `ModuleKey`), so this
+        // query takes no fmha parameter.
+        let fmha_quant = generation_attn_mode(spec, kv_quant);
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
-        };
-        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
-        // the fmha label is inert for generation (the table keys on kv dtype).
-        // Derive the SOL dtype from kv so label changes cannot move decode SOL
-        // — mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
-        // The table key carries no fmha level at all (see `ModuleKey`), so this
-        // query takes no fmha parameter.
-        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
-            FmhaQuantMode::Fp8
-        } else {
-            FmhaQuantMode::Bfloat16
         };
         let node = select_resolved(grids, None, kv_quant, gemm_quant, local_heads)?;
 
@@ -383,7 +388,6 @@ impl Dsv4Table {
         });
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
-        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         // Engine coordinates are (batch, seq); Python's sol_fn is
         // lambda b, s: get_sol(b, s) with prefix=0 and is_context=False.
         let sol = move |c: &[f64]| {

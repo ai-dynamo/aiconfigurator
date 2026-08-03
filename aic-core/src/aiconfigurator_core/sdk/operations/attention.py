@@ -210,18 +210,29 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
+def generation_attn_mode(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> common.FMHAQuantMode:
+    """Decode-attention FMHA mode implied by the kv-cache dtype.
+
+    fp8 KV implies an fp8-MMA decode kernel only where fp8 tensor cores exist
+    (SM >= 89, Ada and newer); on pre-89 hardware — and on specs without
+    ``sm_version``, e.g. XPU — the kernel dequantizes KV and issues the MMA on
+    the bf16 pipeline. That is how a100's shipped fp8-kv generation data was
+    collected in the first place, so gating here keeps that silicon usable
+    under the strict per-dtype resolution. The single home for the derivation
+    rule (mirrors Rust ``perf_database::attention::generation_attn_mode``).
+    """
+    has_fp8_mma = (system_spec["gpu"].get("sm_version") or -1) >= 89
+    if kvcache_quant_mode == common.KVCacheQuantMode.fp8 and has_fp8_mma:
+        return common.FMHAQuantMode.fp8
+    return common.FMHAQuantMode.bfloat16
+
+
 def generation_attn_flops(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> float:
-    """Decode-attention TC FLOPS: the FMHA mode is derived from the kv-cache
-    dtype (fp8 kv -> fp8 FMHA, else bf16), then resolved strictly. The single
-    home for that derivation rule (mirrors Rust
-    ``perf_database::attention::generation_attn_flops``); used by the
-    generation get_sol closures, the eager query-entry checks, and
+    """Strictly resolved TC FLOPS for :func:`generation_attn_mode`; used by
+    the generation get_sol closures, the eager query-entry checks, and
     ``Attention._correct_sol``.
     """
-    fmha_mode = (
-        common.FMHAQuantMode.fp8 if kvcache_quant_mode == common.KVCacheQuantMode.fp8 else common.FMHAQuantMode.bfloat16
-    )
-    return common.get_quant_tc_flops(system_spec, fmha_mode)
+    return common.get_quant_tc_flops(system_spec, generation_attn_mode(system_spec, kvcache_quant_mode))
 
 
 class ContextAttention(Operation):

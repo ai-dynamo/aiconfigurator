@@ -328,6 +328,10 @@ impl DsaTable {
         // `skip_indexer=true` reads the GLM-5.2 reuse-layer table (rows tagged
         // `*_skip_indexer` in the same parquet) and zeroes the indexer terms
         // in the SOL — mirroring Python `_query_context_dsa_module_table`.
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsa_context_sol_flops(spec, gemm_quant, fmha_quant)?;
         let nodes = if skip_indexer {
             self.load_context_skip_nodes()?
         } else {
@@ -349,7 +353,6 @@ impl DsaTable {
 
         let dims = dsa_dims(architecture);
         let topk = index_topk as i64;
-        let flops = dsa_context_sol_flops(spec, gemm_quant, fmha_quant)?;
         // Engine coordinates are (num_heads, prefix, seq, batch); the SOL is
         // Python's get_sol(b, s, prefix, num_heads, ...) re-ordered to match.
         let sol = move |c: &[f64]| {
@@ -403,6 +406,10 @@ impl DsaTable {
         // `skip_indexer=true` reads the GLM-5.2 reuse-layer generation table.
         // The generation SOL is skip-independent (Python's generation get_sol
         // has no skip branch) — only the table slice differs.
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsa_generation_sol_flops(spec, gemm_quant)?;
         let nodes = if skip_indexer {
             self.load_generation_skip_nodes()?
         } else {
@@ -425,7 +432,6 @@ impl DsaTable {
             .ok_or_else(|| missing("generation DSA module", &self.data_root, format!("{key:?}")))?;
 
         let dims = dsa_dims(architecture);
-        let flops = dsa_generation_sol_flops(spec, gemm_quant)?;
         // Engine coordinates are (num_heads, batch, seq); the SOL is
         // Python's get_sol(b, s, num_heads, kv_cache_dtype) re-ordered.
         let sol = move |c: &[f64]| {

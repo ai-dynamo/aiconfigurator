@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.attention import generation_attn_flops
+from aiconfigurator_core.sdk.operations.attention import generation_attn_flops, generation_attn_mode
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
@@ -1083,13 +1083,9 @@ class WideEPGenerationMLA(Operation):
         common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (kernel tables key on kv dtype).
-        # Derive the SOL dtype from kv so label changes cannot move decode SOL
-        # -- mirrors query_generation_mla's get_sol.
-        fmha_quant_mode = (
-            common.FMHAQuantMode.fp8
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
-            else common.FMHAQuantMode.bfloat16
-        )
+        # Derive the SOL dtype via the shared sm-gated rule so label changes
+        # cannot move decode SOL -- mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = generation_attn_mode(database.system_spec, kvcache_quant_mode)
 
         def get_sol(
             b: int,

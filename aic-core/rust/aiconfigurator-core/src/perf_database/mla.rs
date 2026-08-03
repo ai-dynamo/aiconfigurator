@@ -177,6 +177,10 @@ impl MlaTable {
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_context()?;
         let key = ContextKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -187,7 +191,6 @@ impl MlaTable {
             .get(&key)
             .ok_or_else(|| missing("context MLA", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
-        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
         // c = (num_heads, seq_len, batch), prefix = 0 (see module docs).
         let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
@@ -206,6 +209,10 @@ impl MlaTable {
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = generation_attn_flops(&self.system_spec, kv_quant)?;
         let grids = self.load_generation()?;
         let key = KvOnlyKey {
             kv_quant: kv_quant.name().to_string(),
@@ -215,7 +222,6 @@ impl MlaTable {
             .get(&key)
             .ok_or_else(|| missing("generation MLA", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
-        let attn_flops = generation_attn_flops(spec, kv_quant)?;
         // Python's generation MLA uses (num_heads, b, s) as the 3 axes
         // — note b and s order differs from context. RAW blending (~linear in s).
         let sol =
@@ -236,6 +242,10 @@ impl MlaTable {
         quant: GemmQuantMode,
         is_pre: bool,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let bmm_flops = quant_tc_flops(&self.system_spec, quant.mapping())?;
         let grids = self.load_bmm()?;
         let pre_or_post = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
 
@@ -265,7 +275,6 @@ impl MlaTable {
         // 1-D tokens curve: RAW lerp in range (BMM is ~linear in tokens);
         // boundary util-hold beyond it via the BMM SOL.
         let spec = &self.system_spec;
-        let bmm_flops = quant_tc_flops(spec, quant.mapping())?;
         let sol = move |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0], bmm_flops);
         let cfg = OpInterpConfig::grid(BMM_AXES, &sol);
         perf_interp::query(&cfg, node, &[num_tokens as f64])
@@ -281,6 +290,10 @@ impl MlaTable {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_context_module()?;
         let key = ModuleKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -292,7 +305,6 @@ impl MlaTable {
             .get(&key)
             .ok_or_else(|| missing("context MLA module", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
-        let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
         // Python's module-context get_sol reuses the op-level context SOL
         // verbatim (the module fuses MLA + RoPE + BMM but the SOL refinement
         // was deliberately deferred there too).
@@ -315,6 +327,11 @@ impl MlaTable {
         kv_quant: KvCacheQuantMode,
         gemm_quant: GemmQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = generation_attn_flops(&self.system_spec, kv_quant)?;
+        let bmm_flops = quant_tc_flops(&self.system_spec, gemm_quant.mapping())?;
         let grids = self.load_generation_module()?;
         let key = GenModuleKey {
             kv_quant: kv_quant.name().to_string(),
@@ -325,8 +342,6 @@ impl MlaTable {
             .get(&key)
             .ok_or_else(|| missing("generation MLA module", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
-        let attn_flops = generation_attn_flops(spec, kv_quant)?;
-        let bmm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
         // Generation module SOL = generation MLA SOL + BMM pre/post terms
         // (Python's module get_sol folds the BMM into sol_math/sol_mem before
         // the max).
