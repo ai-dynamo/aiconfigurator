@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
-from aiconfigurator.sdk.attention_backend import resolve_wideep_mla_attention_backend
 from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
@@ -370,9 +369,7 @@ class Task:
     nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
-    # None / "auto" follows the versioned SGLang default. Explicit requests are
-    # never substituted with a different measured backend.
-    attention_backend: str | None = None
+    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -1168,48 +1165,6 @@ class Task:
             rt.batch_size = batch_size
         return rt
 
-    def resolve_attention_backend(self, *, role: Literal["agg", "prefill", "decode"]) -> str | None:
-        """Return the backend used to model this role.
-
-        Only SGLang DeepSeek WideEP needs automatic MLA resolution. Other paths
-        preserve an explicit value for backward compatibility and otherwise
-        leave the field unset.
-        """
-
-        requested = self.attention_backend
-        is_wideep_mla = (
-            self._role_attr(role, "enable_wideep")
-            and self._role_attr(role, "backend_name") == "sglang"
-            and self._model_family == "DEEPSEEK"
-        )
-        if not is_wideep_mla:
-            return None if requested in {None, "auto"} else requested
-
-        system_name = self._role_attr(role, "system_name")
-        system_spec = load_system_spec(system_name)
-        sm_version = system_spec.get("gpu", {}).get("sm_version")
-        if sm_version is None:
-            raise ValueError(f"System {system_name!r} does not declare gpu.sm_version for MLA backend resolution.")
-
-        return resolve_wideep_mla_attention_backend(
-            requested,
-            framework="sglang",
-            framework_version=self._role_attr(role, "backend_version"),
-            model_family=self._model_family,
-            sm_version=int(sm_version),
-        ).effective
-
-    def get_deployment_attention_backend(self, *, role: Literal["agg", "prefill", "decode"]) -> str | None:
-        """Return the resolved backend that must be emitted for a WideEP worker."""
-
-        if not (
-            self._role_attr(role, "enable_wideep")
-            and self._role_attr(role, "backend_name") == "sglang"
-            and self._model_family == "DEEPSEEK"
-        ):
-            return None
-        return self.resolve_attention_backend(role=role)
-
     def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
         """Build a ModelConfig template for the given role (parallelism unset).
 
@@ -1227,11 +1182,14 @@ class Task:
             enable_encoder_dp=self.enable_encoder_dp,
             enable_wideep=self._role_attr(role, "enable_wideep"),
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # moe_backend / attention_backend / wideep_num_slots are shared across roles.
-            # Resolve the effective MLA backend before model construction so prediction and
-            # deployment use the same value.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             moe_backend=self.moe_backend,
-            attention_backend=self.resolve_attention_backend(role=role),
+            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
+            attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
         )
 
@@ -1303,23 +1261,16 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        supported_attention_backends = ("auto", "flashinfer", "fa3", "trtllm_mla")
-        if self.attention_backend is not None and self.attention_backend not in supported_attention_backends:
-            raise ValueError(
-                f"attention_backend must be one of {supported_attention_backends}, got {self.attention_backend!r}."
-            )
+        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
+            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         if self.serving_mode == "agg":
-            roles = ["agg"]
             self._validate_agg()
         elif self.serving_mode == "disagg":
-            roles = ["prefill", "decode"]
             self._validate_disagg()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
-        for role in roles:
-            self.get_deployment_attention_backend(role=role)
         self._validate_database_quant_modes()
 
     def _validate_agg(self) -> None:
