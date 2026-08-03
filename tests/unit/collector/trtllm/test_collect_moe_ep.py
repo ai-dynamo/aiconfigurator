@@ -173,7 +173,9 @@ def test_pre_hopper_sm_expands_to_zero_with_an_explained_drop(monkeypatch, capsy
     # zero cases, explainable from the logged population line.
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     assert _getter(80)() == []
-    assert "0 cases from 117 moe recipes x 0 quant mode(s)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "0 cases from 117 moe recipes" in out
+    assert "-> 16 recipes kept) x 0 quant mode(s) x 3 EPLB configs = 0 expanded" in out
 
 
 def test_sm120_nvfp4_kernel_limit_drops_are_counted(monkeypatch, capsys):
@@ -181,7 +183,9 @@ def test_sm120_nvfp4_kernel_limit_drops_are_counted(monkeypatch, capsys):
     cases = _getter(120)()
     out = capsys.readouterr().out
     assert len(cases) == 10
-    assert "32 SM120 nvfp4 kernel limits" in out
+    # The log line reconciles arithmetically: 16 recipes x 1 mode x 3 EPLB
+    # configs = 48 expanded, minus 6 slot-alignment and 32 kernel-limit drops.
+    assert "= 48 expanded - 6 num_slots%ep!=0 - 32 SM120 nvfp4 kernel limits" in out
     # The surviving SM120 cases are all EPLB-off with enough slots per rank.
     assert all(case[13] is False for case in cases)
 

@@ -63,6 +63,7 @@ def moe_ep_symbols():
         "MoeEpBenchmarkError",
         "get_moe_ep_test_cases",
         "_build_moe_ep_row",
+        "_global_num_tokens",
         "_phase_cases",
         "_collect_phase_rows",
     )
@@ -171,9 +172,9 @@ def test_phase_sweeps_are_sorted_and_mirror_the_sglang_grids(moe_ep_symbols):
 def test_collect_phase_rows_builds_the_frozen_payload_from_the_bench(moe_ep_symbols):
     calls = []
 
-    def bench(inference_phase, num_tokens, distributed, power_law_alpha):
-        calls.append((inference_phase, num_tokens, distributed, power_law_alpha))
-        return 0.5 + num_tokens / 1000.0, None
+    def bench(inference_phase, global_num_tokens, distributed, power_law_alpha):
+        calls.append((inference_phase, global_num_tokens, distributed, power_law_alpha))
+        return 0.5 + global_num_tokens / 1000.0, None
 
     phase_cases = [
         {"num_tokens": 4, "distributed": "uniform", "power_law_alpha": None},
@@ -191,11 +192,15 @@ def test_collect_phase_rows_builds_the_frozen_payload_from_the_bench(moe_ep_symb
         num_slots=256,
     )
 
-    assert calls == [("context", 4, "uniform", None), ("context", 8, "power_law", 1.01)]
+    # The bench receives the GLOBAL token count — the exact value persisted
+    # in num_tokens (both flow through _global_num_tokens once): benchmarked
+    # population and key cannot diverge.
+    assert calls == [("context", 4 * 32, "uniform", None), ("context", 8 * 32, "power_law", 1.01)]
     assert [(row["distribution"], row["num_tokens"]) for row, _power in rows] == [
-        ("uniform", 4 * 32),  # rows persist the GLOBAL token count
+        ("uniform", 4 * 32),
         ("power_law_1.01", 8 * 32),
     ]
+    assert [call[1] for call in calls] == [row["num_tokens"] for row, _power in rows]
     for row, power_stats in rows:
         assert power_stats is None
         assert list(row.keys()) == [
@@ -218,10 +223,13 @@ def test_collect_phase_rows_builds_the_frozen_payload_from_the_bench(moe_ep_symb
 
 
 def test_a_failing_bench_raises_classified_with_the_case_parameters(moe_ep_symbols):
-    def bench(inference_phase, num_tokens, distributed, power_law_alpha):
+    def bench(inference_phase, global_num_tokens, distributed, power_law_alpha):
         raise RuntimeError("CUDA error: out of resources")
 
-    with pytest.raises(moe_ep_symbols["MoeEpBenchmarkError"], match=r"num_tokens=16.*alpha=1.2.*moe_ep_size=8"):
+    with pytest.raises(
+        moe_ep_symbols["MoeEpBenchmarkError"],
+        match=r"num_tokens=16.*global_num_tokens=128.*alpha=1.2.*moe_ep_size=8",
+    ):
         moe_ep_symbols["_collect_phase_rows"](
             inference_phase="generation",
             phase_cases=[{"num_tokens": 16, "distributed": "power_law", "power_law_alpha": 1.2}],
@@ -233,6 +241,54 @@ def test_a_failing_bench_raises_classified_with_the_case_parameters(moe_ep_symbo
             num_experts=256,
             num_slots=256,
         )
+
+
+def test_token_accounting_mirrors_the_sglang_twin(moe_ep_symbols):
+    """Both moe_ep collectors must benchmark and persist the SAME token
+    population expression, or vllm rows would land on keys shared with sglang
+    rows that ran an ep-fold different population under the one
+    kernel_source="deepep_moe" leg.
+
+    vllm side is behavioral: the value handed to the bench, the persisted
+    num_tokens and _global_num_tokens are one expression (per_rank * ep).
+    sglang side is a source contract: the same global expression
+    (num_token * simulated_ep_size) feeds BOTH distribution generators and the
+    persisted column; the vllm bench feeds its pre-globalized argument into
+    the same generators with no re-division.
+    """
+    # vllm: bench input == persisted num_tokens == _global_num_tokens(4, 32).
+    assert moe_ep_symbols["_global_num_tokens"](4, 32) == 128
+    seen = []
+    [(row, _power)] = moe_ep_symbols["_collect_phase_rows"](
+        inference_phase="generation",
+        phase_cases=[{"num_tokens": 4, "distributed": "power_law", "power_law_alpha": 1.01}],
+        bench=lambda phase, global_tokens, dist, alpha: (seen.append(global_tokens), (1.0, None))[1],
+        moe_ep_size=32,
+        hidden_size=7168,
+        inter_size=2048,
+        topk=8,
+        num_experts=256,
+        num_slots=256,
+    )
+    assert seen == [128]
+    assert row["num_tokens"] == 128 == moe_ep_symbols["_global_num_tokens"](4, 32)
+
+    # sglang: the GLOBAL expression feeds both generators and the persisted
+    # column (collect_deepep_moe.py) ...
+    import re
+
+    sglang_text = (REPO_ROOT / "collector" / "wideep" / "sglang" / "collect_deepep_moe.py").read_text()
+    assert "num_tokens_iter = hidden_states_per_token_iter.shape[0]" in sglang_text  # == num_token * ep
+    assert "int(num_token * simulated_ep_size)" in sglang_text  # sizes the prefill tensors
+    assert sglang_text.count("num_tokens=num_token * simulated_ep_size,") == 2  # both persisted rows
+    assert re.search(r"power_law_deepep_decode\(\s*num_token \* simulated_ep_size,", sglang_text)
+    assert re.search(r"power_law_deepep_prefill\(\s*num_tokens_iter,", sglang_text)
+    # ... and the vllm bench feeds its (global) argument straight into the
+    # same generators — no per-rank re-division anywhere in the module.
+    assert re.search(r"power_law_deepep_prefill\(\s*global_num_tokens,", SOURCE_TEXT)
+    assert re.search(r"power_law_deepep_decode\(\s*global_num_tokens,", SOURCE_TEXT)
+    assert "num_tokens // moe_ep_size" not in SOURCE_TEXT
+    assert "global_num_tokens //" not in SOURCE_TEXT
 
 
 def test_mocked_bench_rows_round_trip_the_frozen_header(tmp_path, moe_ep_symbols):
