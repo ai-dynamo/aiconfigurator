@@ -1214,54 +1214,49 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// key `[kv][gemm]` (the fmha level of `ModuleKey` stays the empty sentinel,
 /// and duplicate rows that differed only in `mla_dtype` collapse last-wins —
 /// exactly what Python's direct-assign loader does).
-/// Resolve each (model, num_heads, tp_size) tuple to its (native, local) head
-/// identity across BOTH historical `num_heads` column semantics — mirrors
-/// Python `_dsv4_row_head_axes`:
-/// - sglang 0.5.10 files (pre-#1131 collectors) write NATIVE heads (constant
-///   per artifact across the tp sweep);
-/// - vllm 0.24.0 files (post-#1131 collectors) write rank-LOCAL heads
-///   (varying with tp; `num_heads * tp_size` constant).
+/// Reject rows still carrying the retired pre-#1131 NATIVE `num_heads`
+/// semantics — mirrors Python `_validate_dsv4_local_head_semantics`.
 ///
-/// Sniffed per (model, version) from the data itself — grouping includes the
-/// version column because the shared layer concatenates sibling-version files
-/// into one row stream, and a re-collected (local-writing) primary pooled
-/// with a stale (native-writing) sibling of the same model must not poison
-/// each other's verdicts. A group seen only at tp == 1 is unambiguous
-/// (native == local); any other single-tp case assumes LOCAL (the current
-/// collector convention).
-#[allow(clippy::type_complexity)]
-fn dsv4_head_axes(
+/// The unified DSV4 module-row convention (issue #1429) is rank-LOCAL:
+/// `num_heads` is the head count the benchmarked module actually ran with on
+/// one rank, `tp_size` is persisted in every row, and the model-native count
+/// is derived as `num_heads * tp_size`. A genuine local sweep varies
+/// `num_heads` as `native // tp` within one artifact, so a group whose
+/// `num_heads` stays constant across several `tp_size` values can only be a
+/// stale pre-migration file (Flash/Flash-FP8 64, Pro 128 constant across
+/// tp 1/2/4/8). Reading it as local would collapse distinct tp shards onto
+/// wrong (native, local) coordinates, so fail the load instead. The shipped
+/// sglang 0.5.10 tables were migrated in-place; external files must be
+/// migrated the same way (`num_heads //= tp_size`).
+///
+/// The fingerprint is checked per (model, version) because the shared layer
+/// concatenates sibling-version files into one row stream — a migrated
+/// (local) primary pooled with a stale (native) sibling of the same model
+/// would otherwise blur both patterns and mask the stale rows.
+fn validate_dsv4_local_head_semantics(
     observed: &BTreeMap<(String, String), BTreeSet<(u32, u32)>>,
-) -> BTreeMap<(String, String, u32, u32), (u32, u32)> {
-    let mut axes = BTreeMap::new();
+) -> Result<(), AicError> {
     for ((model, version), pairs) in observed {
         let tps: BTreeSet<u32> = pairs.iter().map(|&(_, tp)| tp).collect();
         let heads_constant = pairs.iter().map(|&(h, _)| h).collect::<BTreeSet<_>>().len() == 1;
         let product_constant = pairs.iter().map(|&(h, tp)| h * tp).collect::<BTreeSet<_>>().len() == 1;
-        let native_semantics = if tps.len() > 1 {
-            heads_constant && !product_constant
-        } else {
-            tps.contains(&1) // tp=1: native == local, either reading works
-        };
-        for &(heads, tp) in pairs {
-            let identity = if native_semantics {
-                (heads, (heads / tp).max(1))
-            } else {
-                (heads * tp, heads)
-            };
-            axes.insert((model.clone(), version.clone(), heads, tp), identity);
+        if tps.len() > 1 && heads_constant && !product_constant {
+            return Err(AicError::PerfDatabase(format!(
+                "DSV4 module rows for model={model:?} version={version:?} keep num_heads \
+                 constant across tp_size values {tps:?}: that is the retired pre-#1131 NATIVE \
+                 semantics (#1429). Migrate the file to rank-local heads \
+                 (num_heads //= tp_size) before loading."
+            )));
         }
     }
-    axes
+    Ok(())
 }
 
 fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<ModuleGrids, AicError> {
     // Pass 1: parse every row (source order preserved for first-wins) and
-    // record the (model, num_heads, tp) pairs the head-semantics sniffer needs.
+    // record the (model, num_heads, tp) pairs the stale-semantics guard needs.
     struct RawRow {
         key: ModuleKey,
-        model: String,
-        version: String,
         heads: u32,
         tp: u32,
         step: u32,
@@ -1321,11 +1316,9 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
             };
             let heads = row.u32(num_heads_col)?;
             let tp = row.u32(tp_size_col)?.max(1);
-            observed.entry((model.clone(), version.clone())).or_default().insert((heads, tp));
+            observed.entry((model, version)).or_default().insert((heads, tp));
             raw_rows.push(RawRow {
                 key,
-                model,
-                version,
                 heads,
                 tp,
                 step: row.u32(step_col)?,
@@ -1345,11 +1338,12 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
 
     // Pass 2: (native, local) head identity per row + first-wins parity with
     // Python `load_*_dsv4_kind_module_data` (skip-on-key-conflict;
-    // shared-layer contract, design §6.1).
-    let axes = dsv4_head_axes(&observed);
+    // shared-layer contract, design §6.1). The num_heads column is rank-LOCAL
+    // by the unified #1429 convention; native derives as num_heads * tp_size.
+    validate_dsv4_local_head_semantics(&observed)?;
     let mut by_keys: BTreeMap<ModuleKey, ByNative> = BTreeMap::new();
     for row in raw_rows {
-        let (native_heads, local_heads) = axes[&(row.model, row.version, row.heads, row.tp)];
+        let (native_heads, local_heads) = (row.heads * row.tp, row.heads);
         by_keys
             .entry(row.key)
             .or_default()
@@ -1427,6 +1421,32 @@ mod tests {
     /// batch row and the step=0-only prefix axis).
     // NOTE: oracle minted post (native, local) head-identity rekey + first-wins
     // shared-layer merge; regenerate from the Python engine if this fails.
+    #[test]
+    fn dsv4_stale_native_semantics_guard() {
+        // Mirrors Python `_validate_dsv4_local_head_semantics` (#1429): a
+        // model whose num_heads stays constant across several tp values is a
+        // stale pre-#1131 NATIVE-semantics file and must fail the load; a
+        // genuine rank-local sweep (num_heads * tp constant) and single-tp
+        // rows pass.
+        let observed = |pairs: &[(u32, u32)]| {
+            let mut m: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
+            m.insert(
+                ("deepseek-ai/DeepSeek-V4-Pro".to_string(), "0.5.10".to_string()),
+                pairs.iter().copied().collect(),
+            );
+            m
+        };
+        // Stale: native 128 constant across tp 1/2/4/8.
+        let err = validate_dsv4_local_head_semantics(&observed(&[(128, 1), (128, 2), (128, 4), (128, 8)]))
+            .unwrap_err();
+        assert!(err.to_string().contains("pre-#1131 NATIVE semantics"), "{err}");
+        // Local: 128/64/32/16 across tp 1/2/4/8 (product constant).
+        validate_dsv4_local_head_semantics(&observed(&[(128, 1), (64, 2), (32, 4), (16, 8)])).unwrap();
+        // Single tp is unambiguous under the convention.
+        validate_dsv4_local_head_semantics(&observed(&[(64, 1)])).unwrap();
+        validate_dsv4_local_head_semantics(&observed(&[(16, 8)])).unwrap();
+    }
+
     #[test]
     fn dsv4_query_matches_python_v2_engine() {
         let root = b200_sglang_root();

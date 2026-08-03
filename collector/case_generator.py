@@ -2130,14 +2130,24 @@ def _dsv4_config() -> dict:
         default_model_paths = supported_model_paths
     if not default_model_paths:
         raise RuntimeError("model_case_values.dsv4 needs at least one default model path")
-    if len(default_model_paths) != 1:
+
+    # Module tables key [native][local] since #1423/#1431, so several default
+    # models are legal as long as their geometries differ. The topk-calib
+    # table keys still carry no model geometry, so calibration is pinned to
+    # exactly one canonical artifact.
+    calib_model_paths = config.get("calib_model_paths")
+    if calib_model_paths is None:
+        calib_model_paths = [default_model_paths[0]]
+    calib_model_paths = _dedupe_strs(calib_model_paths)
+    if len(calib_model_paths) != 1:
         raise ValueError(
-            "DeepSeek-V4 module keys cannot distinguish models; "
-            "dsv4.default_model_paths must contain one canonical path"
+            "DeepSeek-V4 topk-calib keys carry no model geometry; "
+            "dsv4.calib_model_paths must contain exactly one canonical path"
         )
 
     config["default_model_paths"] = default_model_paths
-    config["supported_model_paths"] = _dedupe_strs([*supported_model_paths, *default_model_paths])
+    config["calib_model_paths"] = calib_model_paths
+    config["supported_model_paths"] = _dedupe_strs([*supported_model_paths, *default_model_paths, *calib_model_paths])
     return config
 
 
@@ -2147,6 +2157,7 @@ def _dsv4_attention_kinds() -> tuple[str, ...]:
 
 _DSV4_CONFIG = _dsv4_config()
 _DSV4_DEFAULT_MODELS = tuple(_as_str_list(_DSV4_CONFIG["default_model_paths"], field_name="dsv4.default_model_paths"))
+_DSV4_CALIB_MODELS = tuple(_as_str_list(_DSV4_CONFIG["calib_model_paths"], field_name="dsv4.calib_model_paths"))
 _DSV4_SUPPORTED_MODELS = tuple(
     _as_str_list(_DSV4_CONFIG["supported_model_paths"], field_name="dsv4.supported_model_paths")
 )
@@ -2191,6 +2202,25 @@ def _selected_dsv4_models() -> tuple[str, ...]:
     if filt in _DSV4_SUPPORTED_MODELS or os.path.isdir(filt):
         return (filt,)
     return ()
+
+
+def _selected_dsv4_calib_models() -> tuple[str, ...]:
+    """Models the topk-calib op may run for.
+
+    Calib rows persist without model geometry (``_TOPK_CALIB_KEYS`` is
+    ``(step, isl, batch_size, score_mode)``), so one shared table can hold
+    exactly one model's calibration — the canonical artifact declared in
+    ``dsv4.calib_model_paths``. Any other selected model drops its calib case
+    here, with the count logged (declared coverage fact, not a runtime skip)."""
+    selected = _selected_dsv4_models()
+    calib = tuple(m for m in selected if m in _DSV4_CALIB_MODELS)
+    dropped = [m for m in selected if m not in _DSV4_CALIB_MODELS]
+    if dropped:
+        print(
+            f"[dsv4-test-cases] dsv4_csa_topk_calib: dropped {len(dropped)} model(s) {dropped} "
+            f"(calib keys carry no model geometry; calibration stays on {_DSV4_CALIB_MODELS[0]})"
+        )
+    return calib
 
 
 def _has_native_fp4_experts() -> bool:
@@ -2361,8 +2391,12 @@ def get_dsv4_topk_calib_test_cases():
     The grid matches the CSA module data 1:1: the worker reads the
     already-collected ``dsv4_csa_*_module_perf.txt`` and benches exactly those
     ``(prefix, isl, batch_size)`` shapes — no separate grid is generated here.
+
+    Only the canonical calib model is eligible (``_selected_dsv4_calib_models``):
+    the calib table keys carry no model geometry, so a second model's rows
+    would silently overwrite the first's.
     """
-    return [[model_path, "topk"] for model_path in _selected_dsv4_models()]
+    return [[model_path, "topk"] for model_path in _selected_dsv4_calib_models()]
 
 
 DSV4_SPARSE_KERNELS = ("paged_mqa_logits", "hca_attn")
