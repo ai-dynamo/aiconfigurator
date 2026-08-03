@@ -329,17 +329,75 @@ def test_both_phases_share_one_table_and_one_header(tmp_path):
     assert perf_file.read_text().count("comm_backend") == 1
 
 
-def test_power_is_measured_or_absent_never_zero(monkeypatch):
-    # D7: no power column at all when the run does not measure power; NaN
-    # (unknown) when the sampler yielded nothing; never a fabricated 0.0 and
-    # never a present-but-null column (which would crash the loader).
-    monkeypatch.delenv("COLLECTOR_MEASURE_POWER", raising=False)
-    assert a2a._power_columns({"power": 210.0}) is None
+def test_no_power_column_is_emitted(tmp_path, monkeypatch):
+    # D7: absent is the loader's supported case (has_power = "power" in
+    # rows[0]); a fabricated 0.0 or a present-but-null column is not. This
+    # table emits no power at all because no sampled region corresponds to a
+    # single row's workload -- see _power_columns' docstring.
+    from collector.helper import log_perf
 
+    assert a2a._power_columns() is None
     monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "1")
-    assert a2a._power_columns({"power": 210.0, "power_limit": 700.0}) == {"power": 210.0, "power_limit": 700.0}
-    unknown = a2a._power_columns(None)
-    assert unknown["power"] != unknown["power"]  # NaN, not 0.0
+    assert a2a._power_columns() is None
+
+    perf_file = tmp_path / "moe_a2a_perf.txt"
+    log_perf(
+        item_list=[
+            a2a._build_moe_a2a_row(
+                comm_backend="deepep_ht",
+                phase="dispatch",
+                ep_size=16,
+                node_num=2,
+                shape=SHAPE,
+                num_tokens=64,
+                sms=16,
+                transmit_us=10.0,
+                notify_us=1.0,
+            )
+        ],
+        framework="SGLang",
+        version="0.5.10",
+        device_name="NVIDIA B200",
+        op_name=a2a.OP_NAME,
+        kernel_source=a2a.KERNEL_SOURCE,
+        perf_filename=str(perf_file),
+        power_stats=a2a._power_columns(),
+    )
+    header = perf_file.read_text().splitlines()[0]
+    assert "power" not in header
+    assert header == MOE_A2A_HEADER
+
+
+def test_power_is_never_sampled_across_the_tuning_sweep():
+    # The sampler must not wrap run_ht_case/run_ll_case: an HT row's latency
+    # is one winning config out of a 116-configuration sweep, so power
+    # averaged over the sweep would give the loader energy = power x latency
+    # from two different workloads.
+    assert "power_monitoring_only" not in SOURCE_TEXT
+    assert "stop_sampling" not in SOURCE_TEXT
+
+
+def test_ll_buffer_is_allocated_only_after_the_ht_buffers_are_torn_down():
+    # DeepEP low_latency_mode=True and =False Buffers are allocated in
+    # mutually exclusive branches in the source scripts and would otherwise
+    # double the resident RDMA/NVL allocation for the whole run.
+    main_body = SOURCE_TEXT.split("def main(", 1)[1]
+    pre_loop, run_loop = main_body.split("for case in cases:", 1)
+    assert "create_ll_buffer(" not in pre_loop
+    assert run_loop.index("ht_buffer = None") < run_loop.index("ll_buffer = create_ll_buffer(")
+
+
+def test_measurement_sync_and_warmup_are_ported():
+    # test_internode.py:123-124 settles the ranks before the first profiled
+    # dispatch; test_low_latency.py reaches its reported numbers only after
+    # utils.bench's warmup passes.
+    assert "group.barrier()\n    time.sleep(1)" in SOURCE_TEXT
+    assert a2a.LL_WARMUP_ITERS == 50
+    assert "for _ in range(LL_WARMUP_ITERS):" in SOURCE_TEXT
+
+
+def test_per_case_reseeding_is_documented_as_a_deviation():
+    assert "Per-case reseeding." in SOURCE_TEXT
 
 
 # ---------------------------------------------------------------------------
