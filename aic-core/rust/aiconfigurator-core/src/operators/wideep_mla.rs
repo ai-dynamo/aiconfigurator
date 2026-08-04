@@ -20,6 +20,7 @@ use crate::common::enums::{DatabaseMode, FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::attention::generation_attn_mode;
 use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::wideep_mla::{wideep_context_mla_sol_ms, wideep_generation_mla_sol_ms};
 use crate::perf_database::PerfDatabase;
@@ -690,14 +691,11 @@ fn wideep_generation_mla_empirical(
     kv_quant: KvCacheQuantMode,
     attn_backend: &str,
 ) -> Result<f64, AicError> {
-    // Decode compute dtype follows the kv-cache dtype (Python overrides the
-    // passed fmha label before get_sol is defined).
-    let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8
-    } else {
-        FmhaQuantMode::Bfloat16
-    };
+    // Decode compute dtype follows the kv-cache dtype via the shared
+    // sm-gated rule (Python overrides the passed fmha label the same way
+    // before get_sol is defined).
     let spec = &db.system_spec;
+    let fmha_quant = generation_attn_mode(spec, kv_quant);
     let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
     // c = (num_heads, b, s); tp = round(128 / c[0]) per Python.
