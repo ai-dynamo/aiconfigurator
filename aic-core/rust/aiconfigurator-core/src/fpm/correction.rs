@@ -23,11 +23,7 @@ struct CorrectionObservation {
 }
 
 impl WithOptions for CorrectionBuckets {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        _relaxable: &[usize],
-    ) -> Self {
+    fn with_options(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self {
         Self {
             samples: BucketedSamples::new_fixed(options, axis_ranges),
             min_observations: options.min_observations,
