@@ -481,7 +481,6 @@ fn mla_bmm_empirical(
 /// Module-level context MLA latency (prefix correction on the silicon
 /// branch) under the database's query mode.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn query_context_mla_module_table(
     db: &PerfDatabase,
     b: u32,

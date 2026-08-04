@@ -799,6 +799,7 @@ class MLAModule(Operation):
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        *,
         native_num_heads: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ):
@@ -923,6 +924,7 @@ class MLAModule(Operation):
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        *,
         native_num_heads: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ):

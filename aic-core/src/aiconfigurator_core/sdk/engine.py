@@ -247,7 +247,7 @@ def _mla_module(op: MLAModule) -> dict:
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
     }
     # Emitted only when set: keeps specs from legacy builders byte-identical
-    # (the Rust field is #[serde(default, skip_serializing_if)], #1458).
+    # (the Rust field is #[serde(default)]; Rust bincode always serializes it, #1458).
     if op._native_num_heads is not None:
         spec["native_num_heads"] = op._native_num_heads
     return spec
