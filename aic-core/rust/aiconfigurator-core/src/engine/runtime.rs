@@ -28,6 +28,7 @@ use crate::session::{
     get_mix_step_ops, query_context_op, query_generation_op, run_context_ops, run_context_ops_with,
     run_generation_ops_step, run_generation_ops_step_beamed_with, ContextOpFilter,
 };
+use crate::work_delta::PrefillDeltaModel;
 use crate::{validate_forward_pass_metrics, ForwardPassMetrics};
 
 /// Per-call runtime inputs. Field-for-field mirror of the Python
@@ -306,6 +307,13 @@ pub struct Engine {
     /// `(nextn + 1)` exactly as Python `_run_generation_phase:200`
     /// (`batch_size = batch_size * (model._nextn + 1)`). 0 disables scaling.
     nextn: u32,
+    /// Intra-batch prefill work delta, applied on the FPM telemetry path only.
+    /// The static-inference entry points take their imbalance scales from
+    /// `RuntimeConfig`, which the caller owns; FPM carries batch shape instead,
+    /// so the scale is derived from the scheduled second moments. Uncalibrated
+    /// by default, in which case every scale is `1.0` and the estimate matches
+    /// the uniform collapse exactly.
+    prefill_delta: PrefillDeltaModel,
 }
 
 impl std::fmt::Debug for Engine {
@@ -314,6 +322,7 @@ impl std::fmt::Debug for Engine {
             .field("context_ops", &self.context_ops.len())
             .field("generation_ops", &self.generation_ops.len())
             .field("nextn", &self.nextn)
+            .field("prefill_delta_calibrated", &self.prefill_delta.is_calibrated())
             .finish_non_exhaustive()
     }
 }
@@ -378,6 +387,7 @@ impl Engine {
             generation_ops: spec.generation_ops,
             db,
             nextn,
+            prefill_delta: PrefillDeltaModel::uncalibrated(),
         })
     }
 
@@ -388,6 +398,22 @@ impl Engine {
             ([Op::FpmForward(p)], [Op::FpmForward(d)]) => Some((p, d)),
             _ => None,
         }
+    }
+
+    /// Install the intra-batch prefill work-delta model used by
+    /// [`Self::forward_pass_time_ms`].
+    ///
+    /// Consumes and returns the engine so it composes with [`Self::build`]. An
+    /// uncalibrated model (the default) leaves every FPM estimate byte-identical
+    /// to the uniform collapse.
+    pub fn with_prefill_delta(mut self, prefill_delta: PrefillDeltaModel) -> Self {
+        self.prefill_delta = prefill_delta;
+        self
+    }
+
+    /// The installed intra-batch prefill work-delta model.
+    pub fn prefill_delta(&self) -> &PrefillDeltaModel {
+        &self.prefill_delta
     }
 
     /// Convenience constructor: deserialize a bincode `EngineSpec` and load the
@@ -1523,6 +1549,13 @@ impl Engine {
             let kv_per_req = sched.sum_decode_kv_tokens / n_decode;
             let ctx_tokens = sched.sum_prefill_tokens;
             let gen_tokens = sched.num_decode_requests;
+            // NOTE: the mix step is left on the uniform collapse for now.
+            // `get_mix_step_ops` splits the batch into a combined
+            // non-attention pass plus per-phase attention, so the prefill
+            // work delta would have to be threaded to pass 2 alone; and the
+            // calibration behind `prefill_delta` was measured on
+            // prefill-only batches, so applying it here would extrapolate
+            // outside the data. Tracked as follow-up work.
             return get_mix_step_ops(
                 &self.context_ops,
                 &self.generation_ops,
@@ -1543,13 +1576,20 @@ impl Engine {
             let n_prefill = sched.num_prefill_requests.max(1);
             let new_tokens_per_req = sched.sum_prefill_tokens / n_prefill;
             let prefix_per_req = sched.sum_prefill_kv_tokens / n_prefill;
+            // The three scalars above are the batch's mean point; on their own
+            // they price a heterogeneous batch as if every request had the mean
+            // shape. The work-delta model reads the scheduled second moments
+            // and charges the difference on the context-attention ops. It
+            // returns exactly 1.0 when uncalibrated, when the batch is uniform,
+            // or when the emitter omits the second moments.
+            let imbalance_scale = self.prefill_delta.correction_scale(sched);
             total += run_context_ops(
                 &self.context_ops,
                 &self.db,
                 n_prefill,
                 new_tokens_per_req,
                 prefix_per_req,
-                1.0,
+                imbalance_scale,
                 ContextOpFilter::All,
             )?;
         }
