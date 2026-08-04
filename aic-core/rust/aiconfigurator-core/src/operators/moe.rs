@@ -123,8 +123,9 @@ fn xprofile_moe_quants(query: MoeQuantMode, table_quants: &[MoeQuantMode]) -> Ve
 
 /// Enabled-tier fingerprint folded into reference-grid cache keys so grids
 /// selected under different policies cannot alias (Python's
-/// `selection_key`/`identity_key` include the policy frozenset).
-fn policy_fingerprint(policy: TransferPolicy) -> String {
+/// `selection_key`/`identity_key` include the policy frozenset). Shared with
+/// the GEMM ladder (operators/gemm.rs).
+pub(crate) fn policy_fingerprint(policy: TransferPolicy) -> String {
     format!(
         "xshape={},xquant={},xprofile={},xop={}",
         policy.xshape as u8, policy.xquant as u8, policy.xprofile as u8, policy.xop as u8

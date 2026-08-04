@@ -41,6 +41,54 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Per-quant achieved-util LEVEL e(q) for GEMM, keyed by the (memory, compute)
+# profile — the GEMM counterpart of moe.py's _MOE_QUANT_UTIL_LEVEL, consumed
+# ONLY by the cross-PROFILE relation of the quant-transfer primitive as the
+# ratio e(query)/e(ref) (see util_empirical.quant_transfer_grid). A SINGLE
+# scalar per profile by design (the per-component split was validated as
+# untrustworthy on MoE; the same SOL-attribution argument holds here).
+#
+# [data] rows: median of util = SOL/measured over the clearly compute-bound
+# region (m >= 1024, n >= 2048, k >= 2048) of every collected gemm table on
+# b200/h200/h100 x trtllm/vllm/sglang (2026-08 snapshot); the range across
+# those six stacks is quoted per row. The bf16/fp8 level RATIO spans
+# 1.38-2.00 (~±20% around 1.6) — looser than MoE's ~10% but acceptable for
+# the last-resort relation. LOO on the mechanism (predict a collected quant
+# from its nearest-profile sibling at shared shapes, m >= 64): nvfp4 <- fp8
+# = 22-33% MAPE, comparable to MoE's ~24% xprofile LOO. [inferred] rows
+# follow the structure (efficiency drops with weight precision, mildly
+# recovers as activation precision drops); levels are relative and tunable —
+# only ratios are consumed.
+_GEMM_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
+    (2, 1): 0.70,  # w16a16 / bfloat16               [data 0.55-0.79]
+    (1, 1): 0.55,  # w8a16 / int8_wo                 [inferred]
+    (0.5, 1): 0.45,  # w4a16 / int4_wo (fused-dequant weight-only runs below
+    #                  the bf16 compute roofline it shares; Marlin-class) [inferred]
+    (1, 2): 0.45,  # w8a8 / fp8(_block/_ootb), sq    [data 0.28-0.55]
+    (0.5, 2): 0.35,  # w4a8                          [inferred]
+    (1, 4): 0.30,  # w8a4                            [inferred]
+    (0.5, 4): 0.30,  # w4a4                          [inferred ≈ nvfp4]
+    (0.5625, 4): 0.30,  # w4a4 / nvfp4               [data 0.21-0.36]
+}
+_GEMM_QUANT_UTIL_DEFAULT = 0.45  # unlisted profile: mid-range relative level
+
+
+def _gemm_quant_util_level(quant_mode) -> float:
+    """Achieved-util level e(q) for a GEMM quant, by (memory, compute) profile."""
+    return _GEMM_QUANT_UTIL_LEVEL.get(util_empirical.quant_profile(quant_mode), _GEMM_QUANT_UTIL_DEFAULT)
+
+
+def xprofile_util_level_known(quant_mode) -> bool:
+    """Whether the GEMM util-LEVEL table lists this quant's profile.
+
+    The runtime ladder falls back to ``_GEMM_QUANT_UTIL_DEFAULT`` for
+    unlisted profiles; the validate gate deliberately does NOT (admitting a
+    quant nobody calibrated would hide the missing level line the
+    add-a-quant recipe requires), so it asks this instead of reaching into
+    the table."""
+    return util_empirical.quant_profile(quant_mode) in _GEMM_QUANT_UTIL_LEVEL
+
+
 class _ZeroAwareDeltaLookup:
     """Preprocessed nearest-neighbour lookup for one immutable delta table.
 
@@ -439,7 +487,10 @@ class GEMM(Operation):
 
         def get_empirical(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> float:
             # SOL / util, where util is read best-effort from this op's own
-            # collected data; raises EmpiricalNotImplementedError when no data.
+            # collected data; when the quant has none, the shared
+            # quant-transfer primitive borrows a sibling quant's util grid
+            # (xquant same-profile / xprofile cross-profile). Raises
+            # EmpiricalNotImplementedError only when no relation finds data.
             sol_time = get_sol(m_v, n_v, k_v, qm)[0]
             tqm = cls._normalize_gemm_quant_mode_for_table(qm)
 
@@ -455,7 +506,56 @@ class GEMM(Operation):
                 lambda c: get_sol(c[0], c[1], c[2], qm)[0],
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid)
+
+            util_scale = 1.0
+            prov = "empirical"  # own-quant util grid; relations below override
+            if grid is None or not grid.samples:
+                cls.load_data(database)
+                wrapper = database._gemm_data
+                policy = database.transfer_policy
+
+                def _collect(q, sol_q, provenance):
+                    # GEMM's xshape relation class is structurally EMPTY: the
+                    # own-quant grid above is already depth-3 over every
+                    # collected (m, n, k) — there is no "other slice of the
+                    # same quant" left to borrow, so a same-quant candidate
+                    # could only rebuild the identical (empty) sample set.
+                    if provenance == "xshape":
+                        return []
+                    # One candidate per sibling quant: its whole m->n->k
+                    # table. GEMM has no categorical slice features, so
+                    # features are constant and the pooled xquant selection
+                    # degrades to first-in-table (file row) order.
+                    return [
+                        util_empirical.ReferenceCandidate(
+                            features=(1.0,),
+                            node=wrapper[q],
+                            sol_fn=(lambda c, _sq=sol_q: get_sol(c[0], c[1], c[2], _sq)[0]),
+                            provenance=provenance,
+                        )
+                    ]
+
+                grid, util_scale, ref_prov = util_empirical.quant_transfer_grid(
+                    "gemm",
+                    (database.system, database.backend, database.version, tqm.name),
+                    (1.0,),
+                    policy,
+                    tqm,
+                    wrapper,
+                    _collect,
+                    _gemm_quant_util_level,
+                    depth=3,
+                    selection_key=(id(wrapper), policy),
+                    # weight-only must borrow bf16, never tie-break into fp8
+                    # (rationale on xprofile_quant_order)
+                    prefer_same_compute=True,
+                )
+                if ref_prov:
+                    prov = ref_prov
+
+            latency, _ = util_empirical.estimate(
+                sol_time, (m_v, n_v, k_v), grid, util_scale=util_scale, provenance=prov
+            )
             return latency
 
         if database_mode is None:

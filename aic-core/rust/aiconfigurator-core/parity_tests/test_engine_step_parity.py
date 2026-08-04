@@ -1185,17 +1185,33 @@ HYBRID_CASES = [
         ),
         id="kimi-k25-b200-vllm-019-hybrid-invariant",
     ),
-    # Ladder miss: NVFP4 MoE on Hopper has no own-shape, cross-shape, or
-    # sibling reference anywhere in the h200/vllm/0.19.0 tables — Python
-    # raises EmpiricalNotImplementedError; the Rust port must fail the same
-    # query point (error-symmetry), never fabricate a SOL/constant value.
+    # Full-model xprofile resolution: NVFP4 on Hopper has no collected GEMM
+    # or MoE tables, but under the default (aggressive) policy the GEMM
+    # quant-transfer ladder borrows across profiles (as does MoE's), so the
+    # whole HYBRID breakdown computes on both sides — value parity. (Before
+    # the GEMM ladder existed this case pinned the error-symmetric miss; the
+    # miss contract moved to the "balanced" case below.)
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/MiniMax-M2.5-NVFP4",
             system_name="h200_sxm",
             database_mode="HYBRID",
         ),
-        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-miss",
+        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile",
+    ),
+    # Ladder miss (error-symmetry): with XPROFILE policy-disabled
+    # ("balanced" = xshape+xquant), NVFP4 GEMM (profile (0.5625, 4)) has no
+    # same-profile sibling anywhere in the h200/vllm/0.19.0 tables — Python
+    # raises EmpiricalNotImplementedError; the Rust port must fail the same
+    # query point, never fabricate a SOL/constant value.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/MiniMax-M2.5-NVFP4",
+            system_name="h200_sxm",
+            database_mode="HYBRID",
+            transfer_policy="balanced",
+        ),
+        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-balanced-miss",
     ),
     # EMPIRICAL mode: every data-backed op answers SOL(query)/util from its
     # own collected slice — the broadest guard of the ported util math (grid
@@ -1365,12 +1381,13 @@ class TestRustTypedErrorsAcrossFfi:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # NVFP4 MoE on Hopper: h200 has no fp4 hardware and its YAML defines
-        # no fp4_tc_flops, so the strict per-dtype resolver rejects the
-        # configuration up front (#1398) — before the HYBRID ladder is even
-        # consulted (this vehicle previously exercised the ladder-miss
-        # contract; symmetric EmpiricalNotImplementedError coverage lives in
-        # the MSA/GDN HYBRID tests above). Rust raises
+        # NVFP4 on Hopper: h200 has no fp4 hardware and its YAML defines no
+        # fp4_tc_flops, so the strict per-dtype resolver rejects the
+        # configuration at query entry (#1398) — before the HYBRID ladder
+        # (any transfer policy) is even consulted, which is why this vehicle
+        # can no longer pin #1455's balanced-policy ladder-miss contract
+        # (symmetric EmpiricalNotImplementedError coverage lives in the
+        # MSA/GDN HYBRID tests above). Rust raises
         # `AicError::MissingSystemFlops`, which must surface as the sdk's
         # MissingSystemFlopsError — the expected-CLI-error ValueError class —
         # and NOT be classified as a plain perf-data miss.

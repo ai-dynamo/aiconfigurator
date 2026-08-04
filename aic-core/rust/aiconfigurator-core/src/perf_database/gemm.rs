@@ -54,14 +54,19 @@ pub struct GemmTable {
 }
 
 /// 3-D GEMM tables keyed by quant name -> m -> n -> k -> latency_ms.
+/// `quant_order` records first-seen (file row) order: the `BTreeMap` iterates
+/// alphabetically, but the quant-transfer ladder's tie-breaks are pinned to
+/// Python's dict-insertion (= file row) order.
 struct GemmGrids {
     by_quant: BTreeMap<String, Grid3<f64>>,
+    quant_order: Vec<String>,
 }
 
 /// Engine-ready GEMM tables: per quant, the nested table plus the scattered
 /// (n, k)-site index, both built once at load (tables are immutable).
 struct GemmEngineGrids {
     by_quant: BTreeMap<String, (Node, SiteIndex)>,
+    quant_order: Vec<String>,
 }
 
 /// 2-D scale tables keyed by quant name -> m -> k -> latency_ms.
@@ -240,6 +245,15 @@ impl GemmTable {
         Ok(points)
     }
 
+    /// Distinct quant names of the loaded GEMM table, in first-seen (file
+    /// row) order — the exact analogue of `MoeTable::available_quants` and of
+    /// Python's dict-insertion iteration over the gemm data. The
+    /// quant-transfer ladder's tie-breaks depend on this order; the
+    /// alphabetical `BTreeMap` iteration must NOT be used for it.
+    pub fn available_quants(&self) -> Result<&[String], AicError> {
+        Ok(&self.load_gemm()?.quant_order)
+    }
+
     fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {
         let cell = self.gemm.get_or_init(|| {
             let mut grids = load_gemm_parquet(&self.gemm_sources)?;
@@ -256,6 +270,7 @@ impl GemmTable {
             // sees the same monotone-bounded inputs as Python.
             clamp_gemm_grids_to_sol(&self.system_spec, &mut grids);
             // Build the engine table + (n, k)-site index once per quant.
+            let quant_order = grids.quant_order;
             let by_quant = grids
                 .by_quant
                 .into_iter()
@@ -265,7 +280,7 @@ impl GemmTable {
                     (quant_name, (node, index))
                 })
                 .collect();
-            Ok(GemmEngineGrids { by_quant })
+            Ok(GemmEngineGrids { by_quant, quant_order })
         });
         cell.as_ref().map_err(|err| clone_err(err))
     }
@@ -339,7 +354,7 @@ fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
     }
 }
 
-fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
+pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
     use GemmQuantMode::*;
     Some(match name {
         "bfloat16" => Bfloat16,
@@ -468,6 +483,7 @@ fn query_scale_table(
 /// source yields rows.
 fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
     let mut by_quant: BTreeMap<String, Grid3<f64>> = BTreeMap::new();
+    let mut quant_order: Vec<String> = Vec::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -494,6 +510,9 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
                 continue;
             }
             let dtype = dtype.to_string();
+            if !by_quant.contains_key(&dtype) {
+                quant_order.push(dtype.clone());
+            }
             // First-wins parity with Python's `load_gemm_data` try/except
             // KeyError, extended across shared-layer sources (earlier source wins).
             by_quant
@@ -514,7 +533,7 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(GemmGrids { by_quant })
+    Ok(GemmGrids { by_quant, quant_order })
 }
 
 /// Load a 2-D (compute_scale / scale_matrix) table from an ordered source list.
