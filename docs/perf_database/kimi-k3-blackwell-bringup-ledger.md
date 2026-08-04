@@ -724,3 +724,27 @@ landed):
   (the K3 attention-population pins were invisible to CI's -m gate);
   the vllm kda dispatch contract test is AST-based (name references,
   not substring greps).
+
+Manifest regen stop-ship RESOLVED (2026-08-04, owner decision: treat kda
+absence-dependence as a one-off; hardened tool exclusion, not the SDK
+fix). Finding: a fresh op_kernel_source_manifest.yaml regen emitted
+kda_perf `causal_conv1d_update` + `fused_recurrent_kda_packed_decode` as
+multi-framework shared entries (both backends genuinely produce rows
+under those names), which let channel-4 cross-backend fill inject vllm's
+12-head Triton generation keys into sglang databases — defeating the
+per-key fused-decode reroute that REQUIRES those keys absent (b200 kda
+meta contract) and regressing b300 K3 agg spec bs1 tpot 3.296 -> 3.336
+ms; the Python-vs-Rust compare gate cannot catch this class (Rust
+consumes Python's serialized source chain, so both engines shift
+together). Fix: check_kernel_source.py now carries the documented
+ABSENCE_LOAD_BEARING denylist and emits those two pairs with tier
+`absence_load_bearing` (visible in the manifest, outside the loader's
+shared/shared_fallback admission); GDN audited and left inheritable (its
+only key-absence sites are nearest-shard fallbacks, not reroutes). A
+donor-injection regression test
+(tests/unit/sdk/operations/test_kda_donor_injection.py) builds the
+manifest THROUGH the generator and pins that a vllm Triton donor cannot
+displace the fused pricing — verified to fail when the exclusion is
+removed. GRADUATION CRITERION: this denylist is a one-off; a second
+absence-dependent kernel family means promoting the SDK to a
+primary-only routing view instead of extending the list.
