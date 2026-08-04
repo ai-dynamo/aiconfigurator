@@ -28,6 +28,28 @@ def _latency(result) -> float:
     return result.latency if hasattr(result, "latency") else (result[0] if isinstance(result, tuple) else result)
 
 
+def _knn_hold(leaves, sol, query, k=4):
+    """Independent reference for the multi-axis past-frontier hold: the k
+    nearest leaves in joint log2 space, blended with tapered modified-Shepard
+    weights w = ((R-d)/(R*d))^2, support radius R at the (k+1)-th distance
+    (R = inf -> plain 1/d^2)."""
+    logq = [math.log2(max(v, 1e-12)) for v in query]
+    scored = sorted((math.dist([math.log2(max(v, 1e-12)) for v in c], logq), sol(*c) / lat) for c, lat in leaves)
+    picked, rest = scored[:k], scored[k:]
+    support_r = rest[0][0] if rest else math.inf
+
+    def weight(d):
+        if math.isinf(support_r):
+            return 1.0 / (d * d + 1e-12)
+        return (max(0.0, support_r - d) / (support_r * d + 1e-12)) ** 2
+
+    weights = [weight(d) for d, _ in picked]
+    if sum(weights) <= 0:  # all picked sit on the support boundary
+        weights = [1.0 / (d * d + 1e-12) for d, _ in picked]
+    util = sum(w * u for w, (_, u) in zip(weights, picked, strict=True)) / sum(weights)
+    return sol(*query) / util
+
+
 def _context_dsa_data(dsa_dict: dict, architecture: str = DEFAULT_DSA_ARCHITECTURE) -> dict:
     return {
         common.FMHAQuantMode.bfloat16: {
@@ -842,10 +864,22 @@ class TestGenerationDSAModule:
             "kv_cache_dtype": common.KVCacheQuantMode.bfloat16,
             "gemm_quant_mode": common.GEMMQuantMode.bfloat16,
         }
-        sol_boundary = float(db.query_generation_dsa_module(s=129, database_mode=common.DatabaseMode.SOL, **query))
-        sol_query = float(db.query_generation_dsa_module(s=11000, database_mode=common.DatabaseMode.SOL, **query))
+
+        def sol(batch: int, sequence: int) -> float:
+            return float(
+                db.query_generation_dsa_module(
+                    s=sequence, database_mode=common.DatabaseMode.SOL, **{**query, "b": batch}
+                )
+            )
+
         result = db.query_generation_dsa_module(s=11000, database_mode=common.DatabaseMode.SILICON, **query)
-        expected = 11.0 * sol_query / sol_boundary
+        # Past-frontier hold: util blended from the nearest measured leaves in
+        # joint log2 space (both s=65 and s=129 contribute; s=129 dominates).
+        expected = _knn_hold(
+            [((32, 4, 65), 10.0), ((32, 4, 129), 11.0)],
+            lambda n, b, s: sol(b, s),
+            (32, 4, 11000),
+        )
 
         assert float(result) == pytest.approx(expected)
         assert result.energy == pytest.approx(expected * 10.0)
@@ -875,11 +909,13 @@ class TestGenerationDSAModule:
         assert result.energy == pytest.approx(120.0)
         assert result.power == pytest.approx(10.0)
 
-    def test_silicon_sequence_overflow_snaps_batch_and_holds_boundary_util(self, mutable_comprehensive_perf_db):
+    def test_silicon_sequence_overflow_blends_nearest_leaf_utils(self, mutable_comprehensive_perf_db):
         """Query (b=3, s=1024) with both axes off-grid and s beyond every
-        collected sweep: the engine snaps outer axes to the nearest collected
-        path (batch 3 -> 2), holds that curve's boundary util (s=128), and
-        lets SOL(query) carry the growth."""
+        collected sweep: the engine holds a util blended from the nearest
+        measured leaves in joint log2 space and lets SOL(query) carry the
+        growth. (The earlier nearest-path snap took the b=2 row wholesale,
+        which was discontinuous at the bracket midpoint — the reported +36.9%
+        cliff between batch 192 and 193 on the real B200 staircase.)"""
         db = mutable_comprehensive_perf_db
         raw = {
             32: {
@@ -915,7 +951,11 @@ class TestGenerationDSAModule:
             database_mode=common.DatabaseMode.SILICON,
         )
 
-        expected = 10.0 * sol(3, 1024) / sol(2, 128)  # anchor: batch snapped to 2, boundary s=128
+        expected = _knn_hold(
+            [((32, 2, 64), 9.0), ((32, 2, 128), 10.0), ((32, 4, 64), 17.0), ((32, 4, 128), 18.0)],
+            lambda n, b, s: sol(b, s),
+            (32, 3, 1024),
+        )
         assert float(result) == pytest.approx(expected)
         assert result.power == pytest.approx(10.0)
         assert result.energy == pytest.approx(expected * 10.0)

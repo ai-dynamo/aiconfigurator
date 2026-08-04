@@ -23,8 +23,9 @@
 //! use the Grid resolver with sqrt-space blending on the seq axis
 //! (`context_attention_config`); generation uses the RAW Grid resolver
 //! (`generation_attention_config`). Past the collected range — including the
-//! truncated large-seq x large-batch staircase corner — the engine holds the
-//! boundary util and lets the analytic SOL carry the growth.
+//! truncated large-seq x large-batch staircase corner — the engine holds a
+//! util blended from the nearest measured leaves in joint log2 space and
+//! lets the analytic SOL carry the growth.
 //!
 //! The query methods on this table return raw interpolated latency in ms.
 //! The operator layer wraps these with prefix correction, SOL/EMPIRICAL
@@ -163,8 +164,10 @@ impl AttentionTable {
         // Python `perf_interp.context_attention_config`: Grid resolver,
         // sqrt-space blend on the seq axis only (~seq^2 curvature; heads and
         // batch are ~linear). Past the staircase frontier (large seq x large
-        // batch, uncollected) the engine holds the boundary util and lets SOL
-        // carry the growth. The sol_fn mirrors the Python wiring: samples are
+        // batch, uncollected) the engine holds a util blended from the
+        // nearest measured leaves (joint log2, tapered modified-Shepard
+        // weights) and lets SOL carry the
+        // growth. The sol_fn mirrors the Python wiring: samples are
         // full attention, so it is evaluated at prefix=0 with the slice's own
         // kv-head/window/head-size setup; c = [n, full_s, b].
         let spec = &self.system_spec;
@@ -948,15 +951,17 @@ mod tests {
     fn generation_query_ragged_corner_matches_python_v2_engine() {
         // Ragged-corner regime: large batch x long kv, off-measured-grid —
         // v2 resolves it on the RAW [n][b][s] grid (no densification), with
-        // the truncated corner handled by boundary-util hold, then 5-sample
-        // s-averaging at the wrapper level. Expected value generated from
-        // Python `db.query_generation_attention(256, 2561, 32, 8, bfloat16,
-        // SILICON, window_size=0, head_size=128)` on gb200/vllm/0.19.0.
+        // the truncated corner handled by the past-frontier hold (util
+        // blended from the nearest measured leaves in joint log2 space),
+        // then 5-sample s-averaging at the wrapper level. Expected value
+        // generated from Python `db.query_generation_attention(256, 2561,
+        // 32, 8, bfloat16, SILICON, window_size=0, head_size=128)` on
+        // gb200/vllm/0.19.0.
         let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
         let latency = table
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed");
-        let expected = 0.4923998240128304;
+        let expected = 0.37153384771269;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -994,14 +999,16 @@ mod tests {
         // sequence_tokens = isl + step = 2). The 5-sample averaging spans
         // s ∈ [max(1,int(2*0.9)), max(..,int(2*1.1))] = [1, 2], i.e.
         // s_samples = [1, 1, 1, 1, 2]; s=1 is below the collected range, so
-        // it resolves via boundary-util hold on the RAW grid. Expected value
-        // generated from Python `db.query_generation_attention(32, 2, 64, 4,
-        // fp8, SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
+        // it resolves via the past-frontier hold (util blended from the
+        // nearest measured leaves in joint log2 space) on the RAW grid.
+        // Expected value generated from Python
+        // `db.query_generation_attention(32, 2, 64, 4, fp8, SILICON, 0,
+        // 128)` on b200_sxm/vllm/0.19.0.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed");
-        let expected = 0.008451361751014535;
+        let expected = 0.009131092737966444;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1013,16 +1020,17 @@ mod tests {
     /// window_size=0, head_size=128)` on b200_sxm/vllm/0.19.0): an exact hit,
     /// a seq interpolation (sqrt-space blend between s=10240 and s=12288),
     /// and a batch past the staircase frontier (b=64 where s=16384 collects
-    /// only up to b=8 -> boundary-util hold). The two engines must agree
+    /// only up to b=8 -> past-frontier hold: util blended from the nearest
+    /// measured leaves in joint log2 space). The two engines must agree
     /// because they implement the same resolution chain.
     // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
     fn context_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (8, 16384, 19.820667266845703),  // exact hit
-            (8, 12000, 11.515825737734879),  // seq interp (sqrt blend)
-            (64, 16384, 158.56533813476562), // batch beyond staircase (util-hold)
+            (8, 16384, 19.820667266845703), // exact hit
+            (8, 12000, 11.515825737734879), // seq interp (sqrt blend)
+            (64, 16384, 184.03017609528183), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table
@@ -1093,16 +1101,17 @@ mod tests {
     /// (`db.query_encoder_attention(b, s, 16, 64, bfloat16, SILICON)` on
     /// b200_sxm/vllm/0.19.0): an exact hit, a seq interpolation (sqrt-space
     /// blend between s=1296 and s=1500), and a batch past the staircase
-    /// frontier (b=64 where s=65536 collects only up to b=2 -> boundary-util
-    /// hold).
+    /// frontier (b=64 where s=65536 collects only up to b=2 -> past-frontier
+    /// hold: util blended from the nearest measured leaves in joint log2
+    /// space).
     // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686), // exact hit
-            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
-            (64, 65536, 9775.049479166666), // batch beyond staircase (util-hold)
+            (1, 1024, 0.03258133431275686),  // exact hit
+            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
+            (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table

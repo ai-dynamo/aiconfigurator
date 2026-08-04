@@ -51,6 +51,28 @@ def _deepseek_v4_value(latency: float) -> dict[str, float]:
     return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
 
 
+def _knn_hold(leaves, sol, query, k=4):
+    """Independent reference for the multi-axis past-frontier hold: the k
+    nearest leaves in joint log2 space, blended with tapered modified-Shepard
+    weights w = ((R-d)/(R*d))^2, support radius R at the (k+1)-th distance
+    (R = inf -> plain 1/d^2)."""
+    logq = [math.log2(max(v, 1e-12)) for v in query]
+    scored = sorted((math.dist([math.log2(max(v, 1e-12)) for v in c], logq), sol(*c) / lat) for c, lat in leaves)
+    picked, rest = scored[:k], scored[k:]
+    support_r = rest[0][0] if rest else math.inf
+
+    def weight(d):
+        if math.isinf(support_r):
+            return 1.0 / (d * d + 1e-12)
+        return (max(0.0, support_r - d) / (support_r * d + 1e-12)) ** 2
+
+    weights = [weight(d) for d, _ in picked]
+    if sum(weights) <= 0:  # all picked sit on the support boundary
+        weights = [1.0 / (d * d + 1e-12) for d, _ in picked]
+    util = sum(w * u for w, (_, u) in zip(weights, picked, strict=True)) / sum(weights)
+    return sol(*query) / util
+
+
 def _write_mhc_perf(path, rows: list[str]) -> str:
     header = "framework,version,device,op_name,kernel_source,architecture,num_tokens,hc_mult,hidden_size,latency"
     path.write_text(header + "\n" + "\n".join(rows) + "\n")
@@ -263,10 +285,12 @@ class TestDeepSeekV4AttentionModule:
         assert next_step[1] > current[1]
 
     def test_generation_silicon_below_min_sampled_s_total_holds_boundary_util(self, mutable_comprehensive_perf_db):
-        """b=1, s_total=1 sits below the min sampled s_total=2: the engine holds
-        the boundary util and lets the decode SOL carry the (tiny) difference,
-        instead of the legacy raw-linear downward extrapolation (which halved
-        the latency straight through the launch-overhead floor)."""
+        """b=1, s_total=1 sits below the min sampled s_total=2: the engine
+        holds a util blended from the nearest measured leaves (joint log2
+        distance, so the small-coordinate corner dominates) and lets the
+        decode SOL carry the (tiny) difference, instead of the legacy
+        raw-linear downward extrapolation (which halved the latency straight
+        through the launch-overhead floor)."""
         db = mutable_comprehensive_perf_db
         # Silicon data is {native}{local}{cr}{b}{s_total}. The shared grid
         # fixture is {tp}{b}{s_total}; strip the tp wrapper so it lands as
@@ -298,7 +322,11 @@ class TestDeepSeekV4AttentionModule:
                 )
             )
 
-        expected = 0.20 * sol(1, 1) / sol(1, 2)  # boundary util held at s_total=2
+        expected = _knn_hold(
+            [((1, 2), 0.20), ((1, 5), 0.50), ((2, 2), 0.40), ((2, 5), 1.00)],
+            sol,
+            (1, 1),
+        )
         assert float(result) == pytest.approx(expected)
         assert result.energy == pytest.approx(expected * 10.0)
 

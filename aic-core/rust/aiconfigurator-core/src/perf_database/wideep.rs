@@ -122,6 +122,10 @@ struct NormalDispatchSlice {
     by_sms: BTreeMap<u32, DispatchPoints>,
     direct_fields: Option<[TokenCurve; DispatchField::COUNT]>,
     fields: [Node; DispatchField::COUNT],
+    /// Python's table leaf: the four normal-mode components summed
+    /// ([`normal_leaf_sum`]). The hold path resolves THIS node so the total
+    /// matches Python exactly (util blending is nonlinear in the leaf).
+    summed: Node,
 }
 
 struct DispatchCurve {
@@ -236,11 +240,13 @@ impl NormalDispatchSlice {
             None
         };
         let mut fields = std::array::from_fn(|_| Node::branch());
+        let mut summed = Node::branch();
         for (&sms, by_tokens) in &by_sms {
             for (&token, &point) in by_tokens {
                 for field in DispatchField::ALL {
                     fields[field.index()].insert(&[sms, token], field.value(point));
                 }
+                summed.insert(&[sms, token], normal_leaf_sum(&point));
             }
         }
         Self {
@@ -250,6 +256,7 @@ impl NormalDispatchSlice {
                 .collect(),
             direct_fields,
             fields,
+            summed,
         }
     }
 }
@@ -677,9 +684,9 @@ impl WideEpTable {
     /// Mirrors Python `_query_wideep_deepep_normal_table` (silicon path):
     /// `node_num == 1 && sms == 20` resolves the sm=20 slice as a plain 1-D
     /// token curve; anything else resolves a 2-axis `(sms, num_tokens)` Grid
-    /// where an off-grid `sms` snaps to the nearest collected value (the SOL
-    /// is the linear token proxy, constant in sms — no data supports an sms
-    /// scaling story yet).
+    /// where past-range coordinates hold via the joint-log kNN util transfer
+    /// (the SOL is the linear token proxy, constant in sms — no data supports
+    /// an sms scaling story yet).
     pub fn query_deepep_normal(
         &self,
         node_num: u32,
@@ -765,44 +772,7 @@ impl WideEpTable {
         {
             return Ok(point);
         }
-        Ok(DispatchPoint {
-            dispatch_transmit_us: dispatch_field_2d(
-                slice,
-                DispatchField::DispatchTransmit,
-                sms,
-                num_tokens,
-            )?,
-            dispatch_notify_us: dispatch_field_2d(
-                slice,
-                DispatchField::DispatchNotify,
-                sms,
-                num_tokens,
-            )?,
-            combine_transmit_us: dispatch_field_2d(
-                slice,
-                DispatchField::CombineTransmit,
-                sms,
-                num_tokens,
-            )?,
-            combine_notify_us: dispatch_field_2d(
-                slice,
-                DispatchField::CombineNotify,
-                sms,
-                num_tokens,
-            )?,
-            combine_avg_t_us: dispatch_field_2d(
-                slice,
-                DispatchField::CombineAverage,
-                sms,
-                num_tokens,
-            )?,
-            dispatch_avg_t_us: dispatch_field_2d(
-                slice,
-                DispatchField::DispatchAverage,
-                sms,
-                num_tokens,
-            )?,
-        })
+        dispatch_point_2d(slice, sms, num_tokens)
     }
 
     /// DeepEP low-latency dispatch point.
@@ -949,85 +919,94 @@ fn dispatch_field(
     fields[field.index()].query(num_tokens as f64, &|t| t)
 }
 
-/// Resolve one `DispatchPoint` field on the DeepEP-normal 2-axis
-/// `(sms, num_tokens)` grid via the shared engine (Python's
-/// `OpInterpConfig(axes=("sms","num_tokens"), resolver=Grid(),
-/// sol_fn=lambda _sm, t: float(t))`): in-range coordinates bracket+blend, an
-/// off-grid `sms` snaps to the nearest collected value, and beyond-range
-/// tokens util-hold on the linear proxy. The zero-boundary convention (see
-/// [`dispatch_field`]) is applied via the hold anchor: when the query resolves
-/// through `grid_hold` and the anchor's field is 0, the field contributes 0
-/// instead of a spurious "no positive-util anchor" miss — numerically
-/// identical to Python's util-hold on the SUMMED curve.
-fn dispatch_field_2d(
-    slice: &NormalDispatchSlice,
-    field: DispatchField,
-    sms: u32,
-    num_tokens: u32,
-) -> Result<f64, AicError> {
-    if let Some(anchor) = normal_hold_anchor(slice, sms, num_tokens) {
-        if field.value(anchor) == 0.0 {
-            return Ok(0.0);
-        }
-    }
-    let sol = |c: &[f64]| c[1];
-    let cfg = OpInterpConfig::grid(&["sms", "num_tokens"], &sol);
-    perf_interp::query(
-        &cfg,
-        &slice.fields[field.index()],
-        &[sms as f64, num_tokens as f64],
-    )
+/// The four components Python's normal-mode loader sums into its table leaf.
+fn normal_leaf_sum(p: &DispatchPoint) -> f64 {
+    p.dispatch_transmit_us + p.dispatch_notify_us + p.combine_transmit_us + p.combine_notify_us
 }
 
-/// Predict the engine's `grid_hold` anchor for a `(sms, num_tokens)` query on
-/// a DeepEP-normal slice; `None` when the query resolves in-range (exact hit,
-/// token lerp, sms lerp, or single-survivor). Mirrors `grid_hold`'s
-/// snap-then-tail walk with `k_tail = 1`: sms snaps to the nearest collected
-/// key (tie -> smaller), tokens anchor at the boundary key when beyond the
-/// slice's range and at the nearest key otherwise.
-fn normal_hold_anchor(
+/// Resolve a DeepEP-normal `DispatchPoint` on the 2-axis `(sms, num_tokens)`
+/// grid via the shared engine (Python's `OpInterpConfig(axes=("sms",
+/// "num_tokens"), resolver=Grid(), sol_fn=lambda _sm, t: float(t))`).
+///
+/// Python resolves the SUMMED curve (its loader stores the four-component
+/// [`normal_leaf_sum`] as the leaf); this port needs the components. In-range
+/// resolution (bracket+blend / single-survivor) is linear in the leaf, so
+/// resolving each field separately (on the slice's precomputed field nodes)
+/// sums to Python's total exactly. The hold path blends utils (nonlinear in
+/// the leaf), so there the total is resolved on the precomputed summed node —
+/// engine-exact parity — and split into components by the hold anchors'
+/// weighted field shares. Shares sum to 1, and a field that is 0 at every
+/// anchor (e.g. the LL-only fields) stays 0, preserving the zero-boundary
+/// convention the per-field path used to special-case.
+fn dispatch_point_2d(
     slice: &NormalDispatchSlice,
     sms: u32,
     num_tokens: u32,
-) -> Option<DispatchPoint> {
-    let by_sms = &slice.by_sms;
+) -> Result<DispatchPoint, AicError> {
+    let sol = |c: &[f64]| c[1];
+    let cfg = OpInterpConfig::grid(&["sms", "num_tokens"], &sol);
+    let coords = [sms as f64, num_tokens as f64];
+
+    if !normal_hold_query(&slice.by_sms, sms, num_tokens) {
+        let field_2d = |field: DispatchField| -> Result<f64, AicError> {
+            perf_interp::query(&cfg, &slice.fields[field.index()], &coords)
+        };
+        return Ok(DispatchPoint {
+            dispatch_transmit_us: field_2d(DispatchField::DispatchTransmit)?,
+            dispatch_notify_us: field_2d(DispatchField::DispatchNotify)?,
+            combine_transmit_us: field_2d(DispatchField::CombineTransmit)?,
+            combine_notify_us: field_2d(DispatchField::CombineNotify)?,
+            combine_avg_t_us: field_2d(DispatchField::CombineAverage)?,
+            dispatch_avg_t_us: field_2d(DispatchField::DispatchAverage)?,
+        });
+    }
+
+    let total = perf_interp::query(&cfg, &slice.summed, &coords)?;
+    let anchors = perf_interp::hold_anchor_weights(&cfg, &slice.summed, &coords, 4)?;
+    let wsum: f64 = anchors.iter().map(|a| a.weight).sum();
+    let share = |field: DispatchField| -> f64 {
+        anchors
+            .iter()
+            .map(|a| {
+                let point = slice.by_sms[&a.coords[0]]
+                    .get(a.coords[1])
+                    .expect("anchor coords come from the summed node");
+                a.weight * (field.value(point) / a.latency)
+            })
+            .sum::<f64>()
+            / wsum
+    };
+    Ok(DispatchPoint {
+        dispatch_transmit_us: total * share(DispatchField::DispatchTransmit),
+        dispatch_notify_us: total * share(DispatchField::DispatchNotify),
+        combine_transmit_us: total * share(DispatchField::CombineTransmit),
+        combine_notify_us: total * share(DispatchField::CombineNotify),
+        combine_avg_t_us: total * share(DispatchField::CombineAverage),
+        dispatch_avg_t_us: total * share(DispatchField::DispatchAverage),
+    })
+}
+
+/// True when a `(sms, num_tokens)` query on a DeepEP-normal slice resolves
+/// through the engine's hold path (an exact hit, token lerp, sms lerp, or
+/// single-survivor is in-range -> false). Mirrors `grid_interior`'s range
+/// decisions for this 2-axis grid, which depend only on the key structure.
+fn normal_hold_query(
+    by_sms: &BTreeMap<u32, DispatchPoints>,
+    sms: u32,
+    num_tokens: u32,
+) -> bool {
     if by_sms.is_empty() {
-        return None;
+        return false;
     }
     let covered = |slice: &DispatchPoints| -> bool {
         let (first, _) = slice.first();
         let (last, _) = slice.last();
         first <= num_tokens && num_tokens <= last
     };
-    let nearest = |keys: &mut dyn Iterator<Item = u32>, c: u32| -> u32 {
-        keys.min_by(|a, b| {
-            let da = (f64::from(*a) - f64::from(c)).abs();
-            let db = (f64::from(*b) - f64::from(c)).abs();
-            da.total_cmp(&db)
-        })
-        .expect("non-empty")
-    };
-    let anchor_in = |slice: &DispatchPoints| -> DispatchPoint {
-        let (first, first_point) = slice.first();
-        let (last, last_point) = slice.last();
-        if num_tokens > last {
-            last_point
-        } else if num_tokens < first {
-            first_point
-        } else {
-            // tokens in range but an OUTER (sms) axis was snapped -> the
-            // engine holds at the NEAREST token key, not a lerp.
-            let key = nearest(&mut slice.token_keys(), num_tokens);
-            slice.get(key).expect("nearest token key must exist")
-        }
-    };
     if let Some(slice) = by_sms.get(&sms) {
         // Exact sms key collapses that level; tokens in range resolve
         // in-slice (exact/lerp) -> no hold.
-        if covered(slice) {
-            return None;
-        }
-        return Some(anchor_in(slice));
+        return !covered(slice);
     }
     let (&min_sms, _) = by_sms.iter().next().expect("non-empty");
     let (&max_sms, _) = by_sms.iter().next_back().expect("non-empty");
@@ -1037,11 +1016,10 @@ fn normal_hold_anchor(
         let (_, lo_slice) = by_sms.range(..sms).next_back().expect("bracketed");
         let (_, hi_slice) = by_sms.range(sms..).next().expect("bracketed");
         if covered(lo_slice) || covered(hi_slice) {
-            return None;
+            return false;
         }
     }
-    let snapped = nearest(&mut by_sms.keys().copied(), sms);
-    Some(anchor_in(&by_sms[&snapped]))
+    true
 }
 
 fn dispatch_lookup(
@@ -1580,16 +1558,58 @@ mod tests {
         writer.close().expect("close writer");
     }
 
+    /// Reference for the multi-axis hold: kNN(4) utils in joint log2 space on
+    /// the SUMMED leaves (mirrors Python's summed-curve resolve), then the
+    /// requested field as the anchors' weighted share of the total.
+    fn knn_hold_field(
+        leaves: &[((u32, u32), f64, f64)], // ((sms, tokens), summed latency, field value)
+        sms: u32,
+        num_tokens: u32,
+    ) -> f64 {
+        let q = [(sms as f64).log2(), (num_tokens as f64).log2()];
+        let mut ranked: Vec<(f64, usize)> = leaves
+            .iter()
+            .enumerate()
+            .map(|(i, ((sm, t), _, _))| {
+                let d = [(*sm as f64).log2() - q[0], (*t as f64).log2() - q[1]];
+                ((d[0] * d[0] + d[1] * d[1]).sqrt(), i)
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Tapered modified-Shepard weights, matching the engine: support
+        // radius R at the 5th distance (R = inf -> plain 1/d^2).
+        let support_r = if ranked.len() > 4 { ranked[4].0 } else { f64::INFINITY };
+        let picked: Vec<(f64, usize)> = ranked.into_iter().take(4).collect();
+        let w = |d: f64| {
+            if support_r.is_infinite() {
+                1.0 / (d * d + 1e-12)
+            } else {
+                let t = (support_r - d).max(0.0) / (support_r * d + 1e-12);
+                t * t
+            }
+        };
+        let wsum: f64 = picked.iter().map(|&(d, _)| w(d)).sum();
+        let util: f64 = picked
+            .iter()
+            .map(|&(d, i)| w(d) * (leaves[i].0 .1 as f64 / leaves[i].1))
+            .sum::<f64>()
+            / wsum;
+        let total = num_tokens as f64 / util;
+        let share: f64 = picked
+            .iter()
+            .map(|&(d, i)| w(d) * (leaves[i].2 / leaves[i].1))
+            .sum::<f64>()
+            / wsum;
+        total * share
+    }
+
     /// Item 3: the DeepEP-normal table is keyed by `dispatch_sms` (Python
-    /// `[node][hidden][topk][experts][dispatch_sms][num_token]`) and queried
-    /// with nearest-snap sms semantics. The old Rust `DispatchKey` lacked the
-    /// sms level and last-wins-collapsed the rows, answering the LAST sms row
-    /// for every query. Python oracle (verified against
-    /// `perf_interp.query(OpInterpConfig(axes=("sms","num_tokens"),
-    /// resolver=Grid(), sol_fn=lambda _sm, t: float(t)), data, sms, 64)` on
-    /// the same synthetic dict): sms=16 -> 100 (own row), sms=32 -> 500 (own
-    /// row), sms=24 -> 300 (sms lerp), sms=12 -> 100 (snap below), sms=40 ->
-    /// 500 (snap above).
+    /// `[node][hidden][topk][experts][dispatch_sms][num_token]`). The old
+    /// Rust `DispatchKey` lacked the sms level and last-wins-collapsed the
+    /// rows, answering the LAST sms row for every query. Semantics on the
+    /// synthetic dict: sms=16 -> 100 (own row), sms=32 -> 500 (own row),
+    /// sms=24 -> 300 (sms lerp); sms=12/40 are past the sms range ->
+    /// util-hold via the joint-log kNN blend of both measured leaves.
     #[test]
     fn deepep_normal_keys_by_dispatch_sms_and_snaps_off_grid() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -1607,15 +1627,19 @@ mod tests {
         // returned 500 for both).
         assert_eq!(q(16).dispatch_transmit_us, 100.0);
         assert_eq!(q(32).dispatch_transmit_us, 500.0);
-        // Off-grid sms: interior lerp / nearest snap (Python Grid semantics).
+        // Off-grid but bracketed sms: interior lerp (Python Grid semantics).
         assert_eq!(q(24).dispatch_transmit_us, 300.0);
-        assert_eq!(q(12).dispatch_transmit_us, 100.0);
-        assert_eq!(q(40).dispatch_transmit_us, 500.0);
-        // The LL-only fields stay 0 through every path (zero-boundary
-        // convention on the snap/hold paths, plain lerp of zeros in range).
+        // Past the sms range: kNN util-hold on the summed leaves (fixture
+        // sums are 103 and 503: transmit + notify 1.0 + combine 2.0).
+        let leaves = [((16u32, 64u32), 103.0, 100.0), ((32, 64), 503.0, 500.0)];
+        let expect = |sms: u32| knn_hold_field(&leaves, sms, 64);
+        assert!((q(12).dispatch_transmit_us - expect(12)).abs() < 1e-9);
+        assert!((q(40).dispatch_transmit_us - expect(40)).abs() < 1e-9);
+        // The LL-only fields stay 0 through every path (zero anchor share on
+        // the hold path, plain lerp of zeros in range).
         assert_eq!(q(24).combine_avg_t_us, 0.0);
         assert_eq!(q(12).combine_avg_t_us, 0.0);
-        // combine_notify_us is measured-zero in this fixture: snap/hold paths
+        // combine_notify_us is measured-zero in this fixture: the hold path
         // must yield 0, not a "no positive-util anchor" miss.
         assert_eq!(q(12).combine_notify_us, 0.0);
         let key = DispatchKey {
@@ -1629,13 +1653,11 @@ mod tests {
             .is_none());
     }
 
-    /// Item 3 (token axis under the sms grid): beyond-range tokens util-hold
-    /// on the linear proxy inside the resolved sms slice; an off-grid sms
-    /// with in-range tokens holds at the NEAREST token key (not a lerp),
-    /// mirroring `_grid_hold`'s outer-axis-snapped tail. Python oracle from
-    /// the same `perf_interp` config on `{16: {64: 100, 128: 200}}`:
-    /// (sms=16, nt=256) -> 400 (= 200 * 256/128); (sms=12, nt=96) -> 150
-    /// (= 100 * 96/64; tie |96-64| == |96-128| keeps the smaller key).
+    /// Item 3 (token axis under the sms grid): beyond-range tokens and
+    /// off-range sms both util-hold via the joint-log kNN blend of the
+    /// measured leaves (the engine no longer snaps to a single nearest path
+    /// — that was discontinuous at bracket midpoints). Expectations come from
+    /// the same kNN reference the engine and Python's `_grid_hold` implement.
     #[test]
     fn deepep_normal_token_hold_and_outer_snap_match_python() {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -1644,14 +1666,15 @@ mod tests {
             &[(2, 16, 64, 100.0), (2, 16, 128, 200.0)],
         );
         let table = WideEpTable::new(tmp.path().to_path_buf());
+        let leaves = [((16u32, 64u32), 103.0, 100.0), ((16, 128), 203.0, 200.0)];
         let hold = table
             .query_deepep_normal(2, 7168, 256, 8, 256, 16)
             .expect("query must succeed");
-        assert!((hold.dispatch_transmit_us - 400.0).abs() < 1e-9);
+        assert!((hold.dispatch_transmit_us - knn_hold_field(&leaves, 16, 256)).abs() < 1e-9);
         let snapped = table
             .query_deepep_normal(2, 7168, 96, 8, 256, 12)
             .expect("query must succeed");
-        assert!((snapped.dispatch_transmit_us - 150.0).abs() < 1e-9);
+        assert!((snapped.dispatch_transmit_us - knn_hold_field(&leaves, 12, 96)).abs() < 1e-9);
     }
 
     /// Item 3 (sm=20 fast path): `node_num == 1 && sms == 20` resolves the
