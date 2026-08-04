@@ -49,6 +49,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend: str) -> str:
+    """Resolve the kernel_source key for the WideEP MLA tables.
+
+    These tables are keyed at the top level by the *measured* kernel_source.
+    Hopper collections use ``fa3`` / ``flashinfer`` -- identical to the
+    user-facing ``attention_backend`` names -- but Blackwell (SM100) collections
+    use ``trtllm_mla``, which is NOT a user-facing attention_backend. Prefer the
+    requested backend when the table actually carries it; otherwise fall back to
+    the kernel source that was collected (e.g. ``trtllm_mla`` on Blackwell) so the
+    lookup does not miss purely on a name mismatch. If neither is present, return
+    the requested backend and let ``require_data_slice`` raise the standard
+    coverage error.
+    """
+    try:
+        if attn_backend in data_wrapper:
+            return attn_backend
+        if "trtllm_mla" in data_wrapper:
+            return "trtllm_mla"
+    except TypeError:
+        pass
+    return attn_backend
+
+
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family.
 
@@ -1251,6 +1274,8 @@ class WideEPGenerationMLA(Operation):
             # (mirrors get_silicon).
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
+            cls.load_data(database)
+            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_generation_mla_data, attn_backend)
 
             def _slice():
                 cls.load_data(database)
@@ -1258,7 +1283,7 @@ class WideEPGenerationMLA(Operation):
                 if wrapper is None:
                     raise PerfDataNotAvailableError("WideEP generation MLA data is SGLang-only.")
                 wrapper.raise_if_not_loaded()
-                return util_empirical.require_data_slice(wrapper, attn_backend, kvcache_quant_mode)
+                return util_empirical.require_data_slice(wrapper, kernel_source, kvcache_quant_mode)
 
             grid = util_empirical.grid_for(
                 (
@@ -1266,7 +1291,7 @@ class WideEPGenerationMLA(Operation):
                     database.system,
                     database.backend,
                     database.version,
-                    attn_backend,
+                    kernel_source,
                     kvcache_quant_mode.name,
                 ),
                 _slice,
@@ -1304,7 +1329,8 @@ class WideEPGenerationMLA(Operation):
             attn_backend = attention_backend or "flashinfer"
             if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
-            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend)
+            attn_data = util_empirical.require_data_slice(data_wrapper, kernel_source)
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
             mla_dict = util_empirical.require_data_slice(attn_data, kvcache_quant_mode)
@@ -1522,6 +1548,8 @@ class WideEPContextMLA(Operation):
             # Samples are prefix=0; SOL(query) carries prefix natively.
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
+            cls.load_data(database)
+            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_context_mla_data, attn_backend)
 
             def _slice():
                 cls.load_data(database)
@@ -1531,7 +1559,7 @@ class WideEPContextMLA(Operation):
                 wrapper.raise_if_not_loaded()
                 return util_empirical.require_data_slice(
                     wrapper,
-                    attn_backend,
+                    kernel_source,
                     fmha_quant_mode,
                     kvcache_quant_mode,
                 )
@@ -1542,7 +1570,7 @@ class WideEPContextMLA(Operation):
                     database.system,
                     database.backend,
                     database.version,
-                    attn_backend,
+                    kernel_source,
                     fmha_quant_mode.name,
                     kvcache_quant_mode.name,
                 ),
@@ -1580,7 +1608,8 @@ class WideEPContextMLA(Operation):
             attn_backend = attention_backend or "flashinfer"
             if attn_backend not in {"flashinfer", "fa3"}:
                 raise ValueError(f"Unsupported attention backend: {attn_backend}")
-            attn_data = util_empirical.require_data_slice(data_wrapper, attn_backend)
+            kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend)
+            attn_data = util_empirical.require_data_slice(data_wrapper, kernel_source)
 
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
             num_heads = 128 // tp_size
