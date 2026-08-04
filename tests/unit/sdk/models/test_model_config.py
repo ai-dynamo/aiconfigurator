@@ -1637,9 +1637,11 @@ class TestBundledModelConfigsOffline:
 
 
 class TestWideEPAttentionExclusions:
-    """TRT-LLM WideEP must inherit the checkpoint's per-projection attention
-    dtypes (reviewer finding: exclusions were not threaded, so q/kv projection
-    perf rows and weights used global NVFP4 — ~5.7 GiB/rank undercount)."""
+    """TRT-LLM large-EP must inherit the checkpoint's per-projection attention
+    dtypes (reviewer finding on the retired WideEP classes: exclusions were
+    not threaded, so q/kv projection perf rows and weights used global NVFP4 —
+    ~5.7 GiB/rank undercount). The legacy ``enable_wideep`` flag is gone;
+    the large-EP regime is selected by ``ModelConfig.moe_comm_backend``."""
 
     @staticmethod
     def _wideep_ops(hf_id: str):
@@ -1653,7 +1655,8 @@ class TestWideEPAttentionExclusions:
             moe_quant_mode=common.MoEQuantMode.nvfp4,
             kvcache_quant_mode=common.KVCacheQuantMode.fp8,
             fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            enable_wideep=True,
+            moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+            num_gpus_per_node=4,
         )
         model = models.get_model(hf_id, model_config, backend_name="trtllm")
         return {getattr(op, "_name", ""): op for op in model.context_ops + model.generation_ops}
