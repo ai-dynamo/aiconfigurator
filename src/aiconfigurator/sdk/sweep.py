@@ -48,6 +48,7 @@ from aiconfigurator.sdk.errors import (
 )
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.picking import _AUTOSCALE_TTFT_CORRECTION_FACTOR
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
@@ -60,9 +61,9 @@ logger = logging.getLogger(__name__)
 _RATE_MATCH_PREFILL_DEGRADATION = 0.9
 _RATE_MATCH_DECODE_DEGRADATION = 0.92
 
-# TTFT pre-correction for queueing under concurrency, sourced from
-# picking._AUTOSCALE_TTFT_CORRECTION_FACTOR (locked by integration parity test).
-_AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
+# The TTFT pre-correction for prefill queueing under concurrency is imported
+# from picking (derived M/G/1 at the rate-matching design utilization — see
+# picking.prefill_queueing_ttft_factor) instead of a parity-locked copy.
 
 # Disagg search shape constants (mirror inference_session.py module-level).
 _DECODE_FILTER_RATIO_MIN = 0.0

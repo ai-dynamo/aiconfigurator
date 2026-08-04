@@ -37,8 +37,9 @@ def _static_row(
 ) -> dict:
     """Return one row dict that conforms to ``common.ColumnsStatic``."""
     num_gpus = tp * pp * dp
-    # Make ttft small enough (< ttft constraint / 1.8 correction) so prefill
-    # candidates are not filtered out.  tpot must be < constraint.
+    # Make ttft small enough (< ttft constraint / the derived queueing
+    # correction, 5.5x at design utilization) so prefill candidates are not
+    # filtered out.  tpot must be < constraint.
     ttft = 50.0 / tp if mode == "static_ctx" else 0.0
     tpot = 5.0 / tp if mode == "static_gen" else 0.0
     seq_s = bs * 10.0

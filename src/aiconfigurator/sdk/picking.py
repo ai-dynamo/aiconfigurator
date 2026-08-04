@@ -33,9 +33,30 @@ _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = 0.9
 # comes from not saturating the batchsize slot of decode worker
 _RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
 
-# TTFT correction for concurrent prefill queueing: with N=10 batches and
-# local concurrency lc=15-20, formula lc/20+0.95 gives ~1.8
-_AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
+
+def prefill_queueing_ttft_factor(utilization: float, service_cv2: float = 0.0) -> float:
+    """Mean-TTFT multiplier for a disagg prefill worker at a given utilization.
+
+    A prefill worker running at utilization ``rho`` queues incoming prompts;
+    the M/G/1 mean waiting time (Pollaczek-Khinchine) gives
+    ``TTFT ~= t_prefill * (1 + rho * (1 + cv^2) / (2 * (1 - rho)))``, where
+    ``cv^2`` is the squared coefficient of variation of the prefill service
+    time (0 for a fixed request shape). No fitted constants: the correction
+    is evaluated at the utilization the sizing itself targets. See
+    docs/design/autoscale_ttft_correction.md.
+    """
+    if not 0.0 <= utilization < 1.0:
+        raise ValueError("utilization must be in [0, 1)")
+    if service_cv2 < 0.0:
+        raise ValueError("service_cv2 must be >= 0")
+    return 1.0 + utilization * (1.0 + service_cv2) / (2.0 * (1.0 - utilization))
+
+
+# TTFT pre-correction for prefill queueing, derived at the rate-matching
+# design utilization (0.9 -> 5.5x) instead of the former hand-tuned 1.8
+# (which corresponds to rho ~= 0.62). Override via
+# Task.autoscale_ttft_correction_factor to pin a different operating point.
+_AUTOSCALE_TTFT_CORRECTION_FACTOR = prefill_queueing_ttft_factor(_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR)
 
 
 # ---------------------------------------------------------------------------

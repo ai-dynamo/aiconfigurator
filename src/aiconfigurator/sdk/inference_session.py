@@ -675,12 +675,10 @@ class DisaggInferenceSession:
             #    throughput.
             #    "1.x" is an empirical value. Default is 1.1.
 
-            # only ttft will be corrected here, other latency and throughput will not be
-            # corrected. concurrency / num_prefill_workers = local_concurrency(lc);
-            # N x concurrency requests. formula = (lc * (lc+1) / 2 + lc * (N-1) )/lc/N
-            # if we use N=10, it's lc/20+0.95. assume lc can be 15-20, 1.8 is a reasonable
-            # correction factor. as we need to get the lc after rate matching, we cannot get the
-            # exact value now. Let's make it simple to do pre-correction instead of post-correction.
+            # only ttft is corrected here (other latency/throughput are not):
+            # M/G/1 queueing multiplier at the rate-matching design
+            # utilization — see picking.prefill_queueing_ttft_factor and
+            # docs/design/autoscale_ttft_correction.md.
             correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
             prefill_candidates = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * correction_factor)
 
