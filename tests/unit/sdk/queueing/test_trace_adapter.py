@@ -159,3 +159,114 @@ class TestWorkloadFromTrace:
         )
         assert rep.per_request and len(rep.per_request) == 3
         assert all(x["ttft_ms"] is not None for x in rep.per_request)
+
+
+class TestPartialTailReuse:
+    """prefix_hit_tokens: TRT-LLM enable_partial_reuse's trace-visible arm —
+    the prompt's trailing partial page reuses when the full leading run hit
+    and its page is resident; matched but never inserted."""
+
+    def test_tail_counts_only_after_full_leading_hit(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        # request 1 computes pages a0,a1 whole; request 2 = same block cut
+        # mid-page-2: full pages [a0] hit + tail (a1, 12 tokens) resident
+        streams = [["a0", "a1"], ["a0"]]
+        tails = [None, ("a1", 12)]
+        assert prefix_hit_tokens(streams, 10, 32, tails=tails) == [0, 32 + 12]
+
+    def test_tail_ignored_when_leading_run_breaks(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        streams = [["a0", "a1", "a2"], ["a0", "x1"]]
+        tails = [None, ("a2", 20)]  # diverged at page 2: tail unreachable
+        assert prefix_hit_tokens(streams, 10, 32, tails=tails) == [0, 32]
+
+    def test_tail_pages_are_not_inserted(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        # request 1's tail (b0, 10) is matched-only: request 2 needing the
+        # full b0 page must MISS it (the pool holds pages computed whole)
+        streams = [[], ["b0"]]
+        tails = [("b0", 10), None]
+        assert prefix_hit_tokens(streams, 10, 32, tails=tails) == [0, 0]
+
+    def test_matches_prefix_hits_when_no_tails(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens, prefix_hits
+
+        s = [["a", "b"], ["a", "b"], ["c"], ["a", "b"]]
+        assert prefix_hit_tokens((list(x) for x in s), 3, 32) == [h * 32 for h in prefix_hits(s, 3)]
+
+    def test_pages_and_tail_shape(self):
+        from aiconfigurator.sdk.queueing import TraceRecord
+
+        r = TraceRecord(arrival_ms=0, isl=64 + 32 + 7, osl=1, hash_ids=(7, 9), block_tokens=64)
+        pages, tail = r.pages_and_tail(32, namespace="s")
+        assert pages == [("s", 7, 0), ("s", 7, 1), ("s", 9, 0)]
+        assert tail == (("s", 9, 1), 7)
+        # boundary-aligned prompt has no tail
+        r2 = TraceRecord(arrival_ms=0, isl=128, osl=1, hash_ids=(7, 9), block_tokens=64)
+        assert r2.pages_and_tail(32, namespace="s")[1] is None
+
+    def test_workload_from_trace_partial_tail_raises_reuse(self):
+        from aiconfigurator.sdk.queueing import TraceRecord, workload_from_trace
+
+        recs = [
+            TraceRecord(arrival_ms=0.0, isl=64, osl=4, hash_ids=(1,), block_tokens=64),
+            TraceRecord(arrival_ms=1000.0, isl=64 + 20, osl=4, hash_ids=(1, 2), block_tokens=64),
+        ]
+        base = workload_from_trace(list(recs), kv_capacity_tokens=4096)
+        pt = workload_from_trace(list(recs), kv_capacity_tokens=4096, partial_tail_reuse=True)
+        # request 2's tail (20 tok into block 2) was never computed whole
+        # by anyone -> no partial hit; both oracles agree
+        assert base.prefix_tokens == pt.prefix_tokens
+        recs3 = recs + [TraceRecord(arrival_ms=2000.0, isl=64 + 20, osl=4, hash_ids=(1, 2), block_tokens=64)]
+        base3 = workload_from_trace(list(recs3), kv_capacity_tokens=4096)
+        pt3 = workload_from_trace(list(recs3), kv_capacity_tokens=4096, partial_tail_reuse=True)
+        # request 3 repeats request 2: full-page oracle stops at 64; the
+        # partial-tail oracle... block 2 page 0 was never computed whole, so
+        # the tail (20 tok into block 2) still misses -> equal here too
+        assert base3.prefix_tokens[2] == 64
+        assert pt3.prefix_tokens[2] == 64
+        # a whole-block repeat WITH a mid-page cut gains the tail
+        recs4 = [
+            TraceRecord(arrival_ms=0.0, isl=128, osl=4, hash_ids=(5, 6), block_tokens=64),
+            TraceRecord(arrival_ms=1000.0, isl=96 + 10, osl=4, hash_ids=(5, 6), block_tokens=64),
+        ]
+        pt4 = workload_from_trace(list(recs4), kv_capacity_tokens=4096, partial_tail_reuse=True)
+        b4 = workload_from_trace(list(recs4), kv_capacity_tokens=4096)
+        assert b4.prefix_tokens[1] == 96
+        assert pt4.prefix_tokens[1] == 96 + 10
+
+
+class TestLeafLruEviction:
+    """leaf-lru pool: radix-tree leaf-first eviction (TRT-LLM block reuse) —
+    chains shrink tail-to-root, so a hot chain's prefix survives pressure
+    that hole-punches the flat LRU mid-chain."""
+
+    def test_chain_shrinks_from_tail_not_holes(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        # chain a0..a3 cached, then an unrelated chain overflows capacity 6:
+        # flat LRU evicts a0,a1 (oldest pages -> hole at the ROOT kills the
+        # leading run); leaf-lru evicts a3 then a2 (leaves first), keeping
+        # the prefix a0,a1 alive for the repeat request
+        streams = [["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["a0", "a1", "a2", "a3"]]
+        flat = prefix_hit_tokens([list(s) for s in streams], 6, 32, eviction="lru")
+        tree = prefix_hit_tokens([list(s) for s in streams], 6, 32, eviction="leaf-lru")
+        assert flat[2] == 0  # root evicted -> leading run dead
+        assert tree[2] == 2 * 32  # tail shrank, prefix a0,a1 survived
+
+    def test_equivalent_without_pressure(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        streams = [["a", "b"], ["a", "b", "c"], ["x"], ["a", "b", "c"]]
+        assert prefix_hit_tokens([list(s) for s in streams], 100, 32, eviction="lru") == prefix_hit_tokens(
+            [list(s) for s in streams], 100, 32, eviction="leaf-lru"
+        )
+
+    def test_rejects_unknown_eviction(self):
+        from aiconfigurator.sdk.queueing import prefix_hit_tokens
+
+        with pytest.raises(ValueError):
+            prefix_hit_tokens([["a"]], 4, 32, eviction="mru")

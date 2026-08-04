@@ -25,11 +25,20 @@ on their side (see the validation experiments).
 Oracle semantics (mirrors vLLM/TRT-LLM paged prefix caching, verified
 against live-engine ``cached_tokens`` self-reporting to +14/+15 tokens mean
 at 34-93% reuse): pages of ``page_tokens`` tokens, LEADING full-page hits
-only, global LRU over ``capacity_pages`` (the engine's page pool). The
-oracle is acausal w.r.t. in-flight computation (a block is reusable the
-moment an earlier-ordered request lists it) — measured against engine
-accounting this makes no material difference (validated on the Mooncake
-replay, appendix 9).
+only, over ``capacity_pages``. Two eviction semantics (``prefix_hit_tokens``):
+page-granular LRU ("lru" — the original oracle) and radix-tree leaf-first
+("leaf-lru" — TRT-LLM block reuse: chains shrink tail-to-root). Below
+eviction pressure they agree; under pressure they differ decisively —
+flat LRU hole-punches chains mid-prefix and collapses leading runs the
+engine still serves fully cached (measured, cc window at 132k pool:
+lru 58.4% vs engine 62.7% with whole-chain misses; leaf-lru at
+capacity = pool − expected in-flight KV lands at 60.3%, per-turn mean
++257 tokens). ``prefix_hit_tokens`` additionally models partial-tail
+reuse (``enable_partial_reuse``) and counts TOKENS. The oracle is acausal
+w.r.t. in-flight computation (a block is reusable the moment an
+earlier-ordered request lists it) — no material difference against engine
+accounting below pressure (Mooncake replay, appendix 9); under pressure
+feed the reusable share (pool minus in-flight) as capacity.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ import json
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from heapq import heappop, heappush
 from itertools import pairwise
 from typing import Optional
 
@@ -56,23 +66,156 @@ def prefix_hits(page_streams: Iterable[list], capacity_pages: int) -> list:
     """
     if capacity_pages < 1:
         raise ValueError("capacity_pages must be >= 1")
-    cache: OrderedDict = OrderedDict()
+    pool = _FlatLruPool(capacity_pages)
     hits = []
     for pages in page_streams:
-        h = 0
-        counting = True
-        for p in pages:
-            if p in cache:
-                cache.move_to_end(p)
-                if counting:
-                    h += 1
-            else:
-                counting = False
-                cache[p] = None
-                if len(cache) > capacity_pages:
-                    cache.popitem(last=False)
+        h, _ = _consume_request(pool, pages, None)
         hits.append(h)
     return hits
+
+
+class _FlatLruPool:
+    """Page pool with page-granular LRU eviction: ANY page can be evicted
+    independently, so pressure punches holes mid-chain and the leading run
+    of a later request breaks at the first hole."""
+
+    def __init__(self, capacity_pages: int):
+        self.cache: OrderedDict = OrderedDict()
+        self.cap = capacity_pages
+
+    def hit(self, p) -> bool:
+        if p in self.cache:
+            self.cache.move_to_end(p)
+            return True
+        return False
+
+    def insert(self, p, parent) -> None:
+        self.cache[p] = None
+        if len(self.cache) > self.cap:
+            self.cache.popitem(last=False)
+
+
+class _TreeLruPool:
+    """Page pool with radix-tree leaf-first eviction, LRU tiebreak — the
+    TRT-LLM block-reuse semantics: eviction removes childless blocks only,
+    so cached chains shrink from the TAIL toward the root and a hot chain's
+    leading prefix survives pressure that a flat LRU would hole-punch
+    (measured on the cc window: flat-LRU leading hits collapse to 0 on
+    turns the engine serves at ~100% cached). A page's parent is fixed at
+    first insertion (content-hash chains make cross-context page reuse
+    negligible in every trace seen)."""
+
+    def __init__(self, capacity_pages: int):
+        self.cap = capacity_pages
+        self.stamp: dict = {}  # page -> last-use counter
+        self.parent: dict = {}
+        self.nchild: dict = {}
+        self._heap: list = []  # (stamp, page) lazy entries
+        self._n = 0
+
+    def _touch(self, p) -> None:
+        self._n += 1
+        self.stamp[p] = self._n
+        if not self.nchild.get(p):
+            heappush(self._heap, (self._n, p))
+
+    def hit(self, p) -> bool:
+        if p in self.stamp:
+            self._touch(p)
+            return True
+        return False
+
+    def insert(self, p, parent) -> None:
+        if parent is not None and parent not in self.stamp:
+            parent = None  # chain root within the pool
+        self.parent[p] = parent
+        self.nchild.setdefault(p, 0)
+        if parent is not None:
+            self.nchild[parent] = self.nchild.get(parent, 0) + 1
+        self._touch(p)
+        while len(self.stamp) > self.cap:
+            if not self._evict_one():
+                break
+
+    def _evict_one(self) -> bool:
+        while self._heap:
+            stamp, p = heappop(self._heap)
+            if self.stamp.get(p) != stamp or self.nchild.get(p, 0) > 0:
+                continue  # stale entry or grew children since
+            del self.stamp[p]
+            del self.nchild[p]
+            par = self.parent.pop(p, None)
+            if par is not None and par in self.stamp:
+                self.nchild[par] -= 1
+                if self.nchild[par] == 0:
+                    heappush(self._heap, (self.stamp[par], par))
+            return True
+        return False
+
+
+def _consume_request(pool, pages, tail) -> tuple:
+    """One request against a page pool: returns (leading full-page hits,
+    tail tokens reused). ``tail`` is ``(page_id, tokens)`` for the prompt's
+    trailing partial page or None; it reuses only when the full leading run
+    hit AND its page is resident, and it is matched but never inserted (a
+    page enters the pool only computed whole)."""
+    h = 0
+    counting = True
+    prev = None
+    for p in pages:
+        if pool.hit(p):
+            if counting:
+                h += 1
+        else:
+            counting = False
+            pool.insert(p, prev)
+        prev = p
+    tail_tokens = 0
+    if tail is not None and counting and pool.hit(tail[0]):
+        tail_tokens = int(tail[1])
+    return h, tail_tokens
+
+
+def prefix_hit_tokens(
+    page_streams: Iterable[list],
+    capacity_pages: int,
+    page_tokens: int,
+    tails: Optional[Iterable] = None,
+    eviction: str = "lru",
+) -> list:
+    """Leading-hit TOKEN counts per request — ``prefix_hits`` extended with
+    the engine's partial-tail reuse (TRT-LLM ``enable_partial_reuse``,
+    default-ON): when every full page of the prompt hits and the trailing
+    partial page's id is resident, the tail's tokens count as reused too
+    (the engine copies the matched fraction of the cached block).
+
+    In trace-hash space this is the only expressible partial reuse:
+    divergence INSIDE a block changes the content hash, so block-interior
+    partial matches are invisible by construction (documented oracle
+    boundary; measured residual after this term: |p90| ~1 page on the cc
+    window). ``tails``: per request, ``(page_id, tokens)`` of the trailing
+    partial page or None — see ``TraceRecord.pages_and_tail``.
+
+    ``eviction`` selects the pool semantics: ``"lru"`` (page-granular — the
+    original oracle, holes mid-chain under pressure) or ``"leaf-lru"``
+    (radix-tree leaf-first, LRU tiebreak — TRT-LLM block-reuse eviction:
+    chains shrink tail-to-root, hot prefixes survive). Under eviction
+    pressure the two differ decisively; measured (cc window, 132k pool,
+    engine reuse 62.7%): flat LRU 58.4% with whole-chain misses the engine
+    serves fully cached, leaf-lru tracks the engine.
+    """
+    if capacity_pages < 1:
+        raise ValueError("capacity_pages must be >= 1")
+    if eviction not in ("lru", "leaf-lru"):
+        raise ValueError("eviction must be 'lru' or 'leaf-lru'")
+    pool = _TreeLruPool(capacity_pages) if eviction == "leaf-lru" else _FlatLruPool(capacity_pages)
+    out = []
+    tails_it = iter(tails) if tails is not None else None
+    for pages in page_streams:
+        tail = next(tails_it) if tails_it is not None else None
+        h, tail_tokens = _consume_request(pool, pages, tail)
+        out.append(h * page_tokens + tail_tokens)
+    return out
 
 
 @dataclass
@@ -99,23 +242,35 @@ class TraceRecord:
         Blocks are whole multiples of engine pages in every trace seen so
         far (512 or 64 tokens vs 32-token pages); a page id is
         ``(namespace, block_hash, page_index_within_block)``. The trailing
-        partial page of the prompt is never reusable and is dropped, like
-        the engine does.
+        partial page of the prompt is dropped here (full-page reuse only);
+        ``pages_and_tail`` exposes it for the partial-reuse oracle.
         """
+        return self.pages_and_tail(page_tokens, namespace)[0]
+
+    def pages_and_tail(self, page_tokens: int, namespace=None) -> tuple:
+        """``(pages, tail)`` where ``tail`` is ``(page_id, tokens)`` for the
+        prompt's trailing partial page (None when the prompt ends on a page
+        boundary or carries no hashes) — the input pair for
+        ``prefix_hit_tokens``'s partial-tail reuse."""
         if self.hash_ids is None:
-            return []
+            return [], None
         if self.block_tokens % page_tokens:
             raise ValueError(f"block_tokens={self.block_tokens} is not a whole multiple of page_tokens={page_tokens}")
         out = []
+        tail = None
         remaining = self.isl
         for h in self.hash_ids:
             take = min(self.block_tokens, remaining)
             for j in range(take // page_tokens):
                 out.append((namespace, h, j))
+            leftover = take % page_tokens
+            if leftover and remaining == take:
+                # the prompt ends inside this block: its final partial page
+                tail = ((namespace, h, take // page_tokens), leftover)
             remaining -= take
             if remaining <= 0:
                 break
-        return out
+        return out, tail
 
 
 def load_mooncake_jsonl(
@@ -211,6 +366,8 @@ def workload_from_trace(
     k_arrival: int = 64,
     turnaround_ms: float = 0.0,
     ingest_us_per_token: float = 0.0,
+    partial_tail_reuse: bool = False,
+    eviction: str = "lru",
 ) -> TraceWorkload:
     """Build queueing-model inputs from trace records (service order).
 
@@ -219,16 +376,30 @@ def workload_from_trace(
     leading-hit page oracle at the deployment's KV capacity. The W3 stream
     form carries joint shape tuples and empirical inter-arrival quantiles
     (zeros preserved — batched/bucketed arrivals ARE the burst structure).
+    ``partial_tail_reuse`` adds the engine's partial-tail block reuse
+    (TRT-LLM ``enable_partial_reuse``, default-ON in 1.3) to the oracle —
+    see ``prefix_hit_tokens``; False preserves the validated full-page
+    accounting. ``eviction`` picks the pool semantics ("lru" | "leaf-lru");
+    under eviction pressure use "leaf-lru" with capacity = pool minus the
+    expected in-flight KV (the engine's reusable share) — see
+    ``prefix_hit_tokens``.
     """
     if not records:
         raise ValueError("records is empty")
     capacity_pages = max(1, kv_capacity_tokens // page_tokens)
     ns = [r.session for r in records]
-    hits = prefix_hits(
-        (r.pages(page_tokens, namespace=n) for r, n in zip(records, ns, strict=True)),
-        capacity_pages,
-    )
-    prefix_tokens = [h * page_tokens for h in hits]
+    if partial_tail_reuse:
+        pt = [r.pages_and_tail(page_tokens, namespace=n) for r, n in zip(records, ns, strict=True)]
+        prefix_tokens = prefix_hit_tokens(
+            (pages for pages, _ in pt), capacity_pages, page_tokens, tails=[tail for _, tail in pt],
+            eviction=eviction,
+        )
+    else:
+        hits = prefix_hits(
+            (r.pages(page_tokens, namespace=n) for r, n in zip(records, ns, strict=True)),
+            capacity_pages,
+        )
+        prefix_tokens = [h * page_tokens for h in hits]
 
     t0 = records[0].arrival_ms
     arrival = [(r.arrival_ms - t0) * time_scale for r in records]

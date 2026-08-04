@@ -56,6 +56,7 @@ from .trace import (
     TraceWorkload,
     load_cc_sessions_jsonl,
     load_mooncake_jsonl,
+    prefix_hit_tokens,
     prefix_hits,
     workload_from_trace,
 )
@@ -82,6 +83,7 @@ __all__ = [
     "load_cc_sessions_jsonl",
     "load_mooncake_jsonl",
     "operating_point_columns",
+    "prefix_hit_tokens",
     "prefix_hits",
     "static_degenerate_columns",
     "static_report",
