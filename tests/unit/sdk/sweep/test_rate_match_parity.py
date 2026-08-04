@@ -159,3 +159,67 @@ def test_rate_match_missing_power_w_defaults_to_zero():
     old_result = _build_disagg_summary_dict(p, 1, d, 1)
     for key in new_result:
         assert new_result[key] == old_result[key]
+
+
+def test_rate_match_counts_cp_in_gpu_accounting():
+    """#1476: a cp8 prefill worker occupies tp*pp*dp*cp GPUs, not tp*pp*dp.
+
+    Before the fix a cp8 worker was accounted as one GPU, inflating
+    num_total_gpus-normalized metrics ~8x and producing replica math the
+    cluster cannot satisfy.
+    """
+    p = _make_prefill_dict(tp=1, pp=1, dp=1, cp=8, parallel="tp1pp1dp1cp8")
+    d = _make_decode_dict(tp=1, pp=1, dp=1, parallel="tp1pp1dp1")
+
+    for result in (_rate_match_dict(p, 2, d, 4), _build_disagg_summary_dict(p, 2, d, 4)):
+        # 2 prefill workers x 8 GPUs (cp8) + 4 decode workers x 1 GPU
+        assert result["num_total_gpus"] == 2 * 8 + 4 * 1
+        assert result["(p)cp"] == 8
+        seq_s = min(p["seq/s"] * 2 * 0.9, d["seq/s"] * 4 * 0.92)
+        assert result["tokens/s/gpu"] == pytest.approx(seq_s * p["osl"] / 20)
+
+
+def test_rate_match_missing_cp_key_defaults_to_one():
+    """Rows predating the cp column (older CSVs, partial dicts) keep working."""
+    p = _make_prefill_dict()  # no "cp" key
+    d = _make_decode_dict()
+    for result in (_rate_match_dict(p, 1, d, 1), _build_disagg_summary_dict(p, 1, d, 1)):
+        assert result["num_total_gpus"] == 4 + 2  # tp4 prefill + tp2 decode
+        assert result["(p)cp"] == 1
+
+
+def test_rate_match_parity_holds_with_cp():
+    p = _make_prefill_dict(cp=4, parallel="tp4pp1dp1cp4")
+    d = _make_decode_dict()
+    new_result = _rate_match_dict(p, 3, d, 5)
+    old_result = _build_disagg_summary_dict(p, 3, d, 5)
+    for key in new_result:
+        assert new_result[key] == old_result[key], (
+            f"Field {key!r} differs with cp: new={new_result[key]} vs old={old_result[key]}"
+        )
+
+
+class TestWorkerGpus:
+    """worker_gpus: num_total_gpus is authoritative, dims are the fallback."""
+
+    def test_prefers_authoritative_num_total_gpus(self):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        # Dims say 1 GPU, but the backend stamped 8 (e.g. a dimension this
+        # helper's fallback list does not know about yet) — trust the stamp.
+        assert worker_gpus({"tp": 1, "pp": 1, "dp": 1, "num_total_gpus": 8}) == 8
+
+    def test_falls_back_to_dims_product_including_cp(self):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        assert worker_gpus({"tp": 2, "pp": 2, "dp": 1, "cp": 4}) == 16
+
+    def test_missing_dims_default_to_one(self):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        assert worker_gpus({"tp": 4}) == 4
+
+    def test_nan_num_total_gpus_falls_back(self):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "num_total_gpus": float("nan")}) == 2

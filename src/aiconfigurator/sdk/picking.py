@@ -37,6 +37,29 @@ _RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
 # local concurrency lc=15-20, formula lc/20+0.95 gives ~1.8
 _AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
 
+# Parallelism dimensions that multiply into a worker's GPU footprint,
+# mirroring ModelConfig.total_gpus_per_worker.  Every consumer that sizes a
+# worker from a row dict must go through this list (or worker_gpus below) —
+# a dimension listed nowhere else was exactly how cp got dropped (#1476).
+WORKER_GPU_DIMS = ("tp", "pp", "dp", "cp")
+
+
+def worker_gpus(summary_dict: dict) -> int:
+    """GPUs occupied by one worker, from a ``ColumnsStatic``-style row dict.
+
+    Prefers the row's own ``num_total_gpus`` — the authoritative value the
+    backends stamp from ``ModelConfig.total_gpus_per_worker`` — and falls
+    back to the ``WORKER_GPU_DIMS`` product for partial dicts that predate
+    the column.
+    """
+    n = summary_dict.get("num_total_gpus")
+    if isinstance(n, (int, float)) and n == n and n > 0:  # n == n filters NaN
+        return int(n)
+    gpus = 1
+    for dim in WORKER_GPU_DIMS:
+        gpus *= int(summary_dict.get(dim) or 1)
+    return gpus
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a disagg summary dict from prefill + decode dicts
@@ -74,8 +97,8 @@ def _build_disagg_summary_dict(
         prefill_summary_dict["seq/s"] * prefill_num_worker * prefill_degradation_factor,
         decode_summary_dict["seq/s"] * decode_num_worker * decode_degradation_factor,
     )
-    prefill_gpus = prefill_summary_dict["pp"] * prefill_summary_dict["tp"] * prefill_summary_dict["dp"]
-    decode_gpus = decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"]
+    prefill_gpus = worker_gpus(prefill_summary_dict)
+    decode_gpus = worker_gpus(decode_summary_dict)
     num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
 

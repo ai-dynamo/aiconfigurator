@@ -24,6 +24,7 @@ from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
+from aiconfigurator.sdk.picking import WORKER_GPU_DIMS
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
 
@@ -75,6 +76,19 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
 
 def _format_power(power_w: object) -> str:
     return "" if pd.isna(power_w) else f"{float(power_w):.1f}W"
+
+
+def _composed_worker_gpus(row: dict, role: str) -> int:
+    """Per-worker GPU count from a composed disagg row's ``(p)``/``(d)`` columns.
+
+    Iterates :data:`aiconfigurator.sdk.picking.WORKER_GPU_DIMS` so every
+    parallelism dimension lands here automatically; columns a row predates
+    (e.g. ``(d)cp``) default to 1.
+    """
+    gpus = 1
+    for dim in WORKER_GPU_DIMS:
+        gpus *= int(row.get(f"({role}){dim}") or 1)
+    return gpus
 
 
 def _plot_worker_setup_table(
@@ -232,11 +246,20 @@ def _plot_worker_setup_table(
         for i, row in enumerate(top_configs.to_dict("records")):
             display_total_gpus = row["total_gpus_used"] if "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] * row["replicas"]
+            # Worker GPU totals come from the shared dims list so a new
+            # parallelism dimension cannot be silently dropped again (#1476);
+            # the cp display factor stays hidden when cp=1 for readability.
+            p_gpus = _composed_worker_gpus(row, "p")
+            d_gpus = _composed_worker_gpus(row, "d")
+            p_cp = int(row.get("(p)cp") or 1)
+            p_cp_label = f"cp{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
+            p_cp_factor = f"x{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
             if is_moe:
                 p_parallel = (
                     f"tp{_cli_underline(str(row['(p)tp']))}"
                     f"pp{_cli_underline(str(row['(p)pp']))}"
                     f"dp{_cli_underline(str(row['(p)dp']))}"
+                    f"{p_cp_label}"
                     f"etp{row['(p)moe_tp']}ep{row['(p)moe_ep']}"
                 )
                 d_parallel = (
@@ -246,35 +269,25 @@ def _plot_worker_setup_table(
                     f"etp{row['(d)moe_tp']}ep{row['(d)moe_ep']}"
                 )
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp'] * row['(p)dp']} "
+                    f"{p_gpus} "
                     f"(={_cli_underline(str(row['(p)tp']))}x"
                     f"{_cli_underline(str(row['(p)pp']))}x"
-                    f"{_cli_underline(str(row['(p)dp']))})"
+                    f"{_cli_underline(str(row['(p)dp']))}{p_cp_factor})"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp'] * row['(d)dp']} "
+                    f"{d_gpus} "
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))}x"
                     f"{_cli_underline(str(row['(d)dp']))})"
                 )
             else:
-                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}"
+                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}{p_cp_label}"
                 d_parallel = f"tp{_cli_underline(str(row['(d)tp']))}pp{_cli_underline(str(row['(d)pp']))}"
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp']} "
-                    f"(={_cli_underline(str(row['(p)tp']))}x"
-                    f"{_cli_underline(str(row['(p)pp']))})"
+                    f"{p_gpus} (={_cli_underline(str(row['(p)tp']))}x{_cli_underline(str(row['(p)pp']))}{p_cp_factor})"
                 )
-                d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp']} "
-                    f"(={_cli_underline(str(row['(d)tp']))}x"
-                    f"{_cli_underline(str(row['(d)pp']))})"
-                )
-            gpus_replica_str = (
-                f"{row['num_total_gpus']} "
-                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-            )
+                d_gpus_worker = f"{d_gpus} (={_cli_underline(str(row['(d)tp']))}x{_cli_underline(str(row['(d)pp']))})"
+            gpus_replica_str = f"{row['num_total_gpus']} (={row['(p)workers']}x{p_gpus}+{row['(d)workers']}x{d_gpus})"
             row_data = [
                 i + 1,
                 row["backend"],

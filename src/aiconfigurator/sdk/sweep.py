@@ -48,6 +48,7 @@ from aiconfigurator.sdk.errors import (
 )
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.picking import worker_gpus
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
@@ -117,8 +118,8 @@ def _rate_match_dict(
         p["seq/s"] * prefill_num_worker * prefill_degradation,
         d["seq/s"] * decode_num_worker * decode_degradation,
     )
-    prefill_gpus = p["pp"] * p["tp"] * p["dp"]
-    decode_gpus = d["pp"] * d["tp"] * d["dp"]
+    prefill_gpus = worker_gpus(p)
+    decode_gpus = worker_gpus(d)
     num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
     tokens_s = seq_s * osl
