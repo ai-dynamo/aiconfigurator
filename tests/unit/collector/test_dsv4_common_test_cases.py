@@ -52,6 +52,16 @@ def test_dsv4_no_filter_expands_flash_and_pro_modules_calib_stays_canonical(monk
     assert "default calibration stays on" in capsys.readouterr().out
 
 
+def test_dsv4_unrelated_model_filter_logs_the_skip(monkeypatch, capsys):
+    """A non-DSV4 filter is a legitimate no-op for DSV4 getters, but the empty
+    plan must be explainable from the log — a green job with an empty artifact
+    is otherwise undiagnosable (#1460 review)."""
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "not-a/dsv4-model")
+    monkeypatch.setattr(sys, "argv", ["pytest"])
+    assert common_test_cases.get_dsv4_topk_calib_test_cases() == []
+    assert "is not a DSV4 model; generating no DSV4 cases" in capsys.readouterr().out
+
+
 def test_dsv4_targeted_model_collects_its_own_calib(monkeypatch):
     """A targeted run collects the selected model's own calibration — since
     #1460 the consumers key the DELTA per native geometry, so Pro calibration

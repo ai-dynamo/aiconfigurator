@@ -634,13 +634,13 @@ fn generation_mla_module_empirical(
     let attn_flops = generation_attn_flops(spec, kv_quant)?;
     let bmm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
     // c = (num_heads, b, s).
-    let sol = |c: &[f64]| {{
+    let sol = |c: &[f64]| {
         generation_mla_module_sol_ms(
             spec, kv_quant, gemm_quant, c[0], c[1], c[2], attn_flops, bmm_flops,
         )
-    }};
+    };
     let key = format!(
-        "gen_mla_mod:{{}}:{{}}:{{:?}}",
+        "gen_mla_mod:{}:{}:{:?}",
         kv_quant.name(),
         gemm_quant.name(),
         native_heads

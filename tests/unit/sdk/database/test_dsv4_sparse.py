@@ -884,6 +884,9 @@ def test_topk_calib_keys_by_native_and_never_borrows(tmp_path):
             0: {512: {8: {"v1_flat": {"latency": 0.30}, "v1_top_last": {"latency": 0.18}}}},
         }
     }
+    # A malformed (non-int) native key is skipped, matching the Rust
+    # u32_optional row skip (#1460 review) — never a load failure.
+    by_native["garbage"] = by_native[64]
     calib = _build_topk_calib_from_rows(by_native)
     assert set(calib.keys()) == {64}
     db = SimpleNamespace(system="b200_sxm", backend="sglang", version="0.5.14")

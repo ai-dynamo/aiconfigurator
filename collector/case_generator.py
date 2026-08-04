@@ -2222,6 +2222,15 @@ def _selected_dsv4_models() -> tuple[str, ...]:
         return _DSV4_DEFAULT_MODELS
     if filt in _DSV4_SUPPORTED_MODELS or os.path.isdir(filt):
         return (filt,)
+    # Other-family filter: a legitimate no-op for DSV4 getters (pinned by
+    # test_dsv4_cases_skip_unrelated_model_filter — legacy all-ops flows rely
+    # on it), but SAY so: a green run with an empty artifact must be
+    # explainable from the log (#1460 review; the empty-plan-is-success
+    # executor behavior is out of this layer's hands).
+    print(
+        f"[dsv4-test-cases] model filter {filt!r} is not a DSV4 model; generating no DSV4 "
+        f"cases (supported: {list(_DSV4_SUPPORTED_MODELS)})"
+    )
     return ()
 
 

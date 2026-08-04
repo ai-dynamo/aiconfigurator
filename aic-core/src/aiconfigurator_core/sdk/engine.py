@@ -102,7 +102,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   enum indices after `DsaGeneration` shifted). The MSA insertion and #1405
 #   each claimed version 3 on their own branch, so their merge needed a
 #   fresh number.
-ENGINE_SPEC_SCHEMA_VERSION = 5  # v5: MLAModule native_num_heads (#1458)
+# - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
+#   `native_num_heads` (always serialized — bincode decodes positionally).
+ENGINE_SPEC_SCHEMA_VERSION = 5
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)

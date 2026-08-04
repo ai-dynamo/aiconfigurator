@@ -1799,6 +1799,11 @@ def _build_topk_calib_from_rows(by_native):
         return None
     out = {}
     for native, by_mode in by_native.items():
+        if not isinstance(native, int):
+            # The generic loader keeps unparseable key cells as str (the
+            # score_mode case); a malformed num_heads must not fail the load.
+            # The Rust twin reads the column via u32_optional and skips too.
+            continue
         variants = {}
         for variant in ("v1", "v2"):
             exact = {}
@@ -1820,7 +1825,7 @@ def _build_topk_calib_from_rows(by_native):
                 by_pi[k].sort()
             variants[variant] = {"exact": exact, "by_pi": by_pi}
         if any(variants.values()):
-            out[int(native)] = variants
+            out[native] = variants
     return out or None
 
 
