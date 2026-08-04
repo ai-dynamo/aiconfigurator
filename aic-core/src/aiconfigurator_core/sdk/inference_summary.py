@@ -5,7 +5,7 @@ import logging
 
 import pandas as pd
 
-from aiconfigurator_core.sdk.common import ColumnsAgg
+from aiconfigurator_core.sdk.common import WIDEEP_COMM_NODE1_FALLBACK_SOURCE, ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,8 @@ class InferenceSummary:
         self._encoder_energy_wms_dict = {}  # W·ms
         self._context_energy_wms_dict = {}  # RENAMED from _context_power_dict, W·ms
         self._generation_energy_wms_dict = {}  # RENAMED from _generation_power_dict, W·ms
-        # Per-op data source ("silicon", "empirical", "sol", or "mixed") populated by
+        # Per-op data source (for example "silicon", "empirical", "sol", or
+        # "mixed") populated by
         # base_backend phase helpers from PerformanceResult.source.
         self._encoder_source_dict: dict[str, str] = {}
         self._context_source_dict: dict[str, str] = {}
@@ -89,8 +90,8 @@ class InferenceSummary:
 
         # per-ops latency breakdown (populated by run_agg or run_disagg)
         self._per_ops_data: dict | None = None
-        # per-ops data source breakdown, parallel to _per_ops_data: same key
-        # structure but values are "silicon" / "empirical" / "sol" / "mixed" strings.
+        # Per-op data source breakdown, parallel to _per_ops_data. Values are
+        # PerformanceResult.source tags.
         self._per_ops_source: dict | None = None
         # Raw forward-pass estimates used by the agg analytic scheduler.
         self._step_estimates: dict | None = None
@@ -491,26 +492,20 @@ class InferenceSummary:
         """Get per-operation latency breakdown data (populated by run_agg)."""
         return self._per_ops_data
 
-    def has_estimated_source(self) -> bool:
-        """Whether any op in this summary was tagged ``"estimated"``.
+    def uses_wideep_comm_node1_fallback(self) -> bool:
+        """Whether this summary reused node-1 WideEP communication data at a multi-node scale.
 
-        ``"estimated"`` means a value modeled from measurements taken at a
-        different coordinate rather than measured at the requested one -- today
-        only the WideEP DeepEP multi-node dispatch/combine substitution. A
-        result carrying one is not a measurement and callers surface it as
-        such; see ``PerformanceResult`` for the full source vocabulary.
+        This is intentionally narrower than generic ``source="estimated"``.
+        Other modeled operations must not receive a WideEP-specific warning.
 
         Reads the phase dicts and ``per_ops_source`` because run_static
-        populates the former and run_agg/disagg assembly the latter. Matches
-        ``"estimated"`` exactly: ``"mixed"`` is the merge of differing sources
-        for one op name and arises benignly (e.g. partial empirical fallback),
-        so treating it as estimated would over-report.
+        populates the former and run_agg/disagg assembly the latter.
         """
 
         def walk(node) -> bool:
             if isinstance(node, dict):
                 return any(walk(v) for v in node.values())
-            return node == "estimated"
+            return node == WIDEEP_COMM_NODE1_FALLBACK_SOURCE
 
         return any(
             walk(d)
@@ -523,7 +518,7 @@ class InferenceSummary:
         )
 
     def set_per_ops_source(self, per_ops_source: dict) -> None:
-        """Set per-operation data-source breakdown ("silicon"/"empirical"/"sol"/"mixed")."""
+        """Set per-operation data-source breakdown from PerformanceResult tags."""
         self._per_ops_source = per_ops_source
 
     def get_per_ops_source(self) -> dict | None:

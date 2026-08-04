@@ -497,8 +497,9 @@ def pick_autoscale(
                 decode_summary_dict=d_dict,
                 decode_num_worker=1,
             )
-            combo[common.ESTIMATED_COLUMN] = bool(
-                p_dict.get(common.ESTIMATED_COLUMN) or d_dict.get(common.ESTIMATED_COLUMN)
+            combo[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = bool(
+                p_dict.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
+                or d_dict.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
             )
             all_combos.append(combo)
 
@@ -508,7 +509,9 @@ def pick_autoscale(
     # ``columns=ColumnsDisagg`` intentionally drops out-of-band metadata, so
     # reattach the flag after constructing the declared result schema.
     disagg_df = pd.DataFrame(all_combos, columns=common.ColumnsDisagg).round(3)
-    disagg_df[common.ESTIMATED_COLUMN] = [bool(combo.get(common.ESTIMATED_COLUMN)) for combo in all_combos]
+    disagg_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = [
+        bool(combo.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)) for combo in all_combos
+    ]
     disagg_df = disagg_df.sort_values(by=["tokens/s/gpu"], ascending=[False]).head(top_n).reset_index(drop=True)
 
     return {

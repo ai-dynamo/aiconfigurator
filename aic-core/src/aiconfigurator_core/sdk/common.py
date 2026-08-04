@@ -683,13 +683,16 @@ ColumnsStatic = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
-# Out-of-band result column: True when the row's latency includes an op tagged
-# PerformanceResult.source == "estimated". Deliberately NOT a member of
-# ColumnsStatic / ColumnsAgg / ColumnsDisagg -- those are the declared result
-# schemas the sweep constructs against, and a DataFrame built with
-# columns=<schema> would drop this, so it is attached after construction the
-# way "_per_ops_source" is.
-ESTIMATED_COLUMN = "_estimated"
+# WideEP-communication-specific provenance for the intentional node_num=1 ->
+# unmeasured multi-node fallback. Keep this distinct from the pre-existing
+# generic ``source="estimated"`` used by other modeled operations.
+WIDEEP_COMM_NODE1_FALLBACK_SOURCE = "wideep_comm_node1_fallback"
+
+# Out-of-band result column: True only when the row includes the WideEP
+# communication node-1 fallback source above. Deliberately NOT a member of
+# ColumnsStatic / ColumnsAgg / ColumnsDisagg: those are declared result schemas,
+# so attach this after frame construction the same way as ``_per_ops_source``.
+WIDEEP_COMM_NODE1_FALLBACK_COLUMN = "_wideep_comm_node1_fallback"
 
 """
 Columns for Agg inference summary dataframe

@@ -105,7 +105,9 @@ def _make_summary(row: dict, runtime_config: RuntimeConfig) -> InferenceSummary:
     return s
 
 
-def _build_mock_backend(*, estimated_mode: str | None = None):
+def _build_mock_backend(
+    *, wideep_comm_node1_fallback_mode: str | None = None, generic_estimate_mode: str | None = None
+):
     """
     Return a mock backend whose ``run_static`` produces a deterministic
     InferenceSummary.  The ``tp`` column value comes from the model's
@@ -134,12 +136,22 @@ def _build_mock_backend(*, estimated_mode: str | None = None):
             summary.set_encoder_source_dict({"encoder_attention": "mixed"})
             summary.set_context_latency_dict({"context_attention": 1.0})
             summary.set_context_energy_wms_dict({"context_attention": 200.0})
-            context_source = "estimated" if estimated_mode == mode else "silicon"
+            if wideep_comm_node1_fallback_mode == mode:
+                context_source = common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE
+            elif generic_estimate_mode == mode:
+                context_source = "estimated"
+            else:
+                context_source = "silicon"
             summary.set_context_source_dict({"context_attention": context_source})
         elif mode == "static_gen":
             summary.set_generation_latency_dict({"generation_attention": 2.0})
             summary.set_generation_energy_wms_dict({"generation_attention": 300.0})
-            generation_source = "estimated" if estimated_mode == mode else "empirical"
+            if wideep_comm_node1_fallback_mode == mode:
+                generation_source = common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE
+            elif generic_estimate_mode == mode:
+                generation_source = "estimated"
+            else:
+                generation_source = "empirical"
             summary.set_generation_source_dict({"generation_attention": generation_source})
         return summary
 
@@ -251,13 +263,17 @@ class TestRequireSameTPFiltering:
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
         assert result.get_power_data_coverage() == 1.0
 
-    @pytest.mark.parametrize("estimated_role", ["prefill", "decode"])
-    def test_run_disagg_preserves_estimated_flag(self, runtime_config, model_config, estimated_role):
+    @pytest.mark.parametrize("node1_fallback_role", ["prefill", "decode"])
+    def test_run_disagg_preserves_wideep_fallback_flag(self, runtime_config, model_config, node1_fallback_role):
         session = DisaggInferenceSession(
             prefill_database=MagicMock(),
-            prefill_backend=_build_mock_backend(estimated_mode="static_ctx" if estimated_role == "prefill" else None),
+            prefill_backend=_build_mock_backend(
+                wideep_comm_node1_fallback_mode="static_ctx" if node1_fallback_role == "prefill" else None
+            ),
             decode_database=MagicMock(),
-            decode_backend=_build_mock_backend(estimated_mode="static_gen" if estimated_role == "decode" else None),
+            decode_backend=_build_mock_backend(
+                wideep_comm_node1_fallback_mode="static_gen" if node1_fallback_role == "decode" else None
+            ),
         )
 
         result = session.run_disagg(
@@ -271,15 +287,19 @@ class TestRequireSameTPFiltering:
             decode_num_worker=1,
         )
 
-        assert bool(result.get_summary_df().iloc[0][common.ESTIMATED_COLUMN])
+        assert bool(result.get_summary_df().iloc[0][common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN])
 
-    @pytest.mark.parametrize("estimated_role", ["prefill", "decode"])
-    def test_constrained_disagg_preserves_estimated_flag(self, runtime_config, model_config, estimated_role):
+    @pytest.mark.parametrize("node1_fallback_role", ["prefill", "decode"])
+    def test_constrained_disagg_preserves_wideep_fallback_flag(self, runtime_config, model_config, node1_fallback_role):
         session = DisaggInferenceSession(
             prefill_database=MagicMock(),
-            prefill_backend=_build_mock_backend(estimated_mode="static_ctx" if estimated_role == "prefill" else None),
+            prefill_backend=_build_mock_backend(
+                wideep_comm_node1_fallback_mode="static_ctx" if node1_fallback_role == "prefill" else None
+            ),
             decode_database=MagicMock(),
-            decode_backend=_build_mock_backend(estimated_mode="static_gen" if estimated_role == "decode" else None),
+            decode_backend=_build_mock_backend(
+                wideep_comm_node1_fallback_mode="static_gen" if node1_fallback_role == "decode" else None
+            ),
         )
 
         result = _run(
@@ -292,7 +312,28 @@ class TestRequireSameTPFiltering:
         )
 
         assert result is not None
-        assert result.get_summary_df()[common.ESTIMATED_COLUMN].all()
+        assert result.get_summary_df()[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN].all()
+
+    def test_generic_estimate_does_not_set_wideep_fallback_flag(self, runtime_config, model_config):
+        session = DisaggInferenceSession(
+            prefill_database=MagicMock(),
+            prefill_backend=_build_mock_backend(generic_estimate_mode="static_ctx"),
+            decode_database=MagicMock(),
+            decode_backend=_build_mock_backend(),
+        )
+
+        result = session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+        )
+
+        assert not bool(result.get_summary_df().iloc[0][common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN])
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

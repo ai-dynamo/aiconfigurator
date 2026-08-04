@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Estimated-provenance propagation through autoscale disagg composition."""
+"""WideEP communication node-1 fallback propagation through autoscale disagg composition."""
 
 import pandas as pd
 import pytest
@@ -12,7 +12,7 @@ from aiconfigurator.sdk.picking import pick_autoscale
 pytestmark = pytest.mark.unit
 
 
-def _candidate(*, estimated: bool) -> dict:
+def _candidate(*, uses_wideep_comm_node1_fallback: bool) -> dict:
     return {
         "model": "test-model",
         "isl": 128,
@@ -47,18 +47,18 @@ def _candidate(*, estimated: bool) -> dict:
         "version": "0.5.12",
         "system": "h200_sxm",
         "power_w": 300.0,
-        common.ESTIMATED_COLUMN: estimated,
+        common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN: uses_wideep_comm_node1_fallback,
     }
 
 
 @pytest.mark.parametrize(
-    "prefill_estimated,decode_estimated,expected",
+    "prefill_fallback,decode_fallback,expected",
     [(True, False, True), (False, True, True), (False, False, False)],
 )
-def test_pick_autoscale_ors_worker_estimate_flags(prefill_estimated, decode_estimated, expected):
+def test_pick_autoscale_ors_worker_wideep_fallback_flags(prefill_fallback, decode_fallback, expected):
     result = pick_autoscale(
-        pd.DataFrame([_candidate(estimated=prefill_estimated)]),
-        pd.DataFrame([_candidate(estimated=decode_estimated)]),
+        pd.DataFrame([_candidate(uses_wideep_comm_node1_fallback=prefill_fallback)]),
+        pd.DataFrame([_candidate(uses_wideep_comm_node1_fallback=decode_fallback)]),
         target_ttft=100.0,
         target_tpot=10.0,
         top_n=1,
@@ -66,5 +66,5 @@ def test_pick_autoscale_ors_worker_estimate_flags(prefill_estimated, decode_esti
     )
 
     best = result["best_config_df"]
-    assert common.ESTIMATED_COLUMN in best.columns
-    assert bool(best.iloc[0][common.ESTIMATED_COLUMN]) is expected
+    assert common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN in best.columns
+    assert bool(best.iloc[0][common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN]) is expected

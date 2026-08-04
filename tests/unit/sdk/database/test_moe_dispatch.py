@@ -497,8 +497,9 @@ class TestWideEpDeepEpLlNodeNumFallback:
     * An unmeasured multi-node scale (node_num > 1) still answers -- refusing
       would remove WideEP from every system whose DeepEP tables carry
       node_num=1 only -- but it answers from node_num=1 rows, warns with the
-      measured error for that scale, and tags ``"estimated"`` so the CLI can
-      mark the config row. What is forbidden is substituting *silently*.
+      measured error for that scale, and tags the dedicated WideEP
+      communication node-1 fallback source so the CLI can mark the config row.
+      What is forbidden is substituting *silently*.
     * A sub-node scale (node_num < 1, what MoEDispatch.query derives for a
       config smaller than one node) keeps the older, quieter fallback and is
       NOT an estimate: it stays intra-node in both directions.
@@ -535,9 +536,9 @@ class TestWideEpDeepEpLlNodeNumFallback:
     @pytest.fixture(autouse=True)
     def _reset_warning_dedupe(self):
         """The once-per-scale dedupe is process-global; isolate it per test."""
-        MoEDispatch._wideep_fallback_logged.clear()
+        MoEDispatch._wideep_comm_node1_fallback_logged.clear()
         yield
-        MoEDispatch._wideep_fallback_logged.clear()
+        MoEDispatch._wideep_comm_node1_fallback_logged.clear()
 
     def test_measured_multi_node_scale_is_neither_warned_nor_marked(self, monkeypatch, caplog):
         """node_num=2 is collected here: real data, used as-is, still "silicon"."""
@@ -549,13 +550,13 @@ class TestWideEpDeepEpLlNodeNumFallback:
         assert res.source == "silicon"
         assert caplog.records == []
 
-    def test_unmeasured_multi_node_scale_substitutes_but_marks_estimated(self, monkeypatch):
+    def test_unmeasured_multi_node_scale_substitutes_but_marks_fallback(self, monkeypatch):
         """node_num=4 is absent -> node_num=1 rows, tagged so the caller can surface it."""
         monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
         db = self._db_with_ll_data()
         res = self._query(db, node_num=4)
         assert float(res) == pytest.approx(0.1)  # 100us/1000, the node_num=1 bucket
-        assert res.source == "estimated"
+        assert res.source == common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE
 
     def test_unmeasured_multi_node_scale_warns_with_the_measured_error(self, monkeypatch, caplog):
         """The warning names the scale and quotes the measured ratio for it."""
@@ -565,7 +566,8 @@ class TestWideEpDeepEpLlNodeNumFallback:
             self._query(db, node_num=4)
         message = caplog.records[0].getMessage()
         assert "node_num=4" in message
-        assert "EXTRAPOLATING" in message
+        assert "FALLING BACK" in message
+        assert common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE in message
         # 3.1x is the measured node4/node1 median for the ll table; asserting the
         # figure keeps the message honest if _MEASURED_NODE_SCALING is edited.
         assert "3.1x" in message
@@ -681,9 +683,9 @@ class TestWideEpDeepEpLlNodeNumFallback:
             )
 
         with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.moe"):
-            estimated = query(node_num=8)
-        assert float(estimated) == pytest.approx(0.1)
-        assert estimated.source == "estimated"
+            fallback_result = query(node_num=8)
+        assert float(fallback_result) == pytest.approx(0.1)
+        assert fallback_result.source == common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE
         assert "wideep_deepep_normal" in caplog.records[0].getMessage()
         assert "6.2x" in caplog.records[0].getMessage()
 
