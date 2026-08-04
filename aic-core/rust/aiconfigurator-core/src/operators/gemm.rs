@@ -633,11 +633,15 @@ mod tests {
     ///
     /// - sq (1, 2): xquant borrow from fp8 (first same-profile in file
     ///   order; identical SOL, no rescale).
-    /// - nvfp4 (0.5625, 4): xprofile borrow, compute-first walk lands on fp8
-    ///   (Δcompute=2 beats bfloat16's 3), rescaled by e(nvfp4)/e(fp8).
     /// - int4_wo (0.5, 1): xprofile borrow from bfloat16 (Δcompute=0), NOT
     ///   the file-order-first fp8 — under plain L1 the two TIE at 1.5 and a
     ///   regression to L1/file-order selection changes this value.
+    /// - nvfp4 (0.5625, 4): NO LONGER a ladder vehicle on h200 — the strict
+    ///   per-dtype resolution (#1398) rejects fp4 at query entry because
+    ///   h200 has no fp4 tensor cores (its old xprofile estimate was
+    ///   anchored on a fictional bf16*4 SOL). Weight-only fp4 modes (the
+    ///   #1392 nvfp4_wo plan) declare the bf16 compute pipeline and keep
+    ///   using the ladder like int4_wo does.
     /// Regenerate if the shipped GEMM tables or the util math change.
     #[test]
     fn gemm_quant_transfer_ladder_matches_python_oracles() {
@@ -646,8 +650,6 @@ mod tests {
         let cases = [
             (GemmQuantMode::Sq, 512u32, 0.01826755536927117, util_empirical::ProvenanceTier::XQuant),
             (GemmQuantMode::Sq, 8192, 0.21285422643025717, util_empirical::ProvenanceTier::XQuant),
-            (GemmQuantMode::Nvfp4, 512, 0.013700666526953379, util_empirical::ProvenanceTier::XProfile),
-            (GemmQuantMode::Nvfp4, 8192, 0.1596406698226929, util_empirical::ProvenanceTier::XProfile),
             (GemmQuantMode::Int4Wo, 512, 0.036529976276703825, util_empirical::ProvenanceTier::XProfile),
             (GemmQuantMode::Int4Wo, 8192, 0.5714972813924153, util_empirical::ProvenanceTier::XProfile),
         ];
@@ -662,6 +664,11 @@ mod tests {
             assert_eq!(source, Source::Empirical, "({quant:?}, m={m}): wrong source");
             assert_eq!(db.worst_provenance(), tier, "({quant:?}, m={m}): wrong tier");
         }
+        // fp4 on h200: strict resolution fires before the ladder.
+        assert!(matches!(
+            query_gemm_table(&db, GemmQuantMode::Nvfp4, 512, 4096, 4096),
+            Err(AicError::MissingSystemFlops(_))
+        ));
     }
 
     #[test]
