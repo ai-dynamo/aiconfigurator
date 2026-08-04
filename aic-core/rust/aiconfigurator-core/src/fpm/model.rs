@@ -584,18 +584,13 @@ pub(crate) struct WorkloadStores<T> {
 impl<T: WithOptions> WorkloadStores<T> {
     fn with_options(options: &ForwardPassPerfOptions) -> Self {
         Self {
-            prefill: T::with_options(
-                options,
-                &[AxisRange::from_zero_to(options.max_num_tokens)],
-                &[],
-            ),
+            prefill: T::with_options(options, &[AxisRange::from_zero_to(options.max_num_tokens)]),
             decode: T::with_options(
                 options,
                 &[
                     AxisRange::from_zero_to(options.max_batch_size),
                     AxisRange::from_zero_to(options.max_kv_tokens),
                 ],
-                &[0],
             ),
             mixed: T::with_options(
                 options,
@@ -603,7 +598,6 @@ impl<T: WithOptions> WorkloadStores<T> {
                     AxisRange::from_zero_to(options.max_num_tokens),
                     AxisRange::from_zero_to(options.max_kv_tokens),
                 ],
-                &[],
             ),
         }
     }
