@@ -761,3 +761,17 @@ serving path). Future l40s kda runs raise classified on those decode
 cells (generation strict-completeness fails) — the honest state. SDK
 side effect: l40s h12 decode queries now take the nearest-shard fallback
 (h24, unscaled).
+
+GDN cross-backend donor fill PINNED (2026-08-04, owner decision on the
+manifest-regen flag): audit of the three newly-inheritable gdn_perf
+kernel_sources shows donors only EXTEND grids — zero pre-existing leaf
+values changed on the audited combos (first-wins shields own rows) —
+but the extensions are real: +48 context boundary points on
+b200_sxm/sglang/0.5.14 (causal_conv1d_fn, Qwen3.5-family shards; NOTE
+the donor lane's conv regime is far slower per token than the sglang
+rows it abuts — visible in the pinned pair) and +43 on
+h200_sxm/vllm/0.24.0 (chunk_gated_delta_rule, Nemotron-H-family shard,
+a whole batch=16 row). tests/unit/sdk/database/test_gdn_donor_fill_pins
+freezes one donor-only and one own-row coordinate per combo as the
+post-f869f616d truth (verified to fail under the pre-regen manifest),
+so any future shift — manifest, data, or loader — is a conscious act.
