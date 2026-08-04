@@ -43,12 +43,15 @@ one segment pin one coefficient without a joint fit:
                       whichever coefficients the cell's other segment and the
                       global dense fit already fixed.
 
-``c_mla_mha`` is a property of the dense kernel rather than of a cell, and at a
-cell whose average request is long it cannot be measured at all: a dense row is
-capped at ``topk`` tokens, so the dense column tops out at ``(b - 1) * topk^2 /
-2`` while the cell's own work grows with ``s_bar^2``. It is therefore fitted
-once from the unsaturated cells, where it carries 8-196% of the work, and
-treated as known everywhere else.
+Each cell owns all three of its prices. An earlier revision fitted
+``c_mla_mha`` once across the unsaturated cells and handed it to the rest
+as a known constant, on the theory that it is a property of the dense
+kernel rather than of an average point. Measurement did not support that:
+the ratio varies by orders of magnitude between cells, because at a cell
+whose average request is long the dense column tops out at
+``(b - 1) * topk^2 / 2`` while the cell's own work grows with ``s_bar^2``,
+so the same nominal price buys a different share of the step. Solving it
+where it is used costs one rung and removes a cross-cell dependency.
 """
 
 from __future__ import annotations
