@@ -37,31 +37,6 @@ pub struct ScheduledRequestMetrics {
     /// and previously computed chunks.
     #[serde(default)]
     pub sum_prefill_kv_tokens: u32,
-    /// Population variance of per-request KV read tokens across prefill
-    /// requests (the second moment matching `sum_prefill_kv_tokens`, mirroring
-    /// `var_decode_kv_tokens` on the decode side).
-    ///
-    /// Optional beyond the Dynamo v1 wire schema: emitters that do not report
-    /// it leave it at `0.0`, which makes the intra-batch work-delta term vanish
-    /// and reproduces the pre-existing uniform-batch estimate exactly. Paired
-    /// with `var_prefill_length` (variance of the FULL prompt length `s + p`)
-    /// it determines the trapezoid work delta
-    /// `(n / 2) * (var_prefill_length - var_prefill_kv_tokens)`.
-    #[serde(default)]
-    pub var_prefill_kv_tokens: f64,
-    /// Smallest per-request KV read token count across prefill requests.
-    ///
-    /// Optional beyond the Dynamo v1 wire schema. Moments cannot decide which
-    /// regime a sparse-attention batch is in: "every request is above the
-    /// indexer's top-k" is a statement about the extremes, not the mean. This
-    /// and `max_prefill_length` are the two order statistics that classify the
-    /// batch without shipping per-request lengths.
-    #[serde(default)]
-    pub min_prefill_kv_tokens: u32,
-    /// Largest per-request FULL prompt length (`kv_read + freshly_computed`)
-    /// across prefill requests. See `min_prefill_kv_tokens`.
-    #[serde(default)]
-    pub max_prefill_length: u32,
     /// Number of decode requests.
     #[serde(default)]
     pub num_decode_requests: u32,
