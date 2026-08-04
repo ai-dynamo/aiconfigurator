@@ -157,37 +157,37 @@
     "deepseek-v32-b200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 306.56702717088723,
-          "agg_tpot": 103.9210261596228,
-          "agg_ttft": 202.64600101126445
+          "agg_request": 299.400688258558,
+          "agg_tpot": 101.49175873171457,
+          "agg_ttft": 197.9089295268434
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 209.275,
-          "disagg_tpot": 15.743,
+          "disagg_request": 206.493,
+          "disagg_tpot": 12.961,
           "disagg_ttft": 193.532
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 103.53059891701972
+          "mixed_step": 101.4148691192112
         }
       },
       "static": {
         "values": {
           "static_ctx": 97.744,
-          "static_gen": 11.123,
-          "static_total": 108.867
+          "static_gen": 9.007,
+          "static_total": 106.751
         }
       }
     },
     "deepseek-v32-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 402.2583800204085,
-          "agg_tpot": 163.46276706842752,
-          "agg_ttft": 238.79561295198098
+          "agg_request": 402.25838002040837,
+          "agg_tpot": 163.46276706842747,
+          "agg_ttft": 238.7956129519809
         }
       },
       "disagg": {
@@ -199,7 +199,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 163.46276706842752
+          "mixed_step": 163.46276706842747
         }
       },
       "static": {
@@ -420,9 +420,9 @@
     "kimi-k25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 396.3907052607567,
-          "agg_tpot": 160.70150835800314,
-          "agg_ttft": 235.68919690275354
+          "agg_request": 396.3907052607566,
+          "agg_tpot": 160.70150835800308,
+          "agg_ttft": 235.68919690275348
         }
       },
       "disagg": {
@@ -434,7 +434,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.70150835800314
+          "mixed_step": 160.70150835800308
         }
       },
       "static": {
@@ -953,9 +953,9 @@
     "minimax-m25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 129.33261794214428,
-          "agg_tpot": 34.60358491395025,
-          "agg_ttft": 94.72903302819404
+          "agg_request": 129.33261794214425,
+          "agg_tpot": 34.603584913950236,
+          "agg_ttft": 94.72903302819401
         }
       },
       "disagg": {
@@ -967,7 +967,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 34.60358491395025
+          "mixed_step": 34.603584913950236
         }
       },
       "static": {
@@ -1191,7 +1191,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 41.17683951536419
+          "mixed_step": 41.176839515364186
         }
       },
       "static": {
@@ -1233,8 +1233,8 @@
     "minimax-m3-b200-vllm-019-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 209.93175912860636,
-          "agg_tpot": 73.37965135463828,
+          "agg_request": 209.93175912860633,
+          "agg_tpot": 73.37965135463827,
           "agg_ttft": 136.55210777396806
         }
       },
@@ -1247,7 +1247,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 73.37965135463828
+          "mixed_step": 73.37965135463827
         }
       },
       "static": {
@@ -1555,9 +1555,9 @@
     "qwen3-235b-a22b-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 180.70708434268093,
-          "agg_tpot": 45.22686322008514,
-          "agg_ttft": 135.4802211225958
+          "agg_request": 180.70708434268087,
+          "agg_tpot": 45.226863220085114,
+          "agg_ttft": 135.48022112259576
         }
       },
       "disagg": {
@@ -1569,7 +1569,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 45.22686322008514
+          "mixed_step": 45.226863220085114
         }
       },
       "static": {
@@ -1583,8 +1583,8 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xprofile": {
       "agg": {
         "values": {
-          "agg_request": 188.0494483452657,
-          "agg_tpot": 48.68209333894856,
+          "agg_request": 188.04944834526566,
+          "agg_tpot": 48.68209333894854,
           "agg_ttft": 139.36735500631713
         }
       },
@@ -1597,7 +1597,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 48.68209333894856
+          "mixed_step": 48.68209333894854
         }
       },
       "static": {
@@ -1611,9 +1611,9 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xquant": {
       "agg": {
         "values": {
-          "agg_request": 278.95339498593313,
-          "agg_tpot": 91.46042116985087,
-          "agg_ttft": 187.49297381608224
+          "agg_request": 278.953394985933,
+          "agg_tpot": 91.46042116985082,
+          "agg_ttft": 187.49297381608218
         }
       },
       "disagg": {
@@ -1625,7 +1625,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 91.46042116985087
+          "mixed_step": 91.46042116985082
         }
       },
       "static": {
@@ -1922,7 +1922,7 @@
       "agg": {
         "values": {
           "agg_request": 95.062174059207,
-          "agg_tpot": 17.629258380803293,
+          "agg_tpot": 17.629258380803297,
           "agg_ttft": 77.4329156784037
         }
       },
@@ -1935,7 +1935,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 17.629258380803293
+          "mixed_step": 17.629258380803297
         }
       },
       "static": {
@@ -2322,8 +2322,8 @@
     "case_count": 93,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "0a2c249c",
-    "git_head": "0a2c249c510230f9649895f78d32b1264d331c5a",
+    "git_describe": "5eacbcaab",
+    "git_head": "5eacbcaab0c27b3f52d48398ccce0739203d4f50",
     "surface_count": 346,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
