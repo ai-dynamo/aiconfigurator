@@ -67,6 +67,9 @@ CORE_SDK_LEAF_MODULES = [
     "step_estimate",
     "system_spec",
     "utils",
+    "work_delta.field",
+    "work_delta.planner",
+    "work_delta.solver",
 ]
 
 
