@@ -372,16 +372,16 @@ def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: l
 def column_gate(x_idx: float, x_mla_sparse: float, x_mla_dense: float) -> tuple:
     """Whether each column moves enough work for its price to be worth applying.
 
-    The two MLA columns share one threshold: they are two paths through the
-    same kernel and a batch's rows split between them, so gating them
-    separately would fail a batch whose rows divide evenly -- which is the
-    batch with the largest deviation, not the smallest.
+    The two MLA columns share one threshold AND one sum: they are two paths
+    through the same kernel and a batch's rows split between them, so the work
+    that matters is what they move together. Comparing each against the
+    threshold on its own fails a batch that splits its deviation evenly -- at
+    1.5M reads per column neither side clears a 2M gate, though the batch moved
+    3M -- and that even split is the largest deviation, not the smallest.
     """
-    return (
-        abs(x_idx) >= MIN_ABS_DELTA_IDX_M * 1e6,
-        abs(x_mla_sparse) >= MIN_ABS_DELTA_MLA_M * 1e6,
-        abs(x_mla_dense) >= MIN_ABS_DELTA_MLA_M * 1e6,
-    )
+    mla_moved = abs(x_mla_sparse) + abs(x_mla_dense)
+    mla_passes = mla_moved >= MIN_ABS_DELTA_MLA_M * 1e6
+    return (abs(x_idx) >= MIN_ABS_DELTA_IDX_M * 1e6, mla_passes, mla_passes)
 
 
 def predict_delta(x_idx: float, x_mla_sparse: float, x_mla_dense: float, fit: CellFit, noise: float = 0.0) -> float:
@@ -400,6 +400,15 @@ def predict_delta(x_idx: float, x_mla_sparse: float, x_mla_dense: float, fit: Ce
     rows actually run on. A cell that did not fit a coefficient contributes
     nothing through it rather than borrowing another one's.
     """
+    for price in (fit.c_idx, fit.c_mla_sparse, fit.c_mla_mha):
+        if price is not None and price < 0.0:
+            # A price is the marginal cost of one more unit of that kernel's
+            # work and cannot be below zero: doing more does not take less
+            # time. A negative one means the fit is not describing the
+            # hardware -- usually a mismeasured uniform batch, the subtrahend
+            # of every label in the cell. CoefficientField declines such a
+            # cell too, but this function is public and reachable without it.
+            return 0.0
     if not any(column_gate(x_idx, x_mla_sparse, x_mla_dense)):
         return 0.0
     delta = (fit.c_idx or 0.0) * x_idx + (fit.c_mla_sparse or 0.0) * x_mla_sparse + (fit.c_mla_mha or 0.0) * x_mla_dense
