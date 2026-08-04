@@ -109,8 +109,7 @@ impl WeightedHingeFit {
 
     fn normalize_monotonic_nonnegative(mut self) -> Option<Self> {
         let right_slope = self.left_slope + self.right_slope_delta;
-        if self.intercept < -HINGE_NEG_TOLERANCE
-            || self.left_slope < -HINGE_NEG_TOLERANCE
+        if self.left_slope < -HINGE_NEG_TOLERANCE
             || right_slope < -HINGE_NEG_TOLERANCE
             || ![self.intercept, self.left_slope, right_slope]
                 .iter()
@@ -119,7 +118,6 @@ impl WeightedHingeFit {
             return None;
         }
 
-        self.intercept = self.intercept.max(0.0);
         self.left_slope = self.left_slope.max(0.0);
         self.right_slope_delta = right_slope.max(0.0) - self.left_slope;
         Some(self)
@@ -393,7 +391,7 @@ mod tests {
     #[test]
     fn weighted_hinge_normalizes_tolerated_negative_slopes() {
         let fit = WeightedHingeFit {
-            intercept: 10.0,
+            intercept: -10.0,
             left_slope: -HINGE_NEG_TOLERANCE / 2.0,
             right_slope_delta: HINGE_NEG_TOLERANCE / 4.0,
             knot: 2.0,
@@ -403,6 +401,7 @@ mod tests {
 
         assert_eq!(fit.left_slope, 0.0);
         assert_eq!(fit.left_slope + fit.right_slope_delta, 0.0);
+        assert_eq!(fit.intercept, -10.0);
 
         let invalid = WeightedHingeFit {
             left_slope: -2.0 * HINGE_NEG_TOLERANCE,
