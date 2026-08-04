@@ -27,6 +27,7 @@ pub mod memory;
 mod operators;
 mod perf_database;
 mod session;
+mod work_delta;
 
 pub use common::AicError;
 // Forward-pass perf model (PR #1152): a forward-pass latency model with online
@@ -44,6 +45,10 @@ pub use fpm::{
 // `engine/runtime.rs`) keep resolving after the types moved into `fpm`.
 pub(crate) use fpm::validate_forward_pass_metrics;
 pub use fpm::{ForwardPassMetrics, QueuedRequestMetrics, ScheduledRequestMetrics, FPM_VERSION};
+// Intra-batch prefill work delta: prices the gap between a heterogeneous
+// prefill batch and the uniform collapse `forward_pass_time_ms` estimates it
+// as. Uncalibrated by default, in which case every estimate is unchanged.
+pub use work_delta::{PrefillDeltaModel, PrefillDeltaPoint, PrefillShape};
 // KV-cache memory API. Top-level surface, not a method on
 // `AicEngine`: estimation runs once at startup, separate from the latency path.
 pub use memory::{
