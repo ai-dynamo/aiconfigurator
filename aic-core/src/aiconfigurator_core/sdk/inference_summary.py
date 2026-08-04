@@ -5,7 +5,7 @@ import logging
 
 import pandas as pd
 
-from aiconfigurator_core.sdk.common import WIDEEP_COMM_NODE1_FALLBACK_SOURCE, ColumnsAgg
+from aiconfigurator_core.sdk.common import ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -491,31 +491,6 @@ class InferenceSummary:
     def get_per_ops_data(self) -> dict | None:
         """Get per-operation latency breakdown data (populated by run_agg)."""
         return self._per_ops_data
-
-    def uses_wideep_comm_node1_fallback(self) -> bool:
-        """Whether this summary reused node-1 WideEP communication data at a multi-node scale.
-
-        This is intentionally narrower than generic ``source="estimated"``.
-        Other modeled operations must not receive a WideEP-specific warning.
-
-        Reads the phase dicts and ``per_ops_source`` because run_static
-        populates the former and run_agg/disagg assembly the latter.
-        """
-
-        def walk(node) -> bool:
-            if isinstance(node, dict):
-                return any(walk(v) for v in node.values())
-            return node == WIDEEP_COMM_NODE1_FALLBACK_SOURCE
-
-        return any(
-            walk(d)
-            for d in (
-                self._encoder_source_dict,
-                self._context_source_dict,
-                self._generation_source_dict,
-                self._per_ops_source,
-            )
-        )
 
     def set_per_ops_source(self, per_ops_source: dict) -> None:
         """Set per-operation data-source breakdown from PerformanceResult tags."""

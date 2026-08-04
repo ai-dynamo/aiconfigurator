@@ -281,15 +281,7 @@ class DisaggInferenceSession:
             prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
             decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
-        summary_dict[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = bool(
-            prefill_dict.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
-            or decode_dict.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
-        )
-        summary_df = pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
-        summary_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = bool(
-            summary_dict.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
-        )
-        return summary_df
+        return pd.DataFrame([summary_dict], columns=common.ColumnsDisagg).round(3)
 
     def run_disagg(
         self,
@@ -352,14 +344,10 @@ class DisaggInferenceSession:
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
-        prefill_summary_df = prefill_summary.get_summary_df().copy()
-        prefill_summary_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = prefill_summary.uses_wideep_comm_node1_fallback()
-        decode_summary_df = decode_summary.get_summary_df().copy()
-        decode_summary_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = decode_summary.uses_wideep_comm_node1_fallback()
         disagg_summary_df = self._get_disagg_summary_df(
-            prefill_summary_df,
+            prefill_summary.get_summary_df(),
             prefill_num_worker,
-            decode_summary_df,
+            decode_summary.get_summary_df(),
             decode_num_worker,
         )
 
@@ -509,18 +497,8 @@ class DisaggInferenceSession:
                     )
                     if not summary.check_oom() and not summary.check_kv_cache_oom():
                         all_configs_oom = False
-                        candidate_df = summary.get_summary_df().copy()
-                        # Out-of-band column (leading underscore, like
-                        # _per_ops_source): carries op provenance forward without
-                        # touching the declared ColumnsStatic schema. Disagg rows
-                        # are composed arithmetically from these candidates and
-                        # have no summary of their own, so this is the only place
-                        # the flag can be captured for them.
-                        candidate_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = (
-                            summary.uses_wideep_comm_node1_fallback()
-                        )
                         summary_df = pd.concat(
-                            [summary_df, candidate_df],
+                            [summary_df, summary.get_summary_df()],
                             axis=0,
                             ignore_index=True,
                         )
@@ -812,10 +790,6 @@ class DisaggInferenceSession:
                             prefill_degradation_factor=rate_matching_prefill_degradation_factor,
                             decode_degradation_factor=rate_matching_decode_degradation_factor,
                         )
-                        disagg_dict[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = bool(
-                            prefill_worker.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
-                            or decode_worker.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)
-                        )
                         category_results.append(disagg_dict)
 
                 if category_results:
@@ -829,12 +803,7 @@ class DisaggInferenceSession:
                 logger.debug("No disagg summary found after applying constraints.")
                 return None
 
-            # ``columns=ColumnsDisagg`` intentionally drops out-of-band metadata,
-            # so reattach the prefill/decode OR captured by the shared composer.
             disagg_summary_df = pd.DataFrame(all_category_results, columns=common.ColumnsDisagg).round(3)
-            disagg_summary_df[common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN] = [
-                bool(result.get(common.WIDEEP_COMM_NODE1_FALLBACK_COLUMN)) for result in all_category_results
-            ]
             disagg_summary_df = (
                 disagg_summary_df.sort_values(by=["tokens/s/gpu"], ascending=[False])
                 .head(return_top_k)

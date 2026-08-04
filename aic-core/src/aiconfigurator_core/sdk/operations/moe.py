@@ -59,26 +59,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_MEASURED_NODE_SCALING_SOURCE = "h100_sxm/h200_sxm sglang 0.5.6.post2"
-
-# Measured node-N / node-1 ratios of DeepEP dispatch+combine cost, per table.
-# Medians over every (hidden, topk, experts, tokens) shape that the
-# ``_MEASURED_NODE_SCALING_SOURCE`` campaign collected at both scales -- the
-# only campaign in the tree that measured more than one node scale, and the
-# two systems agree to the digit. n=13 shapes for ll, n=23 for normal.
-#
-# These describe how wrong the node_num=1 substitution is; they are quoted in
-# the warning and NOWHERE ELSE. Nothing scales a latency by them. Turning them
-# into a correction factor would be a node-scaling model, which needs its own
-# validation (and would have to explain why normal degrades to 6.2x at node 8
-# while ll only reaches 3.5x) -- see the TODO in
-# ``_resolve_wideep_deepep_comm_node_data``.
-_MEASURED_NODE_SCALING: dict[str, dict[int, float]] = {
-    "ll": {2: 2.2, 4: 3.1, 8: 3.5},
-    "normal": {2: 1.8, 4: 3.1, 8: 6.2},
-}
-
-
 def _cache_key(database: PerfDatabase) -> tuple:
     """Shared cache key — same shape as every other migrated op family."""
     return (
@@ -901,11 +881,6 @@ class MoEDispatch(Operation):
 
     _normal_data_cache: ClassVar[dict] = {}
     _ll_data_cache: ClassVar[dict] = {}
-    # (table, node_num) pairs whose communication node-1 fallback has already been
-    # logged this process. The fallback fires once per swept parallel config
-    # (thousands of times), so warn only once per distinct node scale. Cleared
-    # in clear_cache.
-    _wideep_comm_node1_fallback_logged: ClassVar[set] = set()
 
     def __init__(
         self,
@@ -1002,7 +977,6 @@ class MoEDispatch(Operation):
     def clear_cache(cls) -> None:
         cls._normal_data_cache.clear()
         cls._ll_data_cache.clear()
-        cls._wideep_comm_node1_fallback_logged.clear()
 
     # ------------------------------------------------------------------
     # Query tables (formerly PerfDatabase.query_wideep_deepep_normal /
@@ -1022,118 +996,54 @@ class MoEDispatch(Operation):
     ) -> tuple[int, dict, bool]:
         """Resolve DeepEP dispatch/combine rows for ``(node_num, hidden, topk, experts)``.
 
-        Prefer measurements at the requested node scale. When a genuinely
-        multi-node request (``node_num > 1``) has none, fall back to the
-        node_num=1 rows for the SAME (hidden, topk, num_experts) and report
-        whether the node-1 fallback was used, so the caller can tag its
-        ``PerformanceResult`` with dedicated provenance. Refusing instead would strip
-        WideEP from four of the six systems that carry DeepEP data at all:
-        every table in the tree has node_num=1 only, except h100/h200 at
-        0.5.6.post2, and gb200/gb300 hold 4 GPUs per node so they need
-        node_num=2 by 8 GPUs. That removes the capability rather than
-        protecting it. What must never happen is the substitution passing
-        itself off as a measurement, which is why it both warns per node scale
-        and marks the result.
+        Prefer measurements at the requested node scale. When those rows are
+        absent, reuse node_num=1 rows for the same
+        ``(hidden_size, topk, num_experts)``. This is the intentional WideEP
+        communication approximation and is returned as ``source="estimated"``.
+        Exact-scale rows remain ``source="silicon"``.
 
-        The fallback is optimistic, not merely noisy: node_num=1 is an
-        NVLink-only all-to-all with no cross-node RDMA leg. See
-        ``_MEASURED_NODE_SCALING`` for how far off, measured.
-
-        Sub-node scales (``node_num < 1``, produced by ``MoEDispatch.query``
-        as ``num_gpus / num_gpus_per_node`` whenever a config uses fewer GPUs
-        than one node holds) also resolve against the node_num=1 rows, but
-        are NOT flagged: that substitution stays intra-node in both
-        directions -- no cross-node collective is being modelled away -- and
-        it is the only representation those configs have.
+        If neither exact-scale nor matching node_num=1 data exists, fail with
+        ``PerfDataNotAvailableError`` instead of inventing a value. Sub-node
+        scales use the same node-1 approximation because they have no separate
+        table representation.
 
         Read via .get() chains so a miss does not auto-vivify nested entries.
-        TODO(perf enhancement): replace the flat reuse with true multi-node
-        coverage, either by collecting it (test_internode) or by fitting a
-        node-scaling model against the h100/h200 node 2/4/8 measurements.
-
         Returns ``(lookup_node, node_data, used_node1_fallback)``. Raises
         ``PerfDataNotAvailableError`` when neither the requested scale nor the
         node_num=1 rows have this shape.
         """
-        lookup_node = node_num
-        used_node1_fallback = False
         node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
-        if not node_data and node_num != 1:
-            node1_data = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
-            if node1_data:
-                cls._warn_wideep_comm_node1_fallback(table, node_num)
-                lookup_node = 1
-                used_node1_fallback = node_num > 1
-                node_data = node1_data
-        if not node_data:
-            raise PerfDataNotAvailableError(
-                f"wideep_deepep_{table} data missing for node_num={node_num} "
-                f"(and node_num=1 fallback) hidden={hidden_size} topk={topk} experts={num_experts}"
-            )
-        return lookup_node, node_data, used_node1_fallback
+        if node_data:
+            return node_num, node_data, False
 
-    @classmethod
-    def _warn_wideep_comm_node1_fallback(cls, table: str, node_num: float) -> None:
-        """Warn once per (table, node scale) that node_num=1 rows are standing in.
-
-        Keyed on the scale, not just the table, because the two cases differ in
-        kind and the multi-node case differs in degree: a sweep that touches
-        node_num 2, 4 and 8 gets three lines quantifying three different
-        errors, while still collapsing the thousands of repeat queries at each
-        scale into one.
-        """
-        if (table, node_num) in cls._wideep_comm_node1_fallback_logged:
-            return
-        cls._wideep_comm_node1_fallback_logged.add((table, node_num))
-        if node_num < 1:
-            logger.warning(
-                "wideep_deepep_%s: sub-node (node_num=%s) configs reuse node_num=1 single-node "
-                "data. This stays within one node, so it is an approximation of scale, not of "
-                "topology; it over-estimates, since a partial node's all-to-all is smaller than "
-                "a full one. Logged once per node scale.",
-                table,
-                node_num,
-            )
-            return
-        logger.warning(
-            "wideep_deepep_%s: node_num=%s has no measured communication data, so this run is "
-            "FALLING BACK to node_num=1 single-node measurements, which carry no cross-node RDMA leg. "
-            "Affected results are marked source='%s' and flagged in the config table. "
-            "Measured reference: %s. Logged once per node scale.",
-            table,
-            node_num,
-            common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE,
-            cls._measured_node_scaling_note(table, node_num),
+        node1_data = cls._wideep_comm_node1_fallback(
+            data_by_node,
+            table=table,
+            requested_node_num=node_num,
+            hidden_size=hidden_size,
+            topk=topk,
+            num_experts=num_experts,
         )
+        return 1, node1_data, node_num != 1
 
     @staticmethod
-    def _measured_node_scaling_note(table: str, node_num: float) -> str:
-        """How wrong the node_num=1 substitution is, in measured terms only.
-
-        Quotes ``_MEASURED_NODE_SCALING`` at the requested scale, or at the
-        largest measured scale as a floor when the request is beyond it. Never
-        interpolates between measured scales and never states a figure for a
-        scale nobody measured -- the whole point is to avoid passing a modelled
-        number off as knowledge.
-        """
-        measured = _MEASURED_NODE_SCALING.get(table)
-        if not measured:
-            return "none available for this table"
-        # Float keys hash equal to their int counterparts, so node_num=8.0 hits
-        # the 8 entry -- MoEDispatch.query always produces floats.
-        exact = measured.get(node_num)
-        if exact:
-            return (
-                f"real node_num={node_num} dispatch+combine ran {exact}x the node_num=1 cost "
-                f"(median over shapes, {_MEASURED_NODE_SCALING_SOURCE}), so expect this estimate to be "
-                f"roughly that factor optimistic"
-            )
-        largest = max(measured)
-        return (
-            f"no campaign measured node_num={node_num}; at the largest measured scale "
-            f"(node_num={largest}) real dispatch+combine ran {measured[largest]}x the node_num=1 cost "
-            f"(median over shapes, {_MEASURED_NODE_SCALING_SOURCE}), and the ratio grew monotonically "
-            f"with node count, so treat that as a lower bound on how optimistic this estimate is"
+    def _wideep_comm_node1_fallback(
+        data_by_node,
+        *,
+        table: str,
+        requested_node_num: float,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+    ) -> dict:
+        """Return matching node-1 WideEP communication data or fail clearly."""
+        node1_data = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if node1_data:
+            return node1_data
+        raise PerfDataNotAvailableError(
+            f"wideep_deepep_{table} communication data unavailable for requested node_num={requested_node_num}: "
+            f"no exact rows and no matching node_num=1 fallback rows for "
+            f"hidden={hidden_size} topk={topk} experts={num_experts}"
         )
 
     @classmethod
@@ -1193,17 +1103,10 @@ class MoEDispatch(Operation):
     def _wideep_comm_result(
         database: PerfDatabase, latency: float, energy: float, *, used_node1_fallback: bool
     ) -> PerformanceResult:
-        """Tag a DeepEP table result with the provenance the caller can act on.
-
-        The dedicated source distinguishes this topology-changing fallback from
-        generic modeled operations tagged ``"estimated"``. ``base_backend``
-        records it per op into the phase source dicts, and it lands in
-        ``per_ops_source.json`` and the config table's WideEP communication
-        node-1 fallback flag.
-        """
+        """Return exact table data as silicon and node-1 reuse as estimated."""
         if not used_node1_fallback:
             return database._interp_pr(latency, energy=energy)
-        return PerformanceResult(latency, energy=energy, source=common.WIDEEP_COMM_NODE1_FALLBACK_SOURCE)
+        return PerformanceResult(latency, energy=energy, source="estimated")
 
     @classmethod
     def _query_wideep_deepep_normal_table(

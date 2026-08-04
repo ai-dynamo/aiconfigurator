@@ -782,11 +782,10 @@ class EstimateResult:
 
     Values include ``"silicon"`` (table data), ``"empirical"`` (formula
     fallback), ``"sol"`` (explicit SOL estimate), ``"estimated"`` (modeled
-    from measured components), ``"wideep_comm_node1_fallback"`` (single-node
-    DeepEP data reused for an unmeasured multi-node scale), and ``"mixed"``
-    (a sum of values from different sources). The ``scheduling`` section of
-    ``per_ops_data`` is intentionally omitted here -- those entries are
-    scheduling math / aggregate sums, not DB queries.
+    from measured components), and ``"mixed"`` (a sum of values from different
+    sources). The ``scheduling`` section of ``per_ops_data`` is intentionally
+    omitted here -- those entries are scheduling math / aggregate sums, not DB
+    queries.
     """
 
     kv_cache_warning: str | None = None
