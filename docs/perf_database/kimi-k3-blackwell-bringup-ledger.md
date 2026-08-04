@@ -748,3 +748,16 @@ displace the fused pricing — verified to fail when the exclusion is
 removed. GRADUATION CRITERION: this denylist is a one-off; a second
 absence-dependent kernel family means promoting the SDK to a
 primary-only routing view instead of extending the list.
+
+l40s kda 12-head decode rows PRUNED (2026-08-04, owner decision on the
+item-4 data implication): 22 generation rows (Triton pair, 11+11) removed
+from l40s/kda/sglang/0.5.16 (1096 -> 1074). Serving on SM89 crashes at
+the fused JIT for the covered 12-head shard (no catch, no SM gate in
+covered() — kimi_k3.py:1563-1614 + linear/kda_backend.py:426-476 @
+c6ad1f26) rather than reaching the Triton pair, so the rows had no
+serving-truth backing. VERIFY h12 rows kept: the CuTeDSL verify kernel
+is dispatch-gated (capability != 10 -> Triton pair is the genuine SM89
+serving path). Future l40s kda runs raise classified on those decode
+cells (generation strict-completeness fails) — the honest state. SDK
+side effect: l40s h12 decode queries now take the nearest-shard fallback
+(h24, unscaled).
