@@ -334,16 +334,31 @@ def test_sglang_adapter_power_column_populates_energy(tmp_path):
     assert leaf["energy"] == 420.0 * 0.3651657
 
 
-def test_sglang_adapter_duplicate_rows_last_wins_like_oracle(tmp_path):
-    # load_wideep_context_moe_data assigns unconditionally, so on a duplicate
-    # legacy key the LAST row wins — the adapter must mirror that (unlike the
-    # a2a adapters, whose oracles keep-first).
+def test_sglang_adapter_duplicate_rows_first_wins_like_oracle(tmp_path):
+    # load_wideep_context_moe_data guards with the skip-on-key-conflict
+    # shared-layer contract (#1423), so on a duplicate legacy key the FIRST
+    # row wins — the adapter must mirror that (same as the a2a adapters).
     rows = [_row(LEGACY_SGLANG_ROW, latency=0.1), _row(LEGACY_SGLANG_ROW, latency=0.2)]
     path = _write_parquet(tmp_path, rows, "wideep_context_moe_perf.parquet")
 
     data = _load_adapted(tmp_path, legacy_context_sources=[(path, None)])
 
-    assert _leaf(data, LEGACY_SGLANG_KEY)["latency"] == 0.2
+    assert _leaf(data, LEGACY_SGLANG_KEY)["latency"] == 0.1
+
+
+def test_sglang_adapter_cross_source_conflict_first_source_wins(tmp_path):
+    # The case that moved real numbers (case03, sglang 0.5.10): the primary
+    # version file and a shared-layer/fallback file both carry a key. The
+    # oracle's #1423 keep-first guard makes the primary (first-listed) source
+    # win; the adapter must resolve the same way.
+    primary = _write_parquet(tmp_path, [_row(LEGACY_SGLANG_ROW, latency=0.1)], "wideep_context_moe_perf.parquet")
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    fallback = _write_parquet(shared_dir, [_row(LEGACY_SGLANG_ROW, latency=0.9)], "wideep_context_moe_perf.parquet")
+
+    data = _load_adapted(tmp_path, legacy_context_sources=[(primary, None), (fallback, None)])
+
+    assert _leaf(data, LEGACY_SGLANG_KEY)["latency"] == 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -394,15 +409,16 @@ def test_trtllm_adapter_kernel_source_absent_defaults_moe_torch_flow(tmp_path):
     assert set(data.keys()) == {"moe_torch_flow"}
 
 
-def test_trtllm_adapter_duplicate_rows_last_wins_like_oracle(tmp_path):
-    # load_wideep_moe_compute_data assigns unconditionally -> last row wins.
+def test_trtllm_adapter_duplicate_rows_first_wins_like_oracle(tmp_path):
+    # load_wideep_moe_compute_data guards with the skip-on-key-conflict
+    # shared-layer contract (#1423) -> first row wins.
     rows = [_row(LEGACY_TRTLLM_ROW, latency=0.1), _row(LEGACY_TRTLLM_ROW, latency=0.2)]
     path = _write_parquet(tmp_path, rows, "wideep_moe_perf.parquet")
 
     data = _load_adapted(tmp_path, legacy_trtllm_wideep_sources=[(path, None)])
 
     for phase in ("context", "generation"):
-        assert _leaf(data, (*TRT_KEY_BASE, phase, *TRT_KEY_SHAPE))["latency"] == 0.2
+        assert _leaf(data, (*TRT_KEY_BASE, phase, *TRT_KEY_SHAPE))["latency"] == 0.1
 
 
 # ---------------------------------------------------------------------------

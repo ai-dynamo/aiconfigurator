@@ -715,11 +715,11 @@ def _store_ep_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: bool
     ``key`` is ``(kernel_source, quant, distribution, inference_phase, topk,
     num_experts, num_slots, hidden_size, inter_size, moe_tp_size, moe_ep_size,
     num_tokens)``. ``overwrite=False`` keeps the first-stored leaf on a
-    collision (debug log) — the intra-source convention new-schema rows
-    follow. ``overwrite=True`` replaces whatever is there — used by the
-    legacy adapters (their oracles assign unconditionally, so the last legacy
-    row wins) and by the first new-schema occurrence of a key to take
-    precedence over legacy-adapted rows.
+    collision (debug log) — the keep-first convention shared by new-schema
+    rows AND the legacy adapters (their oracles adopted the
+    skip-on-key-conflict shared-layer contract in #1423). ``overwrite=True``
+    replaces whatever is there — used only by the first new-schema
+    occurrence of a key to take precedence over legacy-adapted rows.
     """
     *outer_key, num_tokens = key
     bucket = data
@@ -736,9 +736,11 @@ def _adapt_legacy_sglang_wideep_moe(data: defaultdict, rows, *, inference_phase:
 
     Mirrors ``load_wideep_context_moe_data`` / ``load_wideep_generation_moe_data``
     (the oracles): straight ``MoEQuantMode[moe_dtype]`` with no
-    kernel-source-based quant rerouting (unlike ``load_moe_data``), and
-    unconditional assignment — the last row wins on an intra-file key
-    collision (``overwrite=True``). ``kernel_source`` is pinned to
+    kernel-source-based quant rerouting (unlike ``load_moe_data``), and the
+    first row wins on a key collision (``overwrite=False``) — the oracles
+    adopted the skip-on-key-conflict shared-layer contract in #1423, so a
+    cross-source conflict (primary vs shared/fallback file) resolves to the
+    first-loaded source on both paths. ``kernel_source`` is pinned to
     ``"deepep_moe"`` (spec §4.2; the legacy column spells it ``deepepmoe``
     and the oracles never read it), ``num_slots = num_experts`` (the legacy
     sglang tables have no EPLB redundancy axis), and ``inference_phase``
@@ -762,7 +764,7 @@ def _adapt_legacy_sglang_wideep_moe(data: defaultdict, rows, *, inference_phase:
             int(row["moe_ep_size"]),
             int(row["num_tokens"]),
         )
-        _store_ep_leaf(data, key, {"latency": latency, "power": power, "energy": power * latency}, overwrite=True)
+        _store_ep_leaf(data, key, {"latency": latency, "power": power, "energy": power * latency}, overwrite=False)
 
 
 def _adapt_legacy_sglang_context_moe(data: defaultdict, rows) -> None:
@@ -779,8 +781,9 @@ def _adapt_legacy_trtllm_wideep_moe(data: defaultdict, rows) -> None:
     Mirrors ``load_wideep_moe_compute_data`` (the oracle): native
     ``kernel_source`` (``"moe_torch_flow"`` when the column is absent),
     ``num_slots`` and ``_eplb`` distributions pass through unchanged, no
-    quant rerouting, unconditional assignment (``overwrite=True``, last row
-    wins). The legacy table has no context/generation split — one kernel
+    quant rerouting, first row wins on a key collision (``overwrite=False``
+    — the oracle adopted the skip-on-key-conflict shared-layer contract in
+    #1423). The legacy table has no context/generation split — one kernel
     measured across the token range — so each row is registered under BOTH
     ``inference_phase`` values with identical (but independent) leaves.
     """
@@ -804,7 +807,7 @@ def _adapt_legacy_trtllm_wideep_moe(data: defaultdict, rows) -> None:
         )
         for inference_phase in ("context", "generation"):
             leaf = {"latency": latency, "power": power, "energy": power * latency}
-            _store_ep_leaf(data, (*base_key, inference_phase, *shape_key), leaf, overwrite=True)
+            _store_ep_leaf(data, (*base_key, inference_phase, *shape_key), leaf, overwrite=False)
 
 
 def _load_legacy_ep(
