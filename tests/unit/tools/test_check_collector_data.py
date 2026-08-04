@@ -115,7 +115,7 @@ def _build_compliant_tree(root: Path) -> None:
     )
 
     # comm family: real data, no reuse.yaml. Framework-owned tables reuse
-    # earlier versions implicitly; NCCL/oneCCL stay primary-only.
+    # earlier versions implicitly; every other comm backend stays primary-only.
     _touch(root, "h200_sxm/comm/sglang/0.5.12/wideep_deepep_normal_perf.parquet")
     _write(
         root,

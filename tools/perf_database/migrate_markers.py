@@ -17,8 +17,9 @@ migration, PR 2, already made every marker dir single-family):
   effective newest-first donor, so behavior is preserved). A marker whose
   siblings hold no table at all (nothing to inherit) is dead data: fail
   closed and list the offender rather than emit an empty declaration.
-  EXCEPTION — design §6.5 rule 5 gives framework-owned `comm` tables implicit
-  earlier-version reuse and keeps NCCL/oneCCL primary-only. A legacy
+  EXCEPTION — design §6.5 rule 5 gives validated framework-versioned `comm`
+  backends implicit earlier-version reuse and keeps every other communication
+  backend primary-only. A legacy
   `SHARED_LAYER_REUSE.txt` inside a
   `<system>/comm/<backend>/<version>` dir is therefore unnecessary and is
   deleted with NO `reuse.yaml` emitted.
@@ -110,7 +111,7 @@ def _spdx_header() -> str:
 # Design §6.5 rule 5: comm does not use declarations.
 COMM_FAMILY = "comm"
 COMM_EXCLUSION_LOG = (
-    "comm uses implicit same-backend reuse or primary-only library data "
+    "comm uses implicit reuse for validated framework backends or primary-only data otherwise "
     "(design §6.5 rule 5); marker dropped without declaration"
 )
 
@@ -159,9 +160,9 @@ class BackfillAction:
 class CommExclusionAction:
     """A `SHARED_LAYER_REUSE.txt` marker found inside a `comm`-family version dir.
 
-    Design §6.5 rule 5 makes framework communication reuse implicit and keeps
-    NCCL/oneCCL primary-only, so the marker is deleted outright — no
-    `reuse.yaml` is synthesized from it.
+    Design §6.5 rule 5 makes validated framework communication reuse implicit
+    and keeps every other communication backend primary-only, so the marker is
+    deleted outright — no `reuse.yaml` is synthesized from it.
     """
 
     src: Path  # relative SHARED_LAYER_REUSE.txt path

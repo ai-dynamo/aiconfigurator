@@ -27,8 +27,9 @@ Six rules, each named after the design section it enforces:
   older than the declaring dir's own version — that asymmetry is exactly what
   a declaration is for (§6.3); this check does not re-derive direction.
 - **R3 comm exclusion** (design §6.5 rule 5): no `reuse.yaml` may exist
-  anywhere under a `comm` family dir. Framework-owned communication uses
-  implicit earlier-version reuse; NCCL/oneCCL are primary-only.
+  anywhere under a `comm` family dir. Validated framework-versioned backends
+  use implicit earlier-version reuse; every other communication backend is
+  primary-only by default.
 - **R4 family placement** (design §2, catalog-driven): every parquet table's
   stem must map, via the op catalog (`collector/op_backend_catalog.yaml`), to
   the family directory it is actually filed under.
@@ -224,8 +225,8 @@ def check_r2_reuse_validity(data_root: Path, version_dirs: list[tuple[str, str, 
 
 
 def check_r3_comm_exclusion(data_root: Path) -> list[str]:
-    """Reject declarations under comm: framework ops reuse implicitly and
-    library-versioned NCCL/oneCCL ops remain primary-only."""
+    """Reject declarations under comm: validated framework backends reuse
+    implicitly and every other communication backend is primary-only."""
     failures: list[str] = []
     for system_dir in _subdirs(data_root):
         comm_dir = system_dir / COMM_FAMILY
@@ -234,7 +235,8 @@ def check_r3_comm_exclusion(data_root: Path) -> list[str]:
         for reuse_path in sorted(comm_dir.rglob(REUSE_YAML)):
             failures.append(
                 f"{reuse_path.relative_to(data_root)}: reuse.yaml is not allowed under the comm family "
-                "(framework communication reuses earlier same-backend data implicitly; NCCL/oneCCL are primary-only)"
+                "(validated framework backends reuse earlier same-backend data implicitly; "
+                "all other communication backends are primary-only)"
             )
     return failures
 

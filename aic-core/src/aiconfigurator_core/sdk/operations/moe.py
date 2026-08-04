@@ -897,7 +897,7 @@ class MoEDispatch(Operation):
                     database.version,
                     PerfDataFilename.wideep_deepep_normal.value,
                 )
-                normal_sources = database._build_op_sources(
+                normal_sources = database._build_communication_op_sources(
                     PerfDataFilename.wideep_deepep_normal, normal_primary, system_data_root
                 )
                 cls._normal_data_cache[key] = LoadedOpData(
@@ -909,7 +909,9 @@ class MoEDispatch(Operation):
                 ll_primary = resolve_op_data_path(
                     system_data_root, database.backend, database.version, PerfDataFilename.wideep_deepep_ll.value
                 )
-                ll_sources = database._build_op_sources(PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root)
+                ll_sources = database._build_communication_op_sources(
+                    PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root
+                )
                 cls._ll_data_cache[key] = LoadedOpData(
                     load_wideep_deepep_ll_data(ll_sources),
                     PerfDataFilename.wideep_deepep_ll,
@@ -1906,7 +1908,9 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 primary = resolve_op_data_path(
                     system_data_root, database.backend, database.version, PerfDataFilename.trtllm_alltoall.value
                 )
-                sources = database._build_op_sources(PerfDataFilename.trtllm_alltoall, primary, system_data_root)
+                sources = database._build_communication_op_sources(
+                    PerfDataFilename.trtllm_alltoall, primary, system_data_root
+                )
                 cls._data_cache[key] = LoadedOpData(
                     load_trtllm_alltoall_data(sources),
                     PerfDataFilename.trtllm_alltoall,

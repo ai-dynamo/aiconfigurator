@@ -1838,23 +1838,13 @@ def _gemm_key_names(database) -> list[str]:
     return sorted(names)
 
 
-# Communication storage has two versioning contracts:
-#
-# * ``comm/nccl`` and ``comm/oneccl`` are keyed by the communication-library
-#   version itself, so they are primary-only.
-# * ``comm/<framework>`` (SGLang, TRT-LLM, vLLM) is keyed by a serving-framework
-#   version. Existing framework-owned communication ops implicitly reuse
-#   earlier same-framework measurements, just like other framework ops. They
-#   do not use per-version ``reuse.yaml`` declarations or cross-framework fill.
-_COMM_PRIMARY_ONLY_OPS = frozenset((PerfDataFilename.nccl, PerfDataFilename.oneccl))
-_COMM_IMPLICIT_SAME_BACKEND_OPS = frozenset(
-    (
-        PerfDataFilename.custom_allreduce,
-        PerfDataFilename.trtllm_alltoall,
-        PerfDataFilename.wideep_deepep_ll,
-        PerfDataFilename.wideep_deepep_normal,
-    )
-)
+# Communication reuse follows the storage namespace, not an op allowlist.
+# Only framework-versioned directories have validated cross-version semantics;
+# every other ``comm/<backend>`` directory is primary-only by default. This is
+# deliberately fail-closed for new communication backends while letting a new
+# op under an existing framework inherit older measurements automatically.
+_COMM_FAMILY = "comm"
+_COMM_FRAMEWORK_VERSIONED_BACKENDS = frozenset(("sglang", "trtllm", "vllm"))
 
 
 def _requested_version_reuse_entries(
@@ -2181,11 +2171,36 @@ class PerfDatabase:
         else:
             self.supported_quant_mode = {}
 
+    def _build_communication_op_sources(
+        self,
+        op_filename_enum: PerfDataFilename,
+        primary_path: str,
+        system_data_root: str,
+        *,
+        storage_backend: str | None = None,
+    ) -> list[tuple[str, Optional[set[str]]]]:
+        """Build sources for a table requested from ``comm/<backend>``.
+
+        Keeping the communication family and storage backend explicit makes
+        the policy reliable even when the requested primary file is missing
+        and its path therefore cannot reveal the family-first namespace.
+        """
+        return self._build_op_sources(
+            op_filename_enum,
+            primary_path,
+            system_data_root,
+            storage_family=_COMM_FAMILY,
+            storage_backend=storage_backend or self.backend,
+        )
+
     def _build_op_sources(
         self,
         op_filename_enum: PerfDataFilename,
         primary_path: str,
         system_data_root: str,
+        *,
+        storage_family: str | None = None,
+        storage_backend: str | None = None,
     ) -> list[tuple[str, Optional[set[str]]]]:
         """Build the priority-ordered list of source files for one op (design §6).
 
@@ -2217,12 +2232,15 @@ class PerfDatabase:
         warning; channels 2-4 still fill.
 
         Returns just the primary tuple (still recorded) when the shared layer
-        is disabled or the op file is communication-library-versioned (NCCL /
-        oneCCL). Framework-owned communication ops skip declared and
-        cross-backend channels but use the ordinary nearest-earlier
-        same-backend chain. This lets a new serving-framework version reuse
-        existing communication ops automatically while a genuinely new op
-        remains unsupported until it has data (design §6.5 rule 5). The
+        is disabled or when the op lives under a communication backend other
+        than the validated framework-versioned namespaces (SGLang, TRT-LLM,
+        and vLLM). Those
+        framework communication folders skip declared and cross-backend
+        channels but use the ordinary nearest-earlier same-backend chain. This
+        lets a new serving-framework version reuse existing communication ops
+        automatically while a new communication backend remains primary-only
+        until its version semantics are explicitly validated (design §6.5
+        rule 5). The
         kernel-source filter on cross-backend sources is essential — `load_*`
         functions strip `kernel_source` from dict keys, so an unfiltered
         cross-backend row would silently clobber an active-backend row on key
@@ -2267,11 +2285,14 @@ class PerfDatabase:
 
         if not self.enable_shared_layer:
             return _finish()
-        if op_filename_enum in _COMM_PRIMARY_ONLY_OPS:
-            return _finish()
 
-        backend_lower = self.backend.lower()
-        comm_implicit_same_backend = op_filename_enum in _COMM_IMPLICIT_SAME_BACKEND_OPS
+        storage_family_lower = storage_family.lower() if storage_family else None
+        backend_lower = (storage_backend or self.backend).lower()
+        comm_implicit_same_backend = (
+            storage_family_lower == _COMM_FAMILY and backend_lower in _COMM_FRAMEWORK_VERSIONED_BACKENDS
+        )
+        if storage_family_lower == _COMM_FAMILY and not comm_implicit_same_backend:
+            return _finish()
 
         # Channel 2 (design §6.3): declared donors from the REQUESTED version
         # dir's reuse.yaml, in file order. Duplicate (table, from_version)
