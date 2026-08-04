@@ -1392,6 +1392,19 @@ class Task:
         def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
                 return
+            # Strict per-dtype FLOPS resolution happens at every query entry
+            # (#1398) — BEFORE any table lookup or transfer ladder — so the
+            # gate must mirror it: a mode whose compute dtype has no usable
+            # *_tc_flops entry fails validate() here instead of on the first
+            # sweep query, no matter how transfer-reachable its data is.
+            # Memory-only modes (kv cache) carry compute_dtype None and skip;
+            # the sm-gated generation derivation stays a query-time concern.
+            # (getattr: unit tests stub _try_load_role_database with sentinel
+            # objects that carry no system_spec — skip the check there, real
+            # databases always have one.)
+            _spec = getattr(database, "system_spec", None)
+            if _spec is not None and getattr(getattr(mode, "value", None), "compute_dtype", None) is not None:
+                common.get_quant_tc_flops(_spec, mode)
             modes = supported.get(op, []) or []
             if not modes:
                 return  # DB doesn't record support for this op; skip

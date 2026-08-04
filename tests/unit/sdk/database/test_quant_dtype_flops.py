@@ -163,6 +163,34 @@ class TestEagerResolution:
                 2, 1024, 32, 8, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SOL
             )
 
+    def test_context_attention_missing_fp8_entry_rejected(self, comprehensive_perf_db, monkeypatch):
+        """attn_dtype family: context attention resolves the fmha label
+        strictly (no kv-derivation gate on the prefill path)."""
+        gpu = comprehensive_perf_db.system_spec["gpu"]
+        monkeypatch.delitem(gpu, "fp8_tc_flops", raising=False)
+
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            comprehensive_perf_db.query_context_attention(
+                2,
+                512,
+                0,
+                32,
+                8,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.fp8,
+                database_mode=common.DatabaseMode.SOL,
+            )
+
+    def test_mla_bmm_missing_fp4_entry_rejected(self, comprehensive_perf_db, monkeypatch):
+        """bmm_dtype family: MLA-BMM resolves its GEMM quant strictly."""
+        gpu = comprehensive_perf_db.system_spec["gpu"]
+        monkeypatch.delitem(gpu, "fp4_tc_flops", raising=False)
+
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            comprehensive_perf_db.query_mla_bmm(
+                16, 16, common.GEMMQuantMode.nvfp4, database_mode=common.DatabaseMode.SOL
+            )
+
     def test_gemm_missing_fp8_entry_rejected_in_silicon_mode(self, stub_perf_db, monkeypatch):
         """SILICON specifically: an exact table hit must not bypass the check."""
         gpu = stub_perf_db.system_spec["gpu"]
@@ -189,7 +217,16 @@ class TestShippedDataImpliesYamlKey:
     """
 
     _QUANT_COLUMNS = frozenset(
-        {"gemm_dtype", "moe_dtype", "fmha_dtype", "mla_dtype", "quant_mode", "gemm_quant_mode", "fmha_quant_mode"}
+        {
+            "gemm_dtype",
+            "moe_dtype",
+            "attn_dtype",  # context/generation attention tables -> FMHAQuantMode
+            "bmm_dtype",  # MLA-BMM tables -> GEMMQuantMode
+            "mla_dtype",
+            "quant_mode",
+            "gemm_quant_mode",
+            "fmha_quant_mode",
+        }
     )
     # Raw collector labels that predate / bypass the enum names.
     _EXTRA_LABELS: typing.ClassVar[dict[str, str]] = {"fp8_e4m3": "fp8", "float16": "bfloat16"}
@@ -226,7 +263,11 @@ class TestShippedDataImpliesYamlKey:
             for parquet_path in data_dir.rglob("*.parquet"):
                 try:
                     schema_names = set(pq.read_schema(parquet_path).names)
-                except Exception:
+                except Exception as exc:
+                    # An unreadable shipped file must fail the invariant, not
+                    # silently drop out of it — it could be hiding exactly the
+                    # data-without-key mismatch this test exists to catch.
+                    problems.append(f"{system}: unreadable shipped parquet {parquet_path}: {exc}")
                     continue
                 cols = sorted(self._QUANT_COLUMNS & schema_names)
                 if not cols:
