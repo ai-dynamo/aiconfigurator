@@ -17,12 +17,12 @@ migration, PR 2, already made every marker dir single-family):
   effective newest-first donor, so behavior is preserved). A marker whose
   siblings hold no table at all (nothing to inherit) is dead data: fail
   closed and list the offender rather than emit an empty declaration.
-  EXCEPTION — design §6.5 rule 5 excludes the `comm` family from
-  sibling-version reuse ENTIRELY (NCCL/oneCCL curves are topology-bound, so
-  cross-version shape-filling is wrong there). A `SHARED_LAYER_REUSE.txt`
-  marker inside a `<system>/comm/<backend>/<version>` dir is deleted with NO
-  `reuse.yaml` emitted — a comm `reuse.yaml` would be a standing
-  contradiction of that rule, and PR 4's loader/CI check must never see one.
+  EXCEPTION — design §6.5 rule 5 excludes the `comm` family from implicit
+  sibling-version reuse. A legacy `SHARED_LAYER_REUSE.txt` provides no
+  table-scoped kernel-identity evidence, so a marker inside a
+  `<system>/comm/<backend>/<version>` dir is deleted with NO `reuse.yaml`
+  emitted. Framework-owned comm tables may receive a separately reviewed,
+  explicit declaration; the migration must not synthesize one.
 - `INCOMPLETE.txt` -> `collection_meta.yaml`: a synthesized `provenance:
   legacy` sidecar (T6 amendment to design §5 — no hashes, since legacy data
   predates the collector's provenance writer) marking every table the
@@ -108,9 +108,11 @@ def _spdx_header() -> str:
     )
 
 
-# Design §6.5 rule 5: comm is excluded from sibling-version reuse entirely.
+# Design §6.5 rule 5: comm legacy markers cannot prove table-scoped reuse.
 COMM_FAMILY = "comm"
-COMM_EXCLUSION_LOG = "comm family excluded from sibling reuse (design §6.5 rule 5); marker dropped without declaration"
+COMM_EXCLUSION_LOG = (
+    "comm legacy marker lacks table-scoped reuse evidence (design §6.5 rule 5); marker dropped without declaration"
+)
 
 
 class MigrationError(Exception):
@@ -157,8 +159,9 @@ class BackfillAction:
 class CommExclusionAction:
     """A `SHARED_LAYER_REUSE.txt` marker found inside a `comm`-family version dir.
 
-    Design §6.5 rule 5 excludes `comm` from sibling-version reuse entirely, so this
-    is deleted outright — no `reuse.yaml` is emitted for it.
+    Design §6.5 rule 5 requires comm reuse to be explicit and table-scoped. A
+    legacy marker carries neither table identity nor kernel evidence, so it is
+    deleted outright — no `reuse.yaml` is synthesized from it.
     """
 
     src: Path  # relative SHARED_LAYER_REUSE.txt path

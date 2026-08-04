@@ -1840,10 +1840,22 @@ def _gemm_key_names(database) -> list[str]:
     return sorted(names)
 
 
-# ``comm`` is the one family design §6.5 rule 5 hard-excludes from every reuse
-# channel (NCCL curves are topology-bound; shape-filling across versions is
-# wrong there). Detected structurally off the op's resolved primary path.
+# Communication data never participates in implicit sibling or cross-backend
+# fill: those measurements are topology-sensitive.  Table-scoped
+# ``reuse.yaml`` declarations are still meaningful for framework-owned comm
+# kernels whose identity was explicitly verified across versions.  NCCL and
+# oneCCL remain primary-only because their version is the communication library
+# version itself, not a serving-framework version.
 _COMM_FAMILY_DIR = "comm"
+_COMM_PRIMARY_ONLY_OPS = frozenset((PerfDataFilename.nccl, PerfDataFilename.oneccl))
+_COMM_DECLARED_REUSE_ONLY_OPS = frozenset(
+    (
+        PerfDataFilename.custom_allreduce,
+        PerfDataFilename.trtllm_alltoall,
+        PerfDataFilename.wideep_deepep_ll,
+        PerfDataFilename.wideep_deepep_normal,
+    )
+)
 
 
 def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str | None:
@@ -1854,8 +1866,10 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
     path's first component relative to ``system_data_root`` when that
     component isn't a known backend dir. Returns ``None`` for legacy-layout
     paths (``<data_dir>/<backend>/<version>/<file>``, 3 components) or
-    otherwise-unresolved paths — comm exclusion then simply does not trigger;
-    detection is deliberately primary-path-only (see ``_build_op_sources``).
+    otherwise-unresolved paths — the structural comm policy then does not
+    trigger. ``_build_op_sources`` separately recognizes known comm operations
+    when the primary file is missing, so marker-only family dirs cannot leak
+    into implicit reuse.
 
     Deliberate exception, not a bug (AIC-1503 PR4 task 1, FIX 2): design
     §6.5 rule 5's "comm" family is a structural concept that only exists in
@@ -1863,7 +1877,7 @@ def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str |
     trtllm_alltoall_perf.parquet, wideep_deepep_*_perf.parquet, ...) resolved
     under a legacy-shaped 3-component path has no family component to
     detect, so this function returns ``None`` for it and `_build_op_sources`
-    does NOT apply the comm hard exclusion — that op keeps the pre-V3
+    does NOT apply the family-layout comm policy — that op keeps the pre-V3
     sibling-reuse behavior for as long as its tree stays legacy-shaped. This
     was adjudicated deliberately over the alternative of recognizing these
     op files by table-name identity: that would smuggle catalog knowledge
@@ -2248,10 +2262,11 @@ class PerfDatabase:
         warning; channels 2-4 still fill.
 
         Returns just the primary tuple (still recorded) when the shared layer
-        is disabled, when the op file is framework-agnostic (nccl / oneccl),
-        or when the op's primary path resolves under the `comm` family dir
-        (design §6.5 rule 5 — comm is hard-excluded from every reuse channel,
-        declarations included; NCCL curves are topology-bound). The
+        is disabled or the op file is framework-agnostic (nccl / oneccl).
+        Other `comm` tables may add same-backend donors through an explicit,
+        table-scoped `reuse.yaml`, but return immediately after that declared
+        channel: implicit sibling and cross-backend fill remain disabled for
+        topology-sensitive communication data (design §6.5 rule 5). The
         kernel-source filter on cross-backend sources is essential — `load_*`
         functions strip `kernel_source` from dict keys, so an unfiltered
         cross-backend row would silently clobber an active-backend row on key
@@ -2296,10 +2311,20 @@ class PerfDatabase:
 
         if not self.enable_shared_layer:
             return _finish()
-        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
+        if op_filename_enum in _COMM_PRIMARY_ONLY_OPS:
             return _finish()
-        if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
+
+        # A missing family-layout primary resolves to the legacy-shaped
+        # fallback path, which has no family component to inspect.  Cover the
+        # known comm tables explicitly in that case so a marker-only requested
+        # version cannot accidentally enable implicit sibling reuse.  Existing
+        # legacy-layout primaries retain the documented transition behavior.
+        primary_family = _op_file_family_from_path(primary_path, system_data_root)
+        if primary_family == _COMM_FAMILY_DIR and op_filename_enum not in _COMM_DECLARED_REUSE_ONLY_OPS:
             return _finish()
+        comm_declared_reuse_only = primary_family == _COMM_FAMILY_DIR or (
+            not os.path.isfile(primary_path) and op_filename_enum in _COMM_DECLARED_REUSE_ONLY_OPS
+        )
 
         backend_lower = self.backend.lower()
 
@@ -2335,6 +2360,9 @@ class PerfDatabase:
                 }
             )
             declared_donor_versions.add(from_version)
+
+        if comm_declared_reuse_only:
+            return _finish()
 
         # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
         # sibling versions can't be ordered against the requested version, so

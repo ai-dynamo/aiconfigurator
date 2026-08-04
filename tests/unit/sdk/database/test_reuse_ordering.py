@@ -10,8 +10,9 @@ REQUESTED version dir's ``reuse.yaml`` (any direction, channel
 requested, nearest first (channel ``fallback`` — never admits a version newer
 than requested implicitly), (4) cross-backend kernel-source-gated fill
 (channel ``cross_backend``, mechanism unchanged from before this PR). The
-``comm`` family is hard-excluded from every non-primary channel. Every
-admitted source is recorded into ``PerfDatabase.data_provenance``.
+``comm`` family admits only table-scoped declared donors; implicit sibling and
+cross-backend channels stay disabled. NCCL and oneCCL remain primary-only.
+Every admitted source is recorded into ``PerfDatabase.data_provenance``.
 
 These tests call ``PerfDatabase._build_op_sources`` directly against
 synthetic on-disk trees — no CSV/parquet content is ever read by that
@@ -379,31 +380,90 @@ def test_self_overlap_declared_donor_admitted_after_primary(systems_root: Path) 
 
 
 # ---------------------------------------------------------------------------
-# comm family hard exclusion (design §6.5 rule 5)
+# comm family: explicit table reuse only (design §6.5 rule 5)
 # ---------------------------------------------------------------------------
 
 
-def test_comm_family_custom_allreduce_gets_primary_only(systems_root: Path) -> None:
-    """custom_allreduce lives under the comm family. Today it inherits
-    newest-first sibling rows via the kernel-source manifest (same mechanism
-    as any other op); this PR tightens that to primary-only, regardless of a
-    stray declaration or a matching cross-backend manifest entry."""
-    backend, requested, older = "trtllm", "1.3.0", "1.2.0"
+def test_comm_family_admits_declared_donor_but_not_implicit_channels(systems_root: Path) -> None:
+    """A comm table may use the requested version's explicit declaration,
+    while undeclared siblings and cross-backend sources remain excluded."""
+    backend, requested, declared, undeclared = "trtllm", "1.3.0", "1.2.0", "1.1.0"
     _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/custom_allreduce_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{undeclared}/custom_allreduce_perf.parquet")
+    _write(systems_root, "data/h100_sxm/comm/sglang/0.5.14/custom_allreduce_perf.parquet")
     _write_yaml(
         systems_root,
         f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
-        {"reuse": [_reuse_entry("custom_allreduce_perf", older)]},
+        {"reuse": [_reuse_entry("custom_allreduce_perf", declared)]},
     )
-    _write_manifest(systems_root, [("custom_allreduce_perf.parquet", "TRTLLM", "shared", [backend])])
+    _write_manifest(
+        systems_root,
+        [("custom_allreduce_perf.parquet", "shared_comm", "shared", [backend, "sglang"])],
+    )
 
     db = _build_db(systems_root, backend=backend, version=requested)
     sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
 
-    assert len(sources) == 1
+    assert len(sources) == 2
     assert sources[0][0].endswith(f"comm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+    assert sources[1][0].endswith(f"comm/{backend}/{declared}/custom_allreduce_perf.parquet")
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary", "declared_reuse"]
+    assert undeclared not in _versions(db, "custom_allreduce_perf.parquet")
+
+
+def test_comm_family_without_declaration_stays_primary_only(systems_root: Path) -> None:
+    backend, requested, older = "sglang", "0.5.14", "0.5.12"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/wideep_deepep_ll_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/wideep_deepep_ll_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.wideep_deepep_ll)
+
+    assert len(sources) == 1
+    assert _channels(db, "wideep_deepep_ll_perf.parquet") == ["primary"]
+
+
+def test_comm_family_rejects_declared_reuse_for_non_allowlisted_table(systems_root: Path) -> None:
+    """The runtime fails closed if a non-comm table is misplaced under comm;
+    the data-policy checker separately rejects that family placement."""
+    backend, requested, declared = "sglang", "0.5.14", "0.5.12"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", declared)]},
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert len(sources) == 1
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+
+
+def test_comm_missing_primary_uses_declared_wideep_donor_only(systems_root: Path) -> None:
+    """Marker-only comm versions still need comm policy even though the path
+    resolver returns a family-less legacy fallback for the missing primary."""
+    backend, requested, declared, undeclared = "sglang", "0.5.14", "0.5.12", "0.5.10"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/wideep_deepep_normal_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{undeclared}/wideep_deepep_normal_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("wideep_deepep_normal_perf", declared)]},
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.wideep_deepep_normal)
+
+    provenance = db.data_provenance["wideep_deepep_normal_perf.parquet"]
+    assert [entry["channel"] for entry in provenance] == ["primary", "declared_reuse"]
+    assert provenance[0]["exists"] is False
+    assert provenance[1]["version"] == declared
+    assert undeclared not in [entry["version"] for entry in provenance]
+    assert [path for path, _ in sources] == [entry["path"] for entry in provenance]
 
 
 def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None:
@@ -414,8 +474,8 @@ def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None
     comm op (3-component path, no ``comm/`` family dir) therefore does NOT
     get the exclusion applied — it keeps pre-V3 sibling-reuse behavior for
     as long as its tree stays legacy-shaped. Contrast with
-    ``test_comm_family_custom_allreduce_gets_primary_only`` above, which
-    pins the family-shaped case (exclusion DOES apply, primary-only)."""
+    ``test_comm_family_admits_declared_donor_but_not_implicit_channels`` above,
+    which pins the family-shaped case (only explicit reuse is admitted)."""
     backend, requested, older = "trtllm", "1.3.0", "1.2.0"
     _write(systems_root, f"data/h100_sxm/{backend}/{requested}/custom_allreduce_perf.parquet")
     _write(systems_root, f"data/h100_sxm/{backend}/{older}/custom_allreduce_perf.parquet")
