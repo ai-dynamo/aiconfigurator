@@ -1272,8 +1272,10 @@ class WideEPGenerationMLA(Operation):
         ) -> float:
             # SOL / util from own (num_heads, b, s) grid; num_heads = 128 // tp_size
             # (mirrors get_silicon).
-            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
+            if attn_backend not in {"flashinfer", "fa3"}:
+                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             cls.load_data(database)
             kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_generation_mla_data, attn_backend)
 
@@ -1546,8 +1548,10 @@ class WideEPContextMLA(Operation):
         ) -> float:
             # SOL / util from own (num_heads, full_s, b) grid; num_heads = 128 // tp_size.
             # Samples are prefix=0; SOL(query) carries prefix natively.
-            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             attn_backend = attention_backend or "flashinfer"
+            if attn_backend not in {"flashinfer", "fa3"}:
+                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             cls.load_data(database)
             kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_context_mla_data, attn_backend)
 
