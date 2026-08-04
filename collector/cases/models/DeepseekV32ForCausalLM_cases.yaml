@@ -6,6 +6,7 @@ architecture: DeepseekV32ForCausalLM
 model_path: deepseek-ai/DeepSeek-V3.2
 model_paths:
   - deepseek-ai/DeepSeek-V3.2
+  - nvidia/DeepSeek-V3.2-NVFP4
 include_base: true
 base_ops:
   - gemm
