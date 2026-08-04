@@ -161,9 +161,29 @@ collector.vllm.collect_moe:
   - __model_cases__
 
 # --- wideep -----------------------------------------------------------
+collector.wideep.sglang.collect_deepep_ll:
+  # Cases are self-contained (get_deepep_ll_test_cases is defined locally), but
+  # the measured kernel lives in the vendored DeepEP scripts this module wraps:
+  # test_low_latency.test_main runs the dispatch/combine collective, and utils.py
+  # supplies the bench/cast helpers it times.
+  # NOTE: the structural shapes also come from src/aiconfigurator/model_configs/
+  # *_config.json, which no closure token can express today (extras must be
+  # literal paths); a config edit will not move this hash.
+  - collector/wideep/sglang/deepep/test_low_latency.py
+  - collector/wideep/sglang/deepep/utils.py
+  - __model_cases__
 collector.wideep.sglang.collect_deepep_moe:
   # No collector/case_generator.py import in this module — cases are
   # self-contained (get_wideep_moe_test_cases is defined locally).
+  - __model_cases__
+collector.wideep.sglang.collect_deepep_normal:
+  # Same self-contained shape derivation and model_configs caveat as
+  # collect_deepep_ll above. test_intranode.test_main runs the normal-mode
+  # collective and itself imports test_low_latency + utils, so all three change
+  # the numbers this module publishes.
+  - collector/wideep/sglang/deepep/test_intranode.py
+  - collector/wideep/sglang/deepep/test_low_latency.py
+  - collector/wideep/sglang/deepep/utils.py
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
   # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model.

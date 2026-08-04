@@ -19,6 +19,11 @@ Rows whose kernel_source is blank/`<unknown>` are skipped during the scan (and
 logged) — they have no name to key inheritance on, and the current corpus has
 zero such rows.
 
+The latency metric is resolved per table from `_LATENCY_COLUMN_GROUPS`. Tables
+that split latency across component columns (the DeepEP dispatch/combine
+tables) have their components summed the same way the SDK sums them at load
+time, so a composed metric is comparable with a single-column one.
+
 The script emits three artifacts:
   - JSON of per-group raw stats
   - Markdown report table
@@ -47,7 +52,7 @@ import logging
 import statistics
 from collections import defaultdict
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,12 +63,30 @@ logger = logging.getLogger(__name__)
 # Columns that never participate in the shape key.
 _META_COLUMNS = {"framework", "version", "device", "op_name", "kernel_source"}
 
-# Latency-like columns. The first one found in the header is used as the metric.
-_LATENCY_COLUMNS_PRIORITY = (
-    "latency",
-    "avg_ms",
-    "combine_avg_t_us",
-    "dispatch_avg_t_us",
+# How to derive a comparable latency metric from a perf table's header.
+#
+# Most tables carry a single latency-like column. A few carry the metric split
+# across component columns and are only meaningful when summed — the SDK does
+# exactly that when it loads them, so the scan must match or it would compare
+# a fragment of the latency against another table's whole.
+#
+# Each entry is the tuple of columns to sum; the first entry whose columns are
+# all present in the header wins. Single-column entries come first so tables
+# with a plain `latency`/`avg_ms` column keep their historical metric.
+_LATENCY_COLUMN_GROUPS = (
+    ("latency",),
+    ("avg_ms",),
+    # wideep_deepep_ll_perf: SDK sums dispatch + combine
+    # (sdk/operations/moe.py, load_wideep_deepep_ll_data).
+    ("dispatch_avg_t_us", "combine_avg_t_us"),
+    # wideep_deepep_normal_perf: SDK sums the four transmit/notify components
+    # (sdk/operations/moe.py, load_wideep_deepep_normal_data).
+    (
+        "dispatch_transmit_us",
+        "dispatch_notify_us",
+        "combine_transmit_us",
+        "combine_notify_us",
+    ),
 )
 
 # Files to skip entirely (markers, already-shared layers, irregular formats).
@@ -229,15 +252,34 @@ class GroupStats:
         }
 
 
-def _pick_latency_column(header: list[str]) -> str | None:
-    for candidate in _LATENCY_COLUMNS_PRIORITY:
-        if candidate in header:
-            return candidate
+def _resolve_latency_columns(header: list[str]) -> tuple[str, ...] | None:
+    """Return the columns whose sum is this table's latency metric, or None."""
+    for group in _LATENCY_COLUMN_GROUPS:
+        if all(column in header for column in group):
+            return group
     return None
 
 
-def _build_shape_key(row: dict[str, str], header: list[str], latency_col: str) -> tuple:
-    keys = [c for c in header if c not in _META_COLUMNS and c != latency_col]
+def _compose_latency(row: dict[str, str], latency_cols: tuple[str, ...]) -> float | None:
+    """Sum `latency_cols` into the row's latency metric.
+
+    Returns None if any component is missing or unparseable — a partial sum
+    would silently understate the latency.
+    """
+    total = 0.0
+    for column in latency_cols:
+        raw = row.get(column)
+        if raw in (None, ""):
+            return None
+        try:
+            total += float(raw)
+        except (TypeError, ValueError):
+            return None
+    return total
+
+
+def _build_shape_key(row: dict[str, str], header: list[str], latency_cols: tuple[str, ...]) -> tuple:
+    keys = [c for c in header if c not in _META_COLUMNS and c not in latency_cols]
     return tuple((c, row.get(c, "")) for c in keys)
 
 
@@ -259,9 +301,12 @@ def _iter_backend_dirs(system_dir: Path) -> Iterable[tuple[str, Path]]:
                 yield backend_dir.name, backend_dir
 
 
-def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
+def _iter_data_files(data_root: Path, op_files: frozenset[str] | None = None) -> Iterable[tuple[str, str, str, Path]]:
     """Yield (system, backend, version, path) for every perf data table, across
-    both the legacy and family-first (Collector V3) tree layouts."""
+    both the legacy and family-first (Collector V3) tree layouts.
+
+    `op_files`, when given, restricts the walk to those table basenames.
+    """
     for system_dir in sorted(data_root.iterdir()):
         if not system_dir.is_dir():
             continue
@@ -272,6 +317,8 @@ def _iter_data_files(data_root: Path) -> Iterable[tuple[str, str, str, Path]]:
                 paths = sorted([*version_dir.glob("*.parquet"), *version_dir.glob("*.txt")])
                 for path in paths:
                     if path.name in _SKIP_FILE_BASENAMES:
+                        continue
+                    if op_files is not None and path.name not in op_files:
                         continue
                     yield system_dir.name, backend, version_dir.name, path
 
@@ -308,8 +355,8 @@ def _scan_one_file(system: str, backend: str, version: str, path: Path) -> _File
     `logger.warning` for missing latency columns escapes."""
     out = _FileScanResult()
     header, rows = _read_perf_rows(path)
-    latency_col = _pick_latency_column(header)
-    if latency_col is None:
+    latency_cols = _resolve_latency_columns(header)
+    if latency_cols is None:
         logger.warning("No latency column found in %s; skipping", path)
         return out
 
@@ -324,16 +371,12 @@ def _scan_one_file(system: str, backend: str, version: str, path: Path) -> _File
             if len(out.unnamed_examples) < 5:
                 out.unnamed_examples.append((str(path), repr(raw_ks)))
             continue
-        latency_raw = row.get(latency_col)
-        try:
-            latency = float(latency_raw) if latency_raw not in (None, "") else None
-        except ValueError:
-            latency = None
+        latency = _compose_latency(row, latency_cols)
         if latency is None or latency <= 0:
             out.rows_skipped += 1
             continue
 
-        shape_key = _build_shape_key(row, header, latency_col)
+        shape_key = _build_shape_key(row, header, latency_cols)
         out.records.append((system, path.name, kernel_source, framework, row_version, shape_key, latency))
     return out
 
@@ -341,12 +384,18 @@ def _scan_one_file(system: str, backend: str, version: str, path: Path) -> _File
 _SCAN_THREADS = 4
 
 
-def scan(data_root: Path) -> dict[tuple[str, str, str], GroupStats]:
+def scan(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple[str, str, str], GroupStats]:
     """Walk the data tree and accumulate per-group stats.
 
     Files are parsed in a `_SCAN_THREADS`-wide thread pool; the merge into
     `groups` runs serially on the main thread, which is cheap enough not to
-    need locks.
+    need locks. The merge walks `futures` in submission order rather than
+    completion order: `GroupStats.record_row` is last-write-wins per
+    (shape, framework), so a completion-ordered merge made the divergence
+    stats differ between identical runs.
+
+    `op_files` restricts the walk to those table basenames — a full-tree run
+    takes minutes, so scoping is how you re-verify one table's numbers.
     """
     groups: dict[tuple[str, str, str], GroupStats] = {}
     rows_scanned = 0
@@ -357,13 +406,13 @@ def scan(data_root: Path) -> dict[tuple[str, str, str], GroupStats]:
     # Materialize the file list up front so the progress bar can show a total
     # and the walk doesn't appear stuck on slow disks. The list is small
     # (~hundreds).
-    file_list = list(_iter_data_files(data_root))
+    file_list = list(_iter_data_files(data_root, op_files))
     total_files = len(file_list)
 
     with ThreadPoolExecutor(max_workers=_SCAN_THREADS) as pool:
         futures = [pool.submit(_scan_one_file, *args) for args in file_list]
         pbar = tqdm(
-            as_completed(futures),
+            futures,
             desc=f"scan {data_root}",
             unit="file",
             total=total_files,
@@ -626,12 +675,30 @@ def main() -> None:
         default=None,
         help="Write a YAML manifest consumed by the SDK loader.",
     )
+    parser.add_argument(
+        "--op-file",
+        action="append",
+        default=None,
+        metavar="BASENAME",
+        help=(
+            "Restrict the walk to this perf table basename (repeatable). Scoped runs are for "
+            "inspecting one table's numbers; a manifest written from a scoped run only contains "
+            "the scoped groups, so never write the committed manifest this way."
+        ),
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     logging.basicConfig(level=args.log_level.upper(), format="%(levelname)s %(message)s")
 
-    groups = scan(args.data_root)
+    op_files = frozenset(args.op_file) if args.op_file else None
+    if op_files and args.out_manifest:
+        logger.warning(
+            "--op-file is set: %s will only contain the %d scoped group(s), not the whole manifest.",
+            args.out_manifest,
+            len(op_files),
+        )
+    groups = scan(args.data_root, op_files)
     summaries = [g.summary() for g in groups.values()]
 
     if args.out_json:

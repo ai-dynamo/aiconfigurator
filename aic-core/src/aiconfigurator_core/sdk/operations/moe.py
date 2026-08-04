@@ -941,6 +941,69 @@ class MoEDispatch(Operation):
     # ------------------------------------------------------------------
 
     @classmethod
+    def _resolve_wideep_deepep_comm_node_data(
+        cls,
+        data_by_node,
+        *,
+        table: str,
+        node_num: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+    ) -> tuple[int, dict, bool]:
+        """Resolve DeepEP dispatch/combine rows for ``(node_num, hidden, topk, experts)``.
+
+        Prefer measurements at the requested node scale. When those rows are
+        absent, reuse node_num=1 rows for the same
+        ``(hidden_size, topk, num_experts)``. This is the intentional WideEP
+        communication approximation and is returned as ``source="estimated"``.
+        Exact-scale rows remain ``source="silicon"``.
+
+        If neither exact-scale nor matching node_num=1 data exists, fail with
+        ``PerfDataNotAvailableError`` instead of inventing a value. Sub-node
+        scales use the same node-1 approximation because they have no separate
+        table representation.
+
+        Read via .get() chains so a miss does not auto-vivify nested entries.
+        Returns ``(lookup_node, node_data, used_node1_fallback)``. Raises
+        ``PerfDataNotAvailableError`` when neither the requested scale nor the
+        node_num=1 rows have this shape.
+        """
+        node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if node_data:
+            return node_num, node_data, False
+
+        node1_data = cls._wideep_comm_node1_fallback(
+            data_by_node,
+            table=table,
+            requested_node_num=node_num,
+            hidden_size=hidden_size,
+            topk=topk,
+            num_experts=num_experts,
+        )
+        return 1, node1_data, node_num != 1
+
+    @staticmethod
+    def _wideep_comm_node1_fallback(
+        data_by_node,
+        *,
+        table: str,
+        requested_node_num: float,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+    ) -> dict:
+        """Return matching node-1 WideEP communication data or fail clearly."""
+        node1_data = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if node1_data:
+            return node1_data
+        raise PerfDataNotAvailableError(
+            f"wideep_deepep_{table} communication data unavailable for requested node_num={requested_node_num}: "
+            f"no exact rows and no matching node_num=1 fallback rows for "
+            f"hidden={hidden_size} topk={topk} experts={num_experts}"
+        )
+
+    @classmethod
     def _query_wideep_deepep_ll_table(
         cls,
         database: PerfDatabase,
@@ -971,7 +1034,14 @@ class MoEDispatch(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
-            data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
+            _lookup_node, data, used_node1_fallback = cls._resolve_wideep_deepep_comm_node_data(
+                database._wideep_deepep_ll_data,
+                table="ll",
+                node_num=node_num,
+                hidden_size=hidden_size,
+                topk=topk,
+                num_experts=num_experts,
+            )
             # 1-D tokens curve. Dispatch has no implemented roofline, but util-hold
             # only needs the SOL *ratio*: dispatch bytes scale ~linearly with
             # tokens (hidden/topk fixed per slice), so a linear proxy is
@@ -982,7 +1052,18 @@ class MoEDispatch(Operation):
             result = perf_interp.query(config, data, num_tokens)
             lat = perf_interp.get_value(result, "latency")
             energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_comm_result(
+                database, lat / 1000.0, energy / 1000.0, used_node1_fallback=used_node1_fallback
+            )
+
+    @staticmethod
+    def _wideep_comm_result(
+        database: PerfDatabase, latency: float, energy: float, *, used_node1_fallback: bool
+    ) -> PerformanceResult:
+        """Return exact table data as silicon and node-1 reuse as estimated."""
+        if not used_node1_fallback:
+            return database._interp_pr(latency, energy=energy)
+        return PerformanceResult(latency, energy=energy, source="estimated")
 
     @classmethod
     def _query_wideep_deepep_normal_table(
@@ -1018,8 +1099,21 @@ class MoEDispatch(Operation):
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
             )
         else:
-            if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+            lookup_node, node_data, used_node1_fallback = cls._resolve_wideep_deepep_comm_node_data(
+                database._wideep_deepep_normal_data,
+                table="normal",
+                node_num=node_num,
+                hidden_size=hidden_size,
+                topk=topk,
+                num_experts=num_experts,
+            )
+            if lookup_node == 1 and sms == 20:  # only collect sm=20 for now
+                # .get(), not [] -- node_data is a nested defaultdict from the
+                # loader, so indexing a missing sms would auto-vivify an empty
+                # branch INTO the shared cached table (see load_data caches) and
+                # skew later 2-axis (sms, tokens) queries on the same slice.
+                # An empty dict here still fails cleanly in perf_interp.query.
+                data = node_data.get(sms, {})
                 # 1-D tokens curve; linear token proxy SOL (see deepep_ll note).
                 config = perf_interp.OpInterpConfig(
                     axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
@@ -1028,7 +1122,7 @@ class MoEDispatch(Operation):
                 lat = perf_interp.get_value(result, "latency")
                 energy = perf_interp.get_value(result, "energy")
             else:
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                data = node_data
                 # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
                 # off-grid sms snaps to the nearest collected value (the legacy
                 # 2-D scattered interp simply failed on a single-sms cloud);
@@ -1042,7 +1136,9 @@ class MoEDispatch(Operation):
                 result = perf_interp.query(config, data, sms, num_tokens)
                 lat = perf_interp.get_value(result, "latency")
                 energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_comm_result(
+                database, lat / 1000.0, energy / 1000.0, used_node1_fallback=used_node1_fallback
+            )
 
     # ------------------------------------------------------------------
     # Op contract — legacy body lifted verbatim. Heavy branching across
