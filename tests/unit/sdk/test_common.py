@@ -283,7 +283,13 @@ class TestSupportMatrix:
         "model,backend,version,expected_agg,expected_disagg",
         [
             ("zai-org/GLM-5-FP8", "sglang", "0.5.10", True, True),
-            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", True, True),
+            # 0.5.9 flipped to unsupported at the 2026-08-04 matrix refresh:
+            # post-#1431 rank-local queries cannot reach the 0.5.9-era
+            # b200-family GLM dsa-module slices (#1460 does not restore
+            # them; b300's 0.5.9 lane still passes) — upstream
+            # data-migration gap, reported. The row is a genuine FAIL, and
+            # check_support must keep using it exactly.
+            ("zai-org/GLM-5-FP8", "sglang", "0.5.9", False, False),
             ("zai-org/GLM-5-FP8", "trtllm", "1.3.0rc10", True, True),
             ("nvidia/GLM-5-NVFP4", "sglang", "0.5.10", True, True),
             ("nvidia/GLM-5-NVFP4", "vllm", "0.19.0", True, True),
