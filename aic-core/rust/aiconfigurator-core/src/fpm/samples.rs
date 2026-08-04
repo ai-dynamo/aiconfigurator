@@ -15,11 +15,7 @@ use std::collections::HashMap;
 use super::options::ForwardPassPerfOptions;
 
 pub(crate) trait WithOptions {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        relaxable: &[usize],
-    ) -> Self;
+    fn with_options(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self;
 }
 
 pub(crate) trait StoreStats {
