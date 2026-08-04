@@ -272,6 +272,14 @@ weights. Converted `sgl-project/*-FP8` checkpoints can still collect
 
 ## TP and Head-Axis Convention (unified by #1429)
 
+> #1458 generalized this section into the repo-wide pin — including the MLA
+> module `[native][local]` migration (native from the model pin, not
+> `num_heads * tp_size`), the computation-completeness exception that keeps
+> GQA and the MLA kernel tables local-only, and the DSA
+> one-native-per-architecture guardrail. See
+> [head-axis-keying.md](head-axis-keying.md); the DSV4 specifics below remain
+> authoritative for this family.
+
 Every persisted DSV4 module row carries two head-related columns whose
 semantics are pinned by issue #1429:
 
@@ -281,9 +289,12 @@ semantics are pinned by issue #1429:
   never rewrites); module attributes are only cross-checked because their
   meaning flips between native and rank-local across framework versions.
 - `tp_size` is **mandatory**, so the model-native head identity is always
-  derivable as `num_heads * tp_size`. Persisting local and deriving native
-  (rather than the reverse) matches every other module table family (DSA,
-  MLA, MiniMax) and what post-#1131 collectors already write.
+  derivable as `num_heads * tp_size`. That derivation is a DSV4 property —
+  its rows carry genuine tp sweeps. Persisting rank-local heads matches every
+  other module table family, but the MLA module tables resolve native from an
+  explicit model pin instead: their rows are single-GPU head sweeps where
+  `tp_size` is provenance (#1458, see
+  [head-axis-keying.md](head-axis-keying.md)).
 
 Loaders key the module tables on **both** axes, `[native][local]`: native is
 the model identity (Flash 64 vs Pro 128 — the `architecture` column cannot
@@ -302,6 +313,15 @@ Exception: the sparse-KERNEL tables (`dsv4_paged_mqa_logits`,
 consumer contract — vllm writes both `num_heads` (native) and
 `local_num_heads` there explicitly, and all sglang rows are tp=1 where the
 two readings coincide.
+
+The CSA topK DELTA calibration is additionally selector-geometry-specific:
+Flash runs `index_topk=512`, Pro `index_topk=1024`, so a Flash-collected
+DELTA must never be subtracted from a Pro query. The consumers key the DELTA
+by the calibration row's native `num_heads` and apply it only on an exact
+native match (#1460 review / #1468). Coverage limitation: the shipped
+calibration is Flash-only today, so **Pro CSA latencies stay uncorrected**
+for the collector's degenerate-topk inflation (a one-time warning is logged)
+until Pro calibration is collected.
 
 SGLang may zero-pad Q back to the native 64-head shape inside the FlashMLA
 backend, but that padding is an implementation detail of the module

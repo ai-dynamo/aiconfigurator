@@ -12,6 +12,14 @@ from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusio
 
 logger = logging.getLogger(__name__)
 
+# Historical DeepSeek-compatible 128-head kernel-table convention: sglang/
+# trtllm kernel queries key at ``128 // tp_size`` even for Kimi K2.5
+# (64-native). Collection side pinned in the Kimi case YAML; rationale and the
+# true-geometry follow-up in docs/perf_database/head-axis-keying.md. Scoped to
+# THIS class — Kimi-K3 (#1435) already queries true local geometry, and the
+# WideEP classes below use 128 as DSV3's actual native, not this convention.
+_MLA_KERNEL_TABLE_NATIVE_HEADS = 128
+
 
 @register_model("DEEPSEEK", "KIMIK25")
 class DeepSeekModel(BaseModel):
@@ -256,7 +264,7 @@ class DeepSeekModel(BaseModel):
             else ops.ContextMLA(
                 "context_attention",
                 self._num_layers,
-                128 // tp_size,
+                _MLA_KERNEL_TABLE_NATIVE_HEADS // tp_size,
                 kvcache_quant_mode,
                 fmha_quant_mode,
                 cp_size=cp,
@@ -286,6 +294,9 @@ class DeepSeekModel(BaseModel):
                         kvcache_quant_mode,
                         fmha_quant_mode,
                         attn_gemm_quant_mode,
+                        # [native][local] module-table identity (#1458);
+                        # resolves nearest (-> DSV3 128) until per-model data lands.
+                        native_num_heads=self._num_heads,
                     ),
                     fallback=context_mla_granular,
                 )
@@ -476,7 +487,7 @@ class DeepSeekModel(BaseModel):
                     ops.GenerationMLA(
                         "generation_attention",
                         self._num_layers * self._mtp_scale_factor,
-                        128 // tp_size,
+                        _MLA_KERNEL_TABLE_NATIVE_HEADS // tp_size,
                         kvcache_quant_mode,
                     ),
                     ops.MLABmm(
@@ -510,6 +521,7 @@ class DeepSeekModel(BaseModel):
                         kvcache_quant_mode,
                         fmha_quant_mode,
                         attn_gemm_quant_mode,
+                        native_num_heads=self._num_heads,
                     ),
                     fallback=generation_mla_granular,
                 )

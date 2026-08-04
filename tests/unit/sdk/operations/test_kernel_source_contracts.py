@@ -178,25 +178,30 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
 def test_topk_calib_builder_splits_v1_and_v2_variants():
     from aiconfigurator.sdk.operations.dsv4 import _build_topk_calib_from_rows
 
-    by_mode = {
-        0: {
-            4096: {
-                8: {
-                    "v1_flat": {"latency": 1.5},
-                    "v1_top_last": {"latency": 1.0},
-                    "v2_flat": {"latency": 0.9},
-                    "v2_top_last": {"latency": 0.7},
+    # Outermost level: the calibration row's native num_heads (#1460 review —
+    # the DELTA is selector-geometry-specific, Flash 512 vs Pro 1024).
+    by_native = {
+        64: {
+            0: {
+                4096: {
+                    8: {
+                        "v1_flat": {"latency": 1.5},
+                        "v1_top_last": {"latency": 1.0},
+                        "v2_flat": {"latency": 0.9},
+                        "v2_top_last": {"latency": 0.7},
+                    }
                 }
             }
         }
     }
-    calib = _build_topk_calib_from_rows(by_mode)
-    assert calib["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.5)
-    assert calib["v2"]["exact"][(0, 4096, 8)] == pytest.approx(0.2)
+    calib = _build_topk_calib_from_rows(by_native)
+    assert set(calib.keys()) == {64}
+    assert calib[64]["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.5)
+    assert calib[64]["v2"]["exact"][(0, 4096, 8)] == pytest.approx(0.2)
 
     # A file carrying only one variant leaves the other None rather than
     # silently borrowing across phases.
-    only_v1 = {0: {4096: {8: {"v1_flat": {"latency": 1.5}, "v1_top_last": {"latency": 1.0}}}}}
+    only_v1 = {64: {0: {4096: {8: {"v1_flat": {"latency": 1.5}, "v1_top_last": {"latency": 1.0}}}}}}
     calib = _build_topk_calib_from_rows(only_v1)
-    assert calib["v1"] is not None
-    assert calib["v2"] is None
+    assert calib[64]["v1"] is not None
+    assert calib[64]["v2"] is None

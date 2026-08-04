@@ -274,6 +274,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
+            native_num_heads: Some(128),
         }
     }
 
@@ -742,6 +743,23 @@ mod tests {
         let bytes = bincode::serialize(&op).unwrap();
         let decoded: OpSpec = bincode::deserialize(&bytes).unwrap();
         assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn mla_module_none_native_round_trips_followed_by_another_op() {
+        // native_num_heads=None must still be serialized (no skip_serializing_if):
+        // bincode decodes positionally, so an omitted Option would desync the
+        // ops decoded after it (#1458 review).
+        let mut none_native = mla_module();
+        none_native.native_num_heads = None;
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::MlaModuleContext(none_native), OpSpec::Gemm(gemm())],
+            vec![OpSpec::MlaModuleGeneration(mla_module()), OpSpec::Moe(moe())],
+        );
+        let bytes = spec.to_bincode().expect("to_bincode");
+        let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
+        assert_eq!(spec, decoded);
     }
 
     #[test]
