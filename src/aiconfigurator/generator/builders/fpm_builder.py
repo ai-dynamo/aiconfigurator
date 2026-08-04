@@ -2,25 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build the artifacts used for FPM collection.
 
-The FPM resource Pod or LeaderWorkerSet deliberately does not launch an engine.
-It reserves the same infrastructure as the normal vLLM worker and stays alive
-while a collector streams the generated ``run.sh`` into it.
+The FPM resource Pod, LeaderWorkerSet, or PodCliqueSet deliberately does not
+launch an engine. It reserves the same infrastructure as the normal vLLM
+worker and stays alive while a collector stages the generated ``fpm_env.sh``
+and ``run.sh`` into it.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import re
 import shlex
 from typing import Any
 
-from .dgd_model import DGD, DGDService, MainContainer, _dump_k8s_yaml
+from aiconfigurator.fpm_contract import (
+    FPM_BARRIER_TIMEOUT_ENV,
+    FPM_ENGINE_BENCHMARK_OUTPUT_ENV,
+    FPM_ENV_EXPORTED_VARS,
+    FPM_ENV_FILENAME,
+    FPM_MANIFEST_FILENAME,
+    FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION,
+    FPM_RESULTS_DIR,
+    FPM_RUN_SCRIPT_FILENAME,
+    fpm_validate_benchmark_output_path,
+)
+
+from .dgd_model import DGD, ComputeDomainDoc, DGDService, MainContainer, _dump_k8s_yaml
 from .k8s_builder import build_dgd
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MISSING = object()
 _NODE_RANK_SENTINEL = "__FPM_NODE_RANK__"
 _FPM_BENCHMARK_MODES = ("agg", "prefill", "decode")
+_FPM_ORCHESTRATORS = frozenset({"lws", "grove"})
 _FPM_OWNED_ORCHESTRATION_FLAGS = frozenset(
     {
         "--nnodes",
@@ -43,12 +58,14 @@ def build_fpm_artifacts(
     resolved_facts: Any = None,
     param_values: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Return a reusable resource workload and a complete FPM engine script.
+    """Return the contract artifact trio for one FPM cell.
 
     The existing DGD builder remains the source of truth for infrastructure.
-    This function lowers its one aggregated worker to a Pod (single node) or a
-    LeaderWorkerSet (multiple nodes), while moving every concrete environment
-    variable and the engine command into ``run.sh``.
+    This function lowers its one aggregated worker to a Pod (single node) or
+    the selected multi-node orchestrator, publishes every collection-relevant
+    render fact through ``fpm_env.sh`` (exactly the contract's
+    ``FPM_ENV_EXPORTED_VARS``), and moves every concrete environment variable
+    and the engine command into ``run.sh``, which only launches the engine.
     """
     if backend != "vllm":
         raise ValueError("FPM V1 supports only the vllm backend")
@@ -65,7 +82,7 @@ def build_fpm_artifacts(
 
     extra_cli_args = _extract_extra_cli_args(param_values)
     _reject_owned_orchestration_args(extra_cli_args)
-    worker = _build_worker(context, backend, resolved_facts)
+    worker, compute_domain = _build_worker(context, backend, resolved_facts)
     main_container = _require_main_container(worker)
 
     command = list(main_container.command or [])
@@ -76,7 +93,7 @@ def build_fpm_artifacts(
         raise ValueError("The resolved vLLM command must contain only string tokens")
     args.extend(extra_cli_args)
 
-    env = _collect_concrete_env(worker, main_container)
+    env, barrier_timeout_override = _collect_concrete_env(worker, main_container)
     benchmark_mode = _require_benchmark_mode(args)
     topology = _resolve_topology(context, worker, args)
     if topology["data_parallel_size"] > 1 and _cli_option_value(args, "--data-parallel-backend") is None:
@@ -84,27 +101,41 @@ def build_fpm_artifacts(
     if topology["data_parallel_size"] > 1:
         _require_cli_option(args, "--data-parallel-backend", expected="mp")
     _ensure_dump_config_path(args, topology["node_count"])
+    if topology["node_count"] > 1 and not _requires_mnnvl_compute_domain(resolved_facts):
+        _force_disable_allreduce_fusion(args)
     benchmark_output_path = _ensure_benchmark_output_path(args, env)
     wait_timeout_seconds = _benchmark_wait_timeout_seconds(args)
-    run_script = _render_run_script(
-        command + args,
-        env,
+    orchestrator = _fpm_orchestrator(context)
+    preserve_compute_domain = topology["node_count"] > 1 and _requires_mnnvl_compute_domain(resolved_facts)
+    env_script = _render_env_script(
         benchmark_mode,
         benchmark_output_path,
         wait_timeout_seconds,
         topology,
+        barrier_timeout_override=barrier_timeout_override,
     )
+    run_script = _render_run_script(command + args, env)
     workload = _lower_worker_to_resource(
         context,
         worker,
         main_container,
         topology,
+        orchestrator=orchestrator,
+        compute_domain=compute_domain,
+        preserve_compute_domain=preserve_compute_domain,
         efa_resource_name=_efa_resource_name(resolved_facts),
+    )
+    resource_documents = _resource_documents(
+        workload,
+        compute_domain,
+        topology,
+        preserve_compute_domain=preserve_compute_domain,
     )
 
     return {
-        "k8s_deploy.yaml": _dump_k8s_yaml(workload),
-        "run.sh": run_script,
+        FPM_MANIFEST_FILENAME: "---\n".join(_dump_k8s_yaml(document) for document in resource_documents),
+        FPM_ENV_FILENAME: env_script,
+        FPM_RUN_SCRIPT_FILENAME: run_script,
     }
 
 
@@ -131,8 +162,13 @@ def _extract_extra_cli_args(param_values: dict[str, Any] | None) -> list[str]:
 
 def _reject_owned_orchestration_args(args: list[str]) -> None:
     for token in args:
+        # vLLM's FlexibleArgumentParser accepts underscore and dash spellings
+        # of the same option, so normalize before matching the owned set.
+        head = token.split("=", 1)[0]
+        if head.startswith("--"):
+            head = "--" + head[2:].replace("_", "-")
         for flag in _FPM_OWNED_ORCHESTRATION_FLAGS:
-            if token == flag or token.startswith(f"{flag}="):
+            if head == flag:
                 raise ValueError(f"FPM owns orchestration option {flag}; do not pass it through extra_cli_args")
 
 
@@ -150,7 +186,9 @@ def _ensure_dump_config_path(args: list[str], node_count: int) -> None:
         raise ValueError(f"FPM accepts at most one {flag} option")
 
     default = (
-        "/results/resolved-config-node{node_rank}.json" if node_count > 1 else "/results/resolved-config-node0.json"
+        f"{FPM_RESULTS_DIR}/resolved-config-node{{node_rank}}.json"
+        if node_count > 1
+        else f"{FPM_RESULTS_DIR}/resolved-config-node0.json"
     )
     if not occurrences:
         value = default
@@ -168,11 +206,18 @@ def _ensure_dump_config_path(args: list[str], node_count: int) -> None:
     args[index] = f"{flag}={value}" if joined else value
 
 
-def _build_worker(context: dict[str, Any], backend: str, resolved_facts: Any) -> DGDService:
+def _build_worker(
+    context: dict[str, Any],
+    backend: str,
+    resolved_facts: Any,
+) -> tuple[DGDService, ComputeDomainDoc | None]:
     docs = build_dgd(context, backend, resolved_facts=resolved_facts)
     dgd_docs = [doc for doc in docs if isinstance(doc, DGD)]
     if len(dgd_docs) != 1:
         raise ValueError("FPM V1 requires exactly one DynamoGraphDeployment document")
+    compute_domains = [doc for doc in docs if isinstance(doc, ComputeDomainDoc)]
+    if len(compute_domains) > 1:
+        raise ValueError("FPM V1 supports at most one ComputeDomain document")
 
     workers = [(name, service) for name, service in dgd_docs[0].services.items() if service.component_type == "worker"]
     if len(workers) != 1 or workers[0][0] != "VllmWorker":
@@ -181,7 +226,33 @@ def _build_worker(context: dict[str, Any], backend: str, resolved_facts: Any) ->
     worker = workers[0][1]
     if worker.replicas != 1:
         raise ValueError("FPM V1 requires worker replicas=1")
-    return worker
+    return worker, compute_domains[0] if compute_domains else None
+
+
+def _requires_mnnvl_compute_domain(resolved_facts: Any) -> bool:
+    hardware = getattr(resolved_facts, "hardware", None)
+    if not isinstance(hardware, dict):
+        return False
+    nccl_env = hardware.get("nccl_env") or {}
+    if not isinstance(nccl_env, dict):
+        return False
+    return str(nccl_env.get("NCCL_MNNVL_ENABLE", "")).strip() == "1"
+
+
+def _fpm_orchestrator(context: dict[str, Any]) -> str:
+    k8s = context.get("K8sConfig") or {}
+    if not isinstance(k8s, dict):
+        raise TypeError("K8sConfig must be a mapping")
+    orchestrator = k8s.get("fpm_orchestrator", "lws")
+    # Older request/template versions materialize absent optional values as an
+    # empty string. Treat that representation exactly like the historical
+    # default so existing frozen requests continue to render LWS artifacts.
+    if orchestrator in (None, ""):
+        orchestrator = "lws"
+    if not isinstance(orchestrator, str) or orchestrator not in _FPM_ORCHESTRATORS:
+        allowed = ", ".join(sorted(_FPM_ORCHESTRATORS))
+        raise ValueError(f"K8sConfig.fpm_orchestrator must be one of: {allowed}")
+    return orchestrator
 
 
 def _positive_cli_int(args: list[str], flag: str, *, default: int = 1) -> int:
@@ -215,6 +286,45 @@ def _worker_gpu_limit(resources: dict[str, Any] | None) -> int:
     if value <= 0:
         raise ValueError("The resolved vLLM worker GPU limit must be positive")
     return value
+
+
+def _force_disable_allreduce_fusion(args: list[str]) -> None:
+    # Guard: (HANG) multinode vLLM without an MNNVL fabric has no working
+    # fused-allreduce path in the pinned engine: backend auto-selection picks
+    # mnnvl unconditionally (vllm flashinfer_all_reduce.py:119) and hangs at
+    # the first cross-node collective without NVSwitch multicast, while the
+    # trtllm backend refuses multi-node outright and no environment variable
+    # can turn the fusion off. Disable the fusion pass so allreduce falls
+    # back to NCCL; single-node and MNNVL-fabric systems keep the fusion.
+    flag = "--compilation-config"
+    occurrences: list[tuple[int, bool]] = []
+    for index, token in enumerate(args):
+        if token == flag:
+            if index + 1 >= len(args) or args[index + 1].startswith("--"):
+                raise ValueError(f"{flag} requires a value")
+            occurrences.append((index + 1, False))
+        elif token.startswith(f"{flag}="):
+            occurrences.append((index, True))
+    if len(occurrences) > 1:
+        raise ValueError(f"FPM accepts at most one {flag} option")
+    disabled = {"fuse_allreduce_rms": False}
+    if not occurrences:
+        args.extend([flag, json.dumps({"pass_config": disabled}, sort_keys=True, separators=(",", ":"))])
+        return
+    index, joined = occurrences[0]
+    raw = args[index].split("=", 1)[1] if joined else args[index]
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{flag} must contain a JSON object") from exc
+    if not isinstance(config, dict):
+        raise TypeError(f"{flag} must contain a JSON object")
+    pass_config = config.setdefault("pass_config", {})
+    if not isinstance(pass_config, dict):
+        raise TypeError(f"{flag} pass_config must be a JSON object")
+    pass_config.update(disabled)
+    value = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    args[index] = f"{flag}={value}" if joined else value
 
 
 def _resolve_topology(context: dict[str, Any], worker: DGDService, args: list[str]) -> dict[str, int]:
@@ -280,12 +390,16 @@ def _require_main_container(worker: DGDService) -> MainContainer:
     return pod_spec.main_container
 
 
-def _collect_concrete_env(worker: DGDService, main_container: MainContainer) -> list[tuple[str, str]]:
+def _collect_concrete_env(
+    worker: DGDService,
+    main_container: MainContainer,
+) -> tuple[list[tuple[str, str]], str | None]:
     # build_dgd sets the operator-only envFromSecret="hf-token-secret" on
     # every vLLM worker. FPM V1 intentionally accepts only concrete values:
     # it cannot safely materialize a Secret into run.sh, and rejecting that
     # built-in marker would make every FPM render fail.
     resolved: list[tuple[str, str]] = []
+    barrier_timeout_override: str | None = None
     entries = list(worker.envs or []) + list(main_container.env or [])
     for entry in entries:
         if not isinstance(entry, dict):
@@ -296,17 +410,28 @@ def _collect_concrete_env(worker: DGDService, main_container: MainContainer) -> 
         name = entry.get("name")
         if not isinstance(name, str) or not _ENV_NAME_RE.fullmatch(name):
             raise ValueError(f"Invalid shell environment variable name: {name!r}")
+        if name in FPM_ENV_EXPORTED_VARS:
+            # An export in run.sh would shadow the fpm_env.sh contract value
+            # for the engine while the collection runtime keeps the original,
+            # splitting the engine's flags from the gate's expectations.
+            raise ValueError(f"Environment variable {name} is a reserved FPM contract variable")
         if "value" not in entry or entry["value"] is None:
             raise ValueError(f"Environment variable {name} must have a concrete value")
 
         value = entry["value"]
         if isinstance(value, bool):
-            resolved.append((name, "true" if value else "false"))
+            text = "true" if value else "false"
         elif isinstance(value, (str, int, float)):
-            resolved.append((name, str(value)))
+            text = str(value)
         else:
             raise TypeError(f"Environment variable {name} must have a scalar value")
-    return resolved
+        if name == FPM_BARRIER_TIMEOUT_ENV:
+            # The DP completion barrier lives in the collection runtime, which
+            # sources fpm_env.sh; an export in run.sh would never reach it.
+            barrier_timeout_override = text
+            continue
+        resolved.append((name, text))
+    return resolved, barrier_timeout_override
 
 
 def _cli_option_value(args: list[str], flag: str) -> str | None:
@@ -353,21 +478,24 @@ def _last_env_value(env: list[tuple[str, str]], name: str) -> str | None:
 def _ensure_benchmark_output_path(args: list[str], env: list[tuple[str, str]]) -> str:
     flag = "--benchmark-output-path"
     cli_value = _cli_option_value(args, flag)
-    env_value = _last_env_value(env, "DYN_FPM_BENCHMARK_OUTPUT_PATH")
+    env_value = _last_env_value(env, FPM_ENGINE_BENCHMARK_OUTPUT_ENV)
     if cli_value is not None and env_value is not None and cli_value != env_value:
-        raise ValueError(f"{flag} and DYN_FPM_BENCHMARK_OUTPUT_PATH must resolve to the same path")
+        raise ValueError(f"{flag} and {FPM_ENGINE_BENCHMARK_OUTPUT_ENV} must resolve to the same path")
     value = cli_value if cli_value is not None else env_value
 
     if value is None:
-        value = "/results/benchmark.json"
+        value = f"{FPM_RESULTS_DIR}/benchmark.json"
     if not value:
         raise ValueError(f"{flag} must not be empty")
+    # Fail closed on paths collector discovery could never find (Ethan's
+    # cross-boundary review finding on the result-path contract).
+    fpm_validate_benchmark_output_path(value)
     if cli_value is None:
         # Waiting for an output path that the engine does not know about would
         # hang forever.  Make the V1 default explicit in the resolved command.
         args.extend([flag, value])
     if env_value is None:
-        env.append(("DYN_FPM_BENCHMARK_OUTPUT_PATH", value))
+        env.append((FPM_ENGINE_BENCHMARK_OUTPUT_ENV, value))
     return value
 
 
@@ -386,17 +514,82 @@ def _benchmark_wait_timeout_seconds(args: list[str]) -> int:
     return benchmark_timeout + 600
 
 
-def _render_run_script(
-    command: list[str],
-    env: list[tuple[str, str]],
+def _render_env_script(
     benchmark_mode: str,
     benchmark_output_path: str,
     wait_timeout_seconds: int,
     topology: dict[str, int],
+    *,
+    barrier_timeout_override: str | None = None,
+) -> str:
+    lines = [
+        "#!/usr/bin/env bash",
+        "# Rendered by the Generator FPM target. Sourced (not executed) by both the",
+        "# collector's in-pod runtime and the generated run.sh. Exports exactly the",
+        "# variables listed in fpm_contract.FPM_ENV_EXPORTED_VARS.",
+        f"export FPM_NODE_COUNT={topology['node_count']}",
+        f"export FPM_DATA_PARALLEL_SIZE={topology['data_parallel_size']}",
+        f"export FPM_LOCAL_DATA_PARALLEL_SIZE={topology['local_data_parallel_size']}",
+        f"export FPM_BENCHMARK_MODE={shlex.quote(benchmark_mode)}",
+        f"export FPM_BENCHMARK_OUTPUT_PATH={shlex.quote(benchmark_output_path)}",
+        f"export FPM_WAIT_TIMEOUT_SECONDS={wait_timeout_seconds}",
+        f"export FPM_RESULT_SCHEMA_VERSION={FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION}",
+    ]
+    if barrier_timeout_override is not None:
+        # Operator tunable consumed by the collection runtime's DP barrier;
+        # it travels here (not run.sh) because the runtime sources this file.
+        lines.append(f"export {FPM_BARRIER_TIMEOUT_ENV}={shlex.quote(barrier_timeout_override)}")
+    lines += [
+        "",
+        "if (( FPM_NODE_COUNT > 1 )); then",
+        '  fpm_node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-}}}"',
+        '  fpm_master_addr="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-}}"',
+        '  if [[ -z "$fpm_master_addr" && -n "${GROVE_PCLQ_NAME:-}" && -n "${GROVE_HEADLESS_SERVICE:-}" ]]; then',
+        '    fpm_master_addr="${GROVE_PCLQ_NAME}-0.${GROVE_HEADLESS_SERVICE}"',
+        "  fi",
+        '  if [[ -z "$fpm_node_rank" || -z "$fpm_master_addr" ]]; then',
+        '    echo "Multinode FPM requires rank and leader discovery from FPM_NODE_*, LWS, or Grove" >&2',
+        "    exit 2",
+        "  fi",
+        "else",
+        '  fpm_node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-}}}"',
+        '  fpm_master_addr="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-}}"',
+        '  if [[ -z "$fpm_master_addr" && -n "${GROVE_PCLQ_NAME:-}" && -n "${GROVE_HEADLESS_SERVICE:-}" ]]; then',
+        '    fpm_master_addr="${GROVE_PCLQ_NAME}-0.${GROVE_HEADLESS_SERVICE}"',
+        "  fi",
+        "  # Defaults apply only to a fully undiscovered environment; a partial",
+        "  # answer is a misconfigured orchestrator and must fail closed.",
+        '  if [[ -z "$fpm_node_rank" && -z "$fpm_master_addr" \\',
+        '    && -z "${GROVE_PCLQ_NAME:-}" && -z "${GROVE_HEADLESS_SERVICE:-}" ]]; then',
+        "    fpm_node_rank=0",
+        "    fpm_master_addr=127.0.0.1",
+        '  elif [[ -z "$fpm_node_rank" || -z "$fpm_master_addr" ]]; then',
+        '    echo "FPM runtime requires complete rank and leader discovery from FPM_NODE_*, LWS, or Grove" >&2',
+        "    exit 2",
+        "  fi",
+        "fi",
+        'if ! [[ "$fpm_node_rank" =~ ^[0-9]+$ ]] || (( fpm_node_rank >= FPM_NODE_COUNT )); then',
+        '  echo "Invalid FPM node rank: $fpm_node_rank (node_count=$FPM_NODE_COUNT)" >&2',
+        "  exit 2",
+        "fi",
+        'export FPM_NODE_RANK="$fpm_node_rank"',
+        'export FPM_MASTER_ADDR="$fpm_master_addr"',
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_run_script(
+    command: list[str],
+    env: list[tuple[str, str]],
 ) -> str:
     lines = [
         "#!/usr/bin/env bash",
         "set -Eeuo pipefail",
+        "",
+        "# fpm_env.sh owns every render-time collection fact (topology, rank and",
+        "# leader discovery, benchmark identity); discovery failures exit 2 here.",
+        f'source "$(dirname "${{BASH_SOURCE[0]}}")/{FPM_ENV_FILENAME}"',
         "",
         "ulimit -l unlimited || true",
         "ulimit -n 1048576 || true",
@@ -407,226 +600,47 @@ def _render_run_script(
     lines.extend(
         [
             "",
-            f"node_count={topology['node_count']}",
-            f"data_parallel_size={topology['data_parallel_size']}",
-            f"local_data_parallel_size={topology['local_data_parallel_size']}",
-            "if (( node_count > 1 )); then",
-            '  node_rank="${LWS_WORKER_INDEX:?LWS_WORKER_INDEX is required for multinode FPM}"',
-            '  master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"',
-            "else",
-            '  node_rank="${LWS_WORKER_INDEX:-0}"',
-            '  master_addr="${LWS_LEADER_ADDRESS:-127.0.0.1}"',
+            "# FlashInfer downloads missing cubins at first use; its default cache",
+            "# lives inside site-packages, which is read-only in the deployed image",
+            "# and crashes every engine worker with EACCES. Default the cache to the",
+            "# writable model-cache volume so pods reuse previously fetched cubins.",
+            'if [[ -z "${FLASHINFER_CUBIN_DIR:-}" && -n "${HF_HOME:-}" ]]; then',
+            '  export FLASHINFER_CUBIN_DIR="${HF_HOME}/flashinfer-cubins"',
             "fi",
-            'if ! [[ "$node_rank" =~ ^[0-9]+$ ]] || (( node_rank >= node_count )); then',
-            '  echo "Invalid FPM node rank: $node_rank (node_count=$node_count)" >&2',
-            "  exit 2",
-            "fi",
-            'export DYN_FPM_WORKER_ID="${DYN_FPM_WORKER_ID:-${FPM_RUN_ID:-fpm}-node${node_rank}}"',
-            f"benchmark_mode={shlex.quote(benchmark_mode)}",
-            f"benchmark_output_path={shlex.quote(benchmark_output_path)}",
-            f"wait_timeout_seconds={wait_timeout_seconds}",
+        ]
+    )
+
+    lines.extend(
+        [
+            "",
+            'export DYN_FPM_WORKER_ID="${DYN_FPM_WORKER_ID:-${FPM_RUN_ID:-fpm}-node${FPM_NODE_RANK}}"',
             f"engine_command=({' '.join(shlex.quote(token) for token in command)})",
             'for index in "${!engine_command[@]}"; do',
-            f'  engine_command[$index]="${{engine_command[$index]//{_NODE_RANK_SENTINEL}/$node_rank}}"',
+            f'  engine_command[$index]="${{engine_command[$index]//{_NODE_RANK_SENTINEL}/$FPM_NODE_RANK}}"',
             "done",
             "",
-            "if (( node_count > 1 )); then",
-            "  if (( data_parallel_size > 1 )); then",
-            '    engine_command+=(--data-parallel-size-local "$local_data_parallel_size")',
-            '    engine_command+=(--data-parallel-start-rank "$((node_rank * local_data_parallel_size))")',
-            '    engine_command+=(--data-parallel-address "$master_addr" --data-parallel-rpc-port 29510)',
+            "if (( FPM_NODE_COUNT > 1 )); then",
+            "  if (( FPM_DATA_PARALLEL_SIZE > 1 )); then",
+            '    engine_command+=(--data-parallel-size-local "$FPM_LOCAL_DATA_PARALLEL_SIZE")',
+            '    engine_command+=(--data-parallel-start-rank "$((FPM_NODE_RANK * FPM_LOCAL_DATA_PARALLEL_SIZE))")',
+            '    engine_command+=(--data-parallel-address "$FPM_MASTER_ADDR" --data-parallel-rpc-port 29510)',
             "    engine_command+=(--data-parallel-hybrid-lb)",
             "  else",
-            '    engine_command+=(--nnodes "$node_count" --node-rank "$node_rank")',
-            '    engine_command+=(--master-addr "$master_addr" --master-port 29500)',
-            "    if (( node_rank > 0 )); then",
-            '      exec "${engine_command[@]}" --headless',
+            '    engine_command+=(--nnodes "$FPM_NODE_COUNT" --node-rank "$FPM_NODE_RANK")',
+            '    engine_command+=(--master-addr "$FPM_MASTER_ADDR" --master-port 29500)',
+            "    if (( FPM_NODE_RANK > 0 )); then",
+            "      # Headless followers never write results; classifying their exit",
+            "      # against the leader's teardown belongs to the collector runtime.",
+            "      engine_command+=(--headless)",
             "    fi",
             "  fi",
             "fi",
             "",
-            "benchmark_path_for_dp_rank() {",
-            "  local dp_rank=$1",
-            '  local directory=""',
-            '  local filename="$benchmark_output_path"',
-            '  if [[ "$benchmark_output_path" == */* ]]; then',
-            '    directory="${benchmark_output_path%/*}/"',
-            '    filename="${benchmark_output_path##*/}"',
-            "  fi",
-            "  if (( dp_rank == 0 )); then",
-            '    printf "%s\\n" "$benchmark_output_path"',
-            '  elif [[ "$filename" == *.* ]]; then',
-            '    printf "%s%s_dp%s.%s\\n" "$directory" "${filename%.*}" "$dp_rank" "${filename##*.}"',
-            "  else",
-            '    printf "%s%s_dp%s\\n" "$directory" "$filename" "$dp_rank"',
-            "  fi",
-            "}",
-            "",
-            "expected_results=()",
-            "local_dp_start=$((node_rank * local_data_parallel_size))",
-            "local_dp_end=$((local_dp_start + local_data_parallel_size))",
-            "for ((dp_rank=local_dp_start; dp_rank<local_dp_end; dp_rank++)); do",
-            '  expected_results+=("$(benchmark_path_for_dp_rank "$dp_rank")")',
-            "done",
-            'for path in "${expected_results[@]}"; do',
-            '  if [[ -e "$path" || -L "$path" ]]; then',
-            '    echo "Refusing to overwrite existing benchmark output: $path" >&2',
-            "    exit 1",
-            "  fi",
-            '  mkdir -p -- "$(dirname -- "$path")"',
-            "done",
-            "",
-            "check_result_files() {",
-            '  python3 - "$local_dp_start" "$benchmark_mode" "${expected_results[@]}" <<\'PY\'',
-            "import json",
-            "import pathlib",
-            "import sys",
-            "",
-            "start_rank = int(sys.argv[1])",
-            "expected_mode = sys.argv[2]",
-            'allowed_point_types = {"prefill", "decode"} if expected_mode == "agg" else {expected_mode}',
-            "",
-            "def invalid(path, message):",
-            '    print(f"Invalid FPM benchmark result {path}: {message}", file=sys.stderr)',
-            "    raise SystemExit(20)",
-            "",
-            "def validate_schema_v1(path, value, expected_rank):",
-            '    if value.get("status") != "complete" or value.get("valid") is not True:',
-            "        invalid(path,",
-            "                f\"schema_version=1 status={value.get('status')!r} \"",
-            "                f\"valid={value.get('valid')!r} errors={value.get('errors')!r}\")",
-            '    config = value.get("config")',
-            '    actual_mode = config.get("mode") if isinstance(config, dict) else None',
-            "    if actual_mode != expected_mode:",
-            '        invalid(path, f"benchmark mode {actual_mode!r} != {expected_mode!r}")',
-            '    coverage = value.get("coverage")',
-            "    if not isinstance(coverage, dict):",
-            '        invalid(path, "coverage must be an object")',
-            '    expected_points = coverage.get("expected_points")',
-            '    completed_points = coverage.get("completed_points")',
-            '    skipped_points = coverage.get("skipped_points")',
-            "    if (type(expected_points) is not int or expected_points <= 0",
-            "            or type(completed_points) is not int or completed_points != expected_points",
-            "            or type(skipped_points) is not int or skipped_points != 0):",
-            '        invalid(path, f"invalid coverage {coverage!r}")',
-            '    results = value.get("results")',
-            "    result_count = len(results) if isinstance(results, list) else None",
-            "    if not isinstance(results, list) or result_count != completed_points:",
-            '        invalid(path, f"results count {result_count!r} != {completed_points!r}")',
-            "    observed_ranks = set()",
-            "    for result in results:",
-            "        if not isinstance(result, dict):",
-            '            invalid(path, "result entry must be an object")',
-            '        point = result.get("point")',
-            '        point_type = point.get("point_type") if isinstance(point, dict) else None',
-            "        if point_type not in allowed_point_types:",
-            '            invalid(path, f"point type {point_type!r} is not valid for {expected_mode!r}")',
-            '        fpms = result.get("fpms")',
-            "        if not isinstance(fpms, list) or not fpms:",
-            '            invalid(path, "each result must contain at least one FPM sample")',
-            "        for fpm in fpms:",
-            '            rank = fpm.get("dp_rank") if isinstance(fpm, dict) else None',
-            "            if type(rank) is not int:",
-            '                invalid(path, f"invalid FPM dp_rank {rank!r}")',
-            "            observed_ranks.add(rank)",
-            "    if observed_ranks != {expected_rank}:",
-            '        invalid(path, f"FPM dp_ranks {sorted(observed_ranks)!r} != [{expected_rank}]")',
-            "",
-            "def validate_legacy_schema_v2(path, value, expected_rank):",
-            '    if value.get("status") != "passed":',
-            "        invalid(path,",
-            "                f\"schema_version=2 status={value.get('status')!r} \"",
-            "                f\"errors={value.get('errors')!r}\")",
-            '    config = value.get("config")',
-            '    actual_rank = config.get("dp_rank") if isinstance(config, dict) else None',
-            "    if actual_rank != expected_rank:",
-            '        invalid(path, f"FPM dp_rank {actual_rank!r} != {expected_rank}")',
-            "",
-            "for offset, raw_path in enumerate(sys.argv[3:]):",
-            "    path = pathlib.Path(raw_path)",
-            "    if not path.is_file() or path.stat().st_size == 0:",
-            "        raise SystemExit(10)",
-            "    try:",
-            '        value = json.loads(path.read_text(encoding="utf-8"))',
-            "    except (OSError, json.JSONDecodeError):",
-            "        raise SystemExit(10)",
-            "    if not isinstance(value, dict):",
-            '        invalid(path, f"top-level JSON must be an object, got {type(value).__name__}")',
-            "    expected_rank = start_rank + offset",
-            '    schema_version = value.get("schema_version")',
-            "    if schema_version == 1:",
-            "        validate_schema_v1(path, value, expected_rank)",
-            "    elif schema_version == 2:",
-            "        validate_legacy_schema_v2(path, value, expected_rank)",
-            "    else:",
-            '        invalid(path, f"unsupported schema_version {schema_version!r}")',
-            "PY",
-            "}",
-            "",
-            'engine_pid=""',
-            "engine_shutdown_grace_seconds=30",
-            "terminate_engine() {",
-            "  local pid=$1",
-            '  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true',
-            "  local shutdown_deadline=$((SECONDS + engine_shutdown_grace_seconds))",
-            '  while kill -0 "$pid" 2>/dev/null || kill -0 -- "-$pid" 2>/dev/null; do',
-            "    if (( SECONDS >= shutdown_deadline )); then",
-            '      echo "Engine did not stop within ${engine_shutdown_grace_seconds}s; sending SIGKILL" >&2',
-            '      kill -KILL -- "-$pid" 2>/dev/null || true',
-            '      kill -KILL "$pid" 2>/dev/null || true',
-            "      break",
-            "    fi",
-            "    sleep 1",
-            "  done",
-            '  wait "$pid" 2>/dev/null || true',
-            "}",
-            "cleanup() {",
-            "  local status=$?",
-            "  trap - EXIT INT TERM",
-            '  if [[ -n "${engine_pid:-}" ]]; then',
-            '    terminate_engine "$engine_pid"',
-            "  fi",
-            '  exit "$status"',
-            "}",
-            "trap cleanup EXIT",
-            "trap 'exit 130' INT",
-            "trap 'exit 143' TERM",
-            "",
-            "python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \"${engine_command[@]}\" &",
-            "engine_pid=$!",
-            "deadline=$((SECONDS + wait_timeout_seconds))",
-            "",
-            "while true; do",
-            "  set +e",
-            "  check_result_files",
-            "  result_status=$?",
-            "  set -e",
-            "  if (( result_status == 0 )); then",
-            "    break",
-            "  fi",
-            "  if (( result_status == 20 )); then",
-            "    exit 1",
-            "  fi",
-            '  if ! kill -0 "$engine_pid" 2>/dev/null; then',
-            "    set +e",
-            '    wait "$engine_pid"',
-            "    engine_status=$?",
-            "    set -e",
-            '    terminate_engine "$engine_pid"',
-            '    engine_pid=""',
-            '    echo "Engine exited before writing all FPM benchmark outputs" >&2',
-            '    if (( engine_status == 0 )); then exit 1; else exit "$engine_status"; fi',
-            "  fi",
-            "  if (( SECONDS >= deadline )); then",
-            '    echo "Timed out waiting for all FPM benchmark outputs" >&2',
-            "    exit 124",
-            "  fi",
-            "  sleep 2",
-            "done",
-            "",
-            'terminate_engine "$engine_pid"',
-            'engine_pid=""',
-            "trap - EXIT INT TERM",
+            "# Replace this shell so run.sh's exit code is the engine's exit code;",
+            "# setsid makes the engine its process-group leader so the collector",
+            "# runtime can terminate the whole group.",
+            "exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])'"
+            ' "${engine_command[@]}"',
             "",
         ]
     )
@@ -639,17 +653,26 @@ def _lower_worker_to_resource(
     main_container: MainContainer,
     topology: dict[str, int],
     *,
+    orchestrator: str,
+    compute_domain: ComputeDomainDoc | None,
+    preserve_compute_domain: bool,
     efa_resource_name: str | None,
 ) -> dict[str, Any]:
     k8s = context.get("K8sConfig") or {}
     if not isinstance(k8s, dict):
         raise TypeError("K8sConfig must be a mapping")
+    compute_domain_channel = compute_domain.channel_name if compute_domain is not None else None
+    if compute_domain_channel is not None and (
+        not isinstance(compute_domain_channel, str) or not compute_domain_channel
+    ):
+        raise ValueError("FPM ComputeDomain requires a non-empty resource claim template name")
     pod_spec = _lower_worker_pod_spec(
         worker,
         main_container,
         topology["gpus_per_node"],
         shared_memory_size=k8s.get("fpm_shared_memory_size"),
-        compute_domain_name=(f"{context.get('name')}-compute-domain-channel" if topology["node_count"] > 1 else None),
+        compute_domain_name=compute_domain_channel,
+        preserve_compute_domain=preserve_compute_domain,
         efa_resource_name=efa_resource_name,
     )
     metadata = _resource_metadata(context)
@@ -662,8 +685,34 @@ def _lower_worker_to_resource(
         }
 
     if len(metadata["name"]) > 50:
-        raise ValueError("FPM LeaderWorkerSet names must be at most 50 characters")
+        raise ValueError("FPM multi-node resource names must be at most 50 characters")
     pod_labels = copy.deepcopy(metadata["labels"])
+    if orchestrator == "grove":
+        return {
+            "apiVersion": "grove.io/v1alpha1",
+            "kind": "PodCliqueSet",
+            "metadata": metadata,
+            "spec": {
+                "replicas": 1,
+                "template": {
+                    "cliqueStartupType": "CliqueStartupTypeAnyOrder",
+                    "headlessServiceConfig": {"publishNotReadyAddresses": True},
+                    "cliques": [
+                        {
+                            "name": "worker",
+                            "labels": pod_labels,
+                            "spec": {
+                                "roleName": "worker",
+                                "replicas": topology["node_count"],
+                                "minAvailable": topology["node_count"],
+                                "podSpec": pod_spec,
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+
     pod_template = {
         "metadata": {"labels": pod_labels},
         "spec": pod_spec,
@@ -684,6 +733,22 @@ def _lower_worker_to_resource(
             },
         },
     }
+
+
+def _resource_documents(
+    workload: dict[str, Any],
+    compute_domain: ComputeDomainDoc | None,
+    topology: dict[str, int],
+    *,
+    preserve_compute_domain: bool,
+) -> list[dict[str, Any]]:
+    if not preserve_compute_domain:
+        return [workload]
+    if topology["node_count"] <= 1:
+        raise ValueError("FPM single-node workload must not require a ComputeDomain document")
+    if compute_domain is None:
+        raise ValueError("FPM multinode workload requires a ComputeDomain document")
+    return [compute_domain.to_dict(), workload]
 
 
 def _resource_metadata(context: dict[str, Any]) -> dict[str, Any]:
@@ -718,8 +783,8 @@ def _resource_metadata(context: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-def _drop_compute_domain_claims(pod_spec: dict[str, Any], expected_template_name: str | None) -> None:
-    claims = pod_spec.pop("resourceClaims", None) or []
+def _validate_compute_domain_claims(pod_spec: dict[str, Any], expected_template_name: str | None) -> None:
+    claims = pod_spec.get("resourceClaims") or []
     if not isinstance(claims, list):
         raise TypeError("Pod resourceClaims must be a list")
     expected = (
@@ -743,6 +808,7 @@ def _lower_worker_pod_spec(
     *,
     shared_memory_size: Any = None,
     compute_domain_name: str | None = None,
+    preserve_compute_domain: bool = False,
     efa_resource_name: str | None = None,
 ) -> dict[str, Any]:
     extra_pod_spec = worker.extra_pod_spec
@@ -751,7 +817,9 @@ def _lower_worker_pod_spec(
 
     pod_spec = extra_pod_spec.to_dict()
     pod_spec.pop("mainContainer", None)
-    _drop_compute_domain_claims(pod_spec, compute_domain_name)
+    _validate_compute_domain_claims(pod_spec, compute_domain_name)
+    if not preserve_compute_domain:
+        pod_spec.pop("resourceClaims", None)
 
     container = main_container.to_dict()
     if container.get("envFrom"):
@@ -782,7 +850,7 @@ def _lower_worker_pod_spec(
         volumes,
         volume_mounts,
         name="results",
-        mount_path="/results",
+        mount_path=FPM_RESULTS_DIR,
         volume_source={"emptyDir": {}},
     )
 
@@ -816,6 +884,7 @@ def _lower_worker_pod_spec(
                     worker.resources,
                     gpu_limit=gpus_per_node,
                     allow_compute_domain_claim=compute_domain_name is not None,
+                    preserve_compute_domain_claim=preserve_compute_domain,
                     efa_resource_name=efa_resource_name,
                 ),
                 resource_override,
@@ -838,6 +907,7 @@ def _lower_resources(
     *,
     gpu_limit: int,
     allow_compute_domain_claim: bool,
+    preserve_compute_domain_claim: bool,
     efa_resource_name: str | None,
 ) -> dict[str, Any]:
     if not isinstance(resources, dict):
@@ -850,6 +920,8 @@ def _lower_resources(
         raise ValueError("FPM does not support user-provided resource claims")
 
     lowered: dict[str, Any] = {}
+    if claims and preserve_compute_domain_claim:
+        lowered["claims"] = copy.deepcopy(claims)
     for section_name in ("limits", "requests"):
         section = resources.get(section_name)
         if section is None:
