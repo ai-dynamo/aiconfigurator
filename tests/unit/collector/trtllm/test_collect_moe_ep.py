@@ -95,17 +95,20 @@ def _retired_case_set(sm_version: int) -> set[tuple]:
         if recipe.tp != 1 or recipe.ep <= 1:
             continue
         moe_list = []
-        if 86 < sm_version < 100:
+        # rc20 chain (#1356): fp8_block floor moved to min_sm 90 (SM87-89 lost
+        # it, SM100+ gained it alongside nvfp4) and the two rc5-era SM120
+        # nvfp4 kernel-limit skips were removed (hardware-verified clean).
+        if sm_version >= 90:
             moe_list += ["fp8_block"]
         if sm_version >= 100:
             moe_list += ["nvfp4"]
         for moe_type in moe_list:
-            for use_eplb, num_slots in ((False, recipe.num_experts), (True, recipe.num_experts), (True, 288)):
-                if moe_type == "nvfp4" and use_eplb and sm_version == 120:
-                    continue
+            eplb_configs = [(False, recipe.num_experts), (True, recipe.num_experts)]
+            if recipe.num_experts <= 288:
+                # replication identity: 384-expert models cannot lay out on 288 slots
+                eplb_configs.append((True, 288))
+            for use_eplb, num_slots in eplb_configs:
                 if num_slots % recipe.ep != 0:
-                    continue
-                if moe_type == "nvfp4" and sm_version >= 120 and num_slots // recipe.ep < recipe.topk:
                     continue
                 cases.add(
                     (
@@ -153,10 +156,12 @@ def test_deepseek_v3_population_counts_per_stage(monkeypatch):
     assert {case[0] for case in cases} == {"fp8_block"}
     # EPLB axis preserved exactly: baseline and redundant slot counts.
     assert {(case[13], case[14]) for case in cases} == {(False, 256), (True, 256), (True, 288)}
-    # Blackwell collects the same population under nvfp4.
-    nvfp4_cases = _getter(100)()
-    assert len(nvfp4_cases) == 42
-    assert {case[0] for case in nvfp4_cases} == {"nvfp4"}
+    # Blackwell collects BOTH quant modes since rc20 (#1356 moved the
+    # fp8_block floor to min_sm 90, so SM100 gains it alongside nvfp4):
+    # 16 recipes x 2 modes x 3 EPLB configs = 96, minus 2x6 slot drops.
+    sm100_cases = _getter(100)()
+    assert len(sm100_cases) == 84
+    assert {case[0] for case in sm100_cases} == {"fp8_block", "nvfp4"}
 
 
 def test_population_is_identical_to_the_retired_getter(monkeypatch):
@@ -176,7 +181,8 @@ def test_pre_hopper_sm_expands_to_zero_with_an_explained_drop(monkeypatch, capsy
     assert _getter(80)() == []
     out = capsys.readouterr().out
     assert "0 cases from 117 moe recipes" in out
-    assert "-> 16 recipes kept) x 0 quant mode(s) x 3 EPLB configs = 0 expanded" in out
+    assert "x 0 quant mode(s) x 2-3 EPLB configs" in out
+    assert "= 0 expanded" in out
 
 
 def test_sm90_42_case_reconciliation_is_log_pinned(monkeypatch, capsys):
@@ -189,26 +195,33 @@ def test_sm90_42_case_reconciliation_is_log_pinned(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert len(cases) == 42
     assert "moe_ep: 42 cases from 117 moe recipes" in out
-    assert "-> 16 recipes kept) x 1 quant mode(s) x 3 EPLB configs" in out
-    assert "= 48 expanded - 6 num_slots%ep!=0 - 0 SM120 nvfp4 kernel limits" in out
+    assert "-> 16 recipes kept) x 1 quant mode(s) x 2-3 EPLB configs" in out
+    assert "= 48 expanded - 6 num_slots%ep!=0" in out
 
 
-def test_sm120_nvfp4_kernel_limit_drops_are_counted(monkeypatch, capsys):
+def test_sm120_collects_both_quants_with_no_kernel_limit_drops(monkeypatch, capsys):
+    # The rc5-era SM120 nvfp4 kernel-limit drops are gone (rc20,
+    # hardware-verified on RTX PRO 6000 2026-07-26 — see the getter's note),
+    # and rc20's min_sm 90 floor gives SM120 fp8_block alongside nvfp4:
+    # 16 recipes x 2 modes x 3 EPLB configs = 96, minus 2x6 slot drops.
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     cases = _getter(120)()
     out = capsys.readouterr().out
-    assert len(cases) == 10
-    # The log line reconciles arithmetically: 16 recipes x 1 mode x 3 EPLB
-    # configs = 48 expanded, minus 6 slot-alignment and 32 kernel-limit drops.
-    assert "= 48 expanded - 6 num_slots%ep!=0 - 32 SM120 nvfp4 kernel limits" in out
-    # The surviving SM120 cases are all EPLB-off with enough slots per rank.
-    assert all(case[13] is False for case in cases)
+    assert len(cases) == 84
+    assert {case[0] for case in cases} == {"fp8_block", "nvfp4"}
+    assert "= 96 expanded - 12 num_slots%ep!=0" in out
+    # The EPLB axis survives in full on SM120 now.
+    assert {case[13] for case in cases} == {False, True}
 
 
 def test_full_population_covers_every_declared_wideep_model(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     cases = _getter(90)()
-    assert len(cases) == 820
+    # 770 at the dc4caca merge-base: rc20 (#1356) restricts the (True, 288)
+    # EPLB layout to models with <= 288 experts (replication identity), so
+    # the five 384-expert entries (Kimi-K2/K2.5 trio, DeepSeek-V4-Pro pair)
+    # collect 28 instead of 38 cases each.
+    assert len(cases) == 770
     models = {case[10] for case in cases}
     assert "deepseek-ai/DeepSeek-V3" in models
     assert "moonshotai/Kimi-K2-Instruct" in models  # the 384-expert family
@@ -259,7 +272,7 @@ def test_row_builder_emits_the_frozen_moe_ep_payload(tmp_path, moe_ep_symbols):
     assert log_perf(
         item_list=[row],
         framework="TRTLLM",
-        version="1.3.0rc10",
+        version="1.3.0rc20",
         device_name="NVIDIA GB200",
         op_name=moe_ep_symbols["MOE_EP_OP_NAME"],
         # kernel_source stays the framework-dispatch ground truth the module
@@ -280,7 +293,7 @@ def test_row_builder_emits_the_frozen_moe_ep_payload(tmp_path, moe_ep_symbols):
     record = table.to_pylist()[0]
     assert record == {
         "framework": "TRTLLM",
-        "version": "1.3.0rc10",
+        "version": "1.3.0rc20",
         "device": "NVIDIA GB200",
         "op_name": "moe_ep",
         "kernel_source": "wideep_compute_cutlass",
@@ -358,7 +371,7 @@ def test_both_phase_rows_share_one_table(tmp_path, moe_ep_symbols):
             latency_ms=1.5,
         ),
         framework="TRTLLM",
-        version="1.3.0rc10",
+        version="1.3.0rc20",
         device_name="NVIDIA GB200",
         op_name="moe_ep",
         kernel_source="wideep_compute_cutlass",
@@ -393,10 +406,10 @@ def test_registry_exposes_moe_ep_and_retires_trtllm_moe_wideep():
 def test_moe_ep_alone_resolves_to_the_wideep_trtllm_pin():
     from collector.framework_manifest import require_collector_runtime
 
-    runtime = require_collector_runtime("trtllm", "1.3.0rc10", requested_ops={"moe_ep"}, wideep_ops={"moe_ep"})
+    runtime = require_collector_runtime("trtllm", "1.3.0rc20", requested_ops={"moe_ep"}, wideep_ops={"moe_ep"})
     assert runtime.framework == "wideep_trtllm"
     assert runtime.workload == "wideep"
-    assert runtime.version == "1.3.0rc10"
+    assert runtime.version == "1.3.0rc20"
 
 
 def test_same_pin_mixing_with_stock_trtllm_ops_is_accepted():
@@ -408,10 +421,10 @@ def test_same_pin_mixing_with_stock_trtllm_ops_is_accepted():
     from collector.framework_manifest import require_collector_runtime
 
     mixed = require_collector_runtime(
-        "trtllm", "1.3.0rc10", requested_ops={"moe", "gemm", "moe_ep"}, wideep_ops={"moe_ep"}
+        "trtllm", "1.3.0rc20", requested_ops={"moe", "gemm", "moe_ep"}, wideep_ops={"moe_ep"}
     )
-    stock = require_collector_runtime("trtllm", "1.3.0rc10", requested_ops={"moe", "gemm"}, wideep_ops={"moe_ep"})
-    assert mixed.version == stock.version == "1.3.0rc10"
+    stock = require_collector_runtime("trtllm", "1.3.0rc20", requested_ops={"moe", "gemm"}, wideep_ops={"moe_ep"})
+    assert mixed.version == stock.version == "1.3.0rc20"
     assert mixed.images == stock.images
 
 
