@@ -145,8 +145,10 @@ class TestExtraEngineArgsMode:
         assert "cache_transceiver_config" not in engine_yaml["kv_cache_config"]
 
     @pytest.mark.parametrize("version", [None, "1.3.0rc1"])
-    def test_disagg_cache_transceiver_config_is_top_level(self, version):
+    @pytest.mark.parametrize("backend", [None, "UCX", "NIXL", "MPI"], ids=["DEFAULT", "UCX", "NIXL", "MPI"])
+    def test_disagg_cache_transceiver_config_is_top_level(self, version, backend):
         """Keep valid disagg cache transceiver settings outside kv_cache_config."""
+        cache_transceiver_config = {"backend": backend} if backend is not None else {}
         params = _build_params(
             DynConfig={"mode": "disagg"},
             WorkerConfig={
@@ -164,6 +166,7 @@ class TestExtraEngineArgsMode:
                     "max_num_tokens": 8192,
                     "kv_cache_free_gpu_memory_fraction": 0.85,
                     "cache_transceiver_max_tokens_in_buffer": 4096,
+                    "cache_transceiver_config": cache_transceiver_config,
                     "gpus_per_worker": 1,
                 },
                 "decode": {
@@ -173,6 +176,7 @@ class TestExtraEngineArgsMode:
                     "max_num_tokens": 16384,
                     "kv_cache_free_gpu_memory_fraction": 0.80,
                     "cache_transceiver_max_tokens_in_buffer": 4096,
+                    "cache_transceiver_config": cache_transceiver_config,
                     "gpus_per_worker": 1,
                 },
             },
@@ -189,7 +193,7 @@ class TestExtraEngineArgsMode:
             engine_yaml = yaml.safe_load(artifacts[f"extra_engine_args_{role}.yaml"])
             assert "cache_transceiver_config" not in engine_yaml["kv_cache_config"]
             assert engine_yaml["cache_transceiver_config"] == {
-                "backend": "DEFAULT",
+                "backend": backend or "DEFAULT",
                 "max_tokens_in_buffer": 4096,
             }
 
