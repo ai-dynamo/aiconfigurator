@@ -443,6 +443,48 @@ fn fallback_regression_keeps_decode_fit_ready_when_ols_kv_slope_is_negative() {
         higher_kv >= lower_kv,
         "decode estimate must not decrease with KV load: lower={lower_kv}, higher={higher_kv}"
     );
+
+    let fewer_requests = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(24, 70_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    let more_requests = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(40, 70_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    assert!(
+        more_requests > fewer_requests,
+        "constrained fit must retain a positive decode load signal: fewer={fewer_requests}, more={more_requests}"
+    );
+}
+
+#[test]
+fn fallback_regression_rejects_intercept_only_fit_when_slopes_are_identifiable() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 4,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![decode_fpm(8, 10_000, 0.020)],
+            vec![decode_fpm(16, 10_000, 0.018)],
+            vec![decode_fpm(8, 20_000, 0.017)],
+            vec![decode_fpm(16, 20_000, 0.015)],
+        ])
+        .unwrap();
+
+    assert_eq!(
+        model.diagnostics().readiness,
+        ForwardPassPerfReadiness::InsufficientData
+    );
+    assert_eq!(
+        model
+            .estimate_forward_pass_time_ms(&[decode_fpm(12, 15_000, 0.0)])
+            .unwrap(),
+        None
+    );
 }
 
 #[test]

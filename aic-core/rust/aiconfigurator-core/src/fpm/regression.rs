@@ -173,10 +173,15 @@ fn fit_linear(
         }
     }
 
-    // An intercept-only boundary remains a valid constrained solution. This
-    // preserves readiness for deliberately small min-observation settings,
-    // while every workload slope still stays monotonic non-negative.
-    best.map(|(_, fit)| fit)
+    let fit = best.map(|(_, fit)| fit)?;
+    let is_underdetermined = observations.len() <= ndim;
+    let has_load_signal = fit.coefficients.iter().any(|coef| *coef > 0.0);
+
+    // Preserve explicitly configured low-observation behavior while the
+    // system is underdetermined. Once there are enough observations to
+    // identify the slopes, an intercept-only boundary has no usable load
+    // signal and must not make the model ready.
+    (is_underdetermined || has_load_signal).then_some(fit)
 }
 
 fn fit_linear_active_set(
