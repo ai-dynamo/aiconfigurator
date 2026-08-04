@@ -758,6 +758,33 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
         assert required_ops <= plan.selected_ops
 
 
+def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
+    # K3 has no trtllm serving lane. moe activation is framework-specific
+    # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
+    # planned-op zero-case expansion with no logged drop is structurally
+    # impossible (case_authoring.md; review 2026-08-04).
+    for backend in ("sglang", "vllm"):
+        plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K3")
+        assert "moe" in plan.selected_ops, backend
+    trtllm_plan = build_collection_case_plan(backend="trtllm", model_path="moonshotai/Kimi-K3")
+    assert "moe" not in trtllm_plan.selected_ops
+
+    # Cross-model trtllm sweeps (getter runs with no model filter) still see
+    # the K3 moe row: the declared empty trtllm allowlist rejects EVERY mode,
+    # and the trtllm getter logs the fully-dropped model instead of silently
+    # expanding to zero.
+    from collector.case_generator import get_moe_quantization_modes, moe_model_allows_quantization
+
+    modes = get_moe_quantization_modes(
+        "trtllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    )
+    assert modes  # the sweep itself is non-empty
+    for mode in modes:
+        assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K3", mode), mode
+
+
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
     from collector.case_generator import get_mla_module_sweep_spec
 

@@ -61,7 +61,15 @@ model_case_values:
       sglang_moe_backends:
         # kimi-k3 branch dispatch: Blackwell -> flashinfer_mxfp4
         # (trtllm-gen SiTU), SM90 -> marlin W4A16 (cookbook §2 MoE runner).
-        w4a16_mxfp4: {90: marlin, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
+        # SM89/120 keys made explicit (previously rode the base map's
+        # GPT-OSS-era citations): the branch's K3 moe-runner override fires
+        # on SM100/103 ONLY and otherwise leaves auto
+        # (arg_groups/overrides.py:479-504 @ c6ad1f26 — the flashinfer_mxfp4
+        # default is gated `get_device_sm() in (100, 103)`), so SM120
+        # resolves to the marlin W4A16 repack lane like SM90 and SM89 stays
+        # on the Triton default — matching the collected kernel_source truth
+        # (rtx marlin, l40s triton).
+        w4a16_mxfp4: {89: triton, 90: marlin, 100: flashinfer_mxfp4, 103: flashinfer_mxfp4, 120: marlin}
         # Blackwell serving truth: the branch's Mxfp4MoEMethod default
         # precision quantizes activations to mxfp8 (per_token_group_quant
         # group 32 / mxfp8_quantize -> trtllm_fp4_block_scale_moe,
@@ -74,8 +82,15 @@ model_case_values:
       framework_quantization:
         sglang:
           allowed_modes: [w4a16_mxfp4, w4a8_mxfp4_mxfp8]
+        # No trtllm K3 lane exists (review 2026-08-04): moe is activated only
+        # for sglang/vllm below, so a K3-scoped trtllm run plans no moe at
+        # all. The explicit empty allowlist keeps CROSS-MODEL trtllm sweeps
+        # (getter runs with no model filter) from planning K3 under the
+        # base ungated modes (bfloat16/fp8/...), and the trtllm getter now
+        # logs the fully-dropped model instead of silently expanding to
+        # zero (case_authoring.md).
         trtllm:
-          allowed_modes: [w4a16_mxfp4]
+          allowed_modes: []
         vllm:
           allowed_modes: [w4a16_mxfp4]
   mla:
@@ -124,12 +139,14 @@ model_case_values:
       num_v_heads: 12
       head_v_dim: 128
 
-all_frameworks_op_cases:
-  moe:
-    cases: all
-
+# moe is activated per-framework (NOT all_frameworks): K3 has no trtllm
+# serving lane, and an all-frameworks activation made a K3-scoped trtllm run
+# plan moe and expand it to zero cases with no logged drop (review
+# 2026-08-04; case_authoring.md forbids silent zero expansions).
 framework_specific_op_cases:
   vllm:
+    moe:
+      cases: all
     kda:
       cases: all
     attention_context:
@@ -141,6 +158,8 @@ framework_specific_op_cases:
     mla_bmm_gen_post:
       cases: all
   sglang:
+    moe:
+      cases: all
     attention_context:
       cases: all
     attention_generation:

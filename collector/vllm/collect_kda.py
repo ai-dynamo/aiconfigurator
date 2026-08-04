@@ -191,6 +191,23 @@ def run_kda_context_benchmark(
         for seq_len in seq_len_list:
             nt = batch_size * seq_len
             try:
+                # FIXME(kernel-limit): UNVERIFIED for vLLM. The pinned
+                # preview's source is not publicly addressable (version
+                # 0.1.dev19262+gb6bbf29dd; commit b6bbf29dd exists in no
+                # public vllm repo), and the era file at v0.24.0 computes
+                # token offsets from int64 strides
+                # (vllm/model_executor/layers/mamba/ops/causal_conv1d.py:39,47
+                # `stride_x_token: tl.int64` plus explicit .to(tl.int64)
+                # casts) — mainline vLLM establishes NO int32 token-offset
+                # limit, per-block or otherwise. This `nt * proj` bound is
+                # therefore a conservative unverified guard, deliberately
+                # NOT sglang's silicon-proven `nt * 3*proj` int32 limit
+                # (its Triton kernel offsets int32 across the 3-block
+                # buffer, causal_conv1d_triton.py:373-379). Silicon:
+                # identical 20-context + 1-generation guard spectrum on all
+                # eight systems; in-band cells pass (ledger 2026-08-01).
+                # Next preview/version bump: verify against the real branch
+                # source and either cite the limit or delete the guard.
                 if nt * proj >= 2**31:
                     raise ValueError(
                         f"causal_conv1d int32 token-offset overflow guard: total_tokens={nt} * proj={proj} >= 2**31"

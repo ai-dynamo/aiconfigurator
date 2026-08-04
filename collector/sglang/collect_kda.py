@@ -429,18 +429,23 @@ def run_kda_generation_benchmark(
             # to the fused kernel's own covered() probe and benchmark
             # whichever path it selects (True -> fused conv+recurrence+onorm
             # in one launch; False -> the Triton packed pair, serving's
-            # fallback). No shard shapes are replicated here — covered() is
-            # the framework's dispatch decision.
-            #
-            # SM90+ only: the JIT kernel emits mbarrier.try_wait.parity, which
-            # ptxas rejects below sm_90 ("requires .target sm_90 or higher",
-            # L40S/SM89 2026-08-01 — covered() accepts the shapes and the
-            # compile failure then kills every batch cell of the 12-head
-            # shard). Pre-Hopper decode is the Triton packed pair, same as
-            # serving after its own JIT failure.
-            fused = _fused_decode_module() if get_sm_version() >= 90 else None
+            # fallback for uncovered shapes). No shard shapes and no SM
+            # predicate are replicated here — serving itself has neither:
+            # the model stashes the fused args on every NVIDIA GPU (HIP and
+            # weight-layout checks only, srt/models/kimi_k3.py:1563-1614 @
+            # c6ad1f26), the backend calls the kernel wherever covered()
+            # accepts with NO try/except around the JIT load
+            # (srt/layers/attention/linear/kda_backend.py:426-476 @
+            # c6ad1f26), and the JIT compiles lazily at first call
+            # (kernels/ops/attention/kda_fused_decode.py:42-51). Below SM90
+            # that call raises (ptxas rejects mbarrier.try_wait.parity:
+            # "requires .target sm_90 or higher", L40S/SM89 2026-08-01), so
+            # the covered 12-head cells fail CLASSIFIED here — the same
+            # crash serving hits; substituting the Triton pair would be an
+            # invented fallback (layer_permissions.md).
+            fused = _fused_decode_module()
             onorm_g = torch.randn(batch_size, proj_size, dtype=dtype, device=device)
-            if fused is not None and fused.covered(mixed_qkv, a, b, conv_pool, recurrent_state, state_indices, onorm_g):
+            if fused.covered(mixed_qkv, a, b, conv_pool, recurrent_state, state_indices, onorm_g):
                 kda_fused_decode = fused.kda_fused_decode
                 # Serving static args (_prepare_fused_decode): per-block
                 # transposed fp32 conv weights [d_conv, proj], dense fp32

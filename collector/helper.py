@@ -694,6 +694,13 @@ def log_perf(
     # dropped). A worker SIGKILLed inside its critical section (host OOM
     # killer) skips `finally` and leaves the lock behind forever, so a lock
     # older than the stale threshold is broken instead of waited on.
+    #
+    # Break via rename, not unlink: with two waiters, an unlink-based break
+    # lets waiter B (still holding its stat of the OLD lock) unlink the FRESH
+    # lock waiter A just created, and two writers then interleave appends
+    # inside the critical section. os.rename is atomic on POSIX, so exactly
+    # one breaker wins the stale lock; the loser's rename raises ENOENT and
+    # it simply retries against whatever fresh lock now exists.
     stale_lock_seconds = 60.0
     got_lock = False
     for _ in range(300):
@@ -705,12 +712,14 @@ def log_perf(
         except OSError:
             try:
                 if time.time() - os.path.getmtime(lock_file) > stale_lock_seconds:
+                    broken_lock_file = f"{lock_file}.breaking-{os.getpid()}"
+                    os.rename(lock_file, broken_lock_file)
                     print(f"Breaking stale lock for {perf_filename}")
-                    os.unlink(lock_file)
+                    os.unlink(broken_lock_file)
                     continue
             except OSError:
-                # Lock vanished between the open attempt and the stat/unlink —
-                # retry immediately.
+                # Lock vanished (or another breaker won the rename) between
+                # the open attempt and the stat/rename — retry immediately.
                 continue
             time.sleep(0.1)
 

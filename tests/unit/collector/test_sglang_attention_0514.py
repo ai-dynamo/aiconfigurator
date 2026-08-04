@@ -14,6 +14,8 @@ from collector.case_generator import (
     get_attention_head_configs,
 )
 
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
