@@ -33,11 +33,11 @@
 //!   `inference_phase` values (`_adapt_legacy_trtllm_wideep_moe`).
 //!
 //! Merge (Python `load_moe_ep_data` / `_store_ep_leaf`): the legacy adapters
-//! assign UNCONDITIONALLY (`overwrite=True` — their oracle loaders
-//! direct-assign, so the LAST legacy row wins on a collision; NOTE this is
-//! the opposite of moe_a2a's keep-first legacy convention). The FIRST
-//! new-schema occurrence of a key then overwrites whatever a legacy adapter
-//! stored there, and repeats of that key keep the first new-schema value.
+//! keep the FIRST row on a collision (`overwrite=False` — their oracle
+//! loaders adopted the skip-on-key-conflict shared-layer contract in #1423,
+//! same as moe_a2a's keep-first legacy convention). The FIRST new-schema
+//! occurrence of a key then overwrites whatever a legacy adapter stored
+//! there, and repeats of that key keep the first new-schema value.
 //!
 //! Query mirrors the silicon body of `_query_ep_table` (moe_comm.py:1160-
 //! 1281): `kernel_source` and `quant` resolve EXACTLY
@@ -148,14 +148,27 @@ impl MoeEpGrids {
     }
 
     /// Python `_store_ep_leaf(..., overwrite=True)`: unconditional
-    /// assignment — the LAST stored row wins on a collision. Used by the
-    /// legacy adapters and by the first new-schema occurrence of a key.
+    /// assignment — replaces whatever is there. Used only by the first
+    /// new-schema occurrence of a key (precedence over legacy-adapted rows).
     fn store_overwrite(&mut self, key: MoeEpKey, num_tokens: u32, latency_ms: f64) {
         self.note_distribution(&key);
         self.by_keys
             .entry(key)
             .or_default()
             .insert(num_tokens, latency_ms);
+    }
+
+    /// Python `_store_ep_leaf(..., overwrite=False)`: the first stored row
+    /// at a coordinate wins. Used by the legacy adapters — their oracle
+    /// loaders guard with the skip-on-key-conflict shared-layer contract
+    /// (#1423), so an earlier source (or earlier row) takes priority.
+    fn store_keep_first(&mut self, key: MoeEpKey, num_tokens: u32, latency_ms: f64) {
+        self.note_distribution(&key);
+        self.by_keys
+            .entry(key)
+            .or_default()
+            .entry(num_tokens)
+            .or_insert(latency_ms);
     }
 }
 
@@ -467,7 +480,8 @@ fn ep_sol_latency_ms(
 }
 
 /// Load the unified table: legacy adapters first — context, generation,
-/// trtllm-wideep, each assigning unconditionally (last row wins) — then the
+/// trtllm-wideep, each keeping the first row on a collision (#1423
+/// shared-layer contract) — then the
 /// new schema (first occurrence of a key overwrites, repeats keep first) —
 /// Python `load_moe_ep_data` + `_load_legacy_ep`.
 fn load_moe_ep_grids(
@@ -500,7 +514,7 @@ fn load_moe_ep_grids(
 /// `_adapt_legacy_sglang_wideep_moe` (moe_comm.py:743-774): every row keys
 /// under the pinned `"deepep_moe"` kernel with `num_slots = num_experts` and
 /// the phase of the FILE the row came from; the `latency` column is already
-/// ms (stored raw); unconditional assignment (last row wins). Returns
+/// ms (stored raw); first row wins on a collision (#1423 contract). Returns
 /// whether any source file exists — Python's exists-but-empty semantic
 /// (`_read_filtered_rows` yields `None` only when EVERY path is missing).
 ///
@@ -554,7 +568,7 @@ fn adapt_legacy_sglang_wideep_moe(
                 moe_tp_size: row.u32_optional(moe_tp_size_col)?.unwrap_or(1),
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            grids.store_overwrite(key, row.u32(num_tokens_col)?, row.f64(latency_col)?);
+            grids.store_keep_first(key, row.u32(num_tokens_col)?, row.f64(latency_col)?);
         }
     }
     Ok(any_source)
@@ -631,7 +645,7 @@ fn adapt_legacy_trtllm_wideep_moe(
                     moe_tp_size,
                     moe_ep_size,
                 };
-                grids.store_overwrite(key, num_tokens, latency_ms);
+                grids.store_keep_first(key, num_tokens, latency_ms);
             }
         }
     }
@@ -1337,11 +1351,11 @@ mod tests {
         .is_err());
     }
 
-    /// Intra-legacy collisions assign unconditionally: the LAST row wins
-    /// (Python `_store_ep_leaf(..., overwrite=True)` — the OPPOSITE of
-    /// moe_a2a's keep-first legacy convention).
+    /// Intra-legacy collisions keep the FIRST row (Python
+    /// `_store_ep_leaf(..., overwrite=False)` — the #1423 skip-on-conflict
+    /// shared-layer contract, same as moe_a2a's legacy convention).
     #[test]
-    fn legacy_sglang_duplicate_rows_last_wins() {
+    fn legacy_sglang_duplicate_rows_first_wins() {
         let tmp = tempfile::tempdir().unwrap();
         write_legacy_sglang_parquet(
             &tmp.path().join("wideep_context_moe_perf.parquet"),
@@ -1361,16 +1375,16 @@ mod tests {
                 32,
             )
             .unwrap(),
-            0.9,
+            0.1,
         );
     }
 
     /// `_adapt_legacy_trtllm_wideep_moe`: one legacy row registers under
     /// BOTH phases with the same value, `num_slots` passes through (EPLB
     /// redundant: 288 slots over 256 experts), the native kernel_source is
-    /// the key, and a later-loaded trtllm row overwrites an sglang-adapted
-    /// leaf at the same key (adapter order: context, generation, trtllm —
-    /// all `overwrite=True`).
+    /// the key, and a later-loaded trtllm row cannot displace an
+    /// sglang-adapted leaf at the same key (adapter order: context,
+    /// generation, trtllm — all keep-first per the #1423 contract).
     #[test]
     fn legacy_trtllm_registers_both_phases_and_passes_num_slots() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1460,8 +1474,8 @@ mod tests {
             .unwrap(),
             0.1,
         );
-        // ...and the duplicated trtllm rows resolved last-wins under nvfp4,
-        // on both phases.
+        // ...and the duplicated trtllm rows resolved first-wins under nvfp4
+        // (#1423 skip-on-conflict contract), on both phases.
         for phase in ["context", "generation"] {
             approx(
                 q(
@@ -1475,7 +1489,7 @@ mod tests {
                     32,
                 )
                 .unwrap(),
-                0.8,
+                0.7,
             );
         }
     }
