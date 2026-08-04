@@ -30,6 +30,7 @@ Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import logging

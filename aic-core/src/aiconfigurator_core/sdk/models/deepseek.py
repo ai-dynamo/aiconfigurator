@@ -434,7 +434,12 @@ class DeepSeekModel(BaseModel):
                     ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
                     ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                     ops.GEMM(
-                        "context_downscale_gemm", self._num_layers, 2112, h, attn_downscale_gemm_quant_mode, seq_split=cp
+                        "context_downscale_gemm",
+                        self._num_layers,
+                        2112,
+                        h,
+                        attn_downscale_gemm_quant_mode,
+                        seq_split=cp,
                     ),  # on every gpu, fused_a
                     ops.WideEPContextMLA(
                         "context_attention",
