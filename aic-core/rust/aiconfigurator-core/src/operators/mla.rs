@@ -148,6 +148,13 @@ pub struct MlaModuleOp {
     pub kv_cache_dtype: KvCacheQuantMode,
     pub fmha_quant_mode: FmhaQuantMode,
     pub gemm_quant_mode: GemmQuantMode,
+    /// Model-native identity for the `[native][local]` module table (#1458).
+    /// `None` = legacy single-native resolution; `serde(default)` covers JSON
+    /// specs predating the field. NO `skip_serializing_if`: bincode decodes
+    /// positionally, so an omitted field would desync every op decoded after
+    /// it — the layout change is gated by the ENGINE_SPEC_SCHEMA_VERSION bump.
+    #[serde(default)]
+    pub native_num_heads: Option<u32>,
 }
 
 impl MlaModuleOp {
@@ -165,6 +172,7 @@ impl MlaModuleOp {
             kv_cache_dtype,
             fmha_quant_mode,
             gemm_quant_mode,
+            native_num_heads: None,
         }
     }
 
@@ -184,6 +192,7 @@ impl MlaModuleOp {
             self.kv_cache_dtype,
             self.fmha_quant_mode,
             self.gemm_quant_mode,
+            self.native_num_heads,
         )?;
         Ok(PerformanceResult::new(latency, source)
             .clamp_non_negative()
@@ -205,6 +214,7 @@ impl MlaModuleOp {
             self.num_heads,
             self.kv_cache_dtype,
             self.gemm_quant_mode,
+            self.native_num_heads,
         )?;
         Ok(PerformanceResult::new(latency, source)
             .clamp_non_negative()
@@ -480,24 +490,33 @@ fn query_context_mla_module_table(
     kv_quant: KvCacheQuantMode,
     fmha_quant: FmhaQuantMode,
     gemm_quant: GemmQuantMode,
+    native_heads: Option<u32>,
 ) -> Result<(f64, Source), AicError> {
     let silicon = || -> Result<f64, AicError> {
         let full_s = s + prefix;
-        let raw = db
-            .mla
-            .query_context_module(b, full_s, num_heads, kv_quant, fmha_quant, gemm_quant)?;
+        let raw = db.mla.query_context_module(
+            b,
+            full_s,
+            num_heads,
+            kv_quant,
+            fmha_quant,
+            gemm_quant,
+            native_heads,
+        )?;
         Ok(raw * prefix_correction(full_s, prefix))
     };
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
-            context_mla_module_empirical(db, b, s, prefix, num_heads, kv_quant, fmha_quant, gemm_quant)?,
+            context_mla_module_empirical(
+                db, b, s, prefix, num_heads, kv_quant, fmha_quant, gemm_quant, native_heads,
+            )?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
                 context_mla_module_empirical(
-                    db, b, s, prefix, num_heads, kv_quant, fmha_quant, gemm_quant,
+                    db, b, s, prefix, num_heads, kv_quant, fmha_quant, gemm_quant, native_heads,
                 )?,
                 Source::Empirical,
             )),
@@ -520,19 +539,25 @@ fn context_mla_module_empirical(
     kv_quant: KvCacheQuantMode,
     fmha_quant: FmhaQuantMode,
     gemm_quant: GemmQuantMode,
+    native_heads: Option<u32>,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     // c = (num_heads, full_s, b), prefix = 0 for collected samples.
     let sol = |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
+    // Native in the cache key: distinct native buckets are distinct grids (#1458).
     let key = format!(
-        "ctx_mla_mod:{}:{}:{}",
+        "ctx_mla_mod:{}:{}:{}:{:?}",
         fmha_quant.name(),
         kv_quant.name(),
-        gemm_quant.name()
+        gemm_quant.name(),
+        native_heads
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.mla.context_module_points(kv_quant, fmha_quant, gemm_quant) {
+        match db
+            .mla
+            .context_module_points(kv_quant, fmha_quant, gemm_quant, native_heads)
+        {
             Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
             Err(err) if err.is_missing_perf_data() => Ok(None),
             Err(err) => Err(err),
@@ -562,20 +587,23 @@ fn query_generation_mla_module_table(
     num_heads: u32,
     kv_quant: KvCacheQuantMode,
     gemm_quant: GemmQuantMode,
+    native_heads: Option<u32>,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
         DatabaseMode::Empirical => Ok((
-            generation_mla_module_empirical(db, b, s, num_heads, kv_quant, gemm_quant)?,
+            generation_mla_module_empirical(db, b, s, num_heads, kv_quant, gemm_quant, native_heads)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => {
             match db
                 .mla
-                .query_generation_module(b, s, num_heads, kv_quant, gemm_quant)
+                .query_generation_module(b, s, num_heads, kv_quant, gemm_quant, native_heads)
             {
                 Ok(latency) => Ok((latency, Source::Silicon)),
                 Err(err) if err.is_missing_perf_data() => Ok((
-                    generation_mla_module_empirical(db, b, s, num_heads, kv_quant, gemm_quant)?,
+                    generation_mla_module_empirical(
+                        db, b, s, num_heads, kv_quant, gemm_quant, native_heads,
+                    )?,
                     Source::Empirical,
                 )),
                 Err(err) => Err(err),
@@ -583,7 +611,7 @@ fn query_generation_mla_module_table(
         }
         _ => Ok((
             db.mla
-                .query_generation_module(b, s, num_heads, kv_quant, gemm_quant)?,
+                .query_generation_module(b, s, num_heads, kv_quant, gemm_quant, native_heads)?,
             Source::Silicon,
         )),
     }
@@ -599,6 +627,7 @@ fn generation_mla_module_empirical(
     num_heads: u32,
     kv_quant: KvCacheQuantMode,
     gemm_quant: GemmQuantMode,
+    native_heads: Option<u32>,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let attn_flops = generation_attn_flops(spec, kv_quant)?;
@@ -609,9 +638,14 @@ fn generation_mla_module_empirical(
             spec, kv_quant, gemm_quant, c[0], c[1], c[2], attn_flops, bmm_flops,
         )
     };
-    let key = format!("gen_mla_mod:{}:{}", kv_quant.name(), gemm_quant.name());
+    let key = format!(
+        "gen_mla_mod:{}:{}:{:?}",
+        kv_quant.name(),
+        gemm_quant.name(),
+        native_heads
+    );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.mla.generation_module_points(kv_quant, gemm_quant) {
+        match db.mla.generation_module_points(kv_quant, gemm_quant, native_heads) {
             Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
             Err(err) if err.is_missing_perf_data() => Ok(None),
             Err(err) => Err(err),
@@ -837,7 +871,7 @@ mod tests {
         ];
         for &(b, s, prefix, n, fmha, kv, gemm, expected) in cases {
             let (latency, source) =
-                query_context_mla_module_table(&db, b, s, prefix, n, kv, fmha, gemm)
+                query_context_mla_module_table(&db, b, s, prefix, n, kv, fmha, gemm, None)
                     .expect("empirical query");
             assert_close(
                 latency,
@@ -858,6 +892,7 @@ mod tests {
             KvCacheQuantMode::Bfloat16,
             FmhaQuantMode::Bfloat16,
             GemmQuantMode::Fp8,
+            None,
         );
         assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
     }
@@ -877,8 +912,8 @@ mod tests {
             (8, 3000, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block, 0.1146692546817411),
         ];
         for &(b, s, n, kv, gemm, expected) in cases {
-            let (latency, source) =
-                query_generation_mla_module_table(&db, b, s, n, kv, gemm).expect("empirical query");
+            let (latency, source) = query_generation_mla_module_table(&db, b, s, n, kv, gemm, None)
+                .expect("empirical query");
             assert_close(
                 latency,
                 expected,
@@ -896,6 +931,7 @@ mod tests {
             128,
             KvCacheQuantMode::Bfloat16,
             GemmQuantMode::Fp8,
+            None,
         );
         assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
     }
