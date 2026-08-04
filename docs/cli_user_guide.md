@@ -240,7 +240,7 @@ aiconfigurator cli estimate \
 | `memory` | Per-component memory (weights, kvcache, activations, nccl, others) as a share of GPU capacity, the KV footprint per sequence, and a KV-bound max-batch upper bound. |
 | `time` | Per-op latency bars in context → generation order, each op's share of the phase, and (in static modes) a Speed-of-Light (SOL) comparison plus the per-op data source. |
 | `energy` | Per-op energy breakdown, when energy data is available for the system. |
-| `source` | Per-op data-source attribution — `silicon` (measured), `empirical` (interpolated / formula), or `mixed` — so you can tell which numbers are measured vs estimated. |
+| `source` | Per-op data-source attribution — including `silicon` (measured), `empirical` (interpolated / formula), `estimated` (modeled), and `mixed` — so you can distinguish measured and modeled values. |
 | `all` | Every section above. |
 
 `--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).

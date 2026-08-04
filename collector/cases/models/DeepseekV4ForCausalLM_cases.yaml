@@ -154,8 +154,9 @@ model_case_values:
     # artifact dimension — one artifact per geometry per plan; Blackwell
     # platform-native collection uses targeted deepseek-ai/* runs. The first
     # entry is the canonical artifact (manual-CLI default model).
-    # The topk-calib table keys still carry no model geometry, so calibration
-    # stays pinned to the canonical artifact via calib_model_paths.
+    # Default calib collection stays on the canonical artifact via
+    # calib_model_paths (cost policy); targeted runs may collect any supported
+    # model's calibration — consumers key the DELTA per native geometry (#1460).
     default_model_paths:
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8

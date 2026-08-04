@@ -10,6 +10,7 @@ gpu:
   float32_tc_flops: 12280000000000 # 12.28TFLOPS
   bfloat16_tc_flops: 98304000000000 # 98.3TFLOPS
   int8_tc_flops: 197000000000000 # 197TOPS
+  fp8_tc_flops: 98304000000000 # B60 has no native FP8 matrix-compute support, so this path falls back to BF16.
   power: 200 # Watt (Total Board Power)
 
 node:

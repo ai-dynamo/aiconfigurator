@@ -939,12 +939,15 @@ class Task:
         # data-driven fallback below must NOT fire on an EXPLICIT fp8 -- explicit
         # values are the user's contract and validate fails fast on them.
         fmha_explicit: dict[str, bool] = {}
+        kv_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
                 explicit = self._role_attr(role, key)
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
+                if key == "kvcache_quant_mode":
+                    kv_explicit[role] = explicit is not None
                 # Native DeepSeek-V4 on sglang uses arch-specific MoE kernels; the
                 # shared helper (also called on the cli estimate path) returns the
                 # dedicated perf-DB quant mode. Acts at the HF-base layer so an
@@ -965,6 +968,28 @@ class Task:
                 resolved = from_hf if from_hf is not None else fallback
                 self._set_role_attr(role, key, resolved)
 
+        # WideEP DeepSeek remaps FMHA/KV labels to match collector tagging on
+        # the wideep_*_mla tables (see collect_mla_module.py). Must run before the
+        # data-driven fp8->bf16 fallback so those roles are not downgraded.
+        for role in roles:
+            backend_name = self._role_attr(role, "backend_name")
+            # DeepSeek-V3 only: the WideEP MLA ops and perf tables are specific to
+            # its shape, and models/deepseek.py likewise routes only this
+            # architecture to WideEPDeepSeekModel.
+            is_deepseek_mla = self._architecture == "DeepseekV3ForCausalLM"
+            # WideEP routes DeepSeek attention through the wideep_*_mla tables,
+            # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
+            # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
+            # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
+            # must query with those same labels, so resolve fmha->fp8_block (context
+            # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
+            is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
+            if is_wideep and is_deepseek_mla:
+                if role != "decode" and not fmha_explicit.get(role, False):
+                    self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
+                if not kv_explicit.get(role, False):
+                    self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
+
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16
         # with a warning instead of failing validate later.  bf16-as-fp8 is
@@ -980,7 +1005,8 @@ class Task:
         # compute dtype follows the kv-cache dtype; the generation MLA module
         # loader drops the degenerate mla_dtype column), so an fp8 label is
         # inert on decode -- and validate likewise checks fmha only for
-        # context-using roles.
+        # context-using roles. WideEP DeepSeek above already remapped to
+        # fp8_block, so this fp8->bf16 path does not touch those roles.
         for role in roles:
             if role == "decode":
                 continue
@@ -1010,11 +1036,22 @@ class Task:
         family / backend / wideep combination (shared by the resolve-time FMHA
         fallback and ``_check_role_against_db``; mapping lives in
         ``models.attention_op_keys``)."""
-        return attention_op_keys(
-            self._model_family,
-            self._role_attr(role, "backend_name"),
-            bool(self._role_attr(role, "enable_wideep")),
+        backend_name = self._role_attr(role, "backend_name")
+        # Three sites decide "is this WideEP attention?" and they must agree:
+        # models/deepseek.py dispatches to WideEPDeepSeekModel -- which builds
+        # WideEPContextMLA / WideEPGenerationMLA -- on the deepep_moe MoE backend
+        # ALONE, and _resolve_quant_modes remaps fmha->fp8_block / kv->fp8 on that
+        # same predicate. Keying this on enable_wideep instead made the intra-node
+        # DeepEP sweep (deepep_moe with enable_wideep unset) validate a WideEP
+        # label against the narrow-EP context_mla table and reject the config.
+        # The DeepseekV3ForCausalLM guard mirrors the remap's, keeping Kimi K2.5
+        # out of the WideEP tables that model construction never builds for it.
+        wideep_attention = bool(self._role_attr(role, "enable_wideep")) or (
+            backend_name == "sglang"
+            and self.moe_backend == "deepep_moe"
+            and self._architecture == "DeepseekV3ForCausalLM"
         )
+        return attention_op_keys(self._model_family, backend_name, wideep_attention)
 
     def _try_load_role_database(self, role: str):
         """Load the role's perf DB, returning None when the perf data is
@@ -1684,36 +1721,81 @@ class Task:
 
         # supported_quant_mode is a DATA-PRESENCE list (which quants the DB carries
         # tables for), not a backend-capability list. In SILICON that equals what we
-        # can model. In HYBRID/EMPIRICAL the MoE util-empirical path can synthesize a
-        # quant from a collected quant that shares its (memory, compute) profile
-        # (XQUANT cross-quant transfer, see operations/moe.py) -- only MoE implements
-        # this, so only MoE relaxes. Truly-unreachable quants (no same-profile data)
-        # still fail early here rather than crashing late in the sweep.
-        # Admission via the XQUANT cross-quant transfer only holds if (a) we're in a
-        # non-SILICON mode AND (b) the resolved transfer policy actually enables XQUANT.
-        # Otherwise operations/moe.py rejects the quant at query time by policy, so
-        # validate must not pre-admit it (e.g. transfer_policy="off"/"conservative").
-        xquant_enabled = self.database_mode not in (
+        # can model. In HYBRID/EMPIRICAL the util-empirical path (GEMM and MoE; the
+        # shared quant-transfer primitive in operations/util_empirical.py) can
+        # synthesize a quant from a collected sibling: XQUANT borrows within the
+        # same (memory, compute) profile, XPROFILE borrows across profiles rescaled
+        # by the op's util-LEVEL ratio. This gate mirrors exactly what the resolved
+        # policy + DB contents make reachable at query time — truly-unreachable
+        # quants still fail early here rather than crashing late in the sweep.
+        # Admission only holds if (a) we're in a non-SILICON mode AND (b) the
+        # resolved transfer policy actually enables that relation. Otherwise the
+        # query path rejects the quant at run time by policy, so validate must not
+        # pre-admit it (e.g. transfer_policy="off"/"conservative").
+        _non_silicon = self.database_mode not in (
             None,
             common.DatabaseMode.SILICON.name,
-        ) and common.TransferKind.XQUANT in common.resolve_transfer_policy(self.transfer_policy)
+        )
+        _policy = common.resolve_transfer_policy(self.transfer_policy)
+        xquant_enabled = _non_silicon and common.TransferKind.XQUANT in _policy
+        xprofile_enabled = _non_silicon and common.TransferKind.XPROFILE in _policy
 
-        def _profile_reachable(mode: Any, supported_names: list) -> bool:
-            enum_cls = type(mode)
+        from aiconfigurator.sdk.operations import gemm as gemm_ops
+        from aiconfigurator.sdk.operations import moe as moe_ops
+
+        _xprofile_level_known = {
+            "gemm": gemm_ops.xprofile_util_level_known,
+            "moe": moe_ops.xprofile_util_level_known,
+            "wideep_context_moe": moe_ops.xprofile_util_level_known,
+            "wideep_generation_moe": moe_ops.xprofile_util_level_known,
+        }
+
+        def _mode_profile(mode: Any) -> tuple:
             val = getattr(mode, "value", None)
-            qp = (getattr(val, "memory", None), getattr(val, "compute", None))
+            return (getattr(val, "memory", None), getattr(val, "compute", None))
+
+        def _supported_profiles(mode: Any, supported_names: list) -> list[tuple]:
+            enum_cls = type(mode)
+            out = []
             for nm in supported_names:
                 try:
-                    other = enum_cls[nm].value
+                    out.append(_mode_profile(enum_cls[nm]))
                 except (KeyError, AttributeError):
                     continue
-                if (getattr(other, "memory", None), getattr(other, "compute", None)) == qp:
-                    return True
-            return False
+            return out
+
+        def _profile_reachable(mode: Any, supported_names: list) -> bool:
+            return _mode_profile(mode) in _supported_profiles(mode, supported_names)
+
+        def _xprofile_reachable(op: str, mode: Any, supported_names: list) -> bool:
+            """XPROFILE admission: the op's util-LEVEL table must list the query
+            profile (the runtime default fallback is deliberately NOT admitted —
+            the one intentional way this gate is stricter than the ladder: it
+            enforces the enum-line + level-line add-a-quant recipe), and the DB
+            must carry at least one quant of a DIFFERENT profile to borrow from
+            (any collected quant is a viable nearest-profile reference)."""
+            level_known = _xprofile_level_known.get(op)
+            if level_known is None or not level_known(mode):
+                return False
+            qp = _mode_profile(mode)
+            return any(p != qp for p in _supported_profiles(mode, supported_names))
 
         def _check(op: str, mode: Any, *, profile_transfer: bool = False) -> None:
             if mode is None:
                 return
+            # Strict per-dtype FLOPS resolution happens at every query entry
+            # (#1398) — BEFORE any table lookup or transfer ladder — so the
+            # gate must mirror it: a mode whose compute dtype has no usable
+            # *_tc_flops entry fails validate() here instead of on the first
+            # sweep query, no matter how transfer-reachable its data is.
+            # Memory-only modes (kv cache) carry compute_dtype None and skip;
+            # the sm-gated generation derivation stays a query-time concern.
+            # (getattr: unit tests stub _try_load_role_database with sentinel
+            # objects that carry no system_spec — skip the check there, real
+            # databases always have one.)
+            _spec = getattr(database, "system_spec", None)
+            if _spec is not None and getattr(getattr(mode, "value", None), "compute_dtype", None) is not None:
+                common.get_quant_tc_flops(_spec, mode)
             modes = supported.get(op, []) or []
             if not modes:
                 return  # DB doesn't record support for this op; skip
@@ -1721,14 +1803,25 @@ class Task:
             if name in modes:
                 return
             # Modes that normalize to a different table name for perf queries
-            # (nvfp4_wo -> bfloat16, w4a16_mxfp4_cutlass -> w4a16_mxfp4) are
-            # accepted when the target table mode is supported.
-            validation_aliases = {"nvfp4_wo": "bfloat16", "w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            # (w4a16_mxfp4_cutlass -> w4a16_mxfp4, see operations/moe.py) are
+            # accepted when the target table mode is supported. Data-less quants
+            # are NOT aliased to a collected table — they are admitted (or not)
+            # through the transfer reachability checks below, mirroring the
+            # query-time ladder.
+            validation_aliases = {"w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
             alias = validation_aliases.get(name)
             if alias and alias in modes:
                 return
-            if profile_transfer and xquant_enabled and _profile_reachable(mode, modes):
-                return  # transfer-reachable in HYBRID/EMPIRICAL with XQUANT enabled
+            # fp8_static is a COMPOSITE mode: its base GEMM is transferable, but
+            # it also requires compute_scale/scale_matrix overhead tables that
+            # have no transfer ladder (by design). Its admission stays purely
+            # data-driven (fp8_static in modes iff all three tables exist, see
+            # _gemm_key_names).
+            transfer_ok = profile_transfer and mode is not common.GEMMQuantMode.fp8_static
+            if transfer_ok and xquant_enabled and _profile_reachable(mode, modes):
+                return  # XQUANT-reachable in HYBRID/EMPIRICAL (same-profile data)
+            if transfer_ok and xprofile_enabled and _xprofile_reachable(op, mode, modes):
+                return  # XPROFILE-reachable (calibrated level + any other-profile data)
             exc_type = UnsupportedWideepConfigError if op.startswith("wideep_") else ValueError
             raise exc_type(
                 f"Unsupported {op} quant mode {name!r} for system={system!r}, "
@@ -1736,8 +1829,10 @@ class Task:
                 f"Supported {op} modes: {sorted(modes)}"
             )
 
-        # GEMM is always validated (applies to all worker shapes).
-        _check("gemm", self._role_attr(role, "gemm_quant_mode"))
+        # GEMM is always validated (applies to all worker shapes). It has the
+        # same transfer ladder as MoE (shared primitive), so the same
+        # HYBRID/EMPIRICAL relaxation applies.
+        _check("gemm", self._role_attr(role, "gemm_quant_mode"), profile_transfer=True)
 
         # MoE — only when model is MoE.
         if is_moe:

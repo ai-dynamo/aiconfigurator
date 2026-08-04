@@ -1178,10 +1178,11 @@ def _bench_topk_512(
 def get_dsv4_topk_calib_test_cases():
     """topk_512 DELTA calibration cases.
 
-    Only the canonical calib model is eligible (same contract as
-    ``case_generator.get_dsv4_topk_calib_test_cases``): the calib table keys
-    carry no model geometry, so a second model's rows would silently
-    overwrite the first's."""
+    Same contract as ``case_generator.get_dsv4_topk_calib_test_cases``
+    (via ``_selected_dsv4_calib_models``): default plans stay on the canonical
+    calib model (cost policy); targeted runs collect their own model's
+    calibration — since #1460 the consumers key the DELTA per native head
+    geometry, so distinct models can no longer overwrite each other."""
     try:
         from collector.case_generator import _selected_dsv4_calib_models
     except ModuleNotFoundError:

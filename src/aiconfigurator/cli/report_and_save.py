@@ -1009,8 +1009,8 @@ def save_results(
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
-                    # Per-op data source breakdown (silicon / empirical / sol / mixed),
-                    # pulled from PerformanceResult.source via the InferenceSummary.
+                    # Per-op PerformanceResult.source breakdown, pulled through
+                    # the InferenceSummary.
                     # Same nested shape as per_ops_data, populated only when the row
                     # carried it through the pareto search.
                     if i < len(best_config_per_ops_source) and best_config_per_ops_source[i] is not None:

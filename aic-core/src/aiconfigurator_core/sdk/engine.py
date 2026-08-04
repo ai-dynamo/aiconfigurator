@@ -102,7 +102,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   enum indices after `DsaGeneration` shifted). The MSA insertion and #1405
 #   each claimed version 3 on their own branch, so their merge needed a
 #   fresh number.
-ENGINE_SPEC_SCHEMA_VERSION = 4
+# - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
+#   `native_num_heads` (always serialized — bincode decodes positionally).
+ENGINE_SPEC_SCHEMA_VERSION = 5
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -236,7 +238,7 @@ def _generation_mla(op: GenerationMLA) -> dict:
 
 
 def _mla_module(op: MLAModule) -> dict:
-    return {
+    spec = {
         "name": op._name,
         "scale_factor": op._scale_factor,
         "num_heads": op._num_heads,
@@ -244,6 +246,11 @@ def _mla_module(op: MLAModule) -> dict:
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
     }
+    # Emitted only when set: keeps specs from legacy builders byte-identical
+    # (the Rust field is #[serde(default)]; Rust bincode always serializes it, #1458).
+    if op._native_num_heads is not None:
+        spec["native_num_heads"] = op._native_num_heads
+    return spec
 
 
 def _mla_bmm(op: MLABmm) -> dict:

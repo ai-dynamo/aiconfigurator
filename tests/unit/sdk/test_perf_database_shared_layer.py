@@ -576,6 +576,6 @@ def test_mla_module_loader_first_source_wins(tmp_path: Path) -> None:
     data = load_generation_mla_module_data([(str(primary), None), (str(sibling), None)])
     kv = common.KVCacheQuantMode.fp8
     gemm = common.GEMMQuantMode.bfloat16
-    # s key = isl + step = 1 + 8192
-    assert data[kv][gemm][64][16][8193]["latency"] == 0.0977  # primary wins at the shared key
-    assert data[kv][gemm][64][32][8193]["latency"] == 0.2  # sibling still fills the gap
+    # s key = isl + step = 1 + 8192; native 128 from the DeepSeek-V3 pin (#1458)
+    assert data[kv][gemm][128][64][16][8193]["latency"] == 0.0977  # primary wins at the shared key
+    assert data[kv][gemm][128][64][32][8193]["latency"] == 0.2  # sibling still fills the gap

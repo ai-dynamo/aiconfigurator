@@ -102,6 +102,39 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 SYSTEMIC_GROUP_THRESHOLD = 5
 
 
+@contextlib.contextmanager
+def _collector_model_path(model_path: str | None):
+    previous = os.environ.get("COLLECTOR_MODEL_PATH")
+    if model_path:
+        os.environ["COLLECTOR_MODEL_PATH"] = model_path
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        else:
+            os.environ["COLLECTOR_MODEL_PATH"] = previous
+
+
+def _get_test_cases_for_model(get_func, model_path: str | None):
+    if not model_path:
+        return get_func()
+    with _collector_model_path(model_path):
+        sig = signature(get_func)
+        params = sig.parameters
+        if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
+            return get_func(model_path=model_path)
+        return get_func()
+
+
+def _requested_ops(ops: list[str] | None, case_plan=None) -> set[str]:
+    if ops is not None:
+        return set(ops)
+    if case_plan is not None:
+        return set(case_plan.ops)
+    return set()
+
+
 def _require_torch():
     if torch is None:
         raise RuntimeError("PyTorch is required to run collectors. Use --plan-only to inspect collector v2 YAML plans.")
@@ -132,7 +165,7 @@ def _registry_with_requested_wideep(registry: list, backend: str, ops: list[str]
     if not wideep_registry:
         return registry
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     requested_wideep_ops = requested_ops & {entry.op for entry in wideep_registry}
     if not requested_wideep_ops:
         return registry
@@ -1023,29 +1056,6 @@ def collect_ops(
     if runtime_version:
         from collector.version_resolver import _check_compat as check_compat
 
-    @contextlib.contextmanager
-    def _collector_model_path(model_path: str | None):
-        previous = os.environ.get("COLLECTOR_MODEL_PATH")
-        if model_path:
-            os.environ["COLLECTOR_MODEL_PATH"] = model_path
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("COLLECTOR_MODEL_PATH", None)
-            else:
-                os.environ["COLLECTOR_MODEL_PATH"] = previous
-
-    def _get_test_cases(get_func, model_path: str | None):
-        if not model_path:
-            return get_func()
-        with _collector_model_path(model_path):
-            sig = signature(get_func)
-            params = sig.parameters
-            if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
-                return get_func(model_path=model_path)
-            return get_func()
-
     all_errors = []
 
     for collection in collections:
@@ -1102,7 +1112,7 @@ def collect_ops(
             def get_func_with_limit(get_func=get_func, op=collection["type"]):
                 from collector.capabilities import filter_cases
 
-                cases = _get_test_cases(get_func, model_path)
+                cases = _get_test_cases_for_model(get_func, model_path)
                 cases, _dropped = filter_cases(cases, op=op, sm_version=sm_version)
                 if case_filters:
                     before_count = len(cases)
@@ -1179,28 +1189,56 @@ def collect_sglang(
 
     from collector.framework_manifest import require_collector_runtime
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
     runtime = require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
+    from collector.fullnode import SGLANG_FULLNODE_OPS, collect_sglang_fullnode_op
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
 
+    all_errors = []
     registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
-    collections = build_collections(registry, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(
-        num_processes,
-        collections,
-        version,
-        limit=limit,
-        shuffle=shuffle,
-        backend="sglang",
-        resume_options=resume_options,
-        model_path=model_path,
-        case_plan=case_plan,
-        sm_version=sm_version,
-        case_filters=case_filters,
-    )
+    ops_filter = ops if ops is not None else (case_plan.ops if case_plan is not None else None)
+    collections = build_collections(registry, "sglang", version, ops_filter, logger=logger)
+    requested_fullnode_ops = requested_ops & set(SGLANG_FULLNODE_OPS)
+    fullnode_collections = [collection for collection in collections if collection["type"] in requested_fullnode_ops]
+    pool_collections = [collection for collection in collections if collection["type"] not in SGLANG_FULLNODE_OPS]
+
+    if pool_collections:
+        all_errors = collect_ops(
+            num_processes,
+            pool_collections,
+            version,
+            limit=limit,
+            shuffle=shuffle,
+            backend="sglang",
+            resume_options=resume_options,
+            model_path=model_path,
+            case_plan=case_plan,
+            sm_version=sm_version,
+            case_filters=case_filters,
+        )
+
+    for collection in fullnode_collections:
+        all_errors.extend(
+            collect_sglang_fullnode_op(
+                collection,
+                runtime_version=version,
+                limit=limit,
+                shuffle=shuffle,
+                shuffle_seed=42,
+                backend="sglang",
+                resume_options=resume_options,
+                model_path=model_path,
+                case_plan=case_plan,
+                sm_version=sm_version,
+                case_filters=case_filters,
+                get_test_cases_for_model=_get_test_cases_for_model,
+                resume_checkpoint_cls=ResumeCheckpoint,
+                logger=logger,
+            )
+        )
 
     generate_collection_summary(all_errors, "sglang", version)
     provenance_ctx = {
