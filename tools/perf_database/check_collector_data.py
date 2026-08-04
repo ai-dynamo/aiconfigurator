@@ -26,10 +26,9 @@ Six rules, each named after the design section it enforces:
   `<family>/<backend>/` subtree it lives in. `from_version` may be newer or
   older than the declaring dir's own version — that asymmetry is exactly what
   a declaration is for (§6.3); this check does not re-derive direction.
-- **R3 comm reuse scope** (design §6.5 rule 5): a `reuse.yaml` under `comm`
-  may name only framework-owned communication tables whose runtime policy
-  admits explicit, same-backend donors. NCCL/oneCCL and unknown tables remain
-  rejected.
+- **R3 comm exclusion** (design §6.5 rule 5): no `reuse.yaml` may exist
+  anywhere under a `comm` family dir. Framework-owned communication uses
+  implicit earlier-version reuse; NCCL/oneCCL are primary-only.
 - **R4 family placement** (design §2, catalog-driven): every parquet table's
   stem must map, via the op catalog (`collector/op_backend_catalog.yaml`), to
   the family directory it is actually filed under.
@@ -84,11 +83,7 @@ if str(REPO_ROOT) not in sys.path:
 # (e.g. tests/unit/sdk/database/test_dual_layout_discovery.py) — it is the
 # same module object as aiconfigurator_core.sdk.perf_database
 # (src/aiconfigurator/sdk/_compat.py:alias_module).
-from aiconfigurator.sdk.perf_database import (
-    _COMM_DECLARED_REUSE_ONLY_OPS,
-    _load_collection_meta_yaml,
-    _parse_reuse_yaml,
-)
+from aiconfigurator.sdk.perf_database import _load_collection_meta_yaml, _parse_reuse_yaml
 from collector.framework_manifest import validate_resolution
 from collector.op_catalog import (
     CATALOG_PATH,
@@ -106,7 +101,7 @@ RULES = ("R1", "R2", "R3", "R4", "R5", "R6")
 RULE_TITLES = {
     "R1": "sidecar coverage",
     "R2": "reuse validity",
-    "R3": "comm reuse scope",
+    "R3": "comm exclusion",
     "R4": "family placement",
     "R5": "identity (manifest v2 resolution)",
     "R6": "no legacy markers",
@@ -224,38 +219,23 @@ def check_r2_reuse_validity(data_root: Path, version_dirs: list[tuple[str, str, 
 
 
 # --------------------------------------------------------------------------
-# R3: comm reuse scope (design §6.5 rule 5)
+# R3: comm exclusion (design §6.5 rule 5)
 # --------------------------------------------------------------------------
 
 
-def check_r3_comm_reuse_scope(data_root: Path) -> list[str]:
-    """Reject comm declarations outside the runtime's explicit allowlist.
-
-    R2 owns yaml syntax and donor-existence validation. This rule only keeps
-    the CI policy synchronized with the loader: framework-owned comm kernels
-    may opt in table-by-table, while NCCL/oneCCL and unknown tables stay
-    primary-only. Malformed yaml is skipped here because R2 already reports
-    it as a hard failure.
-    """
+def check_r3_comm_exclusion(data_root: Path) -> list[str]:
+    """Reject declarations under comm: framework ops reuse implicitly and
+    library-versioned NCCL/oneCCL ops remain primary-only."""
     failures: list[str] = []
-    allowed_tables = {op.value.removesuffix(".parquet") for op in _COMM_DECLARED_REUSE_ONLY_OPS}
     for system_dir in _subdirs(data_root):
         comm_dir = system_dir / COMM_FAMILY
         if not comm_dir.is_dir():
             continue
         for reuse_path in sorted(comm_dir.rglob(REUSE_YAML)):
-            try:
-                parsed = _parse_reuse_yaml(str(reuse_path))
-            except ValueError:
-                continue
-            for entry in parsed["entries"]:
-                table = entry["table"]
-                if table not in allowed_tables:
-                    failures.append(
-                        f"{reuse_path.relative_to(data_root)}: comm table '{table}' is not eligible for "
-                        "declared cross-version reuse (only framework-owned communication tables in the "
-                        "runtime allowlist may declare donors; NCCL/oneCCL and unknown tables are primary-only)"
-                    )
+            failures.append(
+                f"{reuse_path.relative_to(data_root)}: reuse.yaml is not allowed under the comm family "
+                "(framework communication reuses earlier same-backend data implicitly; NCCL/oneCCL are primary-only)"
+            )
     return failures
 
 
@@ -335,7 +315,7 @@ def run_checks(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
     return {
         "R1": check_r1_sidecar_coverage(data_root, version_dirs),
         "R2": check_r2_reuse_validity(data_root, version_dirs),
-        "R3": check_r3_comm_reuse_scope(data_root),
+        "R3": check_r3_comm_exclusion(data_root),
         "R4": check_r4_family_placement(data_root, version_dirs, family_map),
         "R5": check_r5_identity(catalog_path),
         "R6": check_r6_no_legacy_markers(data_root),
