@@ -1724,6 +1724,98 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
             make("HYBRID", disabled).validate()
 
 
+def test_validate_gemm_quant_transfer_reachable_in_hybrid():
+    """GEMM has the same transfer ladder as MoE (shared quant-transfer
+    primitive): int4_wo GEMM (profile (0.5, 1), bf16 compute pipeline) has no
+    Hopper data and no same-profile sibling, but is XPROFILE-reachable in
+    HYBRID from the collected bf16/fp8 tables. SILICON and non-XPROFILE
+    policies keep rejecting — the gate admits exactly what the resolved
+    policy + DB contents make reachable at query time."""
+
+    def make(mode, policy=None, quant=common.GEMMQuantMode.int4_wo):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="vllm",
+            backend_version="0.19.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+        # int4_wo is collected by NO h200/vllm version, so cross-version
+        # shared-layer inheritance cannot data-admit it (unlike trtllm, where
+        # 1.2.0rc5 carries int4_wo and feeds newer versions as a sibling).
+        t.gemm_quant_mode = quant
+        return t
+
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()  # default policy (all on) -> XPROFILE reachable -> no raise
+    make("HYBRID", "xprofile").validate()  # XPROFILE explicitly enabled -> no raise
+
+    # No same-profile GEMM sibling for (0.5, 1): XQUANT alone must not admit it,
+    # and neither may weaker policies — the query ladder would reject at run time.
+    for disabled in ("off", "conservative", "balanced", "xquant"):
+        with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+            make("HYBRID", disabled).validate()
+
+    # nvfp4 (fp4 MMA) can never run on Hopper: strict per-dtype resolution
+    # (#1398) rejects it at validate() in EVERY mode and policy — BEFORE the
+    # transfer ladder is consulted — mirroring the query-entry behavior, so
+    # impossible sweep configurations fail early instead of on the first
+    # HYBRID query.
+    from aiconfigurator.sdk.errors import MissingSystemFlopsError
+
+    for mode, policy in (("SILICON", None), ("HYBRID", None), ("HYBRID", "xprofile")):
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
+
+
+def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
+    """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
+    the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
+    profile transfer on combos without quantize data — validate keeps failing
+    fast instead of the sweep dying late in query_compute_scale."""
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="b200_sxm",
+        backend_name="vllm",
+        backend_version="0.19.0",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.fp8_static
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
+        t.validate()
+
+
+def test_validate_gemm_xprofile_requires_listed_level_profile(monkeypatch):
+    """The gate deliberately refuses XPROFILE admission for a profile missing
+    from the GEMM util-LEVEL table (the runtime ladder would fall back to a
+    default level, but the gate enforces the enum-line + level-line
+    add-a-quant recipe — the one intentional way it is stricter)."""
+    from aiconfigurator.sdk.operations import gemm as gemm_ops
+
+    # int4_wo: resolvable dtype (bf16 pipeline) so the strict-FLOPS check at
+    # the top of the gate passes and the level-table refusal is what fires
+    # (nvfp4 on Hopper would raise MissingSystemFlopsError before reaching
+    # the ladder — see test_validate_gemm_quant_transfer_reachable_in_hybrid).
+    trimmed = {p: lv for p, lv in gemm_ops._GEMM_QUANT_UTIL_LEVEL.items() if p != (0.5, 1)}
+    monkeypatch.setattr(gemm_ops, "_GEMM_QUANT_UTIL_LEVEL", trimmed)
+
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="vllm",
+        backend_version="0.19.0",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.int4_wo
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+        t.validate()
+
+
 def test_validate_skips_db_check_when_database_unavailable():
     """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
     t = Task(

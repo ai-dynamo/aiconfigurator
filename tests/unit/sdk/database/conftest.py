@@ -96,8 +96,14 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
-            # These two values are used in many "SOL"-mode formulas:
+            # These values are used in many "SOL"-mode formulas. The per-dtype
+            # entries keep the historical 1/2/4 ratios so numeric assertions
+            # written against the old bf16-scaled fallback stay valid.
             "bfloat16_tc_flops": 1_000.0,
+            "int8_tc_flops": 2_000.0,
+            "fp8_tc_flops": 2_000.0,
+            "fp4_tc_flops": 4_000.0,
+            "sm_version": 90,  # fp8-capable: the per-dtype entries above assume fp8/fp4 MMA exists
             "mem_bw": 100.0,
             # For query_nccl SILICON branch:
             "mem_empirical_constant_latency": 1.0,
@@ -203,7 +209,13 @@ def _build_comprehensive_test_data():
         "data_dir": "data",
         "misc": {"nccl_version": "v1"},
         "gpu": {
+            # Per-dtype entries keep the historical 1/2/4 ratios so numeric
+            # assertions written against the old bf16-scaled fallback stay valid.
             "bfloat16_tc_flops": 1_000_000_000_000.0,  # 1 TFLOPS
+            "int8_tc_flops": 2_000_000_000_000.0,
+            "fp8_tc_flops": 2_000_000_000_000.0,
+            "fp4_tc_flops": 4_000_000_000_000.0,
+            "sm_version": 90,  # fp8-capable: the per-dtype entries above assume fp8/fp4 MMA exists
             "mem_bw": 1_000_000_000_000.0,  # 1 TB/s
             "mem_bw_empirical_scaling_factor": 0.8,
             "mem_empirical_constant_latency": 0.001,  # 1 us

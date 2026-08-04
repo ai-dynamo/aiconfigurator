@@ -28,8 +28,8 @@ def test_manifest_exposes_current_framework_versions_and_images():
     assert sglang.version == "0.5.14"
     assert sglang.image().startswith("lmsysorg/sglang:v0.5.14@sha256:")
     assert sglang.image("cu130").startswith("lmsysorg/sglang:v0.5.14-cu130@sha256:")
-    assert trtllm.version == "1.3.0rc10"
-    assert trtllm.image().startswith("nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:")
+    assert trtllm.version == "1.3.0rc20"
+    assert trtllm.image().startswith("nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:")
     assert vllm.version == "0.24.0"
     assert vllm.image().startswith("vllm/vllm-openai:v0.24.0@sha256:")
     assert vllm.image("cu129").startswith("vllm/vllm-openai:v0.24.0-cu129@sha256:")

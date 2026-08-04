@@ -13,16 +13,18 @@
 //! as part of slice selection (silicon inside the perf-DB query, empirical
 //! before grid construction).
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::attention::generation_attn_flops;
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::mla::{
     context_mla_sol_ms, context_mla_sol_prefix_ms, generation_mla_module_sol_ms,
     generation_mla_sol_ms, mla_bmm_sol_ms,
 };
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     if full_s == 0 {
@@ -300,8 +302,9 @@ fn context_mla_empirical(
     fmha_quant: FmhaQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     // c = (num_heads, full_s, b), prefix = 0 for collected samples.
-    let sol = |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+    let sol = |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
     let key = format!("ctx_mla:{}:{}", fmha_quant.name(), kv_quant.name());
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.mla.context_points(kv_quant, fmha_quant) {
@@ -315,11 +318,11 @@ fn context_mla_empirical(
     let sol_query = context_mla_sol_prefix_ms(
         spec,
         kv_quant,
-        fmha_quant,
         num_heads as f64,
         s as f64,
         prefix as f64,
         b as f64,
+        attn_flops,
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
@@ -363,16 +366,19 @@ fn generation_mla_empirical(
     kv_quant: KvCacheQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let attn_flops = generation_attn_flops(spec, kv_quant)?;
     // c = (num_heads, b, s).
-    let sol = |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2]);
+    let sol = |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
     let key = format!("gen_mla:{}", kv_quant.name());
-    let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.mla.generation_points(kv_quant) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
-            Err(err) if err.is_missing_perf_data() => Ok(None),
-            Err(err) => Err(err),
-        }
-    })?;
+    let grid =
+        db.util_grids
+            .get_or_try_build(&key, || match db.mla.generation_points(kv_quant) {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    points, sol,
+                )))),
+                Err(err) if err.is_missing_perf_data() => Ok(None),
+                Err(err) => Err(err),
+            })?;
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
     // Own-shape util fired (Python mla.py, estimate()'s default tier).
@@ -458,9 +464,14 @@ fn mla_bmm_empirical(
     is_pre: bool,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let bmm_flops = quant_tc_flops(spec, quant.mapping())?;
     // c = (num_tokens,); the SOL is bound to the REQUESTED quant.
-    let sol = |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0]);
-    let op_name = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
+    let sol = |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0], bmm_flops);
+    let op_name = if is_pre {
+        "mla_gen_pre"
+    } else {
+        "mla_gen_post"
+    };
     // Slice selection first (Python: `qm = quant if quant in wrapper else
     // bfloat16`); a typed miss here means the whole BMM table is absent.
     let grid = match db.mla.bmm_selected_quant(quant) {
@@ -479,9 +490,9 @@ fn mla_bmm_empirical(
             );
             db.util_grids.get_or_try_build(&key, || {
                 match db.mla.bmm_points(selected, is_pre, num_heads) {
-                    Ok(points) => {
-                        Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol))))
-                    }
+                    Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                        points, sol,
+                    )))),
                     Err(err) if err.is_missing_perf_data() => Ok(None),
                     Err(err) => Err(err),
                 }
@@ -551,8 +562,9 @@ fn context_mla_module_empirical(
     gemm_quant: GemmQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     // c = (num_heads, full_s, b), prefix = 0 for collected samples.
-    let sol = |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+    let sol = |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
     let key = format!(
         "ctx_mla_mod:{}:{}:{}",
         fmha_quant.name(),
@@ -569,11 +581,11 @@ fn context_mla_module_empirical(
     let sol_query = context_mla_sol_prefix_ms(
         spec,
         kv_quant,
-        fmha_quant,
         num_heads as f64,
         s as f64,
         prefix as f64,
         b as f64,
+        attn_flops,
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
@@ -629,8 +641,14 @@ fn generation_mla_module_empirical(
     gemm_quant: GemmQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let attn_flops = generation_attn_flops(spec, kv_quant)?;
+    let bmm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
     // c = (num_heads, b, s).
-    let sol = |c: &[f64]| generation_mla_module_sol_ms(spec, kv_quant, gemm_quant, c[0], c[1], c[2]);
+    let sol = |c: &[f64]| {
+        generation_mla_module_sol_ms(
+            spec, kv_quant, gemm_quant, c[0], c[1], c[2], attn_flops, bmm_flops,
+        )
+    };
     let key = format!("gen_mla_mod:{}:{}", kv_quant.name(), gemm_quant.name());
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.mla.generation_module_points(kv_quant, gemm_quant) {

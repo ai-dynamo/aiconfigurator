@@ -104,17 +104,19 @@ def _moe_quant_util_level(quant_mode) -> float:
 
 def _xprofile_moe_quants(query_quant, table) -> list:
     """Collected quants with a DIFFERENT (memory, compute) profile than the query,
-    nearest-profile first. Same-profile quants are handled by the same-profile tier;
-    these are the cross-profile transfer references, rescaled by the util-level ratio."""
-    qp = (query_quant.value.memory, query_quant.value.compute)
+    nearest-profile first. Kept as a named MoE entry point for existing callers;
+    the ordering itself lives in the shared quant-transfer primitive."""
+    return util_empirical.xprofile_quant_order(query_quant, table)
 
-    def dist(q):
-        return abs(q.value.memory - qp[0]) + abs(q.value.compute - qp[1])
 
-    return sorted(
-        (q for q in table if q is not query_quant and (q.value.memory, q.value.compute) != qp),
-        key=dist,
-    )
+def xprofile_util_level_known(quant_mode) -> bool:
+    """Whether the MoE util-LEVEL table lists this quant's profile.
+
+    The runtime ladder falls back to ``_MOE_QUANT_UTIL_DEFAULT`` for unlisted
+    profiles; the validate gate deliberately does NOT (admitting a quant
+    nobody calibrated would hide the missing level line the add-a-quant
+    recipe requires), so it asks this instead of reaching into the table."""
+    return util_empirical.quant_profile(quant_mode) in _MOE_QUANT_UTIL_LEVEL
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -296,6 +298,10 @@ class MoE(Operation):
         enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_moe`` body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         cls.load_data(database)
@@ -327,7 +333,7 @@ class MoE(Operation):
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -493,32 +499,15 @@ class MoE(Operation):
                                     )
                     return out
 
+                # Relation ladder (xshape -> xquant -> xprofile) via the shared
+                # quant-transfer primitive; MoE contributes candidate
+                # enumeration (_collect), its SOL, and its util-LEVEL table.
+                # Same-profile transfer measured ~13% MAPE (fp8_block <- fp8);
+                # cross-profile raw ~58% -> ~24% MAPE LOO with the level ratio.
                 policy = database.transfer_policy
-
-                def _moe_candidates():
-                    # Tier 1 (XSHAPE): cross-shape within the query quant (closest measurement).
-                    cands = (
-                        _collect(quant_mode, quant_mode, "xshape")
-                        if (common.TransferKind.XSHAPE in policy and quant_mode in moe_table)
-                        else []
-                    )
-                    if cands:
-                        return cands
-                    # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
-                    # Same profile => same SOL coefficients and binding regime, so util
-                    # transfers (measured ~13% MAPE for fp8_block <- fp8; the query quant's
-                    # SOL is used unchanged). Only when the query quant has no data of any shape.
-                    if common.TransferKind.XQUANT in policy:
-                        qp = (quant_mode.value.memory, quant_mode.value.compute)
-                        for q in moe_table:
-                            if q is quant_mode or (q.value.memory, q.value.compute) != qp:
-                                continue
-                            cands.extend(_collect(q, quant_mode, "xquant"))
-                    return cands
-
-                grid = util_empirical.grid_from_reference(
+                grid, util_scale, ref_prov = util_empirical.quant_transfer_grid(
+                    "moe",
                     (
-                        "moe_xshape",
                         database.system,
                         database.backend,
                         database.version,
@@ -534,48 +523,16 @@ class MoE(Operation):
                         num_gemms,
                     ),
                     (topk, num_experts, hidden_size, inter_size),
-                    _moe_candidates,
+                    policy,
+                    quant_mode,
+                    moe_table,
+                    _collect,
+                    _moe_quant_util_level,
                     depth=1,
                     selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
                 )
-                if grid is not None and grid.samples and grid.reference_provenance:
-                    prov = grid.reference_provenance
-
-                # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
-                # nearest collected quant's util curve, built with the REFERENCE quant's own
-                # SOL, and rescale by the per-quant util-LEVEL ratio e(query)/e(ref). The
-                # cross-profile error is ~pure systematic kernel-efficiency bias, which this
-                # ratio removes (raw ~58% -> ~24% MAPE LOO). Last resort, lowest confidence.
-                if (grid is None or not grid.samples) and common.TransferKind.XPROFILE in policy:
-                    for ref_q in _xprofile_moe_quants(quant_mode, moe_table):
-                        g = util_empirical.grid_from_reference(
-                            (
-                                "moe_xprofile",
-                                database.system,
-                                database.backend,
-                                database.version,
-                                quant_mode.name,
-                                ref_q.name,
-                                kernel_tag,
-                                topk,
-                                num_experts,
-                                hidden_size,
-                                inter_size,
-                                moe_tp_size,
-                                moe_ep_size,
-                                workload_distribution,
-                                num_gemms,
-                            ),
-                            (topk, num_experts, hidden_size, inter_size),
-                            (lambda _rq=ref_q: _collect(_rq, _rq, "xprofile")),
-                            depth=1,
-                            selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
-                        )
-                        if g is not None and g.samples:
-                            grid = g
-                            util_scale = _moe_quant_util_level(quant_mode) / _moe_quant_util_level(ref_q)
-                            prov = "xprofile"
-                            break
+                if ref_prov:
+                    prov = ref_prov
             latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale, provenance=prov)
             return latency
 
@@ -1592,6 +1549,10 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         cls.load_data(database)
 
         num_gemms = 3 if is_gated else 2
@@ -1624,7 +1585,7 @@ class TrtLLMWideEPMoE(Operation):
                 // moe_tp_size
                 * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

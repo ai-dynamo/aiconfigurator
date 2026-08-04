@@ -41,6 +41,7 @@ import numpy as np
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk.operations.attention import generation_attn_mode
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 
 logger = logging.getLogger(__name__)
@@ -111,12 +112,13 @@ def _dsv4_resolve_head_key(quant_data, num_heads):
 def _dsv4_resolve_head_axes(quant_data, native_heads, num_heads):
     """Two-level head resolution for the DSV4 module tables.
 
-    The loaders key rows as ``[native][local]`` (per-row identity resolved by
-    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
-    semantics).  Resolve the outer level with the model's native head count
-    (identity: separates Pro from Flash rows), then the rank-local head count
-    within it (the physical per-rank shape).  Nearest-match fallback at each
-    level keeps universal-sweep data resolving for unseen shards.
+    The loaders key rows as ``[native][local]`` under the unified #1429
+    convention (rank-local ``num_heads`` column; native derived as
+    ``num_heads * tp_size``).  Resolve the outer level with the model's native
+    head count (identity: separates Pro from Flash rows), then the rank-local
+    head count within it (the physical per-rank shape).  Nearest-match
+    fallback at each level keeps universal-sweep data resolving for unseen
+    shards.
     Returns ``(native_key, local_key)`` or ``None``.
     """
     native_key = _dsv4_resolve_head_key(quant_data, native_heads)
@@ -155,12 +157,11 @@ def _deepseek_v4_attention_sol(
 
     Verbatim port of the legacy ``PerfDatabase._deepseek_v4_attention_sol``
     body. Reads ``database.system_spec``, ``database._causal_limited_pairs``,
-    ``database._compressed_context_pairs``, and ``GEMM._get_quant_tc_flops``.
+    ``database._compressed_context_pairs``, and ``common.get_quant_tc_flops``.
     """
-    from aiconfigurator_core.sdk.operations.gemm import GEMM
 
     def _tc_flops(quant_mode):
-        return GEMM._get_quant_tc_flops(database.system_spec, quant_mode)
+        return common.get_quant_tc_flops(database.system_spec, quant_mode)
 
     tokens = b * s if is_context else b
     kv_len = prefix + s if is_context else max(0, s - 1)
@@ -373,7 +374,10 @@ class DeepSeekV4MHCModule(Operation):
         The SOL estimate models the combined attention-site and FFN-site mHC work
         inside one decoder layer, matching the collector's module boundary.
         """
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         cls.load_data(database)
 
@@ -402,7 +406,7 @@ class DeepSeekV4MHCModule(Operation):
             activation_bytes = sites * nt * hc_dim * quant_mode.value.memory * (3 if op_name == "both" else 2)
             if op_name in {"pre", "both"}:
                 activation_bytes += sites * nt * (2 * hc_mult + hc_mult * hc_mult) * 4
-            sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
 
@@ -816,6 +820,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         prefix: int = 0,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         cls.load_data(database)
 
         def get_sol(b_: int = b, s_: int = s, prefix_: int = prefix) -> tuple[float, float, float]:
@@ -1270,16 +1281,18 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
         cls.load_data(database)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (the table keys on kv dtype).  Derive
         # the SOL dtype from kv so label changes cannot move decode SOL --
         # mirrors query_generation_mla's get_sol.
-        fmha_quant_mode = (
-            common.FMHAQuantMode.fp8
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
-            else common.FMHAQuantMode.bfloat16
-        )
+        fmha_quant_mode = generation_attn_mode(database.system_spec, kvcache_quant_mode)
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(
@@ -1901,65 +1914,64 @@ def _get_dsv4_topk_calib(database):
 _MISSING = object()
 
 
-def _dsv4_row_head_axes(rows):
-    """Resolve each row's (native, local) head identity across BOTH historical
-    ``num_heads`` column semantics.
+def _validate_dsv4_local_head_semantics(rows, file_path):
+    """Reject rows still carrying the retired pre-#1131 NATIVE ``num_heads``
+    semantics.
 
-    Shipped DSV4 module files disagree on what ``num_heads`` means:
+    The unified DSV4 module-row convention (issue #1429) is rank-LOCAL:
+    ``num_heads`` is the head count the benchmarked module actually ran with
+    on one rank, ``tp_size`` is persisted in every row, and the model-native
+    count is derived as ``num_heads * tp_size``.  Within one artifact a
+    genuine local sweep varies ``num_heads`` as ``native // tp``, so a group
+    whose ``num_heads`` stays constant across several ``tp_size`` values can
+    only be a stale pre-migration file (Flash/Flash-FP8 64, Pro 128 constant
+    across tp 1/2/4/8).  Reading such a file as local would collapse distinct
+    tp shards onto wrong (native, local) coordinates again — rows whose
+    latencies differ 30-50% — so raise instead.  The shipped sglang 0.5.10
+    tables were migrated in-place; external files must be migrated the same
+    way (``num_heads //= tp_size``).
 
-    - sglang 0.5.10 files (collected before #1131 changed the collector) write
-      the model's NATIVE head count — constant per artifact across its tp
-      sweep (V4-Flash 64, V4-Pro 128).
-    - vllm 0.24.0 files (post-#1131 collectors) write the rank-LOCAL count
-      ``native // tp`` — varying with tp (64/32/16/8 across tp 1/2/4/8), the
-      semantics the SCHEME A docstrings described.
-
-    Both must key the same way, so sniff the semantics per (model, version)
-    from the data itself: within one group, ``num_heads`` constant while
-    ``tp_size`` varies means NATIVE; ``num_heads * tp_size`` constant means
-    LOCAL.  Grouping includes the ``version`` column because the shared layer
-    concatenates sibling-version files into one row stream — a re-collected
-    (local-writing) primary pooled with a stale (native-writing) sibling of
-    the same model must not poison each other's verdicts.  A group seen at a
-    single tp is ambiguous unless tp == 1 (native == local); assume LOCAL
-    there (what every current collector writes) with a debug note.
-
-    Returns ``{(model, version, num_heads, tp_size): (native, local)}``.
+    The fingerprint is checked per ``(model, version)`` because the shared
+    layer concatenates sibling-version files into one row stream — a
+    migrated (local) primary pooled with a stale (native) sibling of the
+    same model would otherwise blur both patterns and mask the stale rows.
     """
     observed: dict[tuple[str, str], set[tuple[int, int]]] = {}
+    saw_tp_size = False
     for row in rows:
         try:
             heads = int(row["num_heads"])
-            tp = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
+        try:
+            tp = max(1, int(row["tp_size"]))
+            saw_tp_size = True
+        except (TypeError, ValueError, KeyError):
+            tp = 1
         group = (str(row.get("model", "")), str(row.get("version", "")))
         observed.setdefault(group, set()).add((heads, tp))
 
-    axes: dict[tuple[str, str, int, int], tuple[int, int]] = {}
+    if observed and not saw_tp_size:
+        # Without tp_size every row collapses to tp=1 and the stale fingerprint
+        # below can never trigger — a stale file would load silently with wrong
+        # (native, local) coordinates. The #1429 convention makes tp_size a
+        # mandatory column, so fail like the Rust loader does.
+        raise ValueError(
+            f"DSV4 module file {file_path} carries no parseable tp_size column; the #1429 "
+            f"convention requires tp_size in every row (native = num_heads * tp_size)."
+        )
+
     for (model, version), pairs in observed.items():
         tps = {tp for _, tp in pairs}
         heads_constant = len({h for h, _ in pairs}) == 1
         product_constant = len({h * tp for h, tp in pairs}) == 1
         if len(tps) > 1 and heads_constant and not product_constant:
-            semantics = "native"
-        elif len(tps) > 1 and product_constant and not heads_constant:
-            semantics = "local"
-        elif tps == {1}:
-            semantics = "native"  # tp=1: native == local, either reading works
-        else:
-            semantics = "local"
-            logger.debug(
-                f"DSV4 module rows for model={model!r} version={version!r} have ambiguous "
-                f"num_heads semantics (pairs={sorted(pairs)}); assuming rank-LOCAL "
-                f"(current collector convention)."
+            raise ValueError(
+                f"DSV4 module rows for model={model!r} version={version!r} in {file_path} keep "
+                f"num_heads constant across tp_size values {sorted(tps)}: that is the retired "
+                f"pre-#1131 NATIVE semantics (#1429). Migrate the file to rank-local heads "
+                f"(num_heads //= tp_size) before loading."
             )
-        for heads, tp in pairs:
-            if semantics == "native":
-                axes[(model, version, heads, tp)] = (heads, max(1, heads // tp))
-            else:
-                axes[(model, version, heads, tp)] = (heads * tp, heads)
-    return axes
 
 
 def load_context_dsv4_kind_module_data(file_path: str):
@@ -1969,13 +1981,16 @@ def load_context_dsv4_kind_module_data(file_path: str):
         data[fmha_quant][kv_quant][gemm_quant][num_heads_native][num_heads_local]
             [compress_ratio][prefix][s][b] = {"latency": ms, "power": W, "energy": J}
 
-    The head identity is (native, rank-local), resolved per row by
-    ``_dsv4_row_head_axes`` across both historical ``num_heads`` column
-    semantics (see its docstring).  The native value is the row's model
-    identity (separates Pro rows from Flash rows) and the local count is the
-    physical per-rank shape; both are key dimensions.  Collapsing either axis
-    merged rows whose latencies differ 30-50% (different model shapes / tp
-    shards) into one coordinate, leaving an arbitrary row-order winner.
+    The head identity is (native, rank-local) under the unified #1429
+    convention: the ``num_heads`` column is the rank-LOCAL head count the
+    benchmarked module ran with, and the model-native count is derived as
+    ``num_heads * tp_size`` (``_validate_dsv4_local_head_semantics`` rejects
+    stale pre-#1131 files that stored native heads instead).  The native value
+    is the row's model identity (separates Pro rows from Flash rows) and the
+    local count is the physical per-rank shape; both are key dimensions.
+    Collapsing either axis merged rows whose latencies differ 30-50%
+    (different model shapes / tp shards) into one coordinate, leaving an
+    arbitrary row-order winner.
 
     ``prefix`` is the past-KV length, ``int(float(row["step"]))``; ``s`` is the
     context chunk length (``isl``).  Multiple files (csa/hca) merge cleanly
@@ -1985,7 +2000,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
-    head_axes = _dsv4_row_head_axes(rows)
+    _validate_dsv4_local_head_semantics(rows, file_path)
 
     # 8-level nesting: fmha → kv → gemm → native → local → cr → prefix → s → b
     def _make_nested(depth: int):
@@ -2011,9 +2026,8 @@ def load_context_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_native, num_heads_local = head_axes[
-            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
-        ]
+        num_heads_local = heads_col
+        num_heads_native = heads_col * tp_size
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         fmha_mode = common.FMHAQuantMode[_dsv4_normalize_dtype(row["mla_dtype"])]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
@@ -2042,8 +2056,9 @@ def load_generation_dsv4_kind_module_data(file_path: str):
 
     Generation lookup uses absolute KV length ``s_total = isl + step`` (decode
     is q_len=1 with past_kv = step).  Dict shape (same (native, local) head
-    identity as ``load_context_dsv4_kind_module_data``, resolved per row by
-    ``_dsv4_row_head_axes``):
+    identity as ``load_context_dsv4_kind_module_data``: rank-local ``num_heads``
+    column, native derived as ``num_heads * tp_size``, stale NATIVE-semantics
+    files rejected by ``_validate_dsv4_local_head_semantics``):
         data[kv_quant][gemm_quant][num_heads_native][num_heads_local]
             [compress_ratio][b][s_total]
     """
@@ -2051,7 +2066,7 @@ def load_generation_dsv4_kind_module_data(file_path: str):
     if rows is None:
         logger.debug(f"DSV4 module data file {file_path} not found.")
         return None
-    head_axes = _dsv4_row_head_axes(rows)
+    _validate_dsv4_local_head_semantics(rows, file_path)
 
     # 6-level nesting: kv → gemm → native → local → cr → b → s_total
     def _make_nested(depth: int):
@@ -2076,9 +2091,8 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             continue
         power = float(row.get("power", 0.0)) if has_power else 0.0
 
-        num_heads_native, num_heads_local = head_axes[
-            (str(row.get("model", "")), str(row.get("version", "")), heads_col, tp_size)
-        ]
+        num_heads_local = heads_col
+        num_heads_native = heads_col * tp_size
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
         kv_dtype = common.KVCacheQuantMode[_dsv4_normalize_dtype(row["kv_cache_dtype"])]
 

@@ -147,17 +147,43 @@ impl TransferPolicy {
     }
 }
 
+/// Tensor-core pipeline a quant mode's MMA actually executes on — i.e. which
+/// `<dtype>_tc_flops` entry of the system YAML governs its SOL math. Mirrors
+/// Python's `QuantMapping.compute_dtype`. Weight-only modes (int8_wo, int4_wo,
+/// w4a16_*) dequantize to bf16 before the MMA, so they map to `Bfloat16`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputeDtype {
+    Bfloat16,
+    Int8,
+    Fp8,
+    Fp4,
+}
+
+impl ComputeDtype {
+    /// The system YAML key holding this dtype's peak TC-FLOPS.
+    pub fn flops_key(self) -> &'static str {
+        match self {
+            Self::Bfloat16 => "bfloat16_tc_flops",
+            Self::Int8 => "int8_tc_flops",
+            Self::Fp8 => "fp8_tc_flops",
+            Self::Fp4 => "fp4_tc_flops",
+        }
+    }
+}
+
 /// Per-variant payload mirroring Python's
-/// `QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])`.
+/// `QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name", "compute_dtype"])`.
 ///
 /// `memory` is the per-element byte cost relative to bf16 (1.0 = same, 0.5 =
 /// half). `compute` is the TC-FLOPS multiplier relative to bf16. `name` is the
-/// stable string identifier used as a perf-DB column key.
+/// stable string identifier used as a perf-DB column key. `compute_dtype` is
+/// `None` for memory-only modes (KV cache, comm) that never query FLOPS.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuantMapping {
     pub memory: f64,
     pub compute: f64,
     pub name: &'static str,
+    pub compute_dtype: Option<ComputeDtype>,
 }
 
 /// GEMM quantization mode. Mirrors `common.GEMMQuantMode`.
@@ -178,15 +204,60 @@ pub enum GemmQuantMode {
 impl GemmQuantMode {
     pub fn mapping(self) -> QuantMapping {
         match self {
-            Self::Bfloat16 => QuantMapping { memory: 2.0, compute: 1.0, name: "bfloat16" },
-            Self::Int8Wo => QuantMapping { memory: 1.0, compute: 1.0, name: "int8_wo" },
-            Self::Int4Wo => QuantMapping { memory: 0.5, compute: 1.0, name: "int4_wo" },
-            Self::Fp8 => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8" },
-            Self::Fp8Static => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8_static" },
-            Self::Sq => QuantMapping { memory: 1.0, compute: 2.0, name: "sq" },
-            Self::Fp8Block => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8_block" },
-            Self::Fp8Ootb => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8_ootb" },
-            Self::Nvfp4 => QuantMapping { memory: 9.0 / 16.0, compute: 4.0, name: "nvfp4" },
+            Self::Bfloat16 => QuantMapping {
+                memory: 2.0,
+                compute: 1.0,
+                name: "bfloat16",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Int8Wo => QuantMapping {
+                memory: 1.0,
+                compute: 1.0,
+                name: "int8_wo",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Int4Wo => QuantMapping {
+                memory: 0.5,
+                compute: 1.0,
+                name: "int4_wo",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Fp8 => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Fp8Static => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8_static",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Sq => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "sq",
+                compute_dtype: Some(ComputeDtype::Int8),
+            },
+            Self::Fp8Block => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8_block",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Fp8Ootb => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8_ootb",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Nvfp4 => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 4.0,
+                name: "nvfp4",
+                compute_dtype: Some(ComputeDtype::Fp4),
+            },
         }
     }
 
@@ -221,22 +292,66 @@ pub enum MoeQuantMode {
 impl MoeQuantMode {
     pub fn mapping(self) -> QuantMapping {
         match self {
-            Self::Bfloat16 => QuantMapping { memory: 2.0, compute: 1.0, name: "bfloat16" },
-            Self::Fp8 => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8" },
-            Self::Int4Wo => QuantMapping { memory: 0.5, compute: 1.0, name: "int4_wo" },
-            Self::Fp8Block => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8_block" },
-            Self::W4afp8 => QuantMapping { memory: 0.5, compute: 2.0, name: "w4afp8" },
-            Self::Nvfp4 => QuantMapping { memory: 9.0 / 16.0, compute: 4.0, name: "nvfp4" },
-            Self::W4a16Mxfp4 => QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4" },
-            Self::W4a8Mxfp4Mxfp8 => {
-                QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8" }
-            }
-            Self::W4a8Mxfp4Mxfp8Trtllm => {
-                QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8_trtllm" }
-            }
-            Self::W4a16Mxfp4Cutlass => {
-                QuantMapping { memory: 0.5, compute: 1.0, name: "w4a16_mxfp4_cutlass" }
-            }
+            Self::Bfloat16 => QuantMapping {
+                memory: 2.0,
+                compute: 1.0,
+                name: "bfloat16",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Fp8 => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Int4Wo => QuantMapping {
+                memory: 0.5,
+                compute: 1.0,
+                name: "int4_wo",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Fp8Block => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8_block",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::W4afp8 => QuantMapping {
+                memory: 0.5,
+                compute: 2.0,
+                name: "w4afp8",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Nvfp4 => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 4.0,
+                name: "nvfp4",
+                compute_dtype: Some(ComputeDtype::Fp4),
+            },
+            Self::W4a16Mxfp4 => QuantMapping {
+                memory: 0.5,
+                compute: 1.0,
+                name: "w4a16_mxfp4",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::W4a8Mxfp4Mxfp8 => QuantMapping {
+                memory: 0.5,
+                compute: 2.0,
+                name: "w4a8_mxfp4_mxfp8",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::W4a8Mxfp4Mxfp8Trtllm => QuantMapping {
+                memory: 0.5,
+                compute: 2.0,
+                name: "w4a8_mxfp4_mxfp8_trtllm",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::W4a16Mxfp4Cutlass => QuantMapping {
+                memory: 0.5,
+                compute: 1.0,
+                name: "w4a16_mxfp4_cutlass",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
         }
     }
 
@@ -257,9 +372,24 @@ pub enum FmhaQuantMode {
 impl FmhaQuantMode {
     pub fn mapping(self) -> QuantMapping {
         match self {
-            Self::Bfloat16 => QuantMapping { memory: 2.0, compute: 1.0, name: "bfloat16" },
-            Self::Fp8 => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8" },
-            Self::Fp8Block => QuantMapping { memory: 1.0, compute: 2.0, name: "fp8_block" },
+            Self::Bfloat16 => QuantMapping {
+                memory: 2.0,
+                compute: 1.0,
+                name: "bfloat16",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::Fp8 => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
+            Self::Fp8Block => QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8_block",
+                compute_dtype: Some(ComputeDtype::Fp8),
+            },
         }
     }
 
@@ -281,9 +411,24 @@ pub enum KvCacheQuantMode {
 impl KvCacheQuantMode {
     pub fn mapping(self) -> QuantMapping {
         match self {
-            Self::Bfloat16 => QuantMapping { memory: 2.0, compute: 0.0, name: "bfloat16" },
-            Self::Int8 => QuantMapping { memory: 1.0, compute: 0.0, name: "int8" },
-            Self::Fp8 => QuantMapping { memory: 1.0, compute: 0.0, name: "fp8" },
+            Self::Bfloat16 => QuantMapping {
+                memory: 2.0,
+                compute: 0.0,
+                name: "bfloat16",
+                compute_dtype: None,
+            },
+            Self::Int8 => QuantMapping {
+                memory: 1.0,
+                compute: 0.0,
+                name: "int8",
+                compute_dtype: None,
+            },
+            Self::Fp8 => QuantMapping {
+                memory: 1.0,
+                compute: 0.0,
+                name: "fp8",
+                compute_dtype: None,
+            },
         }
     }
 
@@ -305,9 +450,24 @@ pub enum CommQuantMode {
 impl CommQuantMode {
     pub fn mapping(self) -> QuantMapping {
         match self {
-            Self::Half => QuantMapping { memory: 2.0, compute: 0.0, name: "half" },
-            Self::Int8 => QuantMapping { memory: 1.0, compute: 0.0, name: "int8" },
-            Self::Fp8 => QuantMapping { memory: 1.0, compute: 0.0, name: "fp8" },
+            Self::Half => QuantMapping {
+                memory: 2.0,
+                compute: 0.0,
+                name: "half",
+                compute_dtype: None,
+            },
+            Self::Int8 => QuantMapping {
+                memory: 1.0,
+                compute: 0.0,
+                name: "int8",
+                compute_dtype: None,
+            },
+            Self::Fp8 => QuantMapping {
+                memory: 1.0,
+                compute: 0.0,
+                name: "fp8",
+                compute_dtype: None,
+            },
         }
     }
 
@@ -482,15 +642,30 @@ mod tests {
         // Sampled from common.GEMMQuantMode.
         assert_eq!(
             GemmQuantMode::Bfloat16.mapping(),
-            QuantMapping { memory: 2.0, compute: 1.0, name: "bfloat16" }
+            QuantMapping {
+                memory: 2.0,
+                compute: 1.0,
+                name: "bfloat16",
+                compute_dtype: Some(ComputeDtype::Bfloat16)
+            }
         );
         assert_eq!(
             GemmQuantMode::Fp8.mapping(),
-            QuantMapping { memory: 1.0, compute: 2.0, name: "fp8" }
+            QuantMapping {
+                memory: 1.0,
+                compute: 2.0,
+                name: "fp8",
+                compute_dtype: Some(ComputeDtype::Fp8)
+            }
         );
         assert_eq!(
             GemmQuantMode::Nvfp4.mapping(),
-            QuantMapping { memory: 9.0 / 16.0, compute: 4.0, name: "nvfp4" }
+            QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 4.0,
+                name: "nvfp4",
+                compute_dtype: Some(ComputeDtype::Fp4)
+            }
         );
     }
 
@@ -498,11 +673,21 @@ mod tests {
     fn moe_quant_payloads_match_python_quant_mapping() {
         assert_eq!(
             MoeQuantMode::W4afp8.mapping(),
-            QuantMapping { memory: 0.5, compute: 2.0, name: "w4afp8" }
+            QuantMapping {
+                memory: 0.5,
+                compute: 2.0,
+                name: "w4afp8",
+                compute_dtype: Some(ComputeDtype::Fp8)
+            }
         );
         assert_eq!(
             MoeQuantMode::W4a8Mxfp4Mxfp8.mapping(),
-            QuantMapping { memory: 0.5, compute: 2.0, name: "w4a8_mxfp4_mxfp8" }
+            QuantMapping {
+                memory: 0.5,
+                compute: 2.0,
+                name: "w4a8_mxfp4_mxfp8",
+                compute_dtype: Some(ComputeDtype::Fp8)
+            }
         );
     }
 

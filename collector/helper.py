@@ -777,13 +777,33 @@ def log_perf(
     return True
 
 
+# Measured-value columns in a perf row. Everything else is the row's identity
+# (shape/config/kernel) key. log_perf writes exactly these metrics — the timed
+# ``latency`` plus the optional ``power``/``power_limit`` from power_stats.
+PERF_METRIC_COLUMNS = ("latency", "power", "power_limit")
+
+
 def convert_perf_csv_to_parquet(
     csv_file: str | os.PathLike,
     *,
     delete_source: bool = True,
     compression: str = "zstd",
+    merge_existing: bool = False,
 ) -> Path:
-    """Convert a collector CSV staging file to parquet atomically."""
+    """Convert a collector CSV staging file to parquet atomically.
+
+    When ``merge_existing`` is True and a parquet already exists at the target,
+    the new rows are merged into it instead of overwriting: the existing and new
+    rows are concatenated (new last) and deduplicated on their identity key —
+    every column except the measured metrics (``PERF_METRIC_COLUMNS``) — keeping
+    the newest row per key. This makes finalization idempotent and accumulative:
+    a resumed / ``--resume-retry-failed`` / batched collection extends the
+    parquet instead of clobbering it with only the current run's subset.
+    Finalization deletes the source ``.txt``, so without this a partial run after
+    an earlier finalize would silently shrink the complete file. A full fresh run
+    (all cases for the op) still yields the complete file either way, since every
+    identity key is re-measured and replaced.
+    """
     csv_path = Path(csv_file)
     if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
         raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
@@ -795,6 +815,7 @@ def convert_perf_csv_to_parquet(
         raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
 
     try:
+        import pyarrow as pa
         import pyarrow.csv as pc
         import pyarrow.parquet as pq
     except ImportError as exc:
@@ -805,8 +826,16 @@ def convert_perf_csv_to_parquet(
 
     parquet_path = csv_path.with_suffix(".parquet")
     tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
+    # Serialize the read-merge-replace sequence per parquet target: the source
+    # .lock above only guards CSV writers. Two finalizers racing here would
+    # both read the same existing parquet and the later os.replace would
+    # silently drop the earlier merge's rows.
+    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+    lock_fd = _acquire_merge_lock(merge_lock)
     try:
         table = pc.read_csv(csv_path)
+        if merge_existing and parquet_path.exists():
+            table = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
         pq.write_table(table, tmp_path, compression=compression)
         os.replace(tmp_path, parquet_path)
         if delete_source:
@@ -814,7 +843,104 @@ def convert_perf_csv_to_parquet(
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+        _release_merge_lock(merge_lock, lock_fd)
     return parquet_path
+
+
+def _acquire_merge_lock(lock_path: Path) -> int:
+    """Advisory flock on a per-target lock file (blocking).
+
+    flock is atomic, releases automatically when the holding process exits
+    (no stale-lock handling needed), and unlike an O_EXCL create-and-steal
+    scheme cannot let two finalizers past the gate. The lock file itself is
+    left in place — unlinking it would reopen the create/steal race.
+    """
+    import fcntl
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
+    os.close(lock_fd)  # closing releases the flock
+
+
+def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
+    """Merge freshly-collected rows into an existing perf parquet, keeping the
+    newest row per identity key. Returns the merged pyarrow table (or the new
+    table unchanged if the schemas are incompatible)."""
+    import pandas as pd
+
+    log = logging.getLogger(__name__)
+    old_table = pq.read_table(parquet_path)
+
+    # Compare (name, type) pairs for IDENTITY columns only: matching names
+    # with drifted types would otherwise round-trip through pandas and
+    # silently rewrite the parquet under a different schema. Metric columns
+    # are exempt from the type check — pyarrow.csv infers an all-empty
+    # optional metric column (e.g. power on a power-off run) as `null` while
+    # populated runs infer `double`, and treating that drift as a mismatch
+    # made the merge silently OVERWRITE the accumulated dataset. Metric
+    # values are cast to the existing metric type instead. Order-insensitive
+    # (the merge realigns column order below); Arrow metadata is ignored
+    # (pandas round-trips change it).
+    def fields(schema):
+        return sorted(
+            (f.name, str(f.type)) if f.name not in PERF_METRIC_COLUMNS else (f.name, "<metric>") for f in schema
+        )
+
+    old_fields = fields(old_table.schema)
+    new_fields = fields(new_table.schema)
+    if old_fields != new_fields:
+        log.warning(
+            "convert_perf_csv_to_parquet: schema mismatch merging %s "
+            "(existing=%s, new=%s); overwriting instead of merging.",
+            parquet_path.name,
+            old_fields,
+            new_fields,
+        )
+        return new_table
+    # Reconcile metric-column types on BOTH sides: an all-empty metric column
+    # is inferred as `null`, and Arrow can cast null -> anything (all nulls)
+    # but not double -> null. Whichever side is null-typed is cast toward the
+    # other; a genuine numeric-vs-numeric drift casts new toward old.
+    for f in old_table.schema:
+        if f.name not in PERF_METRIC_COLUMNS:
+            continue
+        new_field = new_table.schema.field(f.name)
+        if new_field.type == f.type:
+            continue
+        if pa.types.is_null(f.type):
+            old_table = old_table.set_column(
+                old_table.schema.get_field_index(f.name),
+                f.name,
+                old_table.column(f.name).cast(new_field.type),
+            )
+        else:
+            new_table = new_table.set_column(
+                new_table.schema.get_field_index(f.name),
+                f.name,
+                new_table.column(f.name).cast(f.type),
+            )
+
+    new_df = new_table.to_pandas()
+    old_df = old_table.to_pandas()
+
+    new_df = new_df[old_df.columns.tolist()]  # align column order
+    identity = [c for c in old_df.columns if c not in PERF_METRIC_COLUMNS]
+    combined = pd.concat([old_df, new_df], ignore_index=True)
+    deduped = combined.drop_duplicates(subset=identity, keep="last").reset_index(drop=True)
+    log.info(
+        "convert_perf_csv_to_parquet: merged %s: %d existing + %d new -> %d rows "
+        "(%d identity keys replaced by newer measurements)",
+        parquet_path.name,
+        len(old_df),
+        len(new_df),
+        len(deduped),
+        len(combined) - len(deduped),
+    )
+    return pa.Table.from_pandas(deduped, preserve_index=False)
 
 
 def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bool = False) -> list[Path]:
@@ -829,13 +955,26 @@ def finalize_perf_files(
     *,
     delete_source: bool = True,
     compression: str = "zstd",
+    merge_existing: bool = True,
 ) -> list[Path]:
-    """Finalize explicit collector CSV staging files as parquet."""
+    """Finalize explicit collector CSV staging files as parquet.
+
+    ``merge_existing`` defaults to True so that finalizing accumulates into any
+    pre-existing parquet (resume / retry-failed / batched collection) instead of
+    overwriting it with only this run's rows — see convert_perf_csv_to_parquet.
+    """
     converted: list[Path] = []
     for csv_file in sorted({Path(path) for path in csv_files}):
         if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt") or not csv_file.exists():
             continue
-        converted.append(convert_perf_csv_to_parquet(csv_file, delete_source=delete_source, compression=compression))
+        converted.append(
+            convert_perf_csv_to_parquet(
+                csv_file,
+                delete_source=delete_source,
+                compression=compression,
+                merge_existing=merge_existing,
+            )
+        )
     return converted
 
 
@@ -845,12 +984,14 @@ def finalize_perf_outputs(
     recursive: bool = False,
     delete_source: bool = True,
     compression: str = "zstd",
+    merge_existing: bool = True,
 ) -> list[Path]:
     """Finalize collector CSV staging files directly under `output_root` as parquet."""
     return finalize_perf_files(
         find_perf_csv_outputs(output_root, recursive=recursive),
         delete_source=delete_source,
         compression=compression,
+        merge_existing=merge_existing,
     )
 
 

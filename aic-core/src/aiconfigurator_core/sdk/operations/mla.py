@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, ClassVar
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk.operations.attention import generation_attn_flops, generation_attn_mode
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
@@ -145,6 +146,10 @@ class ContextMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query context MLA table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
         def get_sol(
             b: int,
@@ -161,7 +166,7 @@ class ContextMLA(Operation):
             mem_bytes = (
                 b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
             )  # 2 for qk, TODO
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -345,17 +350,17 @@ class GenerationMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query generation MLA table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        generation_attn_flops(database.system_spec, kvcache_quant_mode)
 
         def get_sol(
             b: int, s: int, num_heads: int, kvcache_quant_mode: common.KVCacheQuantMode
         ) -> tuple[float, float, float]:
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
             ops = 2 * b * num_heads * 1088 * s
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kvcache_quant_mode.value.memory)
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = ops / generation_attn_flops(database.system_spec, kvcache_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -545,13 +550,17 @@ class MLABmm(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query MLA BMM table (legacy body + exact-head-first routing)."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         def get_sol(
             num_tokens: int, num_heads: int, quant_mode: common.GEMMQuantMode, if_pre: bool
         ) -> tuple[float, float, float]:
             ops = 2 * num_tokens * num_heads * 128 * 512
             mem_bytes = num_heads * (num_tokens * 640 + 128 * 512) * quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -766,6 +775,10 @@ class MLAModule(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query context MLA module table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
         def get_sol(
             b: int,
@@ -779,7 +792,7 @@ class MLAModule(Operation):
             full_s = s + prefix
             ops = b * num_heads * 2 / 2 * (192 + 128) * (full_s * full_s - prefix * prefix)
             mem_bytes = b * num_heads * (kvcache_quant_mode.value.memory * full_s * (192 + 128) + 2 * s * (192 + 128))
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -880,6 +893,11 @@ class MLAModule(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query generation MLA module table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        generation_attn_flops(database.system_spec, kv_cache_dtype)
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
 
         # Reuse the same SOL model as query_generation_mla — the module captures
         # the same operations, just profiled together. For a proper SOL we'd
@@ -888,21 +906,15 @@ class MLAModule(Operation):
         def get_sol(
             b: int, s: int, num_heads: int, kv_cache_dtype: common.KVCacheQuantMode
         ) -> tuple[float, float, float]:
-            if kv_cache_dtype == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
             # MLA attention ops
             attn_ops = 2 * b * num_heads * 1088 * s
             mem_bytes = b * (num_heads * 1088 * 2 + (s - 1) * 576 * kv_cache_dtype.value.memory)
-            sol_math = attn_ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = attn_ops / generation_attn_flops(database.system_spec, kv_cache_dtype) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             # Add BMM pre + post SOL (same as query_mla_bmm)
             bmm_ops = 2 * 2 * b * num_heads * 128 * 512  # pre + post
             bmm_mem = 2 * num_heads * (b * 640 + 128 * 512) * gemm_quant_mode.value.memory
-            bmm_math = (
-                bmm_ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * gemm_quant_mode.value.compute) * 1000
-            )
+            bmm_math = bmm_ops / common.get_quant_tc_flops(database.system_spec, gemm_quant_mode) * 1000
             bmm_mem_time = bmm_mem / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_math += bmm_math
             sol_mem += bmm_mem_time
@@ -1108,15 +1120,18 @@ class WideEPGenerationMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query WideEP generation MLA table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure. The
+        # fmha label is inert for generation SOL (re-derived from the kv dtype
+        # just below), so validate the DERIVED dtype, not the label.
+        generation_attn_flops(database.system_spec, kvcache_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (kernel tables key on kv dtype).
-        # Derive the SOL dtype from kv so label changes cannot move decode SOL
-        # -- mirrors query_generation_mla's get_sol.
-        fmha_quant_mode = (
-            common.FMHAQuantMode.fp8
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
-            else common.FMHAQuantMode.bfloat16
-        )
+        # Derive the SOL dtype via the shared sm-gated rule so label changes
+        # cannot move decode SOL -- mirrors query_generation_mla's get_sol.
+        fmha_quant_mode = generation_attn_mode(database.system_spec, kvcache_quant_mode)
 
         def get_sol(
             b: int,
@@ -1172,8 +1187,10 @@ class WideEPGenerationMLA(Operation):
 
             ops = q_b_flop + q_w_kc_flop + s_w_vc_flop + attn_out_flop
             mem_bytes = (q_b_mem + q_w_kc_mem + attn_mem * 2 + s_w_vc_mem + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (database.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
+            sol_math += (
+                attn_flop / common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16) * 1000
+            )
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
 
@@ -1382,6 +1399,11 @@ class WideEPContextMLA(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query WideEP context MLA table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
 
         def get_sol(
             b: int,
@@ -1436,8 +1458,10 @@ class WideEPContextMLA(Operation):
 
             ops = q_b_flop + kv_b_flop + attn_out_flop
             mem_bytes = (q_b_mem + kv_b_mem + attn_mem * 2 + attn_out_mem) * fmha_quant_mode.value.memory
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * fmha_quant_mode.value.compute) * 1000
-            sol_math += attn_flop / (database.system_spec["gpu"]["bfloat16_tc_flops"]) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
+            sol_math += (
+                attn_flop / common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16) * 1000
+            )
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
