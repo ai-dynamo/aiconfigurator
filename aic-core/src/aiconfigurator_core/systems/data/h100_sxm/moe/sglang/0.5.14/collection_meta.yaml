@@ -12,4 +12,12 @@ tables:
     # sglang_marlin_moe, TP 1-32 x 3 distributions) from 8x H100. Every
     # moe_ep_size > 1 K3 cell crashes with CUDA IMA (2537 cells) — the known
     # sglang 0.5.14 Hopper marlin EP-slice bug, candidate upstream issue.
+    # 2026-08-04 (review): the K3 rows above are relabeled kernel_source
+    # `sglang_marlin_moe_situ_as_silu`. K3's checkpoint activation
+    # is SiTU; stock 0.5.14 has no SiTU path, so this lane benchmarks the
+    # silu epilogue under the K3 w4a16_mxfp4 label — the same approximation
+    # the vllm lane marks (epilogue delta up to ~5.5% at small token counts;
+    # Blackwell trtllm-gen lanes are unaffected, same kernel + epilogue
+    # constants). Re-collections on stock images must re-apply the suffix
+    # until the sglang collector learns the checkpoint's situ property.
     status: complete

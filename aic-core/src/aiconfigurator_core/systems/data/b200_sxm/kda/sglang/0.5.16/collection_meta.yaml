@@ -6,16 +6,23 @@ provenance: local
 runtime:
   framework: sglang
   version: 0.5.16
+  image: lmsysorg/sglang
+  # Context/verify phases: the first branch build (manifest pin).
+  image_digest: sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b
 tables:
   kda_perf:
     # 2026-07-28 base collection predates the kda_fused_decode collector
     # branch. 2026-08-02: the GENERATION phase was recollected in the
-    # current kimi-k3 image (sha256:6d9594a4) and REPLACED wholesale (77
-    # rows, zero failures) with the collector's canonical dispatch shape:
-    # kda_fused_decode on the 12-head shard (6.75 us @bs1), Triton pair on
-    # 24/48/96 — matching b300/gb200/gb300. The SDK's per-key fused routing
-    # requires the Triton key to be ABSENT for the covered shard, so an
-    # append was not sufficient. Context/verify rows keep the original
-    # 4b8a7542-image provenance (phases now span two builds of the branch;
-    # both report 0.5.16).
+    # current kimi-k3 image — the 2026-07-29 re-push of the kimi-k3 tag,
+    # lmsysorg/sglang@sha256:6d9594a421be244f2af29d726158ebffe9c3c2b3f39b5b89affd8150a106e187
+    # (branch commit c6ad1f26, build tag kimi-k3-c6ad1f26-20260729; full
+    # digest recovered from the Docker Hub tag manifest, review
+    # 2026-08-04) — and REPLACED wholesale (77 rows, zero failures) with
+    # the collector's canonical dispatch shape: kda_fused_decode on the
+    # 12-head shard (6.75 us @bs1), Triton pair on 24/48/96 — matching
+    # b300/gb200/gb300. The SDK's per-key fused routing requires the
+    # Triton key to be ABSENT for the covered shard, so an append was not
+    # sufficient. Context/verify rows keep the original first-build
+    # provenance (the runtime.image_digest above; phases span two builds
+    # of the branch, both reporting 0.5.16).
     status: complete

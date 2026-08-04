@@ -6,12 +6,17 @@ provenance: local
 runtime:
   framework: sglang
   version: 0.5.16
+  image: lmsysorg/sglang
+  # The 2026-07-29 re-push of the kimi-k3 tag (branch commit c6ad1f26,
+  # build tag kimi-k3-c6ad1f26-20260729); full digest recovered from the
+  # Docker Hub tag manifest (review 2026-08-04).
+  image_digest: sha256:6d9594a421be244f2af29d726158ebffe9c3c2b3f39b5b89affd8150a106e187
 tables:
   # Kimi-K3 MegaMoE module rows (DeepGEMM fp8_fp4_mega_moe + fused symm-buffer
   # a2a, SiTU activation, EP8 cross-rank), collected 2026-08-01 on 8x B200
   # via torchrun collect_dsv4_megamoe --model-config kimi_k3
   # --activation-clamp 0.03125 in the kimi-k3 branch image
-  # (lmsysorg/sglang@sha256:6d9594a4, reports 0.5.16). 64 rows: context 24 +
+  # (the runtime.image_digest above, reports 0.5.16). 64 rows: context 24 +
   # generation 40, 4 routing distributions, w4a8_mxfp4_mxfp8/fp8_fp4.
   # SiTU sentinel VERIFIED live in-kernel: rerunning generation cells at
   # --activation-clamp 10.0 shifts latency (-3.5% at 64 tokens/rank,

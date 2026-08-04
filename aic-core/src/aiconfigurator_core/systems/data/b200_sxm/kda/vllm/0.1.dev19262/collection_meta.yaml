@@ -6,6 +6,19 @@ provenance: local
 runtime:
   framework: vllm
   version: 0.1.dev19262
+  image: vllm/vllm-openai
+  # kimi-k3 preview tag (0.1.dev19262+gb6bbf29dd, CUDA 13 build) — the
+  # collector/framework_manifest.yaml families.kda pin.
+  image_digest: sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616
 tables:
   kda_perf:
+    collected_at: '2026-07-28'
+    rows: 1203
+    # context 428+428 (causal_conv1d_fn_qkv3 + flashkda_fwd), generation
+    # 44+44+43 (conv update / packed recurrence / fused_kda_decode),
+    # verify 108+108 (spec conv + fused_recurrent_kda); dispatch probes
+    # verified on SM100 (bring-up ledger 2026-07-28).
+    # collector_ref/collector_hash/case_plan_hash were not captured by
+    # this pre-provenance-writer run (structured fields backfilled
+    # 2026-08-04, review).
     status: complete

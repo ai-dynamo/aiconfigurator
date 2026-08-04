@@ -652,3 +652,75 @@ running both engine-step backends directly (identical tpot/ttft) because
 the b200 support-matrix cell fails on a PRE-EXISTING K3 memory-fit issue
 (tp8 w4a8 weights exceed the 180 GiB modeled capacity; unrelated to this
 change, fails identically on the parent commit).
+
+Human review wave (2026-08-04, Arsene12358, 2 BLOCKER + 6 MAJOR — all
+landed):
+- Truncated digest RECOVERED: the second kimi-k3 build is the 2026-07-29
+  tag re-push of lmsysorg/sglang,
+  sha256:6d9594a421be244f2af29d726158ebffe9c3c2b3f39b5b89affd8150a106e187
+  (branch commit c6ad1f26, build tag kimi-k3-c6ad1f26-20260729;
+  recovered via the Docker Hub tag manifest).
+  Recorded in the b200 kda + b200 MegaMoE metas; the two bare metas
+  (b300 kda sglang, b200 kda vllm) upgraded to the structured format
+  with honest "pre-provenance-writer, hashes not captured" notes.
+- sglang stock-lane situ-as-silu marked IN DATA (mirrors the vllm
+  standard): the K3 w4a16_mxfp4 rows on h100 (541) / h200 (488) / rtx
+  (551, marlin) and l40s (2997, triton) now carry the _situ_as_silu
+  kernel_source suffix. kernel_source verified NOT a slice key for these
+  rows (Python load_moe_data routes only exact-match names:
+  min_latency split + two DeepSeek-V4 quant remaps; Rust twin
+  identical); loader spot-check bit-identical
+  (h100 K3 tp8ep1 power_law_1.01 query 0.5942489624023437 before ==
+  after, at BOTH 0.5.14 exact and 0.5.16 nearest-version resolution).
+  op_kernel_source_manifest.yaml regen DEFERRED (owner decision needed):
+  a fresh tool run produces ~1400 lines of tree-wide staleness churn —
+  the checked-in manifest predates many lanes including the PR's own
+  vllm _situ_as_silu rows — and the manifest is a live shared-layer
+  inheritance whitelist, so a wholesale regen is its own
+  behavior-changing pass. Interim state is conservative and matches the
+  vllm precedent: suffixed (approximated) rows are NOT cross-backend
+  inheritable; own-backend queries are unaffected (verified above).
+  K3's sglang_moe_backends map gained explicit 89/120 keys with the
+  branch citation (overrides.py:479-504 @ c6ad1f26 fires on SM100/103
+  only). NOTE for future stock re-collections: the suffix must be
+  re-applied until the sglang collector learns the checkpoint's situ
+  property (the vllm collector already probes it).
+- SM>=90 fused-decode gate REMOVED from the sglang kda collector: the
+  serving chain has NO JIT-failure fallback (model stashes fused args on
+  every NVIDIA GPU, kimi_k3.py:1563-1614 @ c6ad1f26; backend calls the
+  kernel wherever covered() accepts with no try/except,
+  linear/kda_backend.py:426-476), so the old "same as serving after its
+  own JIT failure" claim was an invented fallback. SM89 12-head decode
+  cells now raise classified (the crash serving hits). DATA IMPLICATION
+  (owner decision pending): the shipped l40s kda 12-head generation
+  Triton rows have no serving-truth backing — serving on SM89 crashes
+  rather than reaching the Triton pair; future l40s kda runs will fail
+  generation strict-completeness on those cells. Keep as interpolation
+  support or prune — flagged to owner.
+- vllm int32 conv guard: FIXME(kernel-limit) landed with the honest
+  finding — the pinned preview source is not publicly addressable
+  (commit b6bbf29dd absent upstream) and the era file at v0.24.0 uses
+  int64 token strides (causal_conv1d.py:39,47), i.e. mainline vLLM
+  establishes NO int32 limit; the nt*proj bound stays as an unverified
+  conservative guard (in-band cells pass on silicon) pending an on-image
+  probe at the next bump. Guard expression now AST-pinned in the vllm
+  contract test.
+- K3 trtllm moe zero-expansion fixed: moe activation moved to
+  framework_specific_op_cases.{sglang,vllm} (a K3-scoped trtllm run
+  plans no moe at all), the yaml trtllm allowlist is an explicit
+  tombstone (allowed_modes: []) so cross-model trtllm sweeps cannot
+  plan K3 under ungated base modes, and the trtllm getter now logs
+  fully-dropped models like the vllm getter. Population test pins all
+  three. This resolves the parked "zero-expanding trtllm quant lane"
+  fast-follow.
+- SHARED MECHANISM CHANGE (declared per layer_permissions meta-rule 2):
+  helper.log_perf's stale-lock breaker is now rename-based
+  (os.rename to a pid-suffixed name, unlink the renamed file) — the
+  unlink-based breaker had a two-waiter race where the loser could
+  unlink a FRESH lock and interleave two writers. 30s wait window and
+  60s stale threshold unchanged; unit tests pin the stale-break and the
+  loser-never-unlinks contract.
+- test_sglang_attention_0514.py is now module-level pytest.mark.unit
+  (the K3 attention-population pins were invisible to CI's -m gate);
+  the vllm kda dispatch contract test is AST-based (name references,
+  not substring greps).
