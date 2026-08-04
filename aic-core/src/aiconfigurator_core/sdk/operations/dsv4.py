@@ -41,6 +41,7 @@ import numpy as np
 from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import InterpolationDataNotAvailableError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk.operations.attention import generation_attn_mode
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 
 logger = logging.getLogger(__name__)
@@ -156,12 +157,11 @@ def _deepseek_v4_attention_sol(
 
     Verbatim port of the legacy ``PerfDatabase._deepseek_v4_attention_sol``
     body. Reads ``database.system_spec``, ``database._causal_limited_pairs``,
-    ``database._compressed_context_pairs``, and ``GEMM._get_quant_tc_flops``.
+    ``database._compressed_context_pairs``, and ``common.get_quant_tc_flops``.
     """
-    from aiconfigurator_core.sdk.operations.gemm import GEMM
 
     def _tc_flops(quant_mode):
-        return GEMM._get_quant_tc_flops(database.system_spec, quant_mode)
+        return common.get_quant_tc_flops(database.system_spec, quant_mode)
 
     tokens = b * s if is_context else b
     kv_len = prefix + s if is_context else max(0, s - 1)
@@ -374,7 +374,10 @@ class DeepSeekV4MHCModule(Operation):
         The SOL estimate models the combined attention-site and FFN-site mHC work
         inside one decoder layer, matching the collector's module boundary.
         """
-        from aiconfigurator_core.sdk.operations.gemm import GEMM
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         cls.load_data(database)
 
@@ -403,7 +406,7 @@ class DeepSeekV4MHCModule(Operation):
             activation_bytes = sites * nt * hc_dim * quant_mode.value.memory * (3 if op_name == "both" else 2)
             if op_name in {"pre", "both"}:
                 activation_bytes += sites * nt * (2 * hc_mult + hc_mult * hc_mult) * 4
-            sol_math = ops / GEMM._get_quant_tc_flops(database.system_spec, quant_mode) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = (param_bytes + activation_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
             return max(sol_math, sol_mem), sol_math, sol_mem
 
@@ -817,6 +820,13 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         prefix: int = 0,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_context_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         cls.load_data(database)
 
         def get_sol(b_: int = b, s_: int = s, prefix_: int = prefix) -> tuple[float, float, float]:
@@ -1271,16 +1281,18 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_generation_deepseek_v4_attention_module``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.bfloat16)
+        common.get_quant_tc_flops(database.system_spec, common.GEMMQuantMode.fp8)
         cls.load_data(database)
         # Decode attention compute dtype follows the kv-cache dtype; the fmha
         # label is inert for generation (the table keys on kv dtype).  Derive
         # the SOL dtype from kv so label changes cannot move decode SOL --
         # mirrors query_generation_mla's get_sol.
-        fmha_quant_mode = (
-            common.FMHAQuantMode.fp8
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8
-            else common.FMHAQuantMode.bfloat16
-        )
+        fmha_quant_mode = generation_attn_mode(database.system_spec, kvcache_quant_mode)
 
         def get_sol(b_: int = b, s_: int = s) -> tuple[float, float, float]:
             return _deepseek_v4_attention_sol(

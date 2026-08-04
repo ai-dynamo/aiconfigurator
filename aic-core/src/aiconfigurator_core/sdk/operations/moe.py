@@ -298,6 +298,10 @@ class MoE(Operation):
         enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_moe`` body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         cls.load_data(database)
@@ -329,7 +333,7 @@ class MoE(Operation):
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -1545,6 +1549,10 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         cls.load_data(database)
 
         num_gemms = 3 if is_gated else 2
@@ -1577,7 +1585,7 @@ class TrtLLMWideEPMoE(Operation):
                 // moe_tp_size
                 * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

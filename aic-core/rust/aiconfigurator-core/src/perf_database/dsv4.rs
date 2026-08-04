@@ -40,13 +40,15 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use super::dsa::{bs_slice, lookup_2d, SparseGrid};
+use super::attention::generation_attn_mode;
+use super::gemm::quant_tc_flops;
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::dsa::{bs_slice, lookup_2d, SparseGrid};
-use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,14 +299,19 @@ impl Dsv4Table {
         prefix: u32,
         sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
         let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, native_heads, local_heads)?;
 
-        let dims = sol_dims
-            .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
+        let dims = sol_dims.unwrap_or_else(|| {
+            Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64)
+        });
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
         // Engine coordinates are (prefix, seq, batch); Python's sol_fn is
@@ -322,6 +329,7 @@ impl Dsv4Table {
                 c[1] as i64, // s
                 c[0] as i64, // prefix
                 heads,
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["prefix", "seq_len", "batch"], &sol);
@@ -359,25 +367,27 @@ impl Dsv4Table {
         architecture: &str,
         sol_dims: Option<Dsv4SolDims>,
     ) -> Result<f64, AicError> {
+        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
+        // the fmha label is inert for generation (the table keys on kv dtype).
+        // Derive the SOL dtype via the shared sm-gated rule
+        // (`generation_attn_mode`) so label changes cannot move decode SOL —
+        // mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
+        // The table key carries no fmha level at all (see `ModuleKey`), so this
+        // query takes no fmha parameter.
+        let fmha_quant = generation_attn_mode(spec, kv_quant);
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsv4_sol_flops(spec, gemm_quant, fmha_quant)?;
         let grids = match attn_kind {
             AttnKind::Csa => self.load_csa_generation()?,
             AttnKind::Hca => self.load_hca_generation()?,
         };
-        // PR #1337: decode attention compute dtype follows the kv-cache dtype;
-        // the fmha label is inert for generation (the table keys on kv dtype).
-        // Derive the SOL dtype from kv so label changes cannot move decode SOL
-        // — mirrors `GenerationDeepSeekV4AttentionModule` (operations/dsv4.py).
-        // The table key carries no fmha level at all (see `ModuleKey`), so this
-        // query takes no fmha parameter.
-        let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
-            FmhaQuantMode::Fp8
-        } else {
-            FmhaQuantMode::Bfloat16
-        };
         let node = select_resolved(grids, None, kv_quant, gemm_quant, native_heads, local_heads)?;
 
-        let dims = sol_dims
-            .unwrap_or_else(|| Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64));
+        let dims = sol_dims.unwrap_or_else(|| {
+            Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64)
+        });
         let cr = attn_kind.compress_ratio();
         let heads = local_heads as i64;
         // Engine coordinates are (batch, seq); Python's sol_fn is
@@ -395,6 +405,7 @@ impl Dsv4Table {
                 c[1] as i64, // s_total
                 0,
                 heads,
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["batch", "seq_len"], &sol);
@@ -1005,17 +1016,28 @@ fn resolve_head_key<T>(by_native: &BTreeMap<u32, T>, local_heads: u32) -> Option
 // Analytic SOL — verbatim port of Python `_deepseek_v4_attention_sol`
 // ---------------------------------------------------------------------------
 
-/// Python `GEMM._get_quant_tc_flops` (compute factor -> spec TC-flops entry,
-/// bf16-scaled fallback).
-fn tc_flops(spec: &SystemSpec, compute_factor: f64) -> f64 {
-    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    let direct = match compute_factor as u32 {
-        1 => spec.gpu.bfloat16_tc_flops,
-        2 => spec.gpu.fp8_tc_flops,
-        4 => spec.gpu.fp4_tc_flops,
-        _ => None,
-    };
-    direct.unwrap_or(bf16 * compute_factor)
+/// Pre-resolved TC-FLOPS for the four DSV4 attention op groups. Resolved once
+/// per query via `quant_tc_flops` (strict: a missing `*_tc_flops` entry
+/// errors) so the hot sol closures stay `-> f64`.
+#[derive(Clone, Copy)]
+pub(crate) struct Dsv4SolFlops {
+    pub gemm: f64,
+    pub bf16: f64,
+    pub fp8: f64,
+    pub attn: f64,
+}
+
+pub(crate) fn dsv4_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+    fmha_quant: FmhaQuantMode,
+) -> Result<Dsv4SolFlops, AicError> {
+    Ok(Dsv4SolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        bf16: quant_tc_flops(spec, GemmQuantMode::Bfloat16.mapping())?,
+        fp8: quant_tc_flops(spec, GemmQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, fmha_quant.mapping())?,
+    })
 }
 
 /// Python `PerfDatabase._causal_limited_pairs`: sum over queries of
@@ -1085,6 +1107,7 @@ pub(crate) fn dsv4_attention_sol_ms(
     s: i64,
     prefix: i64,
     local_heads: i64,
+    flops: Dsv4SolFlops,
 ) -> f64 {
     let local_o_groups = dims.local_o_groups.max(1);
 
@@ -1174,11 +1197,10 @@ pub(crate) fn dsv4_attention_sol_ms(
     let kv_cache_bytes = (attention_pairs * hd) as f64 * kv_quant.mapping().memory;
     let rope_bytes = (tokens * nh * rope_hd) as f64 * fmha_quant.mapping().memory;
 
-    let sol_math = ((gemm_projection_ops + compressor_ops) as f64 / tc_flops(spec, gemm_quant.mapping().compute)
-        + (output_absorption_ops + indexer_bfloat16_ops) as f64
-            / tc_flops(spec, GemmQuantMode::Bfloat16.mapping().compute)
-        + indexer_ops as f64 / tc_flops(spec, GemmQuantMode::Fp8.mapping().compute)
-        + attention_ops as f64 / tc_flops(spec, fmha_quant.mapping().compute))
+    let sol_math = ((gemm_projection_ops + compressor_ops) as f64 / flops.gemm
+        + (output_absorption_ops + indexer_bfloat16_ops) as f64 / flops.bf16
+        + indexer_ops as f64 / flops.fp8
+        + attention_ops as f64 / flops.attn)
         * 1000.0;
     let sol_mem = (gemm_weight_bytes
         + bfloat16_weight_bytes

@@ -36,14 +36,15 @@
 //! Weights accounting (per-expert FFN weights + router) is in the model
 //! layer; the operator returns latency only.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, MoeQuantMode, TransferKind, TransferPolicy};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::moe::{MoeKernel, MoeSiblingSlice};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Per-quant achieved-util LEVEL `e(q)` for MoE, keyed by the
@@ -112,7 +113,11 @@ fn xprofile_moe_quants(query: MoeQuantMode, table_quants: &[MoeQuantMode]) -> Ve
         let m = q.mapping();
         (m.memory - qp.memory).abs() + (m.compute - qp.compute).abs()
     };
-    refs.sort_by(|a, b| dist(*a).partial_cmp(&dist(*b)).expect("finite profile distances"));
+    refs.sort_by(|a, b| {
+        dist(*a)
+            .partial_cmp(&dist(*b))
+            .expect("finite profile distances")
+    });
     refs
 }
 
@@ -305,7 +310,8 @@ impl MoeOp {
         // floor-division parity with Python's `get_sol`. This replaces the
         // deleted op-level SOL-anchored overflow estimator (the engine's
         // `k_tail=1` util-hold handles beyond-range queries).
-        let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32);
+        let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+        let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32, tc_flops);
 
         // SGLang DeepEP (wideep) routes MoE compute to the wideep
         // context/generation tables (Python operations/moe.py:
@@ -397,6 +403,7 @@ impl MoeOp {
         let spec = &db.system_spec;
         let quant = self.quant_mode;
         let num_gemms: u64 = if self.is_gated { 3 } else { 2 };
+        let tc_flops = quant_tc_flops(spec, quant.mapping())?;
         let sol_time = moe_sol_latency_ms(
             spec,
             quant,
@@ -408,6 +415,7 @@ impl MoeOp {
             self.num_experts,
             self.moe_tp_size,
             self.moe_ep_size,
+            tc_flops,
         );
 
         // Table selection mirrors get_silicon's (`_moe_table`,
@@ -452,6 +460,7 @@ impl MoeOp {
                 self.num_experts,
                 self.moe_tp_size,
                 self.moe_ep_size,
+                tc_flops,
             )
         };
         let own_key = format!(
@@ -715,6 +724,7 @@ impl MoeOp {
             // ReferenceCandidate contract: the SOL uses THE CANDIDATE's
             // shape (not the query's) so util carries only the shared
             // kernel efficiency.
+            let ref_tc_flops = quant_tc_flops(spec, chosen.sol_quant.mapping())?;
             let sol = |c: &[f64]| {
                 moe_sol_latency_ms(
                     spec,
@@ -727,6 +737,7 @@ impl MoeOp {
                     chosen.slice.num_experts,
                     self.moe_tp_size,
                     self.moe_ep_size,
+                    ref_tc_flops,
                 )
             };
             let mut grid = UtilGrid::new(util_empirical::build_samples(
@@ -742,7 +753,7 @@ impl MoeOp {
     /// `get_sol` closure (`operations/moe.py:297`). Passed into the perf-DB
     /// engine query as the util-hold roofline; in-grid resolutions never
     /// consult it (1-axis RAW lerp / exact hit).
-    fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u32) -> f64 {
+    fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u32, tc_flops: f64) -> f64 {
         // `num_gemms`: 3 for gated SwiGLU (gate + up + down), 2 for
         // non-gated Relu² (up + down). Matches Python `num_gemms = 3 if
         // is_gated else 2` (`operations/moe.py:115, 239`).
@@ -758,6 +769,7 @@ impl MoeOp {
             self.num_experts,
             self.moe_tp_size,
             self.moe_ep_size,
+            tc_flops,
         )
     }
 }
@@ -779,6 +791,7 @@ fn moe_sol_latency_ms(
     num_experts: u32,
     moe_tp_size: u32,
     moe_ep_size: u32,
+    tc_flops: f64,
 ) -> f64 {
     let total_tokens = num_tokens as u64 * topk as u64;
     let moe_ep = (moe_ep_size as u64).max(1);
@@ -794,12 +807,9 @@ fn moe_sol_latency_ms(
             * std::cmp::min(ne / moe_ep, total_tokens / moe_ep);
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
 
-    // Python uses `system_spec["gpu"]["bfloat16_tc_flops"]` directly
-    // (KeyError if missing). Rust exposes it as Option; fall back to 1.0
-    // to make the math identity (sol_math → ops, sol_mem dominates)
-    // rather than dividing by zero. Every shipped system populates it.
-    let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
-    let sol_math = (ops as f64) / (tc_flops * quant.mapping().compute) * 1000.0;
+    // `tc_flops` is pre-resolved by the caller via `quant_tc_flops`
+    // (strict per-dtype lookup; a missing `*_tc_flops` entry errors there).
+    let sol_math = (ops as f64) / tc_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }

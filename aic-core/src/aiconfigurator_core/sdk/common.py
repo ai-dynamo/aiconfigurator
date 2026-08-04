@@ -3,6 +3,7 @@
 
 import csv
 import json
+import math
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -10,6 +11,8 @@ from functools import cache
 from importlib import resources as pkg_resources
 
 from packaging.version import InvalidVersion, Version
+
+from aiconfigurator_core.sdk.errors import MissingSystemFlopsError
 
 
 def parse_support_matrix_version(version: str | None) -> Version | None:
@@ -1036,7 +1039,12 @@ class PerfDataFilename(Enum):
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
 
 
-QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
+# compute_dtype names the tensor-core pipeline the mode's MMA actually executes
+# on ("bfloat16" | "int8" | "fp8" | "fp4"), i.e. which <dtype>_tc_flops entry of
+# the system YAML governs its SOL math. Weight-only modes (int8_wo, int4_wo,
+# w4a16_*) dequantize to bf16 before the MMA, so they map to "bfloat16". None
+# marks memory-only modes (KV cache, comm) that never query FLOPS.
+QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name", "compute_dtype"])
 
 
 class GEMMQuantMode(Enum):
@@ -1044,17 +1052,19 @@ class GEMMQuantMode(Enum):
     GEMM quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
-    int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
-    int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
-    fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
-    fp8_static = QuantMapping(1, 2, "fp8_static")  # fp8 with static quantization (compute_scale/scale_matrix modeled)
-    sq = QuantMapping(1, 2, "sq")  # w8int8
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")  # w16a16
+    int8_wo = QuantMapping(1, 1, "int8_wo", "bfloat16")  # w8a16
+    int4_wo = QuantMapping(0.5, 1, "int4_wo", "bfloat16")  # w4a16
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")  # w8fp8
+    fp8_static = QuantMapping(
+        1, 2, "fp8_static", "fp8"
+    )  # fp8 with static quantization (compute_scale/scale_matrix modeled)
+    sq = QuantMapping(1, 2, "sq", "int8")  # w8int8
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
     fp8_ootb = QuantMapping(
-        1, 2, "fp8_ootb"
+        1, 2, "fp8_ootb", "fp8"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
-    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
 
 
 class MoEQuantMode(Enum):
@@ -1062,23 +1072,23 @@ class MoEQuantMode(Enum):
     MoE quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
-    fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
-    int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
-    w4afp8 = QuantMapping(0.5, 2, "w4afp8")  # specific for trtllm torch ds w4a8
-    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
-    w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
-    w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8")
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")  # w16a16
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")  # w8fp8
+    int4_wo = QuantMapping(0.5, 1, "int4_wo", "bfloat16")  # w4a16
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
+    w4afp8 = QuantMapping(0.5, 2, "w4afp8", "fp8")  # specific for trtllm torch ds w4a8
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4", "bfloat16")  # native data format for gpt oss
+    w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8", "fp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)
-    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm")
+    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm", "fp8")
     # Blackwell trtllm-gen fused MoE: MXFP4 (E2M1, block-32) weights x MXFP8 (E4M3)
     # activations -- the kernel DeepSeek-V4-Pro actually runs in prefill on sm100
     # (bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f, flashinfer trtllm_fp4_block_scale_moe).
     # Distinct backend from w4a8_mxfp4_mxfp8 above (flashinfer cutedsl). DSV4 MoE
     # weights are stored MXFP4 (I8-packed E2M1 + E8M0 scales), so sglang dispatches
     # by GPU: sm100 -> this (trtllm-gen); sm90 -> w4a16_mxfp4_cutlass below.
-    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass")
+    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass", "bfloat16")
     # Hopper (sm90) DeepSeek-V4-Pro MoE: flashinfer cutlass SM90 mixed GEMM
     # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
     # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
@@ -1090,9 +1100,9 @@ class FMHAQuantMode(Enum):
     FMHA quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")
-    fp8 = QuantMapping(1, 2, "fp8")
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # FIXME: specific for sglang wideep
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # FIXME: specific for sglang wideep
 
 
 class KVCacheQuantMode(Enum):
@@ -1100,9 +1110,9 @@ class KVCacheQuantMode(Enum):
     KVCache quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 0, "bfloat16")
-    int8 = QuantMapping(1, 0, "int8")
-    fp8 = QuantMapping(1, 0, "fp8")
+    bfloat16 = QuantMapping(2, 0, "bfloat16", None)
+    int8 = QuantMapping(1, 0, "int8", None)
+    fp8 = QuantMapping(1, 0, "fp8", None)
 
 
 class CommQuantMode(Enum):
@@ -1110,6 +1120,47 @@ class CommQuantMode(Enum):
     Comm quant mode.
     """
 
-    half = QuantMapping(2, 0, "half")
-    int8 = QuantMapping(1, 0, "int8")
-    fp8 = QuantMapping(1, 0, "fp8")
+    half = QuantMapping(2, 0, "half", None)
+    int8 = QuantMapping(1, 0, "int8", None)
+    fp8 = QuantMapping(1, 0, "fp8", None)
+
+
+# compute_dtype -> system YAML key. A key's absence from the YAML means the
+# platform has no hardware for that dtype (see get_quant_tc_flops).
+_COMPUTE_DTYPE_TO_FLOPS_KEY = {
+    "bfloat16": "bfloat16_tc_flops",
+    "int8": "int8_tc_flops",
+    "fp8": "fp8_tc_flops",
+    "fp4": "fp4_tc_flops",
+}
+
+
+def get_quant_tc_flops(system_spec: dict, quant_mode) -> float:
+    """Resolve the tensor-core FLOPS governing ``quant_mode``'s SOL math.
+
+    Looks up the mode's ``compute_dtype`` entry in the system GPU spec. Raises
+    :class:`~aiconfigurator_core.sdk.errors.MissingSystemFlopsError` when the
+    YAML has no entry for that dtype — never extrapolates from bf16, so a
+    platform without e.g. fp4 hardware fails loudly instead of yielding a
+    fictional estimate (issue #1398).
+    """
+    compute_dtype = quant_mode.value.compute_dtype
+    if compute_dtype is None:
+        raise MissingSystemFlopsError(f"quant mode '{quant_mode.value.name}' is memory-only and has no compute FLOPS")
+    key = _COMPUTE_DTYPE_TO_FLOPS_KEY[compute_dtype]
+    # A non-positive value is treated the same as a missing entry: it can only
+    # be a placeholder or a typo, and letting it through turns every SOL into
+    # inf and load-time clamps into silent data corruption.
+    value = system_spec["gpu"].get(key)
+    # Require a positive FINITE value: `not value > 0` alone rejects NaN but
+    # admits +inf (PyYAML parses `.inf`), which silently zeroes sol_math and
+    # collapses compute-bound SOL onto the memory roof. Matches the Rust
+    # resolver's `is_finite() && > 0.0` filter.
+    if value is None or not (value > 0 and math.isfinite(value)):
+        raise MissingSystemFlopsError(
+            f"quant mode '{quant_mode.value.name}' needs '{key}', which this system's YAML "
+            f"does not define (or defines as a non-positive placeholder): either the platform "
+            f"does not support {compute_dtype} compute and the quant mode cannot be modeled on "
+            f"it, or the system YAML is missing the entry."
+        )
+    return value

@@ -62,7 +62,6 @@ def _msa_attention_sol(
     the attention group uses GQA dims (compute by num_heads, KV cache by
     num_kv_heads) and the top-k saturated causal pair count.
     """
-    from aiconfigurator_core.sdk.operations.gemm import GEMM
 
     qk_head_dim = head_dim
     tokens = b * s if is_context else b
@@ -112,9 +111,9 @@ def _msa_attention_sol(
     q_io_bytes = tokens * num_heads * qk_head_dim * fmha_quant_mode.value.memory * 2
     total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
 
-    gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
-    fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
-    attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_quant_mode)
+    gemm_flops = common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+    fp8_flops = common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+    attn_flops = common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
     sol_math = (gemm_ops / gemm_flops + indexer_ops / fp8_flops + attention_ops / attn_flops) * 1000
     sol_mem = total_mem / database.system_spec["gpu"]["mem_bw"] * 1000

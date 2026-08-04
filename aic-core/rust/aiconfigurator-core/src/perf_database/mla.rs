@@ -31,13 +31,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::attention::generation_attn_flops;
+use super::gemm::quant_tc_flops;
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// Axes for context-type MLA tables (op-level and module-level).
@@ -175,6 +177,10 @@ impl MlaTable {
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_context()?;
         let key = ContextKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -186,7 +192,7 @@ impl MlaTable {
             .ok_or_else(|| missing("context MLA", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
         // c = (num_heads, seq_len, batch), prefix = 0 (see module docs).
-        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
         perf_interp::query(
             &cfg,
@@ -203,6 +209,10 @@ impl MlaTable {
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = generation_attn_flops(&self.system_spec, kv_quant)?;
         let grids = self.load_generation()?;
         let key = KvOnlyKey {
             kv_quant: kv_quant.name().to_string(),
@@ -214,7 +224,8 @@ impl MlaTable {
         let spec = &self.system_spec;
         // Python's generation MLA uses (num_heads, b, s) as the 3 axes
         // — note b and s order differs from context. RAW blending (~linear in s).
-        let sol = move |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2]);
+        let sol =
+            move |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
         perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
@@ -231,6 +242,10 @@ impl MlaTable {
         quant: GemmQuantMode,
         is_pre: bool,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let bmm_flops = quant_tc_flops(&self.system_spec, quant.mapping())?;
         let grids = self.load_bmm()?;
         let pre_or_post = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
 
@@ -260,7 +275,7 @@ impl MlaTable {
         // 1-D tokens curve: RAW lerp in range (BMM is ~linear in tokens);
         // boundary util-hold beyond it via the BMM SOL.
         let spec = &self.system_spec;
-        let sol = move |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0]);
+        let sol = move |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0], bmm_flops);
         let cfg = OpInterpConfig::grid(BMM_AXES, &sol);
         perf_interp::query(&cfg, node, &[num_tokens as f64])
     }
@@ -275,6 +290,10 @@ impl MlaTable {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let grids = self.load_context_module()?;
         let key = ModuleKey {
             fmha_quant: fmha_quant.name().to_string(),
@@ -289,7 +308,7 @@ impl MlaTable {
         // Python's module-context get_sol reuses the op-level context SOL
         // verbatim (the module fuses MLA + RoPE + BMM but the SOL refinement
         // was deliberately deferred there too).
-        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, fmha_quant, c[0], c[1], c[2]);
+        let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
         perf_interp::query(
             &cfg,
@@ -308,20 +327,29 @@ impl MlaTable {
         kv_quant: KvCacheQuantMode,
         gemm_quant: GemmQuantMode,
     ) -> Result<f64, AicError> {
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let attn_flops = generation_attn_flops(&self.system_spec, kv_quant)?;
+        let bmm_flops = quant_tc_flops(&self.system_spec, gemm_quant.mapping())?;
         let grids = self.load_generation_module()?;
         let key = GenModuleKey {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| {
-            missing("generation MLA module", &self.data_root, format!("{key:?}"))
-        })?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("generation MLA module", &self.data_root, format!("{key:?}")))?;
         let spec = &self.system_spec;
         // Generation module SOL = generation MLA SOL + BMM pre/post terms
         // (Python's module get_sol folds the BMM into sol_math/sol_mem before
         // the max).
-        let sol =
-            move |c: &[f64]| generation_mla_module_sol_ms(spec, kv_quant, gemm_quant, c[0], c[1], c[2]);
+        let sol = move |c: &[f64]| {
+            generation_mla_module_sol_ms(
+                spec, kv_quant, gemm_quant, c[0], c[1], c[2], attn_flops, bmm_flops,
+            )
+        };
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
         perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
@@ -450,9 +478,10 @@ impl MlaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| {
-            missing("generation MLA module", &self.data_root, format!("{key:?}"))
-        })?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("generation MLA module", &self.data_root, format!("{key:?}")))?;
         non_empty_points(node, "generation MLA module", &self.data_root)
     }
 
@@ -478,16 +507,16 @@ impl MlaTable {
     }
 
     fn load_context_module(&self) -> Result<&ModuleGrids, AicError> {
-        let cell = self.context_module.get_or_init(|| {
-            load_context_module_parquet(&self.mla_context_module_sources)
-        });
+        let cell = self
+            .context_module
+            .get_or_init(|| load_context_module_parquet(&self.mla_context_module_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_generation_module(&self) -> Result<&GenModuleGrids, AicError> {
-        let cell = self.generation_module.get_or_init(|| {
-            load_generation_module_parquet(&self.mla_generation_module_sources)
-        });
+        let cell = self
+            .generation_module
+            .get_or_init(|| load_generation_module_parquet(&self.mla_generation_module_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -498,62 +527,57 @@ impl MlaTable {
 // arithmetic ordering so cross-language parity holds to float precision.
 // ---------------------------------------------------------------------------
 
-/// `bfloat16_tc_flops` from the system YAML. Python indexes
-/// `system_spec["gpu"]["bfloat16_tc_flops"]` directly (KeyError if absent);
-/// every shipped system defines it. A missing value degrades to 0.0
-/// (=> infinite sol_math) rather than panicking inside a sol closure.
-fn bf16_tc_flops(spec: &SystemSpec) -> f64 {
-    spec.gpu.bfloat16_tc_flops.unwrap_or(0.0)
-}
-
 /// Context MLA SOL in ms, evaluated at prefix = 0 (the perf_interp `sol_fn`
 /// contract — samples are prefix=0 and the operator layer owns the prefix
 /// correction). See [`context_mla_sol_prefix_ms`] for the formula.
 pub(crate) fn context_mla_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
-    fmha_quant: FmhaQuantMode,
     n: f64,
     s: f64,
     b: f64,
+    attn_flops: f64,
 ) -> f64 {
-    context_mla_sol_prefix_ms(spec, kv_quant, fmha_quant, n, s, 0.0, b)
+    context_mla_sol_prefix_ms(spec, kv_quant, n, s, 0.0, b, attn_flops)
 }
 
 /// Prefix-aware context MLA SOL in ms (`s` is the chunk / isl length; the
 /// util-empirical query SOL carries prefix natively, unlike the prefix=0
 /// sample SOL). Mirrors `ContextMLA._query_context_mla_table::get_sol` and
-/// the identical `MLAModule._query_context_mla_module_table::get_sol`:
+/// the identical `MLAModule._query_context_mla_module_table::get_sol`.
+/// `attn_flops` is the caller-resolved TC-FLOPS for the op's fmha quant
+/// (`quant_tc_flops(spec, fmha_quant.mapping())`):
 /// - `full_s   = s + prefix`
 /// - `ops      = b * n * 2/2 * (192 + 128) * (full_s^2 - prefix^2)`
 /// - `mem      = b * n * (kv.memory * full_s * (192+128) + 2 * s * (192+128))`
-/// - `sol_math = ops / bf16_tc_flops * 1000 / fmha.compute`
+/// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
 pub(crate) fn context_mla_sol_prefix_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
-    fmha_quant: FmhaQuantMode,
     n: f64,
     s: f64,
     prefix: f64,
     b: f64,
+    attn_flops: f64,
 ) -> f64 {
     let full_s = s + prefix;
     let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
     let mem_bytes =
         b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
-    let sol_math = ops / bf16_tc_flops(spec) * 1000.0 / fmha_quant.mapping().compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
 
 /// Generation MLA SOL in ms. Mirrors
-/// `GenerationMLA._query_generation_mla_table::get_sol`:
-/// - `quant_gen = fp8 if kv == fp8 else bfloat16`
+/// `GenerationMLA._query_generation_mla_table::get_sol`. `attn_flops` is
+/// the caller-resolved decode-attention TC-FLOPS
+/// (`generation_attn_flops(spec, kv_quant)` — fp8 KV -> fp8, else bf16):
 /// - `ops      = 2 * b * n * 1088 * s`
 /// - `mem      = b * (n * 1088 * 2 + (s - 1) * 576 * kv.memory)`
-/// - `sol_math = ops / bf16_tc_flops * 1000 / quant_gen.compute`
+/// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
 pub(crate) fn generation_mla_sol_ms(
@@ -562,30 +586,34 @@ pub(crate) fn generation_mla_sol_ms(
     n: f64,
     b: f64,
     s: f64,
+    attn_flops: f64,
 ) -> f64 {
-    let quant_gen = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8
-    } else {
-        FmhaQuantMode::Bfloat16
-    };
     let ops = 2.0 * b * n * 1088.0 * s;
     let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
-    let sol_math = ops / bf16_tc_flops(spec) * 1000.0 / quant_gen.mapping().compute;
+    let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
 
 /// MLA BMM SOL in ms. Mirrors `MLABmm._query_mla_bmm_table::get_sol` (uses
-/// the REQUESTED quant, even when the data lookup fell back to bfloat16):
+/// the REQUESTED quant, even when the data lookup fell back to bfloat16).
+/// `bmm_flops` is the caller-resolved TC-FLOPS for the REQUESTED quant
+/// (`quant_tc_flops(spec, quant.mapping())`):
 /// - `ops      = 2 * t * n * 128 * 512`
 /// - `mem      = n * (t * 640 + 128 * 512) * quant.memory`
-/// - `sol_math = ops / (bf16_tc_flops * quant.compute) * 1000`
+/// - `sol_math = ops / bmm_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
-pub(crate) fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t: f64) -> f64 {
+pub(crate) fn mla_bmm_sol_ms(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    n: f64,
+    t: f64,
+    bmm_flops: f64,
+) -> f64 {
     let ops = 2.0 * t * n * 128.0 * 512.0;
     let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
-    let sol_math = ops / (bf16_tc_flops(spec) * quant.mapping().compute) * 1000.0;
+    let sol_math = ops / bmm_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
@@ -593,12 +621,16 @@ pub(crate) fn mla_bmm_sol_ms(spec: &SystemSpec, quant: GemmQuantMode, n: f64, t:
 /// Generation MLA module SOL in ms. Mirrors
 /// `MLAModule._query_generation_mla_module_table::get_sol`: the generation
 /// MLA SOL plus BMM pre+post terms folded into sol_math / sol_mem BEFORE the
-/// max (NOT `max(attn) + max(bmm)`):
+/// max (NOT `max(attn) + max(bmm)`). `attn_flops` is the caller-resolved
+/// decode-attention TC-FLOPS (`generation_attn_flops(spec, kv_quant)`);
+/// `bmm_flops` the gemm-quant TC-FLOPS
+/// (`quant_tc_flops(spec, gemm_quant.mapping())`):
 /// - attn: `ops = 2*b*n*1088*s`, `mem = b*(n*1088*2 + (s-1)*576*kv.memory)`
 /// - bmm:  `ops = 2*2*b*n*128*512`, `mem = 2*n*(b*640 + 128*512)*gemm.memory`
-/// - `sol_math = attn_ops/bf16/quant_gen.compute + bmm_ops/(bf16*gemm.compute)`
+/// - `sol_math = attn_ops/attn_flops + bmm_ops/bmm_flops`
 /// - `sol_mem  = (attn_mem + bmm_mem) / mem_bw`
 /// - `sol      = max(sol_math, sol_mem)`
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generation_mla_module_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
@@ -606,21 +638,18 @@ pub(crate) fn generation_mla_module_sol_ms(
     n: f64,
     b: f64,
     s: f64,
+    attn_flops: f64,
+    bmm_flops: f64,
 ) -> f64 {
-    let quant_gen = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8
-    } else {
-        FmhaQuantMode::Bfloat16
-    };
     // MLA attention ops
     let attn_ops = 2.0 * b * n * 1088.0 * s;
     let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
-    let mut sol_math = attn_ops / bf16_tc_flops(spec) * 1000.0 / quant_gen.mapping().compute;
+    let mut sol_math = attn_ops / attn_flops * 1000.0;
     let mut sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
     // Add BMM pre + post SOL (same as query_mla_bmm)
     let bmm_ops = 2.0 * 2.0 * b * n * 128.0 * 512.0; // pre + post
     let bmm_mem = 2.0 * n * (b * 640.0 + 128.0 * 512.0) * gemm_quant.mapping().memory;
-    let bmm_math = bmm_ops / (bf16_tc_flops(spec) * gemm_quant.mapping().compute) * 1000.0;
+    let bmm_math = bmm_ops / bmm_flops * 1000.0;
     let bmm_mem_time = bmm_mem / spec.gpu.mem_bw * 1000.0;
     sol_math += bmm_math;
     sol_mem += bmm_mem_time;

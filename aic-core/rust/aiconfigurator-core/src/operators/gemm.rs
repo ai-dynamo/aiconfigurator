@@ -14,14 +14,16 @@
 //! own SOL roofline — mirroring Python's `max(latency_floor, latency)` where
 //! `latency_floor = query_gemm(..., DatabaseMode.SOL)` — not at 0.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, GemmQuantMode, TransferKind};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::moe::policy_fingerprint;
 use crate::operators::util_empirical::{self, UtilGrid, ZeroAwareDeltaLookup};
-use crate::perf_database::gemm::{gemm_quant_by_name, gemm_sol_latency_ms, normalize_fp8_static_quant};
+use crate::perf_database::gemm::{
+    gemm_quant_by_name, gemm_sol_latency_ms_with_flops, normalize_fp8_static_quant, quant_tc_flops,
+};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 /// GEMM operation: a dense matrix multiply of shape `M=x, N=n, K=k`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,9 +100,11 @@ impl GemmOp {
             // the GEMM's own roofline. Floor at the SOL (NOT at 0), and tag
             // the result "estimated" (fp8_static is modeled from dynamic FP8
             // plus overhead tables, not measured directly).
-            latency_floor = crate::perf_database::gemm::gemm_sol_latency_ms(
+            let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
+            latency_floor = gemm_sol_latency_ms_with_flops(
                 &db.system_spec,
                 quant,
+                tc_flops,
                 m as f64,
                 self.n as f64,
                 self.k as f64,
@@ -237,7 +241,9 @@ fn gemm_reference_grid(
 ) -> Result<Option<std::sync::Arc<UtilGrid>>, AicError> {
     let spec = &db.system_spec;
     db.util_grids.get_or_try_build(key, || {
-        let sol = |c: &[f64]| gemm_sol_latency_ms(spec, sol_quant, c[0], c[1], c[2]);
+        let tc_flops = quant_tc_flops(spec, sol_quant.mapping())?;
+        let sol =
+            |c: &[f64]| gemm_sol_latency_ms_with_flops(spec, sol_quant, tc_flops, c[0], c[1], c[2]);
         match db.gemm.gemm_points(source_quant) {
             Ok(points) => {
                 let mut grid = UtilGrid::new(util_empirical::build_samples(points, sol));
@@ -273,7 +279,8 @@ fn gemm_empirical(
     k: u32,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
-    let sol = |c: &[f64]| gemm_sol_latency_ms(spec, quant, c[0], c[1], c[2]);
+    let tc_flops = quant_tc_flops(spec, quant.mapping())?;
+    let sol = |c: &[f64]| gemm_sol_latency_ms_with_flops(spec, quant, tc_flops, c[0], c[1], c[2]);
     let tqm = normalize_fp8_static_quant(quant);
     let key = format!("gemm:{}", tqm.name());
     let mut grid = db.util_grids.get_or_try_build(&key, || {
@@ -351,7 +358,9 @@ fn query_compute_scale_table(
     k: u32,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((compute_scale_empirical(db, quant, m, k)?, Source::Empirical)),
+        DatabaseMode::Empirical => {
+            Ok((compute_scale_empirical(db, quant, m, k)?, Source::Empirical))
+        }
         DatabaseMode::Hybrid => match db.gemm.query_compute_scale(quant, m, k) {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => {
@@ -384,8 +393,9 @@ fn compute_scale_empirical(
         })?;
     // sol_mem = 2 m k / bw * 1000 (read + write of the activation).
     let spec = &db.system_spec;
-    let latency =
-        lookup.estimate(&[m as f64, k as f64], |c| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0)?;
+    let latency = lookup.estimate(&[m as f64, k as f64], |c| {
+        2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0
+    })?;
     // The delta lookup fired (Python `_ZeroAwareDeltaLookup.estimate` notes
     // "empirical"; zero deltas count — they are measured values).
     db.note_provenance(util_empirical::ProvenanceTier::Empirical);
@@ -400,7 +410,9 @@ fn query_scale_matrix_table(
     k: u32,
 ) -> Result<(f64, Source), AicError> {
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((scale_matrix_empirical(db, quant, m, k)?, Source::Empirical)),
+        DatabaseMode::Empirical => {
+            Ok((scale_matrix_empirical(db, quant, m, k)?, Source::Empirical))
+        }
         DatabaseMode::Hybrid => match db.gemm.query_scale_matrix(quant, m, k) {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => {
@@ -425,13 +437,15 @@ fn scale_matrix_empirical(
     let spec = &db.system_spec;
     let sol = |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
     let key = format!("scale_matrix:{}", normalize_fp8_static_quant(quant).name());
-    let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.gemm.scale_matrix_points(quant) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
-            Err(err) if err.is_missing_perf_data() => Ok(None),
-            Err(err) => Err(err),
-        }
-    })?;
+    let grid =
+        db.util_grids
+            .get_or_try_build(&key, || match db.gemm.scale_matrix_points(quant) {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    points, sol,
+                )))),
+                Err(err) if err.is_missing_perf_data() => Ok(None),
+                Err(err) => Err(err),
+            })?;
     let query = [m as f64, k as f64];
     let (latency, _) = util_empirical::estimate(sol(&query), &query, grid.as_deref(), 1.0)?;
     // Own-shape util fired (Python estimate()'s default provenance).
@@ -619,11 +633,15 @@ mod tests {
     ///
     /// - sq (1, 2): xquant borrow from fp8 (first same-profile in file
     ///   order; identical SOL, no rescale).
-    /// - nvfp4 (0.5625, 4): xprofile borrow, compute-first walk lands on fp8
-    ///   (Δcompute=2 beats bfloat16's 3), rescaled by e(nvfp4)/e(fp8).
     /// - int4_wo (0.5, 1): xprofile borrow from bfloat16 (Δcompute=0), NOT
     ///   the file-order-first fp8 — under plain L1 the two TIE at 1.5 and a
     ///   regression to L1/file-order selection changes this value.
+    /// - nvfp4 (0.5625, 4): NO LONGER a ladder vehicle on h200 — the strict
+    ///   per-dtype resolution (#1398) rejects fp4 at query entry because
+    ///   h200 has no fp4 tensor cores (its old xprofile estimate was
+    ///   anchored on a fictional bf16*4 SOL). Weight-only fp4 modes (the
+    ///   #1392 nvfp4_wo plan) declare the bf16 compute pipeline and keep
+    ///   using the ladder like int4_wo does.
     /// Regenerate if the shipped GEMM tables or the util math change.
     #[test]
     fn gemm_quant_transfer_ladder_matches_python_oracles() {
@@ -632,8 +650,6 @@ mod tests {
         let cases = [
             (GemmQuantMode::Sq, 512u32, 0.01826755536927117, util_empirical::ProvenanceTier::XQuant),
             (GemmQuantMode::Sq, 8192, 0.21285422643025717, util_empirical::ProvenanceTier::XQuant),
-            (GemmQuantMode::Nvfp4, 512, 0.013700666526953379, util_empirical::ProvenanceTier::XProfile),
-            (GemmQuantMode::Nvfp4, 8192, 0.1596406698226929, util_empirical::ProvenanceTier::XProfile),
             (GemmQuantMode::Int4Wo, 512, 0.036529976276703825, util_empirical::ProvenanceTier::XProfile),
             (GemmQuantMode::Int4Wo, 8192, 0.5714972813924153, util_empirical::ProvenanceTier::XProfile),
         ];
@@ -648,6 +664,11 @@ mod tests {
             assert_eq!(source, Source::Empirical, "({quant:?}, m={m}): wrong source");
             assert_eq!(db.worst_provenance(), tier, "({quant:?}, m={m}): wrong tier");
         }
+        // fp4 on h200: strict resolution fires before the ladder.
+        assert!(matches!(
+            query_gemm_table(&db, GemmQuantMode::Nvfp4, 512, 4096, 4096),
+            Err(AicError::MissingSystemFlops(_))
+        ));
     }
 
     #[test]
