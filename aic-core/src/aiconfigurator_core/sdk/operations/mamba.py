@@ -290,7 +290,8 @@ class GDNKernel(Operation):
         - "causal_conv1d_update": Single-step causal conv state update
         - "fused_sigmoid_gating_delta_rule_update": Single-step GDN recurrence
 
-    Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
+    Uses the runtime kernel dimensions supplied by the model builder for database
+    lookup. Tensor-parallel model builders therefore pass per-rank head counts.
 
     Owns ``_data_cache`` for the packaged gdn_perf Parquet perf table.
     """
@@ -451,11 +452,21 @@ class GDNKernel(Operation):
             elif exact_aliases:
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             else:
-                # Preserve the legacy fallback only within the logical source;
-                # physical aliases must match the complete model shape.
-                keys_same_d_model = [k for k in by_key if k[0] == d_model]
-                if keys_same_d_model:
-                    model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
+                # Nearest-shape fallback is allowed only across num_v_heads;
+                # every other dimension must match exactly so a TP-local query
+                # can never be priced from a different head geometry. A genuine
+                # miss degrades to SOL.
+                candidate_keys = [
+                    k
+                    for k in by_key
+                    if k[0] == d_model
+                    and k[1] == num_k_heads
+                    and k[2] == head_k_dim
+                    and k[4] == head_v_dim
+                    and k[5] == d_conv
+                ]
+                if candidate_keys:
+                    model_key = min(candidate_keys, key=lambda k: abs(k[3] - num_v_heads))
                 else:
                     return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
