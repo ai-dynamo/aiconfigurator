@@ -46,6 +46,14 @@ class Qwen35Model(BaseModel):
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
 
+        tp = self.config.tp_size
+        if cfg.linear_num_key_heads % tp != 0 or cfg.linear_num_value_heads % tp != 0:
+            raise ValueError(
+                "Qwen3.5 GDN head counts must both be divisible by tensor parallel size: "
+                f"num_k_heads={cfg.linear_num_key_heads}, "
+                f"num_v_heads={cfg.linear_num_value_heads}, tp_size={tp}"
+            )
+
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         if cfg.num_experts > 0:
@@ -88,7 +96,8 @@ class Qwen35Model(BaseModel):
         )
         counts = self._count_layer_types()
 
-        # Unsharded GDN dims (used for kernel lookup)
+        # GDN kernel lookups use TP-local head counts; projection GEMM widths
+        # derive from the global dims.
         nk = cfg.linear_num_key_heads
         hk = cfg.linear_key_head_dim
         nv = cfg.linear_num_value_heads
@@ -98,8 +107,12 @@ class Qwen35Model(BaseModel):
         # Per-TP sizes
         n_q_per_tp = self._num_heads // tp
         n_kv_per_tp = (self._num_kv_heads + tp - 1) // tp
-        # GDN projections: Q+K+V+gate(Z)+beta sharded by tp
-        gdn_in_proj_out = (nk * hk + nk * hk + nv * hv + nv * hv + nk * hk) // tp
+        gdn_nk_per_tp = nk // tp
+        gdn_nv_per_tp = nv // tp
+        # in_proj_qkvz (Q+K+V+gate Z) and in_proj_ba (b+a, 2 scalars per V head)
+        # are separate runtime GEMM kernels.
+        gdn_in_proj_out = (nk * hk + nk * hk + nv * hv + nv * hv) // tp
+        gdn_ba_out = 2 * nv // tp
         gdn_out_proj_in = nv * hv // tp
 
         self.context_ops = [
@@ -114,15 +127,16 @@ class Qwen35Model(BaseModel):
                 [
                     ops.ElementWise("context_gdn_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("context_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
+                    ops.GEMM("context_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q),
                     ops.GDNKernel(
                         "context_gdn_conv1d",
                         c,
                         "causal_conv1d_fn",
                         "context",
                         h,
-                        nk,
+                        gdn_nk_per_tp,
                         hk,
-                        nv,
+                        gdn_nv_per_tp,
                         hv,
                         d_conv,
                     ),
@@ -132,9 +146,9 @@ class Qwen35Model(BaseModel):
                         "chunk_gated_delta_rule",
                         "context",
                         h,
-                        nk,
+                        gdn_nk_per_tp,
                         hk,
-                        nv,
+                        gdn_nv_per_tp,
                         hv,
                         d_conv,
                     ),
@@ -151,7 +165,9 @@ class Qwen35Model(BaseModel):
         # --- full_attention (GQA) layers ---
         if counts["full"] > 0:
             c = counts["full"]
-            qkv_out = n_q_per_tp * self._head_size + n_kv_per_tp * self._head_size * 2
+            # attn_output_gate=True on all Qwen3.5 checkpoints doubles the q slice
+            # (query + output gate).
+            qkv_out = 2 * n_q_per_tp * self._head_size + n_kv_per_tp * self._head_size * 2
             self.context_ops.extend(
                 [
                     ops.ElementWise("context_full_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -192,6 +208,7 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
+            # Layout-specific MoE collectives are priced inside MoEDispatch.
             ops_list.extend(
                 [
                     ops.MoEDispatch(
@@ -236,11 +253,29 @@ class Qwen35Model(BaseModel):
             if cfg.shared_expert_inter_size > 0:
                 ops_list.extend(
                     [
-                        ops.GEMM(f"{prefix}_shared_up_gemm", count, cfg.shared_expert_inter_size // tp, h, gemm_q),
-                        ops.ElementWise(
-                            f"{prefix}_shared_relu2",
+                        # Scalar expert gate (ReplicatedLinear hidden->1). True
+                        # N=1 is below the GEMM table grid; n=8 stands in as a
+                        # launch-floor proxy.
+                        ops.GEMM(
+                            f"{prefix}_shared_expert_gate_gemm",
                             count,
-                            cfg.shared_expert_inter_size // tp,
+                            8,
+                            h,
+                            common.GEMMQuantMode.bfloat16,
+                        ),
+                        # Shared expert is a gated-SiLU MLP (Qwen2MoeMLP) with a
+                        # fused gate_up projection.
+                        ops.GEMM(
+                            f"{prefix}_shared_gate_up_gemm",
+                            count,
+                            2 * cfg.shared_expert_inter_size // tp,
+                            h,
+                            gemm_q,
+                        ),
+                        ops.ElementWise(
+                            f"{prefix}_shared_act_gate",
+                            count,
+                            2 * cfg.shared_expert_inter_size // tp,
                             cfg.shared_expert_inter_size // tp,
                             0.8,
                         ),
@@ -293,7 +328,10 @@ class Qwen35Model(BaseModel):
 
         n_q_per_tp = self._num_heads // tp
         n_kv_per_tp = (self._num_kv_heads + tp - 1) // tp
-        gdn_in_proj_out = (nk * hk + nk * hk + nv * hv + nv * hv + nk * hk) // tp
+        gdn_nk_per_tp = nk // tp
+        gdn_nv_per_tp = nv // tp
+        gdn_in_proj_out = (nk * hk + nk * hk + nv * hv + nv * hv) // tp
+        gdn_ba_out = 2 * nv // tp
         gdn_out_proj_in = nv * hv // tp
 
         sf = self._mtp_scale_factor
@@ -310,15 +348,16 @@ class Qwen35Model(BaseModel):
                 [
                     ops.ElementWise("generation_gdn_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
+                    ops.GEMM("generation_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q),
                     ops.GDNKernel(
                         "generation_gdn_conv1d",
                         c,
                         "causal_conv1d_update",
                         "generation",
                         h,
-                        nk,
+                        gdn_nk_per_tp,
                         hk,
-                        nv,
+                        gdn_nv_per_tp,
                         hv,
                         d_conv,
                     ),
@@ -328,9 +367,9 @@ class Qwen35Model(BaseModel):
                         "fused_sigmoid_gating_delta_rule_update",
                         "generation",
                         h,
-                        nk,
+                        gdn_nk_per_tp,
                         hk,
-                        nv,
+                        gdn_nv_per_tp,
                         hv,
                         d_conv,
                     ),
@@ -347,7 +386,9 @@ class Qwen35Model(BaseModel):
         # --- full_attention (GQA) layers ---
         if counts["full"] > 0:
             c = counts["full"] * sf
-            qkv_out = n_q_per_tp * self._head_size + n_kv_per_tp * self._head_size * 2
+            # attn_output_gate=True on all Qwen3.5 checkpoints doubles the q slice
+            # (query + output gate).
+            qkv_out = 2 * n_q_per_tp * self._head_size + n_kv_per_tp * self._head_size * 2
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_full_attn_norm", c, 2 * h, 2 * h, 0.8),
@@ -389,6 +430,7 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
+            # Layout-specific MoE collectives are priced inside MoEDispatch.
             ops_list.extend(
                 [
                     ops.MoEDispatch(
@@ -433,11 +475,29 @@ class Qwen35Model(BaseModel):
             if cfg.shared_expert_inter_size > 0:
                 ops_list.extend(
                     [
-                        ops.GEMM(f"{prefix}_shared_up_gemm", count, cfg.shared_expert_inter_size // tp, h, gemm_q),
-                        ops.ElementWise(
-                            f"{prefix}_shared_relu2",
+                        # Scalar expert gate (ReplicatedLinear hidden->1). True
+                        # N=1 is below the GEMM table grid; n=8 stands in as a
+                        # launch-floor proxy.
+                        ops.GEMM(
+                            f"{prefix}_shared_expert_gate_gemm",
                             count,
-                            cfg.shared_expert_inter_size // tp,
+                            8,
+                            h,
+                            common.GEMMQuantMode.bfloat16,
+                        ),
+                        # Shared expert is a gated-SiLU MLP (Qwen2MoeMLP) with a
+                        # fused gate_up projection.
+                        ops.GEMM(
+                            f"{prefix}_shared_gate_up_gemm",
+                            count,
+                            2 * cfg.shared_expert_inter_size // tp,
+                            h,
+                            gemm_q,
+                        ),
+                        ops.ElementWise(
+                            f"{prefix}_shared_act_gate",
+                            count,
+                            2 * cfg.shared_expert_inter_size // tp,
                             cfg.shared_expert_inter_size // tp,
                             0.8,
                         ),
