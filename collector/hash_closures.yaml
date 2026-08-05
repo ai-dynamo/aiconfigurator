@@ -97,6 +97,10 @@ collector.trtllm.collect_computescale:
   - collector/cases/base_ops/compute_scale.yaml
   - collector/cases/base_ops/gemm.yaml
   - __model_cases__
+collector.trtllm.collect_dsv4_attn:
+  # Cases derive from case_generator's DSV4 model constants (module batch/
+  # seq/tp lists come from the dsv4 block of the model cases YAML).
+  - __model_cases__
 collector.trtllm.collect_gdn:
   - collector/cases/base_ops/gdn.yaml
   - __model_cases__

@@ -166,6 +166,13 @@ mappings:
   - {framework: trtllm, kernel_source: trtllm_mhc_pre_dg_nosplit, backend: deepgemm, source: "collector/trtllm/collect_mhc_module.py (observed dg_nosplit tactic: deep_gemm tf32_hc_prenorm_gemm + mhc_big_fuse)"}
   - {framework: trtllm, kernel_source: trtllm_mhc_post_mapping, backend: trtllm_mhc, source: "collector/trtllm/collect_mhc_module.py (single kernel torch.ops.trtllm.mhc_post_mapping, mhc_cuda.py:472-510 @1.3.0rc20)"}
 
+  # DeepSeek-V4 attention module label: the attention backend class TRT-LLM's
+  # own selector returns for sparse algorithm "deepseek_v4"
+  # (get_attention_backend -> DeepseekV4TrtllmAttention @1.3.0rc23). The
+  # module internally dispatches indexer (DeepGEMM), sparse MLA and
+  # compressor kernels not observable from one label -> trtllm_internal.
+  - {framework: trtllm, kernel_source: DeepseekV4TrtllmAttention, backend: trtllm_internal, source: "collector/trtllm/collect_dsv4_attn.py (framework-selected backend class name)"}
+
   # Mamba/GDN kernels.
   - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
   - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
