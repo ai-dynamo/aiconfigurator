@@ -569,6 +569,17 @@ def run_dsv4_attn(
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=torch_device)
 
+    # FIXME(kernel-limit): two framework-side failure clusters observed on
+    # B200/1.3.0rc23 (smoke 2026-08-06), both raising classified errors here:
+    # (1) HCA generation with tiny past-KV (step<=64): trtllmGen fmha asserts
+    #     "SparseAttnTopK must be a multiple of 4" (FmhaOptions.h) — effective
+    #     topk = kv/128 < 4. Unverified whether serving takes a dense/short-seq
+    #     path for such requests; audit against DeepseekV4TrtllmAttention's
+    #     decode dispatch on the next version bump.
+    # (2) context shapes at bs*sl == 262144 query tokens: cudaLaunchKernelEx
+    #     "invalid argument" (grid-dim limit). Serving chunks prefill at
+    #     max_num_tokens (<<262144), so these sweep extremes exceed the
+    #     serving envelope; unverified which kernel hits the limit.
     with model_extra_attrs(model_config.extra_attrs):
         get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
         try:
