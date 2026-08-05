@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 
 _RFC1123_MAX_LEN = 63
 
+# Engine-limit keys stripped by ``build_naive_generator_params`` when the
+# caller asks to preserve the target image's own resolved limits
+# (``preserve_engine_limits=True``). Keep in sync with the rule plugins'
+# ``preserve_engine_limits`` guard.
+_ENGINE_LIMIT_KEYS = (
+    "max_batch_size",
+    "max_num_tokens",
+    "max_seq_len",
+    "tokens_per_block",
+    "gpu_memory_utilization",
+    "compilation_config",
+    "cuda_graph_batch_sizes",
+)
+
 # Default fallbacks
 _DEFAULT_GPUS_PER_NODE = 8
 _DEFAULT_VRAM_BYTES = 141 * 1024 * 1024 * 1024  # 141 GiB (H200)
@@ -190,6 +204,16 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     try:
         config = get_model_config_from_model_path(model_path)
+    except Exception as e:
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
+    return _estimate_weight_bytes_from_config(config, model_path)
+
+
+def _estimate_weight_bytes_from_config(config: dict, model_path: str) -> int:
+    """Run the DPP weight-size formula over an already-resolved model config."""
+
+    try:
         num_layers = config["layers"]
         hidden_size = config["hidden_size"]
         inter_size = config["inter_size"]
@@ -306,6 +330,8 @@ def build_naive_generator_params(
     optimization_type: str | None = None,
     generator_dynamo_version: str | None = None,
     generator_overrides: dict[str, Any] | None = None,
+    preserve_engine_limits: bool = False,
+    model_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
@@ -313,6 +339,10 @@ def build_naive_generator_params(
     Calculates the smallest parallelization that fits the model in memory
     and selects the appropriate strategy (TP, TEP, or DEP) based on the
     model architecture and optimization objective.
+
+    This function is the FPM collector's declared render entry point:
+    ``collector/fpm_forward`` imports it from ``aiconfigurator.generator.naive``
+    and renders every cell with ``preserve_engine_limits=True``.
 
     Args:
         model_name: Name or HuggingFace ID of the model.
@@ -327,6 +357,18 @@ def build_naive_generator_params(
             defaults such as backend runtime images.
         generator_overrides: Optional raw generator override mapping loaded
             from ``--generator-config`` and ``--generator-set``.
+        preserve_engine_limits: When True, strip the naive engine-limit
+            defaults in ``_ENGINE_LIMIT_KEYS`` from every worker role's params
+            and set ``params["preserve_engine_limits"] = True`` so the rule
+            plugins do not reintroduce them. Native self-benchmarking must
+            observe the limits resolved by the target engine image instead of
+            the SLA-derived serving defaults.
+        model_config: Optional pre-parsed model configuration in the shape
+            returned by ``get_model_config_from_model_path``. When provided
+            (the FPM collector's frozen-plan render), model metadata is taken
+            from this payload verbatim and no filesystem or network model
+            resolution happens -- render stays a pure function of the frozen
+            plan even for checkpoints only reachable inside the cluster.
 
     Returns:
         Dictionary containing generator parameters.  When ``mode="agg"``,
@@ -339,8 +381,11 @@ def build_naive_generator_params(
     gpus_per_node = system_config["gpus_per_node"]
     vram_per_gpu = system_config["vram_per_gpu"]
 
-    # Estimate model weight size
-    model_weight_bytes = _estimate_model_weight_bytes(model_name)
+    # Estimate model weight size (from the frozen config when provided)
+    if model_config is not None:
+        model_weight_bytes = _estimate_weight_bytes_from_config(model_config, model_name)
+    else:
+        model_weight_bytes = _estimate_model_weight_bytes(model_name)
 
     # Calculate minimum GPU count that fits the model
     min_gpus, fits, required_tp = _calculate_min_tp(
@@ -354,9 +399,9 @@ def build_naive_generator_params(
     architecture = ""
     is_moe = False
     try:
-        model_config = get_model_config_from_model_path(model_name)
-        architecture = model_config.get("architecture", "")
-        num_experts = model_config.get("num_experts", 0)
+        detected = model_config if model_config is not None else get_model_config_from_model_path(model_name)
+        architecture = detected.get("architecture", "")
+        num_experts = detected.get("num_experts", 0)
         is_moe = bool(num_experts and num_experts > 1)
     except Exception:
         logger.warning(
@@ -523,5 +568,11 @@ def build_naive_generator_params(
     if effective_dynamo_version:
         params["generator_dynamo_version"] = effective_dynamo_version
     _drop_empty_worker_roles(params)
+
+    if preserve_engine_limits:
+        for role_params in params.get("params", {}).values():
+            for key in _ENGINE_LIMIT_KEYS:
+                role_params.pop(key, None)
+        params["preserve_engine_limits"] = True
 
     return params
