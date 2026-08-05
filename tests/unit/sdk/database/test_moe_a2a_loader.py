@@ -142,6 +142,16 @@ def test_present_but_null_power_cells_load_as_no_power(tmp_path):
     assert by_tokens[256]["power"] == 400.0  # measured rows keep their power
 
 
+def test_null_latency_cell_refuses_load_with_named_error(tmp_path):
+    # latency is schema-required, so a null cell is corrupt data: the load
+    # must fail with a named error (not the bare float("") ValueError), and
+    # must NOT coerce to 0.0ms — that would silently poison every consumer.
+    path = _write_parquet(tmp_path, [_row(latency=None)])
+
+    with pytest.raises(ValueError, match="latency is schema-required"):
+        load_moe_a2a_data([(path, None)])
+
+
 def test_two_shapes_coexist(tmp_path):
     rows = [
         _row(),

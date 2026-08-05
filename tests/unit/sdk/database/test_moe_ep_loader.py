@@ -269,6 +269,15 @@ def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
     assert measured_leaf["power"] == 400.0  # measured rows keep their power
 
 
+def test_new_schema_null_latency_cell_refuses_load_with_named_error(tmp_path):
+    # latency is schema-required (unlike power): a null cell is corrupt data
+    # and must fail the load with a named error — never coerce to 0.0ms.
+    path = _write_parquet(tmp_path, [_row(NEW_ROW, latency=None)], "moe_ep_perf.parquet")
+
+    with pytest.raises(ValueError, match="latency is schema-required"):
+        load_moe_ep_data([(path, None)])
+
+
 def test_missing_file_returns_none(tmp_path):
     assert load_moe_ep_data([(str(tmp_path / "moe_ep_perf.parquet"), None)]) is None
 
