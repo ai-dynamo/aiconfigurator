@@ -115,12 +115,25 @@ struct LoadedMoeGrids {
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    index: MoeIndex,
     /// Distinct quant names in first-seen (file row) order. Python's
     /// transfer ladder iterates the table dict in INSERTION order
     /// (`for q in moe_table`), which breaks profile-distance ties by file
     /// order — live on shards whose file order differs from sorted order
     /// (e.g. b200/vllm/0.24.0 lists `fp8_block` before `fp8`).
     quants_in_load_order: Vec<String>,
+}
+
+type MoeIndex = BTreeMap<String, BTreeMap<String, BTreeMap<MoeShapeKey, MoeKey>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MoeShapeKey {
+    topk: u32,
+    num_experts: u32,
+    hidden_size: u32,
+    inter_size: u32,
+    moe_tp_size: u32,
+    moe_ep_size: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,6 +146,21 @@ struct MoeKey {
     inter_size: u32,
     moe_tp_size: u32,
     moe_ep_size: u32,
+}
+
+impl MoeKey {
+    fn from_shape(quant: &str, distribution: &str, shape: MoeShapeKey) -> Self {
+        Self {
+            quant: quant.to_string(),
+            distribution: distribution.to_string(),
+            topk: shape.topk,
+            num_experts: shape.num_experts,
+            hidden_size: shape.hidden_size,
+            inter_size: shape.inter_size,
+            moe_tp_size: shape.moe_tp_size,
+            moe_ep_size: shape.moe_ep_size,
+        }
+    }
 }
 
 impl MoeTable {
@@ -183,10 +211,7 @@ impl MoeTable {
         let grids = &loaded.default;
         let quant_name = quant.name();
 
-        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
-        let key = MoeKey {
-            quant: quant_name.to_string(),
-            distribution: dist,
+        let shape = MoeShapeKey {
             topk,
             num_experts,
             hidden_size,
@@ -194,19 +219,23 @@ impl MoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = grids.by_keys.get(&key).ok_or_else(|| {
+        let (dist, key) = self.resolve_key(grids, quant_name, workload_distribution, shape);
+        let by_tokens = key.and_then(|key| grids.by_keys.get(key)).ok_or_else(|| {
+            let key = MoeKey::from_shape(quant_name, dist, shape);
             AicError::PerfDatabase(format!(
                 "MoE data missing for {key:?} at {}",
                 self.data_root.display()
             ))
         })?;
         if by_tokens.is_empty() {
+            let key = MoeKey::from_shape(quant_name, dist, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE data has no token points for {key:?} at {}",
                 self.data_root.display()
             )));
         }
         if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+            let key = MoeKey::from_shape(quant_name, dist, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE silicon token underflow has only one measured point; cannot infer \
                  low-token latency from a singleton. num_tokens={num_tokens}, \
@@ -250,10 +279,7 @@ impl MoeTable {
             return Ok(None);
         }
         let quant_name = quant.name();
-        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
-        let key = MoeKey {
-            quant: quant_name.to_string(),
-            distribution: dist,
+        let shape = MoeShapeKey {
             topk,
             num_experts,
             hidden_size,
@@ -261,13 +287,15 @@ impl MoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let Some(by_tokens) = grids.by_keys.get(&key) else {
+        let (dist, key) = self.resolve_key(grids, quant_name, workload_distribution, shape);
+        let Some(by_tokens) = key.and_then(|key| grids.by_keys.get(key)) else {
             return Ok(None);
         };
         if by_tokens.is_empty() {
             return Ok(None);
         }
         if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+            let key = MoeKey::from_shape(quant_name, dist, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE low-latency token underflow has only one measured point; cannot infer \
                  low-token latency from a singleton. num_tokens={num_tokens}, \
@@ -307,10 +335,7 @@ impl MoeTable {
         moe_ep_size: u32,
     ) -> Result<Vec<(u32, f64)>, AicError> {
         let grids = self.grids_for(kernel)?;
-        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
-        let key = MoeKey {
-            quant: quant_name.to_string(),
-            distribution: dist,
+        let shape = MoeShapeKey {
             topk,
             num_experts,
             hidden_size,
@@ -318,12 +343,17 @@ impl MoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "MoE data missing for {key:?} ({kernel:?}) at {}",
-                self.data_root.display()
-            ))
-        })?;
+        let (dist, key) = self.resolve_key(grids, quant_name, workload_distribution, shape);
+        let by_tokens = key
+            .and_then(|key| grids.by_keys.get(key))
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                let key = MoeKey::from_shape(quant_name, dist, shape);
+                AicError::PerfDatabase(format!(
+                    "MoE data missing for {key:?} ({kernel:?}) at {}",
+                    self.data_root.display()
+                ))
+            })?;
         Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
     }
 
@@ -344,12 +374,15 @@ impl MoeTable {
         moe_ep_size: u32,
     ) -> Result<Vec<MoeSiblingSlice>, AicError> {
         let grids = self.grids_for(kernel)?;
-        let dist = self.resolve_distribution(grids, quant_name, workload_distribution);
+        let by_distribution = grids.index.get(quant_name);
+        let dist = self.resolve_distribution(by_distribution, workload_distribution);
         let mut slices = Vec::new();
-        for (key, curve) in &grids.by_keys {
-            if key.quant != quant_name
-                || key.distribution != dist
-                || key.moe_tp_size != moe_tp_size
+        let Some(by_shape) = by_distribution.and_then(|index| index.get(dist)) else {
+            return Ok(slices);
+        };
+        for key in by_shape.values() {
+            let curve = &grids.by_keys[key];
+            if key.moe_tp_size != moe_tp_size
                 || key.moe_ep_size != moe_ep_size
                 || curve.is_empty()
             {
@@ -384,22 +417,31 @@ impl MoeTable {
 
     /// Mirrors Python's:
     /// `dist = workload if workload in moe_data[quant] else "uniform"`
-    fn resolve_distribution(
+    fn resolve_distribution<'q>(
         &self,
-        grids: &MoeGrids,
-        quant: &str,
-        workload_distribution: &str,
-    ) -> String {
-        // Check whether any key with this (quant, distribution) exists.
-        let requested_exists = grids
-            .by_keys
-            .keys()
-            .any(|k| k.quant == quant && k.distribution == workload_distribution);
-        if requested_exists {
-            workload_distribution.to_string()
+        by_distribution: Option<&BTreeMap<String, BTreeMap<MoeShapeKey, MoeKey>>>,
+        workload_distribution: &'q str,
+    ) -> &'q str {
+        if by_distribution.is_some_and(|index| index.contains_key(workload_distribution)) {
+            workload_distribution
         } else {
-            "uniform".to_string()
+            "uniform"
         }
+    }
+
+    fn resolve_key<'g, 'q>(
+        &self,
+        grids: &'g MoeGrids,
+        quant: &str,
+        workload_distribution: &'q str,
+        shape: MoeShapeKey,
+    ) -> (&'q str, Option<&'g MoeKey>) {
+        let by_distribution = grids.index.get(quant);
+        let distribution = self.resolve_distribution(by_distribution, workload_distribution);
+        let key = by_distribution
+            .and_then(|index| index.get(distribution))
+            .and_then(|index| index.get(&shape));
+        (distribution, key)
     }
 
     fn load(&self) -> Result<&LoadedMoeGrids, AicError> {
@@ -510,14 +552,37 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
     }
     Ok(LoadedMoeGrids {
         default: MoeGrids {
+            index: build_moe_index(&default_keys),
             by_keys: default_keys,
             quants_in_load_order: default_quants,
         },
         low_latency: MoeGrids {
+            index: build_moe_index(&low_latency_keys),
             by_keys: low_latency_keys,
             quants_in_load_order: low_latency_quants,
         },
     })
+}
+
+fn build_moe_index(by_keys: &BTreeMap<MoeKey, BTreeMap<u32, f64>>) -> MoeIndex {
+    let mut index = MoeIndex::new();
+    for key in by_keys.keys() {
+        let shape = MoeShapeKey {
+            topk: key.topk,
+            num_experts: key.num_experts,
+            hidden_size: key.hidden_size,
+            inter_size: key.inter_size,
+            moe_tp_size: key.moe_tp_size,
+            moe_ep_size: key.moe_ep_size,
+        };
+        index
+            .entry(key.quant.clone())
+            .or_default()
+            .entry(key.distribution.clone())
+            .or_default()
+            .insert(shape, key.clone());
+    }
+    index
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -546,6 +611,38 @@ mod tests {
     /// resolution path (not the extrapolated value) matters.
     fn proxy_sol(t: f64) -> f64 {
         t
+    }
+
+    #[test]
+    fn moe_index_resolves_requested_and_uniform_distributions() {
+        let shape = MoeShapeKey {
+            topk: 2,
+            num_experts: 8,
+            hidden_size: 4096,
+            inter_size: 2048,
+            moe_tp_size: 1,
+            moe_ep_size: 4,
+        };
+        let requested = MoeKey::from_shape("fp8", "power_law", shape);
+        let uniform = MoeKey::from_shape("fp8", "uniform", shape);
+        let by_keys = BTreeMap::from([
+            (requested, BTreeMap::from([(1, 1.0)])),
+            (uniform, BTreeMap::from([(1, 2.0)])),
+        ]);
+        let grids = MoeGrids {
+            index: build_moe_index(&by_keys),
+            by_keys,
+            quants_in_load_order: vec!["fp8".to_string()],
+        };
+        let table = MoeTable::new(PathBuf::new());
+
+        let (dist, key) = table.resolve_key(&grids, "fp8", "power_law", shape);
+        assert_eq!(dist, "power_law");
+        assert_eq!(grids.by_keys[key.unwrap()][&1], 1.0);
+
+        let (dist, key) = table.resolve_key(&grids, "fp8", "missing", shape);
+        assert_eq!(dist, "uniform");
+        assert_eq!(grids.by_keys[key.unwrap()][&1], 2.0);
     }
 
     #[test]

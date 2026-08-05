@@ -56,6 +56,15 @@ pub struct WideEpMoeGrids {
     /// `(kernel, quant)` — which differs from sorted order on real shards
     /// (e.g. gb200/h100 wideep files start with `power_law_1.01_eplb`).
     pub first_distribution: BTreeMap<(String, String), String>,
+    index: WideEpMoeIndex,
+}
+
+type WideEpMoeIndex = BTreeMap<String, BTreeMap<String, WideEpMoeQuantIndex>>;
+
+#[derive(Default)]
+struct WideEpMoeQuantIndex {
+    first_distribution: String,
+    by_distribution: BTreeMap<String, BTreeMap<WideEpMoeShapeKey, WideEpMoeKey>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,6 +79,17 @@ pub struct WideEpMoeKey {
     pub num_slots: u32,
     pub moe_tp_size: u32,
     pub moe_ep_size: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct WideEpMoeShapeKey {
+    topk: u32,
+    num_experts: u32,
+    hidden_size: u32,
+    inter_size: u32,
+    num_slots: u32,
+    moe_tp_size: u32,
+    moe_ep_size: u32,
 }
 
 /// `kernel_source` defaults to `"moe_torch_flow"` when null, matching Python's
@@ -192,13 +212,7 @@ impl WideEpMoeTable {
             Err(err) => return Err(err),
         };
         let mut names: Vec<String> = Vec::new();
-        for key in grids.by_keys.keys() {
-            // `WideEpMoeKey` sorts by kernel_source first, so consecutive
-            // dedup suffices.
-            if names.last().map(String::as_str) != Some(key.kernel_source.as_str()) {
-                names.push(key.kernel_source.clone());
-            }
-        }
+        names.extend(grids.index.keys().cloned());
         Ok(names)
     }
 
@@ -226,48 +240,33 @@ impl WideEpMoeTable {
         moe_ep_size: u32,
     ) -> Result<&BTreeMap<u32, f64>, AicError> {
         let grids = self.load_compute()?;
-        let mut kernel_seen = false;
-        let mut quant_seen = false;
-        let mut requested_distribution_seen = false;
-        for key in grids.by_keys.keys() {
-            if key.kernel_source != kernel_source {
-                continue;
-            }
-            kernel_seen = true;
-            if key.quant != quant_name {
-                continue;
-            }
-            quant_seen = true;
-            if key.distribution == distribution {
-                requested_distribution_seen = true;
-                break;
-            }
-        }
-        if !kernel_seen {
+        let Some(by_quant) = grids.index.get(kernel_source) else {
             return Err(AicError::PerfDatabase(format!(
                 "WideEP MoE compute data missing for kernel_source={kernel_source:?} at {}",
                 self.data_root.display()
             )));
-        }
-        if !quant_seen {
+        };
+        let Some(index) = by_quant.get(quant_name) else {
             return Err(AicError::PerfDatabase(format!(
                 "WideEP MoE compute data missing for kernel_source={kernel_source:?} \
                  quant={quant_name:?} at {}",
-                self.data_root.display()
+                 self.data_root.display()
             )));
-        }
-        let dist = if requested_distribution_seen {
-            distribution
-        } else {
+        };
+        debug_assert_eq!(
             grids
                 .first_distribution
-                .get(&(kernel_source.to_string(), quant_name.to_string()))
-                .expect("quant_seen implies a recorded first distribution")
+                .iter()
+                .find(|((kernel, quant), _)| kernel == kernel_source && quant == quant_name)
+                .map(|(_, distribution)| distribution.as_str()),
+            Some(index.first_distribution.as_str())
+        );
+        let dist = if index.by_distribution.contains_key(distribution) {
+            distribution
+        } else {
+            index.first_distribution.as_str()
         };
-        let key = WideEpMoeKey {
-            kernel_source: kernel_source.to_string(),
-            quant: quant_name.to_string(),
-            distribution: dist.to_string(),
+        let shape = WideEpMoeShapeKey {
             topk,
             num_experts,
             hidden_size,
@@ -276,11 +275,25 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        grids
-            .by_keys
-            .get(&key)
+        let key = index
+            .by_distribution
+            .get(dist)
+            .and_then(|by_shape| by_shape.get(&shape));
+        key.and_then(|key| grids.by_keys.get(key))
             .filter(|curve| !curve.is_empty())
             .ok_or_else(|| {
+                let key = WideEpMoeKey {
+                    kernel_source: kernel_source.to_string(),
+                    quant: quant_name.to_string(),
+                    distribution: dist.to_string(),
+                    topk,
+                    num_experts,
+                    hidden_size,
+                    inter_size,
+                    num_slots,
+                    moe_tp_size,
+                    moe_ep_size,
+                };
                 AicError::PerfDatabase(format!(
                     "WideEP MoE compute data missing for {key:?} at {}",
                     self.data_root.display()
@@ -377,7 +390,47 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(WideEpMoeGrids { by_keys, first_distribution })
+    let index = build_wideep_moe_index(&by_keys, &first_distribution);
+    Ok(WideEpMoeGrids {
+        by_keys,
+        first_distribution,
+        index,
+    })
+}
+
+fn build_wideep_moe_index(
+    by_keys: &BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>>,
+    first_distribution: &BTreeMap<(String, String), String>,
+) -> WideEpMoeIndex {
+    let mut index = WideEpMoeIndex::new();
+    for key in by_keys.keys() {
+        let quant_index = index
+            .entry(key.kernel_source.clone())
+            .or_default()
+            .entry(key.quant.clone())
+            .or_default();
+        if quant_index.first_distribution.is_empty() {
+            quant_index.first_distribution = first_distribution
+                .get(&(key.kernel_source.clone(), key.quant.clone()))
+                .expect("loaded key must have a first distribution")
+                .clone();
+        }
+        let shape = WideEpMoeShapeKey {
+            topk: key.topk,
+            num_experts: key.num_experts,
+            hidden_size: key.hidden_size,
+            inter_size: key.inter_size,
+            num_slots: key.num_slots,
+            moe_tp_size: key.moe_tp_size,
+            moe_ep_size: key.moe_ep_size,
+        };
+        quant_index
+            .by_distribution
+            .entry(key.distribution.clone())
+            .or_default()
+            .insert(shape, key.clone());
+    }
+    index
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -424,6 +477,23 @@ mod tests {
             (latency - 0.086_009_597_778_320_32).abs() < 1e-6,
             "expected recorded latency, got {latency}"
         );
+        let fallback = table
+            .query_compute(
+                1,
+                6144,
+                2048,
+                8,
+                256,
+                256,
+                1,
+                2,
+                MoeQuantMode::Nvfp4,
+                "not_collected",
+                "wideep_compute_cutlass",
+                &|t| t,
+            )
+            .expect("unknown distribution must use the first collected distribution");
+        assert_eq!(fallback, latency);
         assert_eq!(
             table.available_kernels().expect("kernels list"),
             vec!["wideep_compute_cutlass".to_string()]

@@ -78,11 +78,14 @@ pub struct WideEpTable {
 
 struct MoeGrids {
     by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    index: MoeIndex,
     /// Distinct quant names in first-seen (file row) order — Python's dict
     /// insertion order, consumed by the operator-layer transfer ladder
     /// (same contract as `moe.rs::MoeTable::available_quants`).
     quants_in_load_order: Vec<String>,
 }
+
+type MoeIndex = BTreeMap<String, BTreeMap<String, BTreeMap<MoeShapeKey, MoeKey>>>;
 
 /// TRT-LLM alltoall grids. Keying mirrors Python `load_trtllm_alltoall_data`
 /// exactly: `[kernel_source][op_name][quant][num_nodes][hidden_size][topk]
@@ -126,6 +129,31 @@ struct MoeKey {
     inter_size: u32,
     moe_tp_size: u32,
     moe_ep_size: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MoeShapeKey {
+    topk: u32,
+    num_experts: u32,
+    hidden_size: u32,
+    inter_size: u32,
+    moe_tp_size: u32,
+    moe_ep_size: u32,
+}
+
+impl MoeKey {
+    fn from_shape(quant: &str, distribution: &str, shape: MoeShapeKey) -> Self {
+        Self {
+            quant: quant.to_string(),
+            distribution: distribution.to_string(),
+            topk: shape.topk,
+            num_experts: shape.num_experts,
+            hidden_size: shape.hidden_size,
+            inter_size: shape.inter_size,
+            moe_tp_size: shape.moe_tp_size,
+            moe_ep_size: shape.moe_ep_size,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -287,9 +315,7 @@ impl WideEpTable {
         moe_ep_size: u32,
     ) -> Result<Vec<(u32, f64)>, AicError> {
         let grids = self.load_ctx_or_gen_moe(is_context)?;
-        let key = MoeKey {
-            quant: quant_name.to_string(),
-            distribution: resolve_moe_distribution(grids, quant_name, workload_distribution),
+        let shape = MoeShapeKey {
             topk,
             num_experts,
             hidden_size,
@@ -297,12 +323,18 @@ impl WideEpTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "WideEP MoE data missing for {key:?} at {}",
-                self.data_root.display()
-            ))
-        })?;
+        let (distribution, key) =
+            resolve_moe_key(grids, quant_name, workload_distribution, shape);
+        let by_tokens = key
+            .and_then(|key| grids.by_keys.get(key))
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                let key = MoeKey::from_shape(quant_name, distribution, shape);
+                AicError::PerfDatabase(format!(
+                    "WideEP MoE data missing for {key:?} at {}",
+                    self.data_root.display()
+                ))
+            })?;
         Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
     }
 
@@ -321,12 +353,15 @@ impl WideEpTable {
         moe_ep_size: u32,
     ) -> Result<Vec<MoeSiblingSlice>, AicError> {
         let grids = self.load_ctx_or_gen_moe(is_context)?;
-        let dist = resolve_moe_distribution(grids, quant_name, workload_distribution);
+        let by_distribution = grids.index.get(quant_name);
+        let dist = resolve_moe_distribution(by_distribution, workload_distribution);
         let mut slices = Vec::new();
-        for (key, curve) in &grids.by_keys {
-            if key.quant != quant_name
-                || key.distribution != dist
-                || key.moe_tp_size != moe_tp_size
+        let Some(by_shape) = by_distribution.and_then(|index| index.get(dist)) else {
+            return Ok(slices);
+        };
+        for key in by_shape.values() {
+            let curve = &grids.by_keys[key];
+            if key.moe_tp_size != moe_tp_size
                 || key.moe_ep_size != moe_ep_size
                 || curve.is_empty()
             {
@@ -624,20 +659,29 @@ impl WideEpTable {
 
 /// Mirrors Python's `wl = workload if workload in moe_data[quant] else
 /// "uniform"` on a wideep MoE grid.
-fn resolve_moe_distribution(
-    grids: &MoeGrids,
-    quant_name: &str,
-    workload_distribution: &str,
-) -> String {
-    let requested_exists = grids
-        .by_keys
-        .keys()
-        .any(|k| k.quant == quant_name && k.distribution == workload_distribution);
-    if requested_exists {
-        workload_distribution.to_string()
+fn resolve_moe_distribution<'q>(
+    by_distribution: Option<&BTreeMap<String, BTreeMap<MoeShapeKey, MoeKey>>>,
+    workload_distribution: &'q str,
+) -> &'q str {
+    if by_distribution.is_some_and(|index| index.contains_key(workload_distribution)) {
+        workload_distribution
     } else {
-        "uniform".to_string()
+        "uniform"
     }
+}
+
+fn resolve_moe_key<'g, 'q>(
+    grids: &'g MoeGrids,
+    quant_name: &str,
+    workload_distribution: &'q str,
+    shape: MoeShapeKey,
+) -> (&'q str, Option<&'g MoeKey>) {
+    let by_distribution = grids.index.get(quant_name);
+    let distribution = resolve_moe_distribution(by_distribution, workload_distribution);
+    let key = by_distribution
+        .and_then(|index| index.get(distribution))
+        .and_then(|index| index.get(&shape));
+    (distribution, key)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -657,10 +701,7 @@ fn query_moe(
     sol: &dyn Fn(f64) -> f64,
 ) -> Result<f64, AicError> {
     let quant_name = quant.name();
-    let distribution = resolve_moe_distribution(grids, quant_name, workload_distribution);
-    let key = MoeKey {
-        quant: quant_name.to_string(),
-        distribution,
+    let shape = MoeShapeKey {
         topk,
         num_experts,
         hidden_size,
@@ -668,10 +709,17 @@ fn query_moe(
         moe_tp_size,
         moe_ep_size,
     };
-    let by_tokens = grids
-        .by_keys
-        .get(&key)
-        .ok_or_else(|| AicError::PerfDatabase(format!("MoE data missing for {key:?} at {}", data_root.display())))?;
+    let (distribution, key) =
+        resolve_moe_key(grids, quant_name, workload_distribution, shape);
+    let by_tokens = key
+        .and_then(|key| grids.by_keys.get(key))
+        .ok_or_else(|| {
+            let key = MoeKey::from_shape(quant_name, distribution, shape);
+            AicError::PerfDatabase(format!(
+                "MoE data missing for {key:?} at {}",
+                data_root.display()
+            ))
+        })?;
     if by_tokens.is_empty() {
         return Err(AicError::PerfDatabase("MoE table has no token points".to_string()));
     }
@@ -681,6 +729,7 @@ fn query_moe(
     // engine directly and let a singleton curve util-hold instead.
     if guard_singleton_underflow {
         if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+            let key = MoeKey::from_shape(quant_name, distribution, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE silicon token underflow has only one measured point; cannot infer \
                  low-token latency from a singleton. num_tokens={num_tokens}, \
@@ -916,7 +965,32 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(MoeGrids { by_keys, quants_in_load_order })
+    Ok(MoeGrids {
+        index: build_moe_index(&by_keys),
+        by_keys,
+        quants_in_load_order,
+    })
+}
+
+fn build_moe_index(by_keys: &BTreeMap<MoeKey, BTreeMap<u32, f64>>) -> MoeIndex {
+    let mut index = MoeIndex::new();
+    for key in by_keys.keys() {
+        let shape = MoeShapeKey {
+            topk: key.topk,
+            num_experts: key.num_experts,
+            hidden_size: key.hidden_size,
+            inter_size: key.inter_size,
+            moe_tp_size: key.moe_tp_size,
+            moe_ep_size: key.moe_ep_size,
+        };
+        index
+            .entry(key.quant.clone())
+            .or_default()
+            .entry(key.distribution.clone())
+            .or_default()
+            .insert(shape, key.clone());
+    }
+    index
 }
 
 /// Auto-select the TRT-LLM All2All kernel. Verbatim port of Python
