@@ -45,10 +45,14 @@ struct GemmQueryKey {
     k: u32,
 }
 
-fn gemm_query_cache(capacity: usize) -> Cache<GemmQueryKey, f64> {
+// Quick Cache is the intended pattern for hot, high-cardinality scalar-query
+// memoization in the perf database. DSA's `sparse` map is deliberately
+// different: it holds a small, unbounded set of lazily loaded table objects,
+// rather than memoizing high-volume scalar results.
+fn gemm_query_cache() -> Cache<GemmQueryKey, f64> {
     let options = OptionsBuilder::new()
-        .estimated_items_capacity(capacity)
-        .weight_capacity(capacity as u64)
+        .estimated_items_capacity(GEMM_QUERY_CACHE_CAPACITY)
+        .weight_capacity(GEMM_QUERY_CACHE_CAPACITY as u64)
         .shards(GEMM_QUERY_CACHE_SHARDS)
         .build()
         .expect("valid static GEMM query cache options");
@@ -92,7 +96,12 @@ pub struct GemmTable {
     gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
+    /// Successful finite scalar GEMM queries, keyed by normalized quant and
+    /// shape and bounded independently for each shard.
     query_cache: OnceLock<Cache<GemmQueryKey, f64>>,
+    // These test-only counters intentionally measure probes at this call site.
+    // Quick Cache's optional internal statistics cannot distinguish a missed
+    // probe from `GemmTable::query` never reaching the cache at all.
     #[cfg(test)]
     query_cache_hits: AtomicUsize,
     #[cfg(test)]
@@ -177,15 +186,15 @@ impl GemmTable {
         // data miss when the quant's table also happens to be uncollected.
         let spec = &self.system_spec;
         let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        // Keep the cache probe below FLOPS resolution, even on hits. Hoisting
+        // it would change MissingSystemFlops-over-PerfDatabase error precedence.
         let key = GemmQueryKey {
             quant: lookup_quant,
             m,
             n,
             k,
         };
-        let cache = self
-            .query_cache
-            .get_or_init(|| gemm_query_cache(GEMM_QUERY_CACHE_CAPACITY));
+        let cache = self.query_cache.get_or_init(gemm_query_cache);
         if let Some(value) = cache.get(&key) {
             #[cfg(test)]
             self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -208,6 +217,8 @@ impl GemmTable {
         };
         let cfg = gemm_engine_config(&sol);
         let value = index.resolve(&cfg, &[m as f64, n as f64, k as f64])?;
+        // Preserve resolver behavior by returning non-finite results, but do
+        // not make them sticky cache hits for later queries.
         if value.is_finite() {
             cache.insert(key, value);
         }
@@ -885,20 +896,35 @@ mod tests {
     }
 
     #[test]
-    fn gemm_query_cache_is_bounded() {
-        let cache = gemm_query_cache(2);
+    fn gemm_query_cache_enforces_production_per_shard_bound() {
+        let cache = gemm_query_cache();
         let key = |m| GemmQueryKey {
             quant: GemmQuantMode::Bfloat16,
             m,
             n: 32,
             k: 32,
         };
+        let per_shard_capacity = GEMM_QUERY_CACHE_CAPACITY / GEMM_QUERY_CACHE_SHARDS;
 
-        cache.insert(key(1), 1.0);
-        cache.insert(key(2), 2.0);
-        cache.insert(key(3), 3.0);
+        assert_eq!(per_shard_capacity, 2_048);
+        assert_eq!(cache.num_shards(), GEMM_QUERY_CACHE_SHARDS);
+        assert_eq!(cache.shard_capacity(), per_shard_capacity as u64);
+        assert_eq!(cache.capacity(), GEMM_QUERY_CACHE_CAPACITY as u64);
 
-        assert_eq!(cache.len(), 2);
+        let target_shard = cache.shard_index(&key(0));
+        let keys: Vec<_> = (0..)
+            .map(key)
+            .filter(|key| cache.shard_index(key) == target_shard)
+            .take(per_shard_capacity + 1)
+            .collect();
+        assert_eq!(keys.len(), 2_049);
+
+        for (value, key) in keys.into_iter().enumerate() {
+            cache.insert(key, value as f64);
+        }
+
+        assert_eq!(cache.len(), per_shard_capacity);
+        assert!(cache.len() < GEMM_QUERY_CACHE_CAPACITY);
     }
 
     #[test]
