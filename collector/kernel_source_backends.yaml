@@ -163,6 +163,7 @@ mappings:
   - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
   - {framework: trtllm, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
   - {framework: trtllm, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
+  - {framework: trtllm, kernel_source: mamba_chunk_scan_combined, backend: flashinfer, source: "collector/trtllm/collect_mamba2.py:290 (mamba2 SSD chunk scan; tensorrt_llm/_torch/modules/mamba/ssd_combined.py:437-444@1.3.0rc15 flashinfer SSDCombined on SM100+ when _flashinfer_ssd_supported; Triton fallback on non-SM100 or unsupported tile sizes)"}
 
   # Comm.
   - {framework: trtllm, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm custom AR)"}
