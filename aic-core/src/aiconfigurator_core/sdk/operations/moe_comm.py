@@ -201,6 +201,23 @@ def _row_power(row: dict) -> float:
     return 0.0 if math.isnan(value) else value
 
 
+def _require_latency(row: dict, table: str) -> float:
+    """Read the schema-required ``latency`` cell; a null is corrupt data.
+
+    Unlike ``power`` (optional — see ``_row_power``), a latency-less row has
+    no meaning: coercing null to 0.0 would silently poison every consumer, so
+    the load refuses with a named error instead of the bare ``float("")``
+    ValueError. New-schema loaders only — the legacy adapters keep their
+    oracle loaders' bare ``float(row["latency"])`` behavior (parity).
+    """
+    raw = row.get("latency")
+    if raw is None or raw == "":
+        raise ValueError(
+            f"null latency cell in a {table} row: latency is schema-required; refusing to load corrupt perf data"
+        )
+    return float(raw)
+
+
 def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_columns: dict) -> None:
     """Adapt legacy sglang DeepEP rows (normal or ll table) into ``data``.
 
@@ -409,7 +426,7 @@ def load_moe_a2a_data(
             _normalize_sms(row.get("sms")),
             int(row["num_tokens"]),
         )
-        latency = float(row["latency"]) / 1000.0  # collector records us; leaves are ms
+        latency = _require_latency(row, "moe_a2a_perf") / 1000.0  # collector records us; leaves are ms
         power = _row_power(row)
         energy = power * latency  # watt-milliseconds
 
@@ -436,11 +453,23 @@ _A2A_PHASES = ("prepare", "dispatch", "combine")
 
 
 def _validate_a2a_request(comm_backend: str, phase: str) -> None:
-    """Shared ctor/query validation: unknown backend or phase is a ValueError."""
+    """Shared ctor/query validation: unknown backend or phase is a ValueError.
+
+    The per-backend check is a guard, not a live code path: the block builder
+    iterates ``spec.comm_phases`` itself and the coverage probe walks table
+    keys without validating — so a combination like ``("deepep_ht",
+    "prepare")`` can only come from future misuse, and should fail here where
+    the intent is expressed rather than later as a data miss.
+    """
     if comm_backend not in MOE_A2A_BACKENDS:
         raise ValueError(f"Invalid comm_backend '{comm_backend}'. Must be one of {sorted(MOE_A2A_BACKENDS)}")
     if phase not in _A2A_PHASES:
         raise ValueError(f"Invalid phase '{phase}'. Must be one of {list(_A2A_PHASES)}")
+    supported = MOE_A2A_BACKENDS[comm_backend].comm_phases
+    if phase not in supported:
+        raise ValueError(
+            f"comm_backend '{comm_backend}' does not implement phase '{phase}'; supported: {list(supported)}"
+        )
 
 
 def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
@@ -926,7 +955,7 @@ def load_moe_ep_data(
             int(row["moe_ep_size"]),
             int(row["num_tokens"]),
         )
-        latency = float(row["latency"])  # already ms (spec §4.2) — stored raw
+        latency = _require_latency(row, "moe_ep_perf")  # already ms (spec §4.2) — stored raw
         power = _row_power(row)
         energy = power * latency  # watt-milliseconds
 
@@ -1055,6 +1084,15 @@ class EPMoE(Operation):
         self._is_gated = is_gated
         # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down).
         # EP-only family: no moe_tp division (moe_tp == 1 by construction).
+        # Parity-pinned: sized by num_experts, NOT num_slots, matching the
+        # retired TrtLLMWideEPMoE._weights (operations/moe.py:1435 @ dc4caca)
+        # so get_weights() byte-matches the legacy classes on the shipped
+        # gb200 EPLB artifacts. Physically EPLB replicates experts across
+        # slots, so num_slots-based sizing is the correct model — tracked as
+        # AIC-1674 (intentional delta: moves the memory column on EPLB
+        # configs). The SOL roofline's num_slots weight term mirrors its own
+        # legacy twin (the retired wideep_moe.rs sol_latency_ms) — the
+        # asymmetry is inherited, not invented.
         num_gemms = 3 if is_gated else 2
         self._weights = hidden_size * inter_size * num_experts * quant_mode.value.memory * num_gemms // moe_ep_size
 

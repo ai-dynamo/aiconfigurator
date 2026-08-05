@@ -211,6 +211,16 @@ def test_ctor_rejects_unknown_phase():
         _make_op(phase="gather")
 
 
+def test_ctor_and_query_reject_phase_outside_backend_comm_phases(a2a_db):
+    # prepare is a known phase globally, but only the trtllm nvlink_two_sided
+    # backend implements it — the registry's per-backend comm_phases must
+    # reject the combination at the boundary, not as a later data miss.
+    with pytest.raises(ValueError, match="does not implement phase 'prepare'"):
+        _make_op(comm_backend="deepep_ht", phase="prepare")
+    with pytest.raises(ValueError, match="does not implement phase 'prepare'"):
+        a2a_db.query_moe_a2a("deepep_ll", "prepare", "default", 16, 2, 7168, 8, 256, 32)
+
+
 def test_query_rejects_unknown_backend_and_phase(a2a_db):
     with pytest.raises(ValueError, match="comm_backend"):
         a2a_db.query_moe_a2a("bogus_backend", "dispatch", "default", 16, 2, 7168, 8, 256, 32)
