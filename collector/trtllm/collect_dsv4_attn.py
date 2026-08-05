@@ -368,9 +368,9 @@ def create_dsv4_kv_cache_and_metadata(
     from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 
     try:
-        from .collect_mla_module import _round_up, get_kv_cache_manager_cls
+        from .collect_mla_module import get_kv_cache_manager_cls
     except ImportError:
-        from collect_mla_module import _round_up, get_kv_cache_manager_cls
+        from collect_mla_module import get_kv_cache_manager_cls
 
     config = model_config.pretrained_config
     mapping = model_config.mapping
@@ -397,8 +397,17 @@ def create_dsv4_kv_cache_and_metadata(
         seq_len_q = 1
         kv_cache_len = seq_len
 
+    # Size the pool by memory fraction like serving does
+    # (examples/models/core/deepseek_v4/README.md:148-151 @v1.3.0rc23:
+    # KvCacheConfig(tokens_per_block=128, free_gpu_memory_fraction=0.5)).
+    # A max_tokens cap computed from the main-KV shape under-counts on V2:
+    # _get_quota_from_max_tokens converts to a byte quota across ALL cache
+    # types (main KV + SWA + compressor/indexer state), so large-KV shapes
+    # failed dummy-request allocation and surfaced as "Request ID not found
+    # in IndexMapper" at forward (B200 smoke 2026-08-06).
     kv_cache_config = KvCacheConfig(
-        max_tokens=batch_size * _round_up(max_seq, tokens_per_block),
+        tokens_per_block=tokens_per_block,
+        free_gpu_memory_fraction=0.5,
         enable_block_reuse=False,
     )
     kv_cache_manager_cls = get_kv_cache_manager_cls(model_config, kv_cache_config)
@@ -430,7 +439,9 @@ def create_dsv4_kv_cache_and_metadata(
 
     request_ids = list(range(batch_size))
     token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [max_seq] * batch_size
-    kv_cache_manager.add_dummy_requests(request_ids, token_nums)
+    # is_gen mirrors the request phase (KVCacheManagerV2.add_dummy_requests;
+    # generation metadata below declares num_contexts=0 with cached KV).
+    kv_cache_manager.add_dummy_requests(request_ids, token_nums, is_gen=not is_context)
 
     attention_cls = get_attention_backend(
         model_config.attn_backend,
