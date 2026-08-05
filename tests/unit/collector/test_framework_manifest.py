@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from collector.framework_manifest import get_collector_runtime, require_collector_runtime
+from collector.framework_manifest import get_collector_runtime, require_collector_runtime, resolve_op_runtime
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
+from collector.wideep.sglang import dataset_version_label
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
@@ -28,8 +29,8 @@ def test_manifest_exposes_current_framework_versions_and_images():
     assert sglang.version == "0.5.14"
     assert sglang.image().startswith("lmsysorg/sglang:v0.5.14@sha256:")
     assert sglang.image("cu130").startswith("lmsysorg/sglang:v0.5.14-cu130@sha256:")
-    assert trtllm.version == "1.3.0rc10"
-    assert trtllm.image().startswith("nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:")
+    assert trtllm.version == "1.3.0rc20"
+    assert trtllm.image().startswith("nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:")
     assert vllm.version == "0.24.0"
     assert vllm.image().startswith("vllm/vllm-openai:v0.24.0@sha256:")
     assert vllm.image("cu129").startswith("vllm/vllm-openai:v0.24.0-cu129@sha256:")
@@ -53,6 +54,36 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     assert wideep_sglang.version != get_collector_runtime("sglang").version
     assert wideep_sglang.collector_dir == "collector/wideep/sglang"
     assert "deepseek-v4" in wideep_sglang.image()
+
+
+def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
+    # The `comm` family override retargets exactly the two DeepEP ops; wideep_moe
+    # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset was
+    # collected with, where DSv4 module support is verified.
+    moe = resolve_op_runtime("wideep_sglang", "wideep_moe")
+    assert (moe.family, moe.version) == ("moe", "0.5.10")
+    assert "deepseek-v4" in moe.image()
+
+    for op, env_var in (("deepep_ll", "DEEPEP_LL_VERSION"), ("deepep_normal", "DEEPEP_NORMAL_VERSION")):
+        monkeypatch.delenv(env_var, raising=False)
+        runtime = resolve_op_runtime("wideep_sglang", op)
+        assert (runtime.family, runtime.version) == ("comm", "0.5.12")
+        assert runtime.image().startswith("lmsysorg/sglang:v0.5.12-cu130@sha256:")
+        # multi-arch index: one entry serves arm64 too, so no grace variant
+        assert runtime.image("grace_blackwell") == runtime.image()
+        # the version column on the rows must name the directory they land in
+        assert dataset_version_label(env_var, op) == runtime.version
+        monkeypatch.setenv(env_var, "9.9.9")
+        assert dataset_version_label(env_var, op) == "9.9.9"
+
+
+def test_deepep_and_wideep_moe_cannot_share_one_container():
+    with pytest.raises(RuntimeError) as excinfo:
+        require_collector_runtime("sglang", "0.5.12", requested_ops={"wideep_moe", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
+    message = str(excinfo.value)
+    assert "deepep_ll→0.5.12" in message
+    assert "wideep_moe→0.5.10" in message
+    assert "run each version group in its own container" in message
 
 
 def test_wideep_entries_are_flattened_peer_frameworks():

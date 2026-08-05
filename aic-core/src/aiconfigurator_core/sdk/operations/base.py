@@ -195,7 +195,7 @@ class Operation:
 
     Note: query() returns PerformanceResult (float-like) instead of plain float.
     The class behaves as a float for backward compatibility while carrying
-    energy data and a ``source`` tag ("silicon" / "empirical" / "mixed").
+    energy data and a provenance ``source`` tag; see ``PerformanceResult``.
     """
 
     # Subclasses that own CSV data override this. Keyed by (system_path, db_mode).

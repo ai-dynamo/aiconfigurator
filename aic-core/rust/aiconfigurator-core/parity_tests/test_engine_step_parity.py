@@ -1185,17 +1185,33 @@ HYBRID_CASES = [
         ),
         id="kimi-k25-b200-vllm-019-hybrid-invariant",
     ),
-    # Ladder miss: NVFP4 MoE on Hopper has no own-shape, cross-shape, or
-    # sibling reference anywhere in the h200/vllm/0.19.0 tables — Python
-    # raises EmpiricalNotImplementedError; the Rust port must fail the same
-    # query point (error-symmetry), never fabricate a SOL/constant value.
+    # Full-model xprofile resolution: NVFP4 on Hopper has no collected GEMM
+    # or MoE tables, but under the default (aggressive) policy the GEMM
+    # quant-transfer ladder borrows across profiles (as does MoE's), so the
+    # whole HYBRID breakdown computes on both sides — value parity. (Before
+    # the GEMM ladder existed this case pinned the error-symmetric miss; the
+    # miss contract moved to the "balanced" case below.)
     pytest.param(
         EngineStepParityCase(
             model_path="nvidia/MiniMax-M2.5-NVFP4",
             system_name="h200_sxm",
             database_mode="HYBRID",
         ),
-        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-miss",
+        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile",
+    ),
+    # Ladder miss (error-symmetry): with XPROFILE policy-disabled
+    # ("balanced" = xshape+xquant), NVFP4 GEMM (profile (0.5625, 4)) has no
+    # same-profile sibling anywhere in the h200/vllm/0.19.0 tables — Python
+    # raises EmpiricalNotImplementedError; the Rust port must fail the same
+    # query point, never fabricate a SOL/constant value.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="nvidia/MiniMax-M2.5-NVFP4",
+            system_name="h200_sxm",
+            database_mode="HYBRID",
+            transfer_policy="balanced",
+        ),
+        id="minimax-m25-nvfp4-h200-vllm-019-hybrid-balanced-miss",
     ),
     # EMPIRICAL mode: every data-backed op answers SOL(query)/util from its
     # own collected slice — the broadest guard of the ported util math (grid
@@ -1343,13 +1359,16 @@ class TestRustTypedErrorsAcrossFfi:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # NVFP4 GEMM tables are not collected on h200/vllm/0.19.0: under
-        # SILICON, Rust hits `AicError::PerfDatabase` ("GEMM perf data missing
-        # for quant 'nvfp4'") at the query point — which must cross the FFI as
-        # the SAME sdk class Python raises, recognized by the cause-chain
-        # walker (the miss-classification the sweep/support-matrix rely on).
+        # MiMo-V2-Flash has head_dim=192 while b200/vllm/0.19.0 collected only
+        # {128, 256}: under SILICON, Rust hits `AicError::PerfDatabase` at the
+        # attention query point — which must cross the FFI as the SAME sdk
+        # class Python raises, recognized by the cause-chain walker (the
+        # miss-classification the sweep/support-matrix rely on). (The previous
+        # vehicle, NVFP4 GEMM on h200, now classifies as the strict
+        # MissingSystemFlopsError before any data lookup — h200 has no
+        # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="nvidia/MiniMax-M2.5-NVFP4", system_name="h200_sxm")
+        case = EngineStepParityCase(model_path="XiaomiMiMo/MiMo-V2-Flash")
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)
         assert perf_database.has_perf_data_not_available_cause(excinfo.value)
@@ -1358,26 +1377,76 @@ class TestRustTypedErrorsAcrossFfi:
         message = str(excinfo.value)
         assert "perf database error" in message or "I/O error" in message, message
 
-    def test_hybrid_ladder_miss_raises_typed_empirical_miss(
+    def test_missing_dtype_flops_raises_typed_missing_flops_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # NVFP4 MoE on Hopper: no own-shape/cross-shape/sibling reference
-        # anywhere (the HYBRID_CASES ladder-miss config). Rust raises
-        # `AicError::EmpiricalNotImplemented`, which must surface as the sdk's
-        # EmpiricalNotImplementedError — the typed hybrid-miss — and NOT be
-        # classified as a plain perf-data miss.
+        # NVFP4 on Hopper: h200 has no fp4 hardware and its YAML defines no
+        # fp4_tc_flops, so the strict per-dtype resolver rejects the
+        # configuration at query entry (#1398) — before the HYBRID ladder
+        # (any transfer policy) is even consulted, which is why this vehicle
+        # can no longer pin #1455's balanced-policy ladder-miss contract
+        # (symmetric EmpiricalNotImplementedError coverage lives in the
+        # MSA/GDN HYBRID tests above). Rust raises
+        # `AicError::MissingSystemFlops`, which must surface as the sdk's
+        # MissingSystemFlopsError — the expected-CLI-error ValueError class —
+        # and NOT be classified as a plain perf-data miss.
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(
             model_path="nvidia/MiniMax-M2.5-NVFP4",
             system_name="h200_sxm",
             database_mode="HYBRID",
         )
-        with pytest.raises(errors.EmpiricalNotImplementedError) as excinfo:
+        with pytest.raises(errors.MissingSystemFlopsError) as excinfo:
             _rust_static_breakdown(case)
         message = str(excinfo.value)
-        assert "empirical estimation not implemented" in message, message
+        assert "fp4_tc_flops" in message, message
+        # The AicError display prefix pins the raise to the rust side of the
+        # FFI (a Python-side raise would carry the sdk's own wording).
+        assert "missing system flops" in message, message
+        assert isinstance(excinfo.value, ValueError)
         assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
+
+    def test_silicon_missing_dtype_on_lazy_family_matches_python(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # SILICON x missing-dtype on a lazily-loading table family (nvfp4
+        # MLA-BMM: h200 has no fp4_tc_flops). Both engines must classify this
+        # as MissingSystemFlopsError, NOT as a perf-data miss — the quadrant
+        # the original pins (SILICON with all dtypes present; HYBRID
+        # missing-dtype on an eager op) left uncovered until the flops
+        # resolution was hoisted before every load/key lookup.
+        _prepare_rust_core(monkeypatch)
+        case = EngineStepParityCase(model_path="nvidia/MiniMax-M2.5-NVFP4", system_name="h200_sxm")
+        with pytest.raises(errors.MissingSystemFlopsError) as excinfo:
+            _rust_static_breakdown(case)
+        assert "missing system flops" in str(excinfo.value), str(excinfo.value)
+        assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
+        # Python classifies the same query point identically.
+        database = _case_database(case)
+        with pytest.raises(errors.MissingSystemFlopsError):
+            database.query_mla_bmm(16, 16, common.GEMMQuantMode.nvfp4, database_mode=common.DatabaseMode.SILICON)
+
+    def test_pre_sm89_fp8_kv_generation_returns_shipped_silicon(self) -> None:
+        # a100_sxm ships 2,534 measured generation-MLA rows with fp8 KV
+        # (trtllm/1.0.0): Ampere has no fp8 tensor cores — the decode kernel
+        # dequantizes KV and issues the MMA on the bf16 pipeline, which is how
+        # that data was collected at all. The sm-gated derivation
+        # (generation_attn_mode) must keep those rows queryable instead of
+        # demanding an fp8_tc_flops entry a100 must never define (the
+        # support-matrix FP8 gate is keyed on that entry's presence).
+        database = _quiet_call(perf_database.get_database, "a100_sxm", "trtllm", "1.0.0")
+        fp8_kv = database.query_generation_mla(
+            1, 65, 64, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SILICON
+        )
+        bf16_kv = database.query_generation_mla(
+            1, 65, 64, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SILICON
+        )
+        assert float(fp8_kv) > 0
+        # Same silicon exact-hit region: the two dtypes' measured values sit
+        # within a few percent of each other (dequant-to-bf16 pipeline).
+        assert abs(float(fp8_kv) - float(bf16_kv)) / float(bf16_kv) < 0.25
 
 
 class TestRustProvenanceCapture:

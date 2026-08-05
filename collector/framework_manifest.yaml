@@ -21,9 +21,9 @@ frameworks:
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:
-      version: "1.3.0rc10"
+      version: "1.3.0rc20"
       images:
-        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:fd68e7500952100df58bb3682c4ea69b6e6723dc4d13dfc911a1bdee80ac389a"
+        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
   vllm:
     source_repo: "https://github.com/vllm-project/vllm.git"
     default:
@@ -40,6 +40,18 @@ frameworks:
       images:
         default: "deepseek-v4-blackwell"
         grace_blackwell: "deepseek-v4-grace-blackwell"
+    families:
+      # DeepEP dispatch/combine only. The DeepSeek-V4 images ship deep_ep 1.1.0
+      # (kNumMaxTopK 9), which cannot run topk=10 shapes such as
+      # (4096, 512, 10); this image ships deep_ep 1.2.1+d28bd67 (kNumMaxTopK 11)
+      # and collects them, verified on GB200. It is a multi-arch index (amd64 +
+      # arm64), so one entry serves every system and no grace_blackwell variant
+      # is needed. `moe` (wideep_moe) deliberately stays on the DeepSeek-V4
+      # default: its DSv4 module support on this image is unverified.
+      comm:
+        version: "0.5.12"
+        images:
+          default: "lmsysorg/sglang:v0.5.12-cu130@sha256:42194170546745092e74cd5f81ad32a7c6e944c7111fe7bf13588152277ff356"
     notes: >
       Requires an SGLang image with DeepSeek-V4/DeepEP modules; stock
       lmsysorg/sglang images may not include them.
@@ -48,6 +60,6 @@ frameworks:
     collector_dir: "collector/wideep/trtllm"
     data_backend: trtllm
     default:
-      version: "1.3.0rc10"
+      version: "1.3.0rc20"
       images:
-        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10@sha256:fd68e7500952100df58bb3682c4ea69b6e6723dc4d13dfc911a1bdee80ac389a"
+        default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"

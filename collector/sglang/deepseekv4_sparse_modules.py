@@ -61,18 +61,21 @@ except ModuleNotFoundError:
     from case_generator import _DSV4_DEFAULT_MODELS
 
 
-def _dsv4_sparse_kernel_cases(kernel):
+def _dsv4_sparse_kernel_cases(kernel, models=None):
     # One task per (model, bs); collect.py spreads bs across GPU workers (no
     # single-worker cuda-graph buildup). All sparse kernels run a single fixed
     # head config: the FMLA pads to its required head count OUTSIDE the kernel
     # (model TP zero-pad), so the kernel is TP-independent -> one config per bs,
     # no tp sweep. Each task sweeps (isl, prefix) for its bs.
-    try:
-        from collector.case_generator import _selected_dsv4_models
-    except ModuleNotFoundError:
-        from case_generator import _selected_dsv4_models
+    if models is None:
+        try:
+            from collector.case_generator import _selected_dsv4_models
+        except ModuleNotFoundError:
+            from case_generator import _selected_dsv4_models
+
+        models = _selected_dsv4_models()
     cases = []
-    for m in _selected_dsv4_models():
+    for m in models:
         ctx = _dsv4_context_derived_shapes(m)
         dec = _dsv4_generation_derived_shapes(m)
         bss = sorted({b for (_p, _i, b) in ctx} | {b for (_p, _i, b) in dec})
@@ -1173,8 +1176,19 @@ def _bench_topk_512(
 
 
 def get_dsv4_topk_calib_test_cases():
-    """topk_512 DELTA calibration cases."""
-    return _dsv4_sparse_kernel_cases("topk")
+    """topk_512 DELTA calibration cases.
+
+    Same contract as ``case_generator.get_dsv4_topk_calib_test_cases``
+    (via ``_selected_dsv4_calib_models``): default plans stay on the canonical
+    calib model (cost policy); targeted runs collect their own model's
+    calibration — since #1460 the consumers key the DELTA per native head
+    geometry, so distinct models can no longer overwrite each other."""
+    try:
+        from collector.case_generator import _selected_dsv4_calib_models
+    except ModuleNotFoundError:
+        from case_generator import _selected_dsv4_calib_models
+
+    return _dsv4_sparse_kernel_cases("topk", models=_selected_dsv4_calib_models())
 
 
 def _bench_topk_shape(prefix: int, isl: int, bs: int, sc, device: str, *, variant: str) -> list:

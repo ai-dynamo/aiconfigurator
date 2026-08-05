@@ -147,10 +147,20 @@ model_case_values:
       hidden_size: 7168
       hc_mult: 4
   dsv4:
-    # Module and calibration output keys cannot distinguish Flash from Pro.
-    # Use one canonical full/raw profile instead of silently overwriting one
-    # model with the other. Targeted runs still preserve all supported paths.
+    # Module tables key [native][local] since #1423/#1431, so full/raw plans
+    # collect Flash and Pro together (distinct native head counts cannot
+    # collide). Artifacts stay uniform (sgl-project FP8 builds, matching every
+    # shipped module table) because the persisted module key carries no
+    # artifact dimension — one artifact per geometry per plan; Blackwell
+    # platform-native collection uses targeted deepseek-ai/* runs. The first
+    # entry is the canonical artifact (manual-CLI default model).
+    # Default calib collection stays on the canonical artifact via
+    # calib_model_paths (cost policy); targeted runs may collect any supported
+    # model's calibration — consumers key the DELTA per native geometry (#1460).
     default_model_paths:
+      - sgl-project/DeepSeek-V4-Flash-FP8
+      - sgl-project/DeepSeek-V4-Pro-FP8
+    calib_model_paths:
       - sgl-project/DeepSeek-V4-Flash-FP8
     supported_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash

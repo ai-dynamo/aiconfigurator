@@ -211,6 +211,7 @@ class TestMLAModule:
             kvcache_quant_mode=common.KVCacheQuantMode.fp8,
             fmha_quant_mode=common.FMHAQuantMode.bfloat16,
             gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            native_num_heads=None,
         )
         mock_db.query_generation_mla_module.assert_not_called()
         assert float(result) == 10.0
@@ -239,6 +240,7 @@ class TestMLAModule:
             num_heads=16,
             kv_cache_dtype=common.KVCacheQuantMode.fp8,
             gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            native_num_heads=None,
         )
         mock_db.query_context_mla_module.assert_not_called()
         assert float(result) == 5.0

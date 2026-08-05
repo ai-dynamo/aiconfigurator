@@ -26,7 +26,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common, perf_interp
-from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator_core.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import util_empirical
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
@@ -210,6 +210,31 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
+def generation_attn_mode(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> common.FMHAQuantMode:
+    """Decode-attention FMHA mode implied by the kv-cache dtype.
+
+    fp8 KV implies an fp8-MMA decode kernel only where fp8 tensor cores exist
+    (SM >= 89, Ada and newer); on pre-89 hardware — and on specs without
+    ``sm_version``, e.g. XPU — the kernel dequantizes KV and issues the MMA on
+    the bf16 pipeline. That is how a100's shipped fp8-kv generation data was
+    collected in the first place, so gating here keeps that silicon usable
+    under the strict per-dtype resolution. The single home for the derivation
+    rule (mirrors Rust ``perf_database::attention::generation_attn_mode``).
+    """
+    has_fp8_mma = (system_spec["gpu"].get("sm_version") or -1) >= 89
+    if kvcache_quant_mode == common.KVCacheQuantMode.fp8 and has_fp8_mma:
+        return common.FMHAQuantMode.fp8
+    return common.FMHAQuantMode.bfloat16
+
+
+def generation_attn_flops(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> float:
+    """Strictly resolved TC FLOPS for :func:`generation_attn_mode`; used by
+    the generation get_sol closures, the eager query-entry checks, and
+    ``Attention._correct_sol``.
+    """
+    return common.get_quant_tc_flops(system_spec, generation_attn_mode(system_spec, kvcache_quant_mode))
+
+
 class ContextAttention(Operation):
     """
     Context (prefill) attention operation.
@@ -316,6 +341,10 @@ class ContextAttention(Operation):
         head_size: int = 128,
     ):
         """Query context attention table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
         def get_sol(
             b: int,
@@ -336,7 +365,7 @@ class ContextAttention(Operation):
             mem_bytes = 2 * b * (
                 n * (full_s - prefix) * h + n * (full_s - prefix) * h
             ) + kvcache_quant_mode.value.memory * b * (2 * n_kv * full_s * h)
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -657,6 +686,15 @@ class GenerationAttention(Operation):
             return
 
         for quant_mode in data_wrapper:
+            # Silicon data can exist for a dtype whose *_tc_flops entry is
+            # missing from the system YAML (e.g. b60 fp8). Leave that slice
+            # unclamped rather than failing the whole database load;
+            # query-time paths reject the quant mode eagerly instead.
+            try:
+                generation_attn_flops(database.system_spec, quant_mode)
+            except MissingSystemFlopsError as exc:
+                logger.debug(f"skipping SOL clamp for generation attention quant {quant_mode}: {exc}")
+                continue
             for n_kv in data_wrapper[quant_mode]:
                 for head_size in data_wrapper[quant_mode][n_kv]:
                     for window_size in data_wrapper[quant_mode][n_kv][head_size]:
@@ -708,6 +746,10 @@ class GenerationAttention(Operation):
         head_size: int = 128,
     ):
         """Query generation attention table. Verbatim port of legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        generation_attn_flops(database.system_spec, kvcache_quant_mode)
 
         def get_sol(
             b: int,
@@ -718,10 +760,6 @@ class GenerationAttention(Operation):
             w: int,
             kvcache_quant_mode: common.KVCacheQuantMode,
         ) -> tuple[float, float, float]:
-            if kvcache_quant_mode == common.KVCacheQuantMode.fp8:
-                quant_mode_gen = common.FMHAQuantMode.fp8
-            else:
-                quant_mode_gen = common.FMHAQuantMode.bfloat16
             if w > 0:
                 kv_len = min(s - 1, w)
             else:
@@ -729,7 +767,7 @@ class GenerationAttention(Operation):
             ops = 2 * b * n * h * 2 * (kv_len)
             mem_bytes = b * (n * h * 2 + 2 * n_kv * (kv_len) * h * kvcache_quant_mode.value.memory + n * h * 2)
 
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / quant_mode_gen.value.compute
+            sol_math = ops / generation_attn_flops(database.system_spec, kvcache_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -1011,6 +1049,10 @@ class EncoderAttention(Operation):
         database_mode: common.DatabaseMode | None = None,
     ):
         """Query encoder attention table. Verbatim port of the legacy body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
         def get_sol(
             b: int, s: int, n: int, h: int, fmha_quant_mode: common.FMHAQuantMode
@@ -1019,7 +1061,7 @@ class EncoderAttention(Operation):
             ops = 2 * b * s * s * n * h * 2  # 2 for fma, 2 for q*k^t + *v
             # Encoder has no KV cache read; Q/K/V are all read once
             mem_bytes = 2 * b * (3 * n * s * h + n * s * h)  # Q/K/V read + output write, bf16
-            sol_math = ops / database.system_spec["gpu"]["bfloat16_tc_flops"] * 1000 / fmha_quant_mode.value.compute
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, fmha_quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem

@@ -19,7 +19,6 @@
 //!   util-space empirical layer: exact-window then window=0 util carriers,
 //!   plus the cross-head_size (XSHAPE) transfer ladder
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, KvCacheQuantMode, TransferKind};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -27,9 +26,11 @@ use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::attention::{
     context_attention_sol_ms, context_attention_sol_with_prefix_ms, encoder_attention_sol_ms,
-    generation_attention_sol_ms,
+    generation_attention_sol_ms, generation_attn_flops,
 };
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 /// Analytic memory-op latency (ms). Matches Python's
 /// `PerfDatabase.query_mem_op` empirical path (the only path used for
@@ -429,6 +430,7 @@ fn context_attention_empirical(
     fmha_quant: FmhaQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     let sol_time = context_attention_sol_with_prefix_ms(
         spec,
         b as f64,
@@ -439,7 +441,7 @@ fn context_attention_empirical(
         head_size,
         window_size,
         kv_quant,
-        fmha_quant,
+        attn_flops,
     );
     let n_kv_lookup = if n == n_kv { 0 } else { n_kv };
     let query = [n as f64, (s + prefix) as f64, b as f64];
@@ -462,8 +464,15 @@ fn context_attention_empirical(
                 Ok(points) => {
                     let sol = |c: &[f64]| {
                         context_attention_sol_ms(
-                            spec, n_kv_lookup, head_size, slice_window, kv_quant, fmha_quant, c[0],
-                            c[1], c[2],
+                            spec,
+                            n_kv_lookup,
+                            head_size,
+                            slice_window,
+                            kv_quant,
+                            c[0],
+                            c[1],
+                            c[2],
+                            attn_flops,
                         )
                     };
                     Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol))))
@@ -526,6 +535,7 @@ fn ctx_headsize_ref_grid(
         return Ok(None);
     };
     let spec = &db.system_spec;
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
     // Reference identity (ref_hs) + provenance in the key, so a policy that
     // later reuses the same slice as own-shape cannot alias this grid.
     let key = format!(
@@ -541,8 +551,15 @@ fn ctx_headsize_ref_grid(
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     context_attention_sol_ms(
-                        spec, n_kv_lookup, ref_hs, window_size, kv_quant, fmha_quant, c[0], c[1],
+                        spec,
+                        n_kv_lookup,
+                        ref_hs,
+                        window_size,
+                        kv_quant,
+                        c[0],
+                        c[1],
                         c[2],
+                        attn_flops,
                     )
                 };
                 let mut grid = UtilGrid::new(util_empirical::build_samples(points, sol));
@@ -612,8 +629,17 @@ fn generation_attention_empirical(
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let n_kv_lookup = if n_kv == n { 0 } else { n_kv };
+    let attn_flops = generation_attn_flops(spec, kv_quant)?;
     let sol_time = generation_attention_sol_ms(
-        spec, n_kv_lookup, head_size, window_size, kv_quant, n as f64, b as f64, s as f64,
+        spec,
+        n_kv_lookup,
+        head_size,
+        window_size,
+        kv_quant,
+        n as f64,
+        b as f64,
+        s as f64,
+        attn_flops,
     );
     let query = [n as f64, b as f64, s as f64];
 
@@ -631,7 +657,15 @@ fn generation_attention_empirical(
                 Ok(points) => {
                     let sol = |c: &[f64]| {
                         generation_attention_sol_ms(
-                            spec, n_kv_lookup, head_size, slice_window, kv_quant, c[0], c[1], c[2],
+                            spec,
+                            n_kv_lookup,
+                            head_size,
+                            slice_window,
+                            kv_quant,
+                            c[0],
+                            c[1],
+                            c[2],
+                            attn_flops,
                         )
                     };
                     Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol))))
@@ -681,6 +715,7 @@ fn gen_headsize_ref_grid(
         return Ok(None);
     };
     let spec = &db.system_spec;
+    let attn_flops = generation_attn_flops(spec, kv_quant)?;
     let key = format!(
         "gen_attn_xhs:{}:{}:{}:{}:xshape",
         kv_quant.name(),
@@ -693,7 +728,15 @@ fn gen_headsize_ref_grid(
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     generation_attention_sol_ms(
-                        spec, n_kv_lookup, ref_hs, window_size, kv_quant, c[0], c[1], c[2],
+                        spec,
+                        n_kv_lookup,
+                        ref_hs,
+                        window_size,
+                        kv_quant,
+                        c[0],
+                        c[1],
+                        c[2],
+                        attn_flops,
                     )
                 };
                 let mut grid = UtilGrid::new(util_empirical::build_samples(points, sol));
@@ -749,7 +792,8 @@ fn encoder_attention_empirical(
     fmha_quant: FmhaQuantMode,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
-    let sol = |c: &[f64]| encoder_attention_sol_ms(spec, head_size, fmha_quant, c[0], c[1], c[2]);
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let sol = |c: &[f64]| encoder_attention_sol_ms(spec, head_size, c[0], c[1], c[2], attn_flops);
     let query = [n as f64, s as f64, b as f64];
     let key = format!("encoder_attn:{}:{}", fmha_quant.name(), head_size);
     let grid = db.util_grids.get_or_try_build(&key, || {
