@@ -928,11 +928,29 @@ ColumnsAFD = [
     "tokens/s/gpu",
     "tokens/s/user",
     "seq/s",
+    "request_rate",
     "concurrency",
+    "parallel",
     "pipeline_model",
     "num_microbatches",
+    "nextn",
     "combined_with_pd",
     "boundary_on_attn",
+    # Static prefill pool paired with the AFD pool in combined-with-PD
+    # default-mode sweeps; NaN for single-phase AFD-only estimates.
+    "(p)workers",
+    "(p)tp",
+    "(p)pp",
+    "(p)dp",
+    "(p)moe_tp",
+    "(p)ep",
+    "(p)bs",
+    "(p)num_gpus",
+    "(p)system",
+    "(p)backend",
+    "(p)version",
+    "(p)impl",
+    "(d)impl",
     "num_total_gpus",
     "memory",
     "backend",
@@ -1151,6 +1169,7 @@ class FMHAQuantMode(Enum):
     """
 
     bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")
+    float16 = QuantMapping(2, 1, "float16", "bfloat16")  # sglang decode attention uses float16 compute
     fp8 = QuantMapping(1, 2, "fp8", "fp8")
     fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # FIXME: specific for sglang wideep
 
