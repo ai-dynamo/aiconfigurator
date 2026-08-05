@@ -221,3 +221,4 @@ vl_epd_agg:
   # max_encoder_workers: 32
   # encoder_latency_correction: 1.0
   # encoder_system_name: h200_sxm   # hetero encode pool
+  # rate_match_encoder_degradation: 0.9   # encode-pool rate-matching loss

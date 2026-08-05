@@ -45,6 +45,17 @@ def test_run_single_epd_arg_validation():
         Task(enable_epd=True).run_single_agg(tp=1, batch_size=1, encoder_tp=1, encoder_num_workers=0)
     with pytest.raises(ValueError, match="require enable_epd"):
         Task().run_single_agg(tp=1, batch_size=1, encoder_tp=2)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(enable_epd=True, rate_match_encoder_degradation=-1.0).run_single_agg(tp=1, batch_size=1, encoder_tp=1)
+    with pytest.raises(ValueError, match="require enable_epd"):
+        Task(rate_match_encoder_degradation=0.7).run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(rate_match_prefill_degradation=-1.0).run_single_disagg(prefill_tp=1, decode_tp=1, decode_batch_size=1)
+
+
+def test_from_cli_resolves_quant_strings():
+    t = Task.from_cli(gemm_quant_mode="fp8", prefill_kvcache_quant_mode=None)
+    assert t.gemm_quant_mode is common.GEMMQuantMode.fp8
 
 
 def test_agg_with_model_resolves_identity_and_backend():

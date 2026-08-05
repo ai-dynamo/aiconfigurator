@@ -235,6 +235,22 @@ class BaseBackend:
         return post_merge * runtime_config.num_images_per_request
 
     @staticmethod
+    def effective_prefill_isl(model_path: str, runtime_config: RuntimeConfig) -> int:
+        """Text ISL + vision context tokens for one request.
+
+        Single source for the effective prefill ISL: every token/batch budget
+        derived from it must divide by this same value, never a recomputed one.
+        """
+        from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+        try:
+            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        except Exception:
+            logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
+            enc_cfg = None
+        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+
+    @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
         return BaseBackend._visual_context_tokens_from_encoder_config(
             getattr(model, "encoder_config", None), runtime_config
@@ -418,22 +434,29 @@ class BaseBackend:
         runtime_config: RuntimeConfig,
         batch_size: int,
         latency_correction_scale: float = 1.0,
-    ) -> tuple[float, float, dict[str, float]]:
+    ) -> tuple[float, float, dict[str, float], float]:
         """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
 
         Runs just the vision-encoder phase for one batch of ``batch_size``
-        requests and returns ``(latency_ms, power_w, memory_dict)``.
-        ``model`` may be any object carrying ``encoder_ops``,
-        ``encoder_config`` and ``config`` (e.g. ``EncoderOnlyModel``);
-        ``power_w`` is the phase-average power, invariant to the correction.
+        requests and returns ``(latency_ms, power_w, memory_dict,
+        power_coverage)``.  ``model`` may be any object carrying
+        ``encoder_ops``, ``encoder_config`` and ``config`` (e.g.
+        ``EncoderOnlyModel``); ``power_w`` is the phase-average power,
+        invariant to the correction.  ``power_coverage`` is the
+        latency-weighted fraction of ops with recorded energy, mirroring
+        ``InferenceSummary.get_power_data_coverage``.
         """
         encoder_latency_dict, encoder_energy_wms_dict, _, _ = self._run_encoder_phase(
             model, database, runtime_config, batch_size
         )
         raw_latency = sum(encoder_latency_dict.values())
         power_w = sum(encoder_energy_wms_dict.values()) / raw_latency if raw_latency > 0 else 0.0
+        covered_latency = sum(
+            latency for op, latency in encoder_latency_dict.items() if encoder_energy_wms_dict.get(op, 0.0) > 0
+        )
+        power_coverage = covered_latency / raw_latency if raw_latency > 0 else 0.0
         memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
-        return raw_latency * latency_correction_scale, power_w, memory
+        return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
     def _run_context_phase(
         self,

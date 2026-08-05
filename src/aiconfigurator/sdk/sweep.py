@@ -441,6 +441,7 @@ def sweep_agg(
     max_encoder_workers: int | None = None,
     encoder_latency_correction: float = 1.0,
     encoder_database: PerfDatabase | None = None,
+    rate_matching_encoder_degradation: float | None = None,
     num_gpu_list: list[int] | None = None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
@@ -501,6 +502,13 @@ def sweep_agg(
     saw_memory_fit = False
     perf_misses = 0
 
+    e_deg = (
+        rate_matching_encoder_degradation
+        if rate_matching_encoder_degradation is not None
+        else _RATE_MATCH_ENCODER_DEGRADATION
+    )
+    if not (math.isfinite(e_deg) and e_deg > 0):
+        raise ValueError(f"rate_matching_encoder_degradation must be a positive finite number, got {e_deg!r}.")
     encoder_candidates: list[dict] | None = None
     if enable_epd:
         # E+agg: enumerate the encode pool once; hetero encoder may use its
@@ -602,6 +610,7 @@ def sweep_agg(
                         num_gpu_set=epd_num_gpu_set,
                         top_k=top_k,
                         max_encoder_workers=max_encoder_workers,
+                        encoder_degradation=e_deg,
                     )
                 if len(point_df) == 0:
                     continue
@@ -807,7 +816,8 @@ def _get_encoder_worker_candidates(
     or exceed the encoder system's GPU memory are dropped.
 
     Returns row dicts with keys
-    ``encoder_latency / seq/s / num_total_gpus / tp / bs / memory``.
+    ``encoder_latency / seq/s / num_total_gpus / tp / bs / memory /
+    power_w / power_coverage``.
     """
     backend = get_backend(backend_name)
     enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
@@ -831,6 +841,13 @@ def _get_encoder_worker_candidates(
     # The dominance filter below relies on ascending batch order.
     b_schedule = sorted(set(b_list or _DEFAULT_ENCODER_BATCH_SCHEDULE))
     for etp in sorted(set(tp_list or _DEFAULT_ENCODER_TP_LIST)):
+        if min(etp, 8) not in misc_spec["nccl_mem"]:
+            logger.warning(
+                "EPD encoder: tp=%s skipped: no comm data for this world size on this system (supported: %s)",
+                etp,
+                sorted(misc_spec["nccl_mem"]),
+            )
+            continue
         overhead_gib = (misc_spec["nccl_mem"][min(etp, 8)] + other_mem) / (1 << 30)
         try:
             encoder_ops = build_encoder_ops(enc_cfg, etp, enable_encoder_dp=False)
@@ -846,13 +863,18 @@ def _get_encoder_worker_candidates(
         )
         best_seq_s = 0.0
         for b in b_schedule:
-            latency, power_w, memory = backend.run_encoder_static(
+            latency, power_w, memory, power_coverage = backend.run_encoder_static(
                 model, database, runtime_config, b, latency_correction_scale=latency_correction
             )
             if memory.get("total", 0.0) + overhead_gib >= mem_capacity_gib:
                 # Memory grows with batch: larger batches also OOM.
                 saw_oom = True
                 break
+            if not (latency > 0 and math.isfinite(latency)):
+                raise ValueError(
+                    f"EPD encoder: invalid batch latency ({latency}) at tp={etp} bs={b}; "
+                    "the encoder perf data or latency correction is invalid."
+                )
             seq_s = b * 1000.0 / latency
             if seq_s <= best_seq_s:
                 continue
@@ -866,6 +888,7 @@ def _get_encoder_worker_candidates(
                     "bs": b,
                     "memory": round(memory.get("total", 0.0), 3),
                     "power_w": power_w,
+                    "power_coverage": power_coverage,
                 }
             )
     if not rows:
@@ -873,7 +896,10 @@ def _get_encoder_worker_candidates(
             raise InsufficientMemoryError(
                 "EPD encoder: the encode worker does not fit in GPU memory for any (tp, batch)."
             )
-        raise NoFeasibleConfigError("EPD encoder: no encode-worker candidate for any encoder tp.")
+        raise NoFeasibleConfigError(
+            "EPD encoder: no encode-worker candidate for any encoder tp "
+            "(tp must divide the ViT geometry and have comm data on this system; see warnings)."
+        )
     return rows
 
 
@@ -900,6 +926,13 @@ def _epd_e_num_candidates(
     return range(1, min(math.ceil(lm_required / encoder_capacity), bound) + 1)
 
 
+def _degraded_encoder_capacity(seq_s: float, degradation: float, e_num: int = 1) -> float:
+    """Degraded encode-pool capacity.  Keeps the ((seq/s x deg) x workers)
+    association order shared by the matchers and the overlay cap, so the
+    capped value is bit-identical to the capacity the argmax used."""
+    return seq_s * degradation * e_num
+
+
 def _overlay_encoder_stage(
     disagg_dict: dict,
     encoder_worker: dict,
@@ -907,6 +940,7 @@ def _overlay_encoder_stage(
     prefill_power: float = 0.0,
     decode_power: float = 0.0,
     ttft_scale: float = 1.0,
+    encoder_degradation: float = _RATE_MATCH_ENCODER_DEGRADATION,
 ) -> dict:
     """Overlay the encode stage onto a rate-matched P/D or agg row (EPD).
 
@@ -916,7 +950,8 @@ def _overlay_encoder_stage(
     it raw (run_agg adds the inline encoder outside its queueing factor).
     When the degraded encode pool capacity is below the row throughput,
     ``seq/s`` is capped and the rate-derived columns rescale with it;
-    ``power_w`` is re-weighted over the encode + prefill + decode timeline.
+    ``power_w`` (and ``power_coverage``, when the row carries it) is
+    re-weighted over the encode + prefill + decode timeline.
     """
     row = dict(disagg_dict)
     encoder_latency = encoder_worker["encoder_latency"]
@@ -930,12 +965,21 @@ def _overlay_encoder_stage(
             + prefill_power * prefill_ttft
             + decode_power * decode_time
         ) / total_time
+        if "power_coverage" in row:
+            row["power_coverage"] = (
+                encoder_worker.get("power_coverage", 0.0) * encoder_ttft_share
+                + row["power_coverage"] * (prefill_ttft + decode_time)
+            ) / total_time
+        elif not encoder_worker.get("power_coverage", 0.0) >= 1.0:
+            # Sweep rows carry no coverage channel to express a partially
+            # covered encoder, so anything short of full encoder energy data
+            # fails closed to the no-data sentinel instead of silently
+            # understating the blended power.
+            row["power_w"] = 0.0
     row["encoder_latency"] = encoder_latency
     row["ttft"] = prefill_ttft + encoder_ttft_share
     row["request_latency"] = row["request_latency"] + encoder_ttft_share
-    # Same association order as the matchers ((seq/s x deg) x workers) so
-    # the capped value is bit-identical to the capacity the argmax used.
-    encoder_capacity = encoder_worker["seq/s"] * _RATE_MATCH_ENCODER_DEGRADATION * encoder_num_worker
+    encoder_capacity = _degraded_encoder_capacity(encoder_worker["seq/s"], encoder_degradation, encoder_num_worker)
     if 0 < encoder_capacity < row["seq/s"]:
         row["tokens/s"] = row["tokens/s"] * (encoder_capacity / row["seq/s"])
         row["seq/s"] = encoder_capacity
@@ -961,6 +1005,7 @@ def _rate_match_agg_epd(
     num_gpu_set: set[int] | None = None,
     top_k: int = 0,
     max_encoder_workers: int | None = None,
+    encoder_degradation: float = _RATE_MATCH_ENCODER_DEGRADATION,
 ) -> pd.DataFrame:
     """Rate-match the encode pool against language-only agg workers (E+agg).
 
@@ -979,7 +1024,7 @@ def _rate_match_agg_epd(
     e_workers_bound = max_encoder_workers or _MAX_ENCODE_WORKERS
     rows: list[dict] = []
     for enc_worker in encoder_records:
-        encoder_capacity = float(enc_worker["seq/s"]) * _RATE_MATCH_ENCODER_DEGRADATION
+        encoder_capacity = _degraded_encoder_capacity(float(enc_worker["seq/s"]), encoder_degradation)
         paired = 0
         for r in records:
             if enc_worker["encoder_latency"] + r["ttft"] >= ttft_target:
@@ -1025,6 +1070,7 @@ def _rate_match_agg_epd(
                     e_num,
                     prefill_power=r.get("power_w", 0.0),
                     decode_power=r.get("power_w", 0.0),
+                    encoder_degradation=encoder_degradation,
                 )
             )
             paired += 1
@@ -1052,6 +1098,7 @@ def _find_best_disagg_under_constraint(
     match_workers: Any,
     autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
     encoder_records: list[dict] | None = None,
+    encoder_degradation: float = _RATE_MATCH_ENCODER_DEGRADATION,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
@@ -1162,6 +1209,7 @@ def _find_best_disagg_under_constraint(
                             prefill_power=p_worker.get("power_w", 0.0),
                             decode_power=d_worker.get("power_w", 0.0),
                             ttft_scale=autoscale_ttft_correction_factor,
+                            encoder_degradation=encoder_degradation,
                         )
                     category_results.append(disagg_dict)
         if category_results:
@@ -1205,6 +1253,7 @@ def sweep_disagg(
     target_tpot: float | None = None,
     rate_matching_prefill_degradation: float | None = None,
     rate_matching_decode_degradation: float | None = None,
+    rate_matching_encoder_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
     enable_epd: bool = False,
     encoder_tp_list: list[int] | None = None,
@@ -1255,6 +1304,16 @@ def sweep_disagg(
         if rate_matching_decode_degradation is not None
         else _RATE_MATCH_DECODE_DEGRADATION
     )
+    e_deg = (
+        rate_matching_encoder_degradation
+        if rate_matching_encoder_degradation is not None
+        else _RATE_MATCH_ENCODER_DEGRADATION
+    )
+    for deg_name, deg_value in (("prefill", p_deg), ("decode", d_deg), ("encoder", e_deg)):
+        if not (math.isfinite(deg_value) and deg_value > 0):
+            raise ValueError(
+                f"rate_matching_{deg_name}_degradation must be a positive finite number, got {deg_value!r}."
+            )
     ttft_corr = (
         autoscale_ttft_correction_factor
         if autoscale_ttft_correction_factor is not None
@@ -1283,14 +1342,7 @@ def sweep_disagg(
     # The token budget divides by the effective ISL (text + vision context
     # tokens); Task._prefill_effective_isl builds the budget the same way,
     # so the caller's batch intent round-trips.
-    try:
-        enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-    except Exception:
-        logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
-        enc_cfg = None
-    prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-        enc_cfg, runtime_config
-    )
+    prefill_effective_isl = BaseBackend.effective_prefill_isl(model_path, runtime_config)
     if prefill_max_num_tokens < prefill_effective_isl:
         logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective ISL")
         prefill_max_num_tokens = prefill_effective_isl
@@ -1408,7 +1460,7 @@ def sweep_disagg(
         """
         prefill_opt, decode_opt, encoder_opt = -1, -1, -1
         throughput_per_gpu_max = 0.0
-        encoder_capacity = encoder_throughput * _RATE_MATCH_ENCODER_DEGRADATION
+        encoder_capacity = _degraded_encoder_capacity(encoder_throughput, e_deg)
         for d_num in d_num_workers:
             for p_num in p_num_workers:
                 if max_prefill_gpus is not None and max_decode_gpus is not None:
@@ -1461,6 +1513,7 @@ def sweep_disagg(
             match_workers=_match_workers,
             autoscale_ttft_correction_factor=ttft_corr,
             encoder_records=encoder_candidates,
+            encoder_degradation=e_deg,
         )
         if partial is not None:
             disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)

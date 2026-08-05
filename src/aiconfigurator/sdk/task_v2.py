@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import logging
+import math
 import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -628,6 +629,8 @@ class Task:
     # the practical efficiency loss.  Calibrated against silicon (V1 default).
     rate_match_prefill_degradation: float = 0.9
     rate_match_decode_degradation: float = 0.92
+    # Encode pool (EPD) takes the same class of loss as prefill.
+    rate_match_encoder_degradation: float = 0.9
     # TTFT pre-correction applied to prefill candidates before the SLA filter,
     # accounting for queueing-under-concurrency in the deployed system.
     # Used by both ``_find_best_disagg_under_constraint`` and
@@ -770,8 +773,15 @@ class Task:
 
     @classmethod
     def from_cli(cls, **kwargs: Any) -> Task:
-        """Construct from CLI kwargs.  Filters None to let __post_init__ defaults run."""
-        return cls(**{k: v for k, v in kwargs.items() if v is not None})
+        """Construct from CLI kwargs.  Filters None to let __post_init__ defaults
+        run; quant_mode strings resolve to enums as in ``from_yaml``."""
+        return cls(
+            **{
+                k: (_resolve_quant_str(k, v) if k.endswith("quant_mode") else v)
+                for k, v in kwargs.items()
+                if v is not None
+            }
+        )
 
     # =====================================================================
     # Convenience read-only views (primary = prefill side in disagg)
@@ -1928,17 +1938,10 @@ class Task:
         return rt
 
     def _prefill_effective_isl(self) -> int:
-        """Text ISL + vision context tokens (must match sweep_disagg's
-        effective-ISL computation so the batch intent in
-        ``prefill_max_num_tokens`` round-trips)."""
+        """Text ISL + vision context tokens for one request."""
         from aiconfigurator.sdk.backends.base_backend import BaseBackend
 
-        runtime_config = self.build_runtime_config()
-        try:
-            enc_cfg = get_model_config_from_model_path(self.primary_model_path).get("extra_params")
-        except Exception:
-            return runtime_config.isl
-        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+        return BaseBackend.effective_prefill_isl(self.primary_model_path, self.build_runtime_config())
 
     def build_model_config(
         self,
@@ -2067,16 +2070,8 @@ class Task:
             raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
-        # encoder_* fields are pure knobs; only enable_epd switches EPD on.
-        encoder_knobs_set = (
-            self.encoder_tp_candidates
-            or self.encoder_batch_candidates
-            or self.encoder_system_name
-            or self.max_encoder_workers is not None
-            or self.encoder_latency_correction != 1.0
-        )
-        if encoder_knobs_set and not self.enable_epd:
-            raise ValueError("encoder_* settings require enable_epd=True.")
+        self._check_encoder_knobs_require_epd()
+        self._validate_rate_match_degradations()
         if self.enable_epd:
             for name in ("encoder_tp_candidates", "encoder_batch_candidates"):
                 values = getattr(self, name)
@@ -2084,8 +2079,7 @@ class Task:
                     raise ValueError(f"{name} must be a list of positive ints, got {values!r}.")
             if self.max_encoder_workers is not None and self.max_encoder_workers <= 0:
                 raise ValueError(f"max_encoder_workers must be > 0, got {self.max_encoder_workers!r}.")
-            if self.encoder_latency_correction <= 0:
-                raise ValueError(f"encoder_latency_correction must be > 0, got {self.encoder_latency_correction!r}.")
+            self._validate_epd_knob_values()
         if self.serving_mode == "agg":
             self._validate_agg()
         elif self.serving_mode == "disagg":
@@ -2497,6 +2491,7 @@ class Task:
             "max_encoder_workers": self.max_encoder_workers,
             "encoder_latency_correction": self.encoder_latency_correction,
             "encoder_database": encoder_database,
+            "rate_matching_encoder_degradation": self.rate_match_encoder_degradation,
             # Per-cell (per-replica) budget for the E+agg rate matching; a
             # plain agg row is a single worker and ignores it.
             "num_gpu_list": self._replica_num_gpu_list() if self.enable_epd else None,
@@ -2541,6 +2536,7 @@ class Task:
             "num_gpu_list": self._replica_num_gpu_list(),
             "rate_matching_prefill_degradation": self.rate_match_prefill_degradation,
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
+            "rate_matching_encoder_degradation": self.rate_match_encoder_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
             "require_same_tp": self._require_same_tp_gate(),
             "enable_epd": self.enable_epd,
@@ -2735,13 +2731,42 @@ class Task:
     # Single-point evaluation (subsumes cli_estimate)
     # =====================================================================
 
+    def _check_encoder_knobs_require_epd(self) -> None:
+        # encoder_* fields are pure knobs; only enable_epd switches EPD on.
+        encoder_knobs_set = (
+            self.encoder_tp_candidates
+            or self.encoder_batch_candidates
+            or self.encoder_system_name
+            or self.max_encoder_workers is not None
+            or self.encoder_latency_correction != 1.0
+            or self.rate_match_encoder_degradation != 0.9
+        )
+        if encoder_knobs_set and not self.enable_epd:
+            raise ValueError("encoder_* settings require enable_epd=True.")
+
+    def _validate_rate_match_degradations(self) -> None:
+        for name in ("rate_match_prefill_degradation", "rate_match_decode_degradation"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
+
+    def _validate_epd_knob_values(self) -> None:
+        """Value-domain checks for the EPD scalar knobs; kept separate because
+        some entry points skip the full ``validate``."""
+        for name in ("encoder_latency_correction", "rate_match_encoder_degradation"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
+
     def _validate_single_point_epd_args(
         self, api_name: str, encoder_tp: int | None, encoder_batch_size: int, encoder_num_workers: int
     ) -> None:
         if not self.enable_epd:
+            self._check_encoder_knobs_require_epd()
             if encoder_tp is not None or encoder_batch_size != 1 or encoder_num_workers != 1:
                 raise ValueError("encoder_* arguments require enable_epd=True.")
             return
+        self._validate_epd_knob_values()
         if encoder_tp is None:
             raise ValueError(f"{api_name} with enable_epd requires encoder_tp for the encode worker.")
         for name, value in (
@@ -2789,6 +2814,7 @@ class Task:
             encoder_num_workers,
             prefill_power=prefill_power,
             decode_power=decode_power,
+            encoder_degradation=self.rate_match_encoder_degradation,
         )
 
     def run_single_agg(
@@ -2940,6 +2966,7 @@ class Task:
             RuntimeError: on OOM in either phase.
         """
         self._validate_single_point_epd_args("run_single_disagg", encoder_tp, encoder_batch_size, encoder_num_workers)
+        self._validate_rate_match_degradations()
         if self.serving_mode != "disagg":
             raise ValueError(
                 f"run_single_disagg requires serving_mode='disagg', got {self.serving_mode!r}; "
@@ -3023,8 +3050,21 @@ class Task:
         # --- Rate-match the pair ---
         p_dict = p_summary.get_summary_df().iloc[0].to_dict()
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
-        row = _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
-        row["power_coverage"] = min(p_summary.get_power_data_coverage(), d_summary.get_power_data_coverage())
+        row = _rate_match_dict(
+            p_dict,
+            prefill_num_workers,
+            d_dict,
+            decode_num_workers,
+            prefill_degradation=self.rate_match_prefill_degradation,
+            decode_degradation=self.rate_match_decode_degradation,
+        )
+        # Time-weighted over the P + D phases, matching the weights the
+        # encoder overlay applies when it blends in the encoder coverage.
+        decode_time = row["tpot"] * max(row["osl"] - 1, 0)
+        lm_time = row["ttft"] + decode_time
+        p_cov = p_summary.get_power_data_coverage()
+        d_cov = d_summary.get_power_data_coverage()
+        row["power_coverage"] = (p_cov * row["ttft"] + d_cov * decode_time) / lm_time if lm_time > 0 else 0.0
         if not self.enable_epd:
             return row
         return self._overlay_single_point_encoder(
