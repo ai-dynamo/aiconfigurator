@@ -1229,11 +1229,18 @@ def load_context_attention_data(context_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            # Check for conflict
+            # Check for conflict. First-wins is load-bearing: earlier-version /
+            # declared-reuse sources are appended after the primary and are
+            # EXPECTED to conflict on shared keys, so this stays debug-level
+            # (warn would spam every load). kernel_source is stripped from the
+            # key, so the message must name it — a same-version conflict with
+            # two kernel_source values means two backends collided on one shape
+            # key and the loser was dropped by row order (AIC-1663).
             context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
             logger.debug(
                 f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
-                f"{head_size} {window_size} {kv_n} {n} {s}"
+                f"{head_size} {window_size} {kv_n} {n} {s} {b} — dropping later row "
+                f"(kernel_source={row.get('kernel_source')}, version={row.get('version')})"
             )
         except KeyError:
             # Store all three values
@@ -1307,11 +1314,18 @@ def load_generation_attention_data(generation_attention_file):
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
 
         try:
-            # Check for conflict
+            # Check for conflict. First-wins is load-bearing: earlier-version /
+            # declared-reuse sources are appended after the primary and are
+            # EXPECTED to conflict on shared keys, so this stays debug-level
+            # (warn would spam every load). kernel_source is stripped from the
+            # key, so the message must name it — a same-version conflict with
+            # two kernel_source values means two backends collided on one shape
+            # key and the loser was dropped by row order (AIC-1663).
             generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
             logger.debug(
                 f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
-                f"{head_size} {window_size} {n} {b}"
+                f"{head_size} {window_size} {n} {b} {s} — dropping later row "
+                f"(kernel_source={row.get('kernel_source')}, version={row.get('version')})"
             )
         except KeyError:
             # Store all three values
