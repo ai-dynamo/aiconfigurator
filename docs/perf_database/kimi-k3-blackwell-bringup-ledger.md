@@ -109,6 +109,18 @@ prune). All retrievable from branch history.
   `tests/unit/sdk/database/test_gdn_donor_fill_pins.py` freezes one
   donor-only and one own-row coordinate per audited combo.
 - **2026-08-04 — ledger restructured to this final-state record.**
+- **2026-08-05 — Python↔Rust parity anchor landed (review Blocker 1, the
+  last open item)**: three committed Kimi-K3 engine-step parity cases
+  (b300 sglang 0.5.16 nospec, b200 vllm 0.1.dev19262 nospec, b300 sglang
+  DSPARK nextn=7 — a new `nextn` field on EngineStepParityCase) plus an
+  11-point Python-generated `query_kda` oracle block in
+  `state_space.rs::state_space_queries_match_python_v2_engine` (context
+  chunk_kda / generation kda_fused_decode / fused CuTeDSL verify; exact,
+  interpolated and beyond-range each, 1e-9, shared_layer=False view).
+  Rationale (reviewer's, endorsed): the donor-injection regression class
+  shifts BOTH engines through the shared serialized source chain, so only
+  committed anchors that freeze the K3 numbers themselves fail CI on a
+  silent shift — the compare gate cannot.
 
 ## Findings
 

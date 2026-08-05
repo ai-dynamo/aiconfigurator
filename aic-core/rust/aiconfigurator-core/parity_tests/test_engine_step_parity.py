@@ -55,6 +55,11 @@ class EngineStepParityCase:
     database_mode: str = "SILICON"
     transfer_policy: str | None = None
     moe_quant_mode: str | None = None
+    # Speculative block size (DSPARK/MTP). nextn > 0 switches the model's
+    # generation ops onto the verify tables — for Kimi-K3 that crosses the
+    # fused CuTeDSL verify reroute and the donor-absence contract it depends
+    # on (kda_perf ABSENCE_LOAD_BEARING manifest exclusion) in CI.
+    nextn: int = 0
 
 
 SMOKE_CASES = [
@@ -556,6 +561,43 @@ SMOKE_CASES = [
         ),
         id="nemotron-h-56b-h200-vllm-019-scan-coverage",
     ),
+    # Kimi-K3 (review Blocker 1 anchor): hybrid KDA + MLA LatentMoE. The
+    # case defaults (tp8/ep8) put KDA on the fused 12-head shard — the exact
+    # config the per-key kda_fused_decode routing and the exact-first mla_bmm
+    # routing serve, freezing the K3 engine-step numbers themselves (the
+    # donor-injection class of regression shifts BOTH engines through the
+    # shared serialized source chain, so only a committed anchor like this
+    # catches a silent shift in CI).
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K3",
+            system_name="b300_sxm",
+            backend_name="sglang",
+            backend_version="0.5.16",
+        ),
+        id="kimi-k3-b300-sglang-0516-nospec",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K3",
+            backend_name="vllm",
+            backend_version="0.1.dev19262",
+        ),
+        id="kimi-k3-b200-vllm-dev19262-nospec",
+    ),
+    # DSPARK speculative case: nextn=7 -> verify width 8 (the fused CuTeDSL
+    # verify kernel's collected draft-width cap), crossing the fused verify
+    # reroute + conv fold-to-zero end-to-end.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="moonshotai/Kimi-K3",
+            system_name="b300_sxm",
+            backend_name="sglang",
+            backend_version="0.5.16",
+            nextn=7,
+        ),
+        id="kimi-k3-b300-sglang-0516-dspark-nextn7",
+    ),
 ]
 
 PARITY_RTOL = 0.01
@@ -780,6 +822,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         moe_ep_size=case.moe_ep_size,
         cp_size=case.cp_size,
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
+        nextn=case.nextn,
     )
 
 

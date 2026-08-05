@@ -1041,7 +1041,9 @@ mod tests {
     /// Values generated from Python v2 on the same tables
     /// (`db.query_gdn` / `db.query_mamba2` via `get_database(...)`, default
     /// SILICON mode; the shared layer was verified to contribute no rows to
-    /// these slices, so both engines see identical data). Covers, per table:
+    /// these slices, so both engines see identical data; the KDA oracle
+    /// below was generated against `get_database(..., shared_layer=False)`
+    /// to match this table's single-source view). Covers, per table:
     /// exact hit, in-range interpolation, and beyond-range util-hold (which
     /// exercises the SOL closure). SOL closures replicate the operators'
     /// `sol_latency_ms` for the queried kernels. Latencies compared at the
@@ -1172,5 +1174,118 @@ mod tests {
                 &dummy_sol,
             )
             .is_err());
+
+        // KDA (Kimi-K3, review Blocker 1 anchor): the TP8 12-head shard
+        // (7168, 12, 128, 12, 128, 4) on b300_sxm/kda/sglang/0.5.16 —
+        // Python oracle generated with
+        // `get_database("b300_sxm", "sglang", "0.5.16", shared_layer=False)`
+        // + `KDAKernel._query_kda_table` at these exact coordinates. Covers
+        // the fused-dispatch kernels the K3 per-key routing depends on:
+        // context chunk_kda, generation kda_fused_decode (the key whose
+        // ABSENCE-load-bearing Triton twin must never be donor-filled), and
+        // the fused CuTeDSL DSPARK verify kernel. SOL closures replicate
+        // `KdaOp::sol_total_bytes_with`; b300_sxm mem_bw = 7.75e12
+        // (systems/b300_sxm.yaml).
+        let kda_bw = 7.75e12_f64;
+        let kda_proj = (12 * 128) as f64;
+        let kda_state = (12 * 128 * 128 * 4) as f64;
+        let kda_conv_ch = 3.0 * kda_proj;
+        let kda_ctx_sol = move |b: f64, s: f64| {
+            // chunk_kda: chunked scan with per-chunk fp32 states.
+            let x = b * s;
+            let num_chunks = if s > 0.0 { (s / 64.0).floor() } else { 0.0 };
+            let h_chunks = num_chunks * kda_state * b;
+            let read = x * 4.0 * kda_proj * 2.0 + kda_state * b + h_chunks;
+            let write = x * kda_proj * 2.0 + kda_state * b + h_chunks;
+            (read + write) / kda_bw * 1000.0
+        };
+        let kda_gen_sol = move |b: f64, _s: f64| {
+            // kda_fused_decode = conv update + packed recurrence (+ folded norm).
+            let x = b;
+            let read = x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
+            let write = x * kda_conv_ch * 2.0 + (x * kda_proj * 2.0 + kda_state * b);
+            (read + write) / kda_bw * 1000.0
+        };
+        let kda_verify_sol = move |b: f64, s: f64| {
+            // fused_kda_decode_mtp_dspark = conv update + chain-verify recurrence.
+            let x = b * s;
+            let read = x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
+            let write = x * kda_conv_ch * 2.0 + (x * kda_proj * 2.0 + kda_state * x);
+            (read + write) / kda_bw * 1000.0
+        };
+
+        let kda = StateSpaceTable::new(data_root("b300_sxm/sglang/0.5.16"), "sglang", "0.5.16");
+        // context chunk_kda: exact / seq-interp / batch-interp / beyond-seq.
+        let kda_ctx_cases: &[(u32, u32, f64)] = &[
+            (8, 1024, 0.35404798984527586),
+            (8, 1536, 0.49525119066238404),
+            (3, 1024, 0.16356800198554994),
+            (8, 65536, 18.784046049450055),
+        ];
+        for &(b, s, expected) in kda_ctx_cases {
+            let got = kda
+                .query_kda("chunk_kda", "context", b, s, 7168, 4, 12, 128, 12, 128, &kda_ctx_sol)
+                .unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "kda ctx (b={b}, s={s}): rust {got} vs python {expected}"
+            );
+        }
+        // generation kda_fused_decode: exact / batch-interp / beyond-batch.
+        let kda_gen_cases: &[(u32, f64)] = &[
+            (8, 0.006656000018119812),
+            (48, 0.01388160027563572),
+            (4096, 1.1138175964355468),
+        ];
+        for &(b, expected) in kda_gen_cases {
+            let got = kda
+                .query_kda(
+                    "kda_fused_decode",
+                    "generation",
+                    b,
+                    0,
+                    7168,
+                    4,
+                    12,
+                    128,
+                    12,
+                    128,
+                    &kda_gen_sol,
+                )
+                .unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "kda gen (b={b}): rust {got} vs python {expected}"
+            );
+        }
+        // verify fused CuTeDSL DSPARK: exact / batch-interp / draft-interp /
+        // beyond-batch (seq axis carries the draft-token width).
+        let kda_verify_cases: &[(u32, u32, f64)] = &[
+            (8, 8, 0.020873600244522096),
+            (12, 4, 0.018801599740982056),
+            (8, 6, 0.01780159994959831),
+            (1024, 8, 1.4328703880310059),
+        ];
+        for &(b, s, expected) in kda_verify_cases {
+            let got = kda
+                .query_kda(
+                    "fused_kda_decode_mtp_dspark",
+                    "verify",
+                    b,
+                    s,
+                    7168,
+                    4,
+                    12,
+                    128,
+                    12,
+                    128,
+                    &kda_verify_sol,
+                )
+                .unwrap();
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "kda verify (b={b}, draft={s}): rust {got} vs python {expected}"
+            );
+        }
     }
 }
