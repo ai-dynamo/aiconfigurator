@@ -667,6 +667,7 @@ def test_encoder_worker_candidates_gated_by_gpu_memory(monkeypatch):
         50.0,
         100.0,
         {"total": memory_by_batch[b]},
+        1.0,
     )
     monkeypatch.setattr(sweep, "get_backend", lambda _name: backend)
 
@@ -689,6 +690,130 @@ def test_encoder_worker_candidates_gated_by_gpu_memory(monkeypatch):
     # The gate charges the framework overhead too: batch 2 (15 + 5 other_mem
     # >= 20 GiB) stops the schedule; only batch 1 survives.
     assert [r["bs"] for r in rows] == [1]
+
+
+def _encoder_candidates_env(monkeypatch, *, latency: float = 50.0):
+    """Fixture env for _get_encoder_worker_candidates: real encoder ops,
+    mocked perf query, nccl_mem table with keys {1, 2} only."""
+    from aiconfigurator.sdk import common
+
+    enc_cfg = common.VisionEncoderConfig(
+        depth=2,
+        hidden_size=64,
+        num_heads=4,
+        intermediate_size=128,
+        patch_size=16,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        out_hidden_size=64,
+        projector_dims=((64, 64),),
+        projector_n_instances=1,
+        partial_rotary_factor=0.0,
+    )
+    monkeypatch.setattr(sweep, "get_model_config_from_model_path", lambda _path: {"extra_params": enc_cfg})
+    backend = MagicMock()
+    backend.OTHERS_OVERHEAD_FRAC = 0.0
+    backend.run_encoder_static.side_effect = lambda model, database, rc, b, latency_correction_scale=1.0: (
+        latency,
+        100.0,
+        {"total": 1.0},
+        1.0,
+    )
+    monkeypatch.setattr(sweep, "get_backend", lambda _name: backend)
+    database = MagicMock()
+    database.system_spec = {
+        "gpu": {"mem_capacity": 20 * (1 << 30)},
+        "misc": {"nccl_mem": {1: 0, 2: 0}, "other_mem": 0},
+    }
+    return database
+
+
+_ENC_RC = config.RuntimeConfig(
+    isl=1000, osl=100, ttft=200.0, tpot=10.0, image_height=256, image_width=256, num_images_per_request=1
+)
+
+
+def test_encoder_tp_without_comm_data_is_skipped_not_crashed(monkeypatch):
+    """tp values absent from the system's nccl_mem table are skipped with a
+    warning instead of raising a raw KeyError; all-skipped fails loud."""
+    database = _encoder_candidates_env(monkeypatch)
+    rows = sweep._get_encoder_worker_candidates(
+        model_path="m",
+        tp_list=[2, 3],
+        b_list=[1],
+        runtime_config=_ENC_RC,
+        database=database,
+        backend_name="sglang",
+        latency_correction=1.0,
+    )
+    assert [r["tp"] for r in rows] == [2]
+    with pytest.raises(NoFeasibleConfigError):
+        sweep._get_encoder_worker_candidates(
+            model_path="m",
+            tp_list=[3],
+            b_list=[1],
+            runtime_config=_ENC_RC,
+            database=database,
+            backend_name="sglang",
+            latency_correction=1.0,
+        )
+
+
+def test_encoder_zero_latency_fails_loud(monkeypatch):
+    """A non-positive batch latency (corrupt perf data or zero correction)
+    raises instead of ZeroDivisionError / silently skewing the sweep."""
+    database = _encoder_candidates_env(monkeypatch, latency=0.0)
+    with pytest.raises(ValueError, match="invalid batch latency"):
+        sweep._get_encoder_worker_candidates(
+            model_path="m",
+            tp_list=[1],
+            b_list=[1],
+            runtime_config=_ENC_RC,
+            database=database,
+            backend_name="sglang",
+            latency_correction=1.0,
+        )
+
+
+def test_overlay_encoder_stage_degradation_knob_and_coverage_blend():
+    """The overlay honors a custom encoder degradation and re-weights
+    power_coverage with the same time weights as power_w; rows without a
+    coverage key must not gain one."""
+    row = {
+        "ttft": 100.0,
+        "tpot": 10.0,
+        "osl": 11,
+        "request_latency": 200.0,
+        "seq/s": 10.0,
+        "tokens/s": 1000.0,
+        "request_rate": 10.0,
+        "num_total_gpus": 4,
+        "power_w": 0.0,
+        "power_coverage": 1.0,
+    }
+    enc = {
+        "encoder_latency": 50.0,
+        "seq/s": 8.0,
+        "num_total_gpus": 1,
+        "tp": 1,
+        "bs": 2,
+        "memory": 1.0,
+        "power_w": 0.0,
+        "power_coverage": 0.0,
+    }
+    out = sweep._overlay_encoder_stage(row, enc, 1, encoder_degradation=0.5)
+    assert out["seq/s"] == pytest.approx(4.0)  # 8.0 x 0.5 x 1 caps the row's 10.0
+    # decode_time = 10 x (11 - 1); coverage = (0 x 50 + 1.0 x 200) / 250.
+    assert out["power_coverage"] == pytest.approx(0.8)
+    # Sweep rows (no coverage channel): anything short of full encoder
+    # energy data zeroes the blended power instead of understating it.
+    bare = {k: v for k, v in row.items() if k != "power_coverage"}
+    for partial in (0.99, float("nan")):
+        zeroed = sweep._overlay_encoder_stage(bare, dict(enc, power_coverage=partial), 1, prefill_power=100.0)
+        assert "power_coverage" not in zeroed
+        assert zeroed["power_w"] == 0.0
+    covered = sweep._overlay_encoder_stage(bare, dict(enc, power_coverage=1.0), 1, prefill_power=100.0)
+    assert covered["power_w"] > 0.0
 
 
 def test_sweep_agg_epd_top_k_defers_to_encoder_pairing(monkeypatch):
