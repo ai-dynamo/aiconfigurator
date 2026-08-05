@@ -1293,8 +1293,11 @@ class MoEDispatch(Operation):
 
             comm_latency = 0
 
-            # Add allreduce latency when TP > 1
-            if self._attention_tp_size > 1:
+            # With attention_dp == 1 activations are already replicated by the
+            # attention-side all-reduce, so vLLM's FusedMoE has no pre-dispatch
+            # collective; the single final all-reduce covers both the TP
+            # partial-sum and the EP combine.
+            if self._attention_tp_size > 1 and not self._pre_dispatch:
                 comm_latency += database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
 
             if self._attention_dp_size > 1:
