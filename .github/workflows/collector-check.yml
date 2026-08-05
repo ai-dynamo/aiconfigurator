@@ -8,6 +8,7 @@ name: Collector Data Check
 # touching the perf data tree, the collector, or the perf-database tools runs
 # tools/perf_database/check_collector_data.py, which fails the job on any
 # provenance/reuse/placement/identity violation.
+# tools/perf_database/backend_facts.py --check also runs fail-closed (AIC-1675): registry drift fails the PR.
 #
 # The changed-operation manifest (tools/perf_database/changed_ops.py) also
 # runs and is uploaded as an artifact -- informational per §8. Gating merges
@@ -63,6 +64,12 @@ jobs:
 
       - name: Check collector data (fail-closed)
         run: uv run python tools/perf_database/check_collector_data.py
+
+      - name: Check op-backend facts registry (fail-closed)
+        # AIC-1675: a data PR that lands perf rows without updating
+        # collector/op_backend_facts.yaml (or mislabels kernel_source)
+        # fails here instead of silently drifting the registry.
+        run: uv run python tools/perf_database/backend_facts.py --check
 
       - name: Compute changed-operation manifest (informational, §8)
         id: changed_ops
