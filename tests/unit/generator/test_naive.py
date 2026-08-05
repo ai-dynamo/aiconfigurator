@@ -3,6 +3,7 @@
 
 """Unit tests for generator naive module — nvbug 5941223."""
 
+import json
 import re
 from unittest.mock import patch
 
@@ -16,6 +17,15 @@ from aiconfigurator.generator.naive import (
 )
 
 _RFC1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-.]*[a-z0-9])?$")
+_UNSUPPORTED_GPT_NEOX_CONFIG = {
+    "architectures": ["GPTNeoXForCausalLM"],
+    "hidden_size": 512,
+    "intermediate_size": 2048,
+    "num_attention_heads": 8,
+    "num_hidden_layers": 6,
+    "torch_dtype": "float16",
+    "vocab_size": 50304,
+}
 
 
 @pytest.mark.unit
@@ -212,7 +222,29 @@ class TestBuildNaiveGeneratorParams:
 
 
 @pytest.mark.unit
-class TestEstimateModelWeightBytesFailsOnMissingModel:
+class TestEstimateModelWeightBytes:
+    def test_estimates_unsupported_architecture_from_raw_config(self, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps(_UNSUPPORTED_GPT_NEOX_CONFIG))
+
+        assert _estimate_model_weight_bytes(str(tmp_path)) == 153354240
+
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 80 * 1024**3},
+    )
+    def test_builds_params_for_unsupported_architecture(self, _mock_system, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps(_UNSUPPORTED_GPT_NEOX_CONFIG))
+
+        result = build_naive_generator_params(
+            model_name=str(tmp_path),
+            total_gpus=8,
+            system_name="h100_sxm",
+            backend_name="vllm",
+        )
+
+        assert result["params"]["agg"]["tensor_parallel_size"] == 1
+        assert result["ModelConfig"]["fits_in_memory"] is True
+
     @patch("aiconfigurator.sdk.utils.get_model_config_from_model_path")
     def test_raises_when_config_download_fails(self, mock_get_config):
         mock_get_config.side_effect = Exception(

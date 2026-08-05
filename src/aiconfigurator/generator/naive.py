@@ -234,6 +234,46 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
         return weight_bytes
 
+    except ValueError as e:
+        # The normalized AIC parser rejects architectures that AIC cannot model,
+        # but those are exactly the models that use naive config generation.
+        # Reuse the architecture-agnostic raw-config estimator so sizing remains
+        # available without weakening the native AIC support boundary.
+        from aiconfigurator.sdk.memory import NaiveKVCacheEstimator
+
+        logger.info(
+            "Normalized model parsing failed for %s; using raw config for naive sizing.",
+            model_path,
+        )
+        logger.debug("Normalized parser error for %s: %s", model_path, e)
+        try:
+            estimator = NaiveKVCacheEstimator.from_model_path(
+                model_path,
+                tp_size=1,
+                pp_size=1,
+                allow_hf_config_download=True,
+            )
+            weight_bytes = estimator.weight_bytes()
+            if weight_bytes is None:
+                raise ValueError(
+                    "insufficient raw model metadata; expected hidden_size, "
+                    "num_hidden_layers, vocab_size, and intermediate_size"
+                )
+            logger.info(
+                "Estimated model weight size from raw config for %s: %.2f GiB",
+                model_path,
+                weight_bytes / (1024**3),
+            )
+            return weight_bytes
+        except Exception as fallback_error:
+            logger.exception(
+                "Could not estimate model size for %s from raw config.",
+                model_path,
+            )
+            raise RuntimeError(
+                f"Could not estimate model size for {model_path!r}: {fallback_error}"
+            ) from fallback_error
+
     except Exception as e:
         logger.exception("Could not estimate model size for %s.", model_path)
         raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
