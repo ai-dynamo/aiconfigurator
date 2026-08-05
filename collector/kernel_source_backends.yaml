@@ -131,6 +131,18 @@ mappings:
   - {framework: sglang, kernel_source: sglang_tilelang_mhc_post, backend: tilelang, source: "PR#1342 collect_mhc_module.py"}
   - {framework: sglang, kernel_source: sglang_torch_mhc_pre, backend: torch, source: "PR#1342 collect_mhc_module.py (torch fallback leaf)"}
 
+  # --- Kimi-K3 (#1435) labels: KDA module kernels (0.5.16) and MoE
+  # situ-as-silu measurement variants (0.5.14; suffix marks the activation
+  # approximation, dispatch = base label).
+  - {framework: sglang, kernel_source: causal_conv1d_fn_qkv3, backend: triton, source: "collect_kda.py:921 (runtime import from kernels/ops/mamba/causal_conv1d_triton); kernels/ops/mamba/causal_conv1d_triton.py:18@v0.5.16 (@triton.jit _causal_conv1d_fwd_kernel — Triton reimpl. of causal-conv1d, 3-call Q/K/V sequence)"}
+  - {framework: sglang, kernel_source: chunk_kda, backend: fla_triton, source: "collect_kda.py:920 (import from fla.kda); kernels/ops/attention/fla/kda.py:1140@v0.5.16 (FLA Triton chunked KDA gated-delta-rule scan)"}
+  - {framework: sglang, kernel_source: kda_fused_decode, backend: sgl_kernel, source: "collect_kda.py:356 (import kda_fused_decode module, kimi-k3 branch); jit_kernel/cutedsl_kda.py:55@v0.5.16 (@cute.kernel CuTeDSL fused conv+recurrence decode, SM90+)"}
+  - {framework: sglang, kernel_source: fused_recurrent_kda_packed_decode, backend: fla_triton, source: "collect_kda.py:914-916 (import from fla.fused_recurrent); kernels/ops/attention/fla/fused_recurrent.py:405@v0.5.16 (@triton.jit fused_recurrent_kda_packed_decode_kernel — packed T=1 recurrence)"}
+  - {framework: sglang, kernel_source: fused_kda_decode_mtp_dspark, backend: sgl_kernel, source: "collect_kda.py:608 (import kimi_k3.kda_decode_mtp, kimi-k3 branch); CuTeDSL fused conv+chain-verify recurrence (collect_kda.py:27-28), SM100+"}
+  - {framework: sglang, kernel_source: fused_sigmoid_gating_delta_rule_update, backend: fla_triton, source: "collect_kda.py:917-919 (import from fla.fused_sigmoid_gating_recurrent); kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py:8@v0.5.16 (@triton.jit fused_sigmoid_gating_delta_rule_update_kernel)"}
+  - {framework: sglang, kernel_source: sglang_fused_moe_triton_situ_as_silu, backend: triton_fused_moe, source: "collect_moe.py:1163 (base label sglang_fused_moe_triton); data relabeled 2026-08-04 (l40s 0.5.14 K3 moe_perf collection_meta.yaml); suffix pattern vllm/collect_moe.py:712"}
+  - {framework: sglang, kernel_source: sglang_marlin_moe_situ_as_silu, backend: marlin, source: "collect_moe.py:1165 (base label sglang_marlin_moe); data relabeled 2026-08-04 (h100_sxm 0.5.14 K3 moe_perf collection_meta.yaml); suffix pattern vllm/collect_moe.py:712"}
+
   # ---------------------------------------------------------------- trtllm
   # TRT-LLM's unified backend dispatches kernels internally; the static
   # labels cannot name the kernel. trtllm_internal = true-but-coarse,
