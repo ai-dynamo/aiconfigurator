@@ -2,6 +2,13 @@
 
 This package implements the model layer of the AIConfigurator SDK. Each model class defines the operation pipeline (context and generation ops) for a specific LLM architecture family.
 
+## `blocks/`
+
+`blocks/` holds composition helpers — reusable pipeline-fragment builders that model classes call to construct parts of their op lists — not model classes. Modules under `blocks/` must stay side-effect-free: no `@register_model` is allowed here.
+
+- `vit.py` — `build_encoder_ops()` for ViT-based vision encoders (moved from `models/vit_ops.py`, which remains as a compatibility shim)
+- `moe.py` — `MoEBlockShape` + `build_moe_block_ops()`, the single MoE-block wiring site (fused and large-EP emission), plus the `register_moe_block` variant registry and `LARGE_EP_READY_FAMILIES` (see [MoE Blocks and Large EP](#moe-blocks-and-large-ep))
+
 ## Package Structure
 
 ```
@@ -11,11 +18,9 @@ models/
   helpers.py         # Standalone utilities: model info lookup, quant defaults, family resolution
   gpt.py             # GPTModel
   llama.py           # LLAMAModel (also covers Qwen2, Qwen3, MiMo)
-  moe.py             # MOEModel + SGLangEPMOEModel (Mixtral, Qwen3MoE, MiniMax-M2, gpt-oss, etc.)
-  deepseek.py        # DeepSeekModel + TrtllmWideEPDeepSeekModel + WideEPDeepSeekModel
-                     #   (also serves the KIMIK25 family — Kimi K2.5)
-  deepseek_v32.py    # DeepSeekV32Model + TrtllmWideEPDeepSeekV32Model + WideEPDeepSeekV32Model
-                     #   (DeepSeek V3.2 / GLM-5 with DSA attention)
+  moe.py             # MOEModel (Mixtral, Qwen3MoE, MiniMax-M2, gpt-oss, etc.)
+  deepseek.py        # DeepSeekModel (also serves the KIMIK25 family — Kimi K2.5)
+  deepseek_v32.py    # DeepSeekV32Model (DeepSeek V3.2 / GLM-5 with DSA attention)
   deepseek_v4.py     # DeepSeekV4Model (mHC + SWA/CSA/HCA compressed attention)
   nemotron_nas.py    # NemotronNas (PUZZLE NAS models)
   nemotron_h.py      # NemotronHModel (Mamba + MoE + Transformer hybrid)
@@ -40,11 +45,7 @@ class LLAMAModel(BaseModel):
 class DeepSeekModel(BaseModel):
     @classmethod
     def create(cls, model_info, model_config, backend_name):
-        family = model_info["model_family"]
-        if family == "KIMIK25":
-            ...  # Kimi-specific construction
-        else:
-            ...  # DeepSeek V3 / R1 construction (with WideEP dispatch)
+        ...  # DeepSeek V3 / R1 + Kimi K2.5 construction
 ```
 
 When the package is imported, all model modules are auto-discovered via `pkgutil.iter_modules`, which triggers the decorators and populates `_MODEL_REGISTRY`.
@@ -62,15 +63,15 @@ model_path
 
 ### `create()` Classmethod
 
-Each model class has a `create(cls, model_info, model_config, backend_name)` classmethod that handles construction. Per-family construction details (MoE prefix args, WideEP dispatch, post-construction hooks like `set_hybrid_config`) live inside `create()`, keeping `get_model()` itself generic.
+Each model class has a `create(cls, model_info, model_config, backend_name)` classmethod that handles construction. Per-family construction details (MoE prefix args, post-construction hooks like `set_hybrid_config`) live inside `create()`, keeping `get_model()` itself generic.
 
 | Model | Why it overrides `create()` |
 |-------|-----------------------------|
 | GPTModel | Standard args, simple wrapper |
 | LLAMAModel | Standard args, simple wrapper |
-| MOEModel | Passes MoE-specific args (`topk`, `num_experts`, `moe_inter_size`); 2-way dispatch to `SGLangEPMOEModel` when `backend_name == "sglang"` and `model_config.moe_backend == "deepep_moe"` |
-| DeepSeekModel | 3-way dispatch (`WideEPDeepSeekModel`, `TrtllmWideEPDeepSeekModel`, default) based on `backend_name` and WideEP config; also branches on `KIMIK25` family to thread `backend_name` as a kwarg |
-| DeepSeekV32Model | 3-way dispatch on `enable_wideep` (different condition than `DEEPSEEK`) |
+| MOEModel | Passes MoE-specific args (`topk`, `num_experts`, `moe_inter_size`) and threads `backend_name` |
+| DeepSeekModel | Passes MoE args and threads `backend_name` (serves DEEPSEEK + KIMIK25) |
+| DeepSeekV32Model | Passes MoE args, resolves the DSA quant/skip `extra_params`, threads `backend_name` |
 | DeepSeekV4Model | Single class, MoE prefix args |
 | NemotronHModel | Passes MoE args + calls `set_hybrid_config()` after construction |
 | HybridMoEModel | Passes MoE args + calls `set_hybrid_config()` after construction |
@@ -86,6 +87,28 @@ Each model class has a `create(cls, model_info, model_config, backend_name)` cla
 ### Architecture-to-Family Mapping
 
 The mapping from HuggingFace architecture names (e.g., `LlamaForCausalLM`) to model families (e.g., `LLAMA`) lives in `sdk/common.py:ARCHITECTURE_TO_MODEL_FAMILY`. This is separate from the model registry because `sdk/utils.py` needs it during config parsing, before any model classes are involved.
+
+## MoE Blocks and Large EP
+
+The per-regime wideEP model classes are gone, and so is the `create()` dispatch that selected them: `DeepSeekModel.create()` used to 3-way dispatch (`WideEPDeepSeekModel` / `TrtllmWideEPDeepSeekModel` / default) on `enable_wideep` and the wideEP config, `DeepSeekV32Model` the same for its `*V32` variants, and `MOEModel` 2-way to `SGLangEPMOEModel` on sglang with `moe_backend == "deepep_moe"`. Today each family has ONE class building ONE graph per config, and the regime is selected inside the MoE block:
+
+- **`blocks/moe.py::build_moe_block_ops`** is the single MoE-block wiring site. Model classes derive an `MoEBlockShape` from their checkpoint geometry and hand it to the builder (with their model-owned workload-distribution string and scale factor). When `ModelConfig.moe_comm_backend` — an internal field the enumerator sets per parallel tuple, never a user flag — names a comm backend for the phase, the builder emits the large-EP `MoEAllToAll`/`EPMoE` graph; otherwise the fused dispatch/MoE/dispatch pipeline. `ModelConfig.num_gpus_per_node` must be set alongside the comm backend (large-EP construction raises otherwise — see `helpers.large_ep_gpus_per_node`).
+- **`blocks/moe.py::register_moe_block`** is how family/framework/system deviations specialize the builder instead of adding model classes. Two variants ship registered: DEEPSEEK-on-sglang and DEEPSEEKV32-on-sglang strip the router GEMM under deepep backends (the legacy wideEP graphs never wired one there).
+- **`blocks/moe.py::LARGE_EP_READY_FAMILIES`** = `{MOE, DEEPSEEK, DEEPSEEKV32, KIMIK25}` — the families whose classes are wired for the large-EP emission. The enumerator assigns `moe_comm_backend` only inside this set.
+
+Current wiring status per family:
+
+| Family (module) | MoE block source | Large EP |
+|---|---|---|
+| MOE (`moe.py`) | builder, both regimes | ready |
+| DEEPSEEK / KIMIK25 (`deepseek.py`) | hand-wired fused spans; builder for large EP | ready |
+| DEEPSEEKV32 (`deepseek_v32.py`) | hand-wired fused spans; builder for large EP | ready |
+| QWEN3VL_MOE (`qwen3vl.py`) | rides MOEModel | excluded from `LARGE_EP_READY_FAMILIES`: `Qwen3VLMoEModel.create()` does not forward `backend_name`, so the builder would pick the wrong large-EP shared-expert/reduce flavor; wiring it is a documented follow-up |
+| HYBRIDMOE (`hybrid_moe.py`) | builder (fused only) | not wired — raises `ValueError` on `moe_comm_backend` |
+| MINIMAXM3 (`minimax_m3.py`) | builder (fused only; shared triplet stays hand-wired) | not wired — raises `ValueError` on `moe_comm_backend` |
+| QWEN35 (`qwen35.py`), GEMMA4 (`gemma4.py`), NEMOTRONH (`nemotron_h.py`), DEEPSEEKV4 (`deepseek_v4.py`) | hand-wired MoE spans | not wired (builder adoption is backlog; DeepSeek-V4 owns its own MegaMoE path) |
+
+Moving the remaining hand-wired MoE spans (including the DeepSeek fused spans, whose generation dialect differs from the builder's transcription) onto the builder is tracked backlog, not a prerequisite for large-EP work: a family becomes large-EP-ready by adopting the builder for its MoE block and joining `LARGE_EP_READY_FAMILIES`.
 
 ## Adding a New Model
 

@@ -52,11 +52,11 @@ agg_full:
   transfer_policy: aggressive
 
   # Worker spec
+  # Large-EP is explored automatically when perf data covers the model shape; restrict with *_moe_ep_candidates.
   model_path: deepseek-ai/DeepSeek-V3
   system_name: h200_sxm
   backend_name: trtllm
   backend_version: 1.2.0rc5
-  enable_wideep: false
   enable_chunked_prefill: false
   enable_eplb: false
   moe_backend: null
@@ -75,7 +75,7 @@ agg_full:
   fmha_quant_mode: bfloat16
   comm_quant_mode: half
 
-  # Search space (auto-defaulted per backend/system/wideep if omitted)
+  # Search space (auto-defaulted per backend/system if omitted)
   agg_num_gpu_candidates: [4, 8]
   agg_tp_candidates: [1, 2, 4, 8]
   agg_pp_candidates: [1]
@@ -118,7 +118,9 @@ disagg_full:
   nextn: 1
   nextn_accepted: 0.85
 
-  # MoE communication backend (shared; e.g. "deepep_moe" for SGLang WideEP).
+  # MoE kernel backend (shared; e.g. "megamoe" for DeepSeek-V4 on Blackwell SGLang).
+  # Large-EP is explored automatically when perf data covers the model shape;
+  # restrict with *_moe_ep_candidates.
   moe_backend: null
 
   # --- Prefill worker spec ---
@@ -126,7 +128,6 @@ disagg_full:
   prefill_system_name: h200_sxm
   prefill_backend_name: trtllm
   prefill_backend_version: 1.2.0rc5
-  prefill_enable_wideep: false
   prefill_enable_chunked_prefill: false
   prefill_enable_eplb: false
 
@@ -152,7 +153,6 @@ disagg_full:
   decode_system_name: h200_sxm
   decode_backend_name: trtllm
   decode_backend_version: 1.2.0rc5
-  decode_enable_wideep: false
   decode_enable_eplb: false
 
   # Decode quantization override (default: infer from HF config)

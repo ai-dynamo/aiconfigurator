@@ -6,6 +6,7 @@ from __future__ import annotations
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
+from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
 
@@ -48,12 +49,24 @@ class HybridMoEModel(BaseModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            backend_name=backend_name,
         )
         model.set_hybrid_config(model_info["extra_params"])
         return model
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
+        # Fused-only family: the MoE-block builder keys its large-EP emission
+        # off cfg.moe_comm_backend, but this family resolves no node width
+        # (large_ep_gpus_per_node) — a comm backend here would silently
+        # mis-price cross-node all-to-all with the builder's default. Loud,
+        # not silent (same principle as the num_gpus_per_node raise).
+        if getattr(self.config, "moe_comm_backend", None):
+            raise ValueError(
+                "large-EP is not wired for the HYBRIDMOE family yet — moe_comm_backend "
+                "must not be set; see models/README blocks/ section"
+            )
         assert (
             self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
             == self.config.moe_tp_size * self.config.moe_ep_size
@@ -167,39 +180,54 @@ class HybridMoEModel(BaseModel):
         prefix: str,
         count: float,
         h: int,
-        moe_tp: int,
-        moe_ep: int,
-        attn_dp: int,
         moe_q: common.MoEQuantMode,
         wl_dist: str,
     ) -> list:
-        """Return the three MoE FFN ops (pre-dispatch, compute, post-dispatch)."""
-        router_ops = (
-            [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.bfloat16)]
-            if self._num_experts >= 128
-            else []
+        """Return the MoE FFN block (router, pre-dispatch, compute, post-dispatch).
+
+        Emitted through the generic MoE-block builder. The router GEMM is now
+        always emitted (spec section 4.4.4); the legacy span gated it on
+        ``num_experts >= 128``, so <128-expert models (Llama-4 Scout class)
+        gain one router GEMM per MoE layer type — the ledgered A8 delta.
+
+        The builder emits phase-canonical op names ("context_*"), so this
+        family's layer-type prefix ("context_global", "generation_swa", ...)
+        is restored on the returned ops. CP wiring stays post-hoc: the loops
+        in ``set_hybrid_config`` / ``_build_context_ops`` mutate the returned
+        ops exactly as they mutated the hand-wired ones.
+        """
+        phase = "context" if prefix.startswith("context") else "generation"
+        shape = MoEBlockShape(
+            hidden_size=h,
+            moe_inter_size=self._moe_inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            num_shared_experts=0,  # hybrid-family checkpoints model none
+            # Descriptor-only: the builder scales by the caller-supplied
+            # per-layer-type ``count``.
+            num_moe_layers=sum(self._hybrid_config.moe_layer_freq),
         )
-        return router_ops + [
-            ops.MoEDispatch(
-                f"{prefix}_moe_pre_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, True
-            ),
-            ops.MoE(
-                f"{prefix}_moe",
-                count,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp,
-                moe_ep,
-                moe_q,
-                wl_dist,
-                attn_dp,
-            ),
-            ops.MoEDispatch(
-                f"{prefix}_moe_post_dispatch", count, h, self._topk, self._num_experts, moe_tp, moe_ep, attn_dp, False
-            ),
-        ]
+        block_ops = build_moe_block_ops(
+            phase,
+            shape,
+            self.config,
+            moe_q,
+            wl_dist,
+            scale_factor=count,
+            backend_name=self._backend_name,
+            inference_phase=phase,
+            model_family=self.model_family,
+        )
+        for op in block_ops:
+            op._name = prefix + op._name[len(phase) :]
+            if isinstance(op, ops.MoEDispatch):
+                # Legacy fidelity: this family's dispatch ops never carried a
+                # quant_mode, while the builder's fused path always forwards
+                # it (a quant-aware trtllm SM100 dispatch-volume model).
+                # Adopting quant-aware dispatch here is a deliberate modeling
+                # change for a follow-up, not a rewire side effect.
+                op._quant_mode = None
+        return block_ops
 
     def _dense_ffn_ops(
         self, prefix: str, count: float, h: int, tp: int, dense_inter_per_tp: int, gemm_q: common.GEMMQuantMode
@@ -220,9 +248,6 @@ class HybridMoEModel(BaseModel):
         counts = self._count_layer_types()
         h = self._hidden_size
         tp = self.config.tp_size
-        moe_tp = self.config.moe_tp_size
-        moe_ep = self.config.moe_ep_size
-        attn_dp = self.config.attention_dp_size
         pp = self.config.pp_size
         gemm_q = self.config.gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
@@ -257,7 +282,7 @@ class HybridMoEModel(BaseModel):
                     ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
-                + self._moe_ops("context_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+                + self._moe_ops("context_global", c, h, moe_q, wl_dist)
             )
 
         # --- SWA/local attention + MoE FFN ---
@@ -280,7 +305,7 @@ class HybridMoEModel(BaseModel):
                     ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
-                + self._moe_ops("context_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+                + self._moe_ops("context_swa", c, h, moe_q, wl_dist)
             )
 
         # --- SWA/local attention + dense FFN ---
@@ -420,9 +445,6 @@ class HybridMoEModel(BaseModel):
         sf = self._mtp_scale_factor
         h = self._hidden_size
         tp = self.config.tp_size
-        moe_tp = self.config.moe_tp_size
-        moe_ep = self.config.moe_ep_size
-        attn_dp = self.config.attention_dp_size
         pp = self.config.pp_size
         gemm_q = self.config.gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
@@ -457,7 +479,7 @@ class HybridMoEModel(BaseModel):
                     ),
                     ops.ElementWise("generation_global_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
-                + self._moe_ops("generation_global", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+                + self._moe_ops("generation_global", c, h, moe_q, wl_dist)
             )
 
         # --- SWA/local attention + MoE FFN ---
@@ -479,7 +501,7 @@ class HybridMoEModel(BaseModel):
                     ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
-                + self._moe_ops("generation_swa", c, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist)
+                + self._moe_ops("generation_swa", c, h, moe_q, wl_dist)
             )
 
         # --- SWA/local attention + dense FFN ---

@@ -1030,13 +1030,22 @@ class TestMOEModelFP8BlockQuantizationValidation:
 
 
 class TestGetModelMOESGLangDispatch:
-    """Test get_model() dispatch logic for MOE family with SGLang backend.
+    """get_model() for the MOE family: one class, two MoE-block regimes.
 
-    Dispatch keys on moe_backend (communication path), not enable_wideep (scale intent).
+    ``SGLangEPMOEModel`` is gone -- ``MOEModel`` now emits the large-EP block
+    when the enumerator set ``ModelConfig.moe_comm_backend``. The A6 name
+    mapping is legacy ``{p}_moe_pre_dispatch`` == ``{p}_moe_dispatch`` +
+    ``{p}_moe_combine`` (one legacy op rode a summed deepep table row).
     """
 
-    def test_sglang_moe_deepep_returns_sglang_ep_moe_model(self):
-        """DeepEP backend (inter-node, enable_wideep=True) → SGLangEPMOEModel."""
+    LARGE_EP_COMM: ClassVar[dict[str, str]] = {"context": "deepep_ht", "generation": "deepep_ll"}
+
+    @staticmethod
+    def _moe_block_names(model, prefix):
+        return [op._name for op in getattr(model, f"{prefix}_ops") if "moe" in op._name or "router" in op._name]
+
+    def test_sglang_moe_large_ep_emits_the_ep_block(self):
+        """DeepEP comm backend (inter-node) -> MoEAllToAll/EPMoE block."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1045,14 +1054,23 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=8,
             attention_dp_size=8,
-            enable_wideep=True,
             moe_backend="deepep_moe",
+            moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
-        assert isinstance(model, models.SGLangEPMOEModel)
+        assert isinstance(model, models.MOEModel)
+        assert self._moe_block_names(model, "context") == [
+            "context_router_gemm",
+            "context_moe_dispatch",
+            "context_moe",
+            "context_moe_combine",
+        ]
+        assert isinstance(model.context_ops[7], ops.MoEAllToAll)
+        assert isinstance(model.context_ops[8], ops.EPMoE)
 
-    def test_sglang_moe_deepep_intranode_returns_sglang_ep_moe_model(self):
-        """DeepEP intra-node (enable_wideep=False, moe_backend=deepep_moe) → SGLangEPMOEModel."""
+    def test_sglang_moe_large_ep_intranode_emits_the_ep_block(self):
+        """Intra-node large EP (ep=4) uses the same block; only the span differs."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1061,14 +1079,21 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=4,
             attention_dp_size=4,
-            enable_wideep=False,
             moe_backend="deepep_moe",
+            moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
-        assert isinstance(model, models.SGLangEPMOEModel)
+        assert isinstance(model, models.MOEModel)
+        assert self._moe_block_names(model, "generation") == [
+            "generation_router_gemm",
+            "generation_moe_dispatch",
+            "generation_moe",
+            "generation_moe_combine",
+        ]
 
-    def test_sglang_moe_no_deepep_returns_moe_model(self):
-        """Standard comm (no moe_backend) → MOEModel."""
+    def test_sglang_moe_no_comm_backend_stays_fused(self):
+        """No moe_comm_backend (even with moe_backend=deepep_moe) -> fused block."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
@@ -1077,14 +1102,19 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=2,
             attention_dp_size=1,
-            enable_wideep=False,
+            moe_backend="deepep_moe",
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
         assert isinstance(model, models.MOEModel)
-        assert not isinstance(model, models.SGLangEPMOEModel)
+        assert self._moe_block_names(model, "context") == [
+            "context_router_gemm",
+            "context_moe_pre_dispatch",
+            "context_moe",
+            "context_moe_post_dispatch",
+        ]
 
     def test_trtllm_moe_returns_moe_model(self):
-        """trtllm always → MOEModel (moe_backend irrelevant for non-sglang)."""
+        """trtllm without a comm backend -> the fused MOEModel block."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
@@ -1093,11 +1123,10 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=2,
             moe_ep_size=1,
             attention_dp_size=1,
-            enable_wideep=True,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
         assert isinstance(model, models.MOEModel)
-        assert not isinstance(model, models.SGLangEPMOEModel)
+        assert "context_moe_post_dispatch" in [op._name for op in model.context_ops]
 
 
 class TestDeepSeekTPAllReduce:

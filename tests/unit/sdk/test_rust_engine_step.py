@@ -480,7 +480,9 @@ def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
             comm_quant_mode=None,
             moe_backend=moe_backend,
             attention_backend=None,
-            enable_wideep=False,
+            # enable_wideep dropped from the fixture: the deprecated flag left
+            # the engine identity (constant False; moe_comm_backend +
+            # num_gpus_per_node carry the regime).
             enable_eplb=False,
             wideep_num_slots=None,
             cp_style=None,
@@ -553,6 +555,109 @@ def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
     gen_spec = _wideep_generation_mla(_WideEpOp())
     assert ctx_spec["num_heads"] == 16  # 128 // 8, NOT tp_size=8
     assert gen_spec["num_heads"] == 16
+
+
+# ---- Large-EP op graphs: deliberate Python fallback (spec section 4.8) ----
+
+_SYSTEMS_DATA_ROOT = Path(__file__).resolve().parents[3] / "aic-core/src/aiconfigurator_core/systems/data"
+
+
+def _h200_sglang_wideep_paths() -> list[str]:
+    from aiconfigurator.sdk.operations.base import resolve_op_data_path
+
+    return [
+        resolve_op_data_path(str(_SYSTEMS_DATA_ROOT / "h200_sxm"), "sglang", "0.5.6.post2", filename)
+        for filename in (
+            "wideep_deepep_normal_perf.parquet",
+            "wideep_deepep_ll_perf.parquet",
+            "wideep_context_moe_perf.parquet",
+            "wideep_generation_moe_perf.parquet",
+            "wideep_context_mla_perf.parquet",
+            "wideep_generation_mla_perf.parquet",
+        )
+    ]
+
+
+@pytest.mark.skipif(
+    not all(os.path.exists(p) for p in _h200_sglang_wideep_paths()),
+    reason="shipped h200_sxm sglang wideEP parquets not present",
+)
+def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
+    """Spec section 4.8: the large-EP ops (MoEAllToAll / EPMoE) have no
+    ``_to_opspec`` branch yet -- the Rust mirror is deliberately deferred to
+    AIC-1601 (PR 2.5). Until it lands, a large-EP model routed at the Rust
+    engine must fail compilation with ``OpConversionError`` (surfaced as
+    ``RustEngineUnsupportedError``) and the ``base_backend`` gates must fall
+    back to the Python step, returning finite latencies -- large-EP configs
+    are degraded to the slower step, never dropped or crashed."""
+    import logging
+    import math
+
+    from aiconfigurator.sdk.backends.factory import get_backend
+    from aiconfigurator.sdk.engine import OpConversionError, build_engine_spec_json
+    from aiconfigurator.sdk.models import get_model
+    from aiconfigurator.sdk.perf_database import get_database
+    from aiconfigurator.sdk.rust_engine_step import RustEngineUnsupportedError
+
+    # A shipped-data large-EP config: DeepSeek-R1 EP32 on h200/sglang, the
+    # per-phase comm backends + node width the enumerator would set, and the
+    # legacy wideEP quant set (fp8_block MLA slices, fp8 KV cache).
+    cfg = ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        attention_dp_size=32,
+        moe_tp_size=1,
+        moe_ep_size=32,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+        moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+        num_gpus_per_node=8,
+    )
+    model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
+    database = get_database("h200_sxm", "sglang", "0.5.6.post2")
+
+    # (1) The op graph is not expressible as a compiled EngineSpec: the walk
+    # dies on the first large-EP op with the op-conversion error.
+    with pytest.raises(OpConversionError, match=r"MoEAllToAll|EPMoE"):
+        build_engine_spec_json(
+            model,
+            model_path="deepseek-ai/DeepSeek-R1",
+            system="h200_sxm",
+            backend="sglang",
+            backend_version="0.5.6.post2",
+            kv_block_size=None,
+            systems_path=None,
+            nextn=0,
+            database=database,
+        )
+
+    rust_engine_step._engine_handle_cache_clear()
+    try:
+        # (2) The engine-step wrapper surfaces it as the typed unsupported error.
+        with pytest.raises(RustEngineUnsupportedError, match=r"MoEAllToAll|EPMoE"):
+            rust_engine_step._cached_engine_handle(model, database)
+
+        # (3) End to end through the backend gate: a rust-routed run_static
+        # falls back to the Python step and produces finite per-op latencies.
+        backend = get_backend("sglang")
+        runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="rust")
+        with caplog.at_level(logging.WARNING):
+            summary = backend.run_static(model, database, runtime_config, mode="static", stride=32)
+        assert any("using the python step" in record.message for record in caplog.records)
+
+        context_latency = summary.get_context_latency_dict()
+        generation_latency = summary.get_generation_latency_dict()
+        assert context_latency and generation_latency
+        # Python-step breakdowns are per-op; the single scalar key would mean
+        # the rust step answered after all.
+        assert "rust_engine_step_context" not in context_latency
+        assert "context_moe_dispatch" in context_latency  # the large-EP A2A op priced by Python
+        for name, value in {**context_latency, **generation_latency}.items():
+            assert math.isfinite(value) and value >= 0.0, name
+    finally:
+        rust_engine_step._engine_handle_cache_clear()
 
 
 def test_non_silicon_database_mode_falls_back_to_python_step():

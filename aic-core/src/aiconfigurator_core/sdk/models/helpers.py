@@ -108,9 +108,9 @@ def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     return bool(attention_projection_exclusions(raw_config))
 
 
-def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
+def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = False) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
-    backend / wideep combination.
+    backend / large-EP combination.
 
     Single source of truth shared by ``task_v2.Task`` (resolve-time FMHA
     fallback + validate) and the estimate-path FMHA guard
@@ -122,7 +122,7 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
     if model_family == "DEEPSEEKV32":
         return "dsa_context_module", "dsa_generation_module"
     if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
-        if enable_wideep:
+        if is_large_ep:
             if backend_name == "sglang":
                 return "wideep_context_mla", "wideep_generation_mla"
             # trtllm wideep context queries the granular context_mla table
@@ -135,6 +135,97 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
     return "context_attention", "generation_attention"
 
 
+def power_law_distribution(base: str, alpha: float, *, eplb_suffix: bool = False) -> str:
+    """Model-owned workload-distribution string for a MoE block.
+
+    ``power_law`` is the only distribution with an alpha axis; any other value
+    (``uniform``, ...) passes through untouched. ``eplb_suffix`` appends the
+    TRT-LLM large-EP ``_eplb`` marker — those tables carry EPLB-balanced rows
+    under their own distribution key instead of correcting the token count.
+    """
+    if base != "power_law":
+        return base
+    return f"{base}_{alpha}_eplb" if eplb_suffix else f"{base}_{alpha}"
+
+
+def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
+    """Node width for a large-EP config; raises when the enumerator omitted it.
+
+    The comm node span (``nodes_for(moe_ep * moe_tp, gpus_per_node)``) is a
+    hardware fact that the model classes have no other channel to — the legacy
+    ops read it from ``database.system_spec["node"]["num_gpus_per_node"]`` at
+    query time, while the large-EP ops take ``node_num`` at construction (the
+    PR 1 op contract). A default would therefore be silently wrong rather than
+    merely approximate: on a GB200 NVL72 (4 GPUs/node) an EP32 decode would be
+    priced as a 4-node cross-rack all-to-all instead of an intra-node one. Only
+    large-EP construction calls this; fused configs never need the value.
+
+    Raises:
+        ValueError: If ``num_gpus_per_node`` is unset.
+    """
+    if model_config.num_gpus_per_node is None:
+        raise ValueError("moe_comm_backend is set but num_gpus_per_node is not — the enumerator must set both")
+    return model_config.num_gpus_per_node
+
+
+def validate_trtllm_large_ep(
+    *,
+    attention_dp_size: int,
+    moe_ep_size: int,
+    topk: int,
+    num_experts: int,
+    wideep_num_slots: int | None,
+    enable_eplb: bool,
+) -> None:
+    """Validate a TRT-LLM large-EP (wideEP) config.
+
+    Transcribed verbatim from the deleted ``TrtllmWideEPDeepSeekModel`` /
+    ``TrtllmWideEPDeepSeekV32Model`` constructors (deepseek.py:638-678 at
+    commit 8372e60), which derive the rules from TensorRT-LLM's WideEPMoE
+    constraints (``fused_moe_wide_ep.py``).
+
+    Raises:
+        ValueError: attention DP disabled, EP size not above 1, or a
+            ``wideep_num_slots`` value that EPLB cannot serve.
+    """
+    # 1. Attention DP must be enabled for WideEP
+    if attention_dp_size <= 1:
+        raise ValueError(
+            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. Attention DP should be used with WideEP."
+        )
+
+    # 2. EP size must be > 1 for WideEP (parallel_size > 1)
+    if moe_ep_size <= 1:
+        raise ValueError(
+            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. WideEP should only be enabled with parallel_size > 1."
+        )
+
+    # 3. EP size must be > top_k for AlltoAll to be effective
+    # FIXME: this warning should make the comm mode fallback to NCCL!!
+    if moe_ep_size <= topk:
+        logger.warning(
+            f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
+            "AlltoAll communication will be disabled. Consider increasing moe_ep_size."
+        )
+
+    # 4. num_slots validation
+    num_slots = wideep_num_slots if wideep_num_slots else num_experts
+
+    # num_slots must be >= num_experts
+    if num_slots < num_experts:
+        raise ValueError(
+            f"wideep_num_slots ({num_slots}) must be >= num_experts ({num_experts}). "
+            "There should be at least num_experts slots in the model engine."
+        )
+
+    # When EPLB is off, num_slots must equal num_experts
+    if not enable_eplb and num_slots != num_experts:
+        raise ValueError(
+            f"When enable_eplb=False, wideep_num_slots ({num_slots}) must equal "
+            f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
+        )
+
+
 @cache
 def _get_model_info(model_path: str) -> dict:
     """
@@ -144,9 +235,82 @@ def _get_model_info(model_path: str) -> dict:
         model_path: HuggingFace model path (e.g., 'meta-llama/Llama-2-7b-hf') or local path
 
     Returns:
-        dict: Model configuration parameters and raw config under "raw_config".
+        dict: Model configuration parameters and raw config under "raw_config",
+        plus the derived MoE fields "num_shared_experts" and "num_moe_layers"
+        (both 0 for dense models).
     """
-    return get_model_config_from_model_path(model_path)
+    # Shallow-copy: get_model_config_from_model_path is @cache'd, so mutating
+    # its return value would poison every other caller's dict.
+    info = dict(get_model_config_from_model_path(model_path))
+    info["num_shared_experts"] = _derive_num_shared_experts(info)
+    info["num_moe_layers"] = _derive_num_moe_layers(info)
+    return info
+
+
+def _moe_source_config(info: dict) -> dict:
+    """Raw HF config dict the MoE keys are read from.
+
+    Mirrors ``_parse_hf_config_json``: for multimodal architectures the LLM
+    parameters (including all MoE fields) live under a nested text config.
+    """
+    raw_config = info.get("raw_config")
+    raw_config = raw_config if isinstance(raw_config, dict) else {}
+    text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(info.get("architecture"))
+    nested = raw_config.get(text_key) if text_key else None
+    return nested if isinstance(nested, dict) else raw_config
+
+
+def _derive_num_shared_experts(info: dict) -> int:
+    """Shared (always-active) expert count derived from the HF config.
+
+    Sources, in order: an explicit count (``n_shared_experts`` /
+    ``num_shared_experts``; DeepSeek/GLM/Kimi/MiniMax/NemotronH spelling), else
+    a shared-expert intermediate size (``shared_expert_intermediate_size`` /
+    ``moe_shared_expert_intermediate_size``; Qwen-MoE spelling) expressed as a
+    multiple of the routed-expert intermediate size, else 0.
+    """
+    raw_config = _moe_source_config(info)
+    for key in ("n_shared_experts", "num_shared_experts"):
+        count = raw_config.get(key)
+        # Explicit ``null`` (e.g. MiMo-V2-Flash) means "no shared experts".
+        if count is not None:
+            return int(count)
+    shared_inter_size = (
+        raw_config.get("shared_expert_intermediate_size") or raw_config.get("moe_shared_expert_intermediate_size") or 0
+    )
+    moe_inter_size = info.get("moe_inter_size") or 0
+    if shared_inter_size and moe_inter_size:
+        return max(1, int(shared_inter_size) // int(moe_inter_size))
+    return 0
+
+
+def _derive_num_moe_layers(info: dict) -> int:
+    """Number of transformer layers that carry an MoE block; 0 for dense models.
+
+    Honors the per-layer patterns the config parser already normalized into
+    ``extra_params`` (NemotronH hybrid pattern; MiMo/Llama4 ``moe_layer_freq`` /
+    ``interleave_moe_layer_step``), else derives from ``num_hidden_layers``
+    minus ``first_k_dense_replace``, honoring a raw ``moe_layer_freq`` when
+    present (HF DeepSeek semantics: layer ``i`` is MoE iff ``i >=
+    first_k_dense_replace and i % moe_layer_freq == 0``).
+    """
+    if not info.get("num_experts") or not info.get("topk"):
+        return 0
+    extra_params = info.get("extra_params")
+    if isinstance(extra_params, common.NemotronHConfig):
+        return extra_params.hybrid_override_pattern.count("E")
+    if isinstance(extra_params, common.HybridMoEConfig):
+        return sum(1 for is_moe in extra_params.moe_layer_freq if is_moe)
+    raw_config = _moe_source_config(info)
+    layers = int(info["layers"])
+    first_k_dense = int(raw_config.get("first_k_dense_replace") or 0)
+    moe_layer_freq = raw_config.get("moe_layer_freq", 1)
+    if isinstance(moe_layer_freq, (list, tuple)):
+        return sum(1 for is_moe in moe_layer_freq if is_moe)
+    moe_layer_freq = int(moe_layer_freq) if moe_layer_freq else 1
+    if moe_layer_freq <= 1:
+        return max(0, layers - first_k_dense)
+    return sum(1 for layer_idx in range(first_k_dense, layers) if layer_idx % moe_layer_freq == 0)
 
 
 def _architecture_to_model_family(architecture: str) -> str:

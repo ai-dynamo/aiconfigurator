@@ -30,9 +30,11 @@ Output DataFrame schema is ``common.ColumnsAgg`` for agg and
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -365,13 +367,29 @@ def _sweep_one_parallel_agg(
     return df, saw_model_fit, saw_memory_fit
 
 
+def _point_model_config(model_config, parallel_config) -> config.ModelConfig:
+    """The ModelConfig for one parallel point.
+
+    ``model_config`` is either a template (deep-copied, as always) or a builder
+    called with the point's ``(tp, pp, dp, moe_tp, moe_ep, cp)`` tuple. The
+    builder form exists because some ModelConfig fields are decided per
+    parallel config rather than per task: ``moe_comm_backend`` -- large EP is
+    offered for exactly the tuples the perf data covers (``Task.
+    _resolve_moe_comm_backend``) -- is the first of them. Either way the caller
+    then overwrites the parallelism fields on the returned object.
+    """
+    if callable(model_config):
+        return model_config(tuple(parallel_config))
+    return copy.deepcopy(model_config)
+
+
 def sweep_agg(
     *,
     model_path: str,
     runtime_config: config.RuntimeConfig,
     database: PerfDatabase,
     backend_name: str,
-    model_config: config.ModelConfig,
+    model_config: config.ModelConfig | Callable[..., config.ModelConfig],
     parallel_config_list: list[list[int]] | list[tuple[int, int, int, int, int, int]],
     top_k: int = 10,
     max_batch_size: int = 512,
@@ -403,7 +421,9 @@ def sweep_agg(
         database: Loaded perf database for (system, backend, version).
         backend_name: Backend name ("trtllm", "vllm", "sglang").
         model_config: Base model config; tp/pp/dp/moe_tp/moe_ep are
-            overwritten per parallel candidate during the sweep.
+            overwritten per parallel candidate during the sweep. May instead be
+            a per-point builder taking the parallel tuple (see
+            ``_point_model_config``).
         parallel_config_list: List of (tp, pp, dp, moe_tp, moe_ep, cp) tuples
             to enumerate.
         top_k: Per-(parallel, tpot) top-K rows to keep before concat.
@@ -440,7 +460,7 @@ def sweep_agg(
         )
         try:
             point_model_config = dataclasses.replace(
-                model_config,
+                _point_model_config(model_config, parallel_config),
                 tp_size=tp_size,
                 pp_size=pp_size,
                 moe_tp_size=moe_tp_size,
@@ -550,7 +570,7 @@ def sweep_agg(
 def _get_disagg_worker_candidates(
     *,
     model_path: str,
-    model_config: config.ModelConfig,
+    model_config: config.ModelConfig | Callable[..., config.ModelConfig],
     parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     b_list: list[int] | range,
     runtime_config: config.RuntimeConfig,
@@ -587,7 +607,7 @@ def _get_disagg_worker_candidates(
         )
         try:
             point_mc = dataclasses.replace(
-                model_config,
+                _point_model_config(model_config, parallel_config),
                 tp_size=tp_size,
                 pp_size=pp_size,
                 moe_tp_size=moe_tp_size,
@@ -665,7 +685,7 @@ def _find_best_disagg_under_constraint(
     decode_num_worker_list: list[int],
     max_prefill_gpus: int | None,
     max_decode_gpus: int | None,
-    require_same_tp: bool,
+    require_same_tp: bool | Callable[[dict, dict], bool],
     prefill_degradation: float,
     decode_degradation: float,
     match_workers: Any,
@@ -680,7 +700,15 @@ def _find_best_disagg_under_constraint(
     ``lru_cache`` is shared across all (ttft, tpot) pairs -- its result is
     independent of the target, so a per-pair cache would recompute identical
     matches.
+
+    ``require_same_tp`` may be a predicate over the (prefill row, decode row)
+    pair instead of one bool: the constraint it models (sglang KV transfer
+    layout) is lifted per pair by a large-EP side, which is a property of the
+    pair's parallel configs, not of the task.
     """
+    requires_same_tp = (
+        require_same_tp if callable(require_same_tp) else (lambda _p, _d, _flag=bool(require_same_tp): _flag)
+    )
 
     p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
@@ -716,7 +744,7 @@ def _find_best_disagg_under_constraint(
             d_throughput = float(d_worker["seq/s"])
             d_gpus = d_worker["num_total_gpus"]
             for p_worker in p_records:
-                if require_same_tp and p_worker["tp"] != d_worker["tp"]:
+                if p_worker["tp"] != d_worker["tp"] and requires_same_tp(p_worker, d_worker):
                     continue
                 p_throughput = float(p_worker["seq/s"])
                 p_gpus = p_worker["num_total_gpus"]
@@ -760,12 +788,12 @@ def sweep_disagg(
     runtime_config: config.RuntimeConfig,
     prefill_database: PerfDatabase,
     prefill_backend_name: str,
-    prefill_model_config: config.ModelConfig,
+    prefill_model_config: config.ModelConfig | Callable[..., config.ModelConfig],
     prefill_parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     prefill_latency_correction: float,
     decode_database: PerfDatabase,
     decode_backend_name: str,
-    decode_model_config: config.ModelConfig,
+    decode_model_config: config.ModelConfig | Callable[..., config.ModelConfig],
     decode_parallel_config_list: list[tuple[int, int, int, int, int, int]] | list[list[int]],
     decode_latency_correction: float,
     prefill_max_num_tokens: int = 16384,
@@ -775,7 +803,7 @@ def sweep_disagg(
     num_gpu_list: list[int] | None = None,
     max_prefill_gpus: int | None = None,
     max_decode_gpus: int | None = None,
-    require_same_tp: bool = False,
+    require_same_tp: bool | Callable[[dict, dict], bool] = False,
     autoscale: bool = False,
     target_tpot: float | None = None,
     rate_matching_prefill_degradation: float | None = None,

@@ -8,11 +8,15 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
+from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
 from aiconfigurator_core.sdk.models.helpers import (
     attention_modules_excluded_from_quant,
     attention_projection_exclusions,
+    large_ep_gpus_per_node,
     mtp_scale_factor,
+    power_law_distribution,
     quant_exclude_patterns,
+    validate_trtllm_large_ep,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,20 +175,63 @@ class DeepSeekV32Model(BaseModel):
             else 1.0,
         )
 
-        if backend_name == "sglang" and model_config.enable_wideep:
-            logger.debug(
-                "WideEP is enabled for DeepSeekV32 model %s with backend %s",
-                model_info["model_path"],
-                backend_name,
-            )
-            return WideEPDeepSeekV32Model(*moe_args, *base_args, extra_params)
-        if backend_name == "trtllm" and model_config.enable_wideep:
-            logger.debug("TensorRT-LLM WideEP is enabled for DeepSeekV32 model %s", model_info["model_path"])
-            return TrtllmWideEPDeepSeekV32Model(*moe_args, *base_args, extra_params)
-        return cls(*moe_args, *base_args, extra_params)
+        # One class for both regimes: ``__init__`` branches on
+        # ``model_config.moe_comm_backend`` (set by the enumerator) for large EP.
+        return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    #: TRT-LLM large-EP decode PDL overlap discount, transcribed from the
+    #: deleted ``TrtllmWideEPDeepSeekV32Model._pdl_factor`` (deepseek_v32.py:463
+    #: at commit 8372e60). Scales every decode-layer op, attention included.
+    _PDL_FACTOR = 0.9
+
+    def _large_ep_moe_ops(self, phase: str, shape: MoEBlockShape, scale_factor: float) -> list:
+        """MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
+
+        Workload-distribution strings transcribed from the deleted wideEP
+        classes at commit 8372e60: sglang flattens the prefill alpha to 0.6
+        under EPLB (deepseek_v32.py:740-751); trtllm keeps alpha 1.01 in both
+        phases and marks EPLB with the ``_eplb`` suffix (deepseek_v32.py:479-486).
+
+        The shared-expert dtype is asymmetric in the legacy classes and is
+        reproduced as such: trtllm sized its shared GEMMs with
+        ``_dsa_shared_expert_quant_mode`` (deepseek_v32.py:536-555, 631-653),
+        i.e. bf16 for checkpoints like ``nvidia/GLM-5.2-NVFP4`` that exclude
+        ``mlp.shared_experts*`` from quantization, while sglang used the plain
+        ``gemm_quant_mode`` (deepseek_v32.py:796-819) -- so the override is
+        passed on trtllm only.
+        """
+        base = self.config.workload_distribution
+        shared_gemm_quant_mode = None
+        if self._backend_name == "trtllm":
+            distribution = power_law_distribution(base, self._power_law_alpha, eplb_suffix=self.config.enable_eplb)
+            shared_gemm_quant_mode = _dsa_shared_expert_quant_mode(self.extra_params, self.config.gemm_quant_mode)
+        else:
+            alpha = 0.6 if (phase == "context" and self.config.enable_eplb) else self._power_law_alpha
+            distribution = power_law_distribution(base, alpha)
+        return build_moe_block_ops(
+            phase,
+            shape,
+            self.config,
+            self.config.moe_quant_mode,
+            distribution,
+            scale_factor=scale_factor,
+            backend_name=self._backend_name,
+            inference_phase=phase,
+            model_family=self.model_family,
+            attn_cp_size=self.config.cp_size,
+            gpus_per_node=self._gpus_per_node,
+            shared_gemm_quant_mode=shared_gemm_quant_mode,
+        )
+
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+
+        self._backend_name = backend_name
+        # Large EP: see ``ModelConfig.moe_comm_backend`` (enumerator-owned).
+        self._is_large_ep = bool(self.config.moe_comm_backend)
+        # Node width is a hardware fact with no default: an unset value would
+        # silently mis-price cross-node all-to-all (see large_ep_gpus_per_node).
+        self._gpus_per_node = large_ep_gpus_per_node(self.config) if self._is_large_ep else 0
 
         assert (
             self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
@@ -223,6 +270,168 @@ class DeepSeekV32Model(BaseModel):
         )
         local_heads = self._num_heads // tp_size
 
+        # MoE block shape (large-EP regime only; the fused spans below stay
+        # hand-wired -- their generation dialect differs from the builder's).
+        moe_shape = MoEBlockShape(
+            hidden_size=h,
+            moe_inter_size=self._moe_inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            # The legacy wideEP graphs model exactly one full-size shared expert
+            # (WideEP ADP mode, shared_tp_size=1).
+            num_shared_experts=1,
+            # Descriptor-only: the builder scales by the model-owned scale_factor.
+            num_moe_layers=self._num_layers,
+        )
+        if self._is_large_ep and backend_name == "trtllm":
+            # ===== TRT-LLM large EP (wideEP) =====
+            # Attention + non-MoE wiring transcribed verbatim from the deleted
+            # TrtllmWideEPDeepSeekV32Model (deepseek_v32.py:488-710 at commit
+            # 8372e60): the add_norms carry NO ``scale_num_tokens=cp_size`` (the
+            # fused path's CP form) and the whole decode stack carries the PDL
+            # discount.
+            validate_trtllm_large_ep(
+                attention_dp_size=attention_dp_size,
+                moe_ep_size=moe_ep_size,
+                topk=topk,
+                num_experts=num_experts,
+                wideep_num_slots=self.config.wideep_num_slots,
+                enable_eplb=self.config.enable_eplb,
+            )
+            self.context_ops.extend(
+                [
+                    ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+                    ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
+                    ops.ContextDSAModule(
+                        "context_attention",
+                        self._num_layers,
+                        local_heads,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        dsa_gemm_quant_mode,
+                        architecture=self.architecture,
+                        cp_size=self.config.cp_size,
+                        index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                        dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    ),
+                    ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
+            self.context_ops.append(
+                ops.GEMM(
+                    "context_logits_gemm",
+                    1,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            generation_scale = self._num_layers * self._mtp_scale_factor * self._PDL_FACTOR
+            self.generation_ops.extend(
+                [
+                    ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
+                    ops.ElementWise("generation_add_norm_1", generation_scale, 2 * h, 2 * h, 0.8),
+                    ops.GenerationDSAModule(
+                        "generation_attention",
+                        generation_scale,
+                        local_heads,
+                        kvcache_quant_mode,
+                        dsa_gemm_quant_mode,
+                        architecture=self.architecture,
+                        index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                        dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    ),
+                    ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
+                ]
+            )
+            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, generation_scale))
+            self.generation_ops.append(
+                ops.GEMM(
+                    "generation_logits_gemm",
+                    1 * self._mtp_scale_factor,
+                    self._vocab_size // tp_size,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                )
+            )
+
+            pp_scale_factor = pp_size - 1
+            self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
+            self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
+            return
+
+        if self._is_large_ep and backend_name == "sglang":
+            # ===== sglang large-EP (deepep) =====
+            # DSA attention + non-MoE wiring transcribed verbatim from the
+            # deleted WideEPDeepSeekV32Model (deepseek_v32.py:754-868 at commit
+            # 8372e60): TP all_gather/reduce_scatter around the DSA module and
+            # NO embedding / add_norm / logits_gemm / P2P.
+            self.context_ops.extend(
+                [
+                    *(
+                        [
+                            ops.NCCL(
+                                "context_tp_all_gather",
+                                self._num_layers,
+                                "all_gather",
+                                h,
+                                tp_size,
+                                common.CommQuantMode.half,
+                            )
+                        ]
+                        if tp_size > 1
+                        else []
+                    ),
+                    ops.ContextDSAModule(
+                        "context_attention",
+                        self._num_layers,
+                        local_heads,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        dsa_gemm_quant_mode,
+                        architecture=self.architecture,
+                        cp_size=self.config.cp_size,
+                        index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                        dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                        attn_projection_quant_modes=dsa_attn_quant_modes,
+                    ),
+                    *(
+                        [
+                            ops.NCCL(
+                                "context_tp_reduce_scatter",
+                                self._num_layers,
+                                "reduce_scatter",
+                                h,
+                                tp_size,
+                                common.CommQuantMode.half,
+                            )
+                        ]
+                        if tp_size > 1
+                        else []
+                    ),
+                ]
+            )
+            self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
+
+            generation_scale = self._num_layers * self._mtp_scale_factor
+            self.generation_ops.append(
+                ops.GenerationDSAModule(
+                    "generation_attention",
+                    generation_scale,
+                    local_heads,
+                    kvcache_quant_mode,
+                    dsa_gemm_quant_mode,
+                    architecture=self.architecture,
+                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
+                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                    attn_projection_quant_modes=dsa_attn_quant_modes,
+                )
+            )
+            self.generation_ops.extend(self._large_ep_moe_ops("generation", moe_shape, generation_scale))
+            return
+
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
@@ -241,81 +450,92 @@ class DeepSeekV32Model(BaseModel):
                     attn_projection_quant_modes=dsa_attn_quant_modes,
                 ),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, scale_num_tokens=cp_size),
-                ops.GEMM(
-                    "context_shared_gate_up_gemm",
-                    self._num_layers,
-                    2 * self._moe_inter_size // moe_tp_size,
-                    h,
-                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-                ),
-                ops.ElementWise(
-                    "context_shared_act_gate",
-                    self._num_layers,
-                    2 * self._moe_inter_size // moe_tp_size,
-                    self._moe_inter_size // moe_tp_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn2_gemm",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size // moe_tp_size,
-                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-                ),
-                ops.GEMM(
-                    "context_router_gemm",
-                    self._num_layers,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.bfloat16,
-                ),
-                ops.MoEDispatch(
-                    "context_moe_pre_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.cp_size,
-                ),
-                ops.MoE(
-                    "context_moe",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                ),
-                ops.MoEDispatch(
-                    "context_moe_post_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                    quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.cp_size,
-                ),
-                ops.GEMM(
-                    "context_logits_gemm",
-                    1,
-                    self._vocab_size // tp_size,
-                    h,
-                    common.GEMMQuantMode.bfloat16,
-                ),
             ]
+        )
+
+        fused_context_moe_ops = [
+            ops.GEMM(
+                "context_shared_gate_up_gemm",
+                self._num_layers,
+                2 * self._moe_inter_size // moe_tp_size,
+                h,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+            ),
+            ops.ElementWise(
+                "context_shared_act_gate",
+                self._num_layers,
+                2 * self._moe_inter_size // moe_tp_size,
+                self._moe_inter_size // moe_tp_size,
+                0.8,
+            ),
+            ops.GEMM(
+                "context_shared_ffn2_gemm",
+                self._num_layers,
+                h,
+                self._moe_inter_size // moe_tp_size,
+                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+            ),
+            ops.GEMM(
+                "context_router_gemm",
+                self._num_layers,
+                self._num_experts,
+                h,
+                common.GEMMQuantMode.bfloat16,
+            ),
+            ops.MoEDispatch(
+                "context_moe_pre_dispatch",
+                self._num_layers,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                True,
+                quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.cp_size,
+            ),
+            ops.MoE(
+                "context_moe",
+                self._num_layers,
+                h,
+                self._moe_inter_size,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                moe_quant_mode,
+                workload_distribution,
+                attention_dp_size,
+            ),
+            ops.MoEDispatch(
+                "context_moe_post_dispatch",
+                self._num_layers,
+                h,
+                self._topk,
+                self._num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                attention_dp_size,
+                False,
+                quant_mode=moe_quant_mode,
+                attn_cp_size=self.config.cp_size,
+            ),
+        ]
+        if self._is_large_ep:
+            # Large EP on a framework without its own attention stack (see the
+            # generation site below).
+            self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
+        else:
+            self.context_ops.extend(fused_context_moe_ops)
+        self.context_ops.append(
+            ops.GEMM(
+                "context_logits_gemm",
+                1,
+                self._vocab_size // tp_size,
+                h,
+                common.GEMMQuantMode.bfloat16,
+            )
         )
 
         self.generation_ops.extend(
@@ -349,83 +569,90 @@ class DeepSeekV32Model(BaseModel):
             ]
         )
 
-        gen_shared_ops = [
-            ops.GEMM(
-                "generation_shared_gate_up_gemm",
-                self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size // moe_tp_size,
-                h,
-                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-            ),
-            ops.ElementWise(
-                "generation_shared_act_gate",
-                self._num_layers * self._mtp_scale_factor,
-                2 * self._moe_inter_size // moe_tp_size,
-                self._moe_inter_size // moe_tp_size,
-                0.8,
-            ),
-            ops.GEMM(
-                "generation_shared_ffn2_gemm",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._moe_inter_size // moe_tp_size,
-                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-            ),
-        ]
+        if self._is_large_ep:
+            # Large EP on a framework without its own attention stack (the
+            # sglang/trtllm branches returned above).
+            self.generation_ops.extend(
+                self._large_ep_moe_ops("generation", moe_shape, self._num_layers * self._mtp_scale_factor)
+            )
+        else:
+            gen_shared_ops = [
+                ops.GEMM(
+                    "generation_shared_gate_up_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * self._moe_inter_size // moe_tp_size,
+                    h,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+                ),
+                ops.ElementWise(
+                    "generation_shared_act_gate",
+                    self._num_layers * self._mtp_scale_factor,
+                    2 * self._moe_inter_size // moe_tp_size,
+                    self._moe_inter_size // moe_tp_size,
+                    0.8,
+                ),
+                ops.GEMM(
+                    "generation_shared_ffn2_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._moe_inter_size // moe_tp_size,
+                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
+                ),
+            ]
 
-        gen_routed_ops = [
-            ops.GEMM(
-                "generation_router_gemm",
-                self._num_layers * self._mtp_scale_factor,
-                self._num_experts,
-                h,
-                common.GEMMQuantMode.bfloat16,
-            ),
-            ops.MoEDispatch(
-                "generation_moe_pre_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                True,
-                quant_mode=moe_quant_mode,
-                attn_cp_size=self.config.cp_size,
-                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
-            ),
-            ops.MoE(
-                "generation_moe",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                moe_quant_mode,
-                workload_distribution,
-                attention_dp_size,
-            ),
-            ops.MoEDispatch(
-                "generation_moe_post_dispatch",
-                self._num_layers * self._mtp_scale_factor,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                False,
-                quant_mode=moe_quant_mode,
-                attn_cp_size=self.config.cp_size,
-                is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
-            ),
-        ]
-        self.generation_ops.append(
-            ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
-        )
+            gen_routed_ops = [
+                ops.GEMM(
+                    "generation_router_gemm",
+                    self._num_layers * self._mtp_scale_factor,
+                    self._num_experts,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                ),
+                ops.MoEDispatch(
+                    "generation_moe_pre_dispatch",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    True,
+                    quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.cp_size,
+                    is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
+                ),
+                ops.MoE(
+                    "generation_moe",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._moe_inter_size,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    moe_quant_mode,
+                    workload_distribution,
+                    attention_dp_size,
+                ),
+                ops.MoEDispatch(
+                    "generation_moe_post_dispatch",
+                    self._num_layers * self._mtp_scale_factor,
+                    h,
+                    self._topk,
+                    self._num_experts,
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    False,
+                    quant_mode=moe_quant_mode,
+                    attn_cp_size=self.config.cp_size,
+                    is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
+                ),
+            ]
+            self.generation_ops.append(
+                ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
+            )
         self.generation_ops.append(
             ops.GEMM(
                 "generation_logits_gemm",
@@ -454,492 +681,4 @@ class DeepSeekV32Model(BaseModel):
                 + qk_rope_head_dim * common.GEMMQuantMode.bfloat16.value.memory
                 + common.indexer_cache_entry_bytes(index_head_dim)
             )
-        )
-
-
-class TrtllmWideEPDeepSeekV32Model(BaseModel):
-    """TensorRT-LLM WideEP variant for DeepSeekV32-family models such as DeepSeek-V3.2 and GLM-5."""
-
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
-        super().__init__(*args)
-
-        assert (
-            self.config.tp_size * self.config.attention_dp_size * self.config.cp_size
-            == self.config.moe_tp_size * self.config.moe_ep_size
-        ), (
-            f"tp_size ({self.config.tp_size}) * attention_dp_size "
-            f"({self.config.attention_dp_size}) * cp_size "
-            f"({self.config.cp_size}) should be equal to moe_tp_size "
-            f"({self.config.moe_tp_size}) * moe_ep_size ({self.config.moe_ep_size})"
-        )
-        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-
-        self._topk = topk
-        self._num_experts = num_experts
-        self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
-        self._pdl_factor = 0.9
-        self._power_law_alpha = 1.01
-
-        h = self._hidden_size
-        tp_size = self.config.tp_size
-        moe_tp_size = self.config.moe_tp_size
-        moe_ep_size = self.config.moe_ep_size
-        attention_dp_size = self.config.attention_dp_size
-        pp_size = self.config.pp_size
-
-        gemm_quant_mode = self.config.gemm_quant_mode
-        moe_quant_mode = self.config.moe_quant_mode
-        kvcache_quant_mode = self.config.kvcache_quant_mode
-        fmha_quant_mode = self.config.fmha_quant_mode
-        dsa_attn_quant_modes, dsa_gemm_quant_mode = _dsa_attention_quant_modes(self.extra_params, gemm_quant_mode)
-
-        eplb_enabled = self.config.enable_eplb
-        if self.config.workload_distribution == "power_law":
-            if eplb_enabled:
-                workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}_eplb"
-            else:
-                workload_distribution = f"{self.config.workload_distribution}_{self._power_law_alpha}"
-        else:
-            workload_distribution = self.config.workload_distribution
-
-        if attention_dp_size <= 1:
-            raise ValueError(
-                f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. "
-                "Attention DP should be used with WideEP."
-            )
-        if moe_ep_size <= 1:
-            raise ValueError(
-                f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. "
-                "WideEP should only be enabled with parallel_size > 1."
-            )
-        if moe_ep_size <= topk:
-            logger.warning(
-                f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
-                "AlltoAll communication will be disabled. Consider increasing moe_ep_size."
-            )
-
-        wideep_num_slots = self.config.wideep_num_slots if self.config.wideep_num_slots else num_experts
-        if wideep_num_slots < num_experts:
-            raise ValueError(
-                f"wideep_num_slots ({wideep_num_slots}) must be >= num_experts ({num_experts}). "
-                "There should be at least num_experts slots in the model engine."
-            )
-        if not eplb_enabled and wideep_num_slots != num_experts:
-            raise ValueError(
-                f"When enable_eplb=False, wideep_num_slots ({wideep_num_slots}) must equal "
-                f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
-            )
-
-        local_heads = self._num_heads // tp_size
-
-        self.context_ops.extend(
-            [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.ContextDSAModule(
-                    "context_attention",
-                    self._num_layers,
-                    local_heads,
-                    kvcache_quant_mode,
-                    fmha_quant_mode,
-                    dsa_gemm_quant_mode,
-                    architecture=self.architecture,
-                    cp_size=self.config.cp_size,
-                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
-                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
-                    attn_projection_quant_modes=dsa_attn_quant_modes,
-                ),
-                ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
-                ops.GEMM(
-                    "context_shared_gate_up_gemm",
-                    self._num_layers,
-                    2 * self._moe_inter_size,
-                    h,
-                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-                ),
-                ops.ElementWise(
-                    "context_shared_act_gate",
-                    self._num_layers,
-                    2 * self._moe_inter_size,
-                    self._moe_inter_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "context_shared_ffn2_gemm",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-                ),
-                ops.GEMM(
-                    "context_router_gemm",
-                    self._num_layers,
-                    self._num_experts,
-                    h,
-                    common.GEMMQuantMode.bfloat16,
-                ),
-                ops.TrtLLMWideEPMoEDispatch(
-                    "context_moe_pre_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                ),
-                ops.TrtLLMWideEPMoE(
-                    "context_moe",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    workload_distribution,
-                    attention_dp_size,
-                    num_slots=wideep_num_slots,
-                ),
-                ops.TrtLLMWideEPMoEDispatch(
-                    "context_moe_post_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    False,
-                    quant_mode=moe_quant_mode,
-                ),
-                ops.ElementWise("context_moe_reduce_add", self._num_layers, 2 * h, h, 0.8),
-                ops.GEMM(
-                    "context_logits_gemm",
-                    1,
-                    self._vocab_size // tp_size,
-                    h,
-                    common.GEMMQuantMode.bfloat16,
-                ),
-            ]
-        )
-
-        generation_scale = self._num_layers * self._mtp_scale_factor * self._pdl_factor
-        self.generation_ops.extend(
-            [
-                ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
-                ops.ElementWise("generation_add_norm_1", generation_scale, 2 * h, 2 * h, 0.8),
-                ops.GenerationDSAModule(
-                    "generation_attention",
-                    generation_scale,
-                    local_heads,
-                    kvcache_quant_mode,
-                    dsa_gemm_quant_mode,
-                    architecture=self.architecture,
-                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
-                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
-                    attn_projection_quant_modes=dsa_attn_quant_modes,
-                ),
-                ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
-            ]
-        )
-
-        shared_ops = [
-            ops.GEMM(
-                "generation_shared_gate_up_gemm",
-                generation_scale,
-                2 * self._moe_inter_size,
-                h,
-                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-            ),
-            ops.ElementWise(
-                "generation_shared_act_gate",
-                generation_scale,
-                2 * self._moe_inter_size,
-                self._moe_inter_size,
-                0.8,
-            ),
-            ops.GEMM(
-                "generation_shared_ffn2_gemm",
-                generation_scale,
-                h,
-                self._moe_inter_size,
-                _dsa_shared_expert_quant_mode(self.extra_params, gemm_quant_mode),
-            ),
-        ]
-        routed_ops = [
-            ops.GEMM("generation_router_gemm", generation_scale, self._num_experts, h, common.GEMMQuantMode.bfloat16),
-            ops.TrtLLMWideEPMoEDispatch(
-                "generation_moe_pre_dispatch",
-                generation_scale,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                True,
-                quant_mode=moe_quant_mode,
-            ),
-            ops.TrtLLMWideEPMoE(
-                "generation_moe",
-                generation_scale,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                moe_quant_mode,
-                workload_distribution,
-                attention_dp_size,
-                num_slots=wideep_num_slots,
-            ),
-            ops.TrtLLMWideEPMoEDispatch(
-                "generation_moe_post_dispatch",
-                generation_scale,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                False,
-                quant_mode=moe_quant_mode,
-                use_low_precision_combine=(moe_quant_mode == common.MoEQuantMode.nvfp4),
-            ),
-        ]
-        self.generation_ops.append(ops.OverlapOp("generation_moe_overlap", group_a=routed_ops, group_b=shared_ops))
-        self.generation_ops.append(ops.ElementWise("generation_moe_reduce_add", generation_scale, 2 * h, h, 0.8))
-        self.generation_ops.append(
-            ops.GEMM(
-                "generation_logits_gemm",
-                1 * self._mtp_scale_factor,
-                self._vocab_size // tp_size,
-                h,
-                common.GEMMQuantMode.bfloat16,
-            )
-        )
-
-        pp_scale_factor = pp_size - 1
-        self.context_ops.append(ops.P2P("context_p2p", pp_scale_factor, h, pp_size))
-        self.generation_ops.append(ops.P2P("generation_p2p", pp_scale_factor * self._mtp_scale_factor, h, pp_size))
-
-
-class WideEPDeepSeekV32Model(BaseModel):
-    """SGLang WideEP variant for DeepSeekV32-family models such as DeepSeek-V3.2 and GLM-5."""
-
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
-        super().__init__(*args)
-
-        assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
-
-        self._topk = topk
-        self._num_experts = num_experts
-        self._moe_inter_size = moe_inter_size
-        self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
-
-        h = self._hidden_size
-        tp_size = self.config.tp_size
-        moe_tp_size = self.config.moe_tp_size
-        moe_ep_size = self.config.moe_ep_size
-        attention_dp_size = self.config.attention_dp_size
-
-        gemm_quant_mode = self.config.gemm_quant_mode
-        moe_quant_mode = self.config.moe_quant_mode
-        kvcache_quant_mode = self.config.kvcache_quant_mode
-        fmha_quant_mode = self.config.fmha_quant_mode
-        dsa_attn_quant_modes, dsa_gemm_quant_mode = _dsa_attention_quant_modes(self.extra_params, gemm_quant_mode)
-        moe_backend = self.config.moe_backend
-        sms = self.config.sms
-
-        self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.01
-        self._power_law_alpha_decode = 1.01
-        context_workload_distribution = (
-            self.config.workload_distribution + f"_{self._power_law_alpha_prefill}"
-            if self.config.workload_distribution == "power_law"
-            else self.config.workload_distribution
-        )
-        generation_workload_distribution = (
-            self.config.workload_distribution + f"_{self._power_law_alpha_decode}"
-            if self.config.workload_distribution == "power_law"
-            else self.config.workload_distribution
-        )
-        local_heads = self._num_heads // tp_size
-
-        self.context_ops.extend(
-            [
-                *(
-                    [
-                        ops.NCCL(
-                            "context_tp_all_gather",
-                            self._num_layers,
-                            "all_gather",
-                            h,
-                            tp_size,
-                            common.CommQuantMode.half,
-                        )
-                    ]
-                    if tp_size > 1
-                    else []
-                ),
-                ops.ContextDSAModule(
-                    "context_attention",
-                    self._num_layers,
-                    local_heads,
-                    kvcache_quant_mode,
-                    fmha_quant_mode,
-                    dsa_gemm_quant_mode,
-                    architecture=self.architecture,
-                    cp_size=self.config.cp_size,
-                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
-                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
-                    attn_projection_quant_modes=dsa_attn_quant_modes,
-                ),
-                *(
-                    [
-                        ops.NCCL(
-                            "context_tp_reduce_scatter",
-                            self._num_layers,
-                            "reduce_scatter",
-                            h,
-                            tp_size,
-                            common.CommQuantMode.half,
-                        )
-                    ]
-                    if tp_size > 1
-                    else []
-                ),
-                ops.GEMM(
-                    "context_gate_ffn1_gemm",
-                    self._num_layers,
-                    2 * self._moe_inter_size,
-                    h,
-                    gemm_quant_mode,
-                    scale_num_tokens=tp_size,
-                ),
-                ops.ElementWise(
-                    "context_act_gate",
-                    self._num_layers,
-                    2 * self._moe_inter_size,
-                    self._moe_inter_size,
-                    0.8,
-                    scale_num_tokens=tp_size,
-                ),
-                ops.GEMM(
-                    "context_ffn2_gemm",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    gemm_quant_mode,
-                    scale_num_tokens=tp_size,
-                ),
-                ops.MoEDispatch(
-                    "context_moe_pre_dispatch",
-                    self._num_layers,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.cp_size,
-                    sms=sms,
-                    moe_backend=moe_backend,
-                    is_context=True,
-                    scale_num_tokens=tp_size,
-                ),
-                ops.MoE(
-                    "context_moe",
-                    self._num_layers,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    context_workload_distribution,
-                    attention_dp_size,
-                    is_context=True,
-                    moe_backend=moe_backend,
-                    enable_eplb=self.config.enable_eplb,
-                ),
-            ]
-        )
-
-        generation_scale = self._num_layers * self._mtp_scale_factor
-        self.generation_ops.extend(
-            [
-                ops.GenerationDSAModule(
-                    "generation_attention",
-                    generation_scale,
-                    local_heads,
-                    kvcache_quant_mode,
-                    dsa_gemm_quant_mode,
-                    architecture=self.architecture,
-                    index_topk_freq=self.extra_params.get("index_topk_freq", 1),
-                    dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
-                    attn_projection_quant_modes=dsa_attn_quant_modes,
-                ),
-                ops.GEMM(
-                    "generation_gate_ffn1_gemm",
-                    generation_scale,
-                    2 * self._moe_inter_size,
-                    h,
-                    gemm_quant_mode,
-                ),
-                ops.ElementWise(
-                    "generation_act_gate",
-                    generation_scale,
-                    2 * self._moe_inter_size,
-                    self._moe_inter_size,
-                    0.8,
-                ),
-                ops.GEMM(
-                    "generation_ffn2_gemm",
-                    generation_scale,
-                    h,
-                    self._moe_inter_size,
-                    gemm_quant_mode,
-                ),
-                ops.MoEDispatch(
-                    "generation_moe_pre_dispatch",
-                    generation_scale,
-                    h,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    attention_dp_size,
-                    True,
-                    quant_mode=moe_quant_mode,
-                    attn_cp_size=self.config.cp_size,
-                    sms=sms,
-                    moe_backend=moe_backend,
-                    is_context=False,
-                ),
-                ops.MoE(
-                    "generation_moe",
-                    generation_scale,
-                    h,
-                    self._moe_inter_size,
-                    self._topk,
-                    self._num_experts,
-                    moe_tp_size,
-                    moe_ep_size,
-                    moe_quant_mode,
-                    generation_workload_distribution,
-                    attention_dp_size,
-                    is_context=False,
-                    moe_backend=moe_backend,
-                    enable_eplb=False,
-                ),
-            ]
         )
