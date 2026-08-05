@@ -961,13 +961,17 @@ class Task:
         return ("context", "generation")
 
     def _required_large_ep_phases(self, role: str) -> tuple[str, ...]:
-        """Phases that must be covered before a role can run large EP.
+        """Extra phase-coverage requirement large EP puts on a role.
 
-        The phases the role RUNS, plus CONTEXT for every role: a worker's model
-        object holds the whole graph and the memory model sizes its weights
-        from ``model.context_ops`` (``base_backend._get_memory_usage``), so a
-        decode worker with a fused context span and a large-EP decode step
-        would be priced with the wrong (÷tp shared expert, router) weights."""
+        Returns ``("context",)`` for the single-phase roles (prefill/decode)
+        and the full phase pair for agg; callers union it with
+        ``_role_phases(role)``, so the effective requirement is always the
+        phases the role runs PLUS context. Context is required even for a
+        decode worker because its model object holds the whole graph and the
+        memory model sizes its weights from ``model.context_ops``
+        (``base_backend._get_memory_usage``) — a fused context span under a
+        large-EP decode step would be priced with the wrong (÷tp shared
+        expert, router) weights."""
         return ("context",) if role != "agg" else self._role_phases(role)
 
     def _large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
@@ -989,8 +993,11 @@ class Task:
         backends cover the same EP); the caller picks the first one covering
         the tuple's EP.
 
-        Never raises: a missing model shape, system spec, database or table
-        yields ``{}`` -- the fused path then serves every tuple.
+        Never raises on missing DATA: an absent model shape, system spec,
+        database or table yields ``{}`` -- the fused path then serves every
+        tuple. A caller BUG still raises: a str-typed ``moe_quant_mode`` is a
+        ``TypeError``, not empty coverage (it would silently miss every
+        enum-keyed compute row and disable large-EP exploration).
         """
         cached = self._large_ep_coverage_cache.get(role)
         if cached is not None:
@@ -1027,6 +1034,14 @@ class Task:
         if gpus_per_node and a2a_probe is not None and compute_probe is not None:
             a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
             quant_mode = self._role_attr(role, "moe_quant_mode")
+            if isinstance(quant_mode, str):
+                # The compute probe keys the moe_ep table on MoEQuantMode
+                # members; a str would miss every key and silently report
+                # "no coverage" instead of the caller's type bug.
+                raise TypeError(
+                    f"moe_quant_mode must be a common.MoEQuantMode member, got str {quant_mode!r} "
+                    f"(e.g. common.MoEQuantMode[{quant_mode!r}])"
+                )
             for phase in ("context", "generation"):
                 compute = compute_probe(
                     shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase

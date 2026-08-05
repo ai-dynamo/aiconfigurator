@@ -24,8 +24,9 @@
 //! `workload_distribution` falls back to `"uniform"` when the requested
 //! variant is absent for the given quant, matching Python's behavior.
 //!
-//! WideEP / DeepEP / TRT-LLM all-to-all variants live in
-//! `perf_database::wideep`, `wideep_mla`, and `wideep_moe`.
+//! WideEP MLA lives in `perf_database::wideep_mla`; the TRT-LLM all-to-all
+//! table in `perf_database::trtllm_alltoall`; large-EP expert compute in
+//! `perf_database::moe_ep`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

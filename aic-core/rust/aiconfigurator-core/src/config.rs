@@ -29,9 +29,13 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   indices after `DsaGeneration` shifted). The MSA insertion and #1405
 //   each claimed version 3 on their own branch, so their merge needed a
 //   fresh number.
-// v5: MlaModuleOp gained `native_num_heads: Option<u32>` (#1458) — a bincode
-// op-layout change.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 5;
+// - 5 (PR #1460 / #1458): `MlaModuleOp` gained `native_num_heads:
+//   Option<u32>` — a bincode op-layout change.
+// - 6 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+//   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
+//   bincode enum index; large-EP is now modeled natively by the appended
+//   `MoeAllToAll` / `EpMoe` variants.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 6;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

@@ -19,8 +19,12 @@ Every floor is ``>= 1.0``: the gate encodes the project goal that Rust must be
 *at least as fast as* Python on each guarded case -- a sub-1.0 floor would license
 Rust being slower, defeating the migration. Floors sit below the measured margin
 (see ``../docs/perf-speedup-report.md``) with headroom for runner noise:
-- ``nemotron-nas`` -- large graph, wide stable margin (~1.9-2.3x) -> 1.5x floor,
-  which also catches partial regressions that still leave Rust >1x.
+- ``nemotron-nas`` -- large graph, wide stable margin (~1.9-2.3x at the
+  e95ebf3 calibration) -> 1.5x floor originally. Recalibrated 2026-08-04 on
+  the dc4caca merge-base: the PYTHON engine-step got faster on this graph
+  (generation p50 ~119us -> ~112-116us; Rust unchanged at ~80us), so the
+  measured generation margin is now ~1.38-1.49x -> 1.3x floor, which still
+  catches partial regressions that leave Rust >1x.
 - the small (~20 us) graphs sit near the fixed-FFI-tax floor (~1.1-1.5x) -> 1.0x,
   the goal line: Rust must not lose to Python, with no sub-1 slack. These have
   the thinnest margin and are the most machine-dependent, so ``ITERATIONS`` is
@@ -51,7 +55,7 @@ ITERATIONS = 100
 # margin in ../docs/perf-speedup-report.md, discounted ~15% for runner variance and
 # clamped to 1.0.
 MIN_SPEEDUP = {
-    "nemotron-nas-49b": 1.5,
+    "nemotron-nas-49b": 1.3,
     "deepseek-v3": 1.0,
     "minimax-m25": 1.0,
 }

@@ -557,9 +557,104 @@ def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
     assert gen_spec["num_heads"] == 16
 
 
-# ---- Large-EP op graphs: deliberate Python fallback (spec section 4.8) ----
+# ---- Large-EP op graphs: native compilation (AIC-1601, PR 2.5) ----
 
 _SYSTEMS_DATA_ROOT = Path(__file__).resolve().parents[3] / "aic-core/src/aiconfigurator_core/systems/data"
+
+
+def test_large_ep_opspec_key_sets_match_the_rust_structs():
+    """Tripwire against silent-default drift. The Rust crate does NOT set
+    ``deny_unknown_fields``: a misspelled key in an emitted opspec dict would
+    silently fall back to the struct's ``#[serde(default)]`` value with no
+    error anywhere. The emitted key sets must therefore EQUAL the Rust struct
+    field sets exactly — source of truth:
+    ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
+    ``rust/aiconfigurator-core/src/operators/ep_moe.rs::EpMoeOp``."""
+    from aiconfigurator.sdk.engine import _to_opspec
+    from aiconfigurator.sdk.operations import EPMoE, MoEAllToAll
+
+    a2a = MoEAllToAll(
+        "context_moe_dispatch",
+        58.0,
+        phase="dispatch",
+        comm_backend="deepep_ht",
+        comm_dtype="default",
+        hidden_size=7168,
+        topk=8,
+        num_experts=256,
+        moe_ep_size=32,
+        node_num=4,
+        sms=20,
+        attention_tp_size=1,
+    )
+    a2a_spec = _to_opspec(a2a, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    assert set(a2a_spec) == {"MoeAllToAll"}
+    # rust `MoeAllToAllOp` fields (operators/moe_a2a.rs), verbatim.
+    assert frozenset(a2a_spec["MoeAllToAll"]) == frozenset(
+        {
+            "name",
+            "scale_factor",
+            "phase",
+            "comm_backend",
+            "comm_dtype",
+            "hidden_size",
+            "topk",
+            "num_experts",
+            "moe_ep_size",
+            "node_num",
+            "sms",
+            "attention_tp_size",
+        }
+    )
+
+    ep = EPMoE(
+        "context_moe",
+        58.0,
+        hidden_size=7168,
+        inter_size=2048,
+        topk=8,
+        num_experts=256,
+        moe_ep_size=32,
+        quant_mode=common.MoEQuantMode.fp8_block,
+        workload_distribution="power_law_1.01",
+        attention_dp_size=32,
+        inference_phase="context",
+        num_slots=None,
+        kernel_source=None,
+        is_gated=True,
+        enable_eplb=True,
+    )
+    ep_spec = _to_opspec(ep, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    assert set(ep_spec) == {"EpMoe"}
+    # rust `EpMoeOp` fields (operators/ep_moe.rs), verbatim.
+    assert frozenset(ep_spec["EpMoe"]) == frozenset(
+        {
+            "name",
+            "scale_factor",
+            "hidden_size",
+            "inter_size",
+            "topk",
+            "num_experts",
+            "moe_ep_size",
+            "quant_mode",
+            "workload_distribution",
+            "attention_dp_size",
+            "inference_phase",
+            "num_slots",
+            "kernel_source",
+            "is_gated",
+            "enable_eplb",
+        }
+    )
+    # Wire formats the Rust serde impls expect: quant_mode is the snake_case
+    # ``MoEQuantMode`` member name; an unpinned kernel_source crosses as null
+    # (the Rust op ports all five auto-resolution legs and resolves at query
+    # time); the Python ctor already resolved num_slots=None -> num_experts.
+    fields = ep_spec["EpMoe"]
+    assert fields["quant_mode"] == "fp8_block"
+    assert fields["kernel_source"] is None
+    assert fields["num_slots"] == 256
+    assert fields["is_gated"] is True and fields["enable_eplb"] is True
 
 
 def _h200_sglang_wideep_paths() -> list[str]:
@@ -582,22 +677,20 @@ def _h200_sglang_wideep_paths() -> list[str]:
     not all(os.path.exists(p) for p in _h200_sglang_wideep_paths()),
     reason="shipped h200_sxm sglang wideEP parquets not present",
 )
-def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
-    """Spec section 4.8: the large-EP ops (MoEAllToAll / EPMoE) have no
-    ``_to_opspec`` branch yet -- the Rust mirror is deliberately deferred to
-    AIC-1601 (PR 2.5). Until it lands, a large-EP model routed at the Rust
-    engine must fail compilation with ``OpConversionError`` (surfaced as
-    ``RustEngineUnsupportedError``) and the ``base_backend`` gates must fall
-    back to the Python step, returning finite latencies -- large-EP configs
-    are degraded to the slower step, never dropped or crashed."""
+def test_large_ep_op_graph_compiles_natively(caplog):
+    """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / EPMoE) now have
+    ``_to_opspec`` branches and Rust mirrors, so a large-EP model compiles
+    into the Rust engine natively — the documented Python-step fallback this
+    test used to pin is retired. A rust-routed static run must answer with
+    the scalar engine-step keys and match the Python step on the same
+    config."""
     import logging
     import math
 
     from aiconfigurator.sdk.backends.factory import get_backend
-    from aiconfigurator.sdk.engine import OpConversionError, build_engine_spec_json
+    from aiconfigurator.sdk.engine import build_engine_spec_json
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import get_database
-    from aiconfigurator.sdk.rust_engine_step import RustEngineUnsupportedError
 
     # A shipped-data large-EP config: DeepSeek-R1 EP32 on h200/sglang, the
     # per-phase comm backends + node width the enumerator would set, and the
@@ -618,9 +711,9 @@ def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
     database = get_database("h200_sxm", "sglang", "0.5.6.post2")
 
-    # (1) The op graph is not expressible as a compiled EngineSpec: the walk
-    # dies on the first large-EP op with the op-conversion error.
-    with pytest.raises(OpConversionError, match=r"MoEAllToAll|EPMoE"):
+    # (1) The op graph compiles into an EngineSpec carrying the tagged
+    # large-EP variants, with the per-phase comm backends the config set.
+    spec = json.loads(
         build_engine_spec_json(
             model,
             model_path="deepseek-ai/DeepSeek-R1",
@@ -632,30 +725,51 @@ def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
             nextn=0,
             database=database,
         )
+    )
+    for phase_ops, comm_backend in ((spec["context_ops"], "deepep_ht"), (spec["generation_ops"], "deepep_ll")):
+        a2a_fields = [op["MoeAllToAll"] for op in phase_ops if "MoeAllToAll" in op]
+        ep_fields = [op["EpMoe"] for op in phase_ops if "EpMoe" in op]
+        assert a2a_fields and ep_fields, "the compiled spec must carry the large-EP variants"
+        assert {fields["comm_backend"] for fields in a2a_fields} == {comm_backend}
+        # Production graphs never pin a kernel: it crosses as null and the
+        # Rust op auto-resolves per backend at query time.
+        assert all(fields["kernel_source"] is None for fields in ep_fields)
 
     rust_engine_step._engine_handle_cache_clear()
     try:
-        # (2) The engine-step wrapper surfaces it as the typed unsupported error.
-        with pytest.raises(RustEngineUnsupportedError, match=r"MoEAllToAll|EPMoE"):
-            rust_engine_step._cached_engine_handle(model, database)
+        # (2) The engine-step wrapper compiles a live handle — no
+        # RustEngineUnsupportedError.
+        assert rust_engine_step._cached_engine_handle(model, database) is not None
 
-        # (3) End to end through the backend gate: a rust-routed run_static
-        # falls back to the Python step and produces finite per-op latencies.
+        # (3) End to end through the backend gate: the rust-routed run_static
+        # answers natively — no python-step fallback warning, and the
+        # breakdown is the scalar engine-step totals, not per-op keys.
         backend = get_backend("sglang")
         runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="rust")
         with caplog.at_level(logging.WARNING):
             summary = backend.run_static(model, database, runtime_config, mode="static", stride=32)
-        assert any("using the python step" in record.message for record in caplog.records)
+        assert not any("using the python step" in record.message for record in caplog.records)
 
         context_latency = summary.get_context_latency_dict()
         generation_latency = summary.get_generation_latency_dict()
-        assert context_latency and generation_latency
-        # Python-step breakdowns are per-op; the single scalar key would mean
-        # the rust step answered after all.
-        assert "rust_engine_step_context" not in context_latency
-        assert "context_moe_dispatch" in context_latency  # the large-EP A2A op priced by Python
-        for name, value in {**context_latency, **generation_latency}.items():
-            assert math.isfinite(value) and value >= 0.0, name
+        assert set(context_latency) == {"rust_engine_step_context"}
+        assert set(generation_latency) == {"rust_engine_step_generation"}
+        rust_context = context_latency["rust_engine_step_context"]
+        rust_generation = generation_latency["rust_engine_step_generation"]
+        assert math.isfinite(rust_context) and rust_context > 0.0
+        assert math.isfinite(rust_generation) and rust_generation > 0.0
+
+        # (4) Parity with the Python step on the same config at rel <= 0.01
+        # (the PR 2.5 bar; the per-op oracles hold 1e-9, so this graph-level
+        # comparison has plenty of headroom).
+        python_runtime_config = RuntimeConfig(
+            batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="python"
+        )
+        python_summary = backend.run_static(model, database, python_runtime_config, mode="static", stride=32)
+        python_context = sum(python_summary.get_context_latency_dict().values())
+        python_generation = sum(python_summary.get_generation_latency_dict().values())
+        assert rust_context == pytest.approx(python_context, rel=0.01)
+        assert rust_generation == pytest.approx(python_generation, rel=0.01)
     finally:
         rust_engine_step._engine_handle_cache_clear()
 

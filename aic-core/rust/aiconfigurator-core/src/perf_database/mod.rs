@@ -8,7 +8,7 @@
 //! paths and parses the system YAML; each table's parquet data is read on first
 //! query via `OnceLock`. Submodules cover the full op-family set: gemm,
 //! attention, mla, dsa, dsv4, mhc, moe, communication, state-space, and
-//! the WideEP/DeepEP all-to-all variants.
+//! the TRT-LLM all-to-all table.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -158,12 +158,13 @@ mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+pub mod moe_a2a;
+pub mod moe_ep;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
-pub mod wideep;
+pub mod trtllm_alltoall;
 pub mod wideep_mla;
-pub mod wideep_moe;
 
 pub use attention::AttentionTable;
 pub use communication::CommunicationTable;
@@ -174,10 +175,11 @@ pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
+pub use moe_a2a::MoeA2aTable;
+pub use moe_ep::MoeEpTable;
 pub use state_space::StateSpaceTable;
-pub use wideep::WideEpTable;
+pub use trtllm_alltoall::TrtllmAlltoallTable;
 pub use wideep_mla::WideEpMlaTable;
-pub use wideep_moe::WideEpMoeTable;
 
 /// The loaded per-family perf tables for one caller-facing
 /// `<system>/<backend>/<version>` tuple — the mode-independent,
@@ -193,14 +195,15 @@ pub struct PerfTables {
     pub attention: AttentionTable,
     pub mla: MlaTable,
     pub moe: MoeTable,
+    pub moe_a2a: MoeA2aTable,
+    pub moe_ep: MoeEpTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
     pub dsv4: Dsv4Table,
     pub dsv4_megamoe: Dsv4MegaMoeTable,
     pub mhc: MhcTable,
-    pub wideep: WideEpTable,
+    pub trtllm_alltoall: TrtllmAlltoallTable,
     pub wideep_mla: WideEpMlaTable,
-    pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
 }
 
@@ -332,6 +335,8 @@ impl PerfDatabase {
             attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
+            moe_a2a: MoeA2aTable::with_sources(data_root.clone(), perf_db_sources),
+            moe_ep: MoeEpTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
                 nccl_root,
@@ -345,9 +350,8 @@ impl PerfDatabase {
             // `dsv4_megamoe.rs`).
             dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
+            trtllm_alltoall: TrtllmAlltoallTable::with_sources(data_root.clone(), perf_db_sources),
             wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
-            wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
             state_space: StateSpaceTable::with_sources(
                 data_root.clone(),
                 backend,

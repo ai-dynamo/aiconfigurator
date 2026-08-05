@@ -103,11 +103,13 @@ def register_moe_block(family: str = "*", framework: str = "*", system: str = "*
     The decorated function is called as ``fn(default, **ctx)`` where
     ``default`` is a zero-argument continuation returning a fresh copy of the
     generic pipeline's ops (compose with it rather than reimplementing) and
-    ``ctx`` carries the full :func:`build_moe_block_ops` parameter set:
+    ``ctx`` carries the :func:`build_moe_block_ops` parameter set:
     ``prefix``/``shape``/``cfg``/``quant_mode``/``workload_distribution``/
     ``scale_factor``/``backend_name``/``inference_phase``/``model_family``/
-    ``attn_cp_size``/``gpus_per_node``/``shared_gemm_quant_mode``. It must
-    return the block's op list.
+    ``attn_cp_size``/``gpus_per_node``/``shared_gemm_quant_mode``
+    (``dispatch_quant_mode`` deliberately rides the ``default`` continuation
+    instead — the ctx key set is a pinned contract). It must return the
+    block's op list.
 
     Raises:
         ValueError: On a duplicate ``(family, framework, system)`` key — a
@@ -161,6 +163,12 @@ def _select_moe_block_variant(family: str | None, framework: str | None, system:
 # Generic MoE-block builder
 # ---------------------------------------------------------------------------
 
+#: Default for ``build_moe_block_ops(dispatch_quant_mode=...)``: forward the
+#: block's ``quant_mode`` to the fused MoEDispatch ops (what every legacy fused
+#: site does). A distinct sentinel rather than ``None`` because ``None`` is a
+#: meaningful override — the hybrid family's dispatches are quant-agnostic.
+_DISPATCH_QUANT_FORWARD = object()
+
 
 def build_moe_block_ops(
     prefix: str,  # "context" | "generation"
@@ -174,8 +182,9 @@ def build_moe_block_ops(
     inference_phase: str,  # "context" | "generation"
     model_family: str = "*",  # registry family axis; "*" matches only wildcard registrations
     attn_cp_size: int = 1,
-    gpus_per_node: int = 8,
+    gpus_per_node: int | None = None,  # node width (hardware fact) — required by the large-EP emission
     shared_gemm_quant_mode=None,  # common.GEMMQuantMode | None
+    dispatch_quant_mode=_DISPATCH_QUANT_FORWARD,  # common.MoEQuantMode | None; unset forwards ``quant_mode``
 ) -> list:
     """Build the MoE-block op list: router, shared experts, dispatch/compute/combine.
 
@@ -184,12 +193,24 @@ def build_moe_block_ops(
     layers, not the 58 MoE-true ``shape.num_moe_layers``) and gate parity
     depends on passing that legacy value through unchanged.
 
+    ``gpus_per_node`` has no default: the node width is a hardware fact, and a
+    guessed value would silently mis-price cross-node all-to-all, so the
+    large-EP branch raises when a comm backend fires without it (the fused
+    path never reads it — fused-only callers may omit it).
+
     ``shared_gemm_quant_mode`` overrides ``cfg.gemm_quant_mode`` for the
     shared-expert GEMMs only (``None`` keeps them on the model-wide mode).
     Checkpoints may exclude the shared experts from quantization while the
     routed experts stay quantized — e.g. ``nvidia/GLM-5.2-NVFP4`` ignores
     every ``mlp.shared_experts*`` module, which the DeepSeekV32 family reads
     into ``extra_params["dsa_shared_expert_quant_mode"]``.
+
+    ``dispatch_quant_mode`` overrides the quant mode of the FUSED path's
+    MoEDispatch ops only; when unset they forward ``quant_mode``. ``None`` is
+    a meaningful override (quant-agnostic dispatches — the hybrid family's
+    legacy spans never carried one), hence the non-``None`` sentinel default.
+    The large-EP branch keys its comm dtypes off ``quant_mode`` and ignores
+    this parameter.
 
     Dispatches to a :func:`register_moe_block` variant when one matches
     ``(model_family, backend_name, system)``; the system query value is read
@@ -216,7 +237,9 @@ def build_moe_block_ops(
     }
 
     def default() -> list:
-        return _default_moe_block_ops(**ctx)
+        # ``dispatch_quant_mode`` rides the continuation, NOT ctx: the ctx key
+        # set is a pinned variant contract (test_variant_receives_full_ctx).
+        return _default_moe_block_ops(dispatch_quant_mode=dispatch_quant_mode, **ctx)
 
     variant = _select_moe_block_variant(
         family=model_family,
@@ -239,8 +262,9 @@ def _default_moe_block_ops(
     inference_phase: str,
     model_family: str,
     attn_cp_size: int,
-    gpus_per_node: int,
+    gpus_per_node: int | None,
     shared_gemm_quant_mode=None,
+    dispatch_quant_mode=_DISPATCH_QUANT_FORWARD,
 ) -> list:
     """The generic pipeline: verbatim transcription of the legacy fused sites.
 
@@ -254,9 +278,10 @@ def _default_moe_block_ops(
 
     # Large-EP branch: a per-phase comm backend on cfg selects the
     # MoEAllToAll + EPMoE emission (with its own shared-expert flavor).
-    # ``moe_comm_backend`` (dict[str, str] | None) does not exist on
-    # ModelConfig yet — hence getattr; absent/uncovered phase means the fused
-    # path below.
+    # ``moe_comm_backend`` (dict[str, str] | None) is read with getattr on
+    # purpose: the builder duck-types ``cfg`` (same contract as the optional
+    # ``cfg.system`` registry axis), so lightweight config doubles without the
+    # attribute keep working; absent/uncovered phase means the fused path below.
     comm_backend = (getattr(cfg, "moe_comm_backend", None) or {}).get(inference_phase)
     if comm_backend:
         return _large_ep_block_ops(
@@ -327,7 +352,11 @@ def _default_moe_block_ops(
 
     # Fused/small-EP path: dispatch tokens to experts, moe calc and get tokens
     # back. Transcribed from MOEModel.__init__ (models/moe.py:195-237 context,
-    # :285-325 generation) — argument lists value-identical.
+    # :285-325 generation) — argument lists value-identical. The dispatches
+    # forward the block quant mode unless the caller overrode it (``None`` =
+    # quant-agnostic, the hybrid family's legacy dispatch flavor).
+    if dispatch_quant_mode is _DISPATCH_QUANT_FORWARD:
+        dispatch_quant_mode = quant_mode
     block_ops.extend(
         [
             ops.MoEDispatch(
@@ -340,7 +369,7 @@ def _default_moe_block_ops(
                 cfg.moe_ep_size,
                 cfg.attention_dp_size,
                 True,
-                quant_mode=quant_mode,
+                quant_mode=dispatch_quant_mode,
                 **dispatch_cp_kwargs,
             ),
             ops.MoE(
@@ -366,7 +395,7 @@ def _default_moe_block_ops(
                 cfg.moe_ep_size,
                 cfg.attention_dp_size,
                 False,
-                quant_mode=quant_mode,
+                quant_mode=dispatch_quant_mode,
                 **dispatch_cp_kwargs,
             ),
         ]
@@ -486,7 +515,7 @@ def _large_ep_block_ops(
     backend_name: str,
     inference_phase: str,
     attn_cp_size: int,
-    gpus_per_node: int,
+    gpus_per_node: int | None,
     shared_gemm_quant_mode=None,
 ) -> list:
     """Large-EP branch: router + shared experts + A2A dispatch/EPMoE/combine.
@@ -513,6 +542,12 @@ def _large_ep_block_ops(
       in generation, the routed/shared OverlapOp (deepseek.py:1014-1020);
       shared-less shapes stay flat with neither.
     """
+    if gpus_per_node is None:
+        raise ValueError(
+            f"moe_comm_backend {comm_backend!r} selected the large-EP emission but gpus_per_node "
+            "was not provided — the node width is a hardware fact with no safe default (a guessed "
+            "value silently mis-prices cross-node all-to-all; see models.helpers.large_ep_gpus_per_node)"
+        )
     is_context = inference_phase == "context"
     seq_split_kwargs = {"seq_split": attn_cp_size} if is_context else {}
     is_deepep = comm_backend.startswith("deepep")
