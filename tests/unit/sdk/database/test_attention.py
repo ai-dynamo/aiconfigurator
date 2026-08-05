@@ -437,19 +437,37 @@ def test_default_database_mode(mutable_comprehensive_perf_db):
     assert sol_result != non_sol_result
 
 
-def test_sol_full_mode_is_retired(mutable_comprehensive_perf_db):
-    """DatabaseMode.SOL_FULL survives as an enum member (public surface) but can
-    never become the active mode: every mode-entry choke point raises."""
+def test_sol_full_is_per_call_diagnostic_never_default_mode(mutable_comprehensive_perf_db):
+    """DatabaseMode.SOL_FULL is a per-call diagnostic (the sanity notebook
+    unpacks its raw 3-tuple) but can never become the active mode: every
+    mode-entry choke point raises."""
     from aiconfigurator_core.sdk.perf_database import _normalize_database_mode
 
     db = mutable_comprehensive_perf_db
-    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
         db.set_default_database_mode(common.DatabaseMode.SOL_FULL)
     # The refused mode must not stick.
     assert db.get_default_database_mode() == common.DatabaseMode.SILICON
 
     # The get_database / get_database_view string+enum normalizer refuses too.
-    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
         _normalize_database_mode("SOL_FULL")
-    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
         _normalize_database_mode(common.DatabaseMode.SOL_FULL)
+
+    # The per-call diagnostic contract stays: a raw (sol, sol_math, sol_mem)
+    # tuple, unpackable exactly as tools/sanity_check/validate_database.ipynb
+    # consumes it.
+    sol_time, sol_math, sol_mem = db.query_mem_op(1 << 20, database_mode=common.DatabaseMode.SOL_FULL)
+    assert sol_time == pytest.approx(max(sol_math, sol_mem))
+    result = db.query_context_attention(
+        b=1,
+        s=128,
+        n=16,
+        n_kv=16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        database_mode=common.DatabaseMode.SOL_FULL,
+        prefix=0,
+    )
+    assert isinstance(result, tuple) and len(result) == 3

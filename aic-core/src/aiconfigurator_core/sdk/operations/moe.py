@@ -586,6 +586,18 @@ class MoE(Operation):
                 workload_distribution,
             )[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 num_tokens,
@@ -1017,6 +1029,8 @@ class MoEDispatch(Operation):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(num_tokens, topk, num_experts)[0], energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(num_tokens, topk, num_experts)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
@@ -1078,6 +1092,8 @@ class MoEDispatch(Operation):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(num_tokens, num_experts, topk, hidden_size)[0], energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(num_tokens, num_experts, topk, hidden_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
@@ -1770,6 +1786,19 @@ class TrtLLMWideEPMoE(Operation):
                 workload_distribution,
             )[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+                quant_mode,
+                workload_distribution,
+            )
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical_from_sol(
                 num_tokens,
@@ -2235,6 +2264,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
         )
 
         if kernel_source == "NotEnabled":
+            if database_mode == common.DatabaseMode.SOL_FULL:
+                return (0.0, 0.0, 0.0)
             source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
             return PerformanceResult(0.0, energy=0.0, source=source)
 
@@ -2249,6 +2280,16 @@ class TrtLLMWideEPMoEDispatch(Operation):
                 node_num,
             )[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(
+                num_tokens,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+                quant_mode,
+                node_num,
+            )
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical_from_sol(
                 num_tokens,

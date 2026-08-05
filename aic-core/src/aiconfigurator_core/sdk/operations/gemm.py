@@ -565,6 +565,8 @@ class GEMM(Operation):
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, n, k, quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, n, k, quant_mode), energy=0.0, source="empirical")
 
@@ -670,6 +672,8 @@ class GEMM(Operation):
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
 
@@ -760,6 +764,8 @@ class GEMM(Operation):
 
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(m, k)[0], energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(m, k)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(m, k), energy=0.0, source="empirical")
 

@@ -31,12 +31,17 @@ of the former gaps:
   fallback.) The VL encoder phase likewise: shape math stays Python, per-op
   values come from `evaluate_ops_json` (encoder ops are deliberately NOT in
   the compiled spec).
-- **SOL is ported; SOL_FULL is retired (PR-2).** The compiled engine
-  dispatches `DatabaseMode::Sol` per family in front of the already-ported
-  SOL formulas; `_RUST_SUPPORTED_DATABASE_MODES` includes SOL, emptying the
-  gate's mode-based delegation. SOL_FULL (CLI-unreachable, raw-tuple debug
-  mode) raises a retirement error at mode entry; its enum member stays for
-  source compatibility.
+- **SOL is ported; SOL_FULL is a Python-side per-call diagnostic (PR-2).**
+  The compiled engine dispatches `DatabaseMode::Sol` per family in front of
+  the already-ported SOL formulas; `_RUST_SUPPORTED_DATABASE_MODES` includes
+  SOL, emptying the gate's mode-based delegation. SOL_FULL is declared a
+  permanently Python-side PER-CALL diagnostic (#1357's alternative
+  disposition): `query_*(..., database_mode=SOL_FULL)` keeps returning the
+  raw `(sol_time, sol_math, sol_mem)` tuple the sanity-check notebook
+  plots, while mode entry rejects it as a DEFAULT mode (it has never worked
+  there — the phase runners cannot consume a bare tuple). The per-call
+  branches are engine-step-dead and delete together with `query()` in PR-3,
+  which must also decide the sanity notebook's replacement oracle.
 
 ## Revised PR sequence (2026-08-01) — supersedes the P0–P4 table below
 

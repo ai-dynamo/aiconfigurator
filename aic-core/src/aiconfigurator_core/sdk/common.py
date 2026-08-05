@@ -969,9 +969,10 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    # RETIRED: the raw (sol_time, sol_math, sol_mem) debug tuples were removed
-    # with the Rust SOL port. The member remains for source compatibility, but
-    # selecting it raises ValueError at mode entry (perf_database).
+    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
+    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
+    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
+    # database's DEFAULT mode — mode entry raises (perf_database).
     SOL_FULL = 4
 
 

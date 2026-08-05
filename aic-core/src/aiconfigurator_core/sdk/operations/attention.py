@@ -466,6 +466,8 @@ class ContextAttention(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(
                 b, s, prefix, n, n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode
@@ -850,6 +852,8 @@ class GenerationAttention(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, n, n_kv, head_size, window_size, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -1090,6 +1094,8 @@ class EncoderAttention(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, n, head_size, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, n, head_size, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, n, head_size, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")

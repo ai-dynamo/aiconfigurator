@@ -667,6 +667,8 @@ class ContextDSAModule(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -1364,6 +1366,8 @@ class GenerationDSAModule(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
+        elif database_mode == common.DatabaseMode.SOL_FULL:
+            return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
