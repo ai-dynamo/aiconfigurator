@@ -18,6 +18,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use quick_cache::sync::{Cache, DefaultLifecycle};
+use quick_cache::{DefaultHashBuilder, OptionsBuilder, UnitWeighter};
+
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use super::{kernel_source_ok, resolve_op_sources};
@@ -26,6 +32,41 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
+
+const GEMM_QUERY_CACHE_CAPACITY: usize = 32_768;
+// Keep construction and per-table memory independent of large host CPU counts.
+const GEMM_QUERY_CACHE_SHARDS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct GemmQueryKey {
+    quant: GemmQuantMode,
+    m: u32,
+    n: u32,
+    k: u32,
+}
+
+fn gemm_query_cache(capacity: usize) -> Cache<GemmQueryKey, f64> {
+    let options = OptionsBuilder::new()
+        .estimated_items_capacity(capacity)
+        .weight_capacity(capacity as u64)
+        .shards(GEMM_QUERY_CACHE_SHARDS)
+        .build()
+        .expect("valid static GEMM query cache options");
+    Cache::with_options(
+        options,
+        UnitWeighter,
+        DefaultHashBuilder::default(),
+        DefaultLifecycle::default(),
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GemmQueryCacheStats {
+    hits: usize,
+    misses: usize,
+    entries: usize,
+}
 
 /// GEMM-family perf-data owner for one logical
 /// `<system>/<backend>/<version>` selection.
@@ -51,6 +92,11 @@ pub struct GemmTable {
     gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
+    query_cache: OnceLock<Cache<GemmQueryKey, f64>>,
+    #[cfg(test)]
+    query_cache_hits: AtomicUsize,
+    #[cfg(test)]
+    query_cache_misses: AtomicUsize,
 }
 
 /// 3-D GEMM tables keyed by quant name -> m -> n -> k -> latency_ms.
@@ -104,6 +150,11 @@ impl GemmTable {
             gemm: OnceLock::new(),
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
+            query_cache: OnceLock::new(),
+            #[cfg(test)]
+            query_cache_hits: AtomicUsize::new(0),
+            #[cfg(test)]
+            query_cache_misses: AtomicUsize::new(0),
         }
     }
 
@@ -126,6 +177,23 @@ impl GemmTable {
         // data miss when the quant's table also happens to be uncollected.
         let spec = &self.system_spec;
         let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        let key = GemmQueryKey {
+            quant: lookup_quant,
+            m,
+            n,
+            k,
+        };
+        let cache = self
+            .query_cache
+            .get_or_init(|| gemm_query_cache(GEMM_QUERY_CACHE_CAPACITY));
+        if let Some(value) = cache.get(&key) {
+            #[cfg(test)]
+            self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(value);
+        }
+        #[cfg(test)]
+        self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
+
         let grids = self.load_gemm()?;
         let quant_name = lookup_quant.name();
         let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
@@ -139,7 +207,11 @@ impl GemmTable {
             gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
         };
         let cfg = gemm_engine_config(&sol);
-        index.resolve(&cfg, &[m as f64, n as f64, k as f64])
+        let value = index.resolve(&cfg, &[m as f64, n as f64, k as f64])?;
+        if value.is_finite() {
+            cache.insert(key, value);
+        }
+        Ok(value)
     }
 
     /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
@@ -297,6 +369,16 @@ impl GemmTable {
             .scale_matrix
             .get_or_init(|| load_two_d_parquet(&self.scale_matrix_sources));
         cell.as_ref().map_err(|err| clone_err(err))
+    }
+
+    #[cfg(test)]
+    fn query_cache_stats(&self) -> GemmQueryCacheStats {
+        let entries = self.query_cache.get().map_or(0, Cache::len);
+        GemmQueryCacheStats {
+            hits: self.query_cache_hits.load(Ordering::Relaxed),
+            misses: self.query_cache_misses.load(Ordering::Relaxed),
+            entries,
+        }
     }
 }
 
@@ -725,6 +807,126 @@ mod tests {
         let first = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         let second = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn gemm_query_cache_is_bit_identical_for_all_resolution_classes() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        let cases = [
+            (256, 32, 32),
+            (259, 32, 32),
+            (10_000_000, 32, 32),
+            (256, 128, 96),
+        ];
+
+        for (m, n, k) in cases {
+            let uncached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
+            let cached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
+            assert_eq!(
+                cached.to_bits(),
+                uncached.to_bits(),
+                "cache changed ({m},{n},{k})"
+            );
+        }
+
+        assert_eq!(
+            table.query_cache_stats(),
+            GemmQueryCacheStats {
+                hits: cases.len(),
+                misses: cases.len(),
+                entries: cases.len(),
+            }
+        );
+    }
+
+    #[test]
+    fn gemm_query_cache_normalizes_quant_and_separates_shape_fields() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+
+        let fp8 = table.query(GemmQuantMode::Fp8, 256, 32, 32).unwrap();
+        let fp8_static = table.query(GemmQuantMode::Fp8Static, 256, 32, 32).unwrap();
+        assert_eq!(fp8.to_bits(), fp8_static.to_bits());
+        assert_eq!(table.query_cache_stats().entries, 1);
+        assert_eq!(table.query_cache_stats().hits, 1);
+
+        for (quant, m, n, k) in [
+            (GemmQuantMode::Bfloat16, 256, 32, 32),
+            (GemmQuantMode::Bfloat16, 257, 32, 32),
+            (GemmQuantMode::Bfloat16, 256, 64, 32),
+            (GemmQuantMode::Bfloat16, 256, 32, 64),
+        ] {
+            table.query(quant, m, n, k).unwrap();
+        }
+        assert_eq!(table.query_cache_stats().entries, 5);
+    }
+
+    #[test]
+    fn gemm_query_errors_never_enter_the_cache() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        for _ in 0..2 {
+            assert!(table
+                .query(GemmQuantMode::Int4Wo, 1024, 4096, 4096)
+                .is_err());
+        }
+        assert_eq!(
+            table.query_cache_stats(),
+            GemmQueryCacheStats {
+                hits: 0,
+                misses: 2,
+                entries: 0,
+            }
+        );
+
+        let missing = GemmTable::new(PathBuf::from("/nonexistent/aic/data/root"), b200_sxm_spec());
+        for _ in 0..2 {
+            assert!(missing.query(GemmQuantMode::Bfloat16, 1, 1, 1).is_err());
+        }
+        assert_eq!(missing.query_cache_stats().entries, 0);
+    }
+
+    #[test]
+    fn gemm_query_cache_is_bounded() {
+        let cache = gemm_query_cache(2);
+        let key = |m| GemmQueryKey {
+            quant: GemmQuantMode::Bfloat16,
+            m,
+            n: 32,
+            k: 32,
+        };
+
+        cache.insert(key(1), 1.0);
+        cache.insert(key(2), 2.0);
+        cache.insert(key(3), 3.0);
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn gemm_query_cache_allows_concurrent_duplicate_misses() {
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 4;
+        let table = Arc::new(GemmTable::new(b200_vllm_data_root(), b200_sxm_spec()));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let table = Arc::clone(&table);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    table.query(GemmQuantMode::Bfloat16, 259, 32, 32).unwrap()
+                })
+            })
+            .collect();
+        let values: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(values
+            .windows(2)
+            .all(|pair| pair[0].to_bits() == pair[1].to_bits()));
+        assert_eq!(table.query_cache_stats().entries, 1);
     }
 
     /// Values generated from the Python v2 engine on the same table
