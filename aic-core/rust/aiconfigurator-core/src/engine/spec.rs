@@ -161,7 +161,7 @@ mod tests {
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
         Dsv4ModuleOp,
         ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-        GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+        GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
         NcclOp, P2POp, TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp,
         WideEpGenerationMlaOp, WideEpMoeOp,
     };
@@ -504,6 +504,22 @@ mod tests {
         }
     }
 
+    fn kda() -> KdaOp {
+        KdaOp {
+            name: "kda".into(),
+            scale_factor: 1.0,
+            kernel_source: "fused_sigmoid_gating_delta_rule_update".into(),
+            phase: "verify".into(),
+            d_model: 7168,
+            d_conv: 4,
+            num_k_heads: 16,
+            head_k_dim: 128,
+            num_v_heads: 16,
+            head_v_dim: 128,
+            draft_tokens: 4,
+        }
+    }
+
     fn wideep_context_mla() -> WideEpContextMlaOp {
         WideEpContextMlaOp {
             name: "wideep_context_mla".into(),
@@ -624,6 +640,8 @@ mod tests {
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
+            // Appended at the very end (schema_version 5: Kda variant).
+            OpSpec::Kda(kda()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -662,7 +680,8 @@ mod tests {
                 | OpSpec::WideEpMoeDispatch(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
-                | OpSpec::Dsv4MegaMoe(_) => {}
+                | OpSpec::Dsv4MegaMoe(_)
+                | OpSpec::Kda(_) => {}
             }
         }
         ops

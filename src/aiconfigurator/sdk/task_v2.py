@@ -43,6 +43,7 @@ from aiconfigurator.sdk.models import (
     check_is_moe,
     get_model_family,
     resolve_dsv4_moe_arch_mode,
+    resolve_kimi_k3_moe_arch_mode,
 )
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
@@ -871,6 +872,13 @@ class Task:
                     "nextn='auto': modeling MTP with nextn=%d from the checkpoint's num_nextn_predict_layers.",
                     resolved,
                 )
+            elif self._architecture in common.DSPARK_ARCHITECTURES:
+                logger.info(
+                    "nextn='auto' cannot resolve a DSPARK block size (the draft is a "
+                    "standalone model, not checkpoint MTP layers); modeling WITHOUT "
+                    "speculative decoding. Pass an explicit nextn (block size, e.g. 7) "
+                    "and nextn_accepted to model DSPARK."
+                )
             else:
                 logger.info(
                     "nextn='auto': checkpoint ships no MTP layers (num_nextn_predict_layers absent or 0); "
@@ -879,7 +887,15 @@ class Task:
             self.nextn = resolved
         if self.nextn > 0:
             # Range/required-ness already validated in __post_init__ (validate_nextn).
-            if hf_nextn is not None and self.nextn != hf_nextn:
+            if self._architecture in common.DSPARK_ARCHITECTURES:
+                logger.info(
+                    "nextn=%d is the DSPARK speculative block size (draft tokens per "
+                    "step, served by a standalone trained draft model); the "
+                    "checkpoint's num_nextn_predict_layers does not apply to this "
+                    "architecture.",
+                    self.nextn,
+                )
+            elif hf_nextn is not None and self.nextn != hf_nextn:
                 logger.warning(
                     "nextn=%d differs from the checkpoint's num_nextn_predict_layers=%d "
                     "(the single MTP module is reused for extra draft steps).",
@@ -959,6 +975,12 @@ class Task:
                         self._role_attr(role, "backend_name"),
                         self.moe_backend,
                     )
+                    if arch_mode is None:
+                        arch_mode = resolve_kimi_k3_moe_arch_mode(
+                            self._role_attr(role, "model_path"),
+                            self._role_attr(role, "system_name"),
+                            self._role_attr(role, "backend_name"),
+                        )
                     if arch_mode is not None:
                         from_hf = arch_mode
                 fallback = _QUANT_FALLBACKS[key]

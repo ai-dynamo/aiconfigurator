@@ -187,13 +187,17 @@ def get_moe_test_cases():
     test_cases = []
     seen = set()
     consumer_key_owners = {}
+    quant_policy_drops = {}
+    models_with_cases = set()
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
 
         for moe_type in moe_list:
             if not moe_model_allows_quantization("trtllm", model_name, moe_type):
+                quant_policy_drops[model_name] = quant_policy_drops.get(model_name, 0) + 1
                 continue
+            models_with_cases.add(model_name)
 
             # Alignment constraints (w4afp8 %128, fp8_block 128x128 block
             # scales, the TLLM_CHECK weight-bits alignment) are enforced in
@@ -247,6 +251,16 @@ def get_moe_test_cases():
                         common_moe_testcase.power_law_alpha,
                     ]
                 )
+
+    # Zero-case expansions must be explainable from logged drops
+    # (case_authoring.md): name every planned model whose declared trtllm
+    # quant policy excluded all of its moe cases (mirrors the vllm getter).
+    fully_dropped = sorted(set(quant_policy_drops) - models_with_cases)
+    if fully_dropped:
+        print(
+            f"moe: dropped all cases for {len(fully_dropped)} model(s) by declared trtllm "
+            f"quantization policy (allowed_modes): {', '.join(fully_dropped)}"
+        )
 
     # Try to optimize number of autotune cache hits by shuffling test cases.
     # This makes sure the same cache keys are far apart from each other.

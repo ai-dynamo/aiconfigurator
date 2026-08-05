@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang
+  image_digest: sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b
+tables:
+  kda_perf:
+    collector_ref: b9f8c47c598c189edda042cb6feba84a68f31249
+    collector_hash: sha256:0234fc1345ff0174df9c5c5d9e1809072d53305409db08c92e03f8686c2a8df8
+    case_plan_hash: sha256:a85d5a9691084f3e76986e676b8ee088c06ee22a3db5fcc023c432a8b00f56a2
+    collected_at: '2026-08-01'
+    rows: 1085
+    # collector_ref is the kda-sm-probe branch: PR head 72b6c0eeb plus only
+    # the registry unverified_sms lift (collector code identical). 52 context
+    # error cells = by-design int32 conv-guard raises; no other failures.
+    status: complete

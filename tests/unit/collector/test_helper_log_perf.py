@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import os
+import time
 
 import pytest
 
@@ -63,3 +65,51 @@ def test_log_perf_returns_false_and_releases_lock_on_fsync_failure(tmp_path, mon
 
     assert _log_perf(str(perf_path)) is False
     assert not lock_path.exists()
+
+
+def _make_stale_lock(lock_path):
+    lock_path.touch()
+    stale = time.time() - 120
+    os.utime(lock_path, (stale, stale))
+
+
+def test_log_perf_breaks_stale_lock_via_rename_and_writes(tmp_path, monkeypatch):
+    perf_path = tmp_path / "mla_perf.txt"
+    lock_path = tmp_path / "mla_perf.txt.lock"
+    _make_stale_lock(lock_path)
+    monkeypatch.setattr(helper.time, "sleep", lambda _seconds: None)
+
+    assert _log_perf(str(perf_path)) is True
+    assert perf_path.exists()
+    assert not lock_path.exists()
+    assert not list(tmp_path.glob("*.breaking-*"))
+
+
+def test_log_perf_losing_breaker_never_unlinks_the_fresh_lock(tmp_path, monkeypatch):
+    # Two-waiter break race: this waiter stats a stale lock, but by the time
+    # it breaks, a winner has already renamed the stale lock away and a
+    # sibling holds a FRESH lock at the same path. The loser's rename raises;
+    # it must retry against the fresh lock (and time out) — never unlink it.
+    # The retired unlink-based breaker failed exactly this: it removed the
+    # fresh lock and let two writers interleave appends.
+    perf_path = tmp_path / "mla_perf.txt"
+    lock_path = tmp_path / "mla_perf.txt.lock"
+    _make_stale_lock(lock_path)
+    monkeypatch.setattr(helper.time, "sleep", lambda _seconds: None)
+
+    state = {"raced": False}
+    real_rename = os.rename
+
+    def racing_rename(src, dst):
+        if not state["raced"]:
+            state["raced"] = True
+            os.unlink(src)  # the winning breaker took the stale lock...
+            lock_path.touch()  # ...and a sibling immediately re-acquired
+            raise FileNotFoundError(src)
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(helper.os, "rename", racing_rename)
+
+    assert _log_perf(str(perf_path)) is False
+    assert lock_path.exists()
+    assert not perf_path.exists()

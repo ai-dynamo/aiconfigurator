@@ -78,6 +78,7 @@ class SGLANGBackend(BaseBackend):
         "DEEPSEEKV32": {1: 28, 2: 17, 4: 13, 8: 13},
         "DEEPSEEKV4": {1: 28, 2: 17, 4: 13, 8: 13},
         "KIMIK25": {1: 28, 2: 17, 4: 13, 8: 13},
+        "KIMIK3": {1: 28, 2: 17, 4: 13, 8: 13},
         "default": {1: 13, 2: 8, 4: 6.5, 8: 6.5},
     }
     MIN_ACTIVATION_BYTES = 90 * 1024 * 1024  # higher floor than TRT-LLM's 70 MiB

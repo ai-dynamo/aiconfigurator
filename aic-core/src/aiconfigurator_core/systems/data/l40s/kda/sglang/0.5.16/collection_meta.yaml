@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang
+  image_digest: sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b
+tables:
+  kda_perf:
+    collector_ref: 39a950b248a40317e0cba88e73ec4b702ac8936c
+    collector_hash: sha256:fb71f4634b10bd3a001016d83360f890c78d9190f0f39967a7c9c3efa34d40bf
+    case_plan_hash: sha256:a85d5a9691084f3e76986e676b8ee088c06ee22a3db5fcc023c432a8b00f56a2
+    collected_at: '2026-08-01'
+    rows: 1074
+    # All 52 context error cells are the by-design int32 conv-guard raises.
+    #
+    # 2026-08-04 (review + owner decision): PRUNED the 22 twelve-head-shard
+    # GENERATION rows (causal_conv1d_update + fused_recurrent_kda_packed_
+    # decode, 11 each; 1096 -> 1074). They were collected through the
+    # collector's former SM>=90 gate, whose "same as serving after its own
+    # JIT failure" claim was falsified against the branch source @ c6ad1f26:
+    # serving stashes the fused args on every NVIDIA GPU
+    # (srt/models/kimi_k3.py:1563-1614), covered() has no SM check, and the
+    # backend calls the kernel with no try/except around the JIT load
+    # (srt/layers/attention/linear/kda_backend.py:426-476) — on SM89 decode
+    # CRASHES at ptxas rather than reaching the Triton pair, so those rows
+    # had no serving-truth backing. VERIFY-phase h12 rows STAY: the CuTeDSL
+    # verify kernel is dispatch-gated (get_device_capability()[0] != 10 ->
+    # False, kda_backend._can_run_dspark_cutedsl_mtp), so SM89 verify
+    # genuinely runs the Triton pair. Expected future behavior: l40s kda
+    # runs raise classified on the covered 12-head decode cells (generation
+    # strict-completeness fails) — the honest state. SDK note: h12 decode
+    # queries on this lane now resolve via the nearest-shard fallback (h24,
+    # unscaled — the known tp16/32-style fallback caveat) instead of the
+    # pruned rows.
+    status: complete
