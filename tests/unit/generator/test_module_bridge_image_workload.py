@@ -13,6 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 
@@ -45,6 +46,17 @@ def _task(
         num_images_per_request=num_images_per_request,
         enable_encoder_dp=enable_encoder_dp,
     )
+
+
+def test_epd_rows_fail_closed():
+    # The bridge does not map the dedicated encode pool ((a)/(e) columns);
+    # direct callers must get a loud error, not a contradicting config.
+    task = _task(image_height=1024, image_width=1024, num_images_per_request=1)
+    with pytest.raises(ValueError, match="encode pool"):
+        task_config_to_generator_config(task, pd.Series({"workers": 1, "tp": 1, "(e)workers": 2}))
+    task.enable_epd = True
+    with pytest.raises(ValueError, match="encode pool"):
+        task_config_to_generator_config(task, pd.Series({"workers": 1, "tp": 1}))
 
 
 def test_image_workload_populates_bench_config():

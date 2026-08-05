@@ -904,9 +904,22 @@ def _apply_power_coverage_gate(summary, result_dict: dict) -> dict:
     power is unavailable without treating the whole estimate as failed.
     """
     gated = dict(result_dict)
-    coverage = summary.get_power_data_coverage()
-    gated["power_coverage"] = coverage
-    if coverage < POWER_DATA_COVERAGE_THRESHOLD:
+    gated["power_coverage"] = summary.get_power_data_coverage()
+    return apply_row_power_coverage_gate(gated)
+
+
+def apply_row_power_coverage_gate(row: dict) -> dict:
+    """Hide ``power_w`` when ``power_coverage`` is missing, non-finite, or
+    below the coverage threshold (fail-closed)."""
+    import math
+
+    gated = dict(row)
+    coverage = gated.get("power_coverage")
+    if (
+        not isinstance(coverage, (int, float))
+        or not math.isfinite(coverage)
+        or coverage < POWER_DATA_COVERAGE_THRESHOLD
+    ):
         gated["power_w"] = None
     return gated
 

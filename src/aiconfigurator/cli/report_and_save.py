@@ -146,6 +146,13 @@ def _plot_worker_setup_table(
         top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
         top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
+    def _power_cell(row) -> str:
+        # power_w == 0.0 on an EPD row is the no-data sentinel (incomplete
+        # encoder energy data), not a real 0 W estimate.
+        if (row.get("(e)workers") or 0) > 0 and row["power_w"] < 1.0:
+            return "n/a"
+        return _format_power(row["power_w"])
+
     ranking_label = "total_gpus_needed" if "replicas_needed" in top_configs.columns else "tokens/s/gpu"
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
@@ -332,7 +339,7 @@ def _plot_worker_setup_table(
                     ]
                 )
             if show_power:
-                row_data.append(_format_power(row["power_w"]))
+                row_data.append(_power_cell(row))
             table.add_row(row_data)
     else:  # agg
         field_names = [
@@ -418,7 +425,7 @@ def _plot_worker_setup_table(
                     ]
                 )
             if show_power:
-                row_data.append(_format_power(row["power_w"]))
+                row_data.append(_power_cell(row))
             table.add_row(row_data)
 
     buf.append(table.get_string())
@@ -1050,17 +1057,8 @@ def save_results(
                             afd_artifact_warning_emitted = True
                         continue
 
-                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
-                    cfg = task_config_to_generator_config(
-                        task_config=row_task,
-                        result_df=result_df,
-                        generator_overrides=generator_overrides,
-                    )
-
                     top_config_dir = os.path.join(exp_dir, f"top{i + 1}")
                     safe_mkdir(top_config_dir, exist_ok=True)
-                    with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
-                        yaml.safe_dump(cfg, f, sort_keys=False)
 
                     # Per-op PerformanceResult.source breakdown, pulled through
                     # the InferenceSummary.
@@ -1069,6 +1067,28 @@ def save_results(
                     if i < len(best_config_per_ops_source) and best_config_per_ops_source[i] is not None:
                         with open(os.path.join(top_config_dir, "per_ops_source.json"), "w") as f:
                             json.dump(best_config_per_ops_source[i], f, indent=2, sort_keys=True)
+
+                    enc_workers = result_df.get("(e)workers", 0)
+                    if pd.notna(enc_workers) and enc_workers > 0:
+                        logger.warning(
+                            "%s top%d is an EPD row ((e)workers=%d): generator artifacts skipped -- "
+                            "the generator bridge does not map the dedicated encode pool yet, and the "
+                            "emitted deploy configs would contradict the recommendation.",
+                            exp_name,
+                            i + 1,
+                            int(enc_workers),
+                        )
+                        continue
+
+                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
+                    cfg = task_config_to_generator_config(
+                        task_config=row_task,
+                        result_df=result_df,
+                        generator_overrides=generator_overrides,
+                    )
+
+                    with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
+                        yaml.safe_dump(cfg, f, sort_keys=False)
 
                     try:
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
