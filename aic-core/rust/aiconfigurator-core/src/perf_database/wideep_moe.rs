@@ -34,7 +34,7 @@ use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::query_token_curve;
+use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {
@@ -49,13 +49,13 @@ pub struct WideEpMoeTable {
 /// `(kernel_source, quant, distribution, topk, num_experts, hidden, inter,
 ///   num_slots, moe_tp, moe_ep)` -> `num_tokens -> latency`.
 pub struct WideEpMoeGrids {
-    pub by_keys: BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<WideEpMoeKey, TokenCurve>,
     /// First-seen (file row order) distribution per `(kernel_source, quant)`.
     /// Python's fallback takes `list(quant_data.keys())[0]` — dict INSERTION
     /// order, i.e. the distribution of the first row loaded for that
     /// `(kernel, quant)` — which differs from sorted order on real shards
     /// (e.g. gb200/h100 wideep files start with `power_law_1.01_eplb`).
-    pub first_distribution: BTreeMap<(String, String), String>,
+    first_distribution: BTreeMap<(String, String), String>,
     index: WideEpMoeIndex,
 }
 
@@ -160,7 +160,7 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         )?;
-        query_token_curve(by_tokens, num_tokens as f64, sol)
+        by_tokens.query(num_tokens as f64, sol)
     }
 
     /// Own-slice `num_tokens -> latency_ms` points, after the level-wise
@@ -194,7 +194,7 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         )?;
-        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+        Ok(by_tokens.iter().collect())
     }
 
     /// Distinct kernel names present in the loaded table, in sorted
@@ -238,7 +238,7 @@ impl WideEpMoeTable {
         num_slots: u32,
         moe_tp_size: u32,
         moe_ep_size: u32,
-    ) -> Result<&BTreeMap<u32, f64>, AicError> {
+    ) -> Result<&TokenCurve, AicError> {
         let grids = self.load_compute()?;
         let Some(by_quant) = grids.index.get(kernel_source) else {
             return Err(AicError::PerfDatabase(format!(
@@ -390,6 +390,10 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
+    let by_keys: BTreeMap<_, _> = by_keys
+        .into_iter()
+        .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+        .collect();
     let index = build_wideep_moe_index(&by_keys, &first_distribution);
     Ok(WideEpMoeGrids {
         by_keys,
@@ -399,7 +403,7 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
 }
 
 fn build_wideep_moe_index(
-    by_keys: &BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>>,
+    by_keys: &BTreeMap<WideEpMoeKey, TokenCurve>,
     first_distribution: &BTreeMap<(String, String), String>,
 ) -> WideEpMoeIndex {
     let mut index = WideEpMoeIndex::new();

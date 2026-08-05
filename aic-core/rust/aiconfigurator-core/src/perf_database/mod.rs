@@ -155,6 +155,7 @@ pub mod dsv4;
 pub mod dsv4_megamoe;
 pub mod gemm;
 mod interpolation;
+mod token_curve;
 pub mod mhc;
 pub mod mla;
 pub mod moe;

@@ -45,7 +45,7 @@ use std::sync::OnceLock;
 
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use super::moe::query_token_curve;
+use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct Dsv4MegaMoeTable {
@@ -56,7 +56,7 @@ pub struct Dsv4MegaMoeTable {
 }
 
 struct Dsv4MegaMoeGrids {
-    by_keys: BTreeMap<Dsv4MegaMoeKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<Dsv4MegaMoeKey, TokenCurve>,
 }
 
 /// Full table key (every level of the Python nested dict except the trailing
@@ -153,7 +153,7 @@ impl Dsv4MegaMoeTable {
         // Python: OpInterpConfig(axes=("num_tokens",), resolver=Grid(),
         // sol_fn=lambda t: float(t)) — in-range RAW lerp, boundary util-hold
         // beyond the collected range with the linear token proxy.
-        query_token_curve(curve, f64::from(num_tokens), &|t| t)
+        curve.query(f64::from(num_tokens), &|t| t)
     }
 
     fn load_module(&self) -> Result<&Dsv4MegaMoeGrids, AicError> {
@@ -283,7 +283,12 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
             )));
         }
     }
-    Ok(Dsv4MegaMoeGrids { by_keys })
+    Ok(Dsv4MegaMoeGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {

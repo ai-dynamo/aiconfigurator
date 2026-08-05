@@ -54,7 +54,8 @@ use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::perf_interp::{self, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::{query_token_curve, singleton_underflow, MoeSiblingSlice};
+use super::moe::MoeSiblingSlice;
+use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpTable {
@@ -77,7 +78,7 @@ pub struct WideEpTable {
 }
 
 struct MoeGrids {
-    by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MoeKey, TokenCurve>,
     index: MoeIndex,
     /// Distinct quant names in first-seen (file row) order — Python's dict
     /// insertion order, consumed by the operator-layer transfer ladder
@@ -93,7 +94,7 @@ type MoeIndex = BTreeMap<String, BTreeMap<String, BTreeMap<MoeShapeKey, MoeKey>>
 /// `distribution` axis (the parquet column is ignored, as in Python) and NO
 /// `inter_size`/`moe_tp_size`.
 struct AlltoallGrids {
-    by_keys: BTreeMap<AlltoallKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<AlltoallKey, TokenCurve>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -109,14 +110,119 @@ struct AlltoallKey {
 }
 
 struct DispatchGrids {
-    by_keys: BTreeMap<DispatchKey, BTreeMap<u32, DispatchPoint>>,
+    by_keys: BTreeMap<DispatchKey, DispatchCurve>,
 }
 
 /// DeepEP-normal grids carry the `dispatch_sms` level Python keys by
 /// (`moe.py::load_wideep_deepep_normal_data`:
 /// `[node_num][hidden_size][topk][num_experts][dispatch_sms][num_token]`).
 struct NormalDispatchGrids {
-    by_keys: BTreeMap<DispatchKey, BTreeMap<u32, BTreeMap<u32, DispatchPoint>>>,
+    by_keys: BTreeMap<DispatchKey, NormalDispatchSlice>,
+}
+
+struct NormalDispatchSlice {
+    by_sms: BTreeMap<u32, DispatchCurve>,
+    fields: [Node; DispatchField::COUNT],
+}
+
+struct DispatchCurve {
+    points: Box<[(u32, DispatchPoint)]>,
+    fields: [TokenCurve; DispatchField::COUNT],
+}
+
+#[derive(Clone, Copy)]
+enum DispatchField {
+    DispatchTransmit,
+    DispatchNotify,
+    CombineTransmit,
+    CombineNotify,
+    CombineAverage,
+    DispatchAverage,
+}
+
+impl DispatchField {
+    const COUNT: usize = 6;
+    const ALL: [Self; Self::COUNT] = [
+        Self::DispatchTransmit,
+        Self::DispatchNotify,
+        Self::CombineTransmit,
+        Self::CombineNotify,
+        Self::CombineAverage,
+        Self::DispatchAverage,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn value(self, point: DispatchPoint) -> f64 {
+        match self {
+            Self::DispatchTransmit => point.dispatch_transmit_us,
+            Self::DispatchNotify => point.dispatch_notify_us,
+            Self::CombineTransmit => point.combine_transmit_us,
+            Self::CombineNotify => point.combine_notify_us,
+            Self::CombineAverage => point.combine_avg_t_us,
+            Self::DispatchAverage => point.dispatch_avg_t_us,
+        }
+    }
+}
+
+impl DispatchCurve {
+    fn new(points: BTreeMap<u32, DispatchPoint>) -> Self {
+        let fields = std::array::from_fn(|index| {
+            let field = DispatchField::ALL[index];
+            TokenCurve::from_iter(points.iter().map(|(&token, &point)| {
+                (token, field.value(point))
+            }))
+        });
+        Self {
+            points: points.into_iter().collect(),
+            fields,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    fn get(&self, token: u32) -> Option<DispatchPoint> {
+        self.points
+            .binary_search_by_key(&token, |&(token, _)| token)
+            .ok()
+            .map(|index| self.points[index].1)
+    }
+
+    fn first(&self) -> (u32, DispatchPoint) {
+        self.points[0]
+    }
+
+    fn last(&self) -> (u32, DispatchPoint) {
+        self.points[self.points.len() - 1]
+    }
+
+    fn token_keys(&self) -> impl Iterator<Item = u32> + '_ {
+        self.points.iter().map(|&(token, _)| token)
+    }
+}
+
+impl NormalDispatchSlice {
+    fn new(by_sms: BTreeMap<u32, BTreeMap<u32, DispatchPoint>>) -> Self {
+        let mut fields = std::array::from_fn(|_| Node::branch());
+        for (&sms, by_tokens) in &by_sms {
+            for (&token, &point) in by_tokens {
+                for field in DispatchField::ALL {
+                    fields[field.index()].insert(&[sms, token], field.value(point));
+                }
+            }
+        }
+        Self {
+            by_sms: by_sms
+                .into_iter()
+                .map(|(sms, curve)| (sms, DispatchCurve::new(curve)))
+                .collect(),
+            fields,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -335,7 +441,7 @@ impl WideEpTable {
                     self.data_root.display()
                 ))
             })?;
-        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+        Ok(by_tokens.iter().collect())
     }
 
     /// All collected sibling slices of the context/generation WideEP MoE
@@ -372,7 +478,7 @@ impl WideEpTable {
                 num_experts: key.num_experts,
                 hidden_size: key.hidden_size,
                 inter_size: key.inter_size,
-                points: curve.iter().map(|(&t, &lat)| (t, lat)).collect(),
+                points: curve.iter().collect(),
             });
         }
         Ok(slices)
@@ -494,7 +600,7 @@ impl WideEpTable {
                 self.data_root.display()
             ))
         })?;
-        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
+        by_tokens.query(num_tokens as f64, &|t| t)
     }
 
     /// Collected `(num_tokens, latency)` points of one resolved alltoall
@@ -538,7 +644,7 @@ impl WideEpTable {
                 self.data_root.display()
             )));
         }
-        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+        Ok(by_tokens.iter().collect())
     }
 
     /// DeepEP normal-mode dispatch point.
@@ -565,7 +671,7 @@ impl WideEpTable {
             num_topk,
             num_experts,
         };
-        let by_sms = grids.by_keys.get(&key).ok_or_else(|| {
+        let slice = grids.by_keys.get(&key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "dispatch data missing for {key:?} at {}",
                 self.data_root.display()
@@ -575,34 +681,34 @@ impl WideEpTable {
             // Python: only sm=20 is collected for node_num==1 today; the
             // sms bucket is indexed directly and the token curve rides the
             // 1-axis engine.
-            let by_tokens = by_sms.get(&20).ok_or_else(|| {
+            let by_tokens = slice.by_sms.get(&20).ok_or_else(|| {
                 AicError::PerfDatabase(format!(
                     "dispatch data missing for {key:?} (sms=20) at {}",
                     self.data_root.display()
                 ))
             })?;
-            if let Some(point) = by_tokens.get(&num_tokens) {
-                return Ok(*point);
+            if let Some(point) = by_tokens.get(num_tokens) {
+                return Ok(point);
             }
             return Ok(DispatchPoint {
-                dispatch_transmit_us: dispatch_field(by_tokens, |p| p.dispatch_transmit_us, num_tokens)?,
-                dispatch_notify_us: dispatch_field(by_tokens, |p| p.dispatch_notify_us, num_tokens)?,
-                combine_transmit_us: dispatch_field(by_tokens, |p| p.combine_transmit_us, num_tokens)?,
-                combine_notify_us: dispatch_field(by_tokens, |p| p.combine_notify_us, num_tokens)?,
-                combine_avg_t_us: dispatch_field(by_tokens, |p| p.combine_avg_t_us, num_tokens)?,
-                dispatch_avg_t_us: dispatch_field(by_tokens, |p| p.dispatch_avg_t_us, num_tokens)?,
+                dispatch_transmit_us: dispatch_field(by_tokens, DispatchField::DispatchTransmit, num_tokens)?,
+                dispatch_notify_us: dispatch_field(by_tokens, DispatchField::DispatchNotify, num_tokens)?,
+                combine_transmit_us: dispatch_field(by_tokens, DispatchField::CombineTransmit, num_tokens)?,
+                combine_notify_us: dispatch_field(by_tokens, DispatchField::CombineNotify, num_tokens)?,
+                combine_avg_t_us: dispatch_field(by_tokens, DispatchField::CombineAverage, num_tokens)?,
+                dispatch_avg_t_us: dispatch_field(by_tokens, DispatchField::DispatchAverage, num_tokens)?,
             });
         }
-        if let Some(point) = by_sms.get(&sms).and_then(|slice| slice.get(&num_tokens)) {
-            return Ok(*point);
+        if let Some(point) = slice.by_sms.get(&sms).and_then(|curve| curve.get(num_tokens)) {
+            return Ok(point);
         }
         Ok(DispatchPoint {
-            dispatch_transmit_us: dispatch_field_2d(by_sms, |p| p.dispatch_transmit_us, sms, num_tokens)?,
-            dispatch_notify_us: dispatch_field_2d(by_sms, |p| p.dispatch_notify_us, sms, num_tokens)?,
-            combine_transmit_us: dispatch_field_2d(by_sms, |p| p.combine_transmit_us, sms, num_tokens)?,
-            combine_notify_us: dispatch_field_2d(by_sms, |p| p.combine_notify_us, sms, num_tokens)?,
-            combine_avg_t_us: dispatch_field_2d(by_sms, |p| p.combine_avg_t_us, sms, num_tokens)?,
-            dispatch_avg_t_us: dispatch_field_2d(by_sms, |p| p.dispatch_avg_t_us, sms, num_tokens)?,
+            dispatch_transmit_us: dispatch_field_2d(slice, DispatchField::DispatchTransmit, sms, num_tokens)?,
+            dispatch_notify_us: dispatch_field_2d(slice, DispatchField::DispatchNotify, sms, num_tokens)?,
+            combine_transmit_us: dispatch_field_2d(slice, DispatchField::CombineTransmit, sms, num_tokens)?,
+            combine_notify_us: dispatch_field_2d(slice, DispatchField::CombineNotify, sms, num_tokens)?,
+            combine_avg_t_us: dispatch_field_2d(slice, DispatchField::CombineAverage, sms, num_tokens)?,
+            dispatch_avg_t_us: dispatch_field_2d(slice, DispatchField::DispatchAverage, sms, num_tokens)?,
         })
     }
 
@@ -728,7 +834,7 @@ fn query_moe(
     // compute); `_query_alltoall_table` / `_query_compute_table` query the
     // engine directly and let a singleton curve util-hold instead.
     if guard_singleton_underflow {
-        if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+        if let Some(only) = by_tokens.singleton_underflow(num_tokens) {
             let key = MoeKey::from_shape(quant_name, distribution, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE silicon token underflow has only one measured point; cannot infer \
@@ -737,7 +843,7 @@ fn query_moe(
             )));
         }
     }
-    query_token_curve(by_tokens, num_tokens as f64, sol)
+    by_tokens.query(num_tokens as f64, sol)
 }
 
 /// Resolve one `DispatchPoint` field's token curve on the engine, with the
@@ -747,20 +853,19 @@ fn query_moe(
 /// anchor" miss. Under the linear proxy this is numerically identical to
 /// Python's util-hold on the SUMMED curve (`q/b * 0 = 0`).
 fn dispatch_field(
-    by_tokens: &BTreeMap<u32, DispatchPoint>,
-    field: fn(&DispatchPoint) -> f64,
+    by_tokens: &DispatchCurve,
+    field: DispatchField,
     num_tokens: u32,
 ) -> Result<f64, AicError> {
-    let (&first, _) = by_tokens.iter().next().expect("caller checked non-empty");
-    let (&last, _) = by_tokens.iter().next_back().expect("caller checked non-empty");
+    let (first, first_point) = by_tokens.first();
+    let (last, last_point) = by_tokens.last();
     if num_tokens < first || num_tokens > last {
-        let anchor = if num_tokens < first { &by_tokens[&first] } else { &by_tokens[&last] };
-        if field(anchor) == 0.0 {
+        let anchor = if num_tokens < first { first_point } else { last_point };
+        if field.value(anchor) == 0.0 {
             return Ok(0.0);
         }
     }
-    let curve: BTreeMap<u32, f64> = by_tokens.iter().map(|(&t, p)| (t, field(p))).collect();
-    query_token_curve(&curve, num_tokens as f64, &|t| t)
+    by_tokens.fields[field.index()].query(num_tokens as f64, &|t| t)
 }
 
 /// Resolve one `DispatchPoint` field on the DeepEP-normal 2-axis
@@ -774,25 +879,23 @@ fn dispatch_field(
 /// instead of a spurious "no positive-util anchor" miss — numerically
 /// identical to Python's util-hold on the SUMMED curve.
 fn dispatch_field_2d(
-    by_sms: &BTreeMap<u32, BTreeMap<u32, DispatchPoint>>,
-    field: fn(&DispatchPoint) -> f64,
+    slice: &NormalDispatchSlice,
+    field: DispatchField,
     sms: u32,
     num_tokens: u32,
 ) -> Result<f64, AicError> {
-    if let Some(anchor) = normal_hold_anchor(by_sms, sms, num_tokens) {
-        if field(anchor) == 0.0 {
+    if let Some(anchor) = normal_hold_anchor(slice, sms, num_tokens) {
+        if field.value(anchor) == 0.0 {
             return Ok(0.0);
-        }
-    }
-    let mut node = Node::branch();
-    for (&sm, by_tokens) in by_sms {
-        for (&t, point) in by_tokens {
-            node.insert(&[sm, t], field(point));
         }
     }
     let sol = |c: &[f64]| c[1];
     let cfg = OpInterpConfig::grid(&["sms", "num_tokens"], &sol);
-    perf_interp::query(&cfg, &node, &[sms as f64, num_tokens as f64])
+    perf_interp::query(
+        &cfg,
+        &slice.fields[field.index()],
+        &[sms as f64, num_tokens as f64],
+    )
 }
 
 /// Predict the engine's `grid_hold` anchor for a `(sms, num_tokens)` query on
@@ -801,17 +904,18 @@ fn dispatch_field_2d(
 /// snap-then-tail walk with `k_tail = 1`: sms snaps to the nearest collected
 /// key (tie -> smaller), tokens anchor at the boundary key when beyond the
 /// slice's range and at the nearest key otherwise.
-fn normal_hold_anchor<'a>(
-    by_sms: &'a BTreeMap<u32, BTreeMap<u32, DispatchPoint>>,
+fn normal_hold_anchor(
+    slice: &NormalDispatchSlice,
     sms: u32,
     num_tokens: u32,
-) -> Option<&'a DispatchPoint> {
+) -> Option<DispatchPoint> {
+    let by_sms = &slice.by_sms;
     if by_sms.is_empty() {
         return None;
     }
-    let covered = |slice: &BTreeMap<u32, DispatchPoint>| -> bool {
-        let (&first, _) = slice.iter().next().expect("loader never stores empty slices");
-        let (&last, _) = slice.iter().next_back().expect("loader never stores empty slices");
+    let covered = |slice: &DispatchCurve| -> bool {
+        let (first, _) = slice.first();
+        let (last, _) = slice.last();
         first <= num_tokens && num_tokens <= last
     };
     let nearest = |keys: &mut dyn Iterator<Item = u32>, c: u32| -> u32 {
@@ -822,18 +926,18 @@ fn normal_hold_anchor<'a>(
         })
         .expect("non-empty")
     };
-    let anchor_in = |slice: &'a BTreeMap<u32, DispatchPoint>| -> &'a DispatchPoint {
-        let (&first, _) = slice.iter().next().expect("non-empty");
-        let (&last, _) = slice.iter().next_back().expect("non-empty");
+    let anchor_in = |slice: &DispatchCurve| -> DispatchPoint {
+        let (first, first_point) = slice.first();
+        let (last, last_point) = slice.last();
         if num_tokens > last {
-            &slice[&last]
+            last_point
         } else if num_tokens < first {
-            &slice[&first]
+            first_point
         } else {
             // tokens in range but an OUTER (sms) axis was snapped -> the
             // engine holds at the NEAREST token key, not a lerp.
-            let key = nearest(&mut slice.keys().copied(), num_tokens);
-            &slice[&key]
+            let key = nearest(&mut slice.token_keys(), num_tokens);
+            slice.get(key).expect("nearest token key must exist")
         }
     };
     if let Some(slice) = by_sms.get(&sms) {
@@ -877,8 +981,8 @@ fn dispatch_lookup(
     let by_tokens = grids.by_keys.get(&key).ok_or_else(|| {
         AicError::PerfDatabase(format!("dispatch data missing for {key:?} at {}", data_root.display()))
     })?;
-    if let Some(point) = by_tokens.get(&num_tokens) {
-        return Ok(*point);
+    if let Some(point) = by_tokens.get(num_tokens) {
+        return Ok(point);
     }
     if by_tokens.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -887,12 +991,12 @@ fn dispatch_lookup(
         )));
     }
     Ok(DispatchPoint {
-        dispatch_transmit_us: dispatch_field(by_tokens, |p| p.dispatch_transmit_us, num_tokens)?,
-        dispatch_notify_us: dispatch_field(by_tokens, |p| p.dispatch_notify_us, num_tokens)?,
-        combine_transmit_us: dispatch_field(by_tokens, |p| p.combine_transmit_us, num_tokens)?,
-        combine_notify_us: dispatch_field(by_tokens, |p| p.combine_notify_us, num_tokens)?,
-        combine_avg_t_us: dispatch_field(by_tokens, |p| p.combine_avg_t_us, num_tokens)?,
-        dispatch_avg_t_us: dispatch_field(by_tokens, |p| p.dispatch_avg_t_us, num_tokens)?,
+        dispatch_transmit_us: dispatch_field(by_tokens, DispatchField::DispatchTransmit, num_tokens)?,
+        dispatch_notify_us: dispatch_field(by_tokens, DispatchField::DispatchNotify, num_tokens)?,
+        combine_transmit_us: dispatch_field(by_tokens, DispatchField::CombineTransmit, num_tokens)?,
+        combine_notify_us: dispatch_field(by_tokens, DispatchField::CombineNotify, num_tokens)?,
+        combine_avg_t_us: dispatch_field(by_tokens, DispatchField::CombineAverage, num_tokens)?,
+        dispatch_avg_t_us: dispatch_field(by_tokens, DispatchField::DispatchAverage, num_tokens)?,
     })
 }
 
@@ -965,6 +1069,10 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
+    let by_keys: BTreeMap<_, _> = by_keys
+        .into_iter()
+        .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+        .collect();
     Ok(MoeGrids {
         index: build_moe_index(&by_keys),
         by_keys,
@@ -972,7 +1080,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
     })
 }
 
-fn build_moe_index(by_keys: &BTreeMap<MoeKey, BTreeMap<u32, f64>>) -> MoeIndex {
+fn build_moe_index(by_keys: &BTreeMap<MoeKey, TokenCurve>) -> MoeIndex {
     let mut index = MoeIndex::new();
     for key in by_keys.keys() {
         let shape = MoeShapeKey {
@@ -1107,7 +1215,12 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(AlltoallGrids { by_keys })
+    Ok(AlltoallGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .collect(),
+    })
 }
 
 /// Load the DeepEP-normal dispatch table from an ordered source list. Missing
@@ -1178,7 +1291,12 @@ fn load_deepep_normal_parquet(sources: &[PerfSource]) -> Result<NormalDispatchGr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(NormalDispatchGrids { by_keys })
+    Ok(NormalDispatchGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, by_sms)| (key, NormalDispatchSlice::new(by_sms)))
+            .collect(),
+    })
 }
 
 /// Load the DeepEP low-latency dispatch table from an ordered source list.
@@ -1235,7 +1353,12 @@ fn load_deepep_ll_parquet(sources: &[PerfSource]) -> Result<DispatchGrids, AicEr
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(DispatchGrids { by_keys })
+    Ok(DispatchGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, DispatchCurve::new(curve)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {

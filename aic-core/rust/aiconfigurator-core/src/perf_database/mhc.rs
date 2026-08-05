@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::query_token_curve;
+use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MhcTable {
@@ -42,7 +42,7 @@ pub struct MhcTable {
 }
 
 struct MhcGrids {
-    by_keys: BTreeMap<MhcKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MhcKey, TokenCurve>,
 }
 
 /// Python `load_mhc_module_data` keys `data[op][hc_mult][hidden_size]` — NO
@@ -126,7 +126,7 @@ impl MhcTable {
         // Engine 1-axis token curve; the caller-threaded per-op roofline
         // anchors beyond-range holds (Python `sol_fn=lambda t: get_sol(t,
         // op_name)[0]`).
-        query_token_curve(by_tokens, num_tokens as f64, &|t| sol(op, t))
+        by_tokens.query(num_tokens as f64, &|t| sol(op, t))
     }
 
     /// Collected `(num_tokens,) -> latency` points for one RESOLVED op half
@@ -162,7 +162,7 @@ impl MhcTable {
         }
         Ok(by_tokens
             .iter()
-            .map(|(&tokens, &latency)| (vec![f64::from(tokens)], latency))
+            .map(|(tokens, latency)| (vec![f64::from(tokens)], latency))
             .collect())
     }
 
@@ -231,7 +231,12 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 .unwrap_or_default()
         )));
     }
-    Ok(MhcGrids { by_keys })
+    Ok(MhcGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {

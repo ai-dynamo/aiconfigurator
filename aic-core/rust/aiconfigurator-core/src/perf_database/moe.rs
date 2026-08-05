@@ -35,40 +35,8 @@ use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::perf_interp::{self, Node, OpInterpConfig};
+use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
-
-/// Resolve a 1-axis `num_tokens -> latency_ms` curve on the perf_interp v2
-/// engine: exact hit / RAW lerp in range; beyond the collected range the
-/// engine holds the boundary util (`k_tail=1`) and lets `sol` carry the
-/// growth. Shared by the MoE / WideEP / mHC token-curve families.
-pub(crate) fn query_token_curve(
-    curve: &BTreeMap<u32, f64>,
-    num_tokens: f64,
-    sol: &dyn Fn(f64) -> f64,
-) -> Result<f64, AicError> {
-    let mut node = Node::branch();
-    for (&t, &lat) in curve {
-        node.insert(&[t], lat);
-    }
-    let sol_slice = |c: &[f64]| sol(c[0]);
-    let cfg = OpInterpConfig::grid(&["num_tokens"], &sol_slice);
-    perf_interp::query(&cfg, &node, &[num_tokens])
-}
-
-/// Python `_require_moe_token_points`: a singleton curve queried below its
-/// only measured point is a structured miss (it cannot define the low-token
-/// launch-overhead regime). Multi-point underflow and singleton overflow go
-/// to the engine's util-hold unchanged.
-pub(crate) fn singleton_underflow(curve: &BTreeMap<u32, f64>, num_tokens: u32) -> Option<u32> {
-    if curve.len() == 1 {
-        let &only = curve.keys().next().expect("len checked");
-        if num_tokens < only {
-            return Some(only);
-        }
-    }
-    None
-}
 
 pub struct MoeTable {
     data_root: PathBuf,
@@ -114,7 +82,7 @@ struct LoadedMoeGrids {
 }
 
 struct MoeGrids {
-    by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MoeKey, TokenCurve>,
     index: MoeIndex,
     /// Distinct quant names in first-seen (file row) order. Python's
     /// transfer ladder iterates the table dict in INSERTION order
@@ -234,7 +202,7 @@ impl MoeTable {
                 self.data_root.display()
             )));
         }
-        if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+        if let Some(only) = by_tokens.singleton_underflow(num_tokens) {
             let key = MoeKey::from_shape(quant_name, dist, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE silicon token underflow has only one measured point; cannot infer \
@@ -242,7 +210,7 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        query_token_curve(by_tokens, num_tokens as f64, sol)
+        by_tokens.query(num_tokens as f64, sol)
     }
 
     /// Probe the TRT-LLM low-latency NVFP4 MoE kernel table.
@@ -294,7 +262,7 @@ impl MoeTable {
         if by_tokens.is_empty() {
             return Ok(None);
         }
-        if let Some(only) = singleton_underflow(by_tokens, num_tokens) {
+        if let Some(only) = by_tokens.singleton_underflow(num_tokens) {
             let key = MoeKey::from_shape(quant_name, dist, shape);
             return Err(AicError::PerfDatabase(format!(
                 "MoE low-latency token underflow has only one measured point; cannot infer \
@@ -302,7 +270,7 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        query_token_curve(by_tokens, num_tokens as f64, sol).map(Some)
+        by_tokens.query(num_tokens as f64, sol).map(Some)
     }
 
     /// `true` iff the loaded low-latency grid has any rows.
@@ -354,7 +322,7 @@ impl MoeTable {
                     self.data_root.display()
                 ))
             })?;
-        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+        Ok(by_tokens.iter().collect())
     }
 
     /// All collected sibling slices for `(quant, distribution-after-uniform-
@@ -393,7 +361,7 @@ impl MoeTable {
                 num_experts: key.num_experts,
                 hidden_size: key.hidden_size,
                 inter_size: key.inter_size,
-                points: curve.iter().map(|(&t, &lat)| (t, lat)).collect(),
+                points: curve.iter().collect(),
             });
         }
         Ok(slices)
@@ -550,6 +518,8 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
+    let default_keys = finalize_curves(default_keys);
+    let low_latency_keys = finalize_curves(low_latency_keys);
     Ok(LoadedMoeGrids {
         default: MoeGrids {
             index: build_moe_index(&default_keys),
@@ -564,7 +534,16 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
     })
 }
 
-fn build_moe_index(by_keys: &BTreeMap<MoeKey, BTreeMap<u32, f64>>) -> MoeIndex {
+fn finalize_curves(
+    by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+) -> BTreeMap<MoeKey, TokenCurve> {
+    by_keys
+        .into_iter()
+        .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+        .collect()
+}
+
+fn build_moe_index(by_keys: &BTreeMap<MoeKey, TokenCurve>) -> MoeIndex {
     let mut index = MoeIndex::new();
     for key in by_keys.keys() {
         let shape = MoeShapeKey {
@@ -626,8 +605,8 @@ mod tests {
         let requested = MoeKey::from_shape("fp8", "power_law", shape);
         let uniform = MoeKey::from_shape("fp8", "uniform", shape);
         let by_keys = BTreeMap::from([
-            (requested, BTreeMap::from([(1, 1.0)])),
-            (uniform, BTreeMap::from([(1, 2.0)])),
+            (requested, TokenCurve::from_map(BTreeMap::from([(1, 1.0)]))),
+            (uniform, TokenCurve::from_map(BTreeMap::from([(1, 2.0)]))),
         ]);
         let grids = MoeGrids {
             index: build_moe_index(&by_keys),
@@ -638,11 +617,11 @@ mod tests {
 
         let (dist, key) = table.resolve_key(&grids, "fp8", "power_law", shape);
         assert_eq!(dist, "power_law");
-        assert_eq!(grids.by_keys[key.unwrap()][&1], 1.0);
+        assert_eq!(grids.by_keys[key.unwrap()].get(1), Some(1.0));
 
         let (dist, key) = table.resolve_key(&grids, "fp8", "missing", shape);
         assert_eq!(dist, "uniform");
-        assert_eq!(grids.by_keys[key.unwrap()][&1], 2.0);
+        assert_eq!(grids.by_keys[key.unwrap()].get(1), Some(2.0));
     }
 
     #[test]
