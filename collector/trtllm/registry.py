@@ -133,4 +133,11 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
+    OpEntry(
+        op="mhc_module",
+        module="collector.trtllm.collect_mhc_module",
+        get_func="get_mhc_module_test_cases",
+        run_func="run_mhc_module_worker",
+        perf_filename=PerfFile.MHC_MODULE,
+    ),
 ]
