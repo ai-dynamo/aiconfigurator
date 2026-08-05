@@ -609,5 +609,25 @@ class TestWideEpDeepEpLlNodeNumFallback:
         assert exact.source == "silicon"
 
 
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
+class TestVllmCommPath:
+    """With attention_dp == 1 vLLM's MoE block has no pre-dispatch collective
+    and exactly one final all-reduce, for pure TP and EP alike."""
+
+    def test_pre_dispatch_is_free_when_attention_dp_is_1(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
+
+        assert float(pre.query(db, x=8)) == 0.0
+        db.query_custom_allreduce.assert_not_called()
+
+    def test_post_dispatch_prices_single_final_allreduce(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        post = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=False)
+
+        assert float(post.query(db, x=8)) == pytest.approx(1.5)
+        db.query_custom_allreduce.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
