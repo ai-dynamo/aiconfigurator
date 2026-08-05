@@ -149,7 +149,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.Mamba2Kernel(
@@ -162,7 +162,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.GEMM(
@@ -440,7 +440,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.Mamba2Kernel(
@@ -453,7 +453,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.GEMM(
