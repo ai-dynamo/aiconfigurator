@@ -42,6 +42,10 @@ jobs:
           # parquet filenames/stems and the YAML sidecars beside them, never
           # parquet content, so LFS smudging is unneeded weight -- and would
           # fail checkout for fork PRs that can't authenticate to LFS.
+          # Exception: the op-backend facts step reads parquet content via
+          # pq.read_table; this is safe because the data tree's parquet is
+          # plain git (no LFS) -- an LFS-pointer parquet would crash the read
+          # and fail the job (still fail-closed).
           persist-credentials: false
 
       - name: Fetch base ref
