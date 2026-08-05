@@ -151,8 +151,10 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         "--engine-step-backend",
         choices=["python", "rust"],
         default=None,
-        help="Experimental static latency backend. Default keeps the existing Python SDK path; "
-        "use 'rust' to route static step estimates through the Rust FPM estimator.",
+        help="Engine-step latency backend. By default the compiled Rust engine answers "
+        "(databases with measured power data delegate to the Python step until energy "
+        "crosses the FFI); use 'python' as the escape hatch or 'rust' to force the "
+        "compiled engine.",
     )
     add_generator_override_arguments(common_parser)
     return common_parser
@@ -1521,7 +1523,10 @@ def build_default_tasks(
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step latency backend ("python" or "rust");
+            unset defaults to the compiled Rust engine (power-carrying databases
+            delegate to the Python step, as do SDK callers passing synthetic
+            database objects the compiled engine cannot re-load from disk).
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.
@@ -1806,8 +1811,9 @@ def build_experiment_tasks(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
-        engine_step_backend: Optional global experimental static-latency backend.
-            Per-experiment ``engine_step_backend`` entries take precedence.
+        engine_step_backend: Optional global engine-step latency backend override.
+            Per-experiment ``engine_step_backend`` entries take precedence;
+            unset defaults to the compiled Rust engine.
 
     Returns:
         Dict mapping experiment names to Task objects.
