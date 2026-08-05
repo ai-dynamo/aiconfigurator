@@ -24,7 +24,7 @@ indexer and the capped-attention kernel. Those are different kernels with
 different prices, so a batch that straddles the bound cannot be charged with a
 single attention coefficient:
 
-    y = c_idx * x_idx  +  c_mla_sparse * x_mla_sparse  +  c_mla_mha * x_mla_dense
+    y = c_idx * x_idx  +  c_mla * x_mla
 
 The three columns are what :func:`work_columns` returns. Splitting them is not
 a refinement -- in the measured grid the dense rows carry between 1% and 88% of
@@ -38,13 +38,13 @@ one segment pin one coefficient without a joint fit:
                       all of them, so the attention term is linear in s and its
                       deviation cancels exactly -- only x_idx survives.
     pure unsaturated  every row short-circuits the indexer, so x_idx is
-                      identically zero -- only x_mla_dense survives.
+                      identically zero -- only x_mla survives.
     mixed             all three are live; the segment is solved against
                       whichever coefficients the cell's other segment and the
                       global dense fit already fixed.
 
 Each cell owns all three of its prices. An earlier revision fitted
-``c_mla_mha`` once across the unsaturated cells and handed it to the rest
+``c_mla`` once across the unsaturated cells and handed it to the rest
 as a known constant, on the theory that it is a property of the dense
 kernel rather than of an average point. Measurement did not support that:
 the ratio varies by orders of magnitude between cells, because at a cell
@@ -121,29 +121,39 @@ def runs_sparse(s: float, p: float, topk: int) -> bool:
     return s + p > topk
 
 
-def work_columns(rows: list[tuple[int, int]], s_bar: float, p_bar: float, topk: int) -> tuple[float, float, float]:
-    """``(x_idx, x_mla_sparse, x_mla_dense)`` against the cell's uniform batch.
+def work_columns(rows: list[tuple[int, int]], s_bar: float, p_bar: float, topk: int) -> tuple[float, float]:
+    """``(x_idx, x_mla)`` against the cell's uniform batch.
 
-    Each row's attention work is credited to the column for the kernel that row
-    actually runs on. The subtrahend goes to whichever pair of columns the
-    UNIFORM batch runs on -- that is decided by the average point's own length,
-    not by the calibration batch's regime -- so an unsaturated average point
-    contributes nothing to the indexer column and its attention work is
-    subtracted from the dense one.
+    Two columns, grouped by the GEOMETRY the work follows rather than by which
+    kernel runs it. The indexer scans the full trapezoid ``s*p + s^2/2`` whether
+    or not the top-k selection had anything to discard, so MQA and top-k share
+    one column. Attention reads pairs capped at ``topk``, which is a different
+    shape, so it gets the other.
+
+    An earlier revision split the attention column by kernel path -- capped and
+    uncapped -- on the theory that they are different kernels at different
+    prices. They are, but they are not separately identifiable: both count
+    attention pairs, so under the conserved totals a batch that moves a row from
+    one path to the other moves both columns in lockstep. Measured across the
+    calibration grid the two sat at 170-177 degrees, near-antiparallel, and only
+    their sum was determined. Splitting them also left saturated average points
+    with a dense price no segment could isolate, which rejected nine of eighteen
+    such cells outright.
+
+    The subtrahend goes to whichever columns the UNIFORM batch runs on -- decided
+    by the average point's own length, not by the calibration batch's regime --
+    so an unsaturated average point contributes nothing to the indexer column.
     """
     b = len(rows)
     x_idx = sum(idx_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
-    x_sp = sum(mla_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
-    x_dn = sum(mla_work(s, p, topk) for s, p in rows if not runs_sparse(s, p, topk))
+    x_mla = sum(mla_work(s, p, topk) for s, p in rows)
     if runs_sparse(s_bar, p_bar, topk):
         x_idx -= b * idx_work(s_bar, p_bar, topk)
-        x_sp -= b * mla_work(s_bar, p_bar, topk)
-    else:
-        x_dn -= b * mla_work(s_bar, p_bar, topk)
-    return x_idx, x_sp, x_dn
+    x_mla -= b * mla_work(s_bar, p_bar, topk)
+    return x_idx, x_mla
 
 
-def key_column(columns: tuple[float, float, float], regime: Regime, avg_is_sat: bool) -> float:
+def key_column(columns: tuple[float, float], regime: Regime, avg_is_sat: bool) -> float:
     """Magnitude of the column this segment has to move to be worth measuring.
 
     A segment that leaves its own column near zero produces a label the fit
@@ -151,16 +161,14 @@ def key_column(columns: tuple[float, float, float], regime: Regime, avg_is_sat: 
     to -- not the total work change, which a mixed batch can inflate by an order
     of magnitude through a column whose coefficient is already known.
     """
-    x_idx, x_sp, x_dn = columns
+    x_idx, x_mla = columns
     if regime == SAT:
         return abs(x_idx)
     if regime == UNSAT:
-        return abs(x_dn)
-    # A mixed batch at a saturated average point is solved for the sparse
-    # attention price alone: the gated price came from the cell's own saturated
-    # segment and the dense price from the global fit. At an unsaturated average
-    # point only the dense price is known, so two columns have to carry signal.
-    return abs(x_sp) if avg_is_sat else min(abs(x_idx), abs(x_sp))
+        return abs(x_mla)
+    # A mixed segment closes whichever price its cell's pure segment left open,
+    # so the column that has to carry signal is the other one.
+    return abs(x_mla) if avg_is_sat else abs(x_idx)
 
 
 # ------------------------------------------------------------------ regimes
@@ -360,12 +368,11 @@ class CalibrationBatch:
     short_len: int
     rows: list[tuple[int, int]]
     x_idx: float
-    x_mla_sparse: float
-    x_mla_dense: float
+    x_mla: float
 
     @property
     def columns(self) -> tuple[float, float, float]:
-        return self.x_idx, self.x_mla_sparse, self.x_mla_dense
+        return self.x_idx, self.x_mla
 
     @property
     def totals(self) -> tuple[int, int]:

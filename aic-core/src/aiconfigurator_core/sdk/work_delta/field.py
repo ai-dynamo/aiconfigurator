@@ -10,10 +10,10 @@ batch-size axis, or not at all.
 Why only that axis. The three grid axes are not interchangeable. Moving along
 ``b`` holds ``avg_s + avg_p``, so every request keeps its kernel path and only
 the parallelism changes -- ``c_idx`` stays inside 0.943-0.999 across a fourfold
-span. Moving along ``avg_s`` lets a row cross ``topk``, and ``c_mla_sparse``
-was measured at +6.0e-06 at one average point and -4.1e-06 at another. Carrying
-a value across that axis does not produce a worse estimate, it produces one
-with the wrong sign.
+span. Moving along ``avg_s`` lets a row cross ``topk``, and ``c_mla`` was measured at
++6.0e-06 at one average point and -4.1e-06 at another. Carrying a value across
+that axis does not produce a worse estimate, it produces one with the wrong
+sign.
 
 Why nothing weaker than bracketing. Earlier revisions fell back to single-ended
 extrapolation and then to inverse-distance weighting over the whole field, so
@@ -48,10 +48,10 @@ def _has_negative(fit: CellFit) -> bool:
     a negative anywhere disqualifies the query, and the caller falls back to
     the uniform estimate.
     """
-    return any(v is not None and v < 0.0 for v in (fit.c_idx, fit.c_mla_sparse, fit.c_mla_mha))
+    return any(v is not None and v < 0.0 for v in (fit.c_idx, fit.c_mla))
 
 
-COLUMNS = ("c_idx", "c_mla_sparse", "c_mla_mha")
+COLUMNS = ("c_idx", "c_mla")
 
 
 @dataclass(frozen=True)
@@ -59,8 +59,7 @@ class Interpolated:
     """A coefficient triple carried to an uncalibrated batch size."""
 
     c_idx: float | None
-    c_mla_sparse: float | None
-    c_mla_mha: float | None
+    c_mla: float | None
     source: str
 
 
@@ -99,7 +98,7 @@ class CoefficientField:
         if exact is not None:
             if _has_negative(exact):
                 return None
-            return Interpolated(exact.c_idx, exact.c_mla_sparse, exact.c_mla_mha, "calibrated")
+            return Interpolated(exact.c_idx, exact.c_mla, "calibrated")
 
         same = sorted(k[0] for k in self._fits if k[1] == s_bar and k[2] == p_bar)
         lower = [x for x in same if x < b]
@@ -123,4 +122,4 @@ class CoefficientField:
         values = {name: blend(name) for name in COLUMNS}
         if all(v is None for v in values.values()):
             return None
-        return Interpolated(values["c_idx"], values["c_mla_sparse"], values["c_mla_mha"], f"b={b_lo}->{b_hi}")
+        return Interpolated(values["c_idx"], values["c_mla"], f"b={b_lo}->{b_hi}")

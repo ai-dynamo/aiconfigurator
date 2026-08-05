@@ -11,13 +11,13 @@ depends on the totals alone and leaves the cost of the spread:
 Three prices, because a prefill batch that straddles ``topk`` runs two different
 attention kernels at once:
 
-    y = c_idx * x_idx  +  c_mla_sparse * x_mla_sparse  +  c_mla_mha * x_mla_dense
+    y = c_idx * x_idx  +  c_mla * x_mla
 
 Nothing here fits all three at once. The order is forced by what each segment
 can move, and each step subtracts what the previous one already fixed:
 
-    1. c_mla_mha  from the unsaturated segments. Those batches short-circuit the
-       indexer on every row, so ``x_idx`` and ``x_mla_sparse`` are identically
+    1. c_mla  from the unsaturated segments. Those batches short-circuit the
+       indexer on every row, so ``x_idx`` is identically
        zero and the segment pins the dense price on its own. It is fitted per
        batch size rather than per cell -- it is a property of the dense kernel,
        and at a cell whose average request is long it cannot be measured at all,
@@ -29,7 +29,7 @@ can move, and each step subtracts what the previous one already fixed:
        term linear in ``s``; with ``sum(s)`` conserved its deviation cancels
        exactly and only the gated column survives.
 
-    3. c_mla_sparse  from the mixed segment, with whatever step 1 and step 2
+    3. the remaining price from the mixed segment, with whatever step 1 and step 2
        already fixed subtracted out. At a saturated average point that leaves
        one unknown; at an unsaturated one the cell has no saturated segment, so
        ``c_idx`` is unknown too and the mixed data carries both.
@@ -140,8 +140,7 @@ class Measurement:
     regime: str
     avg_is_sat: bool
     x_idx: float
-    x_mla_sparse: float
-    x_mla_dense: float
+    x_mla: float
     y: float
     # Spread of the engine's own latency at this shape, in the same units as
     # ``y``. A label smaller than its own noise carries no information about
@@ -166,8 +165,7 @@ class CellFit:
     p_bar: int
     avg_is_sat: bool
     c_idx: float | None = None
-    c_mla_sparse: float | None = None
-    c_mla_mha: float | None = None
+    c_mla: float | None = None
     residuals: dict[str, float] = field(default_factory=dict)
     rejected: list[str] = field(default_factory=list)
     # Labels that never entered the fit because they sat inside the engine's
@@ -274,30 +272,28 @@ def _solve_two(points, col_a, col_b, target) -> tuple[float, float] | None:
 
 
 def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: list[Measurement]) -> CellFit:
-    """Fit this average point's own prices, staged by what each segment isolates.
+    """Fit this average point's two prices, staged by what each segment isolates.
 
-    The regime decides which columns are even live, and that is what makes the
+    The regime decides which column is even live, and that is what makes the
     stages exact rather than a least-squares compromise:
 
-        pure saturated    every row sits above topk, so the attention term is
+        pure saturated    every row is above topk, so the attention term is
                           linear in s and its deviation cancels: only x_idx
                           survives. One rung fixes c_idx outright.
-        pure unsaturated  every row is at or below topk, so x_idx is
-                          identically zero. One rung fixes c_mla_mha.
-        mixed             all three columns are live, but the pure segment has
-                          already fixed one of them, so two rungs close the
-                          remaining two.
+        pure unsaturated  every row is at or below topk, so the top-k selection
+                          discarded nothing and x_idx is identically zero. One
+                          rung fixes c_mla.
+        mixed             both columns are live, but the cell's pure segment has
+                          already fixed one, so the remaining price follows from
+                          the rungs with a degree of freedom left over.
 
-    A cell expresses exactly two of the three regimes (segments_for), so three
-    rungs -- one pure, two mixed -- determine all three prices. There is no
-    spare degree of freedom and none is wanted: the prices are used at this
-    average point, not extrapolated from it, so redundancy would buy a residual
-    we have no use for while rejecting cells that are perfectly well determined.
-    An earlier revision demanded one extra rung per unknown and a residual
-    within tolerance; it left 5 of 33 cells standing where this leaves 45 of 45.
+    A cell expresses exactly two of the three regimes, so one pure rung and one
+    mixed rung determine both prices, and the second mixed rung the planner
+    emits leaves a residual worth reading. That matches what collection can
+    afford: one rung per pure segment and two for mixed.
 
-    Repeated rungs in one pure segment are averaged by median rather than
-    least-squares: the segment is one-dimensional, so each rung is an
+    Repeated rungs in a pure segment are averaged by median rather than
+    least-squares -- the segment is one-dimensional, so each rung is an
     independent estimate of the same ratio, and the median ignores the odd rung
     whose label is dominated by something other than the work.
     """
@@ -314,52 +310,42 @@ def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: l
 
     # ---- stage 1: the pure segment, one column live, one rung is enough
     pure_idx = [p.y / p.x_idx for p in usable if p.regime == SAT and abs(p.x_idx) > MIN_USABLE_COLUMN]
-    pure_dense = [p.y / p.x_mla_dense for p in usable if p.regime == UNSAT and abs(p.x_mla_dense) > MIN_USABLE_COLUMN]
+    pure_mla = [p.y / p.x_mla for p in usable if p.regime == UNSAT and abs(p.x_mla) > MIN_USABLE_COLUMN]
     if pure_idx:
         fit.c_idx = statistics.median(pure_idx)
-    if pure_dense:
-        fit.c_mla_mha = statistics.median(pure_dense)
+    if pure_mla:
+        fit.c_mla = statistics.median(pure_mla)
 
-    # ---- stage 2: mixed closes what the pure segment left open
+    # ---- stage 2: mixed closes whichever price the pure segment left open
     mixed = [p for p in usable if p.regime == MIXED]
-    known = lambda p: (
-        ((fit.c_idx or 0.0) * p.x_idx if fit.c_idx is not None else 0.0)
-        + ((fit.c_mla_mha or 0.0) * p.x_mla_dense if fit.c_mla_mha is not None else 0.0)
-    )
-    unknown = [
-        name
-        for name, value in (("c_idx", fit.c_idx), ("c_mla_sparse", fit.c_mla_sparse), ("c_mla_mha", fit.c_mla_mha))
-        if value is None
-    ]
-    if mixed and unknown:
-        col = {
-            "c_idx": lambda p: p.x_idx,
-            "c_mla_sparse": lambda p: p.x_mla_sparse,
-            "c_mla_mha": lambda p: p.x_mla_dense,
-        }
-        live = [n for n in unknown if sum(col[n](p) ** 2 for p in mixed) > MIN_USABLE_COLUMN]
-        if live:
-            solved = _solve_n(mixed, tuple(col[n] for n in live), lambda p: p.y - known(p))
+    if mixed:
+        if fit.c_idx is None and fit.c_mla is not None:
+            num = sum(p.x_idx * (p.y - fit.c_mla * p.x_mla) for p in mixed)
+            den = sum(p.x_idx * p.x_idx for p in mixed)
+            if den > MIN_USABLE_COLUMN:
+                fit.c_idx = num / den
+        elif fit.c_mla is None and fit.c_idx is not None:
+            num = sum(p.x_mla * (p.y - fit.c_idx * p.x_idx) for p in mixed)
+            den = sum(p.x_mla * p.x_mla for p in mixed)
+            if den > MIN_USABLE_COLUMN:
+                fit.c_mla = num / den
+        elif fit.c_idx is None and fit.c_mla is None:
+            solved = _solve_n(mixed, (lambda p: p.x_idx, lambda p: p.x_mla), lambda p: p.y)
             if solved is None:
                 fit.rejected.append(
-                    f"{len(mixed)} mixed rungs cannot close {len(live)} "
-                    "remaining prices: too few, or their columns are parallel"
+                    f"{len(mixed)} mixed rungs cannot carry both prices with no pure "
+                    "segment to anchor one: too few, or their columns are parallel"
                 )
             else:
-                for name, value in zip(live, solved, strict=True):
-                    setattr(fit, name, value)
+                fit.c_idx, fit.c_mla = solved
 
-    if all(getattr(fit, n) is None for n in ("c_idx", "c_mla_sparse", "c_mla_mha")):
+    if fit.c_idx is None and fit.c_mla is None:
         fit.rejected.append("no segment isolated a price")
         return fit
 
-    # Residuals are reported, never used to reject. A segment solved exactly
-    # has none to report; one with spare rungs does, and it is worth seeing.
-    predict = lambda p: (
-        (fit.c_idx or 0.0) * p.x_idx
-        + (fit.c_mla_sparse or 0.0) * p.x_mla_sparse
-        + (fit.c_mla_mha or 0.0) * p.x_mla_dense
-    )
+    # Residuals are reported, never used to reject. A segment solved exactly has
+    # none to report; one with spare rungs does, and it is worth seeing.
+    predict = lambda p: (fit.c_idx or 0.0) * p.x_idx + (fit.c_mla or 0.0) * p.x_mla
     by_regime: dict[str, list[Measurement]] = {}
     for p in usable:
         by_regime.setdefault(p.regime, []).append(p)
@@ -369,49 +355,31 @@ def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: l
     return fit
 
 
-def column_gate(x_idx: float, x_mla_sparse: float, x_mla_dense: float) -> tuple:
-    """Whether each column moves enough work for its price to be worth applying.
-
-    The two MLA columns share one threshold AND one sum: they are two paths
-    through the same kernel and a batch's rows split between them, so the work
-    that matters is what they move together. Comparing each against the
-    threshold on its own fails a batch that splits its deviation evenly -- at
-    1.5M reads per column neither side clears a 2M gate, though the batch moved
-    3M -- and that even split is the largest deviation, not the smallest.
-    """
-    mla_moved = abs(x_mla_sparse) + abs(x_mla_dense)
-    mla_passes = mla_moved >= MIN_ABS_DELTA_MLA_M * 1e6
-    return (abs(x_idx) >= MIN_ABS_DELTA_IDX_M * 1e6, mla_passes, mla_passes)
+def column_gate(x_idx: float, x_mla: float) -> tuple:
+    """Whether each column moves enough work for its price to be worth applying."""
+    return (abs(x_idx) >= MIN_ABS_DELTA_IDX_M * 1e6, abs(x_mla) >= MIN_ABS_DELTA_MLA_M * 1e6)
 
 
-def predict_delta(x_idx: float, x_mla_sparse: float, x_mla_dense: float, fit: CellFit, noise: float = 0.0) -> float:
+def predict_delta(x_idx: float, x_mla: float, fit: CellFit, noise: float = 0.0) -> float:
     """Latency to add for a batch with these column deviations.
 
     Two gates, in order, and both are all-or-nothing: a partial correction
-    leaves the surviving columns to explain the whole delta and overshoots
+    leaves the surviving column to explain the whole delta and overshoots
     (measured max error 87.6% -> 207.8%, worse than not correcting at all).
 
-    1. Each column must move enough work to be worth pricing at all.
-    2. The resulting milliseconds must clear the step's own jitter, when the
-       caller knows it. Correcting by less than the spread the correction
-       would have to be checked against cannot be verified either way.
-
-    Every column is priced with the coefficient for the kernel that column's
-    rows actually run on. A cell that did not fit a coefficient contributes
-    nothing through it rather than borrowing another one's.
+    1. A price is the marginal cost of one more unit of that kernel's work and
+       cannot be below zero -- doing more does not take less time. A negative
+       one means the fit is not describing the hardware, usually a mismeasured
+       uniform batch, which is the subtrahend of every label in the cell.
+    2. Each column must move enough work to be worth pricing, and the resulting
+       milliseconds must clear the step's own jitter when the caller knows it.
     """
-    for price in (fit.c_idx, fit.c_mla_sparse, fit.c_mla_mha):
+    for price in (fit.c_idx, fit.c_mla):
         if price is not None and price < 0.0:
-            # A price is the marginal cost of one more unit of that kernel's
-            # work and cannot be below zero: doing more does not take less
-            # time. A negative one means the fit is not describing the
-            # hardware -- usually a mismeasured uniform batch, the subtrahend
-            # of every label in the cell. CoefficientField declines such a
-            # cell too, but this function is public and reachable without it.
             return 0.0
-    if not any(column_gate(x_idx, x_mla_sparse, x_mla_dense)):
+    if not any(column_gate(x_idx, x_mla)):
         return 0.0
-    delta = (fit.c_idx or 0.0) * x_idx + (fit.c_mla_sparse or 0.0) * x_mla_sparse + (fit.c_mla_mha or 0.0) * x_mla_dense
+    delta = (fit.c_idx or 0.0) * x_idx + (fit.c_mla or 0.0) * x_mla
     if noise > 0.0 and abs(delta) < MIN_LABEL_SNR * noise:
         return 0.0
     return delta
