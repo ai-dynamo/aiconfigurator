@@ -29,12 +29,19 @@ Let's get started.
 
 ### Install from PyPI
 
-> **Published-wheel support: Linux x86-64 only.** The required
-> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is built
-> as a `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). Linux
-> aarch64 has no published core wheel and must build `./aic-core` and the root
-> project from source; that path is not covered by published-wheel support.
-> macOS and Windows have no supported installation path.
+> **Public PyPI support: Linux x86-64 only.** The required
+> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is
+> published to PyPI as a `manylinux_2_28_x86_64` wheel (Linux x86-64,
+> glibc >= 2.28).
+>
+> **Release wheel coverage:** The
+> [platform-wheel workflow](.github/workflows/build-platform-wheels.yml) also
+> builds, installs, and verifies `manylinux_2_28_aarch64` and
+> `macosx_11_0_arm64` core wheels. Release-branch runs stage the complete wheel
+> set to Artifactory when platform-wheel staging is enabled. These Artifactory
+> artifacts are separate from public PyPI: Linux aarch64 and macOS arm64 users
+> with access to the release artifacts can install the matching wheel set.
+> Windows has no supported installation path.
 
 ```bash
 pip3 install aiconfigurator
