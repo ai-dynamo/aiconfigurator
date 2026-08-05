@@ -19,9 +19,12 @@ impl TokenCurve {
         }
     }
 
-    pub(crate) fn from_iter(points: impl IntoIterator<Item = (u32, f64)>) -> Self {
+    pub(crate) fn from_sorted_iter(points: impl IntoIterator<Item = (u32, f64)>) -> Self {
         let points: Vec<_> = points.into_iter().collect();
-        debug_assert!(points.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(
+            points.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "TokenCurve points must be strictly ascending and unique"
+        );
         Self {
             points: points.into_boxed_slice(),
         }
@@ -53,11 +56,7 @@ impl TokenCurve {
     /// Resolve with the one-axis `perf_interp` Grid contract: exact hits,
     /// raw interpolation within the measured range, and a boundary-util hold
     /// outside it with `k_tail=1`.
-    pub(crate) fn query(
-        &self,
-        num_tokens: f64,
-        sol: &dyn Fn(f64) -> f64,
-    ) -> Result<f64, AicError> {
+    pub(crate) fn query(&self, num_tokens: f64, sol: &dyn Fn(f64) -> f64) -> Result<f64, AicError> {
         if self.points.is_empty() {
             return Err(miss(num_tokens, "empty table"));
         }
@@ -78,11 +77,11 @@ impl TokenCurve {
                 self.points[self.points.len() - 1]
             };
             let anchor_sol = sol(f64::from(anchor.0));
-            if !(anchor.1 > 0.0 && anchor_sol > 0.0) {
+            if anchor.1.is_nan() || anchor.1 <= 0.0 || anchor_sol.is_nan() || anchor_sol <= 0.0 {
                 return Err(miss(num_tokens, "no positive-util boundary anchor"));
             }
             let query_sol = sol(num_tokens);
-            if !(query_sol > 0.0) {
+            if query_sol.is_nan() || query_sol <= 0.0 {
                 return Err(miss(num_tokens, "non-positive SOL at query"));
             }
             return Ok(query_sol / (anchor_sol / anchor.1));
@@ -90,8 +89,7 @@ impl TokenCurve {
 
         let lower = self.points[upper - 1];
         let upper = self.points[upper];
-        let weight =
-            (num_tokens - f64::from(lower.0)) / f64::from(upper.0 - lower.0);
+        let weight = (num_tokens - f64::from(lower.0)) / f64::from(upper.0 - lower.0);
         Ok(lower.1 + (upper.1 - lower.1) * weight)
     }
 }
@@ -148,5 +146,54 @@ mod tests {
             let actual = curve.query(tokens, &sol).unwrap();
             assert_eq!(actual.to_bits(), expected.to_bits(), "tokens={tokens}");
         }
+    }
+
+    fn assert_query_parity(points: BTreeMap<u32, f64>, num_tokens: f64, sol: &dyn Fn(f64) -> f64) {
+        let curve = TokenCurve::from_map(points.clone());
+        let mut node = Node::branch();
+        for (&token, &latency) in &points {
+            node.insert(&[token], latency);
+        }
+        let generic_sol = |coords: &[f64]| sol(coords[0]);
+        let config = OpInterpConfig::grid(&["num_tokens"], &generic_sol);
+        let expected = perf_interp::query(&config, &node, &[num_tokens]);
+        let actual = curve.query(num_tokens, sol);
+        match (actual, expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual.to_bits(), expected.to_bits()),
+            (Err(actual), Err(expected)) => assert_eq!(actual.to_string(), expected.to_string()),
+            (actual, expected) => panic!("specialized={actual:?}, generic={expected:?}"),
+        }
+    }
+
+    #[test]
+    fn token_curve_errors_match_the_generic_grid() {
+        assert_query_parity(BTreeMap::new(), 10.0, &|tokens| tokens);
+        assert_query_parity(BTreeMap::from([(10, 0.0)]), 20.0, &|tokens| tokens);
+        assert_query_parity(BTreeMap::from([(10, 1.0)]), 20.0, &|tokens| {
+            if tokens == 20.0 {
+                0.0
+            } else {
+                tokens
+            }
+        });
+        assert_query_parity(BTreeMap::from([(10, 1.0)]), 20.0, &|tokens| {
+            if tokens == 20.0 {
+                f64::NAN
+            } else {
+                tokens
+            }
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "TokenCurve points must be strictly ascending and unique")]
+    fn token_curve_rejects_unsorted_points() {
+        TokenCurve::from_sorted_iter([(2, 2.0), (1, 1.0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "TokenCurve points must be strictly ascending and unique")]
+    fn token_curve_rejects_duplicate_points() {
+        TokenCurve::from_sorted_iter([(1, 1.0), (1, 2.0)]);
     }
 }

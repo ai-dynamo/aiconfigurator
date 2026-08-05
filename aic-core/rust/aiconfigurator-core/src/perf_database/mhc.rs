@@ -26,10 +26,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::token_curve::TokenCurve;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MhcTable {
@@ -97,8 +97,10 @@ impl MhcTable {
         let grids = self.load()?;
         // "both" aggregates the two silicon look-ups (Python sums pre+post).
         if op == "both" {
-            return Ok(self.query_single("pre", num_tokens, hc_mult, hidden_size, sol, grids)?
-                + self.query_single("post", num_tokens, hc_mult, hidden_size, sol, grids)?);
+            return Ok(
+                self.query_single("pre", num_tokens, hc_mult, hidden_size, sol, grids)?
+                    + self.query_single("post", num_tokens, hc_mult, hidden_size, sol, grids)?,
+            );
         }
         self.query_single(op, num_tokens, hc_mult, hidden_size, sol, grids)
     }
@@ -303,7 +305,10 @@ mod tests {
 
     #[test]
     fn mhc_absent_on_vllm_b200_errors_clearly() {
-        let table = MhcTable::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0"));
+        let table = MhcTable::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0"),
+        );
         let err = table
             .query_module("pre", 1024, 2, 4096, &linear_sol)
             .unwrap_err();
@@ -341,7 +346,9 @@ mod tests {
                 .map(|r| ByteArray::from(if str_field == 0 { r.0 } else { r.1 }))
                 .collect();
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write str");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write str");
             col.close().expect("close col");
         }
         let int_cols: [Vec<i64>; 3] = [
@@ -351,12 +358,16 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let latencies: Vec<f64> = rows.iter().map(|r| r.5).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
-        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.typed::<DoubleType>()
+            .write_batch(&latencies, None, None)
+            .expect("write latency");
         col.close().expect("close col");
         rg.close().expect("close row group");
         writer.close().expect("close writer");

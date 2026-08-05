@@ -43,9 +43,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::token_curve::TokenCurve;
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct Dsv4MegaMoeTable {
@@ -215,7 +215,11 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
     for row in reader.rows()? {
         let row = row?;
         for (col, expected, error) in [
-            (used_cuda_graph_col, true, "DSv4 MegaMoE perf row was not collected with CUDA Graph"),
+            (
+                used_cuda_graph_col,
+                true,
+                "DSv4 MegaMoE perf row was not collected with CUDA Graph",
+            ),
             (
                 includes_gate_topk_col,
                 false,
@@ -228,7 +232,10 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
             ),
         ] {
             if row.bool(col)? != expected {
-                return Err(AicError::PerfDatabase(format!("{error}: {}", path.display())));
+                return Err(AicError::PerfDatabase(format!(
+                    "{error}: {}",
+                    path.display()
+                )));
             }
         }
         let phase = row.str_owned(phase_col)?;
@@ -305,7 +312,10 @@ mod tests {
             moe_dtype_from_name("w4a8_mxfp4_mxfp8"),
             Some(MoeQuantMode::W4a8Mxfp4Mxfp8)
         );
-        assert_eq!(moe_dtype_from_name("fp8_block"), Some(MoeQuantMode::Fp8Block));
+        assert_eq!(
+            moe_dtype_from_name("fp8_block"),
+            Some(MoeQuantMode::Fp8Block)
+        );
         assert_eq!(moe_dtype_from_name("not_a_dtype"), None);
     }
 
@@ -334,6 +344,8 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.is_missing_perf_data(), "got {err:?}");
-        assert!(err.to_string().contains("DSv4 MegaMoE module data not loaded"));
+        assert!(err
+            .to_string()
+            .contains("DSv4 MegaMoE module data not loaded"));
     }
 }

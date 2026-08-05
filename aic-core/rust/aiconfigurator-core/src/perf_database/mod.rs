@@ -121,7 +121,10 @@ fn has_family_backend_version(system_data_root: &Path, backend: &str, version: &
 /// NCCL/OneCCL only ever land under that name in practice — a plain path
 /// check is simpler than a directory scan and behaves identically here.
 fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathBuf {
-    let family_root = system_data_root.join("comm").join(backend_dir).join(version);
+    let family_root = system_data_root
+        .join("comm")
+        .join(backend_dir)
+        .join(version);
     if family_root.is_dir() {
         family_root
     } else {
@@ -155,13 +158,14 @@ pub mod dsv4;
 pub mod dsv4_megamoe;
 pub mod gemm;
 mod interpolation;
-mod token_curve;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
+mod token_curve;
 pub mod wideep;
 pub mod wideep_mla;
 pub mod wideep_moe;
@@ -267,7 +271,13 @@ impl PerfDatabase {
         backend: &str,
         version: &str,
     ) -> Result<Self, AicError> {
-        Self::load_with_sources(systems_root, system, backend, version, &PerfDbSources::default())
+        Self::load_with_sources(
+            systems_root,
+            system,
+            backend,
+            version,
+            &PerfDbSources::default(),
+        )
     }
 
     /// Like [`PerfDatabase::load`], but honours the shared-layer
@@ -330,7 +340,11 @@ impl PerfDatabase {
             // NCCL/OneCCL are framework-agnostic and never inherit siblings, so
             // their roots stay as the direct system-wide dirs.
             gemm: GemmTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
-            attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            attention: AttentionTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
             communication: CommunicationTable::with_sources(
@@ -347,7 +361,11 @@ impl PerfDatabase {
             dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            wideep_mla: WideEpMlaTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
             state_space: StateSpaceTable::with_sources(
                 data_root.clone(),
@@ -396,7 +414,11 @@ impl PerfDatabase {
     /// Configure the query mode + transfer policy (both immutable per
     /// database instance afterwards, mirroring Python's configured query
     /// views). Called by `Engine::from_spec_bytes` with the spec's values.
-    pub fn with_mode(mut self, database_mode: DatabaseMode, transfer_policy: TransferPolicy) -> Self {
+    pub fn with_mode(
+        mut self,
+        database_mode: DatabaseMode,
+        transfer_policy: TransferPolicy,
+    ) -> Self {
         self.database_mode = database_mode;
         self.transfer_policy = transfer_policy;
         self
@@ -449,8 +471,11 @@ mod tests {
         assert_eq!(db.system, "b200_sxm");
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
-        let gemm_sources =
-            resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &db.data_root);
+        let gemm_sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "gemm_perf.parquet",
+            &db.data_root,
+        );
         assert_eq!(gemm_sources.len(), 1);
         assert!(
             gemm_sources[0].0.is_file(),
@@ -505,7 +530,11 @@ mod tests {
         std::fs::create_dir_all(&family_data_root).unwrap();
         std::fs::write(family_data_root.join("gemm_perf.parquet"), b"stub").unwrap();
 
-        let sources = resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &legacy_data_root);
+        let sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "gemm_perf.parquet",
+            &legacy_data_root,
+        );
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].0, family_data_root.join("gemm_perf.parquet"));
         assert!(sources[0].1.is_none());
@@ -525,7 +554,11 @@ mod tests {
         std::fs::create_dir_all(&decoy).unwrap();
         std::fs::write(decoy.join("nccl_perf.parquet"), b"stub").unwrap();
 
-        let sources = resolve_op_sources(&PerfDbSources::default(), "nccl_perf.parquet", &legacy_data_root);
+        let sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "nccl_perf.parquet",
+            &legacy_data_root,
+        );
         // Falls back to the legacy (nonexistent) path since "vllm" is a known
         // backend dir, not a family dir, and must be skipped during the scan.
         assert_eq!(sources.len(), 1);
@@ -558,12 +591,19 @@ node:
 
         // Family-first layout only: <data>/gemm/<backend>/<version>/gemm_perf.parquet.
         // No legacy <data>/<backend>/<version> dir exists at all.
-        let family_dir = systems_root.join("data").join("gemm").join(backend).join(version);
+        let family_dir = systems_root
+            .join("data")
+            .join("gemm")
+            .join(backend)
+            .join(version);
         std::fs::create_dir_all(&family_dir).unwrap();
         std::fs::write(family_dir.join("gemm_perf.parquet"), b"stub").unwrap();
 
         let legacy_data_root = systems_root.join("data").join(backend).join(version);
-        assert!(!legacy_data_root.is_dir(), "fixture must not have a legacy dir");
+        assert!(
+            !legacy_data_root.is_dir(),
+            "fixture must not have a legacy dir"
+        );
 
         let db = PerfDatabase::load(systems_root, system, backend, version)
             .expect("family-only layout must load");
@@ -599,8 +639,14 @@ node:
 
         match PerfDatabase::load(systems_root, system, backend, version) {
             Err(AicError::PerfDatabase(msg)) => {
-                assert!(msg.contains("legacy"), "error should mention legacy layout: {msg}");
-                assert!(msg.contains("family"), "error should mention family layout: {msg}");
+                assert!(
+                    msg.contains("legacy"),
+                    "error should mention legacy layout: {msg}"
+                );
+                assert!(
+                    msg.contains("family"),
+                    "error should mention family layout: {msg}"
+                );
             }
             Ok(_) => panic!("expected load to fail for a totally missing tuple"),
             Err(other) => panic!("expected PerfDatabase error, got {other:?}"),

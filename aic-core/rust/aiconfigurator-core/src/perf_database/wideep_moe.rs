@@ -30,11 +30,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::moe_index::MoeIndex;
+use super::token_curve::TokenCurve;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::token_curve::TokenCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {
@@ -46,39 +47,22 @@ pub struct WideEpMoeTable {
     compute: OnceLock<Result<WideEpMoeGrids, AicError>>,
 }
 
-/// `(kernel_source, quant, distribution, topk, num_experts, hidden, inter,
-///   num_slots, moe_tp, moe_ep)` -> `num_tokens -> latency`.
-pub struct WideEpMoeGrids {
-    by_keys: BTreeMap<WideEpMoeKey, TokenCurve>,
-    /// First-seen (file row order) distribution per `(kernel_source, quant)`.
-    /// Python's fallback takes `list(quant_data.keys())[0]` — dict INSERTION
-    /// order, i.e. the distribution of the first row loaded for that
-    /// `(kernel, quant)` — which differs from sorted order on real shards
-    /// (e.g. gb200/h100 wideep files start with `power_law_1.01_eplb`).
-    first_distribution: BTreeMap<(String, String), String>,
-    index: WideEpMoeIndex,
-}
-
-type WideEpMoeIndex = BTreeMap<String, BTreeMap<String, WideEpMoeQuantIndex>>;
-
-#[derive(Default)]
-struct WideEpMoeQuantIndex {
-    first_distribution: String,
-    by_distribution: BTreeMap<String, BTreeMap<WideEpMoeShapeKey, WideEpMoeKey>>,
+struct WideEpMoeGrids {
+    index: BTreeMap<String, MoeIndex<WideEpMoeShapeKey, TokenCurve>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WideEpMoeKey {
-    pub kernel_source: String,
-    pub quant: String,
-    pub distribution: String,
-    pub topk: u32,
-    pub num_experts: u32,
-    pub hidden_size: u32,
-    pub inter_size: u32,
-    pub num_slots: u32,
-    pub moe_tp_size: u32,
-    pub moe_ep_size: u32,
+struct WideEpMoeKey {
+    kernel_source: String,
+    quant: String,
+    distribution: String,
+    topk: u32,
+    num_experts: u32,
+    hidden_size: u32,
+    inter_size: u32,
+    num_slots: u32,
+    moe_tp_size: u32,
+    moe_ep_size: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -222,7 +206,7 @@ impl WideEpMoeTable {
     /// under (kernel, quant)`) -> exact remaining coordinate. Each level
     /// misses with a typed `AicError::PerfDatabase`. The Python fallback
     /// takes the FIRST distribution in dict-insertion (file row) order —
-    /// served here from the load-time `first_distribution` map — and then
+    /// served here from the load-time quant index — and then
     /// requires the full shape under it (a shape present only under a later
     /// distribution still misses).
     #[allow(clippy::too_many_arguments)]
@@ -246,25 +230,12 @@ impl WideEpMoeTable {
                 self.data_root.display()
             )));
         };
-        let Some(index) = by_quant.get(quant_name) else {
+        let Some(index) = by_quant.quant(quant_name) else {
             return Err(AicError::PerfDatabase(format!(
                 "WideEP MoE compute data missing for kernel_source={kernel_source:?} \
                  quant={quant_name:?} at {}",
-                 self.data_root.display()
+                self.data_root.display()
             )));
-        };
-        debug_assert_eq!(
-            grids
-                .first_distribution
-                .iter()
-                .find(|((kernel, quant), _)| kernel == kernel_source && quant == quant_name)
-                .map(|(_, distribution)| distribution.as_str()),
-            Some(index.first_distribution.as_str())
-        );
-        let dist = if index.by_distribution.contains_key(distribution) {
-            distribution
-        } else {
-            index.first_distribution.as_str()
         };
         let shape = WideEpMoeShapeKey {
             topk,
@@ -275,30 +246,25 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let key = index
-            .by_distribution
-            .get(dist)
-            .and_then(|by_shape| by_shape.get(&shape));
-        key.and_then(|key| grids.by_keys.get(key))
-            .filter(|curve| !curve.is_empty())
-            .ok_or_else(|| {
-                let key = WideEpMoeKey {
-                    kernel_source: kernel_source.to_string(),
-                    quant: quant_name.to_string(),
-                    distribution: dist.to_string(),
-                    topk,
-                    num_experts,
-                    hidden_size,
-                    inter_size,
-                    num_slots,
-                    moe_tp_size,
-                    moe_ep_size,
-                };
-                AicError::PerfDatabase(format!(
-                    "WideEP MoE compute data missing for {key:?} at {}",
-                    self.data_root.display()
-                ))
-            })
+        let (dist, curve) = index.resolve_first(distribution, &shape);
+        curve.filter(|curve| !curve.is_empty()).ok_or_else(|| {
+            let key = WideEpMoeKey {
+                kernel_source: kernel_source.to_string(),
+                quant: quant_name.to_string(),
+                distribution: dist.to_string(),
+                topk,
+                num_experts,
+                hidden_size,
+                inter_size,
+                num_slots,
+                moe_tp_size,
+                moe_ep_size,
+            };
+            AicError::PerfDatabase(format!(
+                "WideEP MoE compute data missing for {key:?} at {}",
+                self.data_root.display()
+            ))
+        })
     }
 
     fn load_compute(&self) -> Result<&WideEpMoeGrids, AicError> {
@@ -315,8 +281,8 @@ impl WideEpMoeTable {
 /// need not exist for every system); an error is returned only when no source
 /// yields rows.
 fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicError> {
-    let mut by_keys: BTreeMap<WideEpMoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    let mut first_distribution: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut index: BTreeMap<String, MoeIndex<WideEpMoeShapeKey, BTreeMap<u32, f64>>> =
+        BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -349,10 +315,9 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
                 .str_optional(kernel_source_col)?
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| DEFAULT_KERNEL_SOURCE.to_string());
-            let key = WideEpMoeKey {
-                kernel_source,
-                quant: row.str_owned(moe_dtype_col)?,
-                distribution: row.str_owned(distribution_col)?,
+            let quant = row.str_owned(moe_dtype_col)?;
+            let distribution = row.str_owned(distribution_col)?;
+            let shape = WideEpMoeShapeKey {
                 topk: row.u32(topk_col)?,
                 num_experts: row.u32(num_experts_col)?,
                 hidden_size: row.u32(hidden_size_col)?,
@@ -361,80 +326,33 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
                 moe_tp_size: row.u32(moe_tp_size_col)?,
                 moe_ep_size: row.u32(moe_ep_size_col)?,
             };
-            // First-seen (file order) distribution per (kernel, quant) — the
-            // distribution-fallback anchor (Python dict insertion order).
-            first_distribution
-                .entry((key.kernel_source.clone(), key.quant.clone()))
-                .or_insert_with(|| key.distribution.clone());
-            // Last-wins parity with Python `load_wideep_moe_compute_data`
-            // (moe.py): it direct-assigns per coordinate with no
-            // `try/except KeyError` guard, so a later row overwrites an
-            // earlier one — both within a file and across the concatenated
-            // shared-layer sources (`_read_filtered_rows` appends in source
-            // order and the loader assigns in row order). Real shards carry
-            // duplicate keys with differing latencies (e.g. 270 keys in
-            // rtx_pro_6000_server/trtllm/1.3.0rc10), so first-wins here was a
-            // live numeric divergence, same class as the MLA-module fix in
-            // `mla.rs::load_module_parquet`.
-            by_keys
-                .entry(key)
+            // The quant index captures the first-seen distribution as its
+            // fallback anchor. Leaf insertion remains first-wins, matching
+            // Python's skip-on-key-conflict shared-layer contract.
+            index
+                .entry(kernel_source)
                 .or_default()
+                .entry(quant, distribution, shape)
                 .entry(row.u32(num_tokens_col)?)
                 .or_insert(row.f64(latency_col)?);
         }
     }
-    if !any_source || by_keys.is_empty() {
+    if !any_source || index.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no WideEP MoE compute rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
-    let by_keys: BTreeMap<_, _> = by_keys
-        .into_iter()
-        .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
-        .collect();
-    let index = build_wideep_moe_index(&by_keys, &first_distribution);
     Ok(WideEpMoeGrids {
-        by_keys,
-        first_distribution,
-        index,
+        index: index
+            .into_iter()
+            .map(|(kernel, index)| (kernel, index.map_values(TokenCurve::from_map)))
+            .collect(),
     })
-}
-
-fn build_wideep_moe_index(
-    by_keys: &BTreeMap<WideEpMoeKey, TokenCurve>,
-    first_distribution: &BTreeMap<(String, String), String>,
-) -> WideEpMoeIndex {
-    let mut index = WideEpMoeIndex::new();
-    for key in by_keys.keys() {
-        let quant_index = index
-            .entry(key.kernel_source.clone())
-            .or_default()
-            .entry(key.quant.clone())
-            .or_default();
-        if quant_index.first_distribution.is_empty() {
-            quant_index.first_distribution = first_distribution
-                .get(&(key.kernel_source.clone(), key.quant.clone()))
-                .expect("loaded key must have a first distribution")
-                .clone();
-        }
-        let shape = WideEpMoeShapeKey {
-            topk: key.topk,
-            num_experts: key.num_experts,
-            hidden_size: key.hidden_size,
-            inter_size: key.inter_size,
-            num_slots: key.num_slots,
-            moe_tp_size: key.moe_tp_size,
-            moe_ep_size: key.moe_ep_size,
-        };
-        quant_index
-            .by_distribution
-            .entry(key.distribution.clone())
-            .or_default()
-            .insert(shape, key.clone());
-    }
-    index
 }
 
 fn clone_err(err: &AicError) -> AicError {
