@@ -397,17 +397,21 @@ def create_dsv4_kv_cache_and_metadata(
         seq_len_q = 1
         kv_cache_len = seq_len
 
-    # Size the pool by memory fraction like serving does
-    # (examples/models/core/deepseek_v4/README.md:148-151 @v1.3.0rc23:
-    # KvCacheConfig(tokens_per_block=128, free_gpu_memory_fraction=0.5)).
-    # A max_tokens cap computed from the main-KV shape under-counts on V2:
-    # _get_quota_from_max_tokens converts to a byte quota across ALL cache
-    # types (main KV + SWA + compressor/indexer state), so large-KV shapes
-    # failed dummy-request allocation and surfaced as "Request ID not found
-    # in IndexMapper" at forward (B200 smoke 2026-08-06).
+    # KVCacheManagerV2 requires an explicit quota (max_tokens or
+    # max_gpu_total_bytes; kv_cache_manager_v2.py "Quota not set" @1.3.0rc23)
+    # — in serving, free_gpu_memory_fraction is converted to a byte quota by
+    # the executor's KV estimation before the manager is built, so pass the
+    # equivalent byte quota directly (half of currently-free device memory,
+    # matching the DSV4 example's free_gpu_memory_fraction=0.5,
+    # examples/models/core/deepseek_v4/README.md:148-151 @v1.3.0rc23). A
+    # main-KV-shaped max_tokens cap under-counts on V2 (the byte quota spans
+    # main KV + SWA + compressor/indexer caches) and made large-KV shapes
+    # fail dummy-request allocation ("Request ID not found in IndexMapper",
+    # B200 smoke round 1 2026-08-06).
+    free_bytes, _ = torch.cuda.mem_get_info(torch.device(device))
     kv_cache_config = KvCacheConfig(
         tokens_per_block=tokens_per_block,
-        free_gpu_memory_fraction=0.5,
+        max_gpu_total_bytes=int(free_bytes * 0.5),
         enable_block_reuse=False,
     )
     kv_cache_manager_cls = get_kv_cache_manager_cls(model_config, kv_cache_config)
