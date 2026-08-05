@@ -399,9 +399,14 @@ def _config_dir_without_layer_types(model_path: str) -> str:
         from huggingface_hub import snapshot_download
 
         src = snapshot_download(model_path, allow_patterns=["*.json"])
+    # Key the cache on the config CONTENT, not just the source path: bundled
+    # model configs can change under an unchanged path (repo update), and a
+    # path-only key would keep serving the stale normalized copy.
+    with open(os.path.join(src, "config.json"), "rb") as f:
+        config_bytes = f.read()
     dst = os.path.join(
         os.path.expanduser("~/.cache/aic_collector/glm_dsa_config_norm"),
-        hashlib.sha1(src.encode()).hexdigest()[:16],
+        hashlib.sha1(src.encode() + b"\0" + config_bytes).hexdigest()[:16],
     )
     config_path = os.path.join(dst, "config.json")
     if not os.path.exists(config_path):
