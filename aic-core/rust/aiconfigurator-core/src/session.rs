@@ -11,6 +11,7 @@
 //! op lists from an [`crate::engine::spec::EngineSpec`].
 
 use crate::common::error::AicError;
+use crate::operators::base::PerformanceResult;
 use crate::operators::{Op, RuntimeContext};
 use crate::perf_database::PerfDatabase;
 
@@ -46,6 +47,33 @@ pub(crate) fn run_context_ops(
     seq_imbalance_correction_scale: f64,
     filter: ContextOpFilter,
 ) -> Result<f64, AicError> {
+    run_context_ops_with(
+        ops,
+        db,
+        batch_size,
+        effective_isl,
+        prefix,
+        seq_imbalance_correction_scale,
+        filter,
+        |_, _| {},
+    )
+}
+
+/// [`run_context_ops`] with a per-op sink: `on_op` observes every queried
+/// op's full [`PerformanceResult`] (the per-op FFI and the mixed-step
+/// breakdown collect through it). The no-op-sink wrapper above monomorphizes
+/// to the pre-sink code, so the scalar hot path pays nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_context_ops_with(
+    ops: &[Op],
+    db: &PerfDatabase,
+    batch_size: u32,
+    effective_isl: u32,
+    prefix: u32,
+    seq_imbalance_correction_scale: f64,
+    filter: ContextOpFilter,
+    mut on_op: impl FnMut(&Op, PerformanceResult),
+) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {
         match filter {
@@ -54,24 +82,52 @@ pub(crate) fn run_context_ops(
             ContextOpFilter::OnlyContextAttention if !op.is_context_attention() => continue,
             _ => {}
         }
-        let x = if op.is_logits_gemm() {
-            batch_size
-        } else {
-            batch_size * effective_isl
-        };
-        let ctx = RuntimeContext {
+        let result = query_context_op(
+            op,
+            db,
             batch_size,
-            beam_width: 1,
-            s: effective_isl,
+            effective_isl,
             prefix,
-            num_tokens: x,
             seq_imbalance_correction_scale,
-            gen_seq_imbalance_correction_scale: 1.0,
-            num_image_tokens: 0,
-        };
-        total += op.query(db, &ctx)?.latency_ms;
+            None,
+        )?;
+        total += result.latency_ms;
+        on_op(op, result);
     }
     Ok(total)
+}
+
+/// One context op at the context-phase shape — the single query body every
+/// context walk shares. Default token count is `x = batch * effective_isl`,
+/// except the logits GEMM's `x = batch` (mirroring `base_backend.py:337`);
+/// `x_override` replaces it verbatim for Python orchestrations with their own
+/// x policy (AFD's `_sum_latency` uses a uniform `batch * s` with NO logits
+/// exception). The index-addressed `evaluate` FFI calls this directly.
+pub(crate) fn query_context_op(
+    op: &Op,
+    db: &PerfDatabase,
+    batch_size: u32,
+    effective_isl: u32,
+    prefix: u32,
+    seq_imbalance_correction_scale: f64,
+    x_override: Option<u32>,
+) -> Result<PerformanceResult, AicError> {
+    let x = x_override.unwrap_or(if op.is_logits_gemm() {
+        batch_size
+    } else {
+        batch_size * effective_isl
+    });
+    let ctx = RuntimeContext {
+        batch_size,
+        beam_width: 1,
+        s: effective_isl,
+        prefix,
+        num_tokens: x,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale: 1.0,
+        num_image_tokens: 0,
+    };
+    op.query(db, &ctx)
 }
 
 /// Python `_run_generation_phase` inner loop body for a single decode step
@@ -120,24 +176,81 @@ pub(crate) fn run_generation_ops_step_beamed(
     gen_seq_imbalance_correction_scale: f64,
     only_generation_attention: bool,
 ) -> Result<f64, AicError> {
+    run_generation_ops_step_beamed_with(
+        ops,
+        db,
+        batch_size,
+        beam_width,
+        kv_seq_tokens,
+        gen_seq_imbalance_correction_scale,
+        only_generation_attention,
+        |_, _| {},
+    )
+}
+
+/// [`run_generation_ops_step_beamed`] with a per-op sink (see
+/// [`run_context_ops_with`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_generation_ops_step_beamed_with(
+    ops: &[Op],
+    db: &PerfDatabase,
+    batch_size: u32,
+    beam_width: u32,
+    kv_seq_tokens: u32,
+    gen_seq_imbalance_correction_scale: f64,
+    only_generation_attention: bool,
+    mut on_op: impl FnMut(&Op, PerformanceResult),
+) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {
         if only_generation_attention && !op.is_generation_attention() {
             continue;
         }
-        let ctx = RuntimeContext {
+        let result = query_generation_op(
+            op,
+            db,
             batch_size,
-            beam_width: beam_width.max(1),
-            s: kv_seq_tokens,
-            prefix: 0,
-            num_tokens: batch_size.saturating_mul(beam_width.max(1)),
-            seq_imbalance_correction_scale: 1.0,
+            beam_width,
+            kv_seq_tokens,
             gen_seq_imbalance_correction_scale,
-            num_image_tokens: 0,
-        };
-        total += op.query(db, &ctx)?.latency_ms;
+            0,
+            None,
+        )?;
+        total += result.latency_ms;
+        on_op(op, result);
     }
     Ok(total)
+}
+
+/// One generation op at the decode-step shape — the single query body every
+/// generation walk shares (`x = batch * beam`, attention keyed on the raw
+/// decode batch, mirroring `base_backend.py:368-372`; the base decode walk
+/// carries no prefix). `prefix` / `x_override` exist for Python
+/// orchestrations with their own conventions (AFD's `_sum_latency` threads
+/// the runtime prefix into decode queries and uses `x = batch`). The
+/// index-addressed `evaluate` FFI calls this directly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn query_generation_op(
+    op: &Op,
+    db: &PerfDatabase,
+    batch_size: u32,
+    beam_width: u32,
+    kv_seq_tokens: u32,
+    gen_seq_imbalance_correction_scale: f64,
+    prefix: u32,
+    x_override: Option<u32>,
+) -> Result<PerformanceResult, AicError> {
+    let ctx = RuntimeContext {
+        batch_size,
+        beam_width: beam_width.max(1),
+        s: kv_seq_tokens,
+        prefix,
+        num_tokens: x_override.unwrap_or(batch_size.saturating_mul(beam_width.max(1))),
+        seq_imbalance_correction_scale: 1.0,
+        gen_seq_imbalance_correction_scale,
+        num_image_tokens: 0,
+    };
+    op.query(db, &ctx)
 }
 
 /// FPM-telemetry mix-step composition (the Dynamo mocker contract). Consumed

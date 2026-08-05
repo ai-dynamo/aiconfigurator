@@ -9,12 +9,12 @@
 //! the whole table). The weight footprint is `vocab * hidden *
 //! memory_factor`.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
-use crate::operators::attention::mem_op_latency_ms;
+use crate::operators::attention::query_mem_op;
+use crate::operators::base::PerformanceResult;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EmbeddingOp {
@@ -50,11 +50,9 @@ impl EmbeddingOp {
     /// `hidden_size * dtype_memory` bytes.
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         let num_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
-        let bytes = (num_tokens as f64)
-            * (self.hidden_size as f64)
-            * self.quant_mode.mapping().memory;
-        let latency = mem_op_latency_ms(&db.system_spec, bytes);
-        Ok(PerformanceResult::new(latency, Source::Empirical).scaled(self.scale_factor))
+        let bytes =
+            (num_tokens as f64) * (self.hidden_size as f64) * self.quant_mode.mapping().memory;
+        Ok(query_mem_op(db, bytes).scaled(self.scale_factor))
     }
 
     pub fn weights_bytes(&self) -> f64 {

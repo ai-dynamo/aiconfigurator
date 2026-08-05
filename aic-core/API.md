@@ -121,8 +121,11 @@ The supported root-level Rust surface is grouped as follows:
   `ENGINE_SPEC_SCHEMA_VERSION`, and `FPM_VERSION`.
 
 Advanced consumers may use `engine::{Engine, RuntimeConfig, StaticMode,
-StaticResult}` and `engine::spec::{EngineSpec, OpSpec}` to load and execute a
-previously compiled specification directly.
+StaticResult, PerOpValue}` and `engine::spec::{EngineSpec, OpSpec}` to load and
+execute a previously compiled specification directly. `PerOpValue` is the
+per-op result tuple `(name, latency_ms, energy_wms, source)` returned by the
+`*_per_op` / `evaluate_*` methods (the thin op-list evaluation FFI); per-op
+energy is 0.0 wherever the perf tables carry no power columns.
 
 ## Compatibility rules
 

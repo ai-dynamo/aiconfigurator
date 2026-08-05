@@ -48,13 +48,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::moe::{query_token_curve, singleton_underflow, MoeSiblingSlice};
+use super::perf_interp::{self, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::{query_token_curve, singleton_underflow, MoeSiblingSlice};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpTable {
@@ -163,14 +163,18 @@ impl WideEpTable {
     /// `perf_db_sources` (Python-supplied). Each perf file falls back to its
     /// primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let context_moe_sources =
-            resolve_op_sources(perf_db_sources, "wideep_context_moe_perf.parquet", &data_root);
+        let context_moe_sources = resolve_op_sources(
+            perf_db_sources,
+            "wideep_context_moe_perf.parquet",
+            &data_root,
+        );
         let generation_moe_sources = resolve_op_sources(
             perf_db_sources,
             "wideep_generation_moe_perf.parquet",
             &data_root,
         );
-        let moe_sources = resolve_op_sources(perf_db_sources, "wideep_moe_perf.parquet", &data_root);
+        let moe_sources =
+            resolve_op_sources(perf_db_sources, "wideep_moe_perf.parquet", &data_root);
         let alltoall_sources =
             resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
         let deepep_normal_sources = resolve_op_sources(
@@ -297,12 +301,16 @@ impl WideEpTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "WideEP MoE data missing for {key:?} at {}",
-                self.data_root.display()
-            ))
-        })?;
+        let by_tokens = grids
+            .by_keys
+            .get(&key)
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "WideEP MoE data missing for {key:?} at {}",
+                    self.data_root.display()
+                ))
+            })?;
         Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
     }
 
@@ -347,7 +355,10 @@ impl WideEpTable {
     /// first-seen (file row) order (Python dict insertion order — same
     /// contract as `moe.rs::MoeTable::available_quants`).
     pub fn moe_available_quants(&self, is_context: bool) -> Result<Vec<String>, AicError> {
-        Ok(self.load_ctx_or_gen_moe(is_context)?.quants_in_load_order.clone())
+        Ok(self
+            .load_ctx_or_gen_moe(is_context)?
+            .quants_in_load_order
+            .clone())
     }
 
     fn load_ctx_or_gen_moe(&self, is_context: bool) -> Result<&MoeGrids, AicError> {
@@ -550,9 +561,21 @@ impl WideEpTable {
                 return Ok(*point);
             }
             return Ok(DispatchPoint {
-                dispatch_transmit_us: dispatch_field(by_tokens, |p| p.dispatch_transmit_us, num_tokens)?,
-                dispatch_notify_us: dispatch_field(by_tokens, |p| p.dispatch_notify_us, num_tokens)?,
-                combine_transmit_us: dispatch_field(by_tokens, |p| p.combine_transmit_us, num_tokens)?,
+                dispatch_transmit_us: dispatch_field(
+                    by_tokens,
+                    |p| p.dispatch_transmit_us,
+                    num_tokens,
+                )?,
+                dispatch_notify_us: dispatch_field(
+                    by_tokens,
+                    |p| p.dispatch_notify_us,
+                    num_tokens,
+                )?,
+                combine_transmit_us: dispatch_field(
+                    by_tokens,
+                    |p| p.combine_transmit_us,
+                    num_tokens,
+                )?,
                 combine_notify_us: dispatch_field(by_tokens, |p| p.combine_notify_us, num_tokens)?,
                 combine_avg_t_us: dispatch_field(by_tokens, |p| p.combine_avg_t_us, num_tokens)?,
                 dispatch_avg_t_us: dispatch_field(by_tokens, |p| p.dispatch_avg_t_us, num_tokens)?,
@@ -562,9 +585,24 @@ impl WideEpTable {
             return Ok(*point);
         }
         Ok(DispatchPoint {
-            dispatch_transmit_us: dispatch_field_2d(by_sms, |p| p.dispatch_transmit_us, sms, num_tokens)?,
-            dispatch_notify_us: dispatch_field_2d(by_sms, |p| p.dispatch_notify_us, sms, num_tokens)?,
-            combine_transmit_us: dispatch_field_2d(by_sms, |p| p.combine_transmit_us, sms, num_tokens)?,
+            dispatch_transmit_us: dispatch_field_2d(
+                by_sms,
+                |p| p.dispatch_transmit_us,
+                sms,
+                num_tokens,
+            )?,
+            dispatch_notify_us: dispatch_field_2d(
+                by_sms,
+                |p| p.dispatch_notify_us,
+                sms,
+                num_tokens,
+            )?,
+            combine_transmit_us: dispatch_field_2d(
+                by_sms,
+                |p| p.combine_transmit_us,
+                sms,
+                num_tokens,
+            )?,
             combine_notify_us: dispatch_field_2d(by_sms, |p| p.combine_notify_us, sms, num_tokens)?,
             combine_avg_t_us: dispatch_field_2d(by_sms, |p| p.combine_avg_t_us, sms, num_tokens)?,
             dispatch_avg_t_us: dispatch_field_2d(by_sms, |p| p.dispatch_avg_t_us, sms, num_tokens)?,
@@ -581,7 +619,15 @@ impl WideEpTable {
         num_experts: u32,
     ) -> Result<DispatchPoint, AicError> {
         let grids = self.load_deepep_ll()?;
-        dispatch_lookup(grids, node_num, hidden_size, num_tokens, num_topk, num_experts, &self.data_root)
+        dispatch_lookup(
+            grids,
+            node_num,
+            hidden_size,
+            num_tokens,
+            num_topk,
+            num_experts,
+            &self.data_root,
+        )
     }
 
     fn load_context_moe(&self) -> Result<&MoeGrids, AicError> {
@@ -668,12 +714,16 @@ fn query_moe(
         moe_tp_size,
         moe_ep_size,
     };
-    let by_tokens = grids
-        .by_keys
-        .get(&key)
-        .ok_or_else(|| AicError::PerfDatabase(format!("MoE data missing for {key:?} at {}", data_root.display())))?;
+    let by_tokens = grids.by_keys.get(&key).ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "MoE data missing for {key:?} at {}",
+            data_root.display()
+        ))
+    })?;
     if by_tokens.is_empty() {
-        return Err(AicError::PerfDatabase("MoE table has no token points".to_string()));
+        return Err(AicError::PerfDatabase(
+            "MoE table has no token points".to_string(),
+        ));
     }
     // Python's `_resolve_tokens` singleton-underflow guard applies only to
     // the paths that route through it (sglang deepep context/generation MoE
@@ -703,9 +753,16 @@ fn dispatch_field(
     num_tokens: u32,
 ) -> Result<f64, AicError> {
     let (&first, _) = by_tokens.iter().next().expect("caller checked non-empty");
-    let (&last, _) = by_tokens.iter().next_back().expect("caller checked non-empty");
+    let (&last, _) = by_tokens
+        .iter()
+        .next_back()
+        .expect("caller checked non-empty");
     if num_tokens < first || num_tokens > last {
-        let anchor = if num_tokens < first { &by_tokens[&first] } else { &by_tokens[&last] };
+        let anchor = if num_tokens < first {
+            &by_tokens[&first]
+        } else {
+            &by_tokens[&last]
+        };
         if field(anchor) == 0.0 {
             return Ok(0.0);
         }
@@ -761,8 +818,14 @@ fn normal_hold_anchor<'a>(
         return None;
     }
     let covered = |slice: &BTreeMap<u32, DispatchPoint>| -> bool {
-        let (&first, _) = slice.iter().next().expect("loader never stores empty slices");
-        let (&last, _) = slice.iter().next_back().expect("loader never stores empty slices");
+        let (&first, _) = slice
+            .iter()
+            .next()
+            .expect("loader never stores empty slices");
+        let (&last, _) = slice
+            .iter()
+            .next_back()
+            .expect("loader never stores empty slices");
         first <= num_tokens && num_tokens <= last
     };
     let nearest = |keys: &mut dyn Iterator<Item = u32>, c: u32| -> u32 {
@@ -826,7 +889,10 @@ fn dispatch_lookup(
         num_experts,
     };
     let by_tokens = grids.by_keys.get(&key).ok_or_else(|| {
-        AicError::PerfDatabase(format!("dispatch data missing for {key:?} at {}", data_root.display()))
+        AicError::PerfDatabase(format!(
+            "dispatch data missing for {key:?} at {}",
+            data_root.display()
+        ))
     })?;
     if let Some(point) = by_tokens.get(&num_tokens) {
         return Ok(*point);
@@ -913,10 +979,16 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
         return Err(AicError::PerfDatabase(format!(
             "no MoE-shape rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
-    Ok(MoeGrids { by_keys, quants_in_load_order })
+    Ok(MoeGrids {
+        by_keys,
+        quants_in_load_order,
+    })
 }
 
 /// Auto-select the TRT-LLM All2All kernel. Verbatim port of Python
@@ -945,7 +1017,9 @@ pub(crate) fn select_alltoall_kernel(
         }
     }
     let supports_mnnvl = spec.gpu.sm_version.unwrap_or(0) >= 100;
-    let is_wideep = moe_backend.map(|b| b.to_uppercase() == "WIDEEP").unwrap_or(false);
+    let is_wideep = moe_backend
+        .map(|b| b.to_uppercase() == "WIDEEP")
+        .unwrap_or(false);
     if is_wideep {
         if supports_mnnvl {
             return "NVLinkTwoSided";
@@ -1030,7 +1104,10 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
         return Err(AicError::PerfDatabase(format!(
             "no TRT-LLM alltoall rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(AlltoallGrids { by_keys })
@@ -1088,7 +1165,9 @@ fn load_deepep_normal_parquet(sources: &[PerfSource]) -> Result<NormalDispatchGr
                 .or_default()
                 .entry(row.u32(num_token_col)?)
                 .or_insert(DispatchPoint {
-                    dispatch_transmit_us: row.f64_optional(dispatch_transmit_us_col)?.unwrap_or(0.0),
+                    dispatch_transmit_us: row
+                        .f64_optional(dispatch_transmit_us_col)?
+                        .unwrap_or(0.0),
                     dispatch_notify_us: row.f64_optional(dispatch_notify_us_col)?.unwrap_or(0.0),
                     combine_transmit_us: row.f64_optional(combine_transmit_us_col)?.unwrap_or(0.0),
                     combine_notify_us: row.f64_optional(combine_notify_us_col)?.unwrap_or(0.0),
@@ -1101,7 +1180,10 @@ fn load_deepep_normal_parquet(sources: &[PerfSource]) -> Result<NormalDispatchGr
         return Err(AicError::PerfDatabase(format!(
             "no DeepEP-normal rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(NormalDispatchGrids { by_keys })
@@ -1142,23 +1224,28 @@ fn load_deepep_ll_parquet(sources: &[PerfSource]) -> Result<DispatchGrids, AicEr
                 num_experts: row.u32(num_experts_col)?,
             };
             // First-wins on the full coordinate (Python skip-on-conflict).
-            by_keys.entry(key).or_default().entry(row.u32(num_token_col)?).or_insert(
-                DispatchPoint {
+            by_keys
+                .entry(key)
+                .or_default()
+                .entry(row.u32(num_token_col)?)
+                .or_insert(DispatchPoint {
                     dispatch_transmit_us: 0.0,
                     dispatch_notify_us: 0.0,
                     combine_transmit_us: 0.0,
                     combine_notify_us: 0.0,
                     combine_avg_t_us: row.f64_optional(combine_avg_t_us_col)?.unwrap_or(0.0),
                     dispatch_avg_t_us: row.f64_optional(dispatch_avg_t_us_col)?.unwrap_or(0.0),
-                },
-            );
+                });
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no DeepEP-LL rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(DispatchGrids { by_keys })
@@ -1250,27 +1337,31 @@ mod tests {
                 .expect("writer");
         let mut rg = writer.next_row_group().expect("row group");
         let int_cols: [Vec<i64>; 6] = [
-            rows.iter().map(|r| r.0).collect(),                // node_num
-            rows.iter().map(|_| 7168).collect(),               // hidden_size
-            rows.iter().map(|r| r.2).collect(),                // num_token
-            rows.iter().map(|_| 8).collect(),                  // num_topk
-            rows.iter().map(|_| 256).collect(),                // num_experts
-            rows.iter().map(|r| r.1).collect(),                // dispatch_sms
+            rows.iter().map(|r| r.0).collect(),  // node_num
+            rows.iter().map(|_| 7168).collect(), // hidden_size
+            rows.iter().map(|r| r.2).collect(),  // num_token
+            rows.iter().map(|_| 8).collect(),    // num_topk
+            rows.iter().map(|_| 256).collect(),  // num_experts
+            rows.iter().map(|r| r.1).collect(),  // dispatch_sms
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let f64_cols: [Vec<f64>; 4] = [
-            rows.iter().map(|r| r.3).collect(),                // dispatch_transmit_us
-            rows.iter().map(|_| 1.0).collect(),                // dispatch_notify_us
-            rows.iter().map(|_| 2.0).collect(),                // combine_transmit_us
-            rows.iter().map(|_| 0.0).collect(),                // combine_notify_us (zero-boundary)
+            rows.iter().map(|r| r.3).collect(), // dispatch_transmit_us
+            rows.iter().map(|_| 1.0).collect(), // dispatch_notify_us
+            rows.iter().map(|_| 2.0).collect(), // combine_transmit_us
+            rows.iter().map(|_| 0.0).collect(), // combine_notify_us (zero-boundary)
         ];
         for values in &f64_cols {
             let mut col = rg.next_column().expect("next col").expect("f64 col");
-            col.typed::<DoubleType>().write_batch(values, None, None).expect("write f64");
+            col.typed::<DoubleType>()
+                .write_batch(values, None, None)
+                .expect("write f64");
             col.close().expect("close col");
         }
         rg.close().expect("close row group");
@@ -1399,12 +1490,31 @@ mod tests {
     fn alltoall_kernel_selection_matches_python() {
         let spec = gb200_spec();
         assert_eq!(select_alltoall_kernel(&spec, 4, 8, None), "NVLinkOneSided");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("WIDEEP")), "NVLinkTwoSided");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("DeepGemm")), "NotEnabled");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("cute_dsl")), "NotEnabled");
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("WIDEEP")),
+            "NVLinkTwoSided"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("DeepGemm")),
+            "NotEnabled"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("cute_dsl")),
+            "NotEnabled"
+        );
         let table = gb200_trtllm_table();
         let zero = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("DEEPGEMM"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("DEEPGEMM"),
+            )
             .expect("NotEnabled short-circuits");
         assert_eq!(zero, 0.0);
     }
@@ -1419,24 +1529,73 @@ mod tests {
         let table = gb200_trtllm_table();
         // WideEP -> NVLinkTwoSided; fp8 dispatch row (ep=4 -> node_num=1).
         let dispatch = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("WIDEEP"),
+            )
             .expect("dispatch row");
-        assert!((dispatch - 0.011_372_800_171_375_274).abs() < 1e-12, "got {dispatch}");
+        assert!(
+            (dispatch - 0.011_372_800_171_375_274).abs() < 1e-12,
+            "got {dispatch}"
+        );
         // Same slice, combine phase: distinct value proves op_name keys the table.
         let combine = table
-            .query_trtllm_alltoall(&spec, "alltoall_combine", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_combine",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("WIDEEP"),
+            )
             .expect("combine row");
-        assert!((combine - 0.012_921_600_043_773_651).abs() < 1e-12, "got {combine}");
+        assert!(
+            (combine - 0.012_921_600_043_773_651).abs() < 1e-12,
+            "got {combine}"
+        );
         // fp8_block reuses the fp8 tables (Python `_normalize_quant_mode_for_table`).
         let block = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8Block, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8Block,
+                Some("WIDEEP"),
+            )
             .expect("fp8_block reroutes to fp8");
         assert_eq!(block, dispatch);
         // Non-WideEP -> NVLinkOneSided (nvfp4-only slice, ep=2 -> node_num=1).
         let one_sided = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 2, MoeQuantMode::Nvfp4, None)
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                2,
+                MoeQuantMode::Nvfp4,
+                None,
+            )
             .expect("one-sided row");
-        assert!((one_sided - 0.012_895_999_848_842_621).abs() < 1e-12, "got {one_sided}");
+        assert!(
+            (one_sided - 0.012_895_999_848_842_621).abs() < 1e-12,
+            "got {one_sided}"
+        );
     }
 
     #[test]

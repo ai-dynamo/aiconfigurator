@@ -36,7 +36,7 @@ use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
-    Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
+    Engine, PerOpValue, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
 };
 use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
@@ -411,6 +411,204 @@ impl AicEngine {
         py.allow_threads(|| {
             self.inner
                 .decode_step_latency(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `run_static` with the per-op values kept: returns
+    /// ``(context, generation)`` lists of ``(name, latency_ms, energy_wms,
+    /// source)`` tuples. Names repeat when the op list repeats them and
+    /// generation entries repeat per stride step — fold by name with `+=`
+    /// (Python phase-dict semantics). Generation values arrive pre-weighted
+    /// by the stride `repeat_count`; `latency_correction_scale` stays a
+    /// downstream Python multiply, exactly like `run_static`.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn run_static_per_op(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
+    ) -> PyResult<(Vec<PerOpValue>, Vec<PerOpValue>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| self.inner.run_static_per_op(&rt, mode, stride))
+            .map_err(aic_to_py)
+    }
+
+    /// `mixed_step_breakdown` with the per-op values kept: returns
+    /// ``(shared_non_attention, context_attention, decode_attention)`` lists
+    /// of ``(name, latency_ms, energy_wms, source)`` tuples. The
+    /// context-attention entries arrive already divided by the
+    /// ``ceil(isl/ctx)`` scale, so each list sums to its breakdown bucket.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown_per_op(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>)> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `decode_step_latency` with the per-op values kept: returns a list of
+    /// ``(name, latency_ms, energy_wms, source)`` tuples for one
+    /// generation-only step.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn decode_step_per_op(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_per_op(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Thin op-list evaluation FFI over the compiled CONTEXT op list:
+    /// evaluate the ops at `indices` (positions in the compiled spec's
+    /// `context_ops`, which mirror `model.context_ops` order) at the
+    /// context-phase shape, returning ``(name, latency_ms, energy_wms,
+    /// source)`` per op in input order. Python-side orchestration (AFD A/F
+    /// partitions) sources per-op values here; the orchestration itself
+    /// stays in Python.
+    #[pyo3(signature = (indices, batch_size, s, prefix=0, seq_imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_context_ops(
+        &self,
+        py: Python<'_>,
+        indices: Vec<usize>,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_context_ops(
+                &indices,
+                batch_size,
+                s,
+                prefix,
+                seq_imbalance_correction_scale,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Thin op-list evaluation FFI over the compiled GENERATION op list at
+    /// the decode-step shape (see `evaluate_context_ops`).
+    #[pyo3(signature = (indices, batch_size, s, gen_seq_imbalance_correction_scale=1.0, prefix=0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_generation_ops(
+        &self,
+        py: Python<'_>,
+        indices: Vec<usize>,
+        batch_size: u32,
+        s: u32,
+        gen_seq_imbalance_correction_scale: f64,
+        prefix: u32,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_generation_ops(
+                &indices,
+                batch_size,
+                s,
+                gen_seq_imbalance_correction_scale,
+                prefix,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Evaluate an ad-hoc op list (JSON array of OpSpec objects — the same
+    /// externally-tagged encoding `EngineSpec` uses) against this engine's
+    /// database. Serves op lists deliberately NOT in the compiled spec (the
+    /// VL encoder phase); the caller keeps the shape math and passes the
+    /// resolved `(batch_size, s)` per group. `is_context` selects the
+    /// context-phase query shape (`x = batch * s`, logits-GEMM exception)
+    /// vs the decode-step shape.
+    #[pyo3(signature = (ops_json, is_context, batch_size, s, prefix=0, imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_ops_json(
+        &self,
+        py: Python<'_>,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_ops_json(
+                ops_json,
+                is_context,
+                batch_size,
+                s,
+                prefix,
+                imbalance_correction_scale,
+                x,
+            )
         })
         .map_err(aic_to_py)
     }
@@ -1246,11 +1444,16 @@ mod tests {
         let raw = Engine::from_spec_bytes(&bytes, &root).unwrap();
         let aic = AicEngine::from_spec(&bytes, root.to_str()).unwrap();
 
-        let raw_mixed = raw.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let raw_mixed = raw
+            .mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
         let mixed =
-            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)).unwrap();
+            Python::with_gil(|py| aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0))
+                .unwrap();
         assert!((mixed - raw_mixed).abs() < 1e-12);
-        let raw_breakdown = raw.mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let raw_breakdown = raw
+            .mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
         let breakdown =
             Python::with_gil(|py| aic.mixed_step_breakdown(py, 1024, 2, 1024, 8, 0, 1.0, 1.0))
                 .unwrap();
@@ -1373,9 +1576,12 @@ mod tests {
         });
         assert_eq!(aic.last_provenance(), None);
 
-        aic.inner.database().note_provenance(ProvenanceTier::Empirical);
+        aic.inner
+            .database()
+            .note_provenance(ProvenanceTier::Empirical);
         Python::with_gil(|py| {
-            aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+            aic.mixed_step_latency(py, 1024, 2, 1024, 8, 0, 1.0, 1.0)
+                .unwrap();
         });
         assert_eq!(aic.last_provenance(), None);
 

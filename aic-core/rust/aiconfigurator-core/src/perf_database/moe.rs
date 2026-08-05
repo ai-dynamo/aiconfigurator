@@ -31,17 +31,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// Resolve a 1-axis `num_tokens -> latency_ms` curve on the perf_interp v2
 /// engine: exact hit / RAW lerp in range; beyond the collected range the
 /// engine holds the boundary util (`k_tail=1`) and lets `sol` carry the
-/// growth. Shared by the MoE / WideEP / mHC token-curve families.
+/// growth. Latency-only variant for the WideEP token-curve families (kept
+/// energy-free in Rust — see the module docs); the MoE table itself and the
+/// mHC/MegaMoE tables resolve via [`query_token_curve_value`].
 pub(crate) fn query_token_curve(
     curve: &BTreeMap<u32, f64>,
     num_tokens: f64,
@@ -56,11 +58,30 @@ pub(crate) fn query_token_curve(
     perf_interp::query(&cfg, &node, &[num_tokens])
 }
 
+/// Power-carrying twin of [`query_token_curve`]: resolves the same 1-axis
+/// engine query on measured `{latency, power, energy}` leaves and returns
+/// the full value (exact hit verbatim; blends re-derive
+/// `energy = power * latency`; util-hold scales latency while power holds —
+/// "energy scaled with latency", mirroring Python `_resolve_tokens`).
+pub(crate) fn query_token_curve_value(
+    curve: &BTreeMap<u32, LeafValue>,
+    num_tokens: f64,
+    sol: &dyn Fn(f64) -> f64,
+) -> Result<LeafValue, AicError> {
+    let mut node = Node::branch();
+    for (&t, &leaf) in curve {
+        node.insert_value(&[t], leaf);
+    }
+    let sol_slice = |c: &[f64]| sol(c[0]);
+    let cfg = OpInterpConfig::grid(&["num_tokens"], &sol_slice);
+    perf_interp::query_value(&cfg, &node, &[num_tokens])
+}
+
 /// Python `_require_moe_token_points`: a singleton curve queried below its
 /// only measured point is a structured miss (it cannot define the low-token
 /// launch-overhead regime). Multi-point underflow and singleton overflow go
 /// to the engine's util-hold unchanged.
-pub(crate) fn singleton_underflow(curve: &BTreeMap<u32, f64>, num_tokens: u32) -> Option<u32> {
+pub(crate) fn singleton_underflow<T>(curve: &BTreeMap<u32, T>, num_tokens: u32) -> Option<u32> {
     if curve.len() == 1 {
         let &only = curve.keys().next().expect("len checked");
         if num_tokens < only {
@@ -114,7 +135,7 @@ struct LoadedMoeGrids {
 }
 
 struct MoeGrids {
-    by_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MoeKey, BTreeMap<u32, LeafValue>>,
     /// Distinct quant names in first-seen (file row) order. Python's
     /// transfer ladder iterates the table dict in INSERTION order
     /// (`for q in moe_table`), which breaks profile-distance ties by file
@@ -155,7 +176,8 @@ impl MoeTable {
         }
     }
 
-    /// Raw MoE latency in ms via the perf_interp v2 engine (1-axis token
+    /// Raw MoE value (latency ms + power/energy) via the perf_interp v2
+    /// engine (1-axis token
     /// curve): exact hit / RAW lerp in range; beyond the collected range the
     /// boundary util is held (`k_tail=1`, unclamped) and `sol` — the
     /// operator layer's MoE roofline — carries the growth. Mirrors Python
@@ -178,7 +200,7 @@ impl MoeTable {
         quant: MoeQuantMode,
         workload_distribution: &str,
         sol: &dyn Fn(f64) -> f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let loaded = self.load()?;
         let grids = &loaded.default;
         let quant_name = quant.name();
@@ -213,7 +235,7 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        query_token_curve(by_tokens, num_tokens as f64, sol)
+        query_token_curve_value(by_tokens, num_tokens as f64, sol)
     }
 
     /// Probe the TRT-LLM low-latency NVFP4 MoE kernel table.
@@ -243,7 +265,7 @@ impl MoeTable {
         quant: MoeQuantMode,
         workload_distribution: &str,
         sol: &dyn Fn(f64) -> f64,
-    ) -> Result<Option<f64>, AicError> {
+    ) -> Result<Option<LeafValue>, AicError> {
         let loaded = self.load()?;
         let grids = &loaded.low_latency;
         if grids.by_keys.is_empty() {
@@ -274,7 +296,7 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        query_token_curve(by_tokens, num_tokens as f64, sol).map(Some)
+        query_token_curve_value(by_tokens, num_tokens as f64, sol).map(Some)
     }
 
     /// `true` iff the loaded low-latency grid has any rows.
@@ -318,13 +340,20 @@ impl MoeTable {
             moe_tp_size,
             moe_ep_size,
         };
-        let by_tokens = grids.by_keys.get(&key).filter(|curve| !curve.is_empty()).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "MoE data missing for {key:?} ({kernel:?}) at {}",
-                self.data_root.display()
-            ))
-        })?;
-        Ok(by_tokens.iter().map(|(&t, &lat)| (t, lat)).collect())
+        let by_tokens = grids
+            .by_keys
+            .get(&key)
+            .filter(|curve| !curve.is_empty())
+            .ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "MoE data missing for {key:?} ({kernel:?}) at {}",
+                    self.data_root.display()
+                ))
+            })?;
+        Ok(by_tokens
+            .iter()
+            .map(|(&t, leaf)| (t, leaf.latency))
+            .collect())
     }
 
     /// All collected sibling slices for `(quant, distribution-after-uniform-
@@ -360,7 +389,7 @@ impl MoeTable {
                 num_experts: key.num_experts,
                 hidden_size: key.hidden_size,
                 inter_size: key.inter_size,
-                points: curve.iter().map(|(&t, &lat)| (t, lat)).collect(),
+                points: curve.iter().map(|(&t, leaf)| (t, leaf.latency)).collect(),
             });
         }
         Ok(slices)
@@ -403,9 +432,7 @@ impl MoeTable {
     }
 
     fn load(&self) -> Result<&LoadedMoeGrids, AicError> {
-        let cell = self
-            .moe
-            .get_or_init(|| load_moe_parquet(&self.moe_sources));
+        let cell = self.moe.get_or_init(|| load_moe_parquet(&self.moe_sources));
         cell.as_ref().map_err(clone_err)
     }
 }
@@ -417,8 +444,8 @@ impl MoeTable {
 /// declared in the manifest need not exist for every system); an error is
 /// returned only when no source yields rows.
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
-    let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
-    let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut default_keys: BTreeMap<MoeKey, BTreeMap<u32, LeafValue>> = BTreeMap::new();
+    let mut low_latency_keys: BTreeMap<MoeKey, BTreeMap<u32, LeafValue>> = BTreeMap::new();
     let mut default_quants: Vec<String> = Vec::new();
     let mut low_latency_quants: Vec<String> = Vec::new();
     let mut any_source = false;
@@ -439,6 +466,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
         let moe_ep_size_col = reader.col("moe_ep_size")?;
         let distribution_col = reader.col("distribution")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         // Optional in older perf-DB versions; when absent every row falls into
         // the `default` grid (matching the pre-split behavior). The same column
         // gates the per-source shared-layer `kernel_source` allowlist.
@@ -448,7 +476,10 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             if !kernel_source_ok(source.kernel_sources(), kernel_source_col, &row)? {
                 continue;
             }
-            let kernel_source = row.str_optional(kernel_source_col)?.unwrap_or("").to_string();
+            let kernel_source = row
+                .str_optional(kernel_source_col)?
+                .unwrap_or("")
+                .to_string();
             // Kernel-specific mxfp4 remaps (mirror Python `load_moe_data`):
             // the collector logs two distinct kernels under one `moe_dtype`;
             // route them to dedicated quant modes so DeepSeek-V4 modeling can
@@ -489,6 +520,8 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             if !target_quants.iter().any(|q| q == &key.quant) {
                 target_quants.push(key.quant.clone());
             }
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // Python's `load_moe_data` wraps the leaf insert in a try/except KeyError
             // and skips on conflict, i.e. it keeps the FIRST occurrence of each
             // (shape, num_tokens) tuple. Some perf files contain duplicate rows
@@ -498,14 +531,17 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
                 .entry(key)
                 .or_default()
                 .entry(row.u32(num_tokens_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || (default_keys.is_empty() && low_latency_keys.is_empty()) {
         return Err(AicError::PerfDatabase(format!(
             "no rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(LoadedMoeGrids {
@@ -572,7 +608,7 @@ mod tests {
         // with a topology mismatch — but not a distribution-specific
         // error.
         match result {
-            Ok(latency) => assert!(latency > 0.0),
+            Ok(value) => assert!(value.latency > 0.0),
             Err(AicError::PerfDatabase(msg)) => {
                 assert!(
                     !msg.contains("nonexistent_distribution"),
@@ -663,7 +699,8 @@ mod tests {
         for &(nt, expected) in cases {
             let got = table
                 .query(nt, 5120, 8192, 1, 16, 1, 1, quant, "power_law_1.01", &sol)
-                .expect("query must succeed");
+                .expect("query must succeed")
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "nt={nt}: rust {got} vs python {expected}"
@@ -693,6 +730,60 @@ mod tests {
         assert!(
             !vllm_available,
             "vLLM perf DB lacks kernel_source column → low_latency should be empty"
+        );
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_moe(num_tokens=1536, hidden_size=4096, inter_size=2048,
+    ///              topk=2, num_experts=8, moe_tp_size=1, moe_ep_size=1,
+    ///              quant_mode=MoEQuantMode.bfloat16,
+    ///              workload_distribution="uniform", database_mode=SILICON)
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    #[test]
+    fn moe_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("moe_perf.parquet"),
+            &[
+                Col::Str("moe_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("num_tokens", vec![1024, 2048]),
+                Col::I64("hidden_size", vec![4096, 4096]),
+                Col::I64("inter_size", vec![2048, 2048]),
+                Col::I64("topk", vec![2, 2]),
+                Col::I64("num_experts", vec![8, 8]),
+                Col::I64("moe_tp_size", vec![1, 1]),
+                Col::I64("moe_ep_size", vec![1, 1]),
+                Col::Str("distribution", vec!["uniform", "uniform"]),
+                Col::Str("kernel_source", vec!["moe_torch_flow", "moe_torch_flow"]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = MoeTable::new(tmp.path().to_path_buf());
+        let v = table
+            .query(
+                1536,
+                4096,
+                2048,
+                2,
+                8,
+                1,
+                1,
+                MoeQuantMode::Bfloat16,
+                "uniform",
+                &proxy_sol,
+            )
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
         );
     }
 }

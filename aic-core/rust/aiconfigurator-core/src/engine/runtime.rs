@@ -21,9 +21,13 @@ use std::sync::Arc;
 use crate::common::enums::TransferPolicy;
 use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
+use crate::operators::base::PerformanceResult;
 use crate::operators::Op;
 use crate::perf_database::PerfDatabase;
-use crate::session::{get_mix_step_ops, run_context_ops, run_generation_ops_step, ContextOpFilter};
+use crate::session::{
+    get_mix_step_ops, query_context_op, query_generation_op, run_context_ops, run_context_ops_with,
+    run_generation_ops_step, run_generation_ops_step_beamed_with, ContextOpFilter,
+};
 use crate::{validate_forward_pass_metrics, ForwardPassMetrics};
 
 /// Per-call runtime inputs. Field-for-field mirror of the Python
@@ -96,6 +100,30 @@ pub struct StaticResult {
 /// `run_static` / `_run_generation_phase` (the `DEFAULT_STATIC_STRIDE`).
 pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 
+/// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
+/// source)`. `name` is the Python `op._name` verbatim (names may repeat —
+/// callers fold with `+=`), `source` the provenance tag
+/// (`silicon|empirical|sol|estimated|mixed`). A plain tuple so pyo3 converts
+/// it to `list[tuple[str, float, float, str]]` with no new binding types.
+pub type PerOpValue = (String, f64, f64, &'static str);
+
+fn per_op_value(op: &Op, r: PerformanceResult) -> PerOpValue {
+    (
+        op.name().to_string(),
+        r.latency_ms,
+        r.energy_wms,
+        r.source.as_str(),
+    )
+}
+
+/// Which of the three mixed-step passes produced a sinked per-op value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MixedPass {
+    SharedNonAttention,
+    ContextAttention,
+    DecodeAttention,
+}
+
 /// Compiled engine: precompiled op lists + the matching perf database.
 ///
 /// Built from an [`EngineSpec`] (Python's `compile_engine` output) plus a
@@ -156,7 +184,10 @@ impl Engine {
     /// only as a fallback: when the decoded `spec.engine.systems_path` is
     /// `Some`, that path is authoritative and overrides the `systems_root`
     /// argument.
-    pub fn from_spec_bytes(bytes: &[u8], systems_root: &std::path::Path) -> Result<Engine, AicError> {
+    pub fn from_spec_bytes(
+        bytes: &[u8],
+        systems_root: &std::path::Path,
+    ) -> Result<Engine, AicError> {
         let spec = EngineSpec::from_bincode(bytes)?;
         let version = spec.engine.backend_version.as_deref().ok_or_else(|| {
             AicError::InvalidEngineConfig(
@@ -234,7 +265,9 @@ impl Engine {
             StaticMode::Generation => 0.0,
         };
         let generation_ms = match mode {
-            StaticMode::Generation | StaticMode::Both => self.run_generation_phase(runtime, stride)?,
+            StaticMode::Generation | StaticMode::Both => {
+                self.run_generation_phase(runtime, stride)?
+            }
             StaticMode::Context => 0.0,
         };
         Ok(StaticResult {
@@ -280,7 +313,23 @@ impl Engine {
     ///
     /// `osl <= 1` yields an empty loop and 0.0 (matches Python).
     fn run_generation_phase(&self, runtime: &RuntimeConfig, stride: u32) -> Result<f64, AicError> {
-        let bs = runtime.batch_size.saturating_mul(self.nextn.saturating_add(1));
+        self.run_generation_phase_with(runtime, stride, |_, _| {})
+    }
+
+    /// [`Self::run_generation_phase`] with a per-op sink. The sink observes
+    /// each op's result ALREADY weighted by the stride `repeat_count`, so
+    /// folding the sink values by name reproduces Python's
+    /// trajectory-integrated `generation_latency_dict` / `_energy_wms_dict`
+    /// (`base_backend.py:401-405`) exactly.
+    fn run_generation_phase_with(
+        &self,
+        runtime: &RuntimeConfig,
+        stride: u32,
+        mut on_op: impl FnMut(&Op, PerformanceResult),
+    ) -> Result<f64, AicError> {
+        let bs = runtime
+            .batch_size
+            .saturating_mul(self.nextn.saturating_add(1));
         let stride = stride.max(1);
         let mut total = 0.0_f64;
         if runtime.osl <= 1 {
@@ -292,7 +341,8 @@ impl Engine {
             // Python `s = isl + i + 1`. NOTE the `+1` — distinct from the FPM
             // bridge's `context_length = isl + i` packing convention.
             let s = runtime.isl + i + 1;
-            let step = crate::session::run_generation_ops_step_beamed(
+            let repeat_count = stride.min(upper - i);
+            let step = run_generation_ops_step_beamed_with(
                 &self.generation_ops,
                 &self.db,
                 bs,
@@ -300,8 +350,8 @@ impl Engine {
                 s,
                 runtime.gen_seq_imbalance_correction_scale,
                 false,
+                |op, r| on_op(op, r.scaled(repeat_count as f64)),
             )?;
-            let repeat_count = stride.min(upper - i);
             total += step * repeat_count as f64;
             i += stride;
         }
@@ -408,6 +458,34 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<[f64; 4], AicError> {
+        self.mixed_step_breakdown_with(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+            |_, _, _| {},
+        )
+    }
+
+    /// [`Self::mixed_step_breakdown`] with a per-op sink. The sink observes
+    /// `(pass, op, result)` for every queried op; pass-2 results arrive
+    /// ALREADY divided by the `ceil(isl/ctx)` scale (division is linear, so
+    /// the per-op values sum to the reported bucket exactly).
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown_with(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mut on_op: impl FnMut(MixedPass, &Op, PerformanceResult),
+    ) -> Result<[f64; 4], AicError> {
         if ctx_tokens == 0 && gen_tokens == 0 {
             return Ok([0.0; 4]);
         }
@@ -431,7 +509,7 @@ impl Engine {
                 combined as i64 - prefix1 as i64
             )));
         }
-        let shared_non_attention = run_context_ops(
+        let shared_non_attention = run_context_ops_with(
             &self.context_ops,
             &self.db,
             1,
@@ -439,6 +517,7 @@ impl Engine {
             prefix1,
             seq_imbalance_correction_scale,
             ContextOpFilter::SkipContextAttention,
+            |op, r| on_op(MixedPass::SharedNonAttention, op, r),
         )?;
 
         // ---- Pass 2: context attention at the prefill shape ----
@@ -455,7 +534,7 @@ impl Engine {
             }
             let batch2 = ctx_tokens.div_ceil(isl);
             let scale2 = isl.div_ceil(ctx_tokens) as f64;
-            let attn = run_context_ops(
+            let attn = run_context_ops_with(
                 &self.context_ops,
                 &self.db,
                 batch2,
@@ -463,6 +542,7 @@ impl Engine {
                 prefix,
                 seq_imbalance_correction_scale,
                 ContextOpFilter::OnlyContextAttention,
+                |op, r| on_op(MixedPass::ContextAttention, op, r.scaled(1.0 / scale2)),
             )?;
             context_attention = attn / scale2;
         }
@@ -474,13 +554,15 @@ impl Engine {
             // `_run_generation_phase` queries at s = isl_pass3 + i + 1 with
             // isl_pass3 = isl + osl//2 and a single step (osl=2, i=0).
             let s = isl + osl / 2 + 1;
-            decode_attention = run_generation_ops_step(
+            decode_attention = run_generation_ops_step_beamed_with(
                 &self.generation_ops,
                 &self.db,
                 bs,
+                1,
                 s,
                 gen_seq_imbalance_correction_scale,
                 true,
+                |op, r| on_op(MixedPass::DecodeAttention, op, r),
             )?;
         }
 
@@ -518,6 +600,229 @@ impl Engine {
             gen_seq_imbalance_correction_scale,
             false,
         )
+    }
+
+    /// [`Self::run_static`] with the per-op values kept instead of summed:
+    /// `(context, generation)` lists of `(name, latency_ms, energy_wms,
+    /// source)`. Names repeat when the op list repeats them (per-block model
+    /// families) and generation entries repeat per stride step — callers fold
+    /// by name with `+=`, exactly like Python's phase dicts. Generation
+    /// values arrive pre-weighted by the stride `repeat_count`.
+    pub fn run_static_per_op(
+        &self,
+        runtime: &RuntimeConfig,
+        mode: StaticMode,
+        stride: u32,
+    ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        let mut context: Vec<PerOpValue> = Vec::new();
+        if matches!(mode, StaticMode::Context | StaticMode::Both) {
+            if runtime.prefix >= runtime.isl {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "isl must be greater than 0 after removing prefix, but got {}",
+                    runtime.isl as i64 - runtime.prefix as i64
+                )));
+            }
+            run_context_ops_with(
+                &self.context_ops,
+                &self.db,
+                runtime.batch_size,
+                runtime.isl - runtime.prefix,
+                runtime.prefix,
+                runtime.seq_imbalance_correction_scale,
+                ContextOpFilter::All,
+                |op, r| context.push(per_op_value(op, r)),
+            )?;
+        }
+        let mut generation: Vec<PerOpValue> = Vec::new();
+        if matches!(mode, StaticMode::Generation | StaticMode::Both) {
+            self.run_generation_phase_with(runtime, stride, |op, r| {
+                generation.push(per_op_value(op, r))
+            })?;
+        }
+        Ok((context, generation))
+    }
+
+    /// [`Self::mixed_step_breakdown`] with the per-op values kept:
+    /// `(shared_non_attention, context_attention, decode_attention)` lists of
+    /// `(name, latency_ms, energy_wms, source)`. Context-attention entries
+    /// arrive already divided by the `ceil(isl/ctx)` scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mixed_step_breakdown_per_op(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        let mut shared: Vec<PerOpValue> = Vec::new();
+        let mut ctx_attn: Vec<PerOpValue> = Vec::new();
+        let mut dec_attn: Vec<PerOpValue> = Vec::new();
+        self.mixed_step_breakdown_with(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+            |pass, op, r| {
+                let out = match pass {
+                    MixedPass::SharedNonAttention => &mut shared,
+                    MixedPass::ContextAttention => &mut ctx_attn,
+                    MixedPass::DecodeAttention => &mut dec_attn,
+                };
+                out.push(per_op_value(op, r));
+            },
+        )?;
+        Ok((shared, ctx_attn, dec_attn))
+    }
+
+    /// [`Self::decode_step_latency`] with the per-op values kept.
+    pub fn decode_step_per_op(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<Vec<PerOpValue>, AicError> {
+        let mut out: Vec<PerOpValue> = Vec::new();
+        if gen_tokens == 0 {
+            return Ok(out);
+        }
+        let effective_batch = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
+        let s = isl.max(1).saturating_add(osl.max(1) / 2).saturating_add(1);
+        run_generation_ops_step_beamed_with(
+            &self.generation_ops,
+            &self.db,
+            effective_batch,
+            1,
+            s,
+            gen_seq_imbalance_correction_scale,
+            false,
+            |op, r| out.push(per_op_value(op, r)),
+        )?;
+        Ok(out)
+    }
+
+    /// Evaluate an index-addressed sublist of the compiled CONTEXT op list at
+    /// the context-phase shape (the thin op-list evaluation FFI — Python-side
+    /// orchestration like AFD partitions the compiled list and sources per-op
+    /// values here instead of walking `Operation.query()`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_context_ops(
+        &self,
+        indices: &[usize],
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        x_override: Option<u32>,
+    ) -> Result<Vec<PerOpValue>, AicError> {
+        let mut out: Vec<PerOpValue> = Vec::with_capacity(indices.len());
+        for &i in indices {
+            let op = self.context_ops.get(i).ok_or_else(|| {
+                AicError::InvalidEngineConfig(format!(
+                    "evaluate_context_ops: index {i} out of range ({} context ops)",
+                    self.context_ops.len()
+                ))
+            })?;
+            let r = query_context_op(
+                op,
+                &self.db,
+                batch_size,
+                s,
+                prefix,
+                seq_imbalance_correction_scale,
+                x_override,
+            )?;
+            out.push(per_op_value(op, r));
+        }
+        Ok(out)
+    }
+
+    /// Evaluate an index-addressed sublist of the compiled GENERATION op list
+    /// at the decode-step shape (see [`Self::evaluate_context_ops`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_generation_ops(
+        &self,
+        indices: &[usize],
+        batch_size: u32,
+        s: u32,
+        gen_seq_imbalance_correction_scale: f64,
+        prefix: u32,
+        x_override: Option<u32>,
+    ) -> Result<Vec<PerOpValue>, AicError> {
+        let mut out: Vec<PerOpValue> = Vec::with_capacity(indices.len());
+        for &i in indices {
+            let op = self.generation_ops.get(i).ok_or_else(|| {
+                AicError::InvalidEngineConfig(format!(
+                    "evaluate_generation_ops: index {i} out of range ({} generation ops)",
+                    self.generation_ops.len()
+                ))
+            })?;
+            let r = query_generation_op(
+                op,
+                &self.db,
+                batch_size,
+                1,
+                s,
+                gen_seq_imbalance_correction_scale,
+                prefix,
+                x_override,
+            )?;
+            out.push(per_op_value(op, r));
+        }
+        Ok(out)
+    }
+
+    /// Evaluate an ad-hoc op list (a JSON array of `OpSpec` objects, the same
+    /// externally-tagged encoding `EngineSpec` uses) against this engine's
+    /// database. Serves op lists that are deliberately NOT in the compiled
+    /// spec — the VL encoder phase — while the shape math stays Python-side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_ops_json(
+        &self,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x_override: Option<u32>,
+    ) -> Result<Vec<PerOpValue>, AicError> {
+        let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
+            AicError::InvalidEngineConfig(format!("evaluate_ops_json: invalid op list JSON: {e}"))
+        })?;
+        let mut out: Vec<PerOpValue> = Vec::with_capacity(ops.len());
+        for op in &ops {
+            let r = if is_context {
+                query_context_op(
+                    op,
+                    &self.db,
+                    batch_size,
+                    s,
+                    prefix,
+                    imbalance_correction_scale,
+                    x_override,
+                )?
+            } else {
+                query_generation_op(
+                    op,
+                    &self.db,
+                    batch_size,
+                    1,
+                    s,
+                    imbalance_correction_scale,
+                    prefix,
+                    x_override,
+                )?
+            };
+            out.push(per_op_value(op, r));
+        }
+        Ok(out)
     }
 
     /// Compute one forward-pass latency from a list of per-rank FPM entries.
@@ -728,9 +1033,7 @@ mod tests {
                 activation_dtype: None,
                 kv_cache_dtype: None,
             },
-            speculative: nextn.map(|n| crate::SpeculativeConfig {
-                nextn: Some(n),
-            }),
+            speculative: nextn.map(|n| crate::SpeculativeConfig { nextn: Some(n) }),
             perf_db_sources: Default::default(),
             database_mode: Default::default(),
             transfer_policy: None,
@@ -741,7 +1044,11 @@ mod tests {
     /// Build an `Engine` from the hand-built op lists over the real fixture DB.
     fn build_engine(nextn: Option<u32>) -> Engine {
         let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        let spec = EngineSpec::new(fixture_engine_config(nextn), context_ops(), generation_ops());
+        let spec = EngineSpec::new(
+            fixture_engine_config(nextn),
+            context_ops(),
+            generation_ops(),
+        );
         Engine::build(spec, Arc::new(db)).unwrap()
     }
 
@@ -784,7 +1091,10 @@ mod tests {
         let engine = build_engine(None);
         let rt = runtime(1, 1024, 8);
         let gen = engine.run_static(&rt, StaticMode::Generation, 32).unwrap();
-        assert!(gen.generation_ms > 0.0, "generation latency must be non-trivial");
+        assert!(
+            gen.generation_ms > 0.0,
+            "generation latency must be non-trivial"
+        );
         assert_eq!(gen.context_ms, 0.0);
         assert_eq!(gen.total_ms, gen.generation_ms);
     }
@@ -845,7 +1155,12 @@ mod tests {
     #[test]
     fn mixed_step_empty_is_zero() {
         let engine = build_engine(None);
-        assert_eq!(engine.mixed_step_latency(0, 0, 1024, 8, 0, 1.0, 1.0).unwrap(), 0.0);
+        assert_eq!(
+            engine
+                .mixed_step_latency(0, 0, 1024, 8, 0, 1.0, 1.0)
+                .unwrap(),
+            0.0
+        );
     }
 
     #[test]
@@ -855,9 +1170,16 @@ mod tests {
         // End-to-end parity is covered by the mixed-step parity cases; this is
         // the fast pure-Rust smoke that the composition actually computes.
         let engine = build_engine(None);
-        let ms = engine.mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
-        assert!(ms > 0.0 && ms.is_finite(), "mixed-step latency must be > 0, got {ms}");
-        let breakdown = engine.mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0).unwrap();
+        let ms = engine
+            .mixed_step_latency(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
+        assert!(
+            ms > 0.0 && ms.is_finite(),
+            "mixed-step latency must be > 0, got {ms}"
+        );
+        let breakdown = engine
+            .mixed_step_breakdown(1024, 2, 1024, 8, 0, 1.0, 1.0)
+            .unwrap();
         assert_eq!(breakdown[0], breakdown[1] + breakdown[2] + breakdown[3]);
         assert_eq!(ms, breakdown[0]);
     }

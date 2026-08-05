@@ -30,11 +30,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::moe::query_token_curve;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::query_token_curve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct WideEpMoeTable {
@@ -374,10 +374,16 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
         return Err(AicError::PerfDatabase(format!(
             "no WideEP MoE compute rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
-    Ok(WideEpMoeGrids { by_keys, first_distribution })
+    Ok(WideEpMoeGrids {
+        by_keys,
+        first_distribution,
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {
