@@ -571,6 +571,11 @@ def _engine_handle_cache_clear() -> None:
     lever)."""
     with _ENGINE_HANDLE_CACHE_LOCK:
         _ENGINE_HANDLE_CACHE.clear()
+    # The power probe is filesystem-derived but keyed without the systems
+    # root; like the handles above it must not survive a ``set_systems_paths``
+    # switch, or a stale ``False`` would rust-route a now-power-carrying
+    # identity and silently zero agg ``power_w``.
+    _POWER_DATA_CACHE.clear()
 
 
 def _engine_handle_cache_get(key: str) -> Any:
@@ -598,9 +603,11 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     ``engine.build_engine_spec_json`` (NOT ``compile_engine``, which would
     rebuild the model from flat args and risk quant/parallel-inference drift),
     then wraps the bincode bytes in an ``EngineHandle``. The handle's Rust
-    ``AicEngine`` loads its own perf DB; ``_configure_default_data_roots`` sets
-    ``AICONFIGURATOR_SYSTEMS_PATH`` so it resolves to the same systems tree the
-    Python ``database`` came from.
+    ``AicEngine`` loads its own perf DB; the system yaml is resolved from the
+    ``database``'s own ``systems_root`` (the root the Python ``PerfDatabase``
+    actually matched under multi-root ``--systems-paths``), falling back to
+    ``AICONFIGURATOR_SYSTEMS_PATH`` (set by ``_configure_default_data_roots``)
+    for duck-typed databases without a ``systems_root``.
     """
     # The identity JSON is a hot-path cost: the engine-step helpers call this
     # per step and `_engine_config_json` runs ~2-3us of getattr + json.dumps
@@ -632,7 +639,14 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     import aiconfigurator_core
     from aiconfigurator_core.sdk.engine import EngineHandle, OpConversionError, build_engine_spec_json
 
-    systems_path = os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    # Mirror the root the paired database actually resolved from: with
+    # multi-root ``--systems-paths`` the Python PerfDatabase searches every
+    # root ("first match wins" per system), while the compiled engine resolves
+    # the system yaml from exactly one root — pinning the env default (the
+    # first existing root) crashes any system that lives in a later root. The
+    # env remains the fallback for duck-typed databases under an explicit
+    # ``"rust"`` request.
+    systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     nextn = getattr(model, "_nextn", None)
     try:
         spec_json = build_engine_spec_json(

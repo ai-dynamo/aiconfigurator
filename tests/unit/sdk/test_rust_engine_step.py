@@ -158,15 +158,45 @@ def test_cached_engine_handle_negative_entries_raise_fresh_errors(_handle_cache_
     assert compiles == []  # the op graph was walked once, never re-walked
 
 
-def test_clear_all_op_caches_drops_engine_handles(_handle_cache_harness) -> None:
+def test_clear_all_op_caches_drops_engine_handles(_handle_cache_harness, monkeypatch) -> None:
     from aiconfigurator.sdk.operations import clear_all_op_caches
 
     model, database, compiles = _handle_cache_harness
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {("sys", "vllm", "1.0"): False})
     rust_engine_step._cached_engine_handle(model("a"), database)
     assert rust_engine_step._ENGINE_HANDLE_CACHE
 
     clear_all_op_caches()
     assert not rust_engine_step._ENGINE_HANDLE_CACHE
+    # The power probe is filesystem-derived: a stale ``False`` surviving a
+    # ``set_systems_paths`` switch would rust-route a power-carrying identity.
+    assert not rust_engine_step._POWER_DATA_CACHE
+
+
+def test_cached_engine_handle_mirrors_database_systems_root(_handle_cache_harness, monkeypatch) -> None:
+    """The compiled engine must resolve the system yaml from the root the
+    paired database actually matched (multi-root ``--systems-paths``), not the
+    process-wide env default; the env is only the fallback for duck-typed
+    databases without a ``systems_root``."""
+    from aiconfigurator_core.sdk import engine as core_engine
+
+    model, database, compiles = _handle_cache_harness
+    captured: list = []
+
+    def capturing_build(model, **kwargs):
+        captured.append(kwargs["systems_path"])
+        return "{}"
+
+    monkeypatch.setattr(core_engine, "build_engine_spec_json", capturing_build)
+    monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", "/env/root")
+
+    database.systems_root = "/custom/root"
+    rust_engine_step._cached_engine_handle(model("mirrored"), database)
+    assert captured[-1] == "/custom/root"
+
+    del database.systems_root
+    rust_engine_step._cached_engine_handle(model("fallback"), database)
+    assert captured[-1] == "/env/root"
 
 
 def test_power_probe_memoizes_per_database_identity(monkeypatch, tmp_path: Path) -> None:
