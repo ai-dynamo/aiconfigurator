@@ -39,12 +39,12 @@ use crate::perf_database::PerfDatabase;
 /// feasible large-EP configurations is the model builder's job, not the
 /// engine's.
 ///
-/// NOTE (deliberate, matches Python): the per-backend `comm_phases` are NOT
-/// part of [`validate_a2a_request`]. `_validate_a2a_request` checks the
-/// requested phase against the GLOBAL [`A2A_PHASES`] tuple only, so asking
-/// `deepep_ht` for `"prepare"` — a phase it does not declare — is an ordinary
-/// typed DATA MISS, not a `ValueError`. Pinned by
-/// `undeclared_but_valid_phase_is_a_data_miss_not_a_config_error`.
+/// The per-backend `comm_phases` ARE part of [`validate_a2a_request`]
+/// (matches Python `_validate_a2a_request` after the CodeRabbit follow-up on
+/// #1442): asking `deepep_ht` for `"prepare"` — a phase it does not declare —
+/// is a config `ValueError`, failed where the intent is expressed rather than
+/// surfacing later as a data miss. Pinned by
+/// `undeclared_phase_is_a_config_error_not_a_data_miss`.
 const MOE_A2A_BACKENDS: [(&str, &[&str]); 4] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
@@ -76,6 +76,16 @@ fn validate_a2a_request(comm_backend: &str, phase: &str) -> Result<(), AicError>
     if !A2A_PHASES.contains(&phase) {
         return Err(AicError::InvalidEngineConfig(format!(
             "Invalid phase '{phase}'. Must be one of {A2A_PHASES:?}"
+        )));
+    }
+    let supported = MOE_A2A_BACKENDS
+        .iter()
+        .find(|(name, _)| *name == comm_backend)
+        .map(|(_, phases)| *phases)
+        .expect("backend membership checked above");
+    if !supported.contains(&phase) {
+        return Err(AicError::InvalidEngineConfig(format!(
+            "comm_backend '{comm_backend}' does not implement phase '{phase}'; supported: {supported:?}"
         )));
     }
     Ok(())
@@ -497,17 +507,17 @@ mod tests {
         );
     }
 
-    /// Python validates the phase against the GLOBAL `_A2A_PHASES` tuple, not
-    /// against the backend's own `comm_phases`: `deepep_ht` does not declare
-    /// `"prepare"` (see [`MOE_A2A_BACKENDS`]), yet the request is a DATA miss,
-    /// never a `ValueError`. Pins that the registry port did not over-reach.
+    /// Python now validates the phase against the backend's own
+    /// `comm_phases` (the CodeRabbit follow-up on #1442): `deepep_ht` does
+    /// not declare `"prepare"` (see [`MOE_A2A_BACKENDS`]), so the request is
+    /// a config error at the validation boundary, never a data miss.
     #[test]
-    fn undeclared_but_valid_phase_is_a_data_miss_not_a_config_error() {
+    fn undeclared_phase_is_a_config_error_not_a_data_miss() {
         let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
         let result = op("prepare", "deepep_ht", 1).query(&db, 64);
         assert!(
-            matches!(result, Err(AicError::PerfDatabase(_))),
-            "an undeclared-but-valid phase must be a typed miss, got {result:?}"
+            matches!(result, Err(AicError::InvalidEngineConfig(_))),
+            "an undeclared phase must be a config error, got {result:?}"
         );
         // ... and the registry does declare it for the NVLink two-sided
         // backend, which is the only reason the phase name exists.
