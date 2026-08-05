@@ -2460,19 +2460,10 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
 
 
-_ESTIMATE_QUANT_ENUMS = {
-    "gemm_quant_mode": common.GEMMQuantMode,
-    "moe_quant_mode": common.MoEQuantMode,
-    "kvcache_quant_mode": common.KVCacheQuantMode,
-    "fmha_quant_mode": common.FMHAQuantMode,
-    "comm_quant_mode": common.CommQuantMode,
-}
-
-
 def _run_estimate_epd(args, estimate_mode: str) -> None:
     """EPD single-point estimate via Task.run_single_* (dedicated encode pool)."""
-    from aiconfigurator.cli.api import POWER_DATA_COVERAGE_THRESHOLD
-    from aiconfigurator.sdk.task_v2 import Task
+    from aiconfigurator.cli.api import apply_row_power_coverage_gate
+    from aiconfigurator.sdk.task_v2 import _QUANT_ENUM_TABLES, Task
 
     if estimate_mode not in ("agg", "disagg"):
         raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
@@ -2493,9 +2484,7 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
     )
-    workload.update(
-        {name: enum[getattr(args, name)] for name, enum in _ESTIMATE_QUANT_ENUMS.items() if getattr(args, name)}
-    )
+    workload.update({name: getattr(args, name) for name in _QUANT_ENUM_TABLES if getattr(args, name, None)})
     encoder_kwargs = dict(
         encoder_tp=args.encoder_tp,
         encoder_batch_size=args.encoder_batch_size,
@@ -2528,6 +2517,11 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         def _role(value, shared):
             return value if value is not None else shared
 
+        # Shared quant/version args map to the per-role fields: disagg Tasks
+        # reject top-level worker fields and silently ignore backend_version.
+        role_shared = {"backend_version": workload.pop("backend_version", None)}
+        for name in [k for k in workload if k.endswith("quant_mode")]:
+            role_shared[name] = workload.pop(name)
         task = Task.from_cli(
             serving_mode="disagg",
             prefill_model_path=args.model_path,
@@ -2536,6 +2530,8 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             decode_system_name=args.decode_system or args.system,
             prefill_backend_name=args.backend,
             decode_backend_name=args.backend,
+            **{f"prefill_{k}": v for k, v in role_shared.items()},
+            **{f"decode_{k}": v for k, v in role_shared.items()},
             **workload,
         )
         row = task.run_single_disagg(
@@ -2555,6 +2551,7 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             decode_num_workers=args.decode_num_workers,
             **encoder_kwargs,
         )
+    row = apply_row_power_coverage_gate(row)
     logger.info("EPD %s single-point estimate:", estimate_mode)
     keys = (
         "ttft",
@@ -2577,8 +2574,8 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         if key not in row:
             continue
         value = row[key]
-        if key == "power_w" and row.get("power_coverage", 1.0) < POWER_DATA_COVERAGE_THRESHOLD:
-            logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row["power_coverage"] * 100)
+        if key == "power_w" and value is None:
+            logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row.get("power_coverage", 0.0) * 100)
             continue
         logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
 
