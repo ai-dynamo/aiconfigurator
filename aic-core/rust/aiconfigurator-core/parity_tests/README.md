@@ -3,34 +3,45 @@
 Temporary harness for the Rust `aiconfigurator-core` migration. (To be deprecated after the transition)
 
 Serves 2 purposes:
-- Rust-Python Parity check: the engine-step latency diff of the 2 should be < 1%
+- Rust parity check against the frozen Python reference: the engine-step
+  latency diff should be < 1% (tighter regimes for HYBRID/EMPIRICAL and SOL)
 - Rust-Python speed benchmark & comparison: quantitively evaluate the speed boost from Rust
 
 
 ## Pytest Parity Suite
 
-Run the smoke parity checks:
+Run the engine-step parity checks:
 
 ```bash
 AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest -q -rx aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
 ```
 
-The suite compares Python SDK output with Rust-backed output for:
+The suite compares the live Rust engine against **golden fixtures** (see the
+golden workflow below) for:
 
-- `static`: `static_ctx`, `static_gen`, and `static_total`
-- `mixed_step`: Python `_get_mix_step_latency` vs Rust
-  `estimate_mixed_step_latency_with_rust` for the same shape
+- `static`: `static_ctx`, `static_gen`, and `static_total` (plus the
+  context/generation energy sums and power averages on the `POWER_CASES`,
+  which sit on the power-carrying database identities)
+- `mixed_step`: Rust `estimate_mixed_step_latency_with_rust` vs the frozen
+  Python `_get_mix_step_latency` for the same shape
 - `agg`: public `cli_estimate(mode="agg")`
 - `disagg`: public `cli_estimate(mode="disagg")`
 
-After Phase 3 C8-C10, all 12 smoke surfaces (3 cases x 4 modes) pass within
-the 1% drift tolerance and the tests assert hard. If a parity assertion ever
-fails again, the failure message prints the Python value, Rust value, absolute
-delta, percent delta, tolerance, and status for each metric.
+The case matrix has grown far past the original 3-case/12-surface smoke set:
+`SMOKE_CASES` (61) x 4 surfaces, `POWER_CASES` (5, energy/power coverage) x 4,
+`CP_CASES` (3, mixed only), `HYBRID_CASES` (17) x 4 at a 1e-4 rtol,
+`SOL_CASES` (4, static+mixed) at 1e-4, and the two #1456 site-transfer
+tie-break anchors (`TIE_AGG_CASES`/`TIE_DISAGG_CASES`) — 345 golden-backed
+(case, surface) pairs, plus the typed-error/provenance contract tests and the
+anti-vacuous golden guards. If a parity assertion fails, the message prints
+the golden (Python) value, Rust value, absolute delta, percent delta,
+tolerance, and status for each metric.
 
 `test_compile_engine_parity.py` covers the `compile_engine` -> `EngineHandle`
-path specifically: op-transfer bincode round-trip fidelity plus integration
-parity against the Python `BaseBackend`. Both suites run in the
+path specifically: op-transfer bincode round-trip fidelity, integration
+parity against the frozen Python `BaseBackend` references, and the per-op
+FFI anchor (`run_static_per_op` folded by name vs the frozen Python summary
+per-op latency/energy/source dicts). Both suites run in the
 `rust-engine-step-parity` CI job (`build-test.yml`).
 
 Build the `aiconfigurator_core` extension first (the CI job does this with
@@ -41,6 +52,38 @@ repository root and run:
 ```bash
 uv run pytest -q aic-core/rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
 ```
+
+## Golden Fixtures (dedup-plan Gate 2)
+
+The parity suites used to run the Python engine live on every comparison.
+Phase 2 of `docs/python-dedup-plan.md` deletes the duplicated Python latency
+path, which would destroy that live differential oracle — so Gate 2 froze the
+Python reference into fixtures **while the Python path is still alive**:
+
+- `goldens/engine_step.json` — every (case, surface) pair in
+  `ENGINE_STEP_GOLDEN_MATRIX`, as `{"values": {...}}` or (error-symmetry
+  cases) `{"error": ExceptionClassName}` records.
+- `goldens/compile_engine.json` — the compile-engine subset references
+  (static/mixed/decode per case + chunked-prefill, imbalance-scale, and
+  WideEP references).
+- `goldens/per_op.json` — the Python summary per-op dicts (latency + energy
+  + source) for the 9-case subset; the per-op op-list FFI anchor.
+
+The tests compare **live Rust vs golden**; only
+`regenerate_goldens.py` ever runs the Python side. Regenerate with:
+
+```bash
+.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py
+```
+
+Regenerate **deliberately** — when a case list or a compared metric changes,
+or when a Python-reference change is intentional and reviewed — and commit
+the diff with that change. Never regenerate to silence a parity failure: a
+red Rust-vs-golden test means the Rust engine drifted from the frozen
+reference. The capture is byte-reproducible (sorted keys, full-precision
+floats, no timestamps; the header records the capture HEAD), so running it
+twice and diffing proves a clean capture. `TestGoldenComparisonGuards`
+doctors an in-memory golden to prove the comparison itself still bites.
 
 ## Perf Gate (CI)
 

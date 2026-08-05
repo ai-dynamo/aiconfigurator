@@ -13,8 +13,12 @@ a per-metric delta report so the failure mode is informative.
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
+import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -60,6 +64,11 @@ class EngineStepParityCase:
     # fused CuTeDSL verify reroute and the donor-absence contract it depends
     # on (kda_perf ABSENCE_LOAD_BEARING manifest exclusion) in CI.
     nextn: int = 0
+    # Power-carrying identities only: extend the static surface with the
+    # context/generation energy sums and the summary power averages. Leave
+    # False on identities whose perf tables ship no power columns — there the
+    # sums are 0.0 on both engines and the comparison would be vacuous.
+    compare_energy: bool = False
 
 
 SMOKE_CASES = [
@@ -603,6 +612,105 @@ SMOKE_CASES = [
 PARITY_RTOL = 0.01
 
 
+# Power/energy parity cases: one per power-carrying database identity (the
+# only shipped identities whose perf parquets carry measured power columns:
+# b200_sxm/vllm/0.22.0, b200_sxm/trtllm/1.3.0rc15, gb200/vllm/0.22.0,
+# gb200/trtllm/1.3.0rc17, h200_sxm/vllm/0.22.0). Every SMOKE_CASE sits on
+# 0.19.0 / 0.5.x / 1.3.0rc10 tables, which are latency-only — without these
+# cases the per-op energy that now crosses the FFI (PR-2) would have ZERO
+# numeric coverage in the parity suites. ``compare_energy=True`` extends the
+# static surface with the context/generation energy sums and the summary
+# power averages; the mixed/agg/disagg surfaces run at the standard latency
+# metrics. Models verified to have perf data on these versions (probed on
+# the live Python engine): dense Qwen3-32B on four identities, MoE
+# Qwen3-30B-A3B on b200_sxm/vllm/0.22.0 (gb200/trtllm ships no MoE tables at
+# 1.3.0rc17, so that identity stays dense).
+POWER_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            backend_version="0.22.0",
+            tp_size=4,
+            moe_ep_size=4,
+            compare_energy=True,
+        ),
+        id="qwen3-30b-a3b-b200-vllm-022-power",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            backend_name="trtllm",
+            backend_version="1.3.0rc15",
+            compare_energy=True,
+        ),
+        id="qwen3-32b-b200-trtllm-130rc15-power",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            system_name="gb200",
+            backend_version="0.22.0",
+            compare_energy=True,
+        ),
+        id="qwen3-32b-gb200-vllm-022-power",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            system_name="gb200",
+            backend_name="trtllm",
+            backend_version="1.3.0rc17",
+            compare_energy=True,
+        ),
+        id="qwen3-32b-gb200-trtllm-130rc17-power",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_version="0.22.0",
+            compare_energy=True,
+        ),
+        id="qwen3-32b-h200-vllm-022-power",
+    ),
+]
+
+
+# Site-transfer tie-break anchors (issue #1456): when a GEMM query lands off
+# the collected grid, Python resolves equidistant candidate sites through a
+# *stable* sort over the index's enumeration order; the pre-fix Rust selection
+# broke that tie differently and silently drifted these exact configs. Each
+# case pins the surface that originally exposed the divergence, so the
+# tie-break stays anchored in CI:
+#  - Qwen3-32B-FP8 @ h200_sxm/vllm/0.19.0, agg: off-grid fp8_block GEMM
+#    n=1280 k=5120 (the tp8 fused-QKV projection).
+#  - Llama-4-Scout @ gb200/vllm/0.24.0, disagg decode: the mirror bf16 shape
+#    n=5120 k=1280 (the tp4 attention out-projection; tp4 * moe_ep4 keeps the
+#    16-expert MoE mapping valid).
+TIE_AGG_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B-FP8",
+            system_name="h200_sxm",
+        ),
+        id="qwen3-32b-fp8-h200-vllm-019-tiebreak-agg",
+    ),
+]
+TIE_DISAGG_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            system_name="gb200",
+            backend_version="0.24.0",
+            tp_size=4,
+            moe_ep_size=4,
+        ),
+        id="llama4-scout-gb200-vllm-024-tiebreak-disagg",
+    ),
+]
+TIE_CASES = [*TIE_AGG_CASES, *TIE_DISAGG_CASES]
+
+
 # Error-symmetry contract: when Python raises one of these, Rust is
 # expected to raise (Python's `PerfDataNotAvailableError` and friends
 # travel through `cli_estimate` as `ValueError` / `RuntimeError`
@@ -623,8 +731,46 @@ class _ErrorSentinel:
         self.kind = type(exc).__name__
         self.message = str(exc).splitlines()[0][:200]
 
+    @classmethod
+    def from_kind(cls, kind: str) -> _ErrorSentinel:
+        """Rehydrate a sentinel from a golden-recorded exception class name.
+
+        Goldens persist only ``kind`` (the error-symmetry contract matches on
+        the exception class, never the message), so the message is a fixed
+        marker here.
+        """
+        sentinel = cls.__new__(cls)
+        sentinel.kind = kind
+        sentinel.message = "recorded in golden fixture"
+        return sentinel
+
     def __repr__(self) -> str:
         return f"ERROR({self.kind}: {self.message})"
+
+
+class _MemoizedCall:
+    """Memoize a zero-arg thunk *including* a raised exception, so several
+    metric extractions can share one ``cli_estimate`` result while each
+    metric's ``_safe_value`` still observes the same error kind."""
+
+    __slots__ = ("_done", "_exc", "_thunk", "_value")
+
+    def __init__(self, thunk) -> None:
+        self._thunk = thunk
+        self._value = None
+        self._exc: BaseException | None = None
+        self._done = False
+
+    def __call__(self):
+        if not self._done:
+            try:
+                self._value = self._thunk()
+            except Exception as exc:
+                self._exc = exc
+            self._done = True
+        if self._exc is not None:
+            raise self._exc
+        return self._value
 
 
 def _quiet_call(func, *args, **kwargs):
@@ -671,27 +817,32 @@ def _static_metrics(
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
     }
-    context_ms = _safe_value(
-        lambda: (
-            _quiet_call(cli_estimate, mode="static_ctx", **kwargs).summary.get_summary_df().iloc[0]["context_latency"]
-        )
-    )
-    generation_ms = _safe_value(
-        lambda: (
-            _quiet_call(cli_estimate, mode="static_gen", **kwargs)
-            .summary.get_summary_df()
-            .iloc[0]["generation_latency"]
-        )
-    )
+    ctx_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs))
+    gen_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs))
+    context_ms = _safe_value(lambda: ctx_result().summary.get_summary_df().iloc[0]["context_latency"])
+    generation_ms = _safe_value(lambda: gen_result().summary.get_summary_df().iloc[0]["generation_latency"])
     if isinstance(context_ms, _ErrorSentinel) or isinstance(generation_ms, _ErrorSentinel):
         total: float | _ErrorSentinel = context_ms if isinstance(context_ms, _ErrorSentinel) else generation_ms
     else:
         total = context_ms + generation_ms
-    return {
+    metrics: dict[str, float | _ErrorSentinel] = {
         "context_ms": context_ms,
         "generation_ms": generation_ms,
         "total_ms": total,
     }
+    if case.compare_energy:
+        # Power-carrying identities only: the phase energy sums (W*ms, the
+        # per-op values the FFI folds into the summary dicts) and the summary
+        # power averages, from the same memoized cli_estimate results.
+        metrics["ctx_energy_wms"] = _safe_value(
+            lambda: sum(ctx_result().summary.get_context_energy_wms_dict().values())
+        )
+        metrics["gen_energy_wms"] = _safe_value(
+            lambda: sum(gen_result().summary.get_generation_energy_wms_dict().values())
+        )
+        metrics["ctx_power_w"] = _safe_value(lambda: ctx_result().summary.get_context_power_avg())
+        metrics["gen_power_w"] = _safe_value(lambda: gen_result().summary.get_generation_power_avg())
+    return metrics
 
 
 def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
@@ -841,6 +992,12 @@ def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
         isl=case.isl,
         osl=max(case.osl, 2),
         prefix=case.prefix,
+        # Pinned so this helper measures the FROZEN Python step: since the
+        # rust default flip (PR-1), a bare RuntimeConfig routes `run_mixed`
+        # to the compiled engine, which would silently turn this "python
+        # reference" into a rust self-comparison — and poison golden capture
+        # (same rationale as tools/prediction_regression_gate/collect_static.py).
+        engine_step_backend="python",
     )
     shape = _mix_step_shape(case)
     latency_ms, _, _, _ = _quiet_call(
@@ -940,44 +1097,156 @@ def _parity_mismatch_reason(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Surface plumbing shared with `regenerate_goldens.py`. A "surface" is one of
+# the four apples-to-apples comparison granularities; `_surface_metrics` maps
+# a (case, surface, engine side) triple to the comparison-metric dict, keyed
+# by the names the golden fixtures persist.
+# --------------------------------------------------------------------------- #
+
+ENGINE_STEP_SURFACES = ("static", "mixed", "agg", "disagg")
+
+
+def _surface_metrics(
+    case: EngineStepParityCase,
+    surface: str,
+    *,
+    engine_step_backend: str,
+) -> dict[str, float | _ErrorSentinel]:
+    """Comparison metrics for one engine side of a (case, surface) pair."""
+    if surface == "static":
+        metrics = _static_metrics(case, engine_step_backend=engine_step_backend)
+        out: dict[str, float | _ErrorSentinel] = {
+            "static_ctx": metrics["context_ms"],
+            "static_gen": metrics["generation_ms"],
+            "static_total": metrics["total_ms"],
+        }
+        if case.compare_energy:
+            out["static_ctx_energy"] = metrics["ctx_energy_wms"]
+            out["static_gen_energy"] = metrics["gen_energy_wms"]
+            out["static_ctx_power"] = metrics["ctx_power_w"]
+            out["static_gen_power"] = metrics["gen_power_w"]
+        return out
+    if surface == "mixed":
+        step_ms = _python_mixed_step_ms if engine_step_backend == "python" else _rust_mixed_step_ms
+        return {"mixed_step": _safe_value(lambda: step_ms(case))}
+    if surface == "agg":
+        metrics = _agg_metrics(case, engine_step_backend=engine_step_backend)
+        return {
+            "agg_ttft": metrics["ttft_ms"],
+            "agg_tpot": metrics["tpot_ms"],
+            "agg_request": metrics["request_latency_ms"],
+        }
+    if surface == "disagg":
+        metrics = _disagg_metrics(case, engine_step_backend=engine_step_backend)
+        return {
+            "disagg_ttft": metrics["ttft_ms"],
+            "disagg_tpot": metrics["tpot_ms"],
+            "disagg_request": metrics["request_latency_ms"],
+        }
+    raise ValueError(f"unknown parity surface: {surface!r}")
+
+
+def _comparison_metrics(
+    case: EngineStepParityCase,
+    surface: str,
+) -> dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]]:
+    """(python-golden, live-rust) pairs for every metric of the surface."""
+    rust_metrics = _surface_metrics(case, surface, engine_step_backend="rust")
+    python_metrics = _golden_python_metrics(case, surface, rust_metrics)
+    return {name: (python_metrics[name], rust_metrics[name]) for name in rust_metrics}
+
+
 def _static_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[float, float]]:
-    python_metrics = _static_metrics(case, engine_step_backend="python")
-    rust_metrics = _static_metrics(case, engine_step_backend="rust")
-    return {
-        "static_ctx": (python_metrics["context_ms"], rust_metrics["context_ms"]),
-        "static_gen": (python_metrics["generation_ms"], rust_metrics["generation_ms"]),
-        "static_total": (python_metrics["total_ms"], rust_metrics["total_ms"]),
-    }
+    return _comparison_metrics(case, "static")
 
 
 def _mixed_step_comparison_metrics(
     case: EngineStepParityCase,
 ) -> dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]]:
-    return {
-        "mixed_step": (
-            _safe_value(lambda: _python_mixed_step_ms(case)),
-            _safe_value(lambda: _rust_mixed_step_ms(case)),
-        ),
-    }
+    return _comparison_metrics(case, "mixed")
 
 
 def _agg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[float, float]]:
-    python_metrics = _agg_metrics(case, engine_step_backend="python")
-    rust_metrics = _agg_metrics(case, engine_step_backend="rust")
-    return {
-        "agg_ttft": (python_metrics["ttft_ms"], rust_metrics["ttft_ms"]),
-        "agg_tpot": (python_metrics["tpot_ms"], rust_metrics["tpot_ms"]),
-        "agg_request": (python_metrics["request_latency_ms"], rust_metrics["request_latency_ms"]),
-    }
+    return _comparison_metrics(case, "agg")
 
 
 def _disagg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[float, float]]:
-    python_metrics = _disagg_metrics(case, engine_step_backend="python")
-    rust_metrics = _disagg_metrics(case, engine_step_backend="rust")
+    return _comparison_metrics(case, "disagg")
+
+
+# --------------------------------------------------------------------------- #
+# Golden fixtures (dedup-plan Gate 2). The Python side of every comparison is
+# a FROZEN reference captured by `regenerate_goldens.py` while the Python
+# latency path is still alive; only the Rust side runs live. Regenerate the
+# fixtures whenever a case list / compared metric changes, or when a Python
+# reference change is deliberate and reviewed.
+# --------------------------------------------------------------------------- #
+
+GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
+_REGENERATE_HINT = (
+    "regenerate the golden fixtures with "
+    "`.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py` "
+    "(captures the frozen Python reference; see parity_tests/README.md)"
+)
+_GOLDEN_CACHE: dict[str, dict] = {}
+
+
+def load_parity_golden(filename: str) -> dict:
+    """Load (and memoize) one golden JSON from ``parity_tests/goldens/``."""
+    cached = _GOLDEN_CACHE.get(filename)
+    if cached is None:
+        path = GOLDEN_DIR / filename
+        if not path.is_file():
+            pytest.fail(f"missing golden fixture {path}; {_REGENERATE_HINT}", pytrace=False)
+        cached = _GOLDEN_CACHE[filename] = json.loads(path.read_text())
+    return cached
+
+
+def _case_golden_id(case: EngineStepParityCase) -> str:
+    case_id = _CASE_GOLDEN_IDS.get(case)
+    if case_id is None:
+        pytest.fail(
+            f"case {case!r} is not part of ENGINE_STEP_GOLDEN_MATRIX — add it to a golden case list; "
+            f"{_REGENERATE_HINT}",
+            pytrace=False,
+        )
+    return case_id
+
+
+def _golden_python_metrics(
+    case: EngineStepParityCase,
+    surface: str,
+    rust_metrics: dict[str, float | _ErrorSentinel],
+) -> dict[str, float | _ErrorSentinel]:
+    """Golden (frozen Python) metrics for a (case, surface) pair.
+
+    A surface-level ``{"error": kind}`` record (every metric raised with one
+    kind — the single-call-site agg/disagg wrapping) expands over the live
+    comparison's metric names; a ``{"values": ...}`` record must carry exactly
+    the same metric names the live side computed, else the fixture predates a
+    metric-set change and needs regeneration.
+    """
+    case_id = _case_golden_id(case)
+    record = load_parity_golden("engine_step.json")["cases"].get(case_id, {}).get(surface)
+    if record is None:
+        pytest.fail(
+            f"no engine-step golden for case '{case_id}' surface '{surface}'; {_REGENERATE_HINT}",
+            pytrace=False,
+        )
+    if "error" in record:
+        kind = record["error"]
+        return {name: _ErrorSentinel.from_kind(kind) for name in rust_metrics}
+    values = record["values"]
+    if set(values) != set(rust_metrics):
+        pytest.fail(
+            f"golden metric names for '{case_id}::{surface}' ({sorted(values)}) do not match the live "
+            f"comparison ({sorted(rust_metrics)}); {_REGENERATE_HINT}",
+            pytrace=False,
+        )
     return {
-        "disagg_ttft": (python_metrics["ttft_ms"], rust_metrics["ttft_ms"]),
-        "disagg_tpot": (python_metrics["tpot_ms"], rust_metrics["tpot_ms"]),
-        "disagg_request": (python_metrics["request_latency_ms"], rust_metrics["request_latency_ms"]),
+        name: (_ErrorSentinel.from_kind(value["error"]) if isinstance(value, dict) else float(value))
+        for name, value in values.items()
     }
 
 
@@ -995,7 +1264,7 @@ def _prepare_rust_core(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestRustEngineStepStaticParity:
-    @pytest.mark.parametrize("case", SMOKE_CASES)
+    @pytest.mark.parametrize("case", [*SMOKE_CASES, *POWER_CASES])
     def test_smoke_parity(
         self,
         case: EngineStepParityCase,
@@ -1008,7 +1277,7 @@ class TestRustEngineStepStaticParity:
 
 
 class TestRustEngineStepMixedStepParity:
-    @pytest.mark.parametrize("case", SMOKE_CASES)
+    @pytest.mark.parametrize("case", [*SMOKE_CASES, *POWER_CASES])
     def test_smoke_parity(
         self,
         case: EngineStepParityCase,
@@ -1021,7 +1290,7 @@ class TestRustEngineStepMixedStepParity:
 
 
 class TestRustEngineStepAggParity:
-    @pytest.mark.parametrize("case", SMOKE_CASES)
+    @pytest.mark.parametrize("case", [*SMOKE_CASES, *POWER_CASES])
     def test_smoke_parity(
         self,
         case: EngineStepParityCase,
@@ -1034,8 +1303,36 @@ class TestRustEngineStepAggParity:
 
 
 class TestRustEngineStepDisaggParity:
-    @pytest.mark.parametrize("case", SMOKE_CASES)
+    @pytest.mark.parametrize("case", [*SMOKE_CASES, *POWER_CASES])
     def test_smoke_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_disagg_comparison_metrics(case))
+        assert reason is None, reason
+
+
+class TestRustEngineStepTieBreakParity:
+    """#1456 site-transfer tie-break anchors (see TIE_AGG/TIE_DISAGG_CASES):
+    each trigger config runs on the surface that originally exposed the
+    off-grid GEMM tie divergence, at the standard latency tolerance."""
+
+    @pytest.mark.parametrize("case", TIE_AGG_CASES)
+    def test_agg_tie_break_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_agg_comparison_metrics(case))
+        assert reason is None, reason
+
+    @pytest.mark.parametrize("case", TIE_DISAGG_CASES)
+    def test_disagg_tie_break_parity(
         self,
         case: EngineStepParityCase,
         monkeypatch: pytest.MonkeyPatch,
@@ -1371,6 +1668,166 @@ class TestRustEngineStepHybridDisaggParity:
 
         reason = _parity_mismatch_reason(_disagg_comparison_metrics(case), rtol=HYBRID_PARITY_RTOL)
         assert reason is None, reason
+
+
+# SOL parity cases: the per-op speed-of-light dispatch ported with the
+# SOL_FULL retirement (`DatabaseMode::Sol | SolFull` arms across the operator
+# families; the routing gate no longer delegates SOL to the Python step).
+# SOL is a pure analytic formula on BOTH sides — no tables, no interpolation,
+# no transfer ladder — so the faithful port agrees to f64 rounding (~1e-12);
+# HYBRID_PARITY_RTOL (1e-4) keeps headroom while making any silicon/hybrid
+# fallthrough (orders of magnitude off the roofline) unmissable.
+# Re-parameterized from existing SMOKE_CASES ids: two dense (Qwen3-32B,
+# Llama-3.1-70B), one MoE (Qwen3-235B-A22B), one MLA (DeepSeek-V3 — also
+# covers MLA BMM + the mode-aware mem_op extras).
+SOL_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-32B",
+            database_mode="SOL",
+        ),
+        id="qwen3-32b-b200-vllm-019-sol",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="meta-llama/Meta-Llama-3.1-70B",
+            database_mode="SOL",
+        ),
+        id="llama31-70b-b200-vllm-019-sol",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-235B-A22B",
+            database_mode="SOL",
+        ),
+        id="qwen3-235b-a22b-b200-vllm-019-sol",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V3",
+            database_mode="SOL",
+        ),
+        id="deepseek-v3-b200-vllm-019-sol",
+    ),
+]
+
+
+class TestRustEngineStepSolStaticParity:
+    @pytest.mark.parametrize("case", SOL_CASES)
+    def test_sol_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_static_comparison_metrics(case), rtol=HYBRID_PARITY_RTOL)
+        assert reason is None, reason
+
+
+class TestRustEngineStepSolMixedStepParity:
+    @pytest.mark.parametrize("case", SOL_CASES)
+    def test_sol_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case), rtol=HYBRID_PARITY_RTOL)
+        assert reason is None, reason
+
+
+# The full engine-step golden matrix: every (case, surface) pair the parity
+# classes above compare, in one importable structure so
+# `regenerate_goldens.py` captures exactly what the tests consume (single
+# source of truth — the capture script defines no case of its own). Keep in
+# lockstep with the class parametrizations.
+ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
+    (SMOKE_CASES, ENGINE_STEP_SURFACES),
+    (POWER_CASES, ENGINE_STEP_SURFACES),
+    (CP_CASES, ("mixed",)),
+    (HYBRID_CASES, ENGINE_STEP_SURFACES),
+    (SOL_CASES, ("static", "mixed")),
+    (TIE_AGG_CASES, ("agg",)),
+    (TIE_DISAGG_CASES, ("disagg",)),
+)
+
+
+def _build_case_golden_ids() -> dict[EngineStepParityCase, str]:
+    mapping: dict[EngineStepParityCase, str] = {}
+    for params, _surfaces in ENGINE_STEP_GOLDEN_MATRIX:
+        for param in params:
+            (case,) = param.values
+            existing = mapping.get(case)
+            if existing is not None and existing != param.id:
+                raise AssertionError(f"case {case!r} carries two golden ids: {existing!r} / {param.id!r}")
+            mapping[case] = param.id
+    return mapping
+
+
+# Golden records are keyed by the pytest param id; the frozen dataclass is
+# hashable, so tests recover the id from the parametrized case value.
+_CASE_GOLDEN_IDS = _build_case_golden_ids()
+
+
+class TestGoldenComparisonGuards:
+    """Anti-vacuous guard: prove the golden comparison actually bites.
+
+    The golden rewiring replaced the live Python side with fixture lookups;
+    if the lookup or the tolerance check ever degenerated (e.g. comparing the
+    rust value to itself, or an over-wide tolerance), every parity test would
+    stay green forever. Doctoring an in-memory copy of the golden by 5x the
+    tolerance and watching the comparison fail proves drift is detectable.
+    The fixture on disk is never touched.
+    """
+
+    def test_golden_comparison_detects_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+        param = SMOKE_CASES[0]
+        (case,) = param.values
+
+        original = load_parity_golden
+        doctored = copy.deepcopy(original("engine_step.json"))
+        record = doctored["cases"][param.id]["static"]
+        assert "values" in record, f"guard needs a computing case, got {record}"
+        record["values"]["static_ctx"] = float(record["values"]["static_ctx"]) * 1.05
+
+        monkeypatch.setattr(
+            sys.modules[__name__],
+            "load_parity_golden",
+            lambda filename: doctored if filename == "engine_step.json" else original(filename),
+        )
+        reason = _parity_mismatch_reason(_static_comparison_metrics(case))
+        assert reason is not None, "5% golden drift on static_ctx was not detected"
+        assert "static_ctx" in reason and "drift" in reason, reason
+
+    def test_golden_error_asymmetry_detected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The symmetric twin: a golden that recorded an error while the live
+        # rust side computes must fail (asym), with the same message shape
+        # the live differential used.
+        _prepare_rust_core(monkeypatch)
+        param = SMOKE_CASES[0]
+        (case,) = param.values
+
+        original = load_parity_golden
+        doctored = copy.deepcopy(original("engine_step.json"))
+        doctored["cases"][param.id]["static"] = {"error": "PerfDataNotAvailableError"}
+
+        monkeypatch.setattr(
+            sys.modules[__name__],
+            "load_parity_golden",
+            lambda filename: doctored if filename == "engine_step.json" else original(filename),
+        )
+        reason = _parity_mismatch_reason(_static_comparison_metrics(case))
+        assert reason is not None, "golden-error vs rust-value asymmetry was not detected"
+        assert "asym" in reason, reason
 
 
 def _rust_static_breakdown(case: EngineStepParityCase):
