@@ -263,7 +263,7 @@ class ContextMSAModule(_BaseMSAModule):
         prefix = kwargs.get("prefix", 0)
         mode = database._default_database_mode
         sol = self._sol(database, b, s, prefix, is_context=True)
-        if mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL):
+        if mode == common.DatabaseMode.SOL:
             return PerformanceResult(sol * self._scale_factor, energy=0.0, source="sol")
         if mode == common.DatabaseMode.SILICON:
             from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
@@ -306,7 +306,7 @@ class GenerationMSAModule(_BaseMSAModule):
         s = kwargs.get("s")
         mode = database._default_database_mode
         sol = self._sol(database, b, s, 0, is_context=False)
-        if mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL):
+        if mode == common.DatabaseMode.SOL:
             return PerformanceResult(sol * self._scale_factor, energy=0.0, source="sol")
         if mode == common.DatabaseMode.SILICON:
             from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError

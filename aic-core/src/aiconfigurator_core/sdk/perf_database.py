@@ -1023,8 +1023,24 @@ def _normalize_database_mode(database_mode: str | common.DatabaseMode | None) ->
     if database_mode is None:
         return common.DatabaseMode.SILICON
     if isinstance(database_mode, common.DatabaseMode):
+        _reject_retired_database_mode(database_mode)
         return database_mode
-    return common.DatabaseMode[database_mode.upper()]
+    mode = common.DatabaseMode[database_mode.upper()]
+    _reject_retired_database_mode(mode)
+    return mode
+
+
+def _reject_retired_database_mode(mode: common.DatabaseMode) -> None:
+    """SOL_FULL is retired: the raw ``(sol_time, sol_math, sol_mem)`` debug
+    tuples were removed with the Rust SOL port (the enum member remains for
+    source compatibility only). Reject it at mode entry so it can never
+    become a database's active mode."""
+    if mode == common.DatabaseMode.SOL_FULL:
+        raise ValueError(
+            "DatabaseMode.SOL_FULL is retired; use DatabaseMode.SOL for pure "
+            "speed-of-light estimates (per-op sol_math/sol_mem detail tuples "
+            "are no longer produced)."
+        )
 
 
 @functools.cache
@@ -2440,6 +2456,7 @@ class PerfDatabase:
         """
         Set the default database mode
         """
+        _reject_retired_database_mode(mode)
         if getattr(self, "_is_query_view", False) and mode != self._default_database_mode:
             raise RuntimeError(
                 "A cached query view has immutable mode/policy state; request a different view with "
@@ -2952,14 +2969,11 @@ class PerfDatabase:
         )
 
     @functools.lru_cache(maxsize=32768)
-    def query_mem_op(
-        self, mem_bytes: int, database_mode: common.DatabaseMode | None = None
-    ) -> PerformanceResult | tuple[float, float, float]:
+    def query_mem_op(self, mem_bytes: int, database_mode: common.DatabaseMode | None = None) -> PerformanceResult:
         """Query memory-operation latency analytically (no CSV data).
 
         Returns:
             PerformanceResult acting as float (latency in ms); energy via ``.energy``.
-            For SOL_FULL, returns a ``(sol_time, 0, sol_time)`` tuple.
         """
         gpu_spec = self.system_spec["gpu"]
 
@@ -2977,8 +2991,6 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
         # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is
         # no silicon table for raw memory ops, so always tag as ``empirical``.
         return PerformanceResult(get_empirical(), energy=0.0, source="empirical")

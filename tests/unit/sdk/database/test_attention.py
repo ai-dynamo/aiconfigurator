@@ -124,24 +124,6 @@ class TestContextAttention:
         finally:
             comprehensive_perf_db.set_transfer_policy(None)
 
-    def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4
-        s = full_s - prefix
-        kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
-        fmha_quant_mode = common.FMHAQuantMode.bfloat16
-
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_context_attention(
-            b, s, prefix, n, n_kv, kv_cache_quant_mode, fmha_quant_mode, database_mode=common.DatabaseMode.SOL
-        )
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
-
     def test_query_context_attention_non_database_mode_mha(self, comprehensive_perf_db):
         """Test SILICON mode with MHA (n_kv == n)."""
         b, full_s, prefix, n = 2, 32, 0, 16
@@ -226,22 +208,6 @@ class TestGenerationAttention:
         expected = max(sol_math, sol_mem)
 
         assert math.isclose(result, expected, rel_tol=1e-6)
-
-    def test_query_generation_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        b, s, n, n_kv = 2, 64, 16, 4
-        kv_cache_quant_mode = common.KVCacheQuantMode.fp8
-
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_generation_attention(
-            b, s, n, n_kv, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
-        )
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_generation_attention_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with interpolation."""
@@ -440,19 +406,6 @@ class TestGenerationMLA:
         expected = comprehensive_perf_db._generation_mla_data[kv_cache_quant_mode][num_heads][b][s]
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_generation_mla_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_generation_mla(
-            1, 32, 32, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_generation_mla(
-            1, 32, 32, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
-        )
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
-
 
 def test_default_database_mode(mutable_comprehensive_perf_db):
     """Test setting and getting default database mode, and that query cache is cleared when default mode is changed."""
@@ -482,3 +435,21 @@ def test_default_database_mode(mutable_comprehensive_perf_db):
     assert cache_info.currsize == 1
     assert isinstance(sol_result, float)
     assert sol_result != non_sol_result
+
+
+def test_sol_full_mode_is_retired(mutable_comprehensive_perf_db):
+    """DatabaseMode.SOL_FULL survives as an enum member (public surface) but can
+    never become the active mode: every mode-entry choke point raises."""
+    from aiconfigurator_core.sdk.perf_database import _normalize_database_mode
+
+    db = mutable_comprehensive_perf_db
+    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+        db.set_default_database_mode(common.DatabaseMode.SOL_FULL)
+    # The refused mode must not stick.
+    assert db.get_default_database_mode() == common.DatabaseMode.SILICON
+
+    # The get_database / get_database_view string+enum normalizer refuses too.
+    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+        _normalize_database_mode("SOL_FULL")
+    with pytest.raises(ValueError, match="SOL_FULL is retired"):
+        _normalize_database_mode(common.DatabaseMode.SOL_FULL)

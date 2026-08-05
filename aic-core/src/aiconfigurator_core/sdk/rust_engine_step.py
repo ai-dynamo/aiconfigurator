@@ -28,6 +28,48 @@ logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 
 
+# Freeze-window telemetry (#1357 Phase 1): count every Python-step use by
+# reason and warn once per reason, so sweep logs stay readable while "who
+# still uses the Python step" stays measurable during the freeze.
+_PYTHON_STEP_FALLBACK_COUNTS: dict[str, int] = {}
+_PYTHON_STEP_FALLBACK_WARNED: set[str] = set()
+_PYTHON_STEP_FALLBACK_LOCK = threading.Lock()
+
+
+def note_python_step_fallback(reason: str, detail: str = "") -> None:
+    """Record one Python-step use. First occurrence of a ``reason`` logs at
+    WARNING; repeats log at DEBUG. Counts are cumulative per process
+    (``python_step_fallback_counts()``)."""
+    with _PYTHON_STEP_FALLBACK_LOCK:
+        _PYTHON_STEP_FALLBACK_COUNTS[reason] = _PYTHON_STEP_FALLBACK_COUNTS.get(reason, 0) + 1
+        first = reason not in _PYTHON_STEP_FALLBACK_WARNED
+        if first:
+            _PYTHON_STEP_FALLBACK_WARNED.add(reason)
+    suffix = f": {detail}" if detail else ""
+    if first:
+        logger.warning(
+            "engine step using the python path (%s)%s — further occurrences log at DEBUG; "
+            "cumulative counts via rust_engine_step.python_step_fallback_counts().",
+            reason,
+            suffix,
+        )
+    else:
+        logger.debug("engine step using the python path (%s)%s", reason, suffix)
+
+
+def python_step_fallback_counts() -> dict[str, int]:
+    """Cumulative Python-step uses by reason (freeze-window telemetry)."""
+    with _PYTHON_STEP_FALLBACK_LOCK:
+        return dict(_PYTHON_STEP_FALLBACK_COUNTS)
+
+
+def _python_step_fallback_reset() -> None:
+    """Test hook: clear telemetry counters and the warn-once memory."""
+    with _PYTHON_STEP_FALLBACK_LOCK:
+        _PYTHON_STEP_FALLBACK_COUNTS.clear()
+        _PYTHON_STEP_FALLBACK_WARNED.clear()
+
+
 class RustEngineUnsupportedError(RuntimeError):
     """The model's op graph cannot be expressed as a compiled ``EngineSpec``
     (``engine.OpConversionError``). Python CAN compute these configs, so the
@@ -231,32 +273,38 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
-# Database modes the compiled engine answers itself. SILICON plus the
-# util-space empirical layer (HYBRID / EMPIRICAL, mirroring
-# `sdk/operations/util_empirical.py`); the SOL diagnostic modes stay on the
-# Python step.
-_RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL"}
+# Database modes the compiled engine answers itself: SILICON, the util-space
+# empirical layer (HYBRID / EMPIRICAL, mirroring
+# `sdk/operations/util_empirical.py`), and SOL (per-op speed-of-light
+# dispatch, ported with the SOL_FULL retirement). The only excluded name is
+# the retired SOL_FULL, which can no longer be a database's active mode —
+# the mode-based delegation below is vestigial belt-and-braces.
+_RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL", "SOL"}
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route to the compiled engine only when it can give the SAME answer.
 
-    The compiled engine is the DEFAULT. The Python step remains reachable
-    three ways, all answer-parity delegations rather than capabilities:
+    The compiled engine is the DEFAULT — including on power-carrying
+    databases, now that per-op energy crosses the FFI. The Python step
+    remains reachable two ways, both answer-parity delegations rather than
+    capabilities:
 
     * an explicit ``engine_step_backend="python"`` (config or env) — the
       escape hatch retained for one release cycle;
-    * the SOL / SOL_FULL diagnostic modes, which only the Python step
-      implements (the compiled engine answers SILICON / HYBRID / EMPIRICAL);
-    * by default (not when ``"rust"`` is explicitly requested), a database
-      whose perf tables carry measured power columns — energy does not cross
-      the FFI yet, so rust-routing an agg sweep would silently zero its
-      ``power_w``. Explicit ``"rust"`` keeps its historical force semantics
-      (the parity scan tooling relies on it and measures latency only).
+    * by default (not when ``"rust"`` is explicitly requested), a
+      non-``PerfDatabase`` object — the compiled engine re-loads perf data
+      from disk by identity, which a synthetic database does not have.
+
+    The compiled engine answers every selectable database mode (SILICON /
+    HYBRID / EMPIRICAL / SOL). The mode gate below only rejects unknown
+    names — in practice just the retired SOL_FULL, which mode entry already
+    refuses to activate — so the mode-based delegation is empty in practice.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
     requested = str(backend).lower() if backend else None
     if requested is not None and requested != "rust":
+        note_python_step_fallback("explicit_python", requested)
         return False
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay
@@ -268,87 +316,20 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
             # (system, backend, version); a synthetic/duck-typed database has
             # no on-disk identity it could resolve. Only an explicit "rust"
             # request bypasses this (and owns the resulting load error).
-            return False
-        if _database_has_power_data(database):
-            logger.debug(
-                "engine-step backend defaulting to the python step: database %s/%s/%s carries "
-                "measured power data and energy does not cross the FFI yet "
-                "(set %s=rust to force the compiled engine).",
-                database.system,
-                database.backend,
-                database.version,
-                ENGINE_STEP_BACKEND_ENV,
-            )
+            note_python_step_fallback("non_perf_database", type(database).__name__)
             return False
     if database is not None:
         mode = getattr(database, "get_default_database_mode", lambda: None)()
         if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
+            note_python_step_fallback("database_mode", str(getattr(mode, "name", mode)))
             logger.debug(
                 "engine-step backend 'rust' requested but database_mode=%s; "
-                "using the python step (compiled engine implements SILICON/HYBRID/EMPIRICAL only).",
+                "using the python step (compiled engine implements "
+                "SILICON/HYBRID/EMPIRICAL/SOL only).",
                 getattr(mode, "name", mode),
             )
             return False
     return True
-
-
-# Power-data probe results keyed by (system, backend, version). The probe is
-# a filesystem schema scan, so the answer is immutable for a given identity;
-# memoizing here keeps the per-step routing gate free of I/O.
-_POWER_DATA_CACHE: dict[tuple[str, str, str], bool] = {}
-
-
-def _database_has_power_data(database: Any) -> bool:
-    """True when the database's perf-data tree carries measured power columns.
-
-    Detection is a parquet *schema* scan (no row reads) over the database's
-    ``<data_dir>/<family>/<backend>/<version>/*.parquet`` tree, plus the
-    deprecated ``<data_dir>/<backend>/<version>`` layout. All sibling version
-    dirs of the backend are scanned, not just ``database.version``: the loader
-    may fill gaps from sibling-version channels, and over-matching only keeps
-    that database on the (status quo) Python step. Collectors write power
-    columns only when power was actually measured, so column presence is the
-    signal — no row values are inspected.
-
-    Any probe failure (mock database objects in tests, missing tree, no
-    pyarrow) means "no power data": those databases cannot produce energy on
-    the Python step either, so rust-routing them changes nothing.
-    """
-    system = getattr(database, "system", None)
-    backend = getattr(database, "backend", None)
-    if not system or not backend:
-        return False
-    key = (str(system), _backend_name(backend), str(getattr(database, "version", "")))
-    cached = _POWER_DATA_CACHE.get(key)
-    if cached is not None:
-        return cached
-    result = _scan_for_power_columns(database)
-    _POWER_DATA_CACHE[key] = result
-    return result
-
-
-def _scan_for_power_columns(database: Any) -> bool:
-    try:
-        import pyarrow.parquet as pq
-
-        systems_root = getattr(database, "systems_root", None)
-        spec = getattr(database, "system_spec", None)
-        data_dir_rel = spec.get("data_dir") if isinstance(spec, dict) else None
-        if not systems_root or not data_dir_rel:
-            return False
-        data_dir = Path(systems_root) / data_dir_rel
-        backend = _backend_name(database.backend)
-        candidates = list(data_dir.glob(f"*/{backend}/*/*.parquet")) + list(data_dir.glob(f"{backend}/*/*.parquet"))
-        for parquet_path in candidates:
-            try:
-                names = pq.read_schema(parquet_path).names
-            except Exception:  # one unreadable file must not poison the probe
-                continue
-            if any("power" in name for name in names):
-                return True
-        return False
-    except Exception:  # probe failures mean "no power data", see docstring
-        return False
 
 
 def _note_rust_provenance(handle: Any) -> None:
@@ -383,6 +364,36 @@ def _scale_or_one(value: Any) -> float:
     return 1.0 if value is None else float(value)
 
 
+def _fold_per_op(
+    entries: Any,
+    scale: float = 1.0,
+) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+    """Fold the compiled engine's per-op tuples into the Python phase dicts.
+
+    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source), ...]``.
+    Duplicate names accumulate with ``+=`` (per-block model families repeat op
+    names; generation entries repeat per stride step) and sources merge to
+    ``"mixed"`` on mismatch — byte-for-byte the accumulation semantics of
+    ``base_backend._run_context_phase``. ``scale`` is the flat
+    ``latency_correction_scale`` post-multiply, applied to latency AND energy
+    per key exactly like the Python phase runners' downstream scaling. The
+    three dicts share one key set (the power-coverage gate pairs latency and
+    energy by identical keys).
+    """
+    latency: dict[str, float] = {}
+    energy: dict[str, float] = {}
+    source: dict[str, str] = {}
+    for name, latency_ms, energy_wms, src in entries:
+        latency[name] = latency.get(name, 0.0) + latency_ms * scale
+        energy[name] = energy.get(name, 0.0) + energy_wms * scale
+        prior = source.get(name)
+        if prior is None:
+            source[name] = src
+        elif prior != src:
+            source[name] = "mixed"
+    return latency, energy, source
+
+
 def estimate_static_latency_breakdown_with_rust(
     model: Any,
     database: Any,
@@ -390,20 +401,29 @@ def estimate_static_latency_breakdown_with_rust(
     mode: str,
     stride: int,
     latency_correction_scale: float,
-) -> tuple[dict[str, float], dict[str, float], dict[str, str], dict[str, str]]:
-    """Static (context / generation) latency breakdown via the compiled engine.
+) -> tuple[
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, str],
+    dict[str, str],
+]:
+    """Static (context / generation) per-op breakdown via the compiled engine.
 
-    Routes through ``EngineHandle.run_static`` (the "Python builds, Rust
-    executes" path). ``run_static`` performs the decode stride quadrature and
+    Routes through ``EngineHandle.run_static_per_op`` (the "Python builds,
+    Rust executes" path). The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
-    ``base_backend._run_generation_phase``), so the Python side here only maps
-    ``mode`` -> the engine ``mode`` string, applies ``latency_correction_scale``
-    after the call, and collapses the scalar phase totals into the synthetic
-    single-key breakdown dicts the caller sums.
+    ``base_backend._run_generation_phase``) and returns every queried op's
+    ``(name, latency_ms, energy_wms, source)``; this side folds them into the
+    same name-keyed dicts the Python phase runners produce — real op names,
+    real energies, real provenance tags. Returns ``(context_latency,
+    generation_latency, context_energy_wms, generation_energy_wms,
+    context_source, generation_source)``.
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
-    context_latency_ms, generation_latency_ms, _ = handle.run_static(
+    context_ops, generation_ops = handle.run_static_per_op(
         batch_size=int(runtime_config.batch_size),
         isl=int(runtime_config.isl),
         osl=int(runtime_config.osl),
@@ -416,15 +436,16 @@ def estimate_static_latency_breakdown_with_rust(
     )
     _note_rust_provenance(handle)
 
-    if latency_correction_scale != 1.0:
-        context_latency_ms *= latency_correction_scale
-        generation_latency_ms *= latency_correction_scale
-
-    context_latency = {"rust_engine_step_context": context_latency_ms} if context_latency_ms > 0.0 else {}
-    generation_latency = {"rust_engine_step_generation": generation_latency_ms} if generation_latency_ms > 0.0 else {}
-    context_source = dict.fromkeys(context_latency, "rust")
-    generation_source = dict.fromkeys(generation_latency, "rust")
-    return context_latency, generation_latency, context_source, generation_source
+    context_latency, context_energy, context_source = _fold_per_op(context_ops, latency_correction_scale)
+    generation_latency, generation_energy, generation_source = _fold_per_op(generation_ops, latency_correction_scale)
+    return (
+        context_latency,
+        generation_latency,
+        context_energy,
+        generation_energy,
+        context_source,
+        generation_source,
+    )
 
 
 def estimate_mixed_step_latency_with_rust(
@@ -473,15 +494,19 @@ def estimate_mixed_step_breakdown_with_rust(
     prefix: int,
     seq_imbalance_correction_scale: float = 1.0,
     gen_seq_imbalance_correction_scale: float = 1.0,
-) -> dict[str, float]:
-    """Estimate one mixed step and retain its three execution components.
+) -> dict[str, Any]:
+    """Estimate one mixed step with per-op and per-component values retained.
 
     Same three-pass composition as ``estimate_mixed_step_latency_with_rust``
-    (``total`` is the identical sum), reported per pass so the agg speculative
-    scheduler can consume the shared/context-attention/decode-attention split.
+    (``latency_ms`` is the identical sum), reported per pass AND per op so
+    ``run_mixed`` builds the same ``StepEstimate`` shape as the Python step:
+    non-attention ops under their raw names plus the two literal keys
+    ``"context_attention (scaled)"`` (pass 2, already divided by
+    ``ceil(isl/ctx)``) and ``"generation_attention"`` (pass 3) — mirroring
+    ``base_backend.run_mixed``'s Python branch key-for-key, energies included.
     """
     handle = _cached_engine_handle(model, database)
-    total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
+    shared_ops, ctx_attn_ops, decode_attn_ops = handle.mixed_step_breakdown_per_op(
         int(ctx_tokens),
         int(gen_tokens),
         int(isl),
@@ -491,11 +516,45 @@ def estimate_mixed_step_breakdown_with_rust(
         gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
     _note_rust_provenance(handle)
+
+    shared_latency, shared_energy, shared_source = _fold_per_op(shared_ops)
+    ctx_latency, ctx_energy, ctx_source = _fold_per_op(ctx_attn_ops)
+    dec_latency, dec_energy, dec_source = _fold_per_op(decode_attn_ops)
+
+    # Pass 2/3 fold to (at most) the single filtered attention key; missing
+    # passes report 0.0 under the Python branch's default "silicon" source
+    # (mirrors `.get("context_attention", ...)` / `.get(..., "silicon")`).
+    ctx_attention_latency = sum(ctx_latency.values())
+    ctx_attention_energy = sum(ctx_energy.values())
+    dec_attention_latency = sum(dec_latency.values())
+    dec_attention_energy = sum(dec_energy.values())
+    per_op_latency_ms: dict[str, float] = {
+        **shared_latency,
+        "context_attention (scaled)": ctx_attention_latency,
+        "generation_attention": dec_attention_latency,
+    }
+    per_op_source: dict[str, str] = {
+        **shared_source,
+        "context_attention (scaled)": ctx_source.get("context_attention", "silicon"),
+        "generation_attention": dec_source.get("generation_attention", "silicon"),
+    }
+    component_latency_ms = {
+        "shared_non_attention": sum(shared_latency.values()),
+        "context_attention": ctx_attention_latency,
+        "decode_attention": dec_attention_latency,
+    }
+    component_energy_wms = {
+        "shared_non_attention": sum(shared_energy.values()),
+        "context_attention": ctx_attention_energy,
+        "decode_attention": dec_attention_energy,
+    }
     return {
-        "total": float(total),
-        "shared_non_attention": float(shared_non_attention),
-        "context_attention": float(context_attention),
-        "decode_attention": float(decode_attention),
+        "latency_ms": sum(component_latency_ms.values()),
+        "energy_wms": sum(component_energy_wms.values()),
+        "component_latency_ms": component_latency_ms,
+        "component_energy_wms": component_energy_wms,
+        "per_op_latency_ms": per_op_latency_ms,
+        "per_op_source": per_op_source,
     }
 
 
@@ -525,6 +584,128 @@ def estimate_decode_step_latency_with_rust(
     )
     _note_rust_provenance(handle)
     return latency_ms
+
+
+def estimate_decode_step_breakdown_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    gen_tokens: int,
+    isl: int,
+    osl: int,
+    gen_seq_imbalance_correction_scale: float = 1.0,
+) -> tuple[float, float, dict[str, float], dict[str, str]]:
+    """``estimate_decode_step_latency_with_rust`` with the per-op values kept.
+
+    Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source)`` —
+    the exact shape ``base_backend._get_genonly_step_latency`` produces on the
+    Python step, with real op names and per-op energies folded from the
+    compiled engine's per-op results.
+    """
+    handle = _cached_engine_handle(model, database)
+    entries = handle.decode_step_per_op(
+        int(gen_tokens),
+        int(isl),
+        int(osl),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+    )
+    _note_rust_provenance(handle)
+    latency, energy, source = _fold_per_op(entries)
+    return sum(latency.values()), sum(energy.values()), latency, source
+
+
+def evaluate_context_ops_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    indices: Any,
+    batch_size: int,
+    s: int,
+    prefix: int = 0,
+    seq_imbalance_correction_scale: float = 1.0,
+    x: int | None = None,
+) -> list[tuple[str, float, float, str]]:
+    """Evaluate an index-addressed sublist of the compiled context op list.
+
+    The thin op-list evaluation FFI: Python-side orchestration (AFD A/F
+    partitions) passes positions into ``model.context_ops`` (the compiled
+    spec preserves that order 1:1) and receives ``(name, latency_ms,
+    energy_wms, source)`` per op in input order — the orchestration itself
+    stays in Python. ``x`` overrides the token count verbatim for callers
+    with their own x policy (AFD's uniform ``batch * s``); ``None`` keeps
+    the base-phase rule (logits-GEMM exception).
+    """
+    handle = _cached_engine_handle(model, database)
+    result = handle.evaluate_context_ops(
+        list(indices),
+        batch_size=int(batch_size),
+        s=int(s),
+        prefix=int(prefix or 0),
+        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+        x=x,
+    )
+    _note_rust_provenance(handle)
+    return result
+
+
+def evaluate_generation_ops_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    indices: Any,
+    batch_size: int,
+    s: int,
+    gen_seq_imbalance_correction_scale: float = 1.0,
+    prefix: int = 0,
+    x: int | None = None,
+) -> list[tuple[str, float, float, str]]:
+    """Evaluate an index-addressed sublist of the compiled generation op list
+    at the decode-step shape (see ``evaluate_context_ops_with_rust``). The
+    base decode walk carries no prefix; ``prefix`` exists for orchestrations
+    that thread it (AFD's ``_sum_latency``)."""
+    handle = _cached_engine_handle(model, database)
+    result = handle.evaluate_generation_ops(
+        list(indices),
+        batch_size=int(batch_size),
+        s=int(s),
+        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        prefix=int(prefix or 0),
+        x=x,
+    )
+    _note_rust_provenance(handle)
+    return result
+
+
+def evaluate_ops_json_with_rust(
+    model: Any,
+    database: Any,
+    *,
+    ops_json: str,
+    is_context: bool,
+    batch_size: int,
+    s: int,
+    prefix: int = 0,
+    imbalance_correction_scale: float = 1.0,
+    x: int | None = None,
+) -> list[tuple[str, float, float, str]]:
+    """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against the
+    engine's database — serves op lists deliberately NOT in the compiled spec
+    (the VL encoder phase). The caller keeps the shape math and passes the
+    resolved ``(batch_size, s)`` — and optionally an explicit ``x`` — per op
+    group.
+    """
+    handle = _cached_engine_handle(model, database)
+    result = handle.evaluate_ops_json(
+        ops_json,
+        is_context=bool(is_context),
+        batch_size=int(batch_size),
+        s=int(s),
+        prefix=int(prefix or 0),
+        imbalance_correction_scale=_scale_or_one(imbalance_correction_scale),
+        x=x,
+    )
+    _note_rust_provenance(handle)
+    return result
 
 
 # LRU memo of compiled ``EngineHandle`` objects, keyed by the engine identity
@@ -571,11 +752,6 @@ def _engine_handle_cache_clear() -> None:
     lever)."""
     with _ENGINE_HANDLE_CACHE_LOCK:
         _ENGINE_HANDLE_CACHE.clear()
-    # The power probe is filesystem-derived but keyed without the systems
-    # root; like the handles above it must not survive a ``set_systems_paths``
-    # switch, or a stale ``False`` would rust-route a now-power-carrying
-    # identity and silently zero agg ``power_w``.
-    _POWER_DATA_CACHE.clear()
 
 
 def _engine_handle_cache_get(key: str) -> Any:

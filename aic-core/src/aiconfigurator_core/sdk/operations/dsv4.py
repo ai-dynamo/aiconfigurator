@@ -448,8 +448,6 @@ class DeepSeekV4MHCModule(Operation):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
@@ -930,8 +928,6 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 
@@ -1361,8 +1357,6 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol()
         if database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(), energy=0.0, source="empirical")
 

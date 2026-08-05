@@ -220,12 +220,11 @@ def test_query_trtllm_alltoall_not_enabled_is_zero_in_every_mode(stub_perf_db, m
         moe_backend=moe_backend,
     )
 
-    if database_mode == common.DatabaseMode.SOL_FULL:
-        assert result == (0.0, 0.0, 0.0)
-    else:
-        assert float(result) == 0.0
-        expected_source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
-        assert result.source == expected_source
+    assert float(result) == 0.0
+    # SOL_FULL is retired: passed explicitly per-query it no longer produces a
+    # raw tuple — the NotEnabled early return tags only real SOL as "sol".
+    expected_source = "sol" if database_mode == common.DatabaseMode.SOL else "empirical"
+    assert result.source == expected_source
 
 
 def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):
@@ -250,31 +249,9 @@ def test_query_custom_allreduce_database_mode_calculation(stub_perf_db):
     assert math.isclose(sol_time, expected), f"SOL-mode allreduce mismatch: expected {expected}, got {sol_time}"
 
 
-def test_query_custom_allreduce_sol_full_returns_full_tuple(stub_perf_db):
-    """
-    When database_mode == SOL_FULL, query_custom_allreduce returns (sol_time, sol_math, sol_mem).
-    The sol_time value should match the calculated SOL time.
-    """
-    size = 1024
-    tp_size = 2
-    quant_mode = "bfloat16"
-
-    sol_time, sol_math, sol_mem = stub_perf_db.query_custom_allreduce(
-        quant_mode, tp_size, size, database_mode=common.DatabaseMode.SOL_FULL
-    )
-    # The get_sol function calculates: sol_time = 2 * size * 2 / tp_size * (tp_size - 1) / p2p_bw * 1000
-    expected_sol_time = (
-        2 * size * 2 / tp_size * (tp_size - 1) / stub_perf_db.system_spec["node"]["inter_node_bw"]
-    ) * 1000
-
-    assert math.isclose(sol_time, expected_sol_time)
-    assert math.isclose(sol_math, 0.0)
-    assert math.isclose(sol_mem, 0.0)
-
-
 def test_query_custom_allreduce_non_database_mode_uses_custom_latency(stub_perf_db):
     """
-    When database_mode is neither SOL nor SOL_FULL (e.g. DatabaseMode.NONE), the code picks:
+    When database_mode is not SOL (e.g. DatabaseMode.SILICON), the code picks:
         comm_dict = self._custom_allreduce_data[quant_mode][min(tp_size, 8)]['AUTO']
         size_left, size_right = nearest keys enveloping `size`
         lat = interpolate between comm_dict[size_left], comm_dict[size_right]

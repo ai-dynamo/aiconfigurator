@@ -174,8 +174,6 @@ class CustomAllReduce(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(quant_mode, tp_size, size)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(quant_mode, tp_size, size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(quant_mode, tp_size, size)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -448,8 +446,6 @@ class NCCL(Operation):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(dtype, num_gpus, operation, message_size)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(dtype, num_gpus, operation, message_size)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(
                 get_empirical(dtype, num_gpus, operation, message_size), energy=0.0, source="empirical"
@@ -572,8 +568,6 @@ class P2P(Operation):
             database_mode = database._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol(message_bytes)[0], energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(message_bytes)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(message_bytes), energy=0.0, source="empirical")
         # No silicon table for P2P — even SILICON/HYBRID modes use the

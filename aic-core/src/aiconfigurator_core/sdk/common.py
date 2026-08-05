@@ -969,7 +969,10 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    SOL_FULL = 4  # Provide SOL time and details
+    # RETIRED: the raw (sol_time, sol_math, sol_mem) debug tuples were removed
+    # with the Rust SOL port. The member remains for source compatibility, but
+    # selecting it raises ValueError at mode entry (perf_database).
+    SOL_FULL = 4
 
 
 class TransferKind(Enum):

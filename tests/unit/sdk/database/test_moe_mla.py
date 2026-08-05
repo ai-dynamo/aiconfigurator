@@ -58,37 +58,6 @@ class TestMoE:
         assert math.isclose(result, expected, rel_tol=1e-6)
         assert result.source == "sol"
 
-    def test_query_moe_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_moe(
-            8,
-            1024,
-            4096,
-            2,
-            8,
-            1,
-            1,
-            common.MoEQuantMode.bfloat16,
-            "uniform",
-            database_mode=common.DatabaseMode.SOL_FULL,
-        )
-
-        sol_only = comprehensive_perf_db.query_moe(
-            8,
-            1024,
-            4096,
-            2,
-            8,
-            1,
-            1,
-            common.MoEQuantMode.bfloat16,
-            "uniform",
-            database_mode=common.DatabaseMode.SOL,
-        )
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
-
     def test_query_moe_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with data lookup."""
         num_tokens = 8
@@ -602,19 +571,6 @@ class TestMLABMM:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_mla_bmm_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mla_bmm(
-            8, 4, common.GEMMQuantMode.bfloat16, True, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_mla_bmm(
-            8, 4, common.GEMMQuantMode.bfloat16, True, database_mode=common.DatabaseMode.SOL
-        )
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
-
     def test_query_mla_bmm_non_database_mode_pre(self, comprehensive_perf_db):
         """Test SILICON mode for pre operation."""
         num_tokens = 8
@@ -675,19 +631,6 @@ class TestMemoryOperations:
 
         assert math.isclose(result, expected, rel_tol=1e-6)
 
-    def test_query_mem_op_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        mem_bytes = 500_000
-
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mem_op(
-            mem_bytes, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_mem_op(mem_bytes, database_mode=common.DatabaseMode.SOL)
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
-
     def test_query_mem_op_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with empirical scaling."""
         mem_bytes = 2_000_000
@@ -730,19 +673,6 @@ class TestP2P:
         expected = message_bytes / comprehensive_perf_db.system_spec["node"]["inter_node_bw"] * 1000
 
         assert math.isclose(result, expected, rel_tol=1e-6)
-
-    def test_query_p2p_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
-        message_bytes = 500_000
-
-        sol_time, sol_math, sol_mem = comprehensive_perf_db.query_p2p(
-            message_bytes, database_mode=common.DatabaseMode.SOL_FULL
-        )
-
-        sol_only = comprehensive_perf_db.query_p2p(message_bytes, database_mode=common.DatabaseMode.SOL)
-        assert sol_time > 0
-        assert math.isclose(sol_time, float(sol_only), rel_tol=1e-6)
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_query_p2p_non_database_mode(self, comprehensive_perf_db):
         """Test SILICON mode with P2P latency."""

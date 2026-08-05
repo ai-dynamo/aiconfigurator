@@ -304,8 +304,6 @@ class ContextMLA(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -487,8 +485,6 @@ class GenerationMLA(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kvcache_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kvcache_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kvcache_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -689,8 +685,6 @@ class MLABmm(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(num_tokens, num_heads, quant_mode, if_pre)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(num_tokens, num_heads, quant_mode, if_pre)
 
         # Exact-head-first routing with a data-presence fallback: query the
         # exact head slice at scale 1.0 when it has rows, otherwise the
@@ -945,8 +939,6 @@ class MLAModule(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, prefix, num_heads, kvcache_quant_mode, fmha_quant_mode)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -1066,8 +1058,6 @@ class MLAModule(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_latency = get_sol(b, s, num_heads, kv_cache_dtype)[0]
             return PerformanceResult(sol_latency, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, num_heads, kv_cache_dtype)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             emp_latency = get_empirical(b, s, num_heads, kv_cache_dtype)
             return PerformanceResult(emp_latency, energy=0.0, source="empirical")
@@ -1352,8 +1342,6 @@ class WideEPGenerationMLA(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_time, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(
                 get_empirical(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode), energy=0.0, source="empirical"
@@ -1632,8 +1620,6 @@ class WideEPContextMLA(Operation):
         if database_mode == common.DatabaseMode.SOL:
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             return PerformanceResult(sol_time, energy=0.0, source="sol")
-        elif database_mode == common.DatabaseMode.SOL_FULL:
-            return get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(
                 get_empirical(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode),
