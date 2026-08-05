@@ -66,7 +66,7 @@ all_frameworks_op_cases:
 
 framework_specific_op_cases:
   sglang:
-    wideep_moe:
+    mla_context:
       cases: all
 ```
 
@@ -192,7 +192,7 @@ mode that fail-fast + failure log cannot handle:
 ```yaml
 entries:
   - contains: "tp=32, ep=16"
-    reason: "sglang wideep_moe tp=32 deadlocks in NCCL init on 0.5.10"
+    reason: "sglang moe_ep tp=32 deadlocks in NCCL init on 0.5.10"
     added: 2026-07-04
 ```
 

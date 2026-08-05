@@ -1,12 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SGLang WideEP DeepEP MoE collector.
+"""SGLang large-EP MoE expert-compute collector (op ``moe_ep``).
 
-Runs distributed DeepEP dispatch/combine and MoE-compute benchmarks through a
-minimal SGLang engine setup. The module owns process-group initialization,
-rank-local model runner construction, DeepEP buffer sizing, warmup/measurement,
-and perf-row aggregation for WideEP MoE cases.
+Benchmarks the DeepEP MoE expert compute (``DeepEPMoE.run_moe_core``) through a
+minimal SGLang engine setup, simulating an EP world of ``moe_ep_size`` ranks on
+one GPU by loading only the rank-local expert shard. The module owns rank-local
+model runner construction, warmup/measurement and emission of the unified
+``moe_ep_perf`` rows (one table, ``inference_phase`` column) consumed by
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_ep_data``.
+
+Shapes are DECLARED: every benchmarked geometry comes from the
+``model_case_values.moe`` rows marked ``wideep: true`` crossed with the
+``cases/base_ops/moe.yaml`` expert-parallel grid. The live HF config is read
+only to assert that the loaded checkpoint agrees with the declaration.
 """
 
 import functools
@@ -46,6 +53,123 @@ except ModuleNotFoundError:
     from helper import _resolve_local_model_path, log_perf, power_law_deepep_decode, power_law_deepep_prefill
 from importlib.metadata import version as get_version
 from math import ceil as _ceil
+
+#: The only quantization this collector benchmarks: the DeepEP MoE path is
+#: driven with fp8 activations and ``moe_runner_backend="deep_gemm"`` (see
+#: ``run_moe_benchmark``), i.e. block-scaled FP8. Cases for models whose
+#: declared sglang ``allowed_modes`` exclude it are not generated — a
+#: declaration-layer decision, never a relabelled invocation.
+MOE_EP_QUANT_MODE = "fp8_block"
+
+#: ``kernel_source`` ground truth: the benchmark invokes
+#: ``moe_layer.experts.run_moe_core`` on sglang's ``DeepEPMoE`` module, which
+#: the consumer keys as ``deepep_moe``
+#: (``sdk/operations/moe_comm.py::_SGLANG_ADAPTED_KERNEL_SOURCES``). The legacy
+#: wideep tables spelled the same module ``deepepmoe``; the unified table uses
+#: the consumer spelling so new-schema rows are queryable.
+MOE_EP_KERNEL_SOURCE = "deepep_moe"
+
+#: Written into the ``op_name`` prefix column of every row; the context /
+#: generation split lives in the ``inference_phase`` payload column.
+MOE_EP_OP_NAME = "moe_ep"
+
+
+class MoeEpDeclarationMismatchError(RuntimeError):
+    """The loaded checkpoint disagrees with the declared model_case_values row.
+
+    Declared shapes are what gets persisted, so a mismatch would label the row
+    with geometry that was not benchmarked. Fail the case instead.
+    """
+
+
+class MoeEpBenchmarkError(RuntimeError):
+    """One queued moe_ep benchmark case failed to execute.
+
+    ``layer_permissions.md``: a queued case is executed or raises. The executor
+    records this with its case parameters in ``errors_<module>.json``.
+    """
+
+
+def _measure_power_enabled() -> bool:
+    """Whether this run measures power (mirrors ``helper._parse_bool_env``).
+
+    Both phase writers gate their power columns on this single per-run flag, so
+    one ``moe_ep_perf`` file always has one column set (``helper.log_perf``
+    writes the CSV header from the first row it sees).
+    """
+    value = os.environ.get("COLLECTOR_MEASURE_POWER")
+    return False if value is None else value.lower() in ("true", "1", "yes")
+
+
+def _power_columns(power_stats) -> dict | None:
+    """D7: emit power only where the bench measures it, and never as 0.0.
+
+    Returns ``None`` (no power columns at all) when the run does not measure
+    power; otherwise the measured stats, or NaN when the sampler produced no
+    samples — an unknown, which is not the same fact as "idle at zero watts".
+    """
+    if not _measure_power_enabled():
+        return None
+    if power_stats and power_stats.get("power") is not None:
+        return power_stats
+    return {"power": float("nan"), "power_limit": float("nan")}
+
+
+def _power_device():
+    """The concrete CUDA device the NVML sampler needs (``device.index``)."""
+    return torch.device("cuda", torch.cuda.current_device())
+
+
+def _moe_ep_perf_path(output_path, perf_filename) -> str:
+    """Resolve the registry-provided perf filename into the run's output dir.
+
+    ``perf_filename`` is ``PerfFile.MOE_EP`` as bound by ``collect.py``; no
+    collector-local filename literals.
+    """
+    directory = output_path if output_path is not None else os.getcwd()
+    return os.path.join(directory, str(perf_filename))
+
+
+def _build_moe_ep_row(
+    *,
+    moe_dtype: str,
+    distribution: str,
+    inference_phase: str,
+    num_tokens: int,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    num_slots: int,
+    moe_tp_size: int,
+    moe_ep_size: int,
+    latency_ms: float,
+) -> dict:
+    """Build one unified ``moe_ep_perf`` payload row.
+
+    Column set and order are the consumer contract
+    (``sdk/operations/moe_comm.py::load_moe_ep_data``); the
+    ``framework/version/device/op_name/kernel_source`` prefix is added by
+    ``helper.log_perf``. ``latency`` is milliseconds — the loader stores the
+    column raw, unlike the microsecond-collected a2a table.
+    """
+    return {
+        "moe_dtype": moe_dtype,
+        "distribution": distribution,
+        "inference_phase": inference_phase,
+        "num_tokens": int(num_tokens),
+        "hidden_size": int(hidden_size),
+        "inter_size": int(inter_size),
+        "topk": int(topk),
+        "num_experts": int(num_experts),
+        # sglang has no EPLB redundant-expert axis today: every routed expert
+        # owns exactly one slot. The redundancy axis stays trtllm-side until a
+        # declared case axis exists here.
+        "num_slots": int(num_slots),
+        "moe_tp_size": int(moe_tp_size),
+        "moe_ep_size": int(moe_ep_size),
+        "latency": float(latency_ms),
+    }
 
 
 def _is_scale_ue8m0() -> bool:
@@ -101,6 +225,23 @@ def _get_moe_model_path() -> str:
     return _resolve_moe_model_path(_selected_moe_model_id())
 
 
+def _sorted_phase_cases(test_cases):
+    """Sort phase cases on the non-token key axis first (D5: sorted emission).
+
+    Rows land in the perf file grouped by distribution, ascending in tokens
+    within each group, so the persisted table is deterministic regardless of
+    how the case list was built.
+    """
+    return sorted(
+        test_cases,
+        key=lambda case: (
+            case["distributed"],
+            case["power_law_alpha"] if case.get("power_law_alpha") is not None else -1.0,
+            case["num_tokens"],
+        ),
+    )
+
+
 def get_moe_prefill_test_cases(rank):
     """Get test cases for MoE prefill phase including distribution and alpha.
 
@@ -128,7 +269,7 @@ def get_moe_prefill_test_cases(rank):
                 }
             )
 
-    return test_cases
+    return _sorted_phase_cases(test_cases)
 
 
 def get_moe_decode_test_cases():
@@ -159,7 +300,7 @@ def get_moe_decode_test_cases():
                     "power_law_alpha": alpha,
                 }
             )
-    return test_cases
+    return _sorted_phase_cases(test_cases)
 
 
 def load_model_with_dummy_weights(server_args, port_args, tp_rank):
@@ -216,18 +357,28 @@ def benchmark_moe_layer_prefill(
     num_local_experts,
     simulated_ep_size,
     output_path,
+    perf_filename,
     model_hidden_size,
     model_inter_size,
     model_total_experts,
+    model_topk,
+    num_slots,
+    moe_dtype,
 ):
-    """Benchmark MoE layer in prefill phase
+    """Benchmark MoE layer in the context (prefill) phase.
 
     Args:
-        num_local_experts: Number of experts on this GPU (= model's n_routed_experts or num_experts)
-        simulated_ep_size: The EP size being simulated (= total_experts / num_local_experts)
-        model_hidden_size: Model's hidden_size from config
-        model_inter_size: Model's moe_intermediate_size from config
-        model_total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
+        num_local_experts: Number of experts on this GPU (= declared num_experts // moe_ep_size)
+        simulated_ep_size: The EP size being simulated (declared moe_ep_size)
+        perf_filename: Registry-provided ``PerfFile.MOE_EP`` filename
+        model_hidden_size: Declared hidden_size
+        model_inter_size: Declared per-expert inter_size
+        model_total_experts: Declared total expert count
+        model_topk: Declared top-k — the value persisted in the row (the live
+            ``moe_layer.topk`` read is the subject of run_moe's assert, not the
+            row's source)
+        num_slots: Declared expert slots (== model_total_experts on sglang)
+        moe_dtype: Declared quantization label for the persisted row
     """
 
     for case in prefill_test_cases:
@@ -273,6 +424,13 @@ def benchmark_moe_layer_prefill(
                 tokens_per_local_expert = int(num_token * topk * simulated_ep_size // model_total_experts)
                 rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
                 if tokens_per_local_expert <= 0:
+                    # Physically empty token point: fewer routed tokens than
+                    # local experts, so this rank receives none. Logged, not
+                    # silent — it drops one token point, not the queued case.
+                    rank_print(
+                        f"  moe_ep context: dropping num_tokens={num_token} "
+                        f"(uniform routing yields 0 tokens per local expert at ep={simulated_ep_size})"
+                    )
                     continue
                 num_recv = [tokens_per_local_expert] * num_local_experts
 
@@ -354,33 +512,39 @@ def benchmark_moe_layer_prefill(
 
             gemm_latencies = []
 
-            for i in range(num_iterations):
-                for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
-                    hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
-                    scale_tensor_iter = _make_scale_tensor(
-                        hidden_states_per_token_iter.shape[0],
-                        hidden_states_per_token_iter.shape[1],
-                        hidden_states_per_token_iter.device,
-                    )
-                    dispatch_output = DeepEPNormalDispatchOutput(
-                        hidden_states=hidden_states_fp8_tensor_iter,
-                        hidden_states_scale=scale_tensor_iter,
-                        topk_ids=topk_idx_sample.clone(),
-                        topk_weights=topk_weights_sample.clone(),
-                        num_recv_tokens_per_expert=num_recv_sample,
-                    )
-                    torch.get_device_module(device).synchronize()
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
+            # Power is sampled by a background NVML thread around the existing
+            # event timing (D7) — the measurement method is unchanged.
+            from helper import power_monitoring_only
 
-                    _ = moe_layer.experts.run_moe_core(dispatch_output)
+            with power_monitoring_only(_power_device()) as power_monitor:
+                for i in range(num_iterations):
+                    for topk_idx_sample, topk_weights_sample, num_recv_sample in power_law_samples:
+                        hidden_states_fp8_tensor_iter = hidden_states_per_token_iter.to(torch.float8_e4m3fn)
+                        scale_tensor_iter = _make_scale_tensor(
+                            hidden_states_per_token_iter.shape[0],
+                            hidden_states_per_token_iter.shape[1],
+                            hidden_states_per_token_iter.device,
+                        )
+                        dispatch_output = DeepEPNormalDispatchOutput(
+                            hidden_states=hidden_states_fp8_tensor_iter,
+                            hidden_states_scale=scale_tensor_iter,
+                            topk_ids=topk_idx_sample.clone(),
+                            topk_weights=topk_weights_sample.clone(),
+                            num_recv_tokens_per_expert=num_recv_sample,
+                        )
+                        torch.get_device_module(device).synchronize()
+                        start_event = torch.cuda.Event(enable_timing=True)
+                        end_event = torch.cuda.Event(enable_timing=True)
+                        start_event.record()
 
-                    end_event.record()
-                    end_event.synchronize()
-                    latency_ms = start_event.elapsed_time(end_event)
-                    if i > 2:
-                        gemm_latencies.append(latency_ms)
+                        _ = moe_layer.experts.run_moe_core(dispatch_output)
+
+                        end_event.record()
+                        end_event.synchronize()
+                        latency_ms = start_event.elapsed_time(end_event)
+                        if i > 2:
+                            gemm_latencies.append(latency_ms)
+                power_stats = power_monitor.stop_sampling() if power_monitor is not None else None
 
             torch.cuda.empty_cache()
 
@@ -389,45 +553,32 @@ def benchmark_moe_layer_prefill(
             if tp_rank == 0:
                 rank_print("DeepEP MoE GEMM Results (Prefill):")
                 rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
-            if tp_rank == 0:
-                try:
-                    moe_tp_size = 1
-                    moe_ep_size = simulated_ep_size
-                    num_tokens_log = num_token * simulated_ep_size
-                    device_name = torch.cuda.get_device_name(server_args.device)
-                    version = get_version("sglang")
-                    # Save to collector/ directory to match non-wideep behavior
-                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    perf_filename = (
-                        os.path.join(collector_dir, "wideep_context_moe_perf.txt")
-                        if output_path is None
-                        else os.path.join(output_path, "wideep_context_moe_perf.txt")
-                    )
-                    distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                    log_perf(
-                        item_list=[
-                            {
-                                "moe_dtype": "fp8_block",
-                                "num_tokens": num_tokens_log,
-                                "hidden_size": model_hidden_size,
-                                "inter_size": model_inter_size,
-                                "topk": topk,
-                                "num_experts": model_total_experts,
-                                "moe_tp_size": moe_tp_size,
-                                "moe_ep_size": moe_ep_size,
-                                "distribution": distribution_str,
-                                "latency": avg_latency_ms,
-                            }
-                        ],
-                        framework="SGLang",
-                        version=version,
-                        device_name=device_name,
-                        op_name="moe_context",
-                        kernel_source="deepepmoe",
-                        perf_filename=perf_filename,
-                    )
-                except Exception as e:
-                    rank_print(f"  Warning: failed to log prefill MoE metrics: {e}")
+                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                log_perf(
+                    item_list=[
+                        _build_moe_ep_row(
+                            moe_dtype=moe_dtype,
+                            distribution=distribution_str,
+                            inference_phase="context",
+                            num_tokens=num_token * simulated_ep_size,
+                            hidden_size=model_hidden_size,
+                            inter_size=model_inter_size,
+                            topk=model_topk,
+                            num_experts=model_total_experts,
+                            num_slots=num_slots,
+                            moe_tp_size=1,
+                            moe_ep_size=simulated_ep_size,
+                            latency_ms=avg_latency_ms,
+                        )
+                    ],
+                    framework="SGLang",
+                    version=get_version("sglang"),
+                    device_name=torch.cuda.get_device_name(server_args.device),
+                    op_name=MOE_EP_OP_NAME,
+                    kernel_source=MOE_EP_KERNEL_SOURCE,
+                    perf_filename=_moe_ep_perf_path(output_path, perf_filename),
+                    power_stats=_power_columns(power_stats),
+                )
             del (
                 hidden_states_per_token_iter,
                 hidden_states_fp8_tensor_iter,
@@ -440,22 +591,14 @@ def benchmark_moe_layer_prefill(
             torch.cuda.empty_cache()
 
         except Exception as e:
-            rank_print(f"Prefill case failed: {e}, skipping...")
-            # Check if this is a CUDA error - if so, the context is corrupted and we should exit
-            if "CUDA error" in str(e) or "illegal memory access" in str(e).lower():
-                rank_print("CUDA error detected, exiting prefill benchmark early to avoid cascading failures")
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                break
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                # If empty_cache fails, CUDA context is corrupted
-                rank_print("CUDA context corrupted, exiting prefill benchmark early")
-                break
-            continue
+            # Execute-or-raise: the failure is classified and recorded by the
+            # executor with this case's parameters, never swallowed. A CUDA
+            # fault additionally resets the worker process (collect.py
+            # _is_cuda_fatal), so no cache cleanup is attempted here.
+            raise MoeEpBenchmarkError(
+                f"moe_ep context case failed (num_tokens={case}, "
+                f"moe_ep_size={simulated_ep_size}, num_experts={model_total_experts}): {e}"
+            ) from e
 
 
 def benchmark_moe_layer_decode(
@@ -472,19 +615,20 @@ def benchmark_moe_layer_decode(
     moe_layer,
     num_local_experts,
     simulated_ep_size,
-    output_path=None,
-    model_hidden_size=7168,
-    model_inter_size=2048,
-    model_total_experts=256,
+    output_path,
+    perf_filename,
+    model_hidden_size,
+    model_inter_size,
+    model_total_experts,
+    model_topk,
+    num_slots,
+    moe_dtype,
 ):
-    """Benchmark MoE layer in decode phase
+    """Benchmark MoE layer in the generation (decode) phase.
 
-    Args:
-        num_local_experts: Number of experts on this GPU (= model's n_routed_experts or num_experts)
-        simulated_ep_size: The EP size being simulated (= total_experts / num_local_experts)
-        model_hidden_size: Model's hidden_size from config
-        model_inter_size: Model's moe_intermediate_size from config
-        model_total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
+    Argument semantics are identical to :func:`benchmark_moe_layer_prefill`;
+    both phases write the same unified ``moe_ep_perf`` table and differ only in
+    the ``inference_phase`` column.
     """
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
@@ -495,14 +639,31 @@ def benchmark_moe_layer_decode(
             num_token = case["num_tokens"]
             distributed = case["distributed"]
             power_law_alpha = case.get("power_law_alpha", 0.8) if distributed == "power_law" else None
+            # FIXME(kernel-limit): DeepEP's low-latency path sizes its dispatch
+            # buffers from `num_max_dispatch_tokens_per_rank` (the deep_ep
+            # `Buffer.low_latency_dispatch` / `get_low_latency_rdma_size_hint`
+            # API contract), so a rank may not receive more than
+            # num_max_dispatch_tokens_per_rank * num_ranks tokens for any one
+            # expert. 128 is the value this benchmark pins for the synthetic
+            # buffers below; it is the claimed DeepEP limit at the wideep pin
+            # (sglang 0.5.10 + DeepEP, framework_manifest.yaml wideep_sglang)
+            # and is UNVERIFIED against the framework source — sglang is not
+            # vendored here, so no file:line citation is possible from this
+            # repo. Re-check on the next wideep version bump: either probe the
+            # buffer for its real capacity or replace this with a guard that
+            # raises citing the verified source line.
             num_max_dispatch_tokens_per_rank = 128
 
+            # The declared decode batch grid tops out at 128 == the buffer
+            # bound above, so no decode case can exceed it. Raise rather than
+            # skip if that invariant ever breaks: an oversized batch would
+            # index past the synthetic dispatch buffers allocated below.
             if num_token > num_max_dispatch_tokens_per_rank:
-                print(
-                    f"num_token {num_token} > num_max_dispatch_tokens_per_rank "
-                    f"{num_max_dispatch_tokens_per_rank}, skipping"
+                raise MoeEpBenchmarkError(
+                    f"moe_ep generation: num_tokens={num_token} exceeds the DeepEP low-latency "
+                    f"dispatch bound num_max_dispatch_tokens_per_rank={num_max_dispatch_tokens_per_rank}; "
+                    "the decode sweep and the buffer bound have drifted apart"
                 )
-                continue
 
             hidden_size = model_runner.model.config.hidden_size
 
@@ -559,8 +720,12 @@ def benchmark_moe_layer_decode(
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
             max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
             if max_masked_m > hidden_states.shape[1]:
-                print(
-                    f"  Skipping: max(masked_m_list) {max_masked_m} > hidden_states.shape[1] {hidden_states.shape[1]}"
+                # Same FIXME(kernel-limit) bound as above, expressed per expert:
+                # this skew routes more tokens to one expert than the buffer
+                # holds. One token point is dropped (logged), not the case.
+                rank_print(
+                    f"  moe_ep generation: dropping num_tokens={num_token} "
+                    f"(max masked_m {max_masked_m} exceeds the dispatch buffer {hidden_states.shape[1]})"
                 )
                 continue
             scale_tensor = torch.ones(
@@ -658,7 +823,7 @@ def benchmark_moe_layer_decode(
                     _ = moe_layer.experts.run_moe_core(dispatch_output)
 
             with benchmark_with_power(
-                device=device,
+                device=_power_device(),
                 kernel_func=kernel_func,
                 num_warmups=3,
                 num_runs=num_iterations,
@@ -672,66 +837,59 @@ def benchmark_moe_layer_decode(
             if tp_rank == 0:
                 rank_print("DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
                 rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
-            if tp_rank == 0:
-                try:
-                    moe_tp_size = 1
-                    moe_ep_size = simulated_ep_size
-                    num_tokens_log = num_token * simulated_ep_size
-                    device_name = torch.cuda.get_device_name(server_args.device)
-                    version = get_version("sglang")
-                    distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                    # Save to collector/ directory to match non-wideep behavior
-                    collector_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    perf_filename = (
-                        os.path.join(collector_dir, "wideep_generation_moe_perf.txt")
-                        if output_path is None
-                        else os.path.join(output_path, "wideep_generation_moe_perf.txt")
-                    )
-                    log_perf(
-                        item_list=[
-                            {
-                                "moe_dtype": "fp8_block",
-                                "num_tokens": num_tokens_log,
-                                "hidden_size": model_hidden_size,
-                                "inter_size": model_inter_size,
-                                "topk": top_k,
-                                "num_experts": model_total_experts,
-                                "moe_tp_size": moe_tp_size,
-                                "moe_ep_size": moe_ep_size,
-                                "distribution": distribution_str,
-                                "latency": avg_latency_ms,
-                            }
-                        ],
-                        framework="SGLang",
-                        version=version,
-                        device_name=device_name,
-                        op_name="moe_generation",
-                        kernel_source="deepepmoe",
-                        perf_filename=perf_filename,
-                        power_stats=power_stats,
-                    )
-                except Exception as e:
-                    rank_print(f"  Warning: failed to log decode MoE metrics: {e}")
+                distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
+                log_perf(
+                    item_list=[
+                        _build_moe_ep_row(
+                            moe_dtype=moe_dtype,
+                            distribution=distribution_str,
+                            inference_phase="generation",
+                            num_tokens=num_token * simulated_ep_size,
+                            hidden_size=model_hidden_size,
+                            inter_size=model_inter_size,
+                            topk=model_topk,
+                            num_experts=model_total_experts,
+                            num_slots=num_slots,
+                            moe_tp_size=1,
+                            moe_ep_size=simulated_ep_size,
+                            latency_ms=avg_latency_ms,
+                        )
+                    ],
+                    framework="SGLang",
+                    version=get_version("sglang"),
+                    device_name=torch.cuda.get_device_name(server_args.device),
+                    op_name=MOE_EP_OP_NAME,
+                    kernel_source=MOE_EP_KERNEL_SOURCE,
+                    perf_filename=_moe_ep_perf_path(output_path, perf_filename),
+                    power_stats=_power_columns(power_stats),
+                )
             del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
             torch.cuda.empty_cache()
 
         except Exception as e:
-            rank_print(f"Decode case failed: {e}, skipping...")
-            # Check if this is a CUDA error - if so, the context is corrupted and we should exit
-            if "CUDA error" in str(e) or "illegal memory access" in str(e).lower():
-                rank_print("CUDA error detected, exiting decode benchmark early to avoid cascading failures")
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                break
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                # If empty_cache fails, CUDA context is corrupted
-                rank_print("CUDA context corrupted, exiting decode benchmark early")
-                break
-            continue
+            # Execute-or-raise, same doctrine as the context loop above.
+            raise MoeEpBenchmarkError(
+                f"moe_ep generation case failed (case={case}, "
+                f"moe_ep_size={simulated_ep_size}, num_experts={model_total_experts}): {e}"
+            ) from e
+
+
+def _assert_declared(field: str, declared, live) -> None:
+    """Consistency assert: the loaded checkpoint must match the declared row.
+
+    The persisted row carries the DECLARED geometry, so a divergence means the
+    case would be labelled with a shape that was not benchmarked. Raise instead
+    (``case_authoring.md``: unresolvable declarations fail loudly).
+    """
+    if live is None:
+        raise MoeEpDeclarationMismatchError(
+            f"moe_ep: could not read {field} from the loaded checkpoint to verify the declared value {declared!r}"
+        )
+    if int(declared) != int(live):
+        raise MoeEpDeclarationMismatchError(
+            f"moe_ep: declared {field}={declared} but the loaded checkpoint reports {live}; "
+            "update collector/cases/models/<architecture>_cases.yaml or the model path"
+        )
 
 
 def run_moe(
@@ -742,9 +900,21 @@ def run_moe(
     test_layer,
     num_experts,
     tp_rank,
-    output_path=None,
+    output_path,
+    perf_filename,
+    moe_ep_size,
+    model_topk,
+    model_hidden_size,
+    model_inter_size,
+    model_total_experts,
+    num_slots,
+    moe_dtype,
 ):
-    """Run the complete MoE benchmark"""
+    """Run the complete moe_ep benchmark for one declared (model, EP) case.
+
+    ``num_experts`` is the rank-local expert count the model is loaded with;
+    every other shape argument is the DECLARED value that will be persisted.
+    """
 
     if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):
         set_gpu_proc_affinity(server_args.tp_size, server_args.nnodes, tp_rank)
@@ -761,184 +931,180 @@ def run_moe(
     rank_print(f"Testing MoE Layer {test_layer}")
     rank_print(f"{'=' * 60}")
 
-    try:
-        rank_print(f"\n{'=' * 50}")
-        rank_print(f"Testing with {num_experts} experts")
-        rank_print(f"{'=' * 50}")
+    rank_print(f"\n{'=' * 50}")
+    rank_print(f"Testing with {num_experts} experts")
+    rank_print(f"{'=' * 50}")
 
-        # Get ORIGINAL model config BEFORE applying override
-        # This is needed to get the true total_experts count
-        original_json_override = server_args.json_model_override_args
-        original_model_config = ModelConfig.from_server_args(server_args)
-        original_hf_config = original_model_config.hf_config
-        model_hidden_size = original_hf_config.hidden_size
-        # Per-expert MLP intermediate size. The HF field name varies:
-        #   moe_intermediate_size  - DeepSeek-V3, Qwen3-MoE, GPT-OSS
-        #   intermediate_size      - MiniMax-M2 (Mixtral-style; no separate dense MLP)
-        # Probe in priority order; raise if neither is present rather than silently
-        # falling back to a wrong default (2048 was DeepSeek-shaped).
-        model_inter_size = getattr(original_hf_config, "moe_intermediate_size", None)
-        if model_inter_size is None:
-            model_inter_size = getattr(original_hf_config, "intermediate_size", None)
-        if model_inter_size is None:
+    # Read the ORIGINAL model config BEFORE applying the expert override:
+    # it is the consistency oracle for the declared shapes, never their
+    # source.
+    original_json_override = server_args.json_model_override_args
+    original_model_config = ModelConfig.from_server_args(server_args)
+    original_hf_config = original_model_config.hf_config
+    # Per-expert MLP intermediate size. The HF field name varies:
+    #   moe_intermediate_size  - DeepSeek-V3, Qwen3-MoE, GPT-OSS
+    #   intermediate_size      - MiniMax-M2 (Mixtral-style; no separate dense MLP)
+    live_inter_size = getattr(original_hf_config, "moe_intermediate_size", None) or getattr(
+        original_hf_config, "intermediate_size", None
+    )
+    # Total expert count. The HF field name varies:
+    #   n_routed_experts   - DeepSeek-V3
+    #   num_experts        - Qwen3-MoE, GPT-OSS
+    #   num_local_experts  - MiniMax-M2 (Mixtral-style)
+    live_total_experts = (
+        getattr(original_hf_config, "n_routed_experts", None)
+        or getattr(original_hf_config, "num_experts", None)
+        or getattr(original_hf_config, "num_local_experts", None)
+    )
+    _assert_declared("hidden_size", model_hidden_size, getattr(original_hf_config, "hidden_size", None))
+    _assert_declared("inter_size", model_inter_size, live_inter_size)
+    _assert_declared("num_experts", model_total_experts, live_total_experts)
+    rank_print(
+        f"Declared model shape confirmed against the checkpoint: hidden_size={model_hidden_size}, "
+        f"inter_size={model_inter_size}, total_experts={model_total_experts}"
+    )
+
+    # Now apply override to load model with reduced experts.
+    # The HF expert-count field varies across model families; override
+    # all known names so this works for DeepSeek / Qwen / MiniMax.
+    server_args.json_model_override_args = json.dumps(
+        {
+            "num_hidden_layers": 4,
+            "n_routed_experts": num_experts,  # DeepSeek-V3
+            "num_experts": num_experts,  # Qwen3-MoE, GPT-OSS
+            "num_local_experts": num_experts,  # MiniMax-M2 (Mixtral-style)
+        }
+    )
+
+    model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
+
+    # MoE submodule attribute name differs across sglang models:
+    #   .mlp                 - DeepSeek-V2/V3, Qwen2/3-MoE, GPT-OSS
+    #   .block_sparse_moe    - MiniMax-M2 (HF Mixtral-style), Mixtral
+    decoder_layer = model_runner.model.model.layers[test_layer]
+    moe_layer = None
+    for attr in ("mlp", "block_sparse_moe"):
+        candidate = getattr(decoder_layer, attr, None)
+        # Require an `experts` submodule whose `run_moe_core` is callable: this
+        # is what the benchmark actually invokes below, and it filters out
+        # non-MoE MLP layers (e.g. DeepSeek's leading dense layers).
+        experts = getattr(candidate, "experts", None) if candidate is not None else None
+        if experts is not None and callable(getattr(experts, "run_moe_core", None)):
+            moe_layer = candidate
+            break
+    if moe_layer is None:
+        raise AttributeError(
+            f"Could not find MoE submodule on {type(decoder_layer).__name__}; "
+            "tried .mlp / .block_sparse_moe. "
+            "Add the attribute name used by this model to the probe list."
+        )
+    # Supports DeepSeek-V3 and Qwen3 MoE
+    if hasattr(moe_layer, "config") and hasattr(moe_layer.config, "n_routed_experts"):
+        # DeepSeek-V3 style
+        actual_num_experts = moe_layer.config.n_routed_experts
+    elif hasattr(moe_layer, "experts") and hasattr(moe_layer.experts, "num_experts"):
+        # Qwen3 MoE style - from experts submodule
+        actual_num_experts = moe_layer.experts.num_experts
+    elif hasattr(moe_layer, "num_experts"):
+        # Direct attribute (deepep mode)
+        actual_num_experts = moe_layer.num_experts
+    else:
+        # Fall back to hf_config; probe the same three field names as the
+        # pre-load probe at the top of this function, since the loaded
+        # config has had all three overridden to the simulated count.
+        hf_config = model_runner.model_config.hf_config
+        actual_num_experts = (
+            getattr(hf_config, "n_routed_experts", None)
+            or getattr(hf_config, "num_experts", None)
+            or getattr(hf_config, "num_local_experts", None)
+        )
+        if actual_num_experts is None:
             raise AttributeError(
-                f"Could not find MoE intermediate size on hf_config "
-                f"({type(original_hf_config).__name__}); tried "
-                "moe_intermediate_size / intermediate_size."
+                f"Could not determine expert count from {type(moe_layer).__name__} "
+                "or hf_config; tried .config.n_routed_experts / "
+                ".experts.num_experts / .num_experts on the MoE layer and "
+                "n_routed_experts / num_experts / num_local_experts on hf_config."
             )
-        # Total expert count. The HF field name varies:
-        #   n_routed_experts   - DeepSeek-V3
-        #   num_experts        - Qwen3-MoE, GPT-OSS
-        #   num_local_experts  - MiniMax-M2 (Mixtral-style)
-        model_total_experts = (
-            getattr(original_hf_config, "n_routed_experts", None)
-            or getattr(original_hf_config, "num_experts", None)
-            or getattr(original_hf_config, "num_local_experts", None)
+
+    _assert_declared("topk", model_topk, getattr(getattr(moe_layer.topk, "topk_config", None), "top_k", None))
+
+    rank_print(f"Loaded model with {actual_num_experts} local experts (simulating {model_total_experts} total)")
+
+    server_args.json_model_override_args = original_json_override
+
+    # The declared case decides the EP world; the loaded shard must match it,
+    # otherwise the row would claim an EP size that was not benchmarked.
+    _assert_declared("num_local_experts", num_experts, actual_num_experts)
+    num_local_experts = actual_num_experts  # With ep_size=1, all experts are local
+    simulated_ep_size = moe_ep_size
+    if num_local_experts * simulated_ep_size != model_total_experts:
+        raise MoeEpDeclarationMismatchError(
+            f"moe_ep: declared moe_ep_size={simulated_ep_size} x local experts={num_local_experts} "
+            f"!= declared num_experts={model_total_experts}"
         )
-        if model_total_experts is None:
-            raise AttributeError(
-                f"Could not find expert count on hf_config "
-                f"({type(original_hf_config).__name__}); tried "
-                "n_routed_experts / num_experts / num_local_experts."
-            )
-        rank_print(
-            f"Original model config: hidden_size={model_hidden_size}, "
-            f"inter_size={model_inter_size}, total_experts={model_total_experts}"
-        )
+    rank_print(
+        f"Simulating EP size: {simulated_ep_size} "
+        f"(num_local_experts={num_local_experts}, total_experts={model_total_experts})"
+    )
 
-        # Now apply override to load model with reduced experts.
-        # The HF expert-count field varies across model families; override
-        # all known names so this works for DeepSeek / Qwen / MiniMax.
-        server_args.json_model_override_args = json.dumps(
-            {
-                "num_hidden_layers": 4,
-                "n_routed_experts": num_experts,  # DeepSeek-V3
-                "num_experts": num_experts,  # Qwen3-MoE, GPT-OSS
-                "num_local_experts": num_experts,  # MiniMax-M2 (Mixtral-style)
-            }
-        )
+    prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
+    rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
-        model_runner = load_model_with_dummy_weights(server_args, port_args, tp_rank)
+    # Use deepep_mode="normal" for prefill
+    server_args.deepep_mode = "normal"
+    benchmark_moe_layer_prefill(
+        model_runner,
+        server_args,
+        port_args,
+        num_warmup,
+        num_iterations,
+        test_layer,
+        rank_print,
+        server_args.device,
+        tp_rank,
+        prefill_test_cases,
+        moe_layer,
+        num_local_experts,
+        simulated_ep_size,
+        output_path,
+        perf_filename,
+        model_hidden_size=model_hidden_size,
+        model_inter_size=model_inter_size,
+        model_total_experts=model_total_experts,
+        model_topk=model_topk,
+        num_slots=num_slots,
+        moe_dtype=moe_dtype,
+    )
 
-        # MoE submodule attribute name differs across sglang models:
-        #   .mlp                 - DeepSeek-V2/V3, Qwen2/3-MoE, GPT-OSS
-        #   .block_sparse_moe    - MiniMax-M2 (HF Mixtral-style), Mixtral
-        decoder_layer = model_runner.model.model.layers[test_layer]
-        moe_layer = None
-        for attr in ("mlp", "block_sparse_moe"):
-            candidate = getattr(decoder_layer, attr, None)
-            # Require an `experts` submodule whose `run_moe_core` is callable: this
-            # is what the benchmark actually invokes below, and it filters out
-            # non-MoE MLP layers (e.g. DeepSeek's leading dense layers).
-            experts = getattr(candidate, "experts", None) if candidate is not None else None
-            if experts is not None and callable(getattr(experts, "run_moe_core", None)):
-                moe_layer = candidate
-                break
-        if moe_layer is None:
-            raise AttributeError(
-                f"Could not find MoE submodule on {type(decoder_layer).__name__}; "
-                "tried .mlp / .block_sparse_moe. "
-                "Add the attribute name used by this model to the probe list."
-            )
-        # Supports DeepSeek-V3 and Qwen3 MoE
-        if hasattr(moe_layer, "config") and hasattr(moe_layer.config, "n_routed_experts"):
-            # DeepSeek-V3 style
-            actual_num_experts = moe_layer.config.n_routed_experts
-        elif hasattr(moe_layer, "experts") and hasattr(moe_layer.experts, "num_experts"):
-            # Qwen3 MoE style - from experts submodule
-            actual_num_experts = moe_layer.experts.num_experts
-        elif hasattr(moe_layer, "num_experts"):
-            # Direct attribute (deepep mode)
-            actual_num_experts = moe_layer.num_experts
-        else:
-            # Fall back to hf_config; probe the same three field names as the
-            # pre-load probe at the top of this function, since the loaded
-            # config has had all three overridden to the simulated count.
-            hf_config = model_runner.model_config.hf_config
-            actual_num_experts = (
-                getattr(hf_config, "n_routed_experts", None)
-                or getattr(hf_config, "num_experts", None)
-                or getattr(hf_config, "num_local_experts", None)
-            )
-            if actual_num_experts is None:
-                raise AttributeError(
-                    f"Could not determine expert count from {type(moe_layer).__name__} "
-                    "or hf_config; tried .config.n_routed_experts / "
-                    ".experts.num_experts / .num_experts on the MoE layer and "
-                    "n_routed_experts / num_experts / num_local_experts on hf_config."
-                )
+    decode_test_cases = get_moe_decode_test_cases()
+    rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
+    # Use deepep_mode="low_latency" for decode
+    server_args.deepep_mode = "low_latency"
+    benchmark_moe_layer_decode(
+        model_runner,
+        server_args,
+        port_args,
+        num_warmup,
+        num_iterations,
+        test_layer,
+        rank_print,
+        server_args.device,
+        tp_rank,
+        decode_test_cases,
+        moe_layer,
+        num_local_experts,
+        simulated_ep_size,
+        output_path,
+        perf_filename,
+        model_hidden_size=model_hidden_size,
+        model_inter_size=model_inter_size,
+        model_total_experts=model_total_experts,
+        model_topk=model_topk,
+        num_slots=num_slots,
+        moe_dtype=moe_dtype,
+    )
 
-        rank_print(f"Loaded model with {actual_num_experts} local experts (simulating {model_total_experts} total)")
-
-        server_args.json_model_override_args = original_json_override
-
-        # Calculate simulated EP size: total_experts / num_local_experts
-        num_local_experts = actual_num_experts  # With ep_size=1, all experts are local
-        simulated_ep_size = model_total_experts // num_local_experts
-        rank_print(
-            f"Simulating EP size: {simulated_ep_size} "
-            f"(num_local_experts={num_local_experts}, total_experts={model_total_experts})"
-        )
-
-        prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
-        rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
-
-        # Use deepep_mode="normal" for prefill
-        server_args.deepep_mode = "normal"
-        benchmark_moe_layer_prefill(
-            model_runner,
-            server_args,
-            port_args,
-            num_warmup,
-            num_iterations,
-            test_layer,
-            rank_print,
-            server_args.device,
-            tp_rank,
-            prefill_test_cases,
-            moe_layer,
-            num_local_experts,
-            simulated_ep_size,
-            output_path,
-            model_hidden_size=model_hidden_size,
-            model_inter_size=model_inter_size,
-            model_total_experts=model_total_experts,
-        )
-
-        decode_test_cases = get_moe_decode_test_cases()
-        rank_print(f"Testing {len(decode_test_cases)} decode configurations...")
-        # Use deepep_mode="low_latency" for decode
-        server_args.deepep_mode = "low_latency"
-        benchmark_moe_layer_decode(
-            model_runner,
-            server_args,
-            port_args,
-            num_warmup,
-            num_iterations,
-            test_layer,
-            rank_print,
-            server_args.device,
-            tp_rank,
-            decode_test_cases,
-            moe_layer,
-            num_local_experts,
-            simulated_ep_size,
-            output_path=output_path,
-            model_hidden_size=model_hidden_size,
-            model_inter_size=model_inter_size,
-            model_total_experts=model_total_experts,
-        )
-
-        del model_runner, moe_layer
-        torch.cuda.empty_cache()
-
-    except Exception as e:
-        rank_print(f"Error during MoE benchmark: {e}")
-        import traceback
-
-        rank_print(f"Traceback: {traceback.format_exc()}")
-        return
-
+    del model_runner, moe_layer
     torch.cuda.empty_cache()
 
     rank_print(f"\n{'=' * 60}")
@@ -951,54 +1117,106 @@ def run_moe(
 # ============================================================================
 
 
-def get_wideep_moe_test_cases(total_experts=256):
-    """Returns list of [num_experts] for MOE collection.
+def get_moe_ep_test_cases():
+    """Declared large-EP MoE compute cases.
 
-    Each num_experts value simulates a different EP size based on model's total experts.
-    Starts from EP=2 (half experts per GPU) to focus on wideep multi-GPU scenarios.
+    Expands the ``model_case_values.moe`` rows marked ``wideep: true`` against
+    the shared ``cases/base_ops/moe.yaml`` expert-parallel grid — the same
+    recipe source the trtllm wideep compute collector uses — instead of
+    deriving the sweep from a live HF ``n_routed_experts`` read.
 
-    For DeepSeek-V3 (256 experts):
-    - num_experts=128 → EP=2
-    - num_experts=64 → EP=4
-    - num_experts=32 → EP=8
-    - num_experts=16 → EP=16
-    - num_experts=8 → EP=32
-    - num_experts=4 → EP=64
-    - num_experts=2 → EP=128
-    - num_experts=1 → EP=256
+    Filters, all in declared homes:
 
-    For Qwen3-235B (128 experts):
-    - num_experts=64 → EP=2
-    - num_experts=32 → EP=4
-    - num_experts=16 → EP=8
-    - num_experts=8 → EP=16
-    - num_experts=4 → EP=32
-    - num_experts=2 → EP=64
-    - num_experts=1 → EP=128
+    * ``wideep: true`` on the model's moe row — the op is declared for the model.
+    * ``tp == 1 and ep > 1`` — the large-EP identity of this table; TP-sharded
+      MoE is the stock ``moe`` op's business.
+    * declared sglang quantization policy must allow :data:`MOE_EP_QUANT_MODE`,
+      the only precision this benchmark actually runs.
 
-    Formula: simulated_ep_size = total_experts / num_experts
+    One benchmark invocation per ``(model, ep)``: this collector simulates the
+    EP world on a single GPU and sweeps token counts and expert distributions
+    internally, so the base grid's ``gpu_counts`` and
+    ``token_expert_distributions`` axes collapse here. Emitted sorted (D5).
 
-    Args:
-        total_experts: Total number of experts in the model (256 for DeepSeek-V3, 128 for Qwen3)
+    Returns:
+        list[list]: ``[num_local_experts, moe_ep_size, hidden_size, inter_size,
+        topk, num_experts, num_slots, moe_dtype]`` per case — the positional
+        argument list ``collect.py`` hands to :func:`run_moe_ep`.
     """
-    # Generate test cases based on total_experts
-    # num_experts must be a power of 2 and <= total_experts
-    # Start from EP=2 (total_experts // 2) to avoid single-GPU OOM and focus on wideep scenarios
-    test_cases = []
-    n = total_experts // 2  # Start from EP=2
-    while n >= 1:
-        test_cases.append([n])
-        n //= 2
-    return test_cases
+    try:
+        # collect.py puts COLLECTOR_ROOT on sys.path (see the module header).
+        from case_generator import (
+            get_common_moe_test_cases,
+            is_wideep_moe_model,
+            moe_model_allows_quantization,
+        )
+    except ModuleNotFoundError:
+        from collector.case_generator import (
+            get_common_moe_test_cases,
+            is_wideep_moe_model,
+            moe_model_allows_quantization,
+        )
+
+    recipes = get_common_moe_test_cases(backend="sglang")
+    dropped_not_declared = 0
+    dropped_not_ep = 0
+    dropped_quant = 0
+    cases: dict[tuple[str, int], list] = {}
+
+    for recipe in recipes:
+        if not is_wideep_moe_model(recipe.model_name):
+            dropped_not_declared += 1
+            continue
+        if recipe.tp != 1 or recipe.ep <= 1:
+            dropped_not_ep += 1
+            continue
+        if not moe_model_allows_quantization("sglang", recipe.model_name, MOE_EP_QUANT_MODE):
+            dropped_quant += 1
+            continue
+        num_experts = int(recipe.num_experts)
+        ep_size = int(recipe.ep)
+        # get_common_moe_test_cases already enforces num_experts % ep == 0.
+        cases.setdefault(
+            (recipe.model_name, ep_size),
+            [
+                num_experts // ep_size,
+                ep_size,
+                int(recipe.hidden_size),
+                int(recipe.inter_size),
+                int(recipe.topk),
+                num_experts,
+                num_experts,  # num_slots: no EPLB redundancy axis on sglang
+                MOE_EP_QUANT_MODE,
+            ],
+        )
+
+    print(
+        f"moe_ep: {len(cases)} cases from {len(recipes)} moe recipes "
+        f"(dropped: {dropped_not_declared} not declared wideep, "
+        f"{dropped_not_ep} not tp=1/ep>1, {dropped_quant} quant not allowed; "
+        f"{len(recipes) - dropped_not_declared - dropped_not_ep - dropped_quant - len(cases)} "
+        f"deduplicated onto (model, ep))"
+    )
+    return [cases[key] for key in sorted(cases)]
 
 
-def run_moe_benchmark(num_experts, gpu_id, output_path=None):
-    """Run MOE benchmark - called in subprocess with CUDA_VISIBLE_DEVICES set.
+def run_moe_benchmark(
+    num_local_experts,
+    moe_ep_size,
+    hidden_size,
+    inter_size,
+    topk,
+    num_experts,
+    num_slots,
+    moe_dtype,
+    gpu_id,
+    output_path,
+    perf_filename,
+):
+    """Run one moe_ep case — called in a subprocess with CUDA_VISIBLE_DEVICES set.
 
-    This function contains all the initialization logic that must happen
-    after CUDA_VISIBLE_DEVICES is set.
-
-    Supports both DeepSeek-V3 and Qwen3 MoE models.
+    All initialization that must happen after CUDA_VISIBLE_DEVICES is set lives
+    here. Every shape argument is the DECLARED value from the case plan.
     """
     # In subprocess, always use cuda:0 since CUDA_VISIBLE_DEVICES isolates the GPU
     torch.cuda.set_device("cuda:0")
@@ -1029,28 +1247,38 @@ def run_moe_benchmark(num_experts, gpu_id, output_path=None):
     # PortArgs.init_new() must be called in subprocess for proper isolation
     port_args = PortArgs.init_new(server_args)
 
-    # Get total experts from model config to calculate simulated EP size
-    model_config = ModelConfig.from_server_args(server_args)
-    hf_config = model_config.hf_config
-    total_experts = getattr(hf_config, "n_routed_experts", None) or getattr(hf_config, "num_experts", 256)
-
-    simulated_ep_size = total_experts // num_experts * server_args.ep_size
     print(f"\n{'=' * 60}")
     print(
-        f"MOE Benchmark: num_experts={num_experts}, EP_size={simulated_ep_size}, "
-        f"total_experts={total_experts}, GPU={gpu_id}"
+        f"moe_ep: local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, "
+        f"num_experts={num_experts}, moe_dtype={moe_dtype}, GPU={gpu_id}"
     )
     print(f"{'=' * 60}")
 
-    # Run the actual benchmark
-    run_moe(server_args, port_args, 3, 10, 3, num_experts, 0, output_path)
+    run_moe(
+        server_args,
+        port_args,
+        3,
+        10,
+        3,
+        num_local_experts,
+        0,
+        output_path,
+        perf_filename,
+        moe_ep_size=moe_ep_size,
+        model_topk=topk,
+        model_hidden_size=hidden_size,
+        model_inter_size=inter_size,
+        model_total_experts=num_experts,
+        num_slots=num_slots,
+        moe_dtype=moe_dtype,
+    )
 
     torch.cuda.empty_cache()
-    print(f"Completed num_experts={num_experts} (EP size {simulated_ep_size})")
+    print(f"Completed local_experts={num_local_experts} (EP size {moe_ep_size})")
 
 
-def _run_moe_subprocess(num_experts, gpu_id, output_path=None):
-    """Helper to run MOE in subprocess with CUDA_VISIBLE_DEVICES isolation."""
+def _run_moe_subprocess(case_args, gpu_id, output_path, perf_filename):
+    """Run one moe_ep case in a subprocess with CUDA_VISIBLE_DEVICES isolation."""
     import subprocess
     import sys
 
@@ -1062,7 +1290,7 @@ import sys
 sys.path.insert(0, "{THIS_DIR}")
 sys.path.insert(0, "{COLLECTOR_ROOT}")
 from collect_deepep_moe import run_moe_benchmark
-run_moe_benchmark({num_experts}, {gpu_id}, {output_path!r})
+run_moe_benchmark(*{case_args!r}, {gpu_id}, {output_path!r}, {str(perf_filename)!r})
 '''
 
     proc = subprocess.Popen(
@@ -1074,35 +1302,52 @@ run_moe_benchmark({num_experts}, {gpu_id}, {output_path!r})
     )
 
     try:
-        stdout, _ = proc.communicate(timeout=600)  # 10 min timeout per MOE config
+        stdout, _ = proc.communicate(timeout=600)  # 10 min timeout per moe_ep case
         if stdout:
             print(stdout.decode("utf-8", errors="replace"))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        print(f"MOE subprocess timed out for num_experts={num_experts}")
+        raise MoeEpBenchmarkError(f"moe_ep subprocess timed out for case {case_args}") from None
 
     if proc.returncode != 0:
-        raise RuntimeError(f"MOE subprocess failed with exit code {proc.returncode}")
+        raise MoeEpBenchmarkError(f"moe_ep subprocess failed with exit code {proc.returncode} for case {case_args}")
 
 
-def run_wideep_moe(num_experts, *, perf_filename, device="cuda:0"):
-    """Run wideep DeepEP MOE benchmark.
+def run_moe_ep(
+    num_local_experts,
+    moe_ep_size,
+    hidden_size,
+    inter_size,
+    topk,
+    num_experts,
+    num_slots,
+    moe_dtype,
+    *,
+    perf_filename,
+    device="cuda:0",
+):
+    """Run one declared large-EP MoE compute case.
 
-    Compatible with collect.py framework - uses subprocess for GPU isolation.
-    Supports both DeepSeek-V3 (256 experts) and Qwen3 (128 experts) models.
+    Compatible with the collect.py framework — uses a subprocess for GPU
+    isolation. ``perf_filename`` is ``PerfFile.MOE_EP``, bound by collect.py
+    from the registry OpEntry.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
 
     print("\n" + "=" * 60)
-    print(f"MOE: num_experts={num_experts}, GPU={gpu_id}")
+    print(f"moe_ep: local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, GPU={gpu_id}")
     print("=" * 60)
 
     # Resolve output_path from cwd so perf files land in the collector
     # framework's result directory (consistent with collect_moe.py behavior).
-    output_path = os.getcwd()
-    _run_moe_subprocess(num_experts, gpu_id, output_path)
+    _run_moe_subprocess(
+        [num_local_experts, moe_ep_size, hidden_size, inter_size, topk, num_experts, num_slots, moe_dtype],
+        gpu_id,
+        os.getcwd(),
+        perf_filename,
+    )
 
 
 if __name__ == "__main__":
@@ -1110,15 +1355,14 @@ if __name__ == "__main__":
 
     from registry_types import PerfFile
 
-    parser = argparse.ArgumentParser(description="SGLang Wideep DeepEP MOE Benchmark")
+    parser = argparse.ArgumentParser(description="SGLang large-EP DeepEP MoE compute benchmark")
     parser.add_argument("--output-path", default=None, help="Output directory for perf files")
     args = parser.parse_args()
 
     print(f"Model path: {_get_moe_model_path()}")
 
-    # Run all MOE test cases
-    for test_case in get_wideep_moe_test_cases():
-        run_wideep_moe(*test_case, perf_filename=PerfFile.WIDEEP_MOE)
+    for test_case in get_moe_ep_test_cases():
+        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EP)
 
     print("\n" + "=" * 60)
     print("SCRIPT COMPLETED SUCCESSFULLY")

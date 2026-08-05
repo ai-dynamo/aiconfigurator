@@ -1,48 +1,156 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-TensorRT-LLM MoE NVLink All-to-All Communication Benchmark (NVFP4 Only)
+"""TensorRT-LLM MoE NVLink All-to-All benchmark -> unified ``moe_a2a_perf``.
 
-Unified benchmark for two NVLink-based All-to-All communication strategies:
+Benchmarks two NVLink-based All-to-All communication strategies:
 
   --kernel-source NVLinkTwoSided
-      WideEPMoE backend.
+      WideEPMoE backend (MnnvlMoe).
       Phases: prepare + dispatch + combine [+ combine_low_precision].
       Supports multi-node.
 
   --kernel-source NVLinkOneSided
-      CutlassMoE backend.
+      CutlassMoE backend (torch.ops.trtllm.moe_a2a_*).
       Phases: dispatch + combine (no prepare).
       Single-node only.
 
-Output: trtllm_alltoall_perf.txt
+Rows are emitted in the unified ``moe_a2a`` schema consumed by
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_a2a_data`` — the same
+table (and CSV header) the sglang DeepEP collector
+(``collector/wideep/sglang/collect_moe_a2a.py``) writes, whose row builder
+and sidecar finalizer this module shares. The column mapping mirrors the
+SDK's legacy adapter ``_adapt_legacy_trtllm_alltoall`` EXACTLY, so a
+new-schema row and an adapted legacy row for the same measurement land on the
+same store key with the same leaf value:
 
-Usage (Slurm):
-    srun --ntasks 4 --ntasks-per-node 4 --mpi=pmix \\
-        python collect_trtllm_alltoall.py --kernel-source NVLinkOneSided
+* ``kernel_source`` -> ``comm_backend``: ``NVLinkTwoSided -> nvlink_two_sided``,
+  ``NVLinkOneSided -> nvlink_one_sided`` (``_LEGACY_TRTLLM_KERNEL_TO_BACKEND``).
+* ``op_name`` -> ``phase``/``comm_dtype``: ``alltoall_prepare -> prepare``,
+  ``alltoall_dispatch -> dispatch``, ``alltoall_combine -> combine`` (each
+  keyed by the run's ``moe_dtype``), and
+  ``alltoall_combine_low_precision -> combine`` keyed ``"fp4"``
+  (``_LEGACY_TRTLLM_OP_TO_PHASE_DTYPE``).
+* ``ep_size = world_size``; ``node_num = world_size // gpus_per_node`` from
+  the launcher environment — explicit and asserted integral, replacing the
+  legacy loader's fabricated ``max(1, ep_size // 4)`` derivation.
+* ``sms = 0`` — "legacy alltoall rows carry no SM budget" (the adapter keys
+  every trtllm row under sms 0).
+
+UNITS: the measured per-phase latency is milliseconds
+(``benchmark_with_power``), but the unified ``latency`` column is
+MICROSECONDS — ``load_moe_a2a_data`` divides the column by 1000
+(moe_comm.py:393 "collector records us; leaves are ms"), whereas the LEGACY
+``trtllm_alltoall_perf`` rows were already ms and are adapted raw
+(``_adapt_legacy_trtllm_alltoall`` docstring: "no us->ms conversion"). The
+writer therefore emits ``latency_ms * 1000`` so the loader's leaf equals the
+adapted-legacy leaf for the same measurement. The trtllm measurement has no
+transmit/notify split (the adapter leaf carries only ``latency``), so —
+exactly like the DeepEP LL precedent (moe_comm.py:232-234) — the whole
+latency is recorded as ``transmit_us`` with ``notify_us = 0.0``; the loader
+reads only their sum.
+
+Provenance: this is a STANDALONE collector
+(``provenance.STANDALONE_COLLECTOR_MODULES``) — it owns its case plan, its
+classified failure log (``errors_trtllm_alltoall.rank<N>.json``), its parquet
+finalization and its ``collection_meta.yaml`` sidecar, written by rank 0
+post-finalize. The recorded runtime is the installed tensorrt_llm version,
+gated against the manifest ``trtllm`` pin.
+
+Emission order (D5): cases are expanded ascending on every non-token key axis
+(``comm_dtype, hidden_size, topk, num_experts, num_tokens``; ``comm_backend``
+and the world are fixed per run, ``sms`` is a constant 0), and within a case
+rows are emitted ascending on ``(phase, comm_dtype)`` — so for an NVFP4
+two-sided case: combine/fp4, combine/nvfp4, dispatch/nvfp4, prepare/nvfp4.
+
+Whole-branch flag (pre-existing, unchanged here): the token-count sweep and
+model shape grid are internal constants rather than declared
+``cases/base_ops`` axes — the same undeclared-axis flag already ledgered for
+the family's other standalone collectors.
+
+Usage (see ``submit_trtllm_alltoall.sh``)::
 
     srun --ntasks 8 --ntasks-per-node 4 --mpi=pmix \\
-        python collect_trtllm_alltoall.py --kernel-source NVLinkTwoSided
+        python collect_trtllm_alltoall.py --kernel-source NVLinkTwoSided \\
+        --gpus-per-node 4 --output-path results/moe_a2a_NVLinkTwoSided.8gpu
 """
 
+from __future__ import annotations
+
+import argparse
+import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
-import torch
-import torch.distributed as dist
+# Standalone entry point: `python collector/network/slurm/collect_trtllm_alltoall.py`
+# must be able to import the `collector` package.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-# Add parent directory to path for helper imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from collector.framework_manifest import get_collector_runtime
+from collector.helper import benchmark_with_power, finalize_perf_files, log_perf
+from collector.registry_types import PerfFile
+from collector.wideep.sglang.collect_moe_a2a import (
+    MoeA2AShape,
+    _build_moe_a2a_row,
+    write_moe_a2a_sidecar,
+)
 
-from helper import benchmark_with_power, log_perf
+MODULE_NAME = "collector.network.slurm.collect_trtllm_alltoall"
+#: The unified comm table this module writes (shared with the sglang DeepEP
+#: collector — same file name, same frozen header).
+OP_NAME = "moe_a2a"
+
+#: Identity recorded in the perf-row prefix columns. The framework version is
+#: the INSTALLED tensorrt_llm, gated against this manifest pin.
+FRAMEWORK = "TRTLLM"
+MANIFEST_FRAMEWORK = "trtllm"
 
 KERNEL_SOURCE_TWO_SIDED = "NVLinkTwoSided"
 KERNEL_SOURCE_ONE_SIDED = "NVLinkOneSided"
 VALID_KERNEL_SOURCES = [KERNEL_SOURCE_TWO_SIDED, KERNEL_SOURCE_ONE_SIDED]
+
+#: ``kernel_source`` -> ``comm_backend``. MUST mirror the SDK adapter's
+#: ``_LEGACY_TRTLLM_KERNEL_TO_BACKEND`` (aic-core .../sdk/operations/
+#: moe_comm.py) so new-schema rows key identically to adapted legacy rows.
+KERNEL_SOURCE_TO_COMM_BACKEND = {
+    KERNEL_SOURCE_TWO_SIDED: "nvlink_two_sided",
+    KERNEL_SOURCE_ONE_SIDED: "nvlink_one_sided",
+}
+
+#: op_name -> (phase, comm_dtype); ``None`` means the case's ``moe_dtype``
+#: passes through. MUST mirror the SDK adapter's
+#: ``_LEGACY_TRTLLM_OP_TO_PHASE_DTYPE``: prepare/dispatch/standard combine are
+#: keyed by the run dtype (standard-combine payload is physically bf16 but is
+#: keyed by run dtype so every legacy leaf maps 1:1); the low-precision
+#: combine kernel keys as "fp4".
+OP_TO_PHASE_DTYPE = {
+    "alltoall_prepare": ("prepare", None),
+    "alltoall_dispatch": ("dispatch", None),
+    "alltoall_combine": ("combine", None),
+    "alltoall_combine_low_precision": ("combine", "fp4"),
+}
+
+#: The SDK's legacy trtllm adapter keys every alltoall row under sms 0
+#: ("legacy alltoall rows carry no SM budget"); the new rows key identically.
+ALLTOALL_SMS = 0
+
+#: Classified failure log, rank-scoped (the output dir may be shared storage;
+#: one file would be corrupted by concurrent writers).
+ERRORS_FILENAME_TEMPLATE = "errors_trtllm_alltoall.rank{rank}.json"
+
+
+class TrtllmAlltoallDeclarationError(RuntimeError):
+    """A declared input (world layout, runtime pin, plan) does not resolve."""
+
+
+class TrtllmAlltoallBenchmarkError(RuntimeError):
+    """A queued case failed to execute. Classified failure record, never a skip."""
 
 
 class TokenDistribution(Enum):
@@ -92,16 +200,30 @@ class AlltoallTestCase:
                 f"dtype={self.moe_dtype.value}, dist={self.distribution.value}"
             )
 
+    def sort_key(self) -> tuple:
+        """D5: ascending on every varying non-token key axis, token last.
+
+        The consumer's store keys (below the fixed ``comm_backend``/world/
+        ``sms`` levels for one run): ``comm_dtype`` sits above the shape axes
+        ``hidden_size -> topk -> num_experts``, with ``num_tokens`` as the
+        interpolated leaf axis.
+        """
+        return (
+            self.moe_dtype.value,
+            self.hidden_size,
+            self.top_k,
+            self.num_experts,
+            self.num_tokens,
+        )
+
 
 def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
-    """
-    Generate default test cases for All-to-All benchmark.
+    """Generate the test-case plan for this world, in D5 sort order.
 
-    Args:
-        ep_size: Expert Parallelism size (number of GPUs)
-
-    Returns:
-        List of test cases covering different token counts, model configs, dtypes, and distributions
+    The token sweep and model shapes are internal constants (pre-existing;
+    declared-axes migration is a ledgered whole-branch flag). Drops are the
+    op's universal math — ``num_experts % ep_size == 0`` (experts shard across
+    EP ranks) — counted and logged, never silent; a zero-case expansion raises.
     """
     test_cases = []
 
@@ -145,12 +267,13 @@ def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
         (7168, 256, 8),
     ]
 
-    for num_tokens in token_counts:
-        for hidden_size, num_experts, top_k in model_configs:
-            # Skip if num_experts < ep_size or not evenly divisible
-            if num_experts < ep_size or num_experts % ep_size != 0:
-                continue
-
+    dropped_ep = 0
+    for hidden_size, num_experts, top_k in model_configs:
+        # Experts must shard evenly across EP ranks.
+        if num_experts < ep_size or num_experts % ep_size != 0:
+            dropped_ep += 1
+            continue
+        for num_tokens in token_counts:
             for moe_dtype in DEFAULT_MOE_DTYPES:
                 for distribution in DEFAULT_DISTRIBUTIONS:
                     test_cases.append(
@@ -165,7 +288,66 @@ def get_default_test_cases(ep_size: int) -> list[AlltoallTestCase]:
                         )
                     )
 
+    test_cases.sort(key=AlltoallTestCase.sort_key)
+    print(
+        f"trtllm_alltoall: {len(test_cases)} cases for ep_size={ep_size} from "
+        f"{len(model_configs)} shapes x {len(token_counts)} tokens x "
+        f"{len(DEFAULT_MOE_DTYPES)} dtypes "
+        f"(dropped: {dropped_ep} shapes with num_experts % ep_size != 0)",
+        flush=True,
+    )
+    if not test_cases:
+        raise TrtllmAlltoallDeclarationError(
+            f"trtllm_alltoall expanded to zero cases for ep_size={ep_size}: all "
+            f"{len(model_configs)} shapes were dropped (num_experts % ep_size != 0). "
+            "Collecting nothing is never a clean completion — fix the world layout or the shapes."
+        )
     return test_cases
+
+
+# ---------------------------------------------------------------------------
+# Distributed identity — from the launcher, never from filenames
+# ---------------------------------------------------------------------------
+
+
+def resolve_gpus_per_node(arg_value: int | None, env: dict[str, str]) -> int:
+    """The GPUs-per-node divisor: explicit ``--gpus-per-node``, else Slurm's
+    ``SLURM_NTASKS_PER_NODE`` (one task per GPU under this launcher), else
+    raise. ``node_num`` is a persisted key column derived from this value, so
+    guessing it (device count, a system table, a stale default) would
+    silently mislabel every collected row.
+    """
+    if arg_value is not None:
+        if arg_value <= 0:
+            raise TrtllmAlltoallDeclarationError(f"--gpus-per-node must be positive, got {arg_value}")
+        return arg_value
+    if "SLURM_NTASKS_PER_NODE" in env:
+        return int(env["SLURM_NTASKS_PER_NODE"])
+    raise TrtllmAlltoallDeclarationError(
+        "cannot derive gpus_per_node: pass --gpus-per-node explicitly (SLURM_NTASKS_PER_NODE is unset); "
+        "node_num = world_size // gpus_per_node is a persisted key column"
+    )
+
+
+def derive_node_num(world_size: int, gpus_per_node: int) -> int:
+    """``node_num = world_size // gpus_per_node``, asserted integral.
+
+    ``gpus_per_node`` is the tasks-per-node the launcher actually placed (a
+    sub-node job on a 4-GPU node runs with ``--ntasks-per-node`` = the GPU
+    count, so the division is exact there too). This replaces the legacy
+    loader's fabricated ``max(1, ep_size // 4)`` — which this derivation
+    reproduces for the shipped GB200 NVL4 fleet — with the launcher's
+    declared layout. No visible-device cross-check: a sub-node allocation
+    legitimately sees more CUDA devices than it runs tasks.
+    """
+    if gpus_per_node <= 0:
+        raise TrtllmAlltoallDeclarationError(f"gpus_per_node must be positive, got {gpus_per_node}")
+    if world_size % gpus_per_node != 0:
+        raise TrtllmAlltoallDeclarationError(
+            f"WORLD_SIZE={world_size} is not an integral number of nodes at gpus_per_node={gpus_per_node}; "
+            "moe_a2a rows persist node_num = world_size // gpus_per_node"
+        )
+    return world_size // gpus_per_node
 
 
 def init_distributed():
@@ -177,6 +359,8 @@ def init_distributed():
     Returns:
         Tuple of (rank, world_size, device)
     """
+    import torch
+    import torch.distributed as dist
     from tensorrt_llm._utils import mpi_comm
 
     # Get MPI communicator (srun --mpi=pmix)
@@ -223,21 +407,24 @@ def init_distributed():
     return rank, world_size, device
 
 
-def check_mnnvl_support() -> bool:
-    """
-    Check if MNNVL (Multi-Node NVLink) is supported on current hardware.
+def require_mnnvl_support() -> None:
+    """Raise unless MNNVL (Multi-Node NVLink) is supported on this hardware.
 
-    Returns:
-        True if MNNVL is supported
+    Both kernel sources require NVLink connectivity; running anyway would
+    benchmark nothing. Execute-or-raise — never a silent early return.
     """
+    from tensorrt_llm._mnnvl_utils import MnnvlMemory
+
     try:
-        from tensorrt_llm._mnnvl_utils import MnnvlMemory
-
         MnnvlMemory.initialize()
-        return MnnvlMemory.supports_mnnvl()
-    except Exception as e:
-        print(f"MNNVL support check failed: {e}")
-        return False
+        supported = MnnvlMemory.supports_mnnvl()
+    except Exception as error:
+        raise TrtllmAlltoallBenchmarkError(f"MNNVL support probe failed: {error}") from error
+    if not supported:
+        raise TrtllmAlltoallBenchmarkError(
+            "MNNVL (NVLink) is not supported on this hardware; both NVLinkTwoSided and "
+            "NVLinkOneSided require NVLink connectivity"
+        )
 
 
 def create_mapping(rank: int, world_size: int, gpus_per_node: int):
@@ -272,8 +459,8 @@ def generate_balanced_expert_ids(
     num_experts: int,
     top_k: int,
     ep_size: int,
-    device: torch.device,
-) -> torch.Tensor:
+    device,
+):
     """
     Generate balanced expert IDs for testing.
 
@@ -300,6 +487,8 @@ def generate_balanced_expert_ids(
     Returns:
         Expert IDs tensor of shape [num_tokens, top_k]
     """
+    import torch
+
     experts_per_rank = num_experts // ep_size
     expert_ids = torch.zeros((num_tokens, top_k), dtype=torch.int32, device=device)
 
@@ -327,8 +516,8 @@ def generate_balanced_expert_ids(
 
 def generate_expert_ids(
     test_case: AlltoallTestCase,
-    device: torch.device,
-) -> torch.Tensor:
+    device,
+):
     """
     Generate expert IDs based on test case distribution configuration.
 
@@ -424,8 +613,8 @@ def calculate_bandwidth_gbps(data_size_bytes: int, latency_ms: float) -> float:
 
 def prepare_test_data(
     test_case: AlltoallTestCase,
-    device: torch.device,
-) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+    device,
+):
     """
     Prepare test data based on MoE dtype.
 
@@ -437,6 +626,8 @@ def prepare_test_data(
         Tuple of (hidden_states, hidden_states_sf, token_selected_slots, token_final_scales)
         - hidden_states_sf is scale factor for NVFP4, None otherwise
     """
+    import torch
+
     num_tokens = test_case.num_tokens
     hidden_size = test_case.hidden_size
     top_k = test_case.top_k
@@ -472,14 +663,44 @@ class AlltoallBenchmarkResult:
     """
     Benchmark results for each All-to-All operation.
 
-    NVLinkTwoSided populates all four fields.
-    NVLinkOneSided only populates dispatch and combine (prepare and combine_lp stay 0).
+    NVLinkTwoSided populates all four latency fields.
+    NVLinkOneSided only populates dispatch and combine (prepare and combine_lp
+    stay 0, meaning "phase not run" — no row is emitted for them).
+
+    ``combine_low_precision_error`` carries a failed low-precision-combine
+    probe out to the run loop so it lands in the classified failure log —
+    a missing fp4 row must be explained, never a silent drop.
     """
 
     dispatch_latency_ms: float
     combine_latency_ms: float
     prepare_latency_ms: float = 0.0
     combine_low_precision_latency_ms: float = 0.0
+    combine_low_precision_error: Optional[BaseException] = field(default=None, compare=False)
+
+
+def _benchmark_op(func, label, device, ep_rank, num_warmup, num_iterations):
+    """Benchmark a single operation using shared benchmark_with_power.
+
+    ``measure_power=False``: the moe_a2a table emits NO power column BY RULING
+    (Task 4 review, see ``collect_moe_a2a._power_columns``): the ruling is per
+    TABLE — HT/LL and trtllm writers share one file and one header, and
+    ``helper.log_perf`` writes the header from the first row — so this writer
+    must not sample or emit power either.
+    """
+    with benchmark_with_power(
+        device=device,
+        kernel_func=func,
+        num_warmups=num_warmup,
+        num_runs=num_iterations,
+        measure_power=False,
+        allow_graph_fail=True,
+    ) as results:
+        latency = results["latency_ms"]
+        if ep_rank == 0:
+            mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
+            print(f"    [{label}] {mode} timing: {latency:.3f} ms")
+    return latency
 
 
 # ============================================================================
@@ -488,7 +709,7 @@ class AlltoallBenchmarkResult:
 def benchmark_nvlink_two_sided(
     test_case: AlltoallTestCase,
     mapping,
-    device: torch.device,
+    device,
     num_warmup: int = 3,
     num_iterations: int = 10,
 ) -> AlltoallBenchmarkResult:
@@ -506,6 +727,7 @@ def benchmark_nvlink_two_sided(
     Returns:
         AlltoallBenchmarkResult containing latencies for each operation
     """
+    import torch
     from tensorrt_llm._mnnvl_utils import MnnvlMoe
 
     # Get workspaces
@@ -531,26 +753,6 @@ def benchmark_nvlink_two_sided(
     all_rank_max_num_tokens = max(all_rank_num_tokens)
 
     # ============================================================================
-    # Helper: benchmark using shared CUDA Graph infrastructure from helper.py.
-    # Reuses benchmark_with_power which handles graph capture, fallback to eager
-    # execution, warmup, timing, and optional power monitoring.
-    # ============================================================================
-    def _benchmark_op(func, label):
-        """Benchmark a single operation using shared benchmark_with_power."""
-        with benchmark_with_power(
-            device=device,
-            kernel_func=func,
-            num_warmups=num_warmup,
-            num_runs=num_iterations,
-            allow_graph_fail=True,
-        ) as results:
-            latency = results["latency_ms"]
-            if ep_rank == 0:
-                mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
-                print(f"    [{label}] {mode} timing: {latency:.3f} ms")
-        return latency
-
-    # ============================================================================
     # Benchmark: alltoall_prepare
     # ============================================================================
     def prepare_func():
@@ -566,7 +768,7 @@ def benchmark_nvlink_two_sided(
             top_k,
         )
 
-    prepare_latency = _benchmark_op(prepare_func, "prepare")
+    prepare_latency = _benchmark_op(prepare_func, "prepare", device, ep_rank, num_warmup, num_iterations)
     # Run prepare once more to get valid alltoall_info for dispatch/combine
     alltoall_info, _ = prepare_func()
     torch.cuda.synchronize()
@@ -583,7 +785,7 @@ def benchmark_nvlink_two_sided(
             ep_size,
         )
 
-    dispatch_latency = _benchmark_op(dispatch_func, "dispatch")
+    dispatch_latency = _benchmark_op(dispatch_func, "dispatch", device, ep_rank, num_warmup, num_iterations)
     # Run dispatch once more to get valid output for combine
     dispatched = dispatch_func()
     torch.cuda.synchronize()
@@ -610,13 +812,14 @@ def benchmark_nvlink_two_sided(
             do_reduce=False,
         )
 
-    combine_latency = _benchmark_op(combine_func, "combine")
+    combine_latency = _benchmark_op(combine_func, "combine", device, ep_rank, num_warmup, num_iterations)
 
     # ============================================================================
     # Benchmark: alltoall_combine_low_precision (do_reduce=False, use_low_precision_combine=True)
     # Only benchmark for NVFP4 dtype as low_precision_combine is most relevant for it
     # ============================================================================
     combine_low_precision_latency = 0.0
+    combine_low_precision_error: BaseException | None = None
     if moe_dtype == MoEDtype.NVFP4:
 
         def combine_low_precision_func():
@@ -633,18 +836,22 @@ def benchmark_nvlink_two_sided(
             )
 
         try:
-            # Test if low precision combine is supported
             combine_low_precision_func()
             torch.cuda.synchronize()
-            combine_low_precision_latency = _benchmark_op(combine_low_precision_func, "combine_lp")
-        except Exception:
-            combine_low_precision_latency = 0.0
+            combine_low_precision_latency = _benchmark_op(
+                combine_low_precision_func, "combine_lp", device, ep_rank, num_warmup, num_iterations
+            )
+        except Exception as error:
+            # The fp4 row is dropped, but never silently: the error rides the
+            # result out to the run loop's classified failure record.
+            combine_low_precision_error = error
 
     return AlltoallBenchmarkResult(
         prepare_latency_ms=prepare_latency,
         dispatch_latency_ms=dispatch_latency,
         combine_latency_ms=combine_latency,
         combine_low_precision_latency_ms=combine_low_precision_latency,
+        combine_low_precision_error=combine_low_precision_error,
     )
 
 
@@ -654,7 +861,7 @@ def benchmark_nvlink_two_sided(
 def benchmark_nvlink_one_sided(
     test_case: AlltoallTestCase,
     mapping,
-    device: torch.device,
+    device,
     max_num_tokens: int,
     num_warmup: int = 3,
     num_iterations: int = 10,
@@ -678,6 +885,7 @@ def benchmark_nvlink_one_sided(
     Returns:
         AlltoallBenchmarkResult containing dispatch and combine latencies
     """
+    import torch
     from tensorrt_llm._torch.distributed.moe_alltoall import MoeAlltoAll
 
     ep_rank = mapping.moe_ep_rank
@@ -748,24 +956,6 @@ def benchmark_nvlink_one_sided(
     torch.cuda.synchronize()
 
     # ========================================================================
-    # Helper: benchmark using shared CUDA Graph infrastructure from helper.py.
-    # ========================================================================
-    def _benchmark_op(func, label):
-        """Benchmark a single operation using shared benchmark_with_power."""
-        with benchmark_with_power(
-            device=device,
-            kernel_func=func,
-            num_warmups=num_warmup,
-            num_runs=num_iterations,
-            allow_graph_fail=True,
-        ) as results:
-            latency = results["latency_ms"]
-            if ep_rank == 0:
-                mode = "CUDA Graph" if results["used_cuda_graph"] else "Eager"
-                print(f"    [{label}] {mode} timing: {latency:.3f} ms")
-        return latency
-
-    # ========================================================================
     # Benchmark: dispatch
     # ========================================================================
     def dispatch_op():
@@ -781,7 +971,7 @@ def benchmark_nvlink_one_sided(
             num_slots,
         )
 
-    dispatch_latency = _benchmark_op(dispatch_op, "dispatch")
+    dispatch_latency = _benchmark_op(dispatch_op, "dispatch", device, ep_rank, num_warmup, num_iterations)
 
     # ========================================================================
     # Benchmark: combine
@@ -806,7 +996,7 @@ def benchmark_nvlink_one_sided(
             True,  # payload_in_workspace: MoE output was written into workspace via get_combine_payload_tensor
         )
 
-    combine_latency = _benchmark_op(combine_op, "combine")
+    combine_latency = _benchmark_op(combine_op, "combine", device, ep_rank, num_warmup, num_iterations)
 
     return AlltoallBenchmarkResult(
         dispatch_latency_ms=dispatch_latency,
@@ -815,113 +1005,230 @@ def benchmark_nvlink_one_sided(
 
 
 # ============================================================================
-# Performance logging
+# Unified-schema row construction
 # ============================================================================
-def log_alltoall_perf(
+
+
+def result_measurements(result: AlltoallBenchmarkResult) -> list[tuple[str, float]]:
+    """The ``(op_name, latency_ms)`` measurements a result actually ran.
+
+    A 0.0 latency means "phase not run" (one-sided has no prepare; the
+    low-precision combine only runs for NVFP4 and its failure is separately
+    classified), never a measured zero.
+    """
+    measurements = []
+    if result.prepare_latency_ms > 0:
+        measurements.append(("alltoall_prepare", result.prepare_latency_ms))
+    measurements.append(("alltoall_dispatch", result.dispatch_latency_ms))
+    measurements.append(("alltoall_combine", result.combine_latency_ms))
+    if result.combine_low_precision_latency_ms > 0:
+        measurements.append(("alltoall_combine_low_precision", result.combine_low_precision_latency_ms))
+    return measurements
+
+
+def build_unified_rows(
     test_case: AlltoallTestCase,
-    op_name: str,
-    latency_ms: float,
-    framework: str,
-    version: str,
-    device_name: str,
+    result: AlltoallBenchmarkResult,
+    *,
     kernel_source: str,
-    perf_filename: str,
-):
-    """
-    Log All-to-All performance data in perf.txt compatible format.
+    node_num: int,
+) -> list[dict]:
+    """The case's unified ``moe_a2a`` rows, in D5 emission order.
 
-    Args:
-        test_case: Test case configuration
-        op_name: Operation name (alltoall_prepare, alltoall_dispatch, alltoall_combine,
-                 alltoall_combine_low_precision)
-        latency_ms: Latency in milliseconds
-        framework: Framework name (e.g., "TRTLLM")
-        version: Framework version
-        device_name: GPU device name
-        kernel_source: Communication strategy (NVLinkTwoSided or NVLinkOneSided)
-        perf_filename: Output file path
-    """
-    distribution_str = test_case.distribution.value
+    Shares ``_build_moe_a2a_row`` with the sglang DeepEP collector — one frozen
+    header for the whole table. Mapping and units per the module docstring:
+    the SDK adapter's kernel_source/op_name maps mirrored exactly, latency
+    emitted in MICROSECONDS (``latency_ms * 1000``) because
+    ``load_moe_a2a_data`` divides by 1000 while the adapted legacy ms rows are
+    stored raw; the whole latency is ``transmit_us`` with ``notify_us = 0.0``
+    (no transmit/notify split exists in this measurement — the DeepEP LL
+    precedent).
 
-    log_perf(
-        item_list=[
-            {
-                "moe_dtype": test_case.moe_dtype.value,
-                "num_tokens": test_case.num_tokens,
-                "hidden_size": test_case.hidden_size,
-                "topk": test_case.top_k,
-                "num_experts": test_case.num_experts,
-                "moe_ep_size": test_case.ep_size,
-                "distribution": distribution_str,
-                "latency": latency_ms,
-            }
-        ],
-        framework=framework,
-        version=version,
-        device_name=device_name,
-        op_name=op_name,
-        kernel_source=kernel_source,
-        perf_filename=perf_filename,
+    Rows sort ascending on ``(phase, comm_dtype)``, the two store levels that
+    vary within a case (``comm_backend``/world/shape/tokens are fixed here and
+    ascending across cases via ``AlltoallTestCase.sort_key``).
+    """
+    comm_backend = KERNEL_SOURCE_TO_COMM_BACKEND[kernel_source]
+    shape = MoeA2AShape(
+        hidden_size=test_case.hidden_size,
+        topk=test_case.top_k,
+        num_experts=test_case.num_experts,
     )
+    keyed = []
+    for op_name, latency_ms in result_measurements(result):
+        phase, comm_dtype = OP_TO_PHASE_DTYPE[op_name]
+        if comm_dtype is None:
+            comm_dtype = test_case.moe_dtype.value
+        keyed.append((phase, comm_dtype, latency_ms))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+
+    return [
+        _build_moe_a2a_row(
+            comm_backend=comm_backend,
+            phase=phase,
+            comm_dtype=comm_dtype,
+            ep_size=test_case.ep_size,
+            node_num=node_num,
+            shape=shape,
+            num_tokens=test_case.num_tokens,
+            sms=ALLTOALL_SMS,
+            transmit_us=latency_ms * 1000.0,
+            notify_us=0.0,
+        )
+        for phase, comm_dtype, latency_ms in keyed
+    ]
+
+
+def case_plan_ids(cases: list[AlltoallTestCase], *, kernel_source: str, node_num: int) -> list[str]:
+    """Stable case identifiers for ``provenance.case_plan_hash``.
+
+    ``kernel_source`` and the world (``ep_size``/``node_num``) are part of the
+    identity: the same grid collected under another strategy or on another
+    world is a different attested plan.
+    """
+    ids = []
+    for case in cases:
+        payload = {
+            "distribution": case.distribution.value,
+            "ep_size": case.ep_size,
+            "hidden_size": case.hidden_size,
+            "kernel_source": kernel_source,
+            "moe_dtype": case.moe_dtype.value,
+            "node_num": node_num,
+            "num_experts": case.num_experts,
+            "num_tokens": case.num_tokens,
+            "topk": case.top_k,
+        }
+        ids.append(f"{MODULE_NAME}:run_case:" + json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    return ids
+
+
+# ============================================================================
+# Provenance
+# ============================================================================
+
+
+def resolve_runtime_meta(installed_version: str) -> dict:
+    """The sidecar ``runtime`` block, from the manifest ``trtllm`` pin.
+
+    The INSTALLED version is what actually produced the data, so it is what
+    is recorded — but it must equal the pin, or the collected rows would be
+    attributed to a runtime that never ran them.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    runtime = get_collector_runtime(MANIFEST_FRAMEWORK)
+    try:
+        installed_public = Version(installed_version).public
+    except InvalidVersion as error:
+        raise TrtllmAlltoallDeclarationError(f"invalid installed tensorrt_llm version {installed_version!r}") from error
+    if installed_public != Version(runtime.version).public:
+        raise TrtllmAlltoallDeclarationError(
+            f"trtllm alltoall collection requires tensorrt_llm {runtime.version} (manifest trtllm pin), "
+            f"found {installed_version}; use {runtime.image()}"
+        )
+    image, sep, digest = runtime.image().partition("@")
+    meta = {"framework": runtime.framework, "version": installed_version, "image": image}
+    if sep:
+        meta["image_digest"] = digest
+    return meta
+
+
+def record_failure(
+    output_dir: Path,
+    case: AlltoallTestCase,
+    error: BaseException,
+    *,
+    rank: int,
+    kernel_source: str,
+    node_num: int,
+    op_name: str | None = None,
+) -> None:
+    """Append one classified failure record (rank-scoped ``errors_*.json``)."""
+    record = {
+        "module": MODULE_NAME,
+        "op": op_name or OP_NAME,
+        "classification": "unexpected",
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "rank": rank,
+        "case": {
+            "kernel_source": kernel_source,
+            "moe_dtype": case.moe_dtype.value,
+            "distribution": case.distribution.value,
+            "ep_size": case.ep_size,
+            "node_num": node_num,
+            "hidden_size": case.hidden_size,
+            "topk": case.top_k,
+            "num_experts": case.num_experts,
+            "num_tokens": case.num_tokens,
+        },
+    }
+    path = output_dir / ERRORS_FILENAME_TEMPLATE.format(rank=rank)
+    existing = json.loads(path.read_text()) if path.exists() else []
+    existing.append(record)
+    path.write_text(json.dumps(existing, indent=2))
+    print(f"  FAILED {op_name or 'case'} ({case.description}): {error}", flush=True)
+
+
+# ============================================================================
+# Run loop
+# ============================================================================
 
 
 def run_benchmark(
     rank: int,
     world_size: int,
-    device: torch.device,
+    device,
+    *,
     kernel_source: str,
-    output_file: str = "trtllm_alltoall_perf.txt",
+    gpus_per_node: int,
+    output_dir: Path,
     num_warmup: int = 3,
     num_iterations: int = 10,
-):
-    """
-    Run All-to-All benchmark and log results.
+) -> None:
+    """Run the All-to-All benchmark, emit unified rows, finalize + attest.
 
-    Args:
-        rank: Current rank
-        world_size: Total number of ranks
-        device: CUDA device
-        kernel_source: Communication strategy (NVLinkTwoSided or NVLinkOneSided)
-        output_file: Output file path
-        num_warmup: Number of warmup iterations
-        num_iterations: Number of benchmark iterations
+    Rank 0 owns the perf file, the parquet finalization and the
+    ``collection_meta.yaml`` sidecar; every rank records its own classified
+    failures. After each case the ranks ``all_reduce(MAX)`` their failure
+    flags so they agree whether the case produced data and the next collective
+    stays in lockstep.
     """
     import tensorrt_llm
+    import torch
+    import torch.distributed as dist
 
-    # Check MNNVL support
-    if not check_mnnvl_support():
-        if rank == 0:
-            print("ERROR: MNNVL (NVLink) not supported on this hardware.")
-            print("Both NVLinkTwoSided and NVLinkOneSided require NVLink connectivity.")
-        return
+    require_mnnvl_support()
 
-    # Create mapping
-    gpus_per_node = int(os.environ.get("SLURM_NTASKS_PER_NODE", torch.cuda.device_count()))
+    node_num = derive_node_num(world_size, gpus_per_node)
     mapping = create_mapping(rank, world_size, gpus_per_node)
-
-    # Get test cases
     test_cases = get_default_test_cases(world_size)
+    case_ids = case_plan_ids(test_cases, kernel_source=kernel_source, node_num=node_num)
 
-    framework = "TRTLLM"
     version = tensorrt_llm.__version__
+    runtime_meta = resolve_runtime_meta(version)
     device_name = torch.cuda.get_device_name(device)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    perf_path = str(output_dir / PerfFile.MOE_A2A.value)
 
     if rank == 0:
         print(f"\n{'=' * 70}")
         print(f"TensorRT-LLM MoE All-to-All Benchmark  [{kernel_source}]")
         print(f"{'=' * 70}")
-        print(f"EP size: {world_size}")
+        print(f"EP size: {world_size} ({node_num} node(s) x {gpus_per_node} GPUs)")
         print(f"Device: {device_name}")
         print(f"TensorRT-LLM version: {version}")
         print(f"Number of test cases: {len(test_cases)}")
         print(f"MoE dtypes: {[d.value for d in DEFAULT_MOE_DTYPES]}")
-        print(f"Output: {output_file}")
+        print(f"Output: {perf_path}")
         print(f"{'=' * 70}\n")
 
     # For NVLinkOneSided, workspace is a process-level singleton sized by max_num_tokens
-    max_num_tokens = max(tc.num_tokens for tc in test_cases) if test_cases else 0
+    max_num_tokens = max(tc.num_tokens for tc in test_cases)
 
-    # Run benchmarks
+    failure_count = 0
     for idx, test_case in enumerate(test_cases):
         if rank == 0:
             print(f"[{idx + 1}/{len(test_cases)}] {test_case.description}")
@@ -930,6 +1237,9 @@ def run_benchmark(
         if world_size > 1:
             dist.barrier()
 
+        failed = 0
+        lp_failed = 0
+        result = None
         try:
             if kernel_source == KERNEL_SOURCE_TWO_SIDED:
                 result = benchmark_nvlink_two_sided(
@@ -950,108 +1260,107 @@ def run_benchmark(
                 )
             else:
                 raise ValueError(f"Unknown kernel_source '{kernel_source}', expected one of {VALID_KERNEL_SOURCES}")
-
-            # Log results (only rank 0)
-            if rank == 0:
-                # Calculate data sizes and bandwidths
-                dispatch_data_size = get_dispatch_data_size_bytes(
-                    test_case.num_tokens,
-                    test_case.hidden_size,
-                    test_case.top_k,
-                    test_case.moe_dtype,
-                    test_case.ep_size,
-                )
-                combine_data_size = get_combine_data_size_bytes(
-                    test_case.num_tokens,
-                    test_case.hidden_size,
-                    test_case.top_k,
-                    test_case.ep_size,
-                )
-
-                if result.prepare_latency_ms > 0:
-                    print(f"  Prepare:  {result.prepare_latency_ms:.3f} ms")
-
-                dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
-                dispatch_kb = dispatch_data_size / 1024
-                print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
-
-                combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
-                combine_kb = combine_data_size / 1024
-                print(f"  Combine:  {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
-
-                if result.combine_low_precision_latency_ms > 0:
-                    combine_lp_bw = calculate_bandwidth_gbps(
-                        combine_data_size,
-                        result.combine_low_precision_latency_ms,
-                    )
-                    print(
-                        f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms "
-                        f"({combine_lp_bw:.2f} GB/s)"
-                    )
-
-                # Log each operation separately
-                if result.prepare_latency_ms > 0:
-                    log_alltoall_perf(
-                        test_case,
-                        "alltoall_prepare",
-                        result.prepare_latency_ms,
-                        framework,
-                        version,
-                        device_name,
-                        kernel_source,
-                        output_file,
-                    )
-                log_alltoall_perf(
+        except Exception as error:
+            failed = 1
+            record_failure(output_dir, test_case, error, rank=rank, kernel_source=kernel_source, node_num=node_num)
+        else:
+            if result.combine_low_precision_error is not None:
+                lp_failed = 1
+                record_failure(
+                    output_dir,
                     test_case,
-                    "alltoall_dispatch",
-                    result.dispatch_latency_ms,
-                    framework,
-                    version,
-                    device_name,
-                    kernel_source,
-                    output_file,
+                    result.combine_low_precision_error,
+                    rank=rank,
+                    kernel_source=kernel_source,
+                    node_num=node_num,
+                    op_name="alltoall_combine_low_precision",
                 )
-                log_alltoall_perf(
-                    test_case,
-                    "alltoall_combine",
-                    result.combine_latency_ms,
-                    framework,
-                    version,
-                    device_name,
-                    kernel_source,
-                    output_file,
+
+        # Every rank must agree whether this case produced data, or the next
+        # collective desyncs; the fp4 leg's flag rides along so a
+        # peer-rank-only failure still suppresses the row and is counted.
+        if world_size > 1:
+            agreement = torch.tensor([failed, lp_failed], dtype=torch.int32, device=device)
+            dist.all_reduce(agreement, op=dist.ReduceOp.MAX)
+            failed, lp_failed = (int(value) for value in agreement.tolist())
+        if failed:
+            failure_count += 1
+            continue
+        if lp_failed:
+            failure_count += 1
+            result.combine_low_precision_latency_ms = 0.0
+
+        if rank == 0:
+            _print_case_summary(test_case, result)
+            for row in build_unified_rows(test_case, result, kernel_source=kernel_source, node_num=node_num):
+                log_perf(
+                    item_list=[row],
+                    framework=FRAMEWORK,
+                    version=version,
+                    device_name=device_name,
+                    op_name=OP_NAME,
+                    kernel_source=kernel_source,
+                    perf_filename=perf_path,
                 )
-                if result.combine_low_precision_latency_ms > 0:
-                    log_alltoall_perf(
-                        test_case,
-                        "alltoall_combine_low_precision",
-                        result.combine_low_precision_latency_ms,
-                        framework,
-                        version,
-                        device_name,
-                        kernel_source,
-                        output_file,
-                    )
-
-        except Exception as e:
-            if rank == 0:
-                import traceback
-
-                print(f"  ERROR: {e}")
-                traceback.print_exc()
 
     if rank == 0:
+        converted = finalize_perf_files([perf_path])
+        if not converted:
+            raise TrtllmAlltoallBenchmarkError(
+                f"trtllm alltoall produced no rows: all {failure_count}/{len(test_cases)} cases failed. "
+                f"See {output_dir / ERRORS_FILENAME_TEMPLATE.format(rank='*')} — a whole-family failure "
+                "is a collector problem to fix, not a partial collection to publish."
+            )
+        [parquet_path] = converted
+        meta_path = write_moe_a2a_sidecar(
+            output_dir,
+            runtime_meta=runtime_meta,
+            case_ids=case_ids,
+            parquet_path=parquet_path,
+            failure_count=failure_count,
+            module_name=MODULE_NAME,
+        )
         print(f"\n{'=' * 70}")
-        print(f"Benchmark completed. Results saved to: {output_file}")
+        print(f"Benchmark completed. Wrote {parquet_path} and {meta_path} ({failure_count} classified failures)")
         print(f"{'=' * 70}")
 
 
-def parse_args():
-    """Parse command line arguments."""
-    import argparse
+def _print_case_summary(test_case: AlltoallTestCase, result: AlltoallBenchmarkResult) -> None:
+    """Console bandwidth summary (derived quantities, not persisted)."""
+    dispatch_data_size = get_dispatch_data_size_bytes(
+        test_case.num_tokens,
+        test_case.hidden_size,
+        test_case.top_k,
+        test_case.moe_dtype,
+        test_case.ep_size,
+    )
+    combine_data_size = get_combine_data_size_bytes(
+        test_case.num_tokens,
+        test_case.hidden_size,
+        test_case.top_k,
+        test_case.ep_size,
+    )
 
+    if result.prepare_latency_ms > 0:
+        print(f"  Prepare:  {result.prepare_latency_ms:.3f} ms")
+
+    dispatch_bw = calculate_bandwidth_gbps(dispatch_data_size, result.dispatch_latency_ms)
+    dispatch_kb = dispatch_data_size / 1024
+    print(f"  Dispatch: {result.dispatch_latency_ms:.3f} ms ({dispatch_bw:.2f} GB/s, {dispatch_kb:.1f} KB)")
+
+    combine_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_latency_ms)
+    combine_kb = combine_data_size / 1024
+    print(f"  Combine:  {result.combine_latency_ms:.3f} ms ({combine_bw:.2f} GB/s, {combine_kb:.1f} KB)")
+
+    if result.combine_low_precision_latency_ms > 0:
+        combine_lp_bw = calculate_bandwidth_gbps(combine_data_size, result.combine_low_precision_latency_ms)
+        print(f"  Combine (low precision): {result.combine_low_precision_latency_ms:.3f} ms ({combine_lp_bw:.2f} GB/s)")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="TensorRT-LLM MoE NVLink All-to-All Communication Benchmark",
+        description="TensorRT-LLM MoE NVLink All-to-All Communication Benchmark (unified moe_a2a schema)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -1062,11 +1371,18 @@ def parse_args():
         help=f"Communication strategy (default: {KERNEL_SOURCE_TWO_SIDED})",
     )
     parser.add_argument(
-        "--output",
+        "--gpus-per-node",
+        type=int,
+        default=None,
+        help="GPUs per node in this allocation; node_num = world_size // gpus-per-node (a persisted "
+        "key column). Defaults to SLURM_NTASKS_PER_NODE; raises when neither is available.",
+    )
+    parser.add_argument(
+        "--output-path",
         "-o",
         type=str,
-        default="trtllm_alltoall_perf.txt",
-        help="Output file path for performance results (default: trtllm_alltoall_perf.txt)",
+        default=os.getcwd(),
+        help="Output DIRECTORY for moe_a2a_perf parquet + collection_meta.yaml (default: cwd)",
     )
     parser.add_argument(
         "--warmup",
@@ -1080,18 +1396,23 @@ def parse_args():
         default=10,
         help="Number of benchmark iterations (default: 10)",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():
     """Main entry point."""
     args = parse_args()
+
+    import torch.distributed as dist
+
+    gpus_per_node = resolve_gpus_per_node(args.gpus_per_node, dict(os.environ))
     rank, world_size, device = init_distributed()
 
     if world_size < 2:
-        print("ERROR: This benchmark requires at least 2 GPUs.")
-        print("Usage: srun --ntasks N --mpi=pmix python collect_trtllm_alltoall.py --kernel-source ...")
-        return
+        raise TrtllmAlltoallDeclarationError(
+            "this benchmark requires at least 2 GPUs; launch with "
+            "srun --ntasks N --mpi=pmix python collect_trtllm_alltoall.py ..."
+        )
 
     if rank == 0:
         print(f"Running {args.kernel_source} with {world_size} GPUs")
@@ -1102,7 +1423,8 @@ def main():
             world_size,
             device,
             kernel_source=args.kernel_source,
-            output_file=args.output,
+            gpus_per_node=gpus_per_node,
+            output_dir=Path(args.output_path),
             num_warmup=args.warmup,
             num_iterations=args.iterations,
         )

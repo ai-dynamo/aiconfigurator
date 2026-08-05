@@ -150,12 +150,35 @@ collector.vllm.collect_moe:
   - collector/cases/base_ops/moe.yaml
   - __model_cases__
 
+# --- network (standalone comm collectors) ------------------------------
+collector.network.slurm.collect_trtllm_alltoall:
+  # moe_a2a (trtllm NVLink alltoall, standalone multi-node): the workload
+  # grid is internal to the module (pre-existing; declared-axes migration is
+  # a ledgered whole-branch flag), so the module's own .py file covers it.
+  # The row builder and sidecar finalizer are shared with the sglang moe_a2a
+  # module, and the Slurm launcher decides the collected worlds.
+  - collector/wideep/sglang/collect_moe_a2a.py
+  - collector/network/slurm/submit_trtllm_alltoall.sh
+
 # --- wideep -----------------------------------------------------------
 collector.wideep.sglang.collect_deepep_moe:
-  # No collector/case_generator.py import in this module — cases are
-  # self-contained (get_wideep_moe_test_cases is defined locally).
+  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model /
+  # moe_model_allows_quantization.
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+collector.wideep.sglang.collect_moe_a2a:
+  # moe_a2a (standalone multi-node): the workload grid it reads plus the
+  # declared model shapes it correlates against. The DeepEP benchmark
+  # internals (kineto timing, tuning sweeps) are vendored INTO the module, so
+  # the deprecated deepep/ scripts are deliberately not in this closure.
+  # The Slurm launcher decides the collected worlds (GPU list, GPUs/node),
+  # so it is in the closure like the dsv4_megamoe run scripts.
+  - collector/cases/base_ops/moe_a2a.yaml
+  - collector/cases/base_ops/moe.yaml
+  - collector/network/slurm/submit_moe_a2a.sh
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
-  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model.
+  # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
+  # is_wideep_moe_model.
   - collector/cases/base_ops/moe.yaml
   - __model_cases__

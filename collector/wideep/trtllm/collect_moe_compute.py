@@ -5,13 +5,19 @@
 # (see _SlotLoraPaddedRunner) — that padding is invalid on older runtimes.
 __compat__ = "trtllm>=1.3.0rc20"
 
-"""
-WideEPMoE compute-only collector (excluding AlltoAll communication).
+"""TensorRT-LLM large-EP MoE expert-compute collector (op ``moe_ep``).
 
-Simulates EP size > 1 scenario, single EP rank compute workload.
-Supports EPLB (Expert Parallel Load Balancer) scenarios.
+WideEPMoE compute-only benchmark (excluding AlltoAll communication).
+Simulates the EP size > 1 scenario, single EP rank compute workload.
+Supports EPLB (Expert Parallel Load Balancer) scenarios: ``num_slots`` may
+exceed ``num_experts`` (redundant experts) and EPLB runs carry an ``_eplb``
+distribution suffix — both flow into the unified table unchanged, exactly as
+``moe_comm._adapt_legacy_trtllm_wideep_moe`` adapts the legacy
+``wideep_moe_perf`` rows.
 
-Reference: aic/collector/wideep/trtllm/collect_moe_compute.py
+Emits the unified ``moe_ep_perf`` rows (one table, ``inference_phase``
+column) consumed by
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_ep_data``.
 """
 
 import gc
@@ -130,6 +136,106 @@ def _install_slot_lora_pad_patch():
 
 
 moe_tune_path = os.path.join(THIS_DIR, "wideep_moe_compute_tuned_cache_path")
+
+#: Written into the ``op_name`` prefix column of every row. The loader never
+#: reads ``op_name``; the EPLB axis rides ``num_slots`` and the ``_eplb``
+#: distribution suffix (the retired split into ``wideep_moe`` /
+#: ``wideep_moe_eplb`` carried no consumer-visible information).
+MOE_EP_OP_NAME = "moe_ep"
+
+
+class MoeEpBenchmarkError(RuntimeError):
+    """One queued moe_ep benchmark case failed to execute.
+
+    ``layer_permissions.md``: a queued case is executed or raises. The executor
+    records this with its case parameters in ``errors_<module>.json``.
+    """
+
+
+def _measure_power_enabled() -> bool:
+    """Whether this run measures power (mirrors ``helper._parse_bool_env``).
+
+    The writer gates its power columns on this single per-run flag, so one
+    ``moe_ep_perf`` file always has one column set (``helper.log_perf`` writes
+    the CSV header from the first row it sees).
+    """
+    value = os.environ.get("COLLECTOR_MEASURE_POWER")
+    return False if value is None else value.lower() in ("true", "1", "yes")
+
+
+def _power_columns(power_stats) -> dict | None:
+    """D7: emit power only where the bench measures it, and never as 0.0.
+
+    Returns ``None`` (no power columns at all) when the run does not measure
+    power; otherwise the measured stats, or NaN when the sampler produced no
+    samples — an unknown, which is not the same fact as "idle at zero watts".
+    A present-but-null power column would crash ``load_moe_ep_data``.
+    """
+    if not _measure_power_enabled():
+        return None
+    if power_stats and power_stats.get("power") is not None:
+        return power_stats
+    return {"power": float("nan"), "power_limit": float("nan")}
+
+
+def _build_moe_ep_row(
+    *,
+    moe_dtype: str,
+    distribution: str,
+    inference_phase: str,
+    num_tokens: int,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    num_slots: int,
+    moe_tp_size: int,
+    moe_ep_size: int,
+    latency_ms: float,
+) -> dict:
+    """Build one unified ``moe_ep_perf`` payload row.
+
+    Column set and order are the consumer contract
+    (``sdk/operations/moe_comm.py::load_moe_ep_data``); the
+    ``framework/version/device/op_name/kernel_source`` prefix is added by
+    ``helper.log_perf``. ``latency`` is milliseconds — the loader stores the
+    column raw, unlike the microsecond-collected a2a table. Identical payload
+    to the sglang collector's ``_build_moe_ep_row``
+    (``collector/wideep/sglang/collect_deepep_moe.py``): one table, one schema.
+    """
+    return {
+        "moe_dtype": moe_dtype,
+        "distribution": distribution,
+        "inference_phase": inference_phase,
+        "num_tokens": int(num_tokens),
+        "hidden_size": int(hidden_size),
+        "inter_size": int(inter_size),
+        "topk": int(topk),
+        "num_experts": int(num_experts),
+        # EPLB redundancy axis, preserved exactly: num_slots > num_experts when
+        # redundant experts are enabled; num_slots == num_experts otherwise.
+        "num_slots": int(num_slots),
+        "moe_tp_size": int(moe_tp_size),
+        "moe_ep_size": int(moe_ep_size),
+        "latency": float(latency_ms),
+    }
+
+
+def _build_moe_ep_phase_rows(**row_kwargs) -> list[dict]:
+    """One measurement -> a ``context`` row and a ``generation`` row.
+
+    This benchmark measures one kernel invocation across the whole declared
+    token range with no prefill/decode split — the same fact the legacy
+    ``wideep_moe_perf`` table recorded phase-free. The unified table keys on
+    ``inference_phase``, and the PR-1 legacy adapter
+    (``moe_comm._adapt_legacy_trtllm_wideep_moe``) registers every legacy row
+    under BOTH phases; emitting both phases here keeps new-schema rows
+    key-identical to the adapted legacy rows for the same configs.
+    """
+    return [
+        _build_moe_ep_row(inference_phase=inference_phase, **row_kwargs)
+        for inference_phase in ("context", "generation")
+    ]
 
 
 def cleanup_empty_json_files(directory):
@@ -583,19 +689,38 @@ class WideEPMoEComputeSimulator(nn.Module):
 # =============================================================================
 # Test Cases Generation
 # =============================================================================
-def get_wideep_moe_compute_all_test_cases():
-    """
-    Generate all test cases for WideEP MoE compute with three EPLB modes.
+def get_moe_ep_test_cases():
+    """Declared large-EP MoE compute cases with three EPLB modes.
 
-    Three EPLB configurations:
+    Expands the ``model_case_values.moe`` rows marked ``wideep: true`` against
+    the shared ``cases/base_ops/moe.yaml`` grid — the same recipe source as
+    the sglang moe_ep getter. Filters, all counted and logged:
+
+    * ``wideep: true`` on the model's moe row — the op is declared for the model.
+    * ``power_law`` distribution only — the retired writer's scope, kept as-is
+      (the accurate WideEP simulation is built around per-rank power-law
+      routing draws).
+    * ``tp == 1 and ep > 1`` — the large-EP identity of this table.
+    * ``num_slots % ep == 0`` — universal math: slots shard evenly over ranks.
+
+    Three EPLB configurations per (recipe, quant mode):
     1. EPLB OFF: use_eplb=False, num_slots=num_experts
     2. EPLB ON (baseline): use_eplb=True, num_slots=num_experts
     3. EPLB ON (redundant): use_eplb=True, num_slots=288
 
+    The quant mode is an SM-gated invocation axis (fp8_block on Hopper, nvfp4
+    on Blackwell), same as the stock trtllm ``get_moe_test_cases``. There is
+    deliberately NO per-model quant-policy filter here: this benchmark drives
+    synthetic weights through the WideEPMoE compute path and the persisted key
+    carries no model column, so every (shape, dtype) point is honest
+    interpolation support — unlike the sglang moe_ep collector, which loads a
+    real checkpoint and therefore obeys the declared artifact policy.
+
     Notes:
     - Only uses cutlass kernel (no deepgemm)
     - Only uses min_latency_mode=False
-    - Only for DeepSeek-V3 model with power_law distribution
+
+    Emitted sorted (D5): (model, quant, ep, alpha, eplb, slots).
     """
     moe_list = []
     if get_sm_version() >= 90:
@@ -611,21 +736,28 @@ def get_wideep_moe_compute_all_test_cases():
     if get_sm_version() >= 100:
         moe_list += ["nvfp4"]  # SM100+ uses nvfp4
 
+    recipes = get_common_moe_test_cases()
+    dropped_not_declared = 0
+    dropped_not_power_law = 0
+    dropped_not_ep = 0
+    dropped_slot_alignment = 0
+    expanded = 0
     test_cases = []
 
-    for common_moe_testcase in get_common_moe_test_cases():
+    for common_moe_testcase in recipes:
         model_name = common_moe_testcase.model_name
         if not is_wideep_moe_model(model_name):
+            dropped_not_declared += 1
             continue
 
         # Only power_law distribution (skip balanced)
         if common_moe_testcase.token_expert_distribution != "power_law":
+            dropped_not_power_law += 1
             continue
 
         # WideEP requires: tp=1, ep>1, num_gpu>1
-        if common_moe_testcase.tp != 1:
-            continue
-        if common_moe_testcase.ep <= 1:
+        if common_moe_testcase.tp != 1 or common_moe_testcase.ep <= 1:
+            dropped_not_ep += 1
             continue
 
         num_experts = common_moe_testcase.num_experts
@@ -644,10 +776,12 @@ def get_wideep_moe_compute_all_test_cases():
         if num_experts <= 288:
             eplb_configs.append((True, 288))
 
+        expanded += len(moe_list) * len(eplb_configs)
         for moe_type in moe_list:
             for use_eplb, num_slots in eplb_configs:
                 # Skip if num_slots is not divisible by ep_size
                 if num_slots % ep_size != 0:
+                    dropped_slot_alignment += 1
                     continue
                 # The two rc5-era SM120 nvfp4 skips that lived here (nvfp4+eplb,
                 # and rank-owns-fewer-slots-than-topk) no longer reproduce:
@@ -678,13 +812,26 @@ def get_wideep_moe_compute_all_test_cases():
                     ]
                 )
 
+    # D5 sorted emission: non-token key axes first, deterministic regardless
+    # of the recipe product order.
+    test_cases.sort(key=lambda case: (case[10], case[0], case[8], case[12], case[13], case[14]))
+
+    kept_recipes = len(recipes) - dropped_not_declared - dropped_not_power_law - dropped_not_ep
+    print(
+        f"moe_ep: {len(test_cases)} cases from {len(recipes)} moe recipes "
+        f"(dropped: {dropped_not_declared} not declared wideep, "
+        f"{dropped_not_power_law} not power_law, {dropped_not_ep} not tp=1/ep>1 "
+        f"-> {kept_recipes} recipes kept) x {len(moe_list)} quant mode(s) x 2-3 EPLB configs "
+        f"(the 288-slot layout only exists when num_experts <= 288) "
+        f"= {expanded} expanded - {dropped_slot_alignment} num_slots%ep!=0"
+    )
     return test_cases
 
 
 # =============================================================================
 # Main Benchmark Function
 # =============================================================================
-def run_wideep_moe_compute(
+def run_moe_ep(
     moe_type,
     moe_kernel,
     num_tokens_lists,
@@ -848,9 +995,15 @@ def run_wideep_moe_compute(
         except Exception as e:
             print(f"[dry run] Failed for {max_tokens} tokens: {e}, trying smaller size...")
             if i == len(num_tokens_lists) - 1:
-                RuntimeError(f"dry run failed for {max_tokens} tokens: {e}")
-            else:
-                continue
+                # Execute-or-raise: not even the smallest declared token count
+                # ran, so the whole case fails classified instead of silently
+                # completing with zero rows (the retired code constructed this
+                # RuntimeError without raising it).
+                raise MoeEpBenchmarkError(
+                    f"moe_ep dry run failed for every declared token count "
+                    f"(moe_type={moe_type}, ep={moe_ep_size}, num_slots={num_slots}): {e}"
+                ) from e
+            continue
 
     # =========================================================================
     # AutoTuner
@@ -911,6 +1064,11 @@ def run_wideep_moe_compute(
     # =========================================================================
     for num_tokens in num_tokens_lists:
         if num_tokens > max_tokens:
+            # Runtime token-point drop, logged with its reason: the dry run
+            # above established that this token count cannot be allocated/run
+            # on this device. Drops one token point inside the queued case,
+            # never the case.
+            print(f"moe_ep: dropping num_tokens={num_tokens} because the dry run failed above {max_tokens} tokens")
             continue
 
         num_iter = 5 if distributed == "power_law" else 1
@@ -1083,38 +1241,40 @@ def run_wideep_moe_compute(
         # Simulation mode string
         sim_mode_str = "accurate" if accurate_wideep_simulation else "simple"
 
-        # Log performance
+        # The retired table's extras stay observable here in the log, not in
+        # the persisted row: moe_kernel / dp_num_tokens / rank0_num_tokens /
+        # simulation_mode are not in the unified consumer contract
+        # (load_moe_ep_data reads none of them).
+        print(
+            f"moe_ep[{source}] total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
+            f"kernel={moe_kernel}, latency={latency:.4f}ms, dist={dist_str}, mode={sim_mode_str}"
+        )
+
+        # Log performance: one measurement -> one row per inference phase
+        # (see _build_moe_ep_phase_rows). kernel_source stays the
+        # framework-dispatch ground truth recorded in `source`.
         log_perf(
-            item_list=[
-                {
-                    "moe_dtype": moe_type,
-                    "moe_kernel": moe_kernel,
-                    "num_tokens": num_tokens,  # Total tokens (input parameter)
-                    "dp_num_tokens": actual_dp_tokens,  # Tokens per DP rank (router input)
-                    "rank0_num_tokens": actual_rank0_tokens,  # Tokens actually computed by EP rank 0
-                    "hidden_size": hidden_size,
-                    "inter_size": inter_size,
-                    "topk": topk,
-                    "num_experts": num_experts,
-                    "num_slots": num_slots,
-                    "moe_tp_size": moe_tp_size,
-                    "moe_ep_size": moe_ep_size,
-                    "distribution": dist_str,
-                    "simulation_mode": sim_mode_str,
-                    "latency": latency,
-                }
-            ],
+            item_list=_build_moe_ep_phase_rows(
+                moe_dtype=moe_type,
+                distribution=dist_str,
+                num_tokens=num_tokens,  # Total tokens (input parameter)
+                hidden_size=hidden_size,
+                inter_size=inter_size,
+                topk=topk,
+                num_experts=num_experts,
+                num_slots=num_slots,
+                moe_tp_size=moe_tp_size,
+                moe_ep_size=moe_ep_size,
+                latency_ms=latency,
+            ),
             framework="TRTLLM",
             version=tensorrt_llm.__version__,
             device_name=torch.cuda.get_device_name(device),
-            op_name="wideep_moe" if not use_eplb else "wideep_moe_eplb",
+            op_name=MOE_EP_OP_NAME,
             kernel_source=source,
             perf_filename=perf_filename,
-            power_stats=power_stats,
+            power_stats=_power_columns(power_stats),
         )
-
-        # print(f"WideEP MOE Compute | total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
-        #       f"kernel={moe_kernel}, latency={latency:.3f}ms, dist={dist_str}, mode={sim_mode_str}")
 
         # Cleanup iteration
         if accurate_wideep_simulation:
@@ -1150,11 +1310,11 @@ def run_wideep_moe_compute(
 if __name__ == "__main__":
     from registry_types import PerfFile
 
-    all_test_cases = get_wideep_moe_compute_all_test_cases()
+    all_test_cases = get_moe_ep_test_cases()
 
-    print(f"Running {len(all_test_cases)} WideEP MOE compute test configurations...")
+    print(f"Running {len(all_test_cases)} moe_ep (WideEP MOE compute) test configurations...")
 
     for i, test_case in enumerate(all_test_cases):
         print(f"\nProgress: {i + 1}/{len(all_test_cases)}")
         print(f"  Config: moe_type={test_case[0]}, kernel={test_case[1]}, model={test_case[10]}, eplb={test_case[13]}")
-        run_wideep_moe_compute(*test_case, perf_filename=PerfFile.WIDEEP_MOE)
+        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EP)
