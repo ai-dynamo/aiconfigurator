@@ -472,7 +472,8 @@ class TestFPMStaticAndMixed:
         model, database, backend, isl, osl = fpm_session
         session = InferenceSession(model, database, backend)
         summary = session.run_static(
-            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl), mode="static_ctx"
+            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python"),
+            mode="static_ctx",
         )
         latency_dict = summary.get_context_latency_dict()
         assert list(latency_dict) == ["fpm_forward_prefill"]
@@ -485,7 +486,8 @@ class TestFPMStaticAndMixed:
         model, database, backend, isl, osl = fpm_session
         session = InferenceSession(model, database, backend)
         summary = session.run_static(
-            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl), mode="static_gen"
+            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python"),
+            mode="static_gen",
         )
         latency_dict = summary.get_generation_latency_dict()
         assert list(latency_dict) == ["fpm_forward_decode"]
@@ -496,7 +498,7 @@ class TestFPMStaticAndMixed:
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
         total, energy, per_op, per_src = backend._get_mix_step_latency(
             model, database, runtime_config, ctx_tokens=isl, gen_tokens=2, isl=isl, osl=osl, prefix=0
         )
@@ -520,7 +522,7 @@ class TestFPMStaticAndMixed:
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
         total, _energy, per_op, _src = backend._get_genonly_step_latency(
             model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )
@@ -535,7 +537,7 @@ class TestFPMStaticAndMixed:
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
         total, energy, per_op, _ = backend._get_genonly_step_latency(
             model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )

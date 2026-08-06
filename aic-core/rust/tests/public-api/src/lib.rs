@@ -79,7 +79,11 @@ mod tests {
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
         assert_eq!(ENGINE_CONFIG_SCHEMA_VERSION, 1);
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 5);
+        // v5: MlaModuleOp gained native_num_heads (#1458).
+        // v6: Kda op variant appended (Kimi-K3; renumbered at the merge).
+        // v7: FpmForward whole-model variant appended (renumbered at the
+        // merge from a concurrent claim of v5).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 7);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

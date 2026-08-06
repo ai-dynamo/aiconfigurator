@@ -161,7 +161,7 @@ mod tests {
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
         Dsv4ModuleOp,
         ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-        GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+        GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
         NcclOp, P2POp, TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp,
         WideEpGenerationMlaOp, WideEpMoeOp,
     };
@@ -274,6 +274,7 @@ mod tests {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Fp8,
             gemm_quant_mode: GemmQuantMode::Fp8Block,
+            native_num_heads: Some(128),
         }
     }
 
@@ -503,6 +504,22 @@ mod tests {
         }
     }
 
+    fn kda() -> KdaOp {
+        KdaOp {
+            name: "kda".into(),
+            scale_factor: 1.0,
+            kernel_source: "fused_sigmoid_gating_delta_rule_update".into(),
+            phase: "verify".into(),
+            d_model: 7168,
+            d_conv: 4,
+            num_k_heads: 16,
+            head_k_dim: 128,
+            num_v_heads: 16,
+            head_v_dim: 128,
+            draft_tokens: 4,
+        }
+    }
+
     fn wideep_context_mla() -> WideEpContextMlaOp {
         WideEpContextMlaOp {
             name: "wideep_context_mla".into(),
@@ -649,6 +666,8 @@ mod tests {
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
+            // Appended at the very end (schema_version 5: Kda variant).
+            OpSpec::Kda(kda()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -688,7 +707,8 @@ mod tests {
                 | OpSpec::FpmForward(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
-                | OpSpec::Dsv4MegaMoe(_) => {}
+                | OpSpec::Dsv4MegaMoe(_)
+                | OpSpec::Kda(_) => {}
             }
         }
         ops
@@ -750,6 +770,23 @@ mod tests {
         let bytes = bincode::serialize(&op).unwrap();
         let decoded: OpSpec = bincode::deserialize(&bytes).unwrap();
         assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn mla_module_none_native_round_trips_followed_by_another_op() {
+        // native_num_heads=None must still be serialized (no skip_serializing_if):
+        // bincode decodes positionally, so an omitted Option would desync the
+        // ops decoded after it (#1458 review).
+        let mut none_native = mla_module();
+        none_native.native_num_heads = None;
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::MlaModuleContext(none_native), OpSpec::Gemm(gemm())],
+            vec![OpSpec::MlaModuleGeneration(mla_module()), OpSpec::Moe(moe())],
+        );
+        let bytes = spec.to_bincode().expect("to_bincode");
+        let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
+        assert_eq!(spec, decoded);
     }
 
     #[test]

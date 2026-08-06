@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.1.dev19262
+tables:
+  # SM89 (L40S) vllm kda data from the 2026-08-01 wave-1 campaign
+  # (aic-auto-collector pipeline 60591349, job 381312867, collect_kda.py
+  # byte-identical from the collection revision to ingest time). Image
+  # vllm/vllm-openai@sha256:e90e2603 (the manifest kda-family pin).
+  # 1145 rows; SM89 designed lane substitution: prefill runs
+  # chunk_kda_with_fused_gate (no FlashKDA kernel below SM90) and there
+  # is no fused_kda_decode CUDA fast path (ptxas rejects
+  # mbarrier.try_wait.parity below sm_90) — decode is the Triton
+  # conv-update + packed recurrence pair, mirroring serving's fallback.
+  # Run on the probe revision b9f8c47c (= PR head + unverified_sms lift
+  # only); this ingest is the verification evidence lifting SM89.
+  # Classified cell failures: 20 context cells at the causal_conv1d
+  # int32 token-offset overflow guard (total_tokens * proj >= 2**31) +
+  # 1 generation Triton bs=1024 grid limit — the identical deterministic
+  # spectrum observed on all eight systems.
+  kda_perf:
+    status: complete

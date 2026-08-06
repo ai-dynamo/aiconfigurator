@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: kda
+description: >
+  Base collector v2 cases for kda (Kimi Delta Attention, Kimi-K3 linear
+  attention layers). Batch/seq sweeps mirror gdn; structural shapes come
+  exclusively from per-model model_case_values.kda rows (no synthetic
+  default shapes). verify_draft_token_nums is the speculative-decode
+  target-verify width sweep (tokens per request = dspark block size + 1).
+common_case_values:
+  kda:
+    context_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    context_sequence_lengths:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    - 8192
+    - 16384
+    - 32768
+    generation_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    verify_batch_sizes:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    verify_draft_token_nums:
+    - 2
+    - 4
+    - 8

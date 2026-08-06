@@ -354,3 +354,164 @@ def grid_from_reference(
         return get_grid(identity_key, build_reference_grid)
     except (PerfDataNotAvailableError, InterpolationDataNotAvailableError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Quant-transfer primitive: ONE borrow mechanism, labels derived from the
+# selected reference's relation to the query quant.
+#
+#     latency(query) = SOL_query / (util_borrowed * e(profile_query)/e(profile_ref))
+#
+# The correction ratio is IDENTICALLY 1 within a (memory, compute) profile
+# (both lookups hit the same level-table row), so the labels are confidence
+# bands over one mechanism, not three mechanisms:
+#
+# - xshape:   same quant, another slice -> trust follows from kernel identity.
+# - xquant:   same profile -> trust follows from SOL-coefficient identity
+#             (no calibrated constant involved; the level table is not read).
+# - xprofile: cross profile -> trust rests on the calibrated per-profile
+#             util-LEVEL ratio. Last resort, lowest confidence.
+#
+# Reference preference is lexicographic (relation rank, profile distance,
+# slice-feature distance), realised as the historical tier flow so MoE's
+# established selection semantics (and its Rust parity oracles) are preserved
+# bit-for-bit: xshape/xquant candidates are POOLED and resolved by nearest
+# slice features; xprofile walks quants nearest-profile-first (stable ties =
+# table/file order) and takes the first with data.
+# ---------------------------------------------------------------------------
+
+
+def quant_profile(quant) -> tuple[float, float]:
+    """The (memory, compute) profile of a quant enum member — the key of the
+    per-op util-LEVEL tables and the equality that separates xquant from
+    xprofile."""
+    return (quant.value.memory, quant.value.compute)
+
+
+def xprofile_quant_order(query_quant, table_quants, *, prefer_same_compute: bool = False) -> list:
+    """Collected quants with a DIFFERENT (memory, compute) profile than the
+    query, nearest-profile first (the stable sort keeps table/file insertion
+    order on distance ties). Same-profile quants belong to the xquant
+    relation and are excluded here.
+
+    Two distance metrics, chosen per op:
+
+    - default (``prefer_same_compute=False``): ``|Δmemory| + |Δcompute|`` —
+      MoE's historical L1 metric, kept as-is (its level ratios were validated
+      under this ordering; changing it would silently reshuffle existing
+      MoE selections).
+    - ``prefer_same_compute=True``: lexicographic ``(|Δcompute|, |Δmemory|)``
+      — for ops where the COMPUTE factor (activation precision) determines
+      the kernel's compute family and the memory factor only scales the
+      weight fetch. Dense GEMM is the motivating case: a weight-only quant
+      (w4a16/w8a16, compute=1) runs bf16 MMA after fused dequant, so its
+      util curve family follows bfloat16's — under plain L1 such a quant
+      TIES between bfloat16 and fp8 (e.g. (0.5625, 1): both at 1.4375) and
+      the reference would be a file-order lottery.
+    """
+    qp = quant_profile(query_quant)
+
+    def l1(q):
+        p = quant_profile(q)
+        return abs(p[0] - qp[0]) + abs(p[1] - qp[1])
+
+    def compute_first(q):
+        p = quant_profile(q)
+        return (abs(p[1] - qp[1]), abs(p[0] - qp[0]))
+
+    return sorted(
+        (q for q in table_quants if q is not query_quant and quant_profile(q) != qp),
+        key=compute_first if prefer_same_compute else l1,
+    )
+
+
+def quant_transfer_grid(
+    op_tag: str,
+    slice_key: tuple,
+    query_features: Coords,
+    policy,
+    query_quant,
+    table,
+    collect: Callable,
+    util_level: Callable[[object], float],
+    depth: int,
+    selection_key,
+    *,
+    prefer_same_compute: bool = False,
+):
+    """Resolve a borrowed util grid for a quant with no own-slice data
+    (semantics in the block comment above).
+
+    ``slice_key`` identifies the query slice inside every grid cache key
+    (prefixed by ``op_tag``). ``query_features`` are the coords for
+    nearest-candidate matching in the pooled xshape/xquant selection — ops
+    without categorical slice axes pass a constant, degrading it to
+    first-in-table-order. ``table`` is the op's quant-keyed data mapping
+    (usually a ``LoadedOpData``): membership/getitem may raise the typed
+    ``PerfDataNotAvailableError`` and is accessed only inside guarded
+    regions; plain iteration yields quants in file first-seen order.
+    ``collect(ref_quant, sol_quant, provenance)`` enumerates a quant's
+    :class:`ReferenceCandidate` list — ``sol_quant`` is the QUERY quant for
+    same-profile relations and the REFERENCE quant for cross-profile; a
+    structurally empty relation class returns ``[]`` (e.g. GEMM for
+    ``"xshape"``). ``util_level(quant)`` is the op's per-profile level
+    e(q), consumed only as the xprofile ratio.
+
+    Returns ``(grid, util_scale, provenance)``: ``grid`` may be ``None`` or
+    empty (the caller's :func:`estimate` then raises the typed empirical
+    miss), ``util_scale`` is 1.0 except for a cross-profile borrow, and
+    ``provenance`` is the relation label that produced the samples (``None``
+    when nothing usable was found).
+    """
+    from aiconfigurator_core.sdk import common
+
+    util_scale = 1.0
+    prov = None
+
+    def _pooled_candidates():
+        # Relation ranks 1+2 in ONE selection: xshape candidates win outright
+        # when any exist; only an empty xshape set falls through to pooled
+        # same-profile xquant siblings resolved by nearest slice features.
+        cands = (
+            collect(query_quant, query_quant, "xshape")
+            if (common.TransferKind.XSHAPE in policy and query_quant in table)
+            else []
+        )
+        if cands:
+            return cands
+        if common.TransferKind.XQUANT in policy:
+            qp = quant_profile(query_quant)
+            for q in table:
+                if q is query_quant or quant_profile(q) != qp:
+                    continue
+                cands.extend(collect(q, query_quant, "xquant"))
+        return cands
+
+    grid = grid_from_reference(
+        (f"{op_tag}_pooled", *slice_key),  # pooled xshape+xquant selection
+        query_features,
+        _pooled_candidates,
+        depth=depth,
+        selection_key=selection_key,
+    )
+    if grid is not None and grid.samples and grid.reference_provenance:
+        prov = grid.reference_provenance
+
+    # Relation rank 3: cross-profile, nearest-profile-first, first quant with
+    # data wins (slice features only break ties WITHIN the chosen quant).
+    if (grid is None or not grid.samples) and common.TransferKind.XPROFILE in policy:
+        for ref_q in xprofile_quant_order(query_quant, table, prefer_same_compute=prefer_same_compute):
+            g = grid_from_reference(
+                (f"{op_tag}_xprofile", *slice_key, ref_q.name),
+                query_features,
+                (lambda _rq=ref_q: collect(_rq, _rq, "xprofile")),
+                depth=depth,
+                selection_key=selection_key,
+            )
+            if g is not None and g.samples:
+                grid = g
+                util_scale = util_level(query_quant) / util_level(ref_q)
+                prov = "xprofile"
+                break
+
+    return grid, util_scale, prov

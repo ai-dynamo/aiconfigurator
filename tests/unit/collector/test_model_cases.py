@@ -655,7 +655,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    assert len(moe_cases) == 4911
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
+    assert len(moe_cases) == 5025
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -668,8 +669,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
-    assert len(get_context_mla_case_specs()) == 220
-    assert len(get_generation_mla_case_specs()) == 362
+    # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
+    # expanding the MLA spec grids.
+    assert len(get_context_mla_case_specs()) == 330
+    assert len(get_generation_mla_case_specs()) == 543
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
@@ -753,6 +756,33 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
     for backend in ("sglang", "trtllm"):
         plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K2.5")
         assert required_ops <= plan.selected_ops
+
+
+def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
+    # K3 has no trtllm serving lane. moe activation is framework-specific
+    # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
+    # planned-op zero-case expansion with no logged drop is structurally
+    # impossible (case_authoring.md; review 2026-08-04).
+    for backend in ("sglang", "vllm"):
+        plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K3")
+        assert "moe" in plan.selected_ops, backend
+    trtllm_plan = build_collection_case_plan(backend="trtllm", model_path="moonshotai/Kimi-K3")
+    assert "moe" not in trtllm_plan.selected_ops
+
+    # Cross-model trtllm sweeps (getter runs with no model filter) still see
+    # the K3 moe row: the declared empty trtllm allowlist rejects EVERY mode,
+    # and the trtllm getter logs the fully-dropped model instead of silently
+    # expanding to zero.
+    from collector.case_generator import get_moe_quantization_modes, moe_model_allows_quantization
+
+    modes = get_moe_quantization_modes(
+        "trtllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    )
+    assert modes  # the sweep itself is non-empty
+    for mode in modes:
+        assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K3", mode), mode
 
 
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
@@ -852,8 +882,10 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
     pre_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_pre")
     post_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_post")
 
-    assert len(pre_cases) == 400
-    assert len(post_cases) == 448
+    # 600/672 since the Kimi-K3 96-head family (96/48/24/12) joined the
+    # base head_counts grid alongside the DeepSeek 128-family (2026-08-02).
+    assert len(pre_cases) == 600
+    assert len(post_cases) == 672
     assert pre_cases[0] == MLABMMCommonTestCase(
         num_tokens=1,
         num_heads=128,
@@ -893,6 +925,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         apply_model_filter=False,
     )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    trtllm_specs = get_mla_module_model_specs(backend="trtllm")
     vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -1003,20 +1036,23 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
         ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
+    assert trtllm_specs == vllm_specs
 
 
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 
-    for model_path, attention_type, architecture in (
-        ("nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+    for backend, model_path, attention_type, architecture in (
+        ("trtllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("trtllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+        ("vllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        specs = get_mla_module_model_specs(attention_type=attention_type, backend="vllm")
+        specs = get_mla_module_model_specs(attention_type=attention_type, backend=backend)
         assert [(spec.model_path, spec.architecture) for spec in specs] == [(model_path, architecture)]
 
 
@@ -1181,7 +1217,10 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_generation",
         "moe",
     ]
+    # TRT-LLM 1.3.0rc20 serves the full K2.5 VLM including MoonViT3d, so the
+    # trtllm plan carries the vision encoder_attention profile like vLLM.
     assert build_collection_case_plan(backend="trtllm", model_path=kimi_path).ops == [
+        "encoder_attention",
         "gemm",
         "mla_bmm_gen_post",
         "mla_bmm_gen_pre",
@@ -1267,7 +1306,7 @@ def test_full_mode_ops_are_a_union_of_model_plan_ops():
             assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
 
 
-def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
+def test_mla_module_metadata_canonicalizes_consumer_keyed_backends():
     from collector.case_generator import get_mla_module_model_specs
 
     original_artifacts = {
@@ -1282,13 +1321,40 @@ def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
             for spec in get_mla_module_model_specs(
                 attention_type="mla",
                 backend=backend,
-                apply_model_filter=backend == "vllm",
+                apply_model_filter=backend in {"trtllm", "vllm"},
             )
         }
 
     assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
     assert paths("sglang") == original_artifacts
-    assert paths("trtllm") == original_artifacts
+    assert paths("trtllm") == {"deepseek-ai/DeepSeek-V3"}
+
+
+def test_trtllm_mla_module_getter_requests_backend_canonicalization():
+    from types import SimpleNamespace
+
+    source_path = REPO_ROOT / "collector/trtllm/collect_mla_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_module_test_cases"
+    )
+    calls = []
+
+    def get_model_specs(**kwargs):
+        calls.append(kwargs)
+        return [SimpleNamespace(model_path="deepseek-ai/DeepSeek-V3")]
+
+    namespace = {
+        "get_context_test_cases": lambda _attention_type: [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16"]],
+        "get_generation_test_cases": lambda _attention_type: [],
+        "get_mla_module_model_specs": get_model_specs,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    cases = namespace["_build_module_test_cases"]("mla", "context")
+
+    assert calls == [{"attention_type": "mla", "backend": "trtllm"}]
+    assert cases == [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16", "deepseek-ai/DeepSeek-V3", "mla"]]
 
 
 def test_support_matrix_models_have_model_case_aliases():

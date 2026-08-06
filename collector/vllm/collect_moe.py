@@ -1,15 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM 0.24.0 production-path MoE collector.
+"""vLLM production-path MoE collector.
 
 Shared MoE cases come from YAML. Every quantization mode is built through
 ``FusedMoE`` so vLLM owns routing, TP/EP sharding, weight post-processing, and
 backend selection exactly as it does for model execution.
+
+Runtime: stock vLLM v0.24.0 (owner decision 2026-08-02, reverting the
+2026-08-01 family-wide preview pin — a temporary build must not own a
+family default). K3 SITU cases collect on stock via the owner-approved
+situ-as-silu Marlin approximation (2026-08-02): serving truth for the
+ct-mxfp4+situ checkpoint is MarlinExperts W4A16 on every SM (the preview
+build's CUTLASS activation whitelist rejects SITU), so the collector
+forces the same Marlin selection on stock, runs the elementwise epilogue
+as silu (<~3% of the op), and marks the rows' kernel_source with
+`_situ_as_silu`. On the preview build itself the betas pass through
+natively. Re-verify at every version bump: when upstream wires SITU into
+a quantized-activation kernel (the preview already carries an unwired
+trtllm-gen SITU mapping), the serving kernel class changes and this
+approximation must be retired.
 """
 
 __compat__ = "vllm==0.24.0"
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -61,6 +76,11 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     use_grouped_topk = model_type in {
         "deepseek_v3",
         "kimi_k2",
+        # Kimi-K3 (kimi_linear): config declares use_grouped_topk=true with
+        # one expert group (num_expert_group=1, topk_group=1, noaux_tc), and
+        # the kimi-k3 branch model honors the flag directly
+        # (models/kimi_k3/nvidia/model.py:411-413 @ 0.1.dev19262).
+        "kimi_linear",
         "mimo_v2_flash",
         "glm_moe_dsa",
         "nemotron_h",
@@ -111,11 +131,19 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         activation = f"{activation}_no_mul"
 
     if use_grouped_topk:
-        missing_fields = [field for field in ("n_group", "topk_group") if model_config.get(field) is None]
+        # DeepSeek-family configs spell the group count `n_group`; Kimi-K3
+        # (kimi_linear) spells it `num_expert_group`, which is the attribute
+        # the branch model reads (models/kimi_k3/nvidia/model.py:412).
+        raw_n_group = model_config.get("n_group", model_config.get("num_expert_group"))
+        missing_fields = [
+            field
+            for field, value in (("n_group", raw_n_group), ("topk_group", model_config.get("topk_group")))
+            if value is None
+        ]
         if missing_fields:
             raise ValueError(f"vLLM grouped-topk model {model_name!r} is missing {', '.join(missing_fields)}")
         try:
-            num_expert_group = int(model_config["n_group"])
+            num_expert_group = int(raw_n_group)
             topk_group = int(model_config["topk_group"])
         except (TypeError, ValueError) as error:
             raise ValueError(f"vLLM grouped-topk model {model_name!r} requires integer group fields") from error
@@ -132,6 +160,13 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "renormalize": renormalize,
         "scoring_func": scoring_func,
         "activation": activation,
+        # SiTU (Kimi-K3) is parameterized: FusedMoE requires the betas when
+        # activation == "situ" (the TRTLLM experts assert beta > 0; the
+        # marlin epilogue reads both). Sourced from the packaged config.
+        "activation_situ_beta": (model_config.get("activation_situ_beta") if activation == "situ" else None),
+        "activation_situ_linear_beta": (
+            model_config.get("activation_situ_linear_beta") if activation == "situ" else None
+        ),
         "routed_scaling_factor": float(model_config.get("routed_scaling_factor") or 1.0),
         "swiglu_limit": model_config.get("swiglu_limit") if model_type in ("deepseek_v4", "deepseek_ref") else None,
         "use_grouped_topk": use_grouped_topk,
@@ -373,7 +408,26 @@ def run_moe_torch(
             weight_block_size=[128, 128],
         )
     elif moe_type == "w4a16_mxfp4":
-        quant_config = Mxfp4Config()
+        checkpoint_qc = _load_model_moe_config(model_name).get("quantization_config") or {}
+        is_ct_mxfp4 = checkpoint_qc.get("quant_method") == "compressed-tensors" and "mxfp4" in str(
+            checkpoint_qc.get("format", "")
+        )
+        if is_ct_mxfp4:
+            # Kimi-K3-style compressed-tensors mxfp4-pack checkpoints: vLLM
+            # resolves this descriptor to CompressedTensorsW4A4Mxfp4MoEMethod
+            # (compressed_tensors_moe.py:66-71 @0.1.dev19262). Its CUTLASS
+            # W4A4 path rejects the SITU activation
+            # (CutlassExpertsMxfp4._supports_activation, cutlass_moe.py:
+            # 321-327 — SILU/GELU/GELU_TANH/SWIGLUOAI only), so the method
+            # falls back to weight-only MarlinExperts, which supports SITU
+            # (compressed_tensors_moe_w4a4_mxfp4.py:58-71) — the w4a16
+            # identity this lane persists. Constructing the checkpoint's own
+            # config (instead of the OCP Mxfp4Config) lets that selection run
+            # exactly as serving; OCP mxfp4 checkpoints (gpt-oss family) keep
+            # the Mxfp4Config path below.
+            quant_config = CompressedTensorsConfig.from_config(checkpoint_qc)
+        else:
+            quant_config = Mxfp4Config()
     elif moe_type == "w4a8_mxfp4_mxfp8":
         # Native DeepSeek-V4 (expert_dtype=fp4) serving path: vLLM overrides
         # the checkpoint's fp8 quant_method to DeepseekV4FP8Config
@@ -471,7 +525,57 @@ def run_moe_torch(
     # one physical rank, but requested logical sizes determine local weights
     # and the rank-0 expert map exactly as in a multi-rank model.
     logical_parallel_size = moe_ep_size if moe_ep_size > 1 else moe_tp_size
-    with set_current_vllm_config(vllm_config):
+
+    # SITU activation (Kimi-K3) exists only on the kimi-k3 preview build
+    # (stock v0.24.0 has no situ path — upstream v0.24.0 activation.py).
+    # Probe the constructor instead of predicting: on the preview build,
+    # pass the betas through. On stock, apply the owner-approved
+    # approximation (2026-08-02): serving truth for (ct-mxfp4, situ) is
+    # MarlinExperts weight-only W4A16 — the preview rejects SITU in its
+    # CUTLASS activation whitelist and falls to Marlin
+    # (compressed_tensors_moe_w4a4_mxfp4.py:58-71 @0.1.dev19262). Stock's
+    # device-only gate would instead send this checkpoint to CUTLASS W4A4
+    # on Blackwell (cutlass_moe.py:693-699 @v0.24.0) — a kernel K3 serving
+    # never runs — so the CUTLASS gate is forced off to reproduce the
+    # serving selection, and the epilogue runs as silu (silu_and_mul vs
+    # situ_and_mul is an elementwise tail, <~3% of the op). The
+    # approximation is recorded in kernel_source (`_situ_as_silu` suffix)
+    # and hard-checked below: it is only valid if Marlin actually ran.
+    situ_kwargs = {}
+    situ_marlin_approx = False
+    if runtime_config["activation"] == "situ":
+        from inspect import signature as _sig
+
+        if "activation_situ_beta" in _sig(FusedMoE.__init__).parameters:
+            situ_kwargs = {
+                "activation_situ_beta": runtime_config["activation_situ_beta"],
+                "activation_situ_linear_beta": runtime_config["activation_situ_linear_beta"],
+            }
+        else:
+            runtime_config["activation"] = "silu"
+            situ_marlin_approx = True
+
+    @contextlib.contextmanager
+    def _serving_truth_marlin_selection():
+        """Force the Marlin selection K3 serving makes for situ checkpoints.
+
+        On Hopper this is a no-op (stock's device gate already excludes
+        CUTLASS mxfp4 below SM100)."""
+        if not situ_marlin_approx:
+            yield
+            return
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
+
+        orig = CutlassExpertsMxfp4.__dict__["_supports_current_device"]
+        CutlassExpertsMxfp4._supports_current_device = staticmethod(lambda: False)
+        try:
+            yield
+        finally:
+            CutlassExpertsMxfp4._supports_current_device = orig
+
+    with set_current_vllm_config(vllm_config), _serving_truth_marlin_selection():
         moe_module = FusedMoE(
             num_experts=num_experts,
             top_k=topk,
@@ -497,6 +601,7 @@ def run_moe_torch(
             activation=runtime_config["activation"],
             router_logits_dtype=router_logits_dtype,
             apply_routed_scale_to_output=runtime_config["apply_routed_scale_to_output"],
+            **situ_kwargs,
         )
         moe_module.to(device)
         moe_module.eval()
@@ -521,7 +626,32 @@ def run_moe_torch(
                     parameter.zero_()
 
         quant_method = routed_experts.quant_method
-        quant_method.process_weights_after_loading(routed_experts)
+        # API-compat shim for stock v0.24.0 Marlin weight prep under EP:
+        # prepare_moe_fp4_layer_for_marlin sizes its repack loop and shape
+        # assert from moe_config.num_experts (GLOBAL), while create_weights
+        # shards the expert dimension locally (marlin_utils_fp4.py:460-481
+        # @v0.24.0: e=moe_config.num_experts vs w13 created with the local
+        # count). The preview build preps EP-local weights fine (972 EP
+        # rows collected there). Present the local count during weight prep
+        # only, then restore the global count — routing needs it. Metadata
+        # presentation only; the invoked kernels are unchanged.
+        _mc = getattr(routed_experts, "moe_config", None)
+        _local_e = getattr(routed_experts, "num_experts", None)
+        _swap = situ_marlin_approx and _mc is not None and _local_e is not None and _mc.num_experts != _local_e
+        if _swap:
+            _global_e = _mc.num_experts
+            try:
+                _mc.num_experts = _local_e
+            except AttributeError:
+                object.__setattr__(_mc, "num_experts", _local_e)
+        try:
+            quant_method.process_weights_after_loading(routed_experts)
+        finally:
+            if _swap:
+                try:
+                    _mc.num_experts = _global_e
+                except AttributeError:
+                    object.__setattr__(_mc, "num_experts", _global_e)
 
         selected_backend = None
         for backend_attr in (
@@ -569,6 +699,17 @@ def run_moe_torch(
             print(f"vLLM MoE experts: wrapper={wrapper_name} leaf={experts_name}")
             source = f"vllm_{method_name}_{backend_name}_{experts_name}".lower()
             source = source.replace(" ", "_").replace("-", "_")
+            if situ_marlin_approx:
+                # The situ->silu approximation is only valid on the Marlin
+                # path serving actually selects; anything else is wrong data.
+                if "marlin" not in experts_name.lower():
+                    raise RuntimeError(
+                        f"situ-as-silu approximation requires MarlinExperts "
+                        f"(serving truth for ct-mxfp4+situ), but the runtime "
+                        f"selected {experts_name} despite the forced CUTLASS "
+                        f"gate — refusing to record mislabeled rows."
+                    )
+                source += "_situ_as_silu"
 
             num_iter = 5 if distributed == "power_law" else 1
             logits_dtype = router_logits_dtype or torch.bfloat16

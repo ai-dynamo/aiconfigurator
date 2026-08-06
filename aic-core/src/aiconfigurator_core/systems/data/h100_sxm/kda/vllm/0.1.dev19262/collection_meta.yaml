@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.1.dev19262
+tables:
+  # SM90 (H100) vllm kda data from the 2026-08-01 wave-1 campaign
+  # (aic-auto-collector pipeline 60591225, job 381311649, collect_kda.py
+  # byte-identical from the collection revision to ingest time). Image
+  # vllm/vllm-openai@sha256:e90e2603 (the manifest kda-family pin).
+  # 1203 rows; all six serving kernel paths, lane structure identical
+  # to the Blackwell systems.
+  # Classified cell failures: 20 context cells at the causal_conv1d
+  # int32 token-offset overflow guard (total_tokens * proj >= 2**31) +
+  # 1 generation Triton bs=1024 grid limit — the identical deterministic
+  # spectrum observed on all eight systems.
+  kda_perf:
+    status: complete

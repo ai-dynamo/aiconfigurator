@@ -22,7 +22,7 @@ use crate::operators::{
     Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, GdnOp, GemmOp,
     GenerationAttentionOp,
-    GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
     MsaModuleOp, TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
@@ -136,11 +136,6 @@ pub enum Op {
     /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
     /// subclass, NOT a `MoEDispatch` flavor.
     WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
-    /// Whole-model forward pass (Python `forward_model="fpm"`): with the FPM
-    /// rewrite each phase op list is exactly one of these, answering from the
-    /// collected `fpm_forward_perf` cells instead of a granular composition.
-    /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
-    FpmForward(FpmForwardOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -161,6 +156,21 @@ pub enum Op {
     /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
     /// variants mid-enum.
     Dsv4MegaMoe(Dsv4MegaMoeOp),
+    /// Kimi Delta Attention (KDA) kernel for Kimi-K3 linear_attention
+    /// layers — Python `KDAKernel` (a `GDNKernel` subclass with a distinct
+    /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
+    /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
+    /// `Dsv4MegaMoe`); the new serialized variant bumped
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5 (renumbered to 6 at its merge).
+    Kda(KdaOp),
+    /// Whole-model forward pass (Python `forward_model="fpm"`): with the FPM
+    /// rewrite each phase op list is exactly one of these, answering from the
+    /// collected `fpm_forward_perf` cells instead of a granular composition.
+    /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
+    /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
+    /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
+    /// renumbered to 7 at the merge.
+    FpmForward(FpmForwardOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -242,6 +252,7 @@ impl Op {
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
+            Op::Kda(o) => &o.name,
         }
     }
 
@@ -402,6 +413,9 @@ impl Op {
             // same `x`); the megamoe table is indexed by local-rank tokens
             // and the op must NOT re-multiply by attention_dp_size.
             Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
+            // Like Gdn: the op derives its phase coordinates internally
+            // (verify divides the (nextn+1)-scaled batch by draft_tokens).
+            Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
         }
     }
 }

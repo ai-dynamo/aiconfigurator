@@ -48,12 +48,16 @@ fn _build_smoke() -> u32 {
 }
 
 /// Cached handles to the canonical SDK exception classes
-/// (`aiconfigurator.sdk.errors`). Filled lazily on first use so importing the
+/// (`aiconfigurator_core.sdk.errors` — the CORE namespace: the standalone
+/// aiconfigurator-core wheel intentionally ships without the upper
+/// `aiconfigurator` package, whose errors module is a pure alias of the core
+/// one anyway). Filled lazily on first use so importing the
 /// extension never imports the sdk (the sdk imports aiconfigurator_core — an
 /// eager import here would be a cycle), and left empty in pure-Rust contexts
 /// where the sdk is not installed (fallback to `PyValueError`).
 static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static MISSING_SYSTEM_FLOPS_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 
 /// Resolve (and memoize) one sdk error class; `None` when the sdk is not
 /// importable, so the caller falls back to `PyValueError`.
@@ -64,7 +68,7 @@ fn sdk_error_type(
 ) -> Option<Py<PyType>> {
     cell.get_or_try_init(py, || -> PyResult<Py<PyType>> {
         Ok(py
-            .import("aiconfigurator.sdk.errors")?
+            .import("aiconfigurator_core.sdk.errors")?
             .getattr(name)?
             .downcast_into::<PyType>()?
             .unbind())
@@ -79,12 +83,15 @@ fn sdk_error_type(
 /// Typed mapping so Python-side classifiers keep working across the FFI:
 /// * missing-perf-data errors (`AicError::PerfDatabase` / `Io` — the
 ///   `is_missing_perf_data` set) raise the canonical
-///   `aiconfigurator.sdk.errors.PerfDataNotAvailableError`, so
+///   `aiconfigurator_core.sdk.errors.PerfDataNotAvailableError`, so
 ///   `perf_database.has_perf_data_not_available_cause` recognizes rust-path
 ///   data misses;
 /// * `AicError::EmpiricalNotImplemented` raises
-///   `aiconfigurator.sdk.errors.EmpiricalNotImplementedError` (the typed
+///   `aiconfigurator_core.sdk.errors.EmpiricalNotImplementedError` (the typed
 ///   HYBRID/EMPIRICAL coverage miss);
+/// * `AicError::MissingSystemFlops` raises
+///   `aiconfigurator_core.sdk.errors.MissingSystemFlopsError` (strict per-dtype
+///   `*_tc_flops` resolution — a `ValueError` subclass on the Python side);
 /// * everything else stays `PyValueError`.
 ///
 /// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
@@ -94,7 +101,12 @@ fn aic_to_py(e: AicError) -> PyErr {
     let sdk_class: Option<(&'static GILOnceCell<Py<PyType>>, &str)> = if e.is_missing_perf_data() {
         Some((&PERF_DATA_NOT_AVAILABLE_ERROR, "PerfDataNotAvailableError"))
     } else if matches!(e, AicError::EmpiricalNotImplemented(_)) {
-        Some((&EMPIRICAL_NOT_IMPLEMENTED_ERROR, "EmpiricalNotImplementedError"))
+        Some((
+            &EMPIRICAL_NOT_IMPLEMENTED_ERROR,
+            "EmpiricalNotImplementedError",
+        ))
+    } else if matches!(e, AicError::MissingSystemFlops(_)) {
+        Some((&MISSING_SYSTEM_FLOPS_ERROR, "MissingSystemFlopsError"))
     } else {
         None
     };
@@ -1300,7 +1312,7 @@ mod tests {
     fn aic_to_py_maps_typed_errors_to_sdk_classes() {
         py_init();
         Python::with_gil(|py| {
-            let sdk_available = py.import("aiconfigurator.sdk.errors").is_ok();
+            let sdk_available = py.import("aiconfigurator_core.sdk.errors").is_ok();
 
             let check = |err: AicError, sdk_name: &str| {
                 let pyerr = aic_to_py(err);

@@ -29,8 +29,15 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   indices after `DsaGeneration` shifted). The MSA insertion and #1405
 //   each claimed version 3 on their own branch, so their merge needed a
 //   fresh number.
-// - 5: `Op::FpmForward` whole-model variant added (forward_model="fpm").
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 5;
+// - 5 (PR #1460): MlaModuleOp gained `native_num_heads: Option<u32>`
+//   (#1458) — a bincode op-layout change.
+// - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
+//   branch concurrently with #1460, so the merge renumbered it (same
+//   precedent as the v3/v4 collision above).
+// - 7: `Op::FpmForward` whole-model variant added (forward_model="fpm").
+//   Claimed version 5 concurrently with #1460/#1435; renumbered at the
+//   merge.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

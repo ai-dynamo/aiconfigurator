@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from collections import OrderedDict
 from importlib import resources as pkg_resources
 from pathlib import Path
 from typing import Any
@@ -239,14 +241,45 @@ _RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL"}
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route to the compiled engine only when it can give the SAME answer.
 
-    The compiled engine implements the SILICON path and the util-space
-    empirical layer (HYBRID / EMPIRICAL). The SOL/SOL_FULL diagnostic modes
-    stay on the Python step -- delegating keeps the two backends
-    answer-identical instead of capability-divergent.
+    The compiled engine is the DEFAULT. The Python step remains reachable
+    three ways, all answer-parity delegations rather than capabilities:
+
+    * an explicit ``engine_step_backend="python"`` (config or env) — the
+      escape hatch retained for one release cycle;
+    * the SOL / SOL_FULL diagnostic modes, which only the Python step
+      implements (the compiled engine answers SILICON / HYBRID / EMPIRICAL);
+    * by default (not when ``"rust"`` is explicitly requested), a database
+      whose perf tables carry measured power columns — energy does not cross
+      the FFI yet, so rust-routing an agg sweep would silently zero its
+      ``power_w``. Explicit ``"rust"`` keeps its historical force semantics
+      (the parity scan tooling relies on it and measures latency only).
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    if str(backend or "python").lower() != "rust":
+    requested = str(backend).lower() if backend else None
+    if requested is not None and requested != "rust":
         return False
+    if requested is None:
+        # Deferred import: perf_database is heavy and this module must stay
+        # light to import (engine.py imports it at top level).
+        from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+        if not isinstance(database, PerfDatabase):
+            # The compiled engine re-loads perf data from disk by
+            # (system, backend, version); a synthetic/duck-typed database has
+            # no on-disk identity it could resolve. Only an explicit "rust"
+            # request bypasses this (and owns the resulting load error).
+            return False
+        if _database_has_power_data(database):
+            logger.debug(
+                "engine-step backend defaulting to the python step: database %s/%s/%s carries "
+                "measured power data and energy does not cross the FFI yet "
+                "(set %s=rust to force the compiled engine).",
+                database.system,
+                database.backend,
+                database.version,
+                ENGINE_STEP_BACKEND_ENV,
+            )
+            return False
     if database is not None:
         mode = getattr(database, "get_default_database_mode", lambda: None)()
         if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
@@ -257,6 +290,65 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
             )
             return False
     return True
+
+
+# Power-data probe results keyed by (system, backend, version). The probe is
+# a filesystem schema scan, so the answer is immutable for a given identity;
+# memoizing here keeps the per-step routing gate free of I/O.
+_POWER_DATA_CACHE: dict[tuple[str, str, str], bool] = {}
+
+
+def _database_has_power_data(database: Any) -> bool:
+    """True when the database's perf-data tree carries measured power columns.
+
+    Detection is a parquet *schema* scan (no row reads) over the database's
+    ``<data_dir>/<family>/<backend>/<version>/*.parquet`` tree, plus the
+    deprecated ``<data_dir>/<backend>/<version>`` layout. All sibling version
+    dirs of the backend are scanned, not just ``database.version``: the loader
+    may fill gaps from sibling-version channels, and over-matching only keeps
+    that database on the (status quo) Python step. Collectors write power
+    columns only when power was actually measured, so column presence is the
+    signal — no row values are inspected.
+
+    Any probe failure (mock database objects in tests, missing tree, no
+    pyarrow) means "no power data": those databases cannot produce energy on
+    the Python step either, so rust-routing them changes nothing.
+    """
+    system = getattr(database, "system", None)
+    backend = getattr(database, "backend", None)
+    if not system or not backend:
+        return False
+    key = (str(system), _backend_name(backend), str(getattr(database, "version", "")))
+    cached = _POWER_DATA_CACHE.get(key)
+    if cached is not None:
+        return cached
+    result = _scan_for_power_columns(database)
+    _POWER_DATA_CACHE[key] = result
+    return result
+
+
+def _scan_for_power_columns(database: Any) -> bool:
+    try:
+        import pyarrow.parquet as pq
+
+        systems_root = getattr(database, "systems_root", None)
+        spec = getattr(database, "system_spec", None)
+        data_dir_rel = spec.get("data_dir") if isinstance(spec, dict) else None
+        if not systems_root or not data_dir_rel:
+            return False
+        data_dir = Path(systems_root) / data_dir_rel
+        backend = _backend_name(database.backend)
+        candidates = list(data_dir.glob(f"*/{backend}/*/*.parquet")) + list(data_dir.glob(f"{backend}/*/*.parquet"))
+        for parquet_path in candidates:
+            try:
+                names = pq.read_schema(parquet_path).names
+            except Exception:  # one unreadable file must not poison the probe
+                continue
+            if any("power" in name for name in names):
+                return True
+        return False
+    except Exception:  # probe failures mean "no power data", see docstring
+        return False
 
 
 def _note_rust_provenance(handle: Any) -> None:
@@ -467,19 +559,73 @@ def estimate_decode_step_latency_with_rust(
     return latency_ms
 
 
-# Memo of compiled ``EngineHandle`` objects, keyed by the engine identity
+# LRU memo of compiled ``EngineHandle`` objects, keyed by the engine identity
 # (model_path + system + backend + version + parallelism + quant + nextn +
 # kv_block_size). ``compile_engine`` rebuilds the model and loads the perf DB,
 # which is expensive; the engine-step helpers are called many times per sweep,
 # so each unique config must compile + load its DB exactly once. The key is
 # ``_engine_config_json``, so two runtime points that differ only in
 # batch/isl/osl share one handle.
-_ENGINE_HANDLE_CACHE: dict[str, Any] = {}
+#
+# The memo is BOUNDED: every handle pins its own Rust-side perf-DB load, so an
+# unbounded dict grows monotonically with the number of engine identities a
+# long-lived process touches (a sweep visits one parallel config at a time and
+# a webapp compares a handful, so a small LRU never thrashes; eviction only
+# costs the ~100ms-scale recompile on a later re-visit). Negative entries
+# (``_CachedUnsupported``) live under the same policy.
+_ENGINE_HANDLE_CACHE: OrderedDict[str, Any] = OrderedDict()
+_ENGINE_HANDLE_CACHE_MAX = 32
+# One lock serializes lookup+recency, insertion+eviction, and clearing:
+# ``clear_all_op_caches`` may run on a webapp thread while another thread is
+# mid-step, and an unserialized get()/move_to_end() pair would KeyError when a
+# clear lands between them. Uncontended acquisition is tens of ns against the
+# ~20us step budget (perf gate re-run green).
+_ENGINE_HANDLE_CACHE_LOCK = threading.Lock()
+
+
+class _CachedUnsupported:
+    """Message-only negative cache entry. Caching the raised
+    ``RustEngineUnsupportedError`` instance instead would pin ``model`` /
+    ``database`` via ``__cause__``/``__traceback__`` and grow the traceback on
+    every cache-hit re-raise; each hit constructs a fresh exception from the
+    message instead."""
+
+    __slots__ = ("message",)
+
+    def __init__(self, message: str) -> None:
+        self.message = message
 
 
 def _engine_handle_cache_clear() -> None:
-    """Reset the compiled-engine handle memo (used by parity harnesses)."""
-    _ENGINE_HANDLE_CACHE.clear()
+    """Drop every cached ``EngineHandle`` (and negative entry), releasing the
+    Rust-side perf DBs they pin. Used by parity harnesses and by
+    ``operations.clear_all_op_caches`` (the long-running-webapp eviction
+    lever)."""
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        _ENGINE_HANDLE_CACHE.clear()
+    # The power probe is filesystem-derived but keyed without the systems
+    # root; like the handles above it must not survive a ``set_systems_paths``
+    # switch, or a stale ``False`` would rust-route a now-power-carrying
+    # identity and silently zero agg ``power_w``.
+    _POWER_DATA_CACHE.clear()
+
+
+def _engine_handle_cache_get(key: str) -> Any:
+    """Look up a handle (or negative entry), refreshing its LRU recency."""
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        entry = _ENGINE_HANDLE_CACHE.get(key)
+        if entry is not None:
+            _ENGINE_HANDLE_CACHE.move_to_end(key)
+        return entry
+
+
+def _engine_handle_cache_put(key: str, value: Any) -> None:
+    """Insert into the handle LRU, evicting least-recently-used overflow."""
+    with _ENGINE_HANDLE_CACHE_LOCK:
+        _ENGINE_HANDLE_CACHE[key] = value
+        _ENGINE_HANDLE_CACHE.move_to_end(key)
+        while len(_ENGINE_HANDLE_CACHE) > _ENGINE_HANDLE_CACHE_MAX:
+            _ENGINE_HANDLE_CACHE.popitem(last=False)
 
 
 def _cached_engine_handle(model: Any, database: Any) -> Any:
@@ -489,9 +635,11 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     ``engine.build_engine_spec_json`` (NOT ``compile_engine``, which would
     rebuild the model from flat args and risk quant/parallel-inference drift),
     then wraps the bincode bytes in an ``EngineHandle``. The handle's Rust
-    ``AicEngine`` loads its own perf DB; ``_configure_default_data_roots`` sets
-    ``AICONFIGURATOR_SYSTEMS_PATH`` so it resolves to the same systems tree the
-    Python ``database`` came from.
+    ``AicEngine`` loads its own perf DB; the system yaml is resolved from the
+    ``database``'s own ``systems_root`` (the root the Python ``PerfDatabase``
+    actually matched under multi-root ``--systems-paths``), falling back to
+    ``AICONFIGURATOR_SYSTEMS_PATH`` (set by ``_configure_default_data_roots``)
+    for duck-typed databases without a ``systems_root``.
     """
     # The identity JSON is a hot-path cost: the engine-step helpers call this
     # per step and `_engine_config_json` runs ~2-3us of getattr + json.dumps
@@ -508,13 +656,13 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
             model._aic_engine_identity_memo = (database, key)
         except (AttributeError, TypeError):
             pass  # slotted/frozen model objects: recompute per call
-    handle = _ENGINE_HANDLE_CACHE.get(key)
-    if isinstance(handle, RustEngineUnsupportedError):
-        # Compilation already failed for this engine identity; re-raise the
-        # cached error instead of re-walking the op graph every step.
-        raise handle
-    if handle is not None:
-        return handle
+    entry = _engine_handle_cache_get(key)
+    if isinstance(entry, _CachedUnsupported):
+        # Compilation already failed for this engine identity; raise a fresh
+        # error from the cached message instead of re-walking the op graph.
+        raise RustEngineUnsupportedError(entry.message)
+    if entry is not None:
+        return entry
 
     _configure_default_data_roots()
     # Lazy import: ``sdk.engine`` imports from this module at top level
@@ -523,12 +671,14 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
     import aiconfigurator_core
     from aiconfigurator_core.sdk.engine import EngineHandle, OpConversionError, build_engine_spec_json
 
-    # The Rust engine must read the SAME systems tree the Python ``database``
-    # resolved to — the database's own winning root, not the env var, which is
-    # pinned by the first ``_configure_default_data_roots`` call and goes stale
-    # when ``set_systems_paths`` later changes the search order (e.g. an
-    # fpm_forward pair in a non-default root).
-    systems_path = str(getattr(database, "systems_root", "") or "") or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    # Mirror the root the paired database actually resolved from: with
+    # multi-root ``--systems-paths`` the Python PerfDatabase searches every
+    # root ("first match wins" per system), while the compiled engine resolves
+    # the system yaml from exactly one root — pinning the env default (the
+    # first existing root) crashes any system that lives in a later root. The
+    # env remains the fallback for duck-typed databases under an explicit
+    # ``"rust"`` request.
+    systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     nextn = getattr(model, "_nextn", None)
     try:
         spec_json = build_engine_spec_json(
@@ -543,12 +693,11 @@ def _cached_engine_handle(model: Any, database: Any) -> Any:
             database=database,
         )
     except OpConversionError as exc:
-        unsupported = RustEngineUnsupportedError(str(exc))
-        _ENGINE_HANDLE_CACHE[key] = unsupported
-        raise unsupported from exc
+        _engine_handle_cache_put(key, _CachedUnsupported(str(exc)))
+        raise RustEngineUnsupportedError(str(exc)) from exc
     spec_bytes = bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
     handle = EngineHandle(spec_bytes, systems_path=systems_path)
-    _ENGINE_HANDLE_CACHE[key] = handle
+    _engine_handle_cache_put(key, handle)
     return handle
 
 

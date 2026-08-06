@@ -64,6 +64,7 @@ from aiconfigurator_core.sdk.operations import (
     GenerationDSAModule,
     GenerationMLA,
     GenerationMSAModule,
+    KDAKernel,
     Mamba2Kernel,
     MLABmm,
     MLAModule,
@@ -103,8 +104,13 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   enum indices after `DsaGeneration` shifted). The MSA insertion and #1405
 #   each claimed version 3 on their own branch, so their merge needed a
 #   fresh number.
-# - 5: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
-ENGINE_SPEC_SCHEMA_VERSION = 5
+# - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
+#   `native_num_heads` (always serialized — bincode decodes positionally).
+# - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
+#   Claimed version 5 concurrently with #1460; renumbered at the merge.
+# - 7: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
+#   Claimed version 5 concurrently with #1460/#1435; renumbered at the merge.
+ENGINE_SPEC_SCHEMA_VERSION = 7
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -238,7 +244,7 @@ def _generation_mla(op: GenerationMLA) -> dict:
 
 
 def _mla_module(op: MLAModule) -> dict:
-    return {
+    spec = {
         "name": op._name,
         "scale_factor": op._scale_factor,
         "num_heads": op._num_heads,
@@ -246,6 +252,11 @@ def _mla_module(op: MLAModule) -> dict:
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
     }
+    # Emitted only when set: keeps specs from legacy builders byte-identical
+    # (the Rust field is #[serde(default)]; Rust bincode always serializes it, #1458).
+    if op._native_num_heads is not None:
+        spec["native_num_heads"] = op._native_num_heads
+    return spec
 
 
 def _mla_bmm(op: MLABmm) -> dict:
@@ -542,6 +553,10 @@ def _gdn(op: GDNKernel) -> dict:
     }
 
 
+def _kda(op: KDAKernel) -> dict:
+    return {**_gdn(op), "draft_tokens": op._draft_tokens}
+
+
 def _wideep_context_mla(op: WideEPContextMLA) -> dict:
     return {
         "name": op._name,
@@ -734,6 +749,11 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"Mhc": _mhc_module(op, architecture=architecture)}
     if isinstance(op, Mamba2Kernel):
         return {"Mamba2": _mamba2(op)}
+    if isinstance(op, KDAKernel):
+        # Must precede the GDNKernel check: KDAKernel subclasses GDNKernel and
+        # would otherwise be silently serialized as Gdn (wrong table + a bf16
+        # SOL byte model for an fp32-state kernel).
+        return {"Kda": _kda(op)}
     if isinstance(op, GDNKernel):
         return {"Gdn": _gdn(op)}
 

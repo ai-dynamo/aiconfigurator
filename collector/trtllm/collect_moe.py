@@ -9,7 +9,7 @@ Shared MoE shapes come from YAML; this file owns TRT-LLM version quirks and
 kernel-specific filters.
 """
 
-__compat__ = "trtllm>=1.0.0,<=1.3.0rc15"
+__compat__ = "trtllm>=1.3.0rc20"
 
 import gc
 import glob
@@ -27,6 +27,7 @@ from tensorrt_llm._torch.autotuner import AutoTuner, autotune
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_deepseekv3 import DeepseekV3Gate
 from tensorrt_llm._torch.modules.fused_moe import RenormalizeMoeRoutingMethod, create_moe
+from tensorrt_llm._utils import is_sm_100f
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
@@ -43,6 +44,7 @@ _MXFP4_MOE_TYPES = {"w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}
 
 from collector.case_generator import (
     get_common_moe_test_cases,
+    get_moe_quantization_modes,
     get_moe_quantization_module_config,
     moe_model_allows_quantization,
 )
@@ -59,14 +61,6 @@ aic_debug = int(os.getenv("aic_moe_debug", "0"))  # noqa: SIM112
 
 moe_tune_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_tuned_cache_path")
 _TRTLLM_VERSION = tensorrt_llm.__version__
-
-
-def _is_trtllm_130rc5_runtime():
-    return _TRTLLM_VERSION.startswith("1.3.0rc5")
-
-
-def _is_trtllm_130rc5_or_rc10_runtime():
-    return _TRTLLM_VERSION.startswith(("1.3.0rc5", "1.3.0rc10"))
 
 
 def _moe_model_behavior(model_name: str) -> str:
@@ -126,52 +120,6 @@ def _moe_consumer_keys(common_moe_testcase, moe_type: str, min_latency_mode: boo
     )
 
 
-def _patch_moe_runners_for_tuple_tactics():
-    """Monkey-patch MoE runners whose forward() asserts isinstance(tactic, list).
-
-    In trtllm 1.2.0rc5, the C++ get_valid_configs() can return strings instead
-    of lists for some runners, causing the assertion to fail. This patch wraps
-    forward() to coerce tuples to lists before the call.
-    """
-    if tensorrt_llm.__version__ != "1.2.0rc5" or get_sm_version() < 100:
-        return
-
-    try:
-        from tensorrt_llm._torch.custom_ops import trtllm_gen_custom_ops as ops
-    except ImportError:
-        return
-
-    runner_classes = []
-    for name in [
-        "MxE4m3MxE2m1BlockScaleMoERunner",
-        "E4m3MxE2m1BlockScaleMoERunner",
-        "Bf16MxE2m1BlockScaleMoERunner",
-    ]:
-        cls = getattr(ops, name, None)
-        if cls is not None:
-            runner_classes.append(cls)
-
-    for cls in runner_classes:
-        orig_forward = cls.forward
-
-        def _patched_forward(self, inputs, tactic=[-1, -1], _orig=orig_forward, **kwargs):
-            if not isinstance(tactic, list):
-                if isinstance(tactic, str):
-                    import ast
-
-                    tactic = ast.literal_eval(tactic)
-                elif isinstance(tactic, (tuple, range)):
-                    tactic = list(tactic)
-                else:
-                    tactic = [tactic]
-            return _orig(self, inputs, tactic=tactic, **kwargs)
-
-        cls.forward = _patched_forward
-
-
-_patch_moe_runners_for_tuple_tactics()
-
-
 def gc_collect():
     """Run GC and clear CUDA cache to reduce fragmentation between runs."""
     for _ in range(2):
@@ -224,82 +172,38 @@ def cleanup_empty_json_files(directory):
 
 def get_moe_test_cases():
     """Build list of MoE test case tuples for trtllm >= 1.1 (power_law, SM-dependent quant modes)."""
-    moe_list = ["bfloat16"]
     sm_version = get_sm_version()
-    if sm_version > 86:
-        moe_list += ["fp8"]
-        # SM90 (Hopper) and SM100 (Blackwell) both support fp8_block.
-        # SM90 uses CUTLASS backend with FP32 scale.
-        # SM100 uses DEEPGEMM/TRTLLM backend with UE8M0 scale (MXFP8 style).
-    if sm_version >= 90:
-        moe_list += ["fp8_block"]
-
-    # SM90 specific quant mode.
-    if 86 < sm_version < 100:
-        moe_list += ["w4a16_mxfp4"]
-
-    if sm_version >= 100:
-        # Keep plain INT4/W4A16 in the collector sweep so unsupported model rows
-        # can fail in TensorRT-LLM itself instead of stopping at AIC validation.
-        moe_list += ["int4_wo", "nvfp4", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"]
+    # Quant-mode axis (SM floors/intervals) is declared on moe.yaml's
+    # moe_trtllm quantization_modes and filtered here, same as the sglang and
+    # vllm collectors. The previous hand-coded if-chain silently bypassed the
+    # YAML axis, so quant-mode gates (e.g. w4a16_mxfp4 max_sm_exclusive: 120)
+    # never took effect for trtllm. Mode-by-mode the YAML axis reproduces the
+    # old chain exactly, except w4a16_mxfp4 at sm>=120 which is the sanctioned
+    # gate (see the citation on its moe.yaml entry). int4_wo stays in the
+    # sweep (min_sm: 100) so unsupported model rows fail in TensorRT-LLM
+    # itself instead of stopping at AIC validation.
+    moe_list = get_moe_quantization_modes("trtllm", sm_version=sm_version)
 
     test_cases = []
     seen = set()
     consumer_key_owners = {}
+    quant_policy_drops = {}
+    models_with_cases = set()
 
     for common_moe_testcase in get_common_moe_test_cases():
         model_name = common_moe_testcase.model_name
-        inter_s = common_moe_testcase.inter_size
-        moe_tp = common_moe_testcase.tp
 
         for moe_type in moe_list:
             if not moe_model_allows_quantization("trtllm", model_name, moe_type):
+                quant_policy_drops[model_name] = quant_policy_drops.get(model_name, 0) + 1
                 continue
+            models_with_cases.add(model_name)
 
-            # w4afp8 requires k shape to be multiple of 128
-            if moe_type == "w4afp8" and inter_s // moe_tp % 128 != 0:
-                continue
-
-            if moe_type == "fp8_block" and sm_version >= 120 and _is_trtllm_130rc5_or_rc10_runtime():
-                # DeepGEMM in TRT-LLM 1.3.0rc5/1.3.0rc10 rejects SM120 MoE
-                # with "Unknown recipe" before any supported row can be collected.
-                continue
-
-            # fp8_block requires hidden_size divisible by block group_size (128)
-            if moe_type == "fp8_block" and (
-                common_moe_testcase.hidden_size % 128 != 0 or (inter_s // moe_tp) % 128 != 0
-            ):
-                continue
-
-            # Blackwell DeepGEMM fp8_block has an additional TP-shard alignment requirement.
-            # Skip shapes that are known to trigger layout assert:
-            #   Assertion error ... layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)
-            if moe_type == "fp8_block" and sm_version >= 100 and (common_moe_testcase.inter_size // moe_tp) % 128 != 0:
-                continue
-
-            # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0
-            weight_bits = {
-                "bfloat16": 16,
-                "fp8": 8,
-                "fp8_block": 8,
-                "int4_wo": 4,
-                "w4a16_mxfp4": 4,
-                "w4a8_mxfp4_mxfp8": 4,
-                "w4afp8": 4,
-                "nvfp4": 4,
-            }[moe_type]
-            if (inter_s // moe_tp) % (256 // weight_bits) != 0:
-                continue
-
-            if (
-                moe_type == "nvfp4"
-                and sm_version >= 120
-                and _is_trtllm_130rc5_runtime()
-                and common_moe_testcase.num_experts // common_moe_testcase.ep < common_moe_testcase.topk
-            ):
-                # These standalone EP shapes crash the 1.3.0rc5 SM120 nvfp4 dry-run
-                # kernel. WideEP collectors cover the large-EP MoE path separately.
-                continue
+            # Alignment constraints (w4afp8 %128, fp8_block 128x128 block
+            # scales, the TLLM_CHECK weight-bits alignment) are enforced in
+            # run_moe_torch as cited, classified raises — generation-time
+            # drops are sanctioned for memory feasibility only
+            # (layer_permissions.md: execute or raise).
 
             min_latency_mode_options = [False]
 
@@ -347,6 +251,16 @@ def get_moe_test_cases():
                         common_moe_testcase.power_law_alpha,
                     ]
                 )
+
+    # Zero-case expansions must be explainable from logged drops
+    # (case_authoring.md): name every planned model whose declared trtllm
+    # quant policy excluded all of its moe cases (mirrors the vllm getter).
+    fully_dropped = sorted(set(quant_policy_drops) - models_with_cases)
+    if fully_dropped:
+        print(
+            f"moe: dropped all cases for {len(fully_dropped)} model(s) by declared trtllm "
+            f"quantization policy (allowed_modes): {', '.join(fully_dropped)}"
+        )
 
     # Try to optimize number of autotune cache hits by shuffling test cases.
     # This makes sure the same cache keys are far apart from each other.
@@ -464,34 +378,102 @@ def run_moe_torch(
 
     sm_version = get_sm_version()
 
+    # FIXME(kernel-limit): fp8_block weight scales are 128x128-blocked, so
+    # hidden_size and the TP-sharded intermediate size must be 128-aligned on
+    # every path: SM100/103 DeepGEMM trips the scale-factor layout assert
+    # "layout.hpp:78: sf.size(-2) == ceil_div(mn, gran_mn)" (hardware-observed
+    # on B200 during the rc20 campaign); Hopper's CUTLASS runner is
+    # DeepGEMM-JIT-backed for fp8_block grouped GEMM and shares the same
+    # 1x128/128x128 scale layout; SM120's Triton block-scale path uses the
+    # same 128 granularity. Raise a cited, classified error instead of
+    # filtering the shapes at generation time (layer_permissions.md sanctions
+    # only memory-feasibility drops there). Re-verify the per-SM paths on the
+    # next framework version bump.
+    if moe_type == "fp8_block" and (hidden_size % 128 != 0 or (inter_size // moe_tp_size) % 128 != 0):
+        raise ValueError(
+            f"fp8_block MoE requires 128-aligned hidden_size and TP-sharded intermediate "
+            f"size (128x128-blocked weight scales; deepgemm layout.hpp:78 on SM90/100/103, "
+            f"Triton block-scale on SM120); got hidden_size={hidden_size}, "
+            f"inter_size={inter_size} / moe_tp={moe_tp_size} = {inter_size // moe_tp_size}"
+        )
+
+    if moe_type == "w4afp8" and (inter_size // moe_tp_size) % 128 != 0:
+        raise ValueError(
+            f"w4afp8 MoE requires a 128-aligned TP-sharded intermediate size (grouped-GEMM "
+            f"k alignment); got inter_size={inter_size} / moe_tp={moe_tp_size} = "
+            f"{inter_size // moe_tp_size}"
+        )
+
+    # TLLM_CHECK_WITH_INFO(inter_size % (256 / sizeof_bits<WeightType>::value) == 0,
+    # "the inter size ... must be a multiple of ...") — the fused-MoE plugin's
+    # weight-layout alignment (cpp moe kernels, checked at op init).
+    _weight_bits = {
+        "bfloat16": 16,
+        "fp8": 8,
+        "fp8_block": 8,
+        "int4_wo": 4,
+        "w4a16_mxfp4": 4,
+        "w4a8_mxfp4_mxfp8": 4,
+        "w4afp8": 4,
+        "nvfp4": 4,
+    }[moe_type]
+    if (inter_size // moe_tp_size) % (256 // _weight_bits) != 0:
+        raise ValueError(
+            f"TRT-LLM fused MoE requires the TP-sharded intermediate size to be a multiple "
+            f"of 256/weight_bits = {256 // _weight_bits} for {moe_type} (TLLM_CHECK_WITH_INFO "
+            f"weight-layout alignment); got inter_size={inter_size} / moe_tp={moe_tp_size} = "
+            f"{inter_size // moe_tp_size}"
+        )
+
     if model_name in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
         swiglu_alpha = torch.tensor([1.702] * (num_experts // moe_ep_size), dtype=torch.float32).to(
             torch.device(device)
         )
         swiglu_beta = torch.tensor([1.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
         swiglu_limit = torch.tensor([7.0] * (num_experts // moe_ep_size), dtype=torch.float32).to(torch.device(device))
-        if 86 < get_sm_version() < 100:
-            # Hopper: use triton backend for best performance
+        if 90 <= get_sm_version() < 100:
+            # Hopper only: serving's AUTO resolution returns TRITON exactly
+            # for 90<=sm<100 (resolve_moe_backend, model_config.py:334-335
+            # @1.3.0rc20). SM89/Ada is NOT in this bucket: TritonFusedMoE's
+            # own guard rejects non-SM9x with EP>1 (fused_moe_triton.py:1495
+            # -1497), and with EP=1 it would run a backend serving never
+            # selects there (hardware-observed on L40S 2026-07-21: EP=16
+            # raises NotImplementedError, EP=1 runs off-serving-truth).
             model_config.moe_backend = "triton"
-        elif get_sm_version() >= 100:
-            # Blackwell: production uses TRTLLMGenFusedMoE (Bf16MxE2m1BlockScaleMoeRunner)
+        elif 100 <= get_sm_version() < 120:
+            # Datacenter Blackwell: production uses TRTLLMGenFusedMoE
+            # (Bf16MxE2m1BlockScaleMoeRunner)
             model_config.moe_backend = "trtllm"
         else:
+            # SM120, SM89/Ada and anything else: serving's AUTO resolution
+            # routes GptOss to CUTLASS (resolve_moe_backend,
+            # model_config.py:329-337@1.3.0rc20: TRTLLM only for
+            # 100<=sm<120, TRITON only for 90<=sm<100, CUTLASS fallback).
+            # Hardware-observed on RTX PRO 6000 2026-07-19: the trtllm pin
+            # fails "does not support SM120".
             model_config.moe_backend = "cutlass"
     else:
         # Select backend based on platform and quant mode.
         if min_latency_mode:
             model_config.moe_backend = "trtllm"
-        elif moe_type in _MXFP4_MOE_TYPES and sm_version >= 100:
-            # Blackwell MXFP4 MoE is implemented by TRTLLMGenFusedMoE; CUTLASS
-            # rejects WFP4A16 on SM100.
+        elif moe_type in _MXFP4_MOE_TYPES and 100 <= sm_version < 120:
+            # Datacenter Blackwell MXFP4 MoE is implemented by
+            # TRTLLMGenFusedMoE; CUTLASS rejects WFP4A16 on SM100. On SM120
+            # TRTLLMGenFusedMoE refuses ("does not support SM120 and above")
+            # and serving AUTO falls through to CUTLASS
+            # (resolve_moe_backend, model_config.py:345@1.3.0rc20).
             model_config.moe_backend = "trtllm"
         elif moe_type == "fp8_block":
-            if sm_version >= 100:
-                # Blackwell: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
+            if is_sm_100f(sm_version):
+                # SM100/103: DeepGEMM uses MXFP8 style (E4M3 + UE8M0 scale).
                 model_config.moe_backend = "deepgemm"
             else:
-                # Hopper: CUTLASS uses FP32 scale.
+                # Hopper AND SM120: CUTLASS with FP32 scale — serving AUTO
+                # resolves fp8_block to TRTLLM only when is_sm_100f
+                # (resolve_moe_backend, model_config.py:339-343@1.3.0rc20),
+                # everything else lands on CUTLASS; DeepGEMM has no SM120
+                # grouped-GEMM recipe (layout.hpp:76 "Unknown recipe",
+                # hardware-observed 2026-07-19).
                 model_config.moe_backend = "cutlass"
         else:
             model_config.moe_backend = "cutlass"
@@ -542,12 +524,13 @@ def run_moe_torch(
     moe = create_moe(**create_moe_kwargs)
     moe.to(torch.device(device))
 
-    # SM100 (Blackwell) DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
+    # SM100/103 DeepGEMM expects weight scales (SFB) in int32 UE8M0 format,
     # but create_moe() initializes them as float32. TRT-LLM's post_load_weights()
     # normally handles this conversion after loading real weights, but AIC uses
     # random weights without calling load_weights() for fp8_block. We must do
     # the conversion here to avoid cudaErrorIllegalAddress from TMA OOB access.
-    if moe_type == "fp8_block" and sm_version >= 100:
+    # (SM120 takes the CUTLASS backend with FP32 scales — no transform.)
+    if moe_type == "fp8_block" and is_sm_100f(sm_version):
         from tensorrt_llm.quantization.utils.fp8_utils import transform_sf_into_required_layout
 
         moe_backend = getattr(moe, "backend", moe)
@@ -653,8 +636,18 @@ def run_moe_torch(
 
     if moe_type != "w4a16_mxfp4":
         cleanup_empty_json_files(moe_tune_path)
+        # The tuned-tactic cache MUST be SM-scoped: tactic indices are positions
+        # in the runner's per-arch config table, and replaying another arch's
+        # indices overruns the table (hardware-observed on RTX PRO 6000
+        # 2026-07-25: SM100-tuned fp8 cache replayed on SM120 →
+        # "vector::_M_range_check: __n (which is 29) >= this->size() (which is
+        # 21)" in FusedMoeRunner.run_moe; same failure family as the wideep
+        # collector's 2026-07-19 fix in collect_moe_compute.py). Pre-fix cache
+        # files without the sm prefix are dead — their tuning SM is not
+        # recorded, so they are never trusted again.
         cache_path = (
-            f"{moe_tune_path}/{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
+            f"{moe_tune_path}/sm{get_sm_version()}_"
+            f"{moe_type}_{hidden_size}_{inter_size // moe_tp_size}_{num_experts // moe_ep_size}"
         )
         existing_files = glob.glob(f"{cache_path}*")
         cache_loaded = False
@@ -765,8 +758,26 @@ def run_moe_torch(
             if not results["used_cuda_graph"] and aic_debug == 1:
                 print(f"CUDA graph capture failed for {num_tokens} tokens, used eager execution fallback")
 
-        if moe_type == "fp8_block" and sm_version >= 100:
+        if moe_type == "fp8_block" and is_sm_100f(sm_version):
             source = "deepgemm"
+        elif moe_type == "fp8_block" and get_sm_version() == 120:
+            # SM120 fp8_block never reaches CUTLASS kernels: CutlassFusedMoE's
+            # forward dispatches to run_triton_fp8_block_scale_moe on SM120
+            # (fused_moe_cutlass.py:958-960@1.3.0rc20, "CUTLASS TMA fails on
+            # SM120 ... cuTensorMapEncodeTiled limitations"), so the ground
+            # truth is the Triton block-scale MoE kernel.
+            # FIXME(kernel-limit): that Triton kernel requires a power-of-2
+            # LOCAL expert count — _moe_prefix_kernel does
+            # tl.arange(0, NUM_EXPERTS) (fused_moe_triton_fp8_block_scale.py:
+            # 37-45,136-142@1.3.0rc20) and triton rejects non-power-of-2
+            # ranges at compile time. Hardware-observed on RTX PRO 6000
+            # 2026-07-26: every fp8_block model with 384 experts
+            # (DeepSeek-V4-Pro, Kimi-K2) or 160 experts (Qwen3-Coder-480B)
+            # fails on every EP split (384/ep and 160/ep are never pow2)
+            # while 256/128-expert models pass; serving hits the identical
+            # compile error. Cases fail fast and classified — re-verify on
+            # the next framework version bump.
+            source = "moe_torch_flow_triton_fp8_block"
         elif min_latency_mode:
             source = "moe_torch_flow_min_latency"  # trtllm gen
         elif not is_gated:

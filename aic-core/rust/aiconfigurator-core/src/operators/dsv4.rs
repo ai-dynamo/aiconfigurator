@@ -16,14 +16,19 @@
 //! so the table is collapsed to the last (max) tp measurement at load time. See
 //! `perf_database::dsv4` and Python `load_context_dsv4_kind_module_data`.
 
-use serde::{Deserialize, Serialize};
-use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode};
+use crate::common::enums::{
+    DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode,
+};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
 use crate::operators::util_empirical::{self, UtilGrid};
-use crate::perf_database::dsv4::{dsv4_attention_sol_ms, dsv4_dims, AttnKind, Dsv4SolDims};
+use crate::perf_database::attention::generation_attn_mode;
+use crate::perf_database::dsv4::{
+    dsv4_attention_sol_ms, dsv4_dims, dsv4_sol_flops, AttnKind, Dsv4SolDims,
+};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Dsv4ModuleOp {
@@ -285,9 +290,16 @@ impl Dsv4ModuleOp {
         let dims = self.sol_dims();
         let cr = self.attn_kind.compress_ratio();
         let heads = i64::from(self.num_heads);
-        let (kv, fmha, gemm) = (self.kv_cache_dtype, self.fmha_quant_mode, self.gemm_quant_mode);
+        let (kv, fmha, gemm) = (
+            self.kv_cache_dtype,
+            self.fmha_quant_mode,
+            self.gemm_quant_mode,
+        );
+        let flops = dsv4_sol_flops(spec, gemm, fmha)?;
         let sol_at = move |b_: i64, s_: i64, p_: i64| {
-            dsv4_attention_sol_ms(spec, &dims, cr, true, kv, fmha, gemm, b_, s_, p_, heads)
+            dsv4_attention_sol_ms(
+                spec, &dims, cr, true, kv, fmha, gemm, b_, s_, p_, heads, flops,
+            )
         };
         // True SOL(b, s, prefix) at the query (Python `sol_q = get_sol()[0]`).
         let sol_q = sol_at(i64::from(b), i64::from(s), i64::from(prefix));
@@ -430,7 +442,10 @@ impl Dsv4ModuleOp {
                     self.native_heads,
                 )
             },
-            &mut |isl_q, step| db.dsv4.csa_topk_top_last(isl_q, step, self.native_heads, batch_size),
+            &mut |isl_q, step| {
+                db.dsv4
+                    .csa_topk_top_last(isl_q, step, self.native_heads, batch_size)
+            },
             &mut |elems| {
                 NcclOp::new(
                     format!("{}_cp_all_gather", self.name),
@@ -599,11 +614,8 @@ impl Dsv4ModuleOp {
         // Python derives the decode SOL dtype from the kv-cache dtype at the
         // top of `_query_generation_attn_table` (the fmha label is inert for
         // generation; the table keys on kv dtype).
-        let fmha = if kv == KvCacheQuantMode::Fp8 {
-            FmhaQuantMode::Fp8
-        } else {
-            FmhaQuantMode::Bfloat16
-        };
+        let fmha = generation_attn_mode(spec, kv);
+        let flops = dsv4_sol_flops(spec, gemm, fmha)?;
         let sol = move |c: &[f64]| {
             // c=(b, s_total); is_context=false, prefix=0.
             dsv4_attention_sol_ms(
@@ -618,6 +630,7 @@ impl Dsv4ModuleOp {
                 c[1] as i64,
                 0,
                 heads,
+                flops,
             )
         };
         // Python keys the grid on (kv, gemm, num_heads, cr) — no fmha level
