@@ -78,14 +78,22 @@ def _git(*args: str) -> str:
         return "unknown"
 
 
+# Captured ONCE before any golden file is written: the first write dirties
+# the tree, so per-file `git describe --dirty` calls would stamp the later
+# files "-dirty" on a capture that started clean.
+_GIT_STATE = {
+    "git_describe": _git("describe", "--always", "--dirty"),
+    "git_head": _git("rev-parse", "HEAD"),
+}
+
+
 def _header(**counts: int) -> dict:
     # Deliberately NO wall-clock timestamp: two captures of the same tree
     # must be byte-identical; the HEAD sha is the only capture identity.
     return {
         "command": COMMAND,
         "engine_step_backend": ENGINE_STEP_BACKEND,
-        "git_describe": _git("describe", "--always", "--dirty"),
-        "git_head": _git("rev-parse", "HEAD"),
+        **_GIT_STATE,
         "thread_caps": THREAD_CAP_ENV,
         **counts,
     }
@@ -182,12 +190,30 @@ def _write(filename: str, payload: dict) -> None:
     _log(f"wrote {path} ({path.stat().st_size:,} bytes)")
 
 
+# The capture helpers are shared with the pytest suites, where a missing perf
+# database surfaces as ``pytest.skip`` — a ``Skipped`` outcome that subclasses
+# BaseException and would otherwise leak out of this script as a cryptic
+# traceback. Caught explicitly below and converted into a clear error.
+try:
+    from _pytest.outcomes import Skipped as _PytestSkipped
+except Exception:  # pragma: no cover — pytest is a hard dependency here
+    _PytestSkipped = ()  # type: ignore[assignment]
+
+
 def main() -> int:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    _write("engine_step.json", capture_engine_step())
-    _write("compile_engine.json", capture_compile_engine())
-    _write("per_op.json", capture_per_op())
+    try:
+        _write("engine_step.json", capture_engine_step())
+        _write("compile_engine.json", capture_compile_engine())
+        _write("per_op.json", capture_per_op())
+    except _PytestSkipped as exc:
+        raise RuntimeError(
+            "golden capture aborted — a capture helper skipped "
+            f"({exc}). Regeneration requires the FULL systems data set "
+            "(e.g. the WideEP databases); do not commit partially captured "
+            "goldens."
+        ) from exc
     _log(f"golden capture complete in {time.monotonic() - started:.0f}s")
     return 0
 
