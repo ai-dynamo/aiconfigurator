@@ -212,7 +212,7 @@ def run_gdn_context_benchmark(
                 # -0.3%, while a sync-bounded eager loop times the launch
                 # envelope instead (~4.9x high; qwen35_397b prefill
                 # qualification, 2026-08).
-                repeat_n=1,
+                repeat_n=10,
             ) as results:
                 log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -321,7 +321,7 @@ def run_gdn_context_benchmark(
                 kernel_func=run_gdn_scan,
                 num_warmups=num_warmups,
                 num_runs=num_runs,
-                repeat_n=1,
+                repeat_n=10,
             ) as results:
                 log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -421,7 +421,7 @@ def run_gdn_generation_benchmark(
             kernel_func=run_conv1d_update,
             num_warmups=num_warmups,
             num_runs=num_runs,
-            repeat_n=1,
+            repeat_n=10,
         ) as results:
             log_perf(
                 item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -507,7 +507,7 @@ def run_gdn_generation_benchmark(
             kernel_func=run_gdn_update,
             num_warmups=num_warmups,
             num_runs=num_runs,
-            repeat_n=1,
+            repeat_n=10,
         ) as results:
             log_perf(
                 item_list=[{**common_log_data, "latency": results["latency_ms"]}],
