@@ -143,7 +143,8 @@ def test_query_gdn_does_not_use_nearest_shape_from_physical_alias(vllm_gdn_db):
     assert result.source == "sol"
 
 
-def test_query_gdn_preserves_nearest_shape_fallback_within_logical_source(vllm_gdn_db):
+def test_query_gdn_does_not_borrow_nearest_shape_within_logical_source(vllm_gdn_db):
+    """Exact geometry only: nearest-num_v_heads rows are never returned as silicon."""
     farther_logical_shape = (2048, 16, 128, 8, 128, 4)
     nearer_logical_shape = (2048, 16, 128, 24, 128, 4)
     nearest_alias_shape = (2048, 16, 128, 31, 128, 4)
@@ -169,8 +170,7 @@ def test_query_gdn_preserves_nearest_shape_fallback_within_logical_source(vllm_g
         **MODEL_SHAPE,
     )
 
-    assert float(result) == pytest.approx(4.0)
-    assert result.source == "silicon"
+    assert result.source == "sol"
 
 
 @pytest.mark.parametrize(("backend", "version"), (("vllm", "0.23.0"), ("sglang", "0.24.0")))
