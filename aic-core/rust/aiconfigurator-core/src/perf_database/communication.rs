@@ -26,12 +26,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::axis_curve::AxisCurve;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct CommunicationTable {
@@ -61,12 +61,12 @@ pub struct CommunicationTable {
 
 struct CustomAllReduceGrids {
     /// (quant_name, tp_size) -> {message_size -> latency_ms}
-    by_keys: BTreeMap<(String, u32), BTreeMap<u64, f64>>,
+    by_keys: BTreeMap<(String, u32), AxisCurve>,
 }
 
 struct NcclGrids {
     /// (dtype_name, operation, num_gpus) -> {message_size -> latency_ms}
-    by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, f64>>,
+    by_keys: BTreeMap<(String, String, u32), AxisCurve>,
 }
 
 impl CommunicationTable {
@@ -127,13 +127,13 @@ impl CommunicationTable {
         }
         let grids = self.load_custom_allreduce()?;
         let key = (quant.name().to_string(), tp_size_effective);
-        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+        let curve = grids.by_keys.get(&key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "custom_allreduce data missing for {key:?} at {}",
                 self.data_root.display()
             ))
         })?;
-        interp_message_size(by_size, message_size)
+        interp_message_size(curve, message_size)
     }
 
     /// Custom-allreduce latency at a RAW tp_size, mirroring the full Python
@@ -222,19 +222,19 @@ impl CommunicationTable {
         let key = (dtype.name().to_string(), operation.to_string(), num_gpus_effective);
 
         if let Ok(grids) = self.load_nccl() {
-            if let Some(by_size) = grids.by_keys.get(&key) {
-                return interp_message_size(by_size, message_size);
+            if let Some(curve) = grids.by_keys.get(&key) {
+                return interp_message_size(curve, message_size);
             }
         }
         // Fall back to OneCCL.
         let grids = self.load_oneccl()?;
-        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+        let curve = grids.by_keys.get(&key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "neither NCCL nor OneCCL has data for {key:?} at {}",
                 self.data_root.display()
             ))
         })?;
-        interp_message_size(by_size, message_size)
+        interp_message_size(curve, message_size)
     }
 
     /// Collected `(message_size,) -> latency_ms` points of the
@@ -249,19 +249,22 @@ impl CommunicationTable {
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_custom_allreduce()?;
         let key = (quant.name().to_string(), tp_size);
-        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+        let curve = grids.by_keys.get(&key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "custom_allreduce data missing for {key:?} at {}",
                 self.data_root.display()
             ))
         })?;
-        if by_size.is_empty() {
+        if curve.is_empty() {
             return Err(AicError::PerfDatabase(format!(
                 "custom_allreduce data empty for {key:?} at {}",
                 self.data_root.display()
             )));
         }
-        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+        Ok(curve
+            .iter()
+            .map(|(size, latency)| (vec![f64::from(size)], latency))
+            .collect())
     }
 
     /// The single NCCL source the empirical path calibrates from, with
@@ -312,19 +315,22 @@ impl CommunicationTable {
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.nccl_empirical_source()?;
         let key = (dtype.name().to_string(), operation.to_string(), num_gpus);
-        let by_size = grids.by_keys.get(&key).ok_or_else(|| {
+        let curve = grids.by_keys.get(&key).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "NCCL data missing for {key:?} at {}",
                 self.data_root.display()
             ))
         })?;
-        if by_size.is_empty() {
+        if curve.is_empty() {
             return Err(AicError::PerfDatabase(format!(
                 "NCCL data empty for {key:?} at {}",
                 self.data_root.display()
             )));
         }
-        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+        Ok(curve
+            .iter()
+            .map(|(size, latency)| (vec![f64::from(size)], latency))
+            .collect())
     }
 
     /// Maximum recorded `num_gpus` for an NCCL (dtype, operation) tuple.
@@ -403,19 +409,38 @@ impl CommunicationTable {
 /// Python keeps float element counts (e.g. the gemma4 CP KV all-gather sizes
 /// `kvcache_bytes_per_token / comm_bytes`), and the engine query coordinate
 /// is float anyway. Truncating to integer first shifted the lerp point.
-fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: f64) -> Result<f64, AicError> {
+fn interp_message_size(by_size: &AxisCurve, message_size: f64) -> Result<f64, AicError> {
     if by_size.is_empty() {
         return Err(AicError::PerfDatabase(
             "comm data has no message_size points".to_string(),
         ));
     }
-    let mut node = Node::branch();
-    for (&size, &latency) in by_size {
-        node.insert(&[size.min(u32::MAX as u64) as u32], latency);
+    by_size.query(message_size, "message_bytes", &|size| size)
+}
+
+/// Freeze a loaded message-size bucket after row/source precedence has been
+/// resolved in the original `u64` key space. Insertion order is ascending, so
+/// if distinct oversized coordinates clamp to `u32::MAX`, the last point wins
+/// exactly as it did when the generic interpolation node was built per query.
+fn message_size_curve(points: BTreeMap<u64, f64>) -> AxisCurve {
+    let mut clamped = BTreeMap::new();
+    for (size, latency) in points {
+        clamped.insert(size.min(u64::from(u32::MAX)) as u32, latency);
     }
-    let sol = |c: &[f64]| c[0];
-    let cfg = OpInterpConfig::grid(&["message_bytes"], &sol);
-    perf_interp::query(&cfg, &node, &[message_size])
+    AxisCurve::from_map(clamped)
+}
+
+fn insert_first_message_point<K: Ord>(
+    by_keys: &mut BTreeMap<K, BTreeMap<u64, f64>>,
+    key: K,
+    message_size: u64,
+    latency: f64,
+) {
+    by_keys
+        .entry(key)
+        .or_default()
+        .entry(message_size)
+        .or_insert(latency);
 }
 
 fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllReduceGrids, AicError> {
@@ -459,11 +484,12 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
             // behavior is stable in production).
             // First-wins parity with Python `load_custom_allreduce_data`,
             // extended across shared-layer sources (earlier source wins).
-            by_keys
-                .entry(("half".to_string(), row.u32(num_gpus_col)?))
-                .or_default()
-                .entry(row.u64(message_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+            insert_first_message_point(
+                &mut by_keys,
+                ("half".to_string(), row.u32(num_gpus_col)?),
+                row.u64(message_size_col)?,
+                row.f64(latency_col)?,
+            );
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -473,7 +499,12 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(CustomAllReduceGrids { by_keys })
+    Ok(CustomAllReduceGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, points)| (key, message_size_curve(points)))
+            .collect(),
+    })
 }
 
 fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
@@ -488,15 +519,16 @@ fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
     for row in reader.rows()? {
         let row = row?;
         // First-wins parity with Python `load_nccl_data`.
-        by_keys
-            .entry((
+        insert_first_message_point(
+            &mut by_keys,
+            (
                 row.str_owned(nccl_dtype_col)?,
                 row.str_owned(op_name_col)?,
                 row.u32(num_gpus_col)?,
-            ))
-            .or_default()
-            .entry(row.u64(message_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+            ),
+            row.u64(message_size_col)?,
+            row.f64(latency_col)?,
+        );
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -504,7 +536,12 @@ fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
             path.display()
         )));
     }
-    Ok(NcclGrids { by_keys })
+    Ok(NcclGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, points)| (key, message_size_curve(points)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -514,6 +551,7 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf_database::perf_interp::{self, Node, OpInterpConfig};
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -535,6 +573,143 @@ mod tests {
     /// system-spec-aware NCCL root for b200_sxm.
     fn b200_nccl_root() -> Option<PathBuf> {
         Some(systems_root().join("data/b200_sxm/comm/nccl/2.27.3"))
+    }
+
+    fn generic_message_size_query(
+        points: &BTreeMap<u64, f64>,
+        message_size: f64,
+    ) -> Result<f64, AicError> {
+        if points.is_empty() {
+            return Err(AicError::PerfDatabase(
+                "comm data has no message_size points".to_string(),
+            ));
+        }
+        let mut node = Node::branch();
+        for (&size, &latency) in points {
+            node.insert(&[size.min(u64::from(u32::MAX)) as u32], latency);
+        }
+        let sol = |coordinates: &[f64]| coordinates[0];
+        let config = OpInterpConfig::grid(&["message_bytes"], &sol);
+        perf_interp::query(&config, &node, &[message_size])
+    }
+
+    #[test]
+    fn message_size_curve_matches_generic_grid() {
+        let points = BTreeMap::from([(256, 1.25), (1024, 2.75), (4096, 5.5)]);
+        let curve = message_size_curve(points.clone());
+
+        for message_size in [64.0, 256.0, 640.5, 1024.0, 2048.25, 4096.0, 8192.0] {
+            let expected = generic_message_size_query(&points, message_size).unwrap();
+            let actual = interp_message_size(&curve, message_size).unwrap();
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "message_size={message_size}"
+            );
+        }
+
+        let singleton = BTreeMap::from([(1024, 3.0)]);
+        let curve = message_size_curve(singleton.clone());
+        for message_size in [512.0, 1024.0, 2048.0] {
+            let expected = generic_message_size_query(&singleton, message_size).unwrap();
+            let actual = interp_message_size(&curve, message_size).unwrap();
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn message_size_curve_preserves_errors_and_clamped_duplicate_precedence() {
+        let empty = BTreeMap::new();
+        let empty_curve = message_size_curve(empty.clone());
+        assert_eq!(
+            interp_message_size(&empty_curve, 1024.0)
+                .unwrap_err()
+                .to_string(),
+            generic_message_size_query(&empty, 1024.0)
+                .unwrap_err()
+                .to_string()
+        );
+
+        let invalid = BTreeMap::from([(1024, 0.0)]);
+        let invalid_curve = message_size_curve(invalid.clone());
+        assert_eq!(
+            interp_message_size(&invalid_curve, 2048.0)
+                .unwrap_err()
+                .to_string(),
+            generic_message_size_query(&invalid, 2048.0)
+                .unwrap_err()
+                .to_string()
+        );
+
+        let oversized = BTreeMap::from([
+            (u64::from(u32::MAX) + 1, 1.0),
+            (u64::from(u32::MAX) + 2, 2.0),
+        ]);
+        let curve = message_size_curve(oversized.clone());
+        assert_eq!(curve.iter().collect::<Vec<_>>(), vec![(u32::MAX, 2.0)]);
+        let expected = generic_message_size_query(&oversized, f64::from(u32::MAX)).unwrap();
+        let actual = interp_message_size(&curve, f64::from(u32::MAX)).unwrap();
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn custom_allreduce_preserves_first_source_and_first_row_precedence() {
+        let key = ("half".to_string(), 4);
+        let mut by_keys = BTreeMap::new();
+        insert_first_message_point(&mut by_keys, key.clone(), 1024, 1.0);
+        insert_first_message_point(&mut by_keys, key.clone(), 1024, 2.0);
+        insert_first_message_point(&mut by_keys, key.clone(), 1024, 3.0);
+        insert_first_message_point(&mut by_keys, key.clone(), 2048, 4.0);
+        let curve = message_size_curve(by_keys.remove(&key).unwrap());
+        assert_eq!(interp_message_size(&curve, 1024.0).unwrap(), 1.0);
+        assert_eq!(interp_message_size(&curve, 2048.0).unwrap(), 4.0);
+    }
+
+    fn table_with_loaded_collectives(
+        nccl: BTreeMap<(String, String, u32), AxisCurve>,
+        oneccl: BTreeMap<(String, String, u32), AxisCurve>,
+    ) -> CommunicationTable {
+        let nccl_cell = OnceLock::new();
+        assert!(nccl_cell.set(Ok(NcclGrids { by_keys: nccl })).is_ok());
+        let oneccl_cell = OnceLock::new();
+        assert!(oneccl_cell.set(Ok(NcclGrids { by_keys: oneccl })).is_ok());
+        CommunicationTable {
+            data_root: PathBuf::from("synthetic"),
+            nccl_root: None,
+            oneccl_root: None,
+            custom_allreduce_sources: Vec::new(),
+            custom_allreduce: OnceLock::new(),
+            nccl: nccl_cell,
+            oneccl: oneccl_cell,
+        }
+    }
+
+    #[test]
+    fn nccl_primary_and_oneccl_fallback_use_frozen_curves() {
+        let key = ("half".to_string(), "all_reduce".to_string(), 4);
+        let primary = BTreeMap::from([(
+            key.clone(),
+            message_size_curve(BTreeMap::from([(1024, 1.0)])),
+        )]);
+        let fallback = BTreeMap::from([(
+            key.clone(),
+            message_size_curve(BTreeMap::from([(1024, 2.0)])),
+        )]);
+        let table = table_with_loaded_collectives(primary, fallback.clone());
+        assert_eq!(
+            table
+                .query_nccl(CommQuantMode::Half, "all_reduce", 4, 1024.0)
+                .unwrap(),
+            1.0
+        );
+
+        let table = table_with_loaded_collectives(BTreeMap::new(), fallback);
+        assert_eq!(
+            table
+                .query_nccl(CommQuantMode::Half, "all_reduce", 4, 1024.0)
+                .unwrap(),
+            2.0
+        );
     }
 
     #[test]
