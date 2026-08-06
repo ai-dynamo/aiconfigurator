@@ -88,7 +88,9 @@ pub enum ForwardPassPerfReadiness {
 /// Native correction grids use fixed constructor-time ranges from
 /// `ForwardPassPerfOptions`: `max_num_tokens` bounds `sum_prefill_tokens`,
 /// `max_batch_size` bounds `num_decode_requests`, and `max_kv_tokens` bounds
-/// `sum_decode_kv_tokens`.
+/// `sum_decode_kv_tokens`. `max_correction_factor` optionally places an
+/// absolute upper bound on learned native correction factors while preserving
+/// downward corrections.
 ///
 /// Queued request fields are accepted for FPM schema parity but ignored by this
 /// forward-pass-level model. `estimate_forward_pass_time_ms` treats FPM as a
@@ -307,11 +309,13 @@ impl ForwardPassPerfModel {
     /// finite positive `wall_time` across ranks as the observed latency target
     /// in milliseconds. Iterations with no scheduled work or no positive
     /// `wall_time` are ignored. Native models update the matching region's
-    /// median `observed_ms / native_ms` correction factor. Regions are used only
-    /// after their inferred workload kind has `min_observations` total samples;
-    /// empty regions keep the default factor `1.0`. Observations outside the
-    /// configured correction bounds are ignored by native correction models.
-    /// Regression models learn a workload-specific linear fit.
+    /// median `observed_ms / native_ms` correction factor, with each ratio
+    /// bounded by `max_correction_factor` when configured. Regions are used
+    /// only after their inferred workload kind has `min_observations` total
+    /// samples; empty regions keep the default factor `1.0`. Observations
+    /// outside the configured correction bounds are ignored by native
+    /// correction models. Regression models learn a workload-specific linear
+    /// fit.
     ///
     /// Pure Rust over the `Engine` — no Python re-entry.
     pub fn tune_with_fpms(

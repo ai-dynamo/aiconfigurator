@@ -3,9 +3,9 @@
 
 //! Online native-correction grid for the forward-pass perf model.
 //!
-//! Buckets observed `(workload feature, observed_ms, native_ms)` samples into a
-//! fixed-bound grid and applies the local median `observed_ms / native_ms`
-//! ratio as a correction factor on top of the native AIC estimate.
+//! Buckets observed `(workload feature, observed_ms / native_ms)` correction
+//! samples into a fixed-bound grid and applies the local median ratio on top of
+//! the native AIC estimate.
 
 use super::options::ForwardPassPerfOptions;
 use super::samples::{median_ratio, AxisRange, BucketedSamples, StoreStats, WithOptions};
@@ -14,12 +14,12 @@ use super::samples::{median_ratio, AxisRange, BucketedSamples, StoreStats, WithO
 pub(crate) struct CorrectionBuckets {
     samples: BucketedSamples<CorrectionObservation>,
     min_observations: usize,
+    max_correction_factor: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct CorrectionObservation {
-    observed_ms: f64,
-    native_ms: f64,
+    correction_factor: f64,
 }
 
 impl WithOptions for CorrectionBuckets {
@@ -27,6 +27,7 @@ impl WithOptions for CorrectionBuckets {
         Self {
             samples: BucketedSamples::new_fixed(options, axis_ranges),
             min_observations: options.min_observations,
+            max_correction_factor: options.max_correction_factor,
         }
     }
 }
@@ -49,11 +50,19 @@ impl CorrectionBuckets {
     pub(crate) fn add_observation(&mut self, x: Vec<f64>, observed_ms: f64, native_ms: f64) {
         if native_ms.is_finite() && native_ms > 0.0 && observed_ms.is_finite() && observed_ms > 0.0
         {
+            // Corrections are absolute observed/native samples, not
+            // incremental multipliers. Bound each sample before the median is
+            // computed so repeated outliers cannot exceed the ceiling.
+            let correction_factor = observed_ms / native_ms;
+            let bounded_correction_factor = self
+                .max_correction_factor
+                .map_or(correction_factor, |max_factor| {
+                    correction_factor.min(max_factor)
+                });
             self.samples.add(
                 x,
                 CorrectionObservation {
-                    observed_ms,
-                    native_ms,
+                    correction_factor: bounded_correction_factor,
                 },
             );
         }
@@ -75,7 +84,7 @@ impl CorrectionBuckets {
         median_ratio(
             bucket
                 .iter()
-                .map(|(_, obs)| obs.observed_ms / obs.native_ms),
+                .map(|(_, observation)| observation.correction_factor),
         )
         .unwrap_or(1.0)
     }
@@ -99,7 +108,7 @@ impl CorrectionBuckets {
                 median_ratio(
                     bucket
                         .iter()
-                        .map(|(_, obs)| obs.observed_ms / obs.native_ms),
+                        .map(|(_, observation)| observation.correction_factor),
                 )
             })
             .collect()

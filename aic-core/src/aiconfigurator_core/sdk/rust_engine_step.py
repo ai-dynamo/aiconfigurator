@@ -75,7 +75,10 @@ class RustForwardPassPerfModel:
     ``max_num_tokens`` bounds ``sum_prefill_tokens`` and defaults to ``8192``,
     ``max_batch_size`` bounds ``num_decode_requests`` and defaults to ``512``,
     and ``max_kv_tokens`` bounds ``sum_decode_kv_tokens`` and defaults to
-    ``2000000``.
+    ``2000000``. ``max_correction_factor`` optionally places an absolute upper
+    bound on learned native correction factors; it must be finite and at least
+    ``1.0``. Downward corrections remain unchanged, and omitting the option
+    preserves the default unbounded behavior.
     """
 
     def __init__(self, inner: Any) -> None:

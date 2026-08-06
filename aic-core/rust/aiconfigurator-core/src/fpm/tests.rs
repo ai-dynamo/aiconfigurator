@@ -326,6 +326,25 @@ fn options_reject_zero_bounds() {
     assert!(matches!(err, AicError::InvalidEngineConfig(_)));
 }
 
+#[test]
+fn options_validate_max_correction_factor() {
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_correction_factor: Some(1.0),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(model.options().max_correction_factor, Some(1.0));
+
+    for invalid_factor in [f64::NEG_INFINITY, -1.0, 0.0, 0.999, f64::INFINITY, f64::NAN] {
+        let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+            max_correction_factor: Some(invalid_factor),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, AicError::InvalidEngineConfig(_)));
+    }
+}
+
 // ---- regression-only mode (engine-agnostic) ----
 
 #[test]
@@ -601,7 +620,11 @@ fn tuning_ignores_idle_wall_time_and_queued_only_work() {
 
 #[test]
 fn fallback_regression_has_no_correction_factors() {
-    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default()).unwrap();
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_correction_factor: Some(2.0),
+        ..Default::default()
+    })
+    .unwrap();
     assert_eq!(model.min_correction_factor(), None);
     assert_eq!(model.max_correction_factor(), None);
     assert_eq!(model.avg_correction_factor(), None);
@@ -649,6 +672,117 @@ fn native_correction_applies_after_bucket_is_ready() {
         model.diagnostics().source,
         ForwardPassPerfSource::AicWithCorrection
     );
+}
+
+/// The configured ceiling is absolute relative to the native estimate. It does
+/// not compound as matching outliers are added to an already-corrected bucket.
+#[test]
+fn native_correction_cap_is_absolute_across_repeated_outliers() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        max_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+    let outlier = prefill_fpm(20, native_ms * 90.0 / 1000.0);
+
+    model
+        .tune_with_fpms(&[vec![outlier.clone()], vec![outlier.clone()]])
+        .unwrap();
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 2.0,
+    );
+
+    model
+        .tune_with_fpms(&[
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier],
+        ])
+        .unwrap();
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 2.0,
+    );
+    assert_close(model.min_correction_factor().unwrap(), 2.0);
+    assert_close(model.max_correction_factor().unwrap(), 2.0);
+    assert_close(model.avg_correction_factor().unwrap(), 2.0);
+}
+
+/// Correction samples are capped before taking the median, retaining the
+/// contribution of observations below the ceiling.
+#[test]
+fn native_correction_cap_is_applied_at_observation_ingestion() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        max_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(20, native_ms / 1000.0)],
+            vec![prefill_fpm(20, native_ms * 100.0 / 1000.0)],
+        ])
+        .unwrap();
+
+    // The stored samples are [1.0, 2.0], whose median is 1.5. Capping only
+    // after taking the raw [1.0, 100.0] median would incorrectly produce 2.0.
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 1.5,
+    );
+    assert_close(model.max_correction_factor().unwrap(), 1.5);
+}
+
+/// An upper ceiling does not clamp genuine observations below the native
+/// estimate.
+#[test]
+fn native_correction_cap_preserves_downward_corrections() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        max_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+    let faster = prefill_fpm(20, native_ms * 0.5 / 1000.0);
+
+    model
+        .tune_with_fpms(&[vec![faster.clone()], vec![faster]])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 0.5,
+    );
+    assert_close(model.max_correction_factor().unwrap(), 0.5);
 }
 
 /// min_observations is workload-kind-wide; empty in-range regions keep the
