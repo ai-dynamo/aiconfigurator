@@ -14,7 +14,8 @@ use super::samples::{median_ratio, AxisRange, BucketedSamples, StoreStats, WithO
 pub(crate) struct CorrectionBuckets {
     samples: BucketedSamples<CorrectionObservation>,
     min_observations: usize,
-    max_correction_factor: Option<f64>,
+    min_faster_correction_factor: Option<f64>,
+    max_slower_correction_factor: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -27,7 +28,8 @@ impl WithOptions for CorrectionBuckets {
         Self {
             samples: BucketedSamples::new_fixed(options, axis_ranges),
             min_observations: options.min_observations,
-            max_correction_factor: options.max_correction_factor,
+            min_faster_correction_factor: options.min_faster_correction_factor,
+            max_slower_correction_factor: options.max_slower_correction_factor,
         }
     }
 }
@@ -52,12 +54,18 @@ impl CorrectionBuckets {
         {
             // Corrections are absolute observed/native samples, not
             // incremental multipliers. Bound each sample before the median is
-            // computed so repeated outliers cannot exceed the ceiling.
+            // computed so repeated outliers cannot exceed either directional
+            // limit.
             let correction_factor = observed_ms / native_ms;
+            let lower_bounded_correction_factor = self
+                .min_faster_correction_factor
+                .map_or(correction_factor, |min_factor| {
+                    correction_factor.max(min_factor)
+                });
             let bounded_correction_factor = self
-                .max_correction_factor
-                .map_or(correction_factor, |max_factor| {
-                    correction_factor.min(max_factor)
+                .max_slower_correction_factor
+                .map_or(lower_bounded_correction_factor, |max_factor| {
+                    lower_bounded_correction_factor.min(max_factor)
                 });
             self.samples.add(
                 x,
