@@ -107,7 +107,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
-ENGINE_SPEC_SCHEMA_VERSION = 6
+# - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
+#   decodes positionally).
+ENGINE_SPEC_SCHEMA_VERSION = 7
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
