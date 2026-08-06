@@ -1627,8 +1627,10 @@ def _get_base_gemm_shape_sweeps(backend: str | None = None) -> list[dict[str, ob
 
 def get_gemm_case_specs(backend: str | None = None) -> list[GemmCommonTestCase]:
     test_cases = []
+    base_token_counts: set[int] = set()
     for shape_sweep in _get_base_gemm_shape_sweeps(backend):
         token_counts = _as_int_list(shape_sweep.get("token_counts"), field_name="gemm.token_counts")
+        base_token_counts.update(token_counts)
         feature_sizes = shape_sweep.get("feature_sizes")
         input_feature_sizes = _as_int_list(
             shape_sweep.get("input_feature_sizes", feature_sizes),
@@ -1650,6 +1652,30 @@ def get_gemm_case_specs(backend: str | None = None) -> list[GemmCommonTestCase]:
                     if output_features * input_features == 65536 * 65536:
                         continue
                     test_cases.append(GemmCommonTestCase(x=token_count, n=output_features, k=input_features))
+
+    # Model-declared exact widths (model_case_values.gemm), e.g. scalar expert
+    # gates and GDN b/a projections below the base feature grid. Token density
+    # comes from the base sweeps; dedup on the physical (x, n, k) tuple.
+    seen = {(case.x, case.n, case.k) for case in test_cases}
+    for model_row in _model_case_values("gemm"):
+        output_features = _as_int_list(
+            model_row.get("output_feature_sizes"),
+            field_name="model_case_values.gemm.output_feature_sizes",
+        )
+        input_features = _as_int_list(
+            model_row.get("input_feature_sizes"),
+            field_name="model_case_values.gemm.input_feature_sizes",
+        )
+        for value in (*output_features, *input_features):
+            if value <= 0:
+                raise ValueError(f"model_case_values.gemm feature sizes must be positive integers, got {value}")
+        for token_count in sorted(base_token_counts, reverse=True):
+            for n in sorted(output_features, reverse=True):
+                for k in sorted(input_features, reverse=True):
+                    if (token_count, n, k) in seen:
+                        continue
+                    seen.add((token_count, n, k))
+                    test_cases.append(GemmCommonTestCase(x=token_count, n=n, k=k))
 
     return test_cases
 

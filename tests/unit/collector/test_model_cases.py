@@ -13,6 +13,7 @@ import pytest
 
 from collector.case_generator import (
     get_attention_head_configs,
+    get_gemm_case_specs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
@@ -701,14 +702,18 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     cases = get_gemm_case_specs()
     xpu_cases = get_gemm_case_specs("vllm_xpu")
 
-    assert len(cases) == 35742
+    # Base sweep expansion first (order preserved for checkpoint stability),
+    # then model_case_values.gemm rows.
+    assert len(cases) == 36926
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
-    assert cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
-    assert len(xpu_cases) == 9177
+    assert len(xpu_cases) == 9513
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
-    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
     compute_scale_cases = get_compute_scale_case_specs()
@@ -1554,3 +1559,19 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
 
     assert violations == []
+
+
+def test_qwen35_gemm_model_rows_add_exact_below_grid_widths():
+    """model_case_values.gemm supplies exact widths under the base feature grid
+    (scalar expert gate n=1, GDN b/a projections); token density comes from the
+    base sweeps and cases dedupe on the physical (x, n, k) tuple."""
+    specs = get_gemm_case_specs()
+    shapes = {(case.n, case.k) for case in specs}
+    assert {(1, 2048), (8, 2048), (16, 4096), (12, 5120)} <= shapes
+
+    base_tokens = set()
+    for sweep in load_yaml_file(BASE_OP_CASES_DIR / "gemm.yaml")["all_frameworks_op_cases"]["gemm"]["cases"]:
+        base_tokens.update(int(token) for token in sweep["token_counts"])
+    assert {case.x for case in specs if (case.n, case.k) == (1, 2048)} == base_tokens
+
+    assert len(specs) == len({(case.x, case.n, case.k) for case in specs})
