@@ -15,7 +15,7 @@ path while that path is still alive. This script is the only writer of
   mixed / decode per subset case, plus the chunked-prefill, imbalance-scale,
   and WideEP references) from ``test_compile_engine_parity``.
 - ``per_op.json``        — the Python summary per-op dicts (latency + energy
-  + source) for static ctx/gen of the 9-case compile-engine subset; these
+  + source) for static ctx/gen of the 10-case compile-engine subset; these
   anchor the per-op op-list FFI.
 
 Run from the repository root::

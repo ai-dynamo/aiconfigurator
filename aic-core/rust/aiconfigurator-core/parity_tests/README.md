@@ -26,14 +26,16 @@ golden workflow below) for:
   Python `_get_mix_step_latency` for the same shape
 - `agg`: public `cli_estimate(mode="agg")`
 - `disagg`: public `cli_estimate(mode="disagg")`
+- `afd`: public `cli_estimate(mode="afd")` (ttft/tpot; the AFD session's
+  per-op values cross the op-list evaluate FFI)
 
 The case matrix has grown far past the original 3-case/12-surface smoke set:
 `SMOKE_CASES` (61) x 4 surfaces, `POWER_CASES` (5, energy/power coverage) x 4,
 `CP_CASES` (3, mixed only), `HYBRID_CASES` (17) x 4 at a 1e-4 rtol,
-`SOL_CASES` (4, static+mixed) at 1e-4, and the two #1456 site-transfer
-tie-break anchors (`TIE_AGG_CASES`/`TIE_DISAGG_CASES`) — 345 golden-backed
-(case, surface) pairs, plus the typed-error/provenance contract tests and the
-anti-vacuous golden guards. If a parity assertion fails, the message prints
+`SOL_CASES` (4, static+mixed) at 1e-4, the two #1456 site-transfer
+tie-break anchors (`TIE_AGG_CASES`/`TIE_DISAGG_CASES`), and `AFD_CASES`
+(1, afd only) — 346 golden-backed (case, surface) pairs, plus the
+typed-error/provenance contract tests and the anti-vacuous golden guards. If a parity assertion fails, the message prints
 the golden (Python) value, Rust value, absolute delta, percent delta,
 tolerance, and status for each metric.
 
@@ -67,7 +69,9 @@ Python reference into fixtures **while the Python path is still alive**:
   (static/mixed/decode per case + chunked-prefill, imbalance-scale, and
   WideEP references).
 - `goldens/per_op.json` — the Python summary per-op dicts (latency + energy
-  + source) for the 9-case subset; the per-op op-list FFI anchor.
+  + source) for the 10-case subset (one member sits on a power-carrying
+  identity, so its `energy_wms` values are nonzero and the per-op energy
+  comparison actually executes); the per-op op-list FFI anchor.
 
 The tests compare **live Rust vs golden**; only
 `regenerate_goldens.py` ever runs the Python side. Regenerate with:
@@ -154,9 +158,10 @@ The benchmark reports, per phase:
 - Rust speedup versus the Python hot path
 
 It also reports one-time Python session setup and Rust estimator setup. Rust
-setup includes loading the shared library through `ctypes`, loading Rust model
-metadata and Rust perf DB data, and constructing the estimator, but excludes
-`cargo build`. These setup costs are excluded from the step-latency table.
+setup includes importing the maturin-built `aiconfigurator_core` extension,
+loading Rust model metadata and Rust perf DB data, and constructing the
+estimator, but excludes `cargo build` / `maturin develop`. These setup costs
+are excluded from the step-latency table.
 
 Use command-line overrides such as `--model-path`, `--system-name`,
 `--backend-version`, `--batch-size`, `--isl`, `--osl`, `--prefix`, and

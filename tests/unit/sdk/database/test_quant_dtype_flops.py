@@ -42,7 +42,7 @@ class TestDivergentRatioSol:
         topk, num_experts = 2, 8
         # Compute-bound shape (sol_math >> sol_mem on the fixture spec even at
         # 10x fp4 flops), so the SOL scalar IS sol_math — the FLOPs term the
-        # retired SOL_FULL tuple used to expose directly.
+        # per-call SOL_FULL diagnostic tuple exposes directly.
         sol_scalar = float(
             comprehensive_perf_db.query_moe(
                 num_tokens,
@@ -69,7 +69,8 @@ class TestDivergentRatioSol:
 
         b, s, n, n_kv = 4, 4096, 32, 8
         # Compute-bound on the fixture spec (1 TFLOPS : 1 TB/s), so the SOL
-        # scalar IS sol_math (the retired SOL_FULL tuple exposed it directly).
+        # scalar IS sol_math (the per-call SOL_FULL diagnostic tuple exposes
+        # it directly).
         sol_scalar = float(
             comprehensive_perf_db.query_generation_attention(
                 b,

@@ -52,9 +52,9 @@ def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
 def _attention_sol_tuple(db, *, is_context: bool, **query_kwargs) -> tuple[float, float, float]:
     """Direct call into the shared DSv4 SOL formula.
 
-    Replaces the retired ``database_mode=SOL_FULL`` instrument: takes the same
-    kwargs the ``query_*_deepseek_v4_attention_module`` wrappers take and
-    returns the raw ``(sol_time, sol_math, sol_mem)`` tuple. Mirrors the
+    A direct stand-in for the per-call ``database_mode=SOL_FULL`` diagnostic:
+    takes the same kwargs the ``query_*_deepseek_v4_attention_module`` wrappers
+    take and returns the raw ``(sol_time, sol_math, sol_mem)`` tuple. Mirrors the
     wrappers' pre-binding: ``native_heads``/``tp_size`` never enter the SOL,
     and the generation path rebinds the fmha label from the kv-cache dtype
     and pins ``prefix=0``.
@@ -224,8 +224,8 @@ class TestDeepSeekV4MHCModule:
         assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
 
         # Lower-precision weights shrink both the FLOPs and the byte terms of
-        # the mHC roofline, so the SOL scalar must drop (the retired SOL_FULL
-        # tuple asserted the sol_mem slot in isolation).
+        # the mHC roofline, so the SOL scalar must drop (the per-call SOL_FULL
+        # diagnostic tuple exposes the sol_mem slot in isolation).
         bf16_sol = comprehensive_perf_db.query_mhc_module(
             num_tokens=512,
             hidden_size=7168,

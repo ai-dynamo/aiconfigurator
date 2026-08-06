@@ -385,6 +385,22 @@ class TestContextDSAModule:
         )
         assert float(result) > 0
 
+    def test_sol_full_returns_three_tuple(self, comprehensive_perf_db):
+        """Per-call SOL_FULL diagnostic returns the raw (sol_time, sol_math, sol_mem) tuple."""
+        result = comprehensive_perf_db.query_context_dsa_module(
+            b=2,
+            s=256,
+            prefix=0,
+            num_heads=32,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert len(result) == 3
+        sol_time, sol_math, sol_mem = result
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
+
     def test_sol_increases_with_seq_len(self, comprehensive_perf_db):
         r1 = comprehensive_perf_db.query_context_dsa_module(
             b=4,
@@ -724,6 +740,20 @@ class TestGenerationDSAModule:
             database_mode=common.DatabaseMode.SOL,
         )
         assert float(result) > 0
+
+    def test_sol_full_returns_three_tuple(self, comprehensive_perf_db):
+        """Per-call SOL_FULL diagnostic returns the raw (sol_time, sol_math, sol_mem) tuple."""
+        result = comprehensive_perf_db.query_generation_dsa_module(
+            b=4,
+            s=1024,
+            num_heads=32,
+            kv_cache_dtype=common.KVCacheQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            database_mode=common.DatabaseMode.SOL_FULL,
+        )
+        assert len(result) == 3
+        sol_time, sol_math, sol_mem = result
+        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
 
     def test_sol_increases_with_batch_size(self, comprehensive_perf_db):
         r1 = comprehensive_perf_db.query_generation_dsa_module(

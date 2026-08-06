@@ -920,10 +920,10 @@ def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
 
 def test_every_selectable_database_mode_routes_to_rust():
     """The compiled engine answers every selectable database mode — SILICON,
-    the util-space empirical layer (HYBRID / EMPIRICAL), and SOL (ported with
-    the SOL_FULL retirement) — so none of them delegates to the Python step.
-    Only the retired SOL_FULL name (which mode entry refuses to activate)
-    still trips the vestigial gate."""
+    the util-space empirical layer (HYBRID / EMPIRICAL), and SOL (also ported
+    to Rust) — so none of them delegates to the Python step. SOL_FULL is a
+    Python-side PER-CALL diagnostic, never a default mode (mode entry refuses
+    to activate it), so only that name still trips the defensive gate."""
     from enum import Enum
 
     from aiconfigurator.sdk.config import RuntimeConfig

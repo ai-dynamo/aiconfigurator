@@ -38,7 +38,7 @@ class TestQueryEncoderAttention:
 
         # At this shape sol_math dwarfs sol_mem by ~1000x on the fixture spec
         # (and both phases share the same byte count), so the SOL scalar IS
-        # the FLOPs term the retired SOL_FULL tuple used to expose directly.
+        # the FLOPs term the per-call SOL_FULL diagnostic tuple exposes directly.
         encoder_sol = float(
             comprehensive_perf_db.query_encoder_attention(b, s, n, h, fmha, database_mode=common.DatabaseMode.SOL)
         )

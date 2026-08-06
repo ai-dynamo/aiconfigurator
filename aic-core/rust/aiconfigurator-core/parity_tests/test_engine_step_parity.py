@@ -69,6 +69,16 @@ class EngineStepParityCase:
     # False on identities whose perf tables ship no power columns — there the
     # sums are 0.0 on both engines and the comparison would be vacuous.
     compare_energy: bool = False
+    # AFD (attention-FFN disaggregation) topology, consumed only by the "afd"
+    # surface (AFD_CASES). Names mirror the cli_estimate kwargs that
+    # cli/main.py maps the --n-a-nodes / --n-f-nodes / --a-tp-size /
+    # --a-batch-size / --f-moe-ep-size flags onto (afd_-prefixed here to keep
+    # the case namespace readable); defaults track cli_estimate's.
+    afd_n_a_nodes: int = 1
+    afd_n_f_nodes: int = 1
+    afd_a_tp_size: int = 1
+    afd_a_batch_size: int = 128
+    afd_f_moe_ep_size: int = 1
 
 
 SMOKE_CASES = [
@@ -929,6 +939,65 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
     }
 
 
+def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+    """AFD (attention-FFN disaggregation) estimate for the case's topology.
+
+    Mirrors how ``cli/main.py`` maps the AFD flags onto
+    ``cli_estimate(mode="afd", ...)`` (n_a_nodes / n_f_nodes / a_tp_size /
+    a_batch_size / f_moe_ep_size; the remaining AFD knobs stay at their
+    cli_estimate defaults: afd_phase="decode" + afd_combined_with_pd=True, so
+    tpot comes from the AFD decode pipeline and ttft from the static-ctx
+    complement). The AFD session sources its per-op values through the
+    op-list evaluate FFI (``AFDInferenceSession._sum_latency``) when the
+    routing gate allows; that internal RuntimeConfig carries no explicit
+    ``engine_step_backend`` (the kwarg reaches only the static complement),
+    so callers pin the AFD side via the ``AICONFIGURATOR_ENGINE_STEP_BACKEND``
+    env var (regenerate_goldens.py exports "python"; the parity test sets
+    "rust").
+    """
+
+    def call():
+        return _quiet_call(
+            cli_estimate,
+            mode="afd",
+            model_path=case.model_path,
+            system_name=case.system_name,
+            backend_name=case.backend_name,
+            backend_version=case.backend_version,
+            batch_size=case.batch_size,
+            isl=case.isl,
+            osl=case.osl,
+            prefix=case.prefix,
+            tp_size=case.tp_size,
+            pp_size=case.pp_size,
+            attention_dp_size=case.attention_dp_size,
+            moe_tp_size=case.moe_tp_size,
+            moe_ep_size=case.moe_ep_size,
+            n_a_nodes=case.afd_n_a_nodes,
+            n_f_nodes=case.afd_n_f_nodes,
+            a_tp_size=case.afd_a_tp_size,
+            a_batch_size=case.afd_a_batch_size,
+            f_moe_ep_size=case.afd_f_moe_ep_size,
+            engine_step_backend=engine_step_backend,
+            database_mode=case.database_mode,
+            transfer_policy=case.transfer_policy,
+            moe_quant_mode=case.moe_quant_mode,
+        )
+
+    err: _ErrorSentinel | None = None
+    try:
+        result = call()
+    except Exception as exc:
+        err = _ErrorSentinel(exc)
+        result = None
+    if err is not None:
+        return {"ttft_ms": err, "tpot_ms": err}
+    return {
+        "ttft_ms": float(result.ttft),
+        "tpot_ms": float(result.tpot),
+    }
+
+
 def _mix_step_shape(case: EngineStepParityCase) -> dict:
     """Mix-step (chunked-prefill + decode) shape for a smoke case.
 
@@ -1143,6 +1212,12 @@ def _surface_metrics(
             "disagg_ttft": metrics["ttft_ms"],
             "disagg_tpot": metrics["tpot_ms"],
             "disagg_request": metrics["request_latency_ms"],
+        }
+    if surface == "afd":
+        metrics = _afd_metrics(case, engine_step_backend=engine_step_backend)
+        return {
+            "afd_ttft": metrics["ttft_ms"],
+            "afd_tpot": metrics["tpot_ms"],
         }
     raise ValueError(f"unknown parity surface: {surface!r}")
 
@@ -1738,6 +1813,53 @@ class TestRustEngineStepSolMixedStepParity:
         assert reason is None, reason
 
 
+# AFD (attention-FFN disaggregation) parity case: the AFD orchestration (A/F
+# partitioning, ping-pong pipeline, comm ops) is Python-side permanently, but
+# the per-op values it sums come from the compiled engine through the op-list
+# evaluate FFI (`AFDInferenceSession._sum_latency`). rust==python was verified
+# manually (bit-identical) when that sourcing landed; this case pins it in CI.
+# One MoE model with AFD support on a version with data: Qwen3-30B-A3B on
+# h200_sxm/vllm/0.19.0, one A node + one F node (a_tp=4, a_batch=32,
+# f_moe_ep=8) — verified end-to-end through `cli_estimate(mode="afd", ...)`.
+AFD_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3-30B-A3B",
+            system_name="h200_sxm",
+            tp_size=4,
+            moe_ep_size=4,
+            afd_n_a_nodes=1,
+            afd_n_f_nodes=1,
+            afd_a_tp_size=4,
+            afd_a_batch_size=32,
+            afd_f_moe_ep_size=8,
+        ),
+        id="qwen3-30b-a3b-h200-vllm-019-afd",
+    ),
+]
+
+
+class TestRustEngineStepAfdParity:
+    """AFD parity anchor (ttft from the static-ctx complement, tpot from the
+    AFD decode pipeline whose per-op values cross the evaluate FFI)."""
+
+    @pytest.mark.parametrize("case", AFD_CASES)
+    def test_afd_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+        # The AFD session's internal RuntimeConfig carries no explicit
+        # engine_step_backend (cli_estimate's kwarg reaches only the static
+        # complement), so pin the env-var backstop: the live side must stay
+        # on the compiled engine even under an ambient =python override.
+        monkeypatch.setenv(rust_engine_step.ENGINE_STEP_BACKEND_ENV, "rust")
+
+        reason = _parity_mismatch_reason(_comparison_metrics(case, "afd"))
+        assert reason is None, reason
+
+
 # The full engine-step golden matrix: every (case, surface) pair the parity
 # classes above compare, in one importable structure so
 # `regenerate_goldens.py` captures exactly what the tests consume (single
@@ -1751,6 +1873,7 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SOL_CASES, ("static", "mixed")),
     (TIE_AGG_CASES, ("agg",)),
     (TIE_DISAGG_CASES, ("disagg",)),
+    (AFD_CASES, ("afd",)),
 )
 
 

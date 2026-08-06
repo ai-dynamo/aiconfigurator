@@ -1143,14 +1143,145 @@
           "source": "silicon"
         }
       }
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power": {
+      "context": {
+        "context_add_norm_1": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.27473155324675325,
+          "source": "empirical"
+        },
+        "context_add_norm_2": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.27473155324675325,
+          "source": "empirical"
+        },
+        "context_attention": {
+          "energy_wms": 886.6545396484373,
+          "latency_ms": 2.8845644815625002,
+          "source": "mixed"
+        },
+        "context_embedding": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.0036808935064935066,
+          "source": "empirical"
+        },
+        "context_embedding_ar": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.029833600521087644,
+          "source": "silicon"
+        },
+        "context_moe": {
+          "energy_wms": 6808.065985917527,
+          "latency_ms": 7.845372121710526,
+          "source": "silicon"
+        },
+        "context_moe_post_dispatch": {
+          "energy_wms": 0.0,
+          "latency_ms": 1.4320128250122068,
+          "source": "silicon"
+        },
+        "context_moe_pre_dispatch": {
+          "energy_wms": 0.0,
+          "latency_ms": 1.4320128250122068,
+          "source": "silicon"
+        },
+        "context_p2p": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.0,
+          "source": "empirical"
+        },
+        "context_proj_gemm": {
+          "energy_wms": 94.83422521636963,
+          "latency_ms": 0.24676812744140625,
+          "source": "silicon"
+        },
+        "context_qkv_gemm": {
+          "energy_wms": 93.98120166299893,
+          "latency_ms": 0.30254537262140707,
+          "source": "silicon"
+        },
+        "context_router_gemm": {
+          "energy_wms": 60.16724792407227,
+          "latency_ms": 0.2131126708984375,
+          "source": "silicon"
+        }
+      },
+      "generation": {
+        "generation_add_norm_1": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.14412766753246753,
+          "source": "empirical"
+        },
+        "generation_add_norm_2": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.14412766753246753,
+          "source": "empirical"
+        },
+        "generation_attention": {
+          "energy_wms": 197.84298345517104,
+          "latency_ms": 0.3931245535016061,
+          "source": "silicon"
+        },
+        "generation_embedding": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.0030006649350649353,
+          "source": "empirical"
+        },
+        "generation_embedding_ar": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.007242239713668823,
+          "source": "silicon"
+        },
+        "generation_logits_gemm": {
+          "energy_wms": 21.34987460453211,
+          "latency_ms": 0.02714319838406666,
+          "source": "silicon"
+        },
+        "generation_moe": {
+          "energy_wms": 1156.5127741781864,
+          "latency_ms": 1.2068215438778211,
+          "source": "silicon"
+        },
+        "generation_moe_post_dispatch": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.3476275062561035,
+          "source": "silicon"
+        },
+        "generation_moe_pre_dispatch": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.3476275062561035,
+          "source": "silicon"
+        },
+        "generation_p2p": {
+          "energy_wms": 0.0,
+          "latency_ms": 0.0,
+          "source": "empirical"
+        },
+        "generation_proj_gemm": {
+          "energy_wms": 91.77636432531736,
+          "latency_ms": 0.21290214029947913,
+          "source": "silicon"
+        },
+        "generation_qkv_gemm": {
+          "energy_wms": 108.62313209728075,
+          "latency_ms": 0.25372314942288376,
+          "source": "silicon"
+        },
+        "generation_router_gemm": {
+          "energy_wms": 61.57585311932374,
+          "latency_ms": 0.22702532958984378,
+          "source": "silicon"
+        }
+      }
     }
   },
   "header": {
-    "case_count": 9,
+    "case_count": 10,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "5765aabb-dirty",
-    "git_head": "5765aabbe03cb5d7a48c9c5d3521f04b55cd8818",
+    "git_describe": "413b9a7a-dirty",
+    "git_head": "413b9a7ad19869c643bde462ae4ce22f77e265ff",
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",

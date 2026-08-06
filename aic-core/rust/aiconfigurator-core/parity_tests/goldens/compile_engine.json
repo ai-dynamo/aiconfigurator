@@ -2,9 +2,9 @@
   "header": {
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "5765aabb-dirty",
-    "git_head": "5765aabbe03cb5d7a48c9c5d3521f04b55cd8818",
-    "reference_count": 49,
+    "git_describe": "413b9a7a-dirty",
+    "git_head": "413b9a7ad19869c643bde462ae4ce22f77e265ff",
+    "reference_count": 53,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",
@@ -57,6 +57,10 @@
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::mixed_step": 15.380402975615636,
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::static_ctx": 14.949130156193013,
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::static_gen": 3.450425196498872,
+    "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.314493163403432,
+    "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.364723323911948,
+    "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 14.939366024779778,
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763,
     "wideep_sglang::decode_step": 11.651700656031192,
     "wideep_sglang::mixed_step": 102.11955248944133,
     "wideep_sglang::static_ctx": 99.42331852569644,

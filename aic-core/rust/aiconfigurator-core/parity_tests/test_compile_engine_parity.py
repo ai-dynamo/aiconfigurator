@@ -44,6 +44,7 @@ import pytest
 from test_engine_step_parity import (
     _REGENERATE_HINT,
     PARITY_RTOL,
+    POWER_CASES,
     SMOKE_CASES,
     EngineStepParityCase,
     load_parity_golden,
@@ -63,10 +64,15 @@ pytestmark = pytest.mark.integration
 # sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
 # SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
-# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All
-# compute (no error-symmetry cases), so every surface yields a real number.
+# Cases drawn straight from `SMOKE_CASES` (plus one `POWER_CASES` member) so
+# this tracks the same matrix. All compute (no error-symmetry cases), so every
+# surface yields a real number.
 #
-#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases.
+#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases, plus the
+#            Qwen3-30B-A3B b200_sxm/vllm/0.22.0 POWER_CASES member — every
+#            0.19.0/0.5.x/1.3.0rc10 identity is latency-only (energy_wms == 0
+#            in every per-op golden), so this is the one subset case whose
+#            per-op energy comparison actually executes.
 #   sglang : Kimi-K2.5 (Fallback-MLA + MoE) and MiniMax-M2.5 (MoE), both
 #            b200_sxm/sglang/0.5.10. SGLang's MoEDispatch flavor is the same
 #            `CustomAllReduce` else-branch as vllm; its distinct value is the
@@ -83,6 +89,7 @@ _SUBSET_IDS_BY_BACKEND = {
         "minimax-m25-b200-vllm-019-sampled-prefix",
         "minimax-m27-b200-vllm-019-isl1024-osl2",
         "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
+        "qwen3-30b-a3b-b200-vllm-022-power",
     ],
     "sglang": [
         "kimi-k25-b200-sglang-0510-isl1024-osl2",
@@ -94,9 +101,14 @@ _SUBSET_IDS_BY_BACKEND = {
     ],
 }
 
+# Subset members on power-carrying database identities: their per-op goldens
+# must carry nonzero energy_wms, so the energy comparison branch is proven to
+# execute (see the anti-vacuous guard in TestCompileEnginePerOpParity).
+_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-022-power"}
+
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
-_SUBSET_BY_ID = {p.id: p for p in SMOKE_CASES}
+_SUBSET_BY_ID = {p.id: p for p in [*SMOKE_CASES, *POWER_CASES]}
 _declared_ids = [cid for ids in _SUBSET_IDS_BY_BACKEND.values() for cid in ids]
 _missing_ids = [cid for cid in _declared_ids if cid not in _SUBSET_BY_ID]
 if _missing_ids:
@@ -463,7 +475,7 @@ def _fold_per_op_entries(entries) -> dict[str, tuple[float, float, str]]:
 
 # Known per-op source-TAG divergences between the frozen Python summary dicts
 # and the compiled engine's per-op leaves. Latency and energy match bit-exact
-# on every one of these (verified across the full 9-case subset); only the
+# on every one of these (verified across the full 10-case subset); only the
 # provenance label differs, and each pattern is pinned as an exact
 # (op_name, golden_tag, rust_tag) triple so any NEW divergence — or a change
 # to these — still fails:
@@ -492,6 +504,7 @@ class TestCompileEnginePerOpParity:
         ctx_entries, gen_entries = handle.run_static_per_op(
             batch_size=case.batch_size, isl=case.isl, osl=max(case.osl, 2), prefix=case.prefix, stride=1
         )
+        energy_compared = False
         for phase, entries in (("context", ctx_entries), ("generation", gen_entries)):
             folded = _fold_per_op_entries(entries)
             expected = golden[phase]
@@ -511,6 +524,7 @@ class TestCompileEnginePerOpParity:
                 golden_energy = float(exp["energy_wms"])
                 if golden_energy > 0.0:
                     _assert_within(f"{phase}::{name}::energy", golden_energy, energy, backend=case.backend_name)
+                    energy_compared = True
                 else:
                     assert energy == 0.0, (
                         f"[{case.backend_name}] {phase}::{name} golden energy is 0 but the rust fold produced {energy}"
@@ -522,6 +536,14 @@ class TestCompileEnginePerOpParity:
                         f"golden={golden_source!r} rust={source!r} "
                         f"(not in _ACCEPTED_SOURCE_TAG_DIVERGENCES)"
                     )
+        # Anti-vacuous guard: the power-identity subset member exists so the
+        # energy comparison above actually executes (every other subset case
+        # sits on a latency-only identity where all golden energy_wms are 0).
+        if case_id in _POWER_SUBSET_IDS:
+            assert energy_compared, (
+                f"{case_id} sits on a power-carrying identity but no golden op carried "
+                "energy_wms > 0 — the per-op energy comparison never executed"
+            )
 
 
 # --------------------------------------------------------------------------- #

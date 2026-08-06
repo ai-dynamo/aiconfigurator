@@ -1850,6 +1850,14 @@
         }
       }
     },
+    "qwen3-30b-a3b-h200-vllm-019-afd": {
+      "afd": {
+        "values": {
+          "afd_tpot": 12.317,
+          "afd_ttft": 17.165
+        }
+      }
+    },
     "qwen3-32b-b200-trtllm-130rc10-shape-prefill-heavy": {
       "agg": {
         "values": {
@@ -2311,12 +2319,12 @@
     }
   },
   "header": {
-    "case_count": 92,
+    "case_count": 93,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "5765aabb-dirty",
-    "git_head": "5765aabbe03cb5d7a48c9c5d3521f04b55cd8818",
-    "surface_count": 345,
+    "git_describe": "413b9a7a-dirty",
+    "git_head": "413b9a7ad19869c643bde462ae4ce22f77e265ff",
+    "surface_count": 346,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",
