@@ -297,6 +297,30 @@ def create_dsv4_attention_module(
 
     _apply_gemm_type_quant(model_config, "fp8_block", use_fp8_kv_cache=True)
 
+    # Provenance: print the RESOLVED kernel-selection knobs (same auto-build
+    # code path default serving takes when the user sets no
+    # sparse_attention_config; model_config.py:948-990 @1.3.0rc23). Audits
+    # compare these against serving defaults — e.g. the 12.7x CSA
+    # long-prefix gap vs vllm traces to cute-dsl topk/paged-mqa being
+    # default-OFF here (2026-08-06 audit).
+    _sc = model_config.sparse_attention_config
+    print(
+        "[dsv4-collector] resolved sparse config: "
+        + ", ".join(
+            f"{k}={getattr(_sc, k, None)}"
+            for k in (
+                "indexer_k_dtype",
+                "use_cute_dsl_topk",
+                "use_cute_dsl_paged_mqa_logits",
+                "enable_heuristic_topk",
+                "q_split_threshold",
+                "skip_indexer_for_short_seqs",
+                "index_topk",
+                "compress_ratios",
+            )
+        )
+    )
+
     aux_stream = torch.cuda.Stream(device=device)
     attn_module = DeepseekV4Attention(
         model_config=model_config,
