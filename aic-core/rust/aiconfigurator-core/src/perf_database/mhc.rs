@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::moe::query_token_curve_value;
+use super::moe::LeafTokenCurve;
 use super::perf_interp::LeafValue;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
@@ -43,7 +43,7 @@ pub struct MhcTable {
 }
 
 struct MhcGrids {
-    by_keys: BTreeMap<MhcKey, BTreeMap<u32, LeafValue>>,
+    by_keys: BTreeMap<MhcKey, LeafTokenCurve>,
 }
 
 /// Python `load_mhc_module_data` keys `data[op][hc_mult][hidden_size]` — NO
@@ -136,7 +136,7 @@ impl MhcTable {
         // Engine 1-axis token curve; the caller-threaded per-op roofline
         // anchors beyond-range holds (Python `sol_fn=lambda t: get_sol(t,
         // op_name)[0]`).
-        query_token_curve_value(by_tokens, num_tokens as f64, &|t| sol(op, t))
+        by_tokens.query(num_tokens as f64, &|t| sol(op, t))
     }
 
     /// Collected `(num_tokens,) -> latency` points for one RESOLVED op half
@@ -172,7 +172,7 @@ impl MhcTable {
         }
         Ok(by_tokens
             .iter()
-            .map(|(&tokens, leaf)| (vec![f64::from(tokens)], leaf.latency))
+            .map(|(tokens, leaf)| (vec![f64::from(tokens)], leaf.latency))
             .collect())
     }
 
@@ -244,7 +244,12 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 .unwrap_or_default()
         )));
     }
-    Ok(MhcGrids { by_keys })
+    Ok(MhcGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, LeafTokenCurve::from_map(curve)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {

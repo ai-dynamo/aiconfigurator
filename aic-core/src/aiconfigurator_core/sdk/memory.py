@@ -518,6 +518,29 @@ class NaiveKVCacheEstimator:
                 f"insufficient model metadata: no HF config for {model_path!r} (not a local "
                 "directory / not pre-cached, and HF download is disabled)"
             )
+        return cls.from_hf_config(
+            hf_config,
+            tp_size=tp_size,
+            pp_size=pp_size,
+            moe_ep_size=moe_ep_size,
+            moe_tp_size=moe_tp_size,
+        )
+
+    @classmethod
+    def from_hf_config(
+        cls,
+        hf_config: dict,
+        *,
+        tp_size: int,
+        pp_size: int,
+        moe_ep_size: int = 1,
+        moe_tp_size: int = 1,
+    ) -> NaiveKVCacheEstimator:
+        """Build directly from an already-loaded HF ``config.json`` dictionary.
+
+        This is the no-I/O counterpart to :meth:`from_model_path`. Callers that
+        already loaded a config can reuse it without issuing a second HF request.
+        """
         try:
             parsed = _parse_hf_config_json(hf_config)  # supported arch -> normalized parse
         except Exception:
