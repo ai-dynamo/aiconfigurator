@@ -54,6 +54,11 @@ pub struct MoEDispatchOp {
     pub moe_ep_size: u32,
     pub attention_dp_size: u32,
     pub pre_dispatch: bool,
+    /// True when the model composes its attention-output all-reduce
+    /// explicitly; the vLLM pre-dispatch proxy AR is then not charged
+    /// (mirrors Python `MoEDispatch._attn_ar_modeled`).
+    #[serde(default)]
+    pub attn_ar_modeled: bool,
     pub backend: BackendKind,
     pub flavor: DispatchFlavor,
     pub comm_quant: CommQuantMode,
@@ -225,7 +230,8 @@ impl MoEDispatchOp {
                 // Python (`operations/moe.py`):
                 //  * vllm (:1003-1020):
                 //      comm = 0
-                //      if attn_tp > 1: comm += custom_allreduce(num_gpus, volume)
+                //      if attn_tp > 1 and not (pre and attn_ar_modeled):
+                //          comm += custom_allreduce(num_gpus, volume)
                 //      if attn_dp > 1: comm += nccl(num_gpus, "all_gather" if pre
                 //                                  else "reduce_scatter", volume * dp)
                 //      (both terms can add; Python asserts moe_tp==1 or moe_ep==1)
@@ -255,7 +261,9 @@ impl MoEDispatchOp {
                 let comm_latency_ms = match self.backend {
                     BackendKind::Vllm => {
                         let mut total = 0.0;
-                        if attn_tp > 1 {
+                        // Pre-dispatch AR is a proxy for the attention-output
+                        // all-reduce; skipped when the model prices it itself.
+                        if attn_tp > 1 && !(pre && self.attn_ar_modeled) {
                             let ar =
                                 CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
                             total += ar.query(db, num_tokens)?.latency_ms;

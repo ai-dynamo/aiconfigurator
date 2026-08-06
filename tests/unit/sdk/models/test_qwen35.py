@@ -111,11 +111,7 @@ def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
     )
 
     for phase_ops in (model.context_ops, model.generation_ops):
-        scalar_gates = [
-            op
-            for op in phase_ops
-            if op._name.endswith("_shared_expert_gate_gemm")
-        ]
+        scalar_gates = [op for op in phase_ops if op._name.endswith("_shared_expert_gate_gemm")]
         assert len(scalar_gates) == 2
         assert {op._n for op in scalar_gates} == {1}
 
@@ -134,3 +130,29 @@ def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
             assert f"{prefix}_moe_pre_dispatch" not in op_names
             assert f"{prefix}_moe" in op_names
             assert f"{prefix}_moe_post_dispatch" in op_names
+
+
+def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
+    """With DP attention the LayerCommunicator pre-MLP gather is real and priced."""
+    model = models.get_model(
+        "Qwen/Qwen3.5-35B-A3B",
+        _model_config(tp_size=4, moe_tp_size=1, moe_ep_size=8, attention_dp_size=2),
+        "sglang",
+    )
+
+    for phase_ops in (model.context_ops, model.generation_ops):
+        op_names = [op._name for op in phase_ops]
+        assert any(name.endswith("_moe_pre_dispatch") for name in op_names)
+
+
+def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():
+    """35B-A3B at tp4: 10 full layers hold per-token KV; 30 GDN layers hold a
+    constant per-request state (fp32 SSM + bf16 conv window), TP-sharded."""
+    model = models.get_model("Qwen/Qwen3.5-35B-A3B", _model_config(tp_size=4), "vllm")
+
+    assert model.get_kvcache_elements_per_token() == 10 * 2 * 1 * 256
+    expected_state = 30 * ((32 // 4) * 128 * 128 * 4 + (2 * 16 * 128 + 32 * 128) // 4 * 3 * 2)
+    assert model._gdn_state_bytes_per_request() == expected_state
+    per_token_bytes = 2 * model.get_kvcache_elements_per_token()
+    assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state
+    assert model.get_kvcache_max_tokens(expected_state + 100 * per_token_bytes) == 100

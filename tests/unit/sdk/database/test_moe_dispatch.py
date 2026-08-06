@@ -41,6 +41,7 @@ def _make_dispatch(
     quant_mode=None,
     moe_backend=None,
     reduce_results=True,
+    attn_ar_modeled=False,
     hidden_size=7168,
     topk=8,
     num_experts=256,
@@ -59,6 +60,7 @@ def _make_dispatch(
         quant_mode=quant_mode,
         moe_backend=moe_backend,
         reduce_results=reduce_results,
+        attn_ar_modeled=attn_ar_modeled,
     )
 
 
@@ -611,15 +613,23 @@ class TestWideEpDeepEpLlNodeNumFallback:
 
 @pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
 class TestVllmCommPath:
-    """With attention_dp == 1 vLLM's MoE block has no pre-dispatch collective
-    and exactly one final all-reduce, for pure TP and EP alike."""
+    """vLLM MoE block collectives: one final all-reduce. The pre-dispatch AR is
+    a proxy for the attention-output AR, skipped only when the model prices
+    that AR explicitly (attn_ar_modeled)."""
 
-    def test_pre_dispatch_is_free_when_attention_dp_is_1(self):
+    def test_pre_dispatch_is_free_when_model_prices_attention_ar(self):
         db = _make_mock_db(sm_version=90, backend="vllm")
-        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
+        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True, attn_ar_modeled=True)
 
         assert float(pre.query(db, x=8)) == 0.0
         db.query_custom_allreduce.assert_not_called()
+
+    def test_pre_dispatch_charges_proxy_ar_by_default(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
+
+        assert float(pre.query(db, x=8)) == pytest.approx(1.5)
+        db.query_custom_allreduce.assert_called_once()
 
     def test_post_dispatch_prices_single_final_allreduce(self):
         db = _make_mock_db(sm_version=90, backend="vllm")
