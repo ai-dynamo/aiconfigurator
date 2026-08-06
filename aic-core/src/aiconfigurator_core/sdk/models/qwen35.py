@@ -291,7 +291,8 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         is_context=True,
                         moe_backend=self.config.moe_backend,
-                        enable_eplb=self.config.enable_eplb,
+                        # EPLB is not modeled for Qwen3.5 (the load curve stays 1.2).
+                        enable_eplb=False,
                     ),
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
