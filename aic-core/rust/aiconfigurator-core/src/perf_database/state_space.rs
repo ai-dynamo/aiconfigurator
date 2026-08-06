@@ -249,11 +249,9 @@ impl StateSpaceTable {
             num_v_heads,
             head_v_dim,
         };
-        // Mirror Python `_query_gdn_table`: on exact-shape miss, fall back to
-        // any same-d_model entry, breaking ties by minimum `|num_v_heads -
-        // query.num_v_heads|`. (Mamba2 uses "first by d_model"; GDN uses
-        // "nearest by num_v_heads" — keep them distinct.) Surface as
-        // `PerfDatabase` if no d_model match exists.
+        // Mirror Python `_query_gdn_table`: exact geometry (or an exact
+        // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
+        // the operator degrades to SOL.
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
             None => {
@@ -299,19 +297,7 @@ impl StateSpaceTable {
                     return engine_query(node, phase, batch_size, seq_len, sol);
                 }
 
-                let nearest = grids
-                    .by_keys
-                    .iter()
-                    .filter(|(k, _)| {
-                        k.kernel_source == key.kernel_source
-                            && k.phase == key.phase
-                            && k.d_model == key.d_model
-                    })
-                    .min_by_key(|(k, _)| (k.num_v_heads as i64 - key.num_v_heads as i64).abs());
-                match nearest {
-                    Some((_, node)) => node,
-                    None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
-                }
+                return Err(missing("GDN", &self.data_root, format!("{key:?}")));
             }
         };
         engine_query(node, phase, batch_size, seq_len, sol)
