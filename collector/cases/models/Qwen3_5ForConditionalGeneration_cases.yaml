@@ -48,6 +48,23 @@ model_case_values:
       window_size: 0
       sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8]
+  gemm:
+    # GDN in_proj_ba widths (2 * num_v_heads / tp) below the base feature grid (min 32).
+    - model_path: Qwen/Qwen3.5-0.8B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [1024]
+    - model_path: Qwen/Qwen3.5-2B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [2048]
+    - model_path: Qwen/Qwen3.5-4B
+      output_feature_sizes: [8, 16]
+      input_feature_sizes: [2560]
+    - model_path: Qwen/Qwen3.5-9B
+      output_feature_sizes: [8, 16]
+      input_feature_sizes: [4096]
+    - model_path: Qwen/Qwen3.5-27B
+      output_feature_sizes: [12, 24]
+      input_feature_sizes: [5120]
   gdn:
     - model_path: Qwen/Qwen3.5-0.8B
       d_model: 1024
