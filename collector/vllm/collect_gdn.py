@@ -174,13 +174,17 @@ def run_gdn_context_benchmark(
             # Production prefill applies the depthwise convolution to packed
             # QKV, not only to K. Fresh prompts have no initial conv state.
             conv_input = torch.randn(num_tokens, conv_dim, dtype=dtype, device=device).transpose(0, 1)
+            # Serving stores conv state in the SD layout and hands the
+            # stride-aware conv kernels a transposed (dim, width-1) view
+            # (vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+            # :1311-1314 @0.24.0); match its strides.
             conv_state = torch.zeros(
                 batch_size + 1,
-                conv_dim,
                 d_conv - 1,
+                conv_dim,
                 dtype=dtype,
                 device=device,
-            )
+            ).transpose(-1, -2)
             # State slot zero is vLLM's null block and is intentionally never
             # assigned to a live request.
             cache_indices = torch.arange(1, batch_size + 1, dtype=torch.int32, device=device)
@@ -391,13 +395,15 @@ def run_gdn_generation_benchmark(
         }
 
         conv_input = torch.randn(batch_size, conv_dim, dtype=dtype, device=device)
+        # SD-layout state with a transposed view, matching serving strides
+        # (see the context-phase note).
         conv_state = torch.randn(
             batch_size + 1,
-            conv_dim,
             d_conv - 1,
+            conv_dim,
             dtype=dtype,
             device=device,
-        )
+        ).transpose(-1, -2)
         state_indices = torch.arange(1, batch_size + 1, dtype=torch.int32, device=device)
 
         def run_conv1d_update(_conv_input=conv_input, _conv_state=conv_state):
