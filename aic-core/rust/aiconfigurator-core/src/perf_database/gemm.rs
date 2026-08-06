@@ -18,9 +18,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use quick_cache::{DefaultHashBuilder, OptionsBuilder, UnitWeighter};
 
@@ -64,12 +61,26 @@ fn gemm_query_cache() -> Cache<GemmQueryKey, f64> {
     )
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct GemmQueryCacheStats {
-    hits: usize,
-    misses: usize,
-    entries: usize,
+#[inline(always)]
+fn resolve_gemm_query_cached<F>(
+    cache: &Cache<GemmQueryKey, f64>,
+    key: GemmQueryKey,
+    resolve: F,
+) -> Result<f64, AicError>
+where
+    F: FnOnce() -> Result<f64, AicError>,
+{
+    if let Some(value) = cache.get(&key) {
+        return Ok(value);
+    }
+
+    let value = resolve()?;
+    // Preserve resolver behavior by returning non-finite results, but do
+    // not make them sticky cache hits for later queries.
+    if value.is_finite() {
+        cache.insert(key, value);
+    }
+    Ok(value)
 }
 
 /// GEMM-family perf-data owner for one logical
@@ -99,13 +110,6 @@ pub struct GemmTable {
     /// Successful finite scalar GEMM queries, keyed by normalized quant and
     /// shape and bounded independently for each shard.
     query_cache: OnceLock<Cache<GemmQueryKey, f64>>,
-    // These test-only counters intentionally measure probes at this call site.
-    // Quick Cache's optional internal statistics cannot distinguish a missed
-    // probe from `GemmTable::query` never reaching the cache at all.
-    #[cfg(test)]
-    query_cache_hits: AtomicUsize,
-    #[cfg(test)]
-    query_cache_misses: AtomicUsize,
 }
 
 /// 3-D GEMM tables keyed by quant name -> m -> n -> k -> latency_ms.
@@ -160,10 +164,6 @@ impl GemmTable {
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
             query_cache: OnceLock::new(),
-            #[cfg(test)]
-            query_cache_hits: AtomicUsize::new(0),
-            #[cfg(test)]
-            query_cache_misses: AtomicUsize::new(0),
         }
     }
 
@@ -195,34 +195,22 @@ impl GemmTable {
             k,
         };
         let cache = self.query_cache.get_or_init(gemm_query_cache);
-        if let Some(value) = cache.get(&key) {
-            #[cfg(test)]
-            self.query_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(value);
-        }
-        #[cfg(test)]
-        self.query_cache_misses.fetch_add(1, Ordering::Relaxed);
-
-        let grids = self.load_gemm()?;
-        let quant_name = lookup_quant.name();
-        let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
-                self.data_root.display(),
-                grids.by_quant.keys().collect::<Vec<_>>(),
-            ))
-        })?;
-        let sol = move |c: &[f64]| {
-            gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
-        };
-        let cfg = gemm_engine_config(&sol);
-        let value = index.resolve(&cfg, &[m as f64, n as f64, k as f64])?;
-        // Preserve resolver behavior by returning non-finite results, but do
-        // not make them sticky cache hits for later queries.
-        if value.is_finite() {
-            cache.insert(key, value);
-        }
-        Ok(value)
+        resolve_gemm_query_cached(cache, key, || {
+            let grids = self.load_gemm()?;
+            let quant_name = lookup_quant.name();
+            let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
+                    self.data_root.display(),
+                    grids.by_quant.keys().collect::<Vec<_>>(),
+                ))
+            })?;
+            let sol = move |c: &[f64]| {
+                gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
+            };
+            let cfg = gemm_engine_config(&sol);
+            index.resolve(&cfg, &[m as f64, n as f64, k as f64])
+        })
     }
 
     /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
@@ -380,16 +368,6 @@ impl GemmTable {
             .scale_matrix
             .get_or_init(|| load_two_d_parquet(&self.scale_matrix_sources));
         cell.as_ref().map_err(|err| clone_err(err))
-    }
-
-    #[cfg(test)]
-    fn query_cache_stats(&self) -> GemmQueryCacheStats {
-        let entries = self.query_cache.get().map_or(0, Cache::len);
-        GemmQueryCacheStats {
-            hits: self.query_cache_hits.load(Ordering::Relaxed),
-            misses: self.query_cache_misses.load(Ordering::Relaxed),
-            entries,
-        }
     }
 }
 
@@ -695,6 +673,10 @@ fn clone_err(err: &AicError) -> AicError {
 mod tests {
     use super::*;
 
+    fn query_cache_len(table: &GemmTable) -> usize {
+        table.query_cache.get().map_or(0, Cache::len)
+    }
+
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
 
     fn b200_vllm_data_root() -> PathBuf {
@@ -840,14 +822,7 @@ mod tests {
             );
         }
 
-        assert_eq!(
-            table.query_cache_stats(),
-            GemmQueryCacheStats {
-                hits: cases.len(),
-                misses: cases.len(),
-                entries: cases.len(),
-            }
-        );
+        assert_eq!(query_cache_len(&table), cases.len());
     }
 
     #[test]
@@ -857,8 +832,7 @@ mod tests {
         let fp8 = table.query(GemmQuantMode::Fp8, 256, 32, 32).unwrap();
         let fp8_static = table.query(GemmQuantMode::Fp8Static, 256, 32, 32).unwrap();
         assert_eq!(fp8.to_bits(), fp8_static.to_bits());
-        assert_eq!(table.query_cache_stats().entries, 1);
-        assert_eq!(table.query_cache_stats().hits, 1);
+        assert_eq!(query_cache_len(&table), 1);
 
         for (quant, m, n, k) in [
             (GemmQuantMode::Bfloat16, 256, 32, 32),
@@ -868,7 +842,7 @@ mod tests {
         ] {
             table.query(quant, m, n, k).unwrap();
         }
-        assert_eq!(table.query_cache_stats().entries, 5);
+        assert_eq!(query_cache_len(&table), 5);
     }
 
     #[test]
@@ -879,20 +853,13 @@ mod tests {
                 .query(GemmQuantMode::Int4Wo, 1024, 4096, 4096)
                 .is_err());
         }
-        assert_eq!(
-            table.query_cache_stats(),
-            GemmQueryCacheStats {
-                hits: 0,
-                misses: 2,
-                entries: 0,
-            }
-        );
+        assert_eq!(query_cache_len(&table), 0);
 
         let missing = GemmTable::new(PathBuf::from("/nonexistent/aic/data/root"), b200_sxm_spec());
         for _ in 0..2 {
             assert!(missing.query(GemmQuantMode::Bfloat16, 1, 1, 1).is_err());
         }
-        assert_eq!(missing.query_cache_stats().entries, 0);
+        assert_eq!(query_cache_len(&missing), 0);
     }
 
     #[test]
@@ -929,18 +896,33 @@ mod tests {
 
     #[test]
     fn gemm_query_cache_allows_concurrent_duplicate_misses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
 
         const THREADS: usize = 4;
-        let table = Arc::new(GemmTable::new(b200_vllm_data_root(), b200_sxm_spec()));
+        const EXPECTED: f64 = 1.25;
+
+        let cache = Arc::new(gemm_query_cache());
         let barrier = Arc::new(Barrier::new(THREADS));
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let key = GemmQueryKey {
+            quant: GemmQuantMode::Bfloat16,
+            m: 259,
+            n: 32,
+            k: 32,
+        };
         let handles: Vec<_> = (0..THREADS)
             .map(|_| {
-                let table = Arc::clone(&table);
+                let cache = Arc::clone(&cache);
                 let barrier = Arc::clone(&barrier);
+                let resolutions = Arc::clone(&resolutions);
                 std::thread::spawn(move || {
-                    barrier.wait();
-                    table.query(GemmQuantMode::Bfloat16, 259, 32, 32).unwrap()
+                    resolve_gemm_query_cached(&cache, key, || {
+                        resolutions.fetch_add(1, Ordering::Relaxed);
+                        barrier.wait();
+                        Ok(EXPECTED)
+                    })
+                    .unwrap()
                 })
             })
             .collect();
@@ -952,7 +934,14 @@ mod tests {
         assert!(values
             .windows(2)
             .all(|pair| pair[0].to_bits() == pair[1].to_bits()));
-        assert_eq!(table.query_cache_stats().entries, 1);
+        assert_eq!(resolutions.load(Ordering::Relaxed), THREADS);
+        assert_eq!(cache.len(), 1);
+
+        let cached = resolve_gemm_query_cached(&cache, key, || -> Result<f64, AicError> {
+            panic!("cache hit unexpectedly invoked the resolver")
+        })
+        .unwrap();
+        assert_eq!(cached.to_bits(), EXPECTED.to_bits());
     }
 
     /// Values generated from the Python v2 engine on the same table
