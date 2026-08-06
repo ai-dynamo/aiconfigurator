@@ -101,19 +101,45 @@ pub struct StaticResult {
 pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
-/// source)`. `name` is the Python `op._name` verbatim (names may repeat —
-/// callers fold with `+=`), `source` the provenance tag
-/// (`silicon|empirical|sol|estimated|mixed`). A plain tuple so pyo3 converts
-/// it to `list[tuple[str, float, float, str]]` with no new binding types.
+/// source)`. Entries are NAME-FOLDED before crossing — repeated names
+/// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
+/// exact accumulation semantics of Python's phase dicts (addition is
+/// commutative, so folding here instead of in Python changes nothing) —
+/// because streaming the raw ops × stride-steps tuples through pyo3
+/// measurably slowed the engine step on per-block puzzle nets (hundreds of
+/// String allocations + Python tuple constructions per call). `source` is
+/// the provenance tag (`silicon|empirical|sol|estimated|mixed`). A plain
+/// tuple so pyo3 converts to `list[tuple[str, float, float, str]]`.
 pub type PerOpValue = (String, f64, f64, &'static str);
 
-fn per_op_value(op: &Op, r: PerformanceResult) -> PerOpValue {
-    (
-        op.name().to_string(),
-        r.latency_ms,
-        r.energy_wms,
-        r.source.as_str(),
-    )
+/// Name-folding accumulator for [`PerOpValue`] streams. First-encounter
+/// order is preserved (mirrors Python dict insertion order). Linear scan on
+/// purpose: unique-name counts are a few dozen (per-block families repeat
+/// names), far below where a map would win.
+#[derive(Default)]
+struct PerOpFold {
+    entries: Vec<PerOpValue>,
+}
+
+impl PerOpFold {
+    fn add(&mut self, op: &Op, r: PerformanceResult) {
+        let name = op.name();
+        let source = r.source.as_str();
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == name) {
+            entry.1 += r.latency_ms;
+            entry.2 += r.energy_wms;
+            if entry.3 != source {
+                entry.3 = "mixed";
+            }
+            return;
+        }
+        self.entries
+            .push((name.to_string(), r.latency_ms, r.energy_wms, source));
+    }
+
+    fn into_values(self) -> Vec<PerOpValue> {
+        self.entries
+    }
 }
 
 /// Which of the three mixed-step passes produced a sinked per-op value.
@@ -614,7 +640,7 @@ impl Engine {
         mode: StaticMode,
         stride: u32,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
-        let mut context: Vec<PerOpValue> = Vec::new();
+        let mut context = PerOpFold::default();
         if matches!(mode, StaticMode::Context | StaticMode::Both) {
             if runtime.prefix >= runtime.isl {
                 return Err(AicError::InvalidEngineConfig(format!(
@@ -630,16 +656,14 @@ impl Engine {
                 runtime.prefix,
                 runtime.seq_imbalance_correction_scale,
                 ContextOpFilter::All,
-                |op, r| context.push(per_op_value(op, r)),
+                |op, r| context.add(op, r),
             )?;
         }
-        let mut generation: Vec<PerOpValue> = Vec::new();
+        let mut generation = PerOpFold::default();
         if matches!(mode, StaticMode::Generation | StaticMode::Both) {
-            self.run_generation_phase_with(runtime, stride, |op, r| {
-                generation.push(per_op_value(op, r))
-            })?;
+            self.run_generation_phase_with(runtime, stride, |op, r| generation.add(op, r))?;
         }
-        Ok((context, generation))
+        Ok((context.into_values(), generation.into_values()))
     }
 
     /// [`Self::mixed_step_breakdown`] with the per-op values kept:
@@ -657,9 +681,9 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
-        let mut shared: Vec<PerOpValue> = Vec::new();
-        let mut ctx_attn: Vec<PerOpValue> = Vec::new();
-        let mut dec_attn: Vec<PerOpValue> = Vec::new();
+        let mut shared = PerOpFold::default();
+        let mut ctx_attn = PerOpFold::default();
+        let mut dec_attn = PerOpFold::default();
         self.mixed_step_breakdown_with(
             ctx_tokens,
             gen_tokens,
@@ -674,10 +698,14 @@ impl Engine {
                     MixedPass::ContextAttention => &mut ctx_attn,
                     MixedPass::DecodeAttention => &mut dec_attn,
                 };
-                out.push(per_op_value(op, r));
+                out.add(op, r);
             },
         )?;
-        Ok((shared, ctx_attn, dec_attn))
+        Ok((
+            shared.into_values(),
+            ctx_attn.into_values(),
+            dec_attn.into_values(),
+        ))
     }
 
     /// [`Self::decode_step_latency`] with the per-op values kept.
@@ -688,9 +716,9 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out: Vec<PerOpValue> = Vec::new();
+        let mut out = PerOpFold::default();
         if gen_tokens == 0 {
-            return Ok(out);
+            return Ok(out.into_values());
         }
         let effective_batch = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
         let s = isl.max(1).saturating_add(osl.max(1) / 2).saturating_add(1);
@@ -702,9 +730,9 @@ impl Engine {
             s,
             gen_seq_imbalance_correction_scale,
             false,
-            |op, r| out.push(per_op_value(op, r)),
+            |op, r| out.add(op, r),
         )?;
-        Ok(out)
+        Ok(out.into_values())
     }
 
     /// Evaluate an index-addressed sublist of the compiled CONTEXT op list at
@@ -721,7 +749,7 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out: Vec<PerOpValue> = Vec::with_capacity(indices.len());
+        let mut out = PerOpFold::default();
         for &i in indices {
             let op = self.context_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -738,9 +766,9 @@ impl Engine {
                 seq_imbalance_correction_scale,
                 x_override,
             )?;
-            out.push(per_op_value(op, r));
+            out.add(op, r);
         }
-        Ok(out)
+        Ok(out.into_values())
     }
 
     /// Evaluate an index-addressed sublist of the compiled GENERATION op list
@@ -755,7 +783,7 @@ impl Engine {
         prefix: u32,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out: Vec<PerOpValue> = Vec::with_capacity(indices.len());
+        let mut out = PerOpFold::default();
         for &i in indices {
             let op = self.generation_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -773,9 +801,9 @@ impl Engine {
                 prefix,
                 x_override,
             )?;
-            out.push(per_op_value(op, r));
+            out.add(op, r);
         }
-        Ok(out)
+        Ok(out.into_values())
     }
 
     /// Evaluate an ad-hoc op list (a JSON array of `OpSpec` objects, the same
@@ -796,7 +824,7 @@ impl Engine {
         let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
             AicError::InvalidEngineConfig(format!("evaluate_ops_json: invalid op list JSON: {e}"))
         })?;
-        let mut out: Vec<PerOpValue> = Vec::with_capacity(ops.len());
+        let mut out = PerOpFold::default();
         for op in &ops {
             let r = if is_context {
                 query_context_op(
@@ -820,9 +848,9 @@ impl Engine {
                     x_override,
                 )?
             };
-            out.push(per_op_value(op, r));
+            out.add(op, r);
         }
-        Ok(out)
+        Ok(out.into_values())
     }
 
     /// Compute one forward-pass latency from a list of per-rank FPM entries.
