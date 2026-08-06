@@ -815,10 +815,17 @@ fn apply_topk_delta(
 ///
 /// Mirrors Python `load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)` +
 /// `_build_topk_calib_from_rows`: rows nest under
-/// `(step, isl, batch_size, score_mode)` with last-write-wins per leaf; a
-/// shape missing either mode is skipped; `DELTA = max(0, flat - top_last)`.
+/// `(step, isl, batch_size, score_mode)`; a shape missing either mode is
+/// skipped; `DELTA = max(0, flat - top_last)`.
 /// The retained top_last grid mirrors `_load_csa_topk_top_last`'s
-/// `{bs: {(isl, step): latency}}` with the same last-row-wins overwrite.
+/// `{bs: {(isl, step): latency}}` — and, like that Python loader, reads the
+/// PRIMARY source only. Python's CP top_last loader is primary-path-only
+/// (it predates the reuse sidecar and does not honor `reuse.yaml` donors),
+/// while its DELTA consumer IS reuse-aware; honoring donors here for
+/// top_last made the compiled engine compute CSA CP configs the Python step
+/// refuses (one-sided scan DRIFT), so the split mirrors Python exactly
+/// until the upstream loader gap + the CP composition divergence are fixed
+/// together (tracked upstream; see the PR-2 notes).
 /// Returns `Ok(None)` when every source file is absent (Python: rows is
 /// None) or no usable row exists (no DELTA pair AND no top_last row —
 /// behaviourally identical to Python's two separate None/{} outcomes).
@@ -827,7 +834,10 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
         BTreeMap::new();
     let mut top_last: BTreeMap<Option<u32>, SparseGrid> = BTreeMap::new();
     let mut any_source = false;
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
+        // Python parity: the CP top_last grid loads from the PRIMARY source
+        // only (see the doc comment above); DELTA rows consume every source.
+        let primary_source = source_index == 0;
         let path = source.path();
         if !path.exists() {
             continue;
@@ -858,7 +868,7 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             // First-wins parity with Python `load_dsv4_sparse_op_data`
             // (skip-on-key-conflict; shared-layer contract, design §6.1).
             let native = row.u32_optional(num_heads_col)?;
-            if mode == "v1_top_last" {
+            if primary_source && mode == "v1_top_last" {
                 top_last
                     .entry(native)
                     .or_default()
@@ -930,7 +940,10 @@ fn load_sparse_kernel_parquet(
 ) -> Result<Option<SparseKernelNodes>, AicError> {
     let mut by_heads: BTreeMap<u32, BTreeMap<u32, Node>> = BTreeMap::new();
     let mut any_source = false;
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
+        // Python parity: the CP top_last grid loads from the PRIMARY source
+        // only (see the doc comment above); DELTA rows consume every source.
+        let primary_source = source_index == 0;
         let path = source.path();
         if !path.exists() {
             continue;
@@ -1400,7 +1413,10 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
     let mut raw_rows: Vec<RawRow> = Vec::new();
     let mut observed: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
     let mut any_source = false;
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
+        // Python parity: the CP top_last grid loads from the PRIMARY source
+        // only (see the doc comment above); DELTA rows consume every source.
+        let primary_source = source_index == 0;
         let path = source.path();
         if !path.exists() {
             continue;
