@@ -396,13 +396,17 @@ def create_dsv4_kv_cache_and_metadata(
         total_tokens = batch_size
         seq_len_q = 1
         kv_cache_len = seq_len
-    # Serving's metadata max_seq_len is the ENGINE envelope, not the request
-    # length. The DSV4 metadata derives num_sparse_topk = window(128) +
+    # Serving's max_seq_len is the ENGINE envelope, not the request length:
+    # the DSV4 metadata derives num_sparse_topk = window(128) +
     # next_pow2(ceil(max_seq_len/128)) (sparse_deepseek_v4.py:435-444
     # @1.3.0rc23) and the trtllmGen fmha kernel asserts it is a multiple of 4
-    # — request-sized max_seq (< 257) yields pow2 1/2 -> 129/130 and crashed
-    # every tiny-KV HCA decode case on B200 (smoke round 3). Floor the
-    # envelope so pow2 >= 4, as any real serving max_seq_len does.
+    # — request-sized envelopes (< 257) yield pow2 1/2 -> 129/130 and crashed
+    # every tiny-KV HCA decode case on B200 (smoke round 3). Floor ONLY the
+    # envelope; per-request state (add_dummy_requests token_nums, metadata
+    # kv lens) stays the real request size, exactly as in serving — flooring
+    # token_nums too registered 512-token dummy KV against 4-token metadata
+    # and turned the crash into an IMA (smoke round 4).
+    request_tokens = prefix_len + seq_len_q if is_context else max_seq
     max_seq = max(max_seq, 512)
 
     # KVCacheManagerV2 requires an explicit quota (max_tokens or
@@ -450,7 +454,7 @@ def create_dsv4_kv_cache_and_metadata(
     )
 
     request_ids = list(range(batch_size))
-    token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [max_seq] * batch_size
+    token_nums = [request_tokens] * batch_size
     # is_gen mirrors the request phase (KVCacheManagerV2.add_dummy_requests;
     # generation metadata below declares num_contexts=0 with cached KV).
     kv_cache_manager.add_dummy_requests(request_ids, token_nums, is_gen=not is_context)
