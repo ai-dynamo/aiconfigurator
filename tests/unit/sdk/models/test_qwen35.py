@@ -7,21 +7,31 @@ import pytest
 
 from aiconfigurator.sdk import common, models
 from aiconfigurator.sdk import config as sdk_config
-from aiconfigurator.sdk.operations import CustomAllReduce
+from aiconfigurator.sdk.operations import CustomAllReduce, OverlapOp
 
 pytestmark = pytest.mark.unit
 
 
-def _model_config(tp_size=2, *, moe_tp_size=None, moe_ep_size=1, attention_dp_size=1):
+def _model_config(tp_size=2, *, moe_tp_size=None, moe_ep_size=1, attention_dp_size=1, moe_backend=None):
     return sdk_config.ModelConfig(
         tp_size=tp_size,
         pp_size=1,
         moe_tp_size=tp_size if moe_tp_size is None else moe_tp_size,
         moe_ep_size=moe_ep_size,
         attention_dp_size=attention_dp_size,
+        moe_backend=moe_backend,
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
     )
+
+
+def _flatten_ops(phase_ops):
+    for op in phase_ops:
+        if isinstance(op, OverlapOp):
+            yield from op._group_a
+            yield from op._group_b
+        else:
+            yield op
 
 
 @pytest.mark.parametrize(
@@ -75,29 +85,50 @@ def test_qwen35_rejects_tensor_parallel_size_that_cannot_shard_gdn_heads():
     ],
 )
 def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_config_kwargs):
-    """Every topology emits the same pre/MoE/post dispatch chain; layout-specific
-    collectives are resolved inside MoEDispatch, leaving one attention-side AR
-    per layer plus embedding."""
+    """Every topology emits the same dispatch chain (serial in context, routed
+    and shared experts overlapped in generation); layout-specific collectives
+    are resolved inside MoEDispatch, leaving one attention-side AR per layer
+    plus embedding."""
     model = models.get_model("Qwen/Qwen3.5-35B-A3B", _model_config(**model_config_kwargs), "vllm")
-    for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
-        op_names = [op._name for op in phase_ops]
 
-        assert not any(name.endswith("_moe_final_ar") for name in op_names)
-        for prefix in (f"{phase}_gdn", f"{phase}_full"):
-            expected_order = [
-                f"{prefix}_router_gemm",
-                f"{prefix}_moe_pre_dispatch",
-                f"{prefix}_moe",
-                f"{prefix}_moe_post_dispatch",
-                f"{prefix}_shared_expert_gate_gemm",
-                f"{prefix}_shared_gate_up_gemm",
-                f"{prefix}_shared_act_gate",
-                f"{prefix}_shared_down_gemm",
-            ]
-            indices = [op_names.index(name) for name in expected_order]
-            assert indices == sorted(indices)
+    context_names = [op._name for op in model.context_ops]
+    assert not any(name.endswith("_moe_final_ar") for name in context_names)
+    for prefix in ("context_gdn", "context_full"):
+        expected_order = [
+            f"{prefix}_router_gemm",
+            f"{prefix}_moe_pre_dispatch",
+            f"{prefix}_moe",
+            f"{prefix}_moe_post_dispatch",
+            f"{prefix}_shared_expert_gate_gemm",
+            f"{prefix}_shared_gate_up_gemm",
+            f"{prefix}_shared_act_gate",
+            f"{prefix}_shared_down_gemm",
+            f"{prefix}_shared_merge",
+        ]
+        indices = [context_names.index(name) for name in expected_order]
+        assert indices == sorted(indices)
 
-        # Explicit CustomAllReduce ops: 40 attention-side + 1 embedding.
+    # Generation runs routed and shared experts on parallel CUDA streams
+    # (OverlapOp), followed by the merge.
+    generation_ops = {op._name: op for op in model.generation_ops}
+    for prefix in ("generation_gdn", "generation_full"):
+        overlap = generation_ops[f"{prefix}_moe_overlap"]
+        assert [op._name for op in overlap._group_a] == [
+            f"{prefix}_router_gemm",
+            f"{prefix}_moe_pre_dispatch",
+            f"{prefix}_moe",
+            f"{prefix}_moe_post_dispatch",
+        ]
+        assert [op._name for op in overlap._group_b] == [
+            f"{prefix}_shared_expert_gate_gemm",
+            f"{prefix}_shared_gate_up_gemm",
+            f"{prefix}_shared_act_gate",
+            f"{prefix}_shared_down_gemm",
+        ]
+        assert f"{prefix}_shared_merge" in generation_ops
+
+    # Explicit CustomAllReduce ops: 40 attention-side + 1 embedding.
+    for phase_ops in (model.context_ops, model.generation_ops):
         allreduce_ops = [op for op in phase_ops if isinstance(op, CustomAllReduce)]
         assert sum(op._scale_factor for op in allreduce_ops) == 41
 
@@ -111,7 +142,7 @@ def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
     )
 
     for phase_ops in (model.context_ops, model.generation_ops):
-        scalar_gates = [op for op in phase_ops if op._name.endswith("_shared_expert_gate_gemm")]
+        scalar_gates = [op for op in _flatten_ops(phase_ops) if op._name.endswith("_shared_expert_gate_gemm")]
         assert len(scalar_gates) == 2
         assert {op._n for op in scalar_gates} == {1}
 
@@ -130,6 +161,26 @@ def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
             assert f"{prefix}_moe_pre_dispatch" not in op_names
             assert f"{prefix}_moe" in op_names
             assert f"{prefix}_moe_post_dispatch" in op_names
+
+
+def test_qwen35_sglang_deepep_prices_one_dispatch_and_replicates_shared_expert():
+    """DeepEP rows hold the full dispatch+combine round trip, so one dispatch
+    op prices it; sglang DeepEP replicates the shared expert (tp_size=1)
+    instead of TP-sharding it."""
+    model = models.get_model(
+        "Qwen/Qwen3.5-35B-A3B",
+        _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8, moe_backend="deepep_moe"),
+        "sglang",
+    )
+    cfg = model.extra_params
+
+    for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
+        op_names = [op._name for op in phase_ops]
+        for prefix in (f"{phase}_gdn", f"{phase}_full"):
+            assert f"{prefix}_moe_pre_dispatch" in op_names
+            assert f"{prefix}_moe_post_dispatch" not in op_names
+        gate_up_widths = {op._n for op in phase_ops if op._name.endswith("_shared_gate_up_gemm")}
+        assert gate_up_widths == {2 * cfg.shared_expert_inter_size}
 
 
 def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
