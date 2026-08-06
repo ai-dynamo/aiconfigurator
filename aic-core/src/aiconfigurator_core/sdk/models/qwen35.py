@@ -246,10 +246,12 @@ class Qwen35Model(BaseModel):
     def _sglang_deepep(self) -> bool:
         return self._backend_name == "sglang" and self.config.moe_backend == "deepep_moe"
 
-    def _shared_expert_ops(self, prefix, count, h, tp, gemm_q, cfg: common.Qwen35Config):
+    def _shared_expert_ops(self, prefix, count, h, tp, gemm_q, cfg: common.Qwen35Config, *, scale_num_tokens=1):
         """Shared-expert block: scalar gate + gated-SiLU MLP (Qwen2MoeMLP) with
         a fused gate_up projection. DeepEP replicates the shared expert across
-        ranks (tp_size=1) instead of TP-sharding it."""
+        ranks (tp_size=1) instead of TP-sharding it; in context it then runs on
+        the attn-TP scattered token slice (scale_num_tokens=tp, the
+        WideEPDeepSeekModel precedent)."""
         if self._sglang_deepep():
             tp = 1
         return [
@@ -260,6 +262,7 @@ class Qwen35Model(BaseModel):
                 1,
                 h,
                 common.GEMMQuantMode.bfloat16,
+                scale_num_tokens=scale_num_tokens,
             ),
             ops.GEMM(
                 f"{prefix}_shared_gate_up_gemm",
@@ -267,6 +270,7 @@ class Qwen35Model(BaseModel):
                 2 * cfg.shared_expert_inter_size // tp,
                 h,
                 gemm_q,
+                scale_num_tokens=scale_num_tokens,
             ),
             ops.ElementWise(
                 f"{prefix}_shared_act_gate",
@@ -274,6 +278,7 @@ class Qwen35Model(BaseModel):
                 2 * cfg.shared_expert_inter_size // tp,
                 cfg.shared_expert_inter_size // tp,
                 0.8,
+                scale_num_tokens=scale_num_tokens,
             ),
             ops.GEMM(
                 f"{prefix}_shared_down_gemm",
@@ -282,12 +287,13 @@ class Qwen35Model(BaseModel):
                 cfg.shared_expert_inter_size // tp,
                 gemm_q,
                 low_precision_input=True,
+                scale_num_tokens=scale_num_tokens,
             ),
         ]
 
-    def _shared_merge_op(self, prefix, count, h):
+    def _shared_merge_op(self, prefix, count, h, *, scale_num_tokens=1):
         # sigmoid(expert gate) * shared output + routed output.
-        return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8)
+        return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8, scale_num_tokens=scale_num_tokens)
 
     def _ffn_context_ops(
         self, prefix, count, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg: common.Qwen35Config
@@ -363,8 +369,13 @@ class Qwen35Model(BaseModel):
                     )
                 )
             if cfg.shared_expert_inter_size > 0:
-                ops_list.extend(self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg))
-                ops_list.append(self._shared_merge_op(prefix, count, h))
+                # DeepEP context runs the shared expert (and merge) on the
+                # attn-TP scattered token slice.
+                shared_scale = tp if self._sglang_deepep() else 1
+                ops_list.extend(
+                    self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg, scale_num_tokens=shared_scale)
+                )
+                ops_list.append(self._shared_merge_op(prefix, count, h, scale_num_tokens=shared_scale))
         else:
             ops_list.extend(
                 [
@@ -572,9 +583,11 @@ class Qwen35Model(BaseModel):
             shared_ops = (
                 self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
             )
-            # vLLM decode runs shared and routed experts on parallel CUDA
-            # streams; sglang runs them serially.
-            if shared_ops and self._backend_name == "vllm":
+            # vLLM decode (aux-stream shared experts, <=256 tokens per rank)
+            # and sglang CUDA-graph decode (forward_normal_dual_stream) run
+            # shared and routed experts on parallel streams; sglang DeepEP
+            # runs them serially.
+            if shared_ops and self._backend_name in ("vllm", "sglang") and not self._sglang_deepep():
                 ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
             else:
                 ops_list.extend(routed_ops)

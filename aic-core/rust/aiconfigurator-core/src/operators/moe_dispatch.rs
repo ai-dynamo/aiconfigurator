@@ -409,14 +409,12 @@ impl MoEDispatchOp {
                     // Python passes `sms=self._sms` (kwarg default 12).
                     self.sms,
                 )?;
-                // Python (`moe.py:1244-1252`) has NO pre/combine branch on
-                // the SGLang DeepEP path: BOTH the pre-dispatch op and the
-                // combine op call `query_wideep_deepep_normal`, whose loader
-                // stores the FULL round trip per point (`lat =
-                // dispatch_transmit + dispatch_notify + combine_transmit +
-                // combine_notify`, moe.py:2724). A layer's step total is
-                // therefore 2x the point — mirror the double-count exactly;
-                // do not split the point into halves.
+                // The loader stores the FULL dispatch+combine round trip per
+                // point (`lat = dispatch_transmit + dispatch_notify +
+                // combine_transmit + combine_notify`, moe.py:2724), so model
+                // builders compose exactly ONE deepep dispatch op per MoE
+                // layer per phase (SGLangEPMOEModel / Qwen35Model). Return
+                // the summed point once — do not split it into halves.
                 let total_us = point.dispatch_transmit_us
                     + point.dispatch_notify_us
                     + point.combine_transmit_us
@@ -449,10 +447,10 @@ impl MoEDispatchOp {
                     self.topk,
                     self.num_experts,
                 )?;
-                // Same no-split rule as DeepEpNormal: Python's generation
-                // branch (`moe.py:1253-1260`) returns the summed LL point
-                // (`lat = combine_avg_t_us + dispatch_avg_t_us`, moe.py:2666)
-                // for BOTH the pre-dispatch and the combine op.
+                // Same single-op rule as DeepEpNormal: the LL point is the
+                // summed round trip (`lat = combine_avg_t_us +
+                // dispatch_avg_t_us`, moe.py:2666), priced once by the sole
+                // dispatch op.
                 let latency_ms = (point.dispatch_avg_t_us + point.combine_avg_t_us) / 1000.0;
                 Ok(PerformanceResult::new(latency_ms, Source::Silicon)
                     .clamp_non_negative()

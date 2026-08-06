@@ -148,7 +148,8 @@ def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
 
 
 def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
-    """SGLang StandardDispatcher has no collective before routed experts."""
+    """SGLang StandardDispatcher has no collective before routed experts;
+    its CUDA-graph decode overlaps shared and routed experts."""
     model = models.get_model(
         "Qwen/Qwen3.5-397B-A17B",
         _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8),
@@ -156,11 +157,12 @@ def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
     )
 
     for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
-        op_names = [op._name for op in phase_ops]
+        op_names = [op._name for op in _flatten_ops(phase_ops)]
         for prefix in (f"{phase}_gdn", f"{phase}_full"):
             assert f"{prefix}_moe_pre_dispatch" not in op_names
             assert f"{prefix}_moe" in op_names
             assert f"{prefix}_moe_post_dispatch" in op_names
+    assert any(isinstance(op, OverlapOp) for op in model.generation_ops)
 
 
 def test_qwen35_sglang_deepep_prices_one_dispatch_and_replicates_shared_expert():
@@ -179,8 +181,13 @@ def test_qwen35_sglang_deepep_prices_one_dispatch_and_replicates_shared_expert()
         for prefix in (f"{phase}_gdn", f"{phase}_full"):
             assert f"{prefix}_moe_pre_dispatch" in op_names
             assert f"{prefix}_moe_post_dispatch" not in op_names
-        gate_up_widths = {op._n for op in phase_ops if op._name.endswith("_shared_gate_up_gemm")}
-        assert gate_up_widths == {2 * cfg.shared_expert_inter_size}
+        gate_ups = [op for op in phase_ops if op._name.endswith("_shared_gate_up_gemm")]
+        assert {op._n for op in gate_ups} == {2 * cfg.shared_expert_inter_size}
+        # Context runs the shared expert on the attn-TP scattered token slice.
+        expected_scale = 8 if phase == "context" else 1
+        assert {op._scale_num_tokens for op in gate_ups} == {expected_scale}
+    # DeepEP keeps shared and routed experts serial in generation.
+    assert not any(isinstance(op, OverlapOp) for op in model.generation_ops)
 
 
 def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
@@ -192,7 +199,7 @@ def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
     )
 
     for phase_ops in (model.context_ops, model.generation_ops):
-        op_names = [op._name for op in phase_ops]
+        op_names = [op._name for op in _flatten_ops(phase_ops)]
         assert any(name.endswith("_moe_pre_dispatch") for name in op_names)
 
 
