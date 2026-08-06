@@ -330,6 +330,7 @@ mod tests {
             is_context: false,
             sms: 12,
             scale_num_tokens: 1,
+            attn_ar_modeled: false,
         }
     }
 
