@@ -2023,10 +2023,14 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
     """
     Generate common test cases for GDN (Gated DeltaNet) kernel benchmarking.
 
-    Covers all 8 unique dimension sets across the full Qwen3.5 collection
-    for both context (prefill) and generation (decode) phases.
+    Expands each model's global GDN geometry over its declared tensor-parallel
+    sizes. ``d_model`` remains global because it is part of the persisted
+    lookup key; K/V head counts are TP-local because that is the geometry
+    executed by the runtime kernels. Batch/seq density comes from the base
+    sweep grid only, like every other base op.
     """
     test_cases: list[GdnCommonTestCase] = []
+    seen_model_keys: set[tuple[int, int, int, int, int, int]] = set()
     gdn_sweep = _required_base_common_case_values("gdn")
     context_seq_lens = _as_int_list(
         gdn_sweep.get("context_sequence_lengths"),
@@ -2051,38 +2055,68 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
         num_v_heads = int(model_config["num_v_heads"])
         head_v_dim = int(model_config["head_v_dim"])
         model_name = str(model_config["model_path"])
-
-        # Context (prefill) test case
-        test_cases.append(
-            GdnCommonTestCase(
-                phase="context",
-                d_model=d_model,
-                d_conv=d_conv,
-                num_k_heads=num_k_heads,
-                head_k_dim=head_k_dim,
-                num_v_heads=num_v_heads,
-                head_v_dim=head_v_dim,
-                batch_size_list=context_batch_sizes,
-                seq_len_list=context_seq_lens,
-                model_name=model_name,
-            )
+        tp_sizes = _as_int_list(
+            model_config.get("tensor_parallel_sizes"),
+            field_name="model_case_values.gdn.tensor_parallel_sizes",
         )
 
-        # Generation (decode) test case
-        test_cases.append(
-            GdnCommonTestCase(
-                phase="generation",
-                d_model=d_model,
-                d_conv=d_conv,
-                num_k_heads=num_k_heads,
-                head_k_dim=head_k_dim,
-                num_v_heads=num_v_heads,
-                head_v_dim=head_v_dim,
-                batch_size_list=generation_batch_sizes,
-                seq_len_list=None,
-                model_name=model_name,
+        for tp_size in tp_sizes:
+            if tp_size <= 0:
+                raise ValueError(
+                    "model_case_values.gdn.tensor_parallel_sizes must contain only positive integers, "
+                    f"got {tp_size} for {model_name}"
+                )
+            if num_k_heads % tp_size != 0 or num_v_heads % tp_size != 0:
+                raise ValueError(
+                    "GDN TP-local heads require both global head counts to be divisible by tensor parallel size: "
+                    f"model={model_name}, num_k_heads={num_k_heads}, num_v_heads={num_v_heads}, tp={tp_size}"
+                )
+
+            local_num_k_heads = num_k_heads // tp_size
+            local_num_v_heads = num_v_heads // tp_size
+            model_key = (
+                d_model,
+                local_num_k_heads,
+                head_k_dim,
+                local_num_v_heads,
+                head_v_dim,
+                d_conv,
             )
-        )
+            if model_key in seen_model_keys:
+                continue
+            seen_model_keys.add(model_key)
+
+            # Context (prefill) test case
+            test_cases.append(
+                GdnCommonTestCase(
+                    phase="context",
+                    d_model=d_model,
+                    d_conv=d_conv,
+                    num_k_heads=local_num_k_heads,
+                    head_k_dim=head_k_dim,
+                    num_v_heads=local_num_v_heads,
+                    head_v_dim=head_v_dim,
+                    batch_size_list=context_batch_sizes,
+                    seq_len_list=context_seq_lens,
+                    model_name=model_name,
+                )
+            )
+
+            # Generation (decode) test case
+            test_cases.append(
+                GdnCommonTestCase(
+                    phase="generation",
+                    d_model=d_model,
+                    d_conv=d_conv,
+                    num_k_heads=local_num_k_heads,
+                    head_k_dim=head_k_dim,
+                    num_v_heads=local_num_v_heads,
+                    head_v_dim=head_v_dim,
+                    batch_size_list=generation_batch_sizes,
+                    seq_len_list=None,
+                    model_name=model_name,
+                )
+            )
 
     return test_cases
 

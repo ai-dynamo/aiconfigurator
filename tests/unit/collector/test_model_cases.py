@@ -40,6 +40,19 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     return namespace["_build_mla_test_cases"]
 
 
+def _load_gdn_getter(module_path: str):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    source_path = REPO_ROOT / module_path
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
+    )
+    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    return namespace["get_gdn_test_cases"]
+
+
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
@@ -196,6 +209,71 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
         assert {
             (case.model_name, case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases
         } == {expected}
+
+
+@pytest.mark.parametrize(
+    ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
+    [
+        ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8)),
+    ],
+)
+def test_qwen35_gdn_getters_expand_tp_local_physical_keys(
+    monkeypatch, model_path, d_model, global_k_heads, global_v_heads, tp_sizes
+):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    expected = {
+        (phase, d_model, 4, global_k_heads // tp, 128, global_v_heads // tp, 128)
+        for phase in ("context", "generation")
+        for tp in tp_sizes
+    }
+
+    for module_path in ("collector/sglang/collect_gdn.py", "collector/vllm/collect_gdn.py"):
+        cases = _load_gdn_getter(module_path)()
+        assert {(case[0], case[1], case[2], case[3], case[4], case[5], case[6]) for case in cases} == expected
+
+
+def test_gdn_tp_declarations_fail_loud_and_dedupe_on_loader_key(monkeypatch):
+    from collector import case_generator
+
+    invalid = {
+        "model_path": "example/invalid",
+        "d_model": 2048,
+        "d_conv": 4,
+        "num_k_heads": 16,
+        "head_k_dim": 128,
+        "num_v_heads": 32,
+        "head_v_dim": 128,
+        "tensor_parallel_sizes": [3],
+    }
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: [invalid])
+    with pytest.raises(ValueError, match="both global head counts to be divisible"):
+        case_generator.get_common_gdn_test_cases()
+
+    def profile(model_path, d_model, num_k_heads, num_v_heads, tp):
+        return {
+            "model_path": model_path,
+            "d_model": d_model,
+            "d_conv": 4,
+            "num_k_heads": num_k_heads,
+            "head_k_dim": 128,
+            "num_v_heads": num_v_heads,
+            "head_v_dim": 128,
+            "tensor_parallel_sizes": [tp],
+        }
+
+    profiles = [
+        profile("example/first", 2048, 16, 32, 4),
+        profile("example/duplicate", 2048, 4, 8, 1),
+        profile("example/distinct-d-model", 4096, 4, 8, 1),
+    ]
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: profiles)
+    cases = case_generator.get_common_gdn_test_cases()
+
+    assert len(cases) == 4
+    assert {(case.phase, case.d_model, case.num_k_heads, case.num_v_heads, case.model_name) for case in cases} == {
+        (phase, 2048, 4, 8, "example/first") for phase in ("context", "generation")
+    } | {(phase, 4096, 4, 8, "example/distinct-d-model") for phase in ("context", "generation")}
 
 
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
@@ -676,7 +754,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
-    assert len(get_common_gdn_test_cases()) == 16
+    assert len(get_common_gdn_test_cases()) == 64
     mhc_cases = get_common_mhc_test_cases()
     assert len(mhc_cases) == 8
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
