@@ -396,7 +396,7 @@ def run_gdn_generation_benchmark(
             a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             a_log = torch.zeros(num_v_heads, dtype=torch.float32, device=device)
-            dt_bias = torch.ones(num_v_heads, dtype=torch.float32, device=device)
+            dt_bias = torch.ones(num_v_heads, dtype=dtype, device=device)
             output = torch.empty(
                 batch_size,
                 1,

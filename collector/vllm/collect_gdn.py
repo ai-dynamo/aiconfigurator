@@ -21,6 +21,8 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule_packed_decode
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import ChunkGatedDeltaRule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 from vllm.version import __version__ as vllm_version
 
 from collector.case_generator import get_common_gdn_test_cases
@@ -137,12 +139,36 @@ def run_gdn_context_benchmark(
                 "head_v_dim": head_v_dim,
                 "model_name": model_name,
             }
-            query_start_loc = torch.arange(
+            query_start_loc_cpu = torch.arange(
                 0,
                 num_tokens + 1,
                 seq_len,
                 dtype=torch.int32,
+                device="cpu",
+            )
+            query_start_loc = query_start_loc_cpu.to(device)
+            # Serving precomputes this metadata once in the attention builder
+            # and passes it into every layer's causal_conv1d_fn call. Omitting
+            # it takes the non-serving branch, which performs D2H/NumPy/list
+            # setup inside every timed invocation. Keep the collector on the
+            # pinned vLLM 0.24.0 serving path:
+            # vllm/v1/attention/backends/gdn_attn.py:394-401 and
+            # vllm/v1/attention/backends/utils.py:810-856 @ ee0da84ab.
+            nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+                query_start_loc_cpu,
                 device=device,
+            )
+            conv_metadata = GDNAttentionMetadata(
+                num_prefills=batch_size,
+                num_prefill_tokens=num_tokens,
+                num_decodes=0,
+                num_decode_tokens=0,
+                num_spec_decodes=0,
+                num_spec_decode_tokens=0,
+                num_actual_tokens=num_tokens,
+                nums_dict=nums_dict,
+                batch_ptr=batch_ptr,
+                token_chunk_offset_ptr=token_chunk_offset_ptr,
             )
 
             # Production prefill applies the depthwise convolution to packed
@@ -170,6 +196,7 @@ def run_gdn_context_benchmark(
                     cache_indices=cache_indices,
                     has_initial_state=has_initial_state,
                     activation="silu",
+                    metadata=conv_metadata,
                 )
 
             run_conv1d()
@@ -180,10 +207,8 @@ def run_gdn_context_benchmark(
                 num_warmups=num_warmups,
                 num_runs=num_runs,
                 repeat_n=1,
-                # vLLM 0.24's packed prefill convolution performs a metadata
-                # copy that CUDA graph capture rejects. Every SM90 full-run
-                # point therefore used eager execution; make that method
-                # explicit instead of silently falling back at runtime.
+                # Qwen3.5 production prefill is eager in the alignment
+                # benchmark. Pin the collector to that same execution regime.
                 use_cuda_graph=False,
             ) as results:
                 log_perf(
@@ -247,12 +272,15 @@ def run_gdn_context_benchmark(
                     device=device,
                 )
             )
+            # FP32 recurrent state matches serving: Qwen3.5 checkpoints pin
+            # mamba_ssm_dtype=float32 (vllm/model_executor/models/config.py:603-628
+            # @0.24.0). Qwen3.5-only contract; revisit if other GDN models join.
             gdn_state = torch.zeros(
                 batch_size,
                 num_v_heads,
                 head_v_dim,
                 head_k_dim,
-                dtype=dtype,
+                dtype=torch.float32,
                 device=device,
             )
 
@@ -431,12 +459,13 @@ def run_gdn_generation_benchmark(
         # which defaults to True (vllm/envs.py:115).
         a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
         b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
+        # FP32 recurrent state matches serving (see the context-phase note).
         gdn_state = torch.randn(
             batch_size + 1,
             num_v_heads,
             head_v_dim,
             head_k_dim,
-            dtype=dtype,
+            dtype=torch.float32,
             device=device,
         )
         out = torch.empty(

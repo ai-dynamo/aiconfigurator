@@ -56,6 +56,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 16
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-2B
       d_model: 2048
       d_conv: 4
@@ -63,6 +64,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 16
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-4B
       d_model: 2560
       d_conv: 4
@@ -70,6 +72,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 32
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-9B
       d_model: 4096
       d_conv: 4
@@ -77,6 +80,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 32
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-27B
       d_model: 5120
       d_conv: 4
@@ -84,6 +88,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 48
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
 
 all_frameworks_op_cases:
   gdn:
