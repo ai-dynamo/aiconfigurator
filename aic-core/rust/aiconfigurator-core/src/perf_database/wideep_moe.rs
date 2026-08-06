@@ -30,8 +30,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::axis_curve::AxisCurve;
 use super::moe_index::MoeIndex;
-use super::token_curve::TokenCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
@@ -48,7 +48,7 @@ pub struct WideEpMoeTable {
 }
 
 struct WideEpMoeGrids {
-    index: BTreeMap<String, MoeIndex<WideEpMoeShapeKey, TokenCurve>>,
+    index: BTreeMap<String, MoeIndex<WideEpMoeShapeKey, AxisCurve>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -144,7 +144,7 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         )?;
-        by_tokens.query(num_tokens as f64, sol)
+        by_tokens.query(num_tokens as f64, "num_tokens", sol)
     }
 
     /// Own-slice `num_tokens -> latency_ms` points, after the level-wise
@@ -222,7 +222,7 @@ impl WideEpMoeTable {
         num_slots: u32,
         moe_tp_size: u32,
         moe_ep_size: u32,
-    ) -> Result<&TokenCurve, AicError> {
+    ) -> Result<&AxisCurve, AicError> {
         let grids = self.load_compute()?;
         let Some(by_quant) = grids.index.get(kernel_source) else {
             return Err(AicError::PerfDatabase(format!(
@@ -350,7 +350,7 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
     Ok(WideEpMoeGrids {
         index: index
             .into_iter()
-            .map(|(kernel, index)| (kernel, index.map_values(TokenCurve::from_map)))
+            .map(|(kernel, index)| (kernel, index.map_values(AxisCurve::from_map)))
             .collect(),
     })
 }

@@ -31,8 +31,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::axis_curve::AxisCurve;
 use super::moe_index::{MoeIndex, MoeShapeKey};
-use super::token_curve::TokenCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
@@ -83,7 +83,7 @@ struct LoadedMoeGrids {
 }
 
 struct MoeGrids {
-    index: MoeIndex<MoeShapeKey, TokenCurve>,
+    index: MoeIndex<MoeShapeKey, AxisCurve>,
     /// Distinct quant names in first-seen (file row) order. Python's
     /// transfer ladder iterates the table dict in INSERTION order
     /// (`for q in moe_table`), which breaks profile-distance ties by file
@@ -201,7 +201,7 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        by_tokens.query(num_tokens as f64, sol)
+        by_tokens.query(num_tokens as f64, "num_tokens", sol)
     }
 
     /// Probe the TRT-LLM low-latency NVFP4 MoE kernel table.
@@ -264,7 +264,9 @@ impl MoeTable {
                  measured_token={only}, key={key:?}"
             )));
         }
-        by_tokens.query(num_tokens as f64, sol).map(Some)
+        by_tokens
+            .query(num_tokens as f64, "num_tokens", sol)
+            .map(Some)
     }
 
     /// `true` iff the loaded low-latency grid has any rows.
@@ -487,11 +489,11 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
     }
     Ok(LoadedMoeGrids {
         default: MoeGrids {
-            index: default_index.map_values(TokenCurve::from_map),
+            index: default_index.map_values(AxisCurve::from_map),
             quants_in_load_order: default_quants,
         },
         low_latency: MoeGrids {
-            index: low_latency_index.map_values(TokenCurve::from_map),
+            index: low_latency_index.map_values(AxisCurve::from_map),
             quants_in_load_order: low_latency_quants,
         },
     })
@@ -537,9 +539,9 @@ mod tests {
         };
         let mut index = MoeIndex::default();
         *index.entry("fp8".into(), "power_law".into(), shape) =
-            TokenCurve::from_map(BTreeMap::from([(1, 1.0)]));
+            AxisCurve::from_map(BTreeMap::from([(1, 1.0)]));
         *index.entry("fp8".into(), "uniform".into(), shape) =
-            TokenCurve::from_map(BTreeMap::from([(1, 2.0)]));
+            AxisCurve::from_map(BTreeMap::from([(1, 2.0)]));
         let grids = MoeGrids {
             index,
             quants_in_load_order: vec!["fp8".to_string()],
