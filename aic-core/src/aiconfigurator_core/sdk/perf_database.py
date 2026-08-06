@@ -2760,6 +2760,8 @@ class PerfDatabase:
         kvcache_quant_mode: common.KVCacheQuantMode,
         fmha_quant_mode: common.FMHAQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        *,
+        native_num_heads: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query context MLA module latency. Delegates to ``MLAModule._query_context_mla_module_table``."""
@@ -2774,7 +2776,8 @@ class PerfDatabase:
             kvcache_quant_mode,
             fmha_quant_mode,
             gemm_quant_mode,
-            database_mode,
+            native_num_heads=native_num_heads,
+            database_mode=database_mode,
         )
 
     @functools.lru_cache(maxsize=32768)
@@ -2785,6 +2788,8 @@ class PerfDatabase:
         num_heads: int,
         kv_cache_dtype: common.KVCacheQuantMode,
         gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        *,
+        native_num_heads: int | None = None,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Query generation MLA module latency. Delegates to ``MLAModule._query_generation_mla_module_table``."""
@@ -2797,7 +2802,8 @@ class PerfDatabase:
             num_heads,
             kv_cache_dtype,
             gemm_quant_mode,
-            database_mode,
+            native_num_heads=native_num_heads,
+            database_mode=database_mode,
         )
 
     @functools.lru_cache(maxsize=32768)

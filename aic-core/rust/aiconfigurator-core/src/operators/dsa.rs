@@ -13,17 +13,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::dsa::{
-    bs_slice, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_ms, dsa_sparse_file_prefix,
-    lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
+    bs_slice, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_flops,
+    dsa_generation_sol_ms, dsa_sparse_file_prefix, lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
 };
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DsaModuleOp {
@@ -464,6 +464,7 @@ fn context_empirical(
     let dims = dsa_dims(&op.architecture);
     let topk = op.index_topk as i64;
     let (kv, fmha, gemm) = (op.kv_cache_dtype, op.fmha_quant_mode, op.gemm_quant_mode);
+    let flops = dsa_context_sol_flops(spec, gemm, fmha)?;
     // Python's inner `get_sol(b, s, prefix, num_heads, kv, fmha)` closing
     // over gemm_quant_mode / index_topk / dims.
     let sol = |b: f64, s: f64, prefix: f64, num_heads: f64| {
@@ -479,6 +480,7 @@ fn context_empirical(
             prefix as i64,
             num_heads as i64,
             skip_indexer,
+            flops,
         )
     };
     let sol_time = sol(b as f64, s as f64, prefix as f64, op.num_heads as f64);
@@ -709,10 +711,20 @@ fn generation_empirical(
     let spec = &db.system_spec;
     let dims = dsa_dims(&op.architecture);
     let (kv, gemm) = (op.kv_cache_dtype, op.gemm_quant_mode);
+    let flops = dsa_generation_sol_flops(spec, gemm)?;
     // Python's inner `get_sol(b, s, num_heads, kv_cache_dtype)` (the
     // attention group is hardcoded bfloat16 inside).
     let sol = |b: f64, s: f64, num_heads: f64| {
-        dsa_generation_sol_ms(spec, dims, kv, gemm, b as i64, s as i64, num_heads as i64)
+        dsa_generation_sol_ms(
+            spec,
+            dims,
+            kv,
+            gemm,
+            b as i64,
+            s as i64,
+            num_heads as i64,
+            flops,
+        )
     };
     let heads_f = op.num_heads as f64;
     let sol_time = sol(b as f64, s as f64, heads_f);

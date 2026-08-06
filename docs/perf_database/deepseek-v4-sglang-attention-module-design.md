@@ -270,23 +270,63 @@ SGLang requires a native FP4 MoE backend before it can materialize those expert
 weights. Converted `sgl-project/*-FP8` checkpoints can still collect
 `fp8_block` on Hopper-class systems.
 
-## TP and Head-Axis Convention
+## TP and Head-Axis Convention (unified by #1429)
 
-The AIC operation surface passes rank-local `num_heads`, computed by the model
-as:
+> #1458 generalized this section into the repo-wide pin — including the MLA
+> module `[native][local]` migration (native from the model pin, not
+> `num_heads * tp_size`), the computation-completeness exception that keeps
+> GQA and the MLA kernel tables local-only, and the DSA
+> one-native-per-architecture guardrail. See
+> [head-axis-keying.md](head-axis-keying.md); the DSV4 specifics below remain
+> authoritative for this family.
 
-```python
-local_heads = total_num_heads // tp_size
-```
+Every persisted DSV4 module row carries two head-related columns whose
+semantics are pinned by issue #1429:
 
-The collector stores the same rank-local `num_heads` value as the lookup axis.
+- `num_heads` is **rank-local**: the head count the benchmarked module
+  actually ran with on one rank, `native // tp_size`. Both collectors derive
+  it from the HF config's `num_attention_heads` (which the TP simulation
+  never rewrites); module attributes are only cross-checked because their
+  meaning flips between native and rank-local across framework versions.
+- `tp_size` is **mandatory**, so the model-native head identity is always
+  derivable as `num_heads * tp_size`. That derivation is a DSV4 property —
+  its rows carry genuine tp sweeps. Persisting rank-local heads matches every
+  other module table family, but the MLA module tables resolve native from an
+  explicit model pin instead: their rows are single-GPU head sweeps where
+  `tp_size` is provenance (#1458, see
+  [head-axis-keying.md](head-axis-keying.md)).
+
+Loaders key the module tables on **both** axes, `[native][local]`: native is
+the model identity (Flash 64 vs Pro 128 — the `architecture` column cannot
+distinguish them), local is the physical per-rank shape. Collapsing either
+axis merges rows whose latencies differ 30-50% (Flash tp1 and Pro tp2 share
+local 64 but are different modules).
+
+History: pre-#1131 collectors stored the NATIVE count constant across the tp
+sweep. The shipped sglang 0.5.10 tables (b200_sxm, b300_sxm, gb200, gb300)
+were migrated in-place to rank-local (#1429), and both the Python and Rust
+loaders reject files that still show the stale fingerprint (`num_heads`
+constant while `tp_size` varies within one model) instead of misreading them.
+
+Exception: the sparse-KERNEL tables (`dsv4_paged_mqa_logits`,
+`dsv4_hca_attn`, `dsv4_csa_topk_calib`) keep their existing native-keyed
+consumer contract — vllm writes both `num_heads` (native) and
+`local_num_heads` there explicitly, and all sglang rows are tp=1 where the
+two readings coincide.
+
+The CSA topK DELTA calibration is additionally selector-geometry-specific:
+Flash runs `index_topk=512`, Pro `index_topk=1024`, so a Flash-collected
+DELTA must never be subtracted from a Pro query. The consumers key the DELTA
+by the calibration row's native `num_heads` and apply it only on an exact
+native match (#1460 review / #1468). Coverage limitation: the shipped
+calibration is Flash-only today, so **Pro CSA latencies stay uncorrected**
+for the collector's degenerate-topk inflation (a one-time warning is logged)
+until Pro calibration is collected.
+
 SGLang may zero-pad Q back to the native 64-head shape inside the FlashMLA
-backend, but that padding is an implementation detail of the module execution.
-AIC lookup should continue to use the rank-local `num_heads` value because that
-is what the operation query passes.
-
-This keeps DeepSeek-V4 consistent with the other attention module data and
-avoids making TP an interpolation axis.
+backend, but that padding is an implementation detail of the module
+execution. This convention keeps DeepSeek-V4 consistent with the other
+attention module data and avoids making TP an interpolation axis.
 
 ## Loader Design
 
@@ -299,8 +339,8 @@ load_context_dsv4_kind_module_data(file_path)
 Context dictionary shape:
 
 ```python
-data[fmha_quant][kv_quant][gemm_quant][architecture][compress_ratio]
-    [num_heads][prefix][s][batch] = {
+data[fmha_quant][kv_quant][gemm_quant][num_heads_native][num_heads_local]
+    [compress_ratio][prefix][s][batch] = {
         "latency": ms,
         "power": W,
         "energy": W * ms,
@@ -318,8 +358,8 @@ load_generation_dsv4_kind_module_data(file_path)
 Generation dictionary shape:
 
 ```python
-data[kv_quant][gemm_quant][architecture][compress_ratio]
-    [num_heads][batch][s_total] = {
+data[kv_quant][gemm_quant][num_heads_native][num_heads_local]
+    [compress_ratio][batch][s_total] = {
         "latency": ms,
         "power": W,
         "energy": W * ms,
@@ -352,9 +392,11 @@ attributes used by the SDK query methods.
 Context uses prefix-aware module data. The lookup path is:
 
 1. Select the requested attention kind by `compress_ratio`.
-2. Select the rank-local `num_heads` axis.
+2. Resolve the head identity: first the model-native axis (the operation
+   passes both `native_heads` and rank-local `num_heads`), then the
+   rank-local axis inside that native bucket.
 3. Select or interpolate the prefix axis.
-4. Inside a prefix slice, query the `(num_heads, s, batch)` grid.
+4. Inside a prefix slice, query the `(s, batch)` grid.
 5. Apply CSA top-k correction when `compress_ratio == 4`.
 
 For exact prefix hits, AIC queries that prefix slice directly. If the exact
@@ -371,17 +413,19 @@ not return a finite value, it falls back to robust module lookup.
 Generation data is keyed as:
 
 ```python
-[num_heads][batch][s_total]
+[num_heads_native][num_heads_local][batch][s_total]
 ```
 
-The generation query performs robust 3D lookup over:
+After resolving the (native, local) head identity, the generation query
+performs robust lookup over:
 
 ```text
-num_heads, batch, s_total
+batch, s_total
 ```
 
-For DeepSeek-V4 Flash, `num_heads` is a fixed lookup key from the rank-local
-operation input. It is not meant to model arbitrary TP interpolation.
+The head axes are fixed lookup keys from the operation input (the model
+passes its native count and the rank-local `native // tp` count). They are
+not meant to model arbitrary TP interpolation.
 
 CSA generation applies the same top-k correction as context, with:
 

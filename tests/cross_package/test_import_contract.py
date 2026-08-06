@@ -36,6 +36,7 @@ CORE_SDK_LEAF_MODULES = [
     "models.gpt",
     "models.helpers",
     "models.hybrid_moe",
+    "models.kimi_k3",
     "models.llama",
     "models.minimax_m3",
     "models.moe",

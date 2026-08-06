@@ -21,7 +21,7 @@ use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
     Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-    GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
     MsaModuleOp, TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
     WideEpGenerationMlaOp, WideEpMoeOp,
@@ -155,6 +155,13 @@ pub enum Op {
     /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
     /// variants mid-enum.
     Dsv4MegaMoe(Dsv4MegaMoeOp),
+    /// Kimi Delta Attention (KDA) kernel for Kimi-K3 linear_attention
+    /// layers — Python `KDAKernel` (a `GDNKernel` subclass with a distinct
+    /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
+    /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
+    /// `Dsv4MegaMoe`); the new serialized variant bumped
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5.
+    Kda(KdaOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -235,6 +242,7 @@ impl Op {
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
+            Op::Kda(o) => &o.name,
         }
     }
 
@@ -392,6 +400,9 @@ impl Op {
             // same `x`); the megamoe table is indexed by local-rank tokens
             // and the op must NOT re-multiply by attention_dp_size.
             Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
+            // Like Gdn: the op derives its phase coordinates internally
+            // (verify divides the (nextn+1)-scaled batch by draft_tokens).
+            Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
         }
     }
 }

@@ -222,7 +222,7 @@ class AFDConfig:
     # for compute and transfer latency queries.
     a_batch_size: int = 128
     num_microbatches: int = 3
-    pipeline_model: str = "optimistic"  # "optimistic" (K=3) or "conservative" (K=2)
+    pipeline_model: str = "optimistic"  # "optimistic" (K=3), "conservative" (K=2), or "serial"
     comm_overhead_factor: float = 1.0
     # Which phase(s) AFD should be applied to.
     # "decode" (default) mirrors existing behavior; "prefill" applies to

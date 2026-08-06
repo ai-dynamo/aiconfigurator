@@ -385,6 +385,12 @@ class ContextDSAModule(Operation):
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table
         (``_context_dsa_module_skip_data``) instead of the full table; all other
         lookup logic is identical."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -480,11 +486,10 @@ class ContextDSAModule(Operation):
             total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
 
             # ── SOL ─────────────────────────────────────────────────────
-            from aiconfigurator_core.sdk.operations.gemm import GEMM
 
-            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
-            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
-            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_quant_mode)
+            gemm_flops = common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -1183,6 +1188,12 @@ class GenerationDSAModule(Operation):
     ):
         """Query generation DSA module table.
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -1247,11 +1258,9 @@ class GenerationDSAModule(Operation):
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
-            from aiconfigurator_core.sdk.operations.gemm import GEMM
-
-            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
-            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
-            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_mode)
+            gemm_flops = common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = common.get_quant_tc_flops(database.system_spec, fmha_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops

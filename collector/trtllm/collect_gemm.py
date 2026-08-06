@@ -9,6 +9,8 @@ FP8, FP8 block, and related quantization modes. Shape policy comes from
 quantized-weight setup, and perf logging.
 """
 
+__compat__ = "trtllm>=1.3.0rc20"
+
 import ctypes
 import math
 import os
@@ -19,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from case_generator import get_gemm_case_specs
 from tensorrt_llm._torch.modules.linear import Linear
+from tensorrt_llm._utils import is_sm_100f
 from tensorrt_llm.models.modeling_utils import QuantAlgo, QuantConfig
 
 from helper import benchmark_with_power, get_sm_version, log_perf
@@ -50,21 +53,6 @@ def _compute_fp8_block_weight_scales(weight: torch.Tensor, group_size: int) -> t
 _weight_cache: dict = {}
 
 
-def _skip_trtllm_large_fp8_projection_gemm(gemm_type: str, m: int, n: int, k: int) -> bool:
-    if gemm_type != "fp8" or not (1 <= m <= 8 and n >= 51200 and k >= 51200):
-        return False
-
-    sm_version = get_sm_version()
-    if tensorrt_llm.__version__.startswith(("1.3.0rc5", "1.3.0rc10")) and sm_version >= 120:
-        # The SM120 FP8 small-M kernel hits an illegal memory access for
-        # Qwen3-235B-style large projection shapes and poisons the CUDA context.
-        # On 1.3.0rc10 this reproduces for m=1..8 when both projection dims are
-        # at least 51200.
-        return True
-
-    return tensorrt_llm.__version__.startswith("1.3.0rc15") and sm_version == 89
-
-
 def _get_l2_cache_bytes(device_id: int = 0) -> int:
     """Query the GPU L2 cache size via the CUDA runtime API."""
     cuda_dev_attr_l2_cache_size = 38
@@ -93,7 +81,7 @@ def _build_weights(gemm_type: str, n: int, k: int, device, dtype, group_size, x)
         w = torch.randn((n, k), dtype=torch.bfloat16, device=device)
         w_sf_global = (448 * 6) / w.abs().max().float()
         w_fp4, w_sf_block = torch.ops.trtllm.fp4_quantize(w, w_sf_global, 16, False)
-        if tensorrt_llm.__version__.startswith(("1.1.0", "1.2.0", "1.3.0")):
+        if tensorrt_llm.__version__.startswith("1.3.0"):
             w_sf_block_unswizzled = torch.ops.trtllm.block_scale_interleave_reverse(
                 w_sf_block.cpu().view(pad_up(n, 128), -1)
             )
@@ -151,8 +139,13 @@ def get_gemm_test_cases():
             for x in x_list:
                 if x * n >= 2**31 or x * k >= 2**31:
                     continue
-                if _skip_trtllm_large_fp8_projection_gemm(gemm_type, x, n, k):
-                    continue
+                # FIXME(kernel-limit): the fp8 small-M giant-projection IMA
+                # family (m 1..8, n and k >= 51200) known from rc5/rc10 SM120
+                # and rc15 SM89 reproduces on rc20 SM120 (5 recorded IMAs in
+                # the 2026-07-25 RTX PRO 6000 full sweep at m5-8,
+                # n/k 51200-65536). Cases run and fail classified; the
+                # version-scoped skip helper was deleted when this collector
+                # pinned trtllm>=1.3.0rc20. Re-verify on the next bump.
                 test_cases.append([gemm_type, x, n, k])
 
     return test_cases
@@ -252,7 +245,13 @@ def run_gemm(gemm_type, m, n, k, *, perf_filename, device="cuda:0"):
     ) as results:
         pass
 
-    kernel_source = "deepgemm" if gemm_type == "fp8_block" and sm_version >= 100 else "torch_flow"
+    # fp8_block Linear dispatch is is_sm_100f-scoped, not sm>=100: SM100/103
+    # take the DeepGEMM fp8_swap_ab_gemm path, while SM120 has its own branch
+    # (per_token_quant_and_transform + torch.ops.trtllm.fp8_block_scaling_gemm)
+    # and Hopper the fp8_quantize_1x128 + fp8_block_scaling_gemm pair, both
+    # labeled torch_flow (modules/linear.py:1111-1133@1.3.0rc20). The previous
+    # sm>=100 predicate mislabeled SM120 rows as deepgemm.
+    kernel_source = "deepgemm" if gemm_type == "fp8_block" and is_sm_100f(sm_version) else "torch_flow"
 
     log_perf(
         item_list=[

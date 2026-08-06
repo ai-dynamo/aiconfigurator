@@ -21,6 +21,7 @@ from aiconfigurator_core.sdk.common import (
     DeepSeekV4Config,
     DefaultHFModels,
     HybridMoEConfig,
+    KimiK3Config,
     Qwen35Config,
     VisionEncoderConfig,
 )
@@ -663,6 +664,46 @@ def _parse_hf_config_json(config: dict) -> dict:
             "kv_lora_rank": config.get("kv_lora_rank", 0),
             "qk_rope_head_dim": config.get("qk_rope_head_dim", 0),
         }
+    elif architecture == "KimiK3ForConditionalGeneration":
+        # Kimi-K3: hybrid KDA linear attention + MLA full attention with LatentMoE.
+        # linear_attn_config.kda_layers / full_attn_layers are 1-based layer ids.
+        linear_attn_cfg = config.get("linear_attn_config") or {}
+        kda_layer_ids = set(linear_attn_cfg.get("kda_layers") or [])
+        if not kda_layer_ids:
+            raise ValueError("Kimi-K3 config must define linear_attn_config.kda_layers")
+        out_of_range = sorted(i for i in kda_layer_ids if not 1 <= i <= layers)
+        if out_of_range:
+            raise ValueError(
+                f"Kimi-K3 linear_attn_config.kda_layers contains out-of-range 1-based "
+                f"layer ids {out_of_range} (num_hidden_layers={layers}); they would be "
+                "silently dropped and produce a wrong hybrid layer plan."
+            )
+        layer_types = tuple("linear_attention" if (i + 1) in kda_layer_ids else "full_attention" for i in range(layers))
+        extra_params = KimiK3Config(
+            layer_types=layer_types,
+            kda_num_heads=linear_attn_cfg["num_heads"],
+            kda_head_dim=linear_attn_cfg["head_dim"],
+            kda_conv_kernel=linear_attn_cfg.get("short_conv_kernel_size", 4),
+            q_lora_rank=config["q_lora_rank"],
+            kv_lora_rank=config["kv_lora_rank"],
+            qk_nope_head_dim=config["qk_nope_head_dim"],
+            qk_rope_head_dim=config["qk_rope_head_dim"],
+            v_head_dim=config["v_head_dim"],
+            # KimiLinearConfig spells it num_experts_per_token (not _tok)
+            topk=topk or config.get("num_experts_per_token", 0),
+            num_experts=num_experts,
+            moe_inter_size=config.get("moe_intermediate_size", 0),
+            routed_expert_hidden_size=config.get("routed_expert_hidden_size", 0) or 0,
+            num_shared_experts=config.get("num_shared_experts", 0),
+            first_k_dense_replace=config.get("first_k_dense_replace", 0),
+            dense_inter_size=config.get("intermediate_size", 0),
+            attn_res_block_size=config.get("attn_res_block_size", 0) or 0,
+        )
+        logger.info(
+            f"Kimi-K3 hybrid config: kda_layers={layer_types.count('linear_attention')}, "
+            f"mla_layers={layer_types.count('full_attention')}, num_experts={num_experts}, "
+            f"latent={extra_params.routed_expert_hidden_size}, shared={extra_params.num_shared_experts}"
+        )
     elif architecture in {"DeepSeekForCausalLM", "DeepseekV3ForCausalLM"}:
         # DeepSeek V3 / R1 / Kimi K2: MLA latent geometry from config so the KV
         # cache size is data-driven instead of hardcoded. v_head_dim feeds the
@@ -974,6 +1015,11 @@ def parse_compressed_tensors_quant(
                 strategy = str(weights.get("strategy", "")).lower()
                 block_structure = weights.get("block_structure")
                 base_algo = "fp8_block" if strategy == "block" or block_structure else "fp8"
+            elif num_bits == 4 and "float" in w_type:
+                # MXFP4 packed weights (e.g. Kimi-K3 "mxfp4-pack-quantized"):
+                # W4A16 base lane; per-SM MoE kernel routing may upgrade the
+                # activation side (see operations/moe.py).
+                base_algo = "w4a16_mxfp4"
         if base_algo:
             break
 

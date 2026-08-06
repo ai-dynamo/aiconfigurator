@@ -16,8 +16,8 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
-- `--engine-step-backend`: Experimental static-latency backend — `python` (default) or `rust` (routes static step estimates through the Rust FPM estimator). (`default`, `exp`, `generate`, `estimate`)
-- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
+- `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). `fpm` always runs on the Python engine step regardless of `--engine-step-backend` (it compiles to no Rust op variant yet). Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -241,7 +241,7 @@ aiconfigurator cli estimate \
 | `memory` | Per-component memory (weights, kvcache, activations, nccl, others) as a share of GPU capacity, the KV footprint per sequence, and a KV-bound max-batch upper bound. |
 | `time` | Per-op latency bars in context → generation order, each op's share of the phase, and (in static modes) a Speed-of-Light (SOL) comparison plus the per-op data source. |
 | `energy` | Per-op energy breakdown, when energy data is available for the system. |
-| `source` | Per-op data-source attribution — `silicon` (measured), `empirical` (interpolated / formula), or `mixed` — so you can tell which numbers are measured vs estimated. |
+| `source` | Per-op data-source attribution — including `silicon` (measured), `empirical` (interpolated / formula), `estimated` (modeled), and `mixed` — so you can distinguish measured and modeled values. |
 | `all` | Every section above. |
 
 `--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).

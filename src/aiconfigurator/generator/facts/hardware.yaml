@@ -171,3 +171,22 @@ profiles:
     shared_memory:
       default: 16Gi
     tolerations: []
+
+  # ---------------------------------------------------------------------------
+  # H20  —  Hopper  sm90
+  # ---------------------------------------------------------------------------
+  h20:
+    node_selector:
+      nvidia.com/gpu.product: NVIDIA-H20-3e
+    arch: x86_64
+    nccl_env:
+      NCCL_CUMEM_ENABLE: "1"
+    shared_memory:
+      default: 64Gi
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    moe_backend:
+      trtllm: CUTLASS

@@ -7,6 +7,10 @@ runtime:
   framework: vllm
   version: 0.24.0
 tables:
+  # 2026-08-02: appended the Kimi-K3 MLA-as-attention 96-family shards
+  # (96/48/24/12 q=kv heads, head_dim 128; profile kimi_k3_mla_as_attention)
+  # — context +204, generation +1072 rows, keys disjoint from the existing
+  # base-grid rows. Stock v0.24.0, 8x B200, zero failures.
   context_attention_perf:
     status: complete
   generation_attention_perf:

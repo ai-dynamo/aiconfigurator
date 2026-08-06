@@ -10,13 +10,13 @@
 //! The MHC module is collected as a single fused kernel; this operator scales
 //! the raw latency by `scale_factor`.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, GemmQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
-use crate::perf_database::gemm::tc_flops_for_compute;
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MhcModuleOp {
@@ -76,7 +76,7 @@ impl MhcModuleOp {
     /// table only ever calls this with `"pre"` / `"post"` (op="both" is
     /// summed at the query level, each half with its own SOL) but the
     /// `"both"` arm is kept for formula completeness.
-    fn sol_ms(&self, db: &PerfDatabase, op_name: &str, nt: i64) -> f64 {
+    fn sol_ms(&self, db: &PerfDatabase, op_name: &str, nt: i64, tc_flops: f64) -> f64 {
         let sites: i128 = 2;
         let nt = nt as i128;
         let hc = self.hc_mult as i128;
@@ -106,8 +106,7 @@ impl MhcModuleOp {
         }
 
         let spec = &db.system_spec;
-        let sol_math =
-            ops as f64 / tc_flops_for_compute(spec, self.quant_mode.mapping().compute) * 1000.0;
+        let sol_math = ops as f64 / tc_flops * 1000.0;
         let sol_mem = (param_bytes + activation_bytes) / spec.gpu.mem_bw * 1000.0;
         sol_math.max(sol_mem)
     }
@@ -118,7 +117,8 @@ impl MhcModuleOp {
     /// always estimates. The SOL diagnostic modes never reach the compiled
     /// engine (the routing gate delegates them to the Python step).
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        let sol = |op_name: &str, t: f64| self.sol_ms(db, op_name, t.round() as i64);
+        let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+        let sol = |op_name: &str, t: f64| self.sol_ms(db, op_name, t.round() as i64, tc_flops);
         let silicon = || {
             db.mhc
                 .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &sol)
@@ -154,8 +154,14 @@ impl MhcModuleOp {
     /// `SOL(query)/util` over one op half's own `(num_tokens,)` curve.
     /// Mirrors Python `_query_mhc_table::get_empirical::_emp_for_op` (grid
     /// depth 1, `sol_fn = lambda c: get_sol(c[0], op_name)[0]`).
-    fn emp_for_op(&self, db: &PerfDatabase, op_name: &str, num_tokens: u32) -> Result<f64, AicError> {
-        let sol = |c: &[f64]| self.sol_ms(db, op_name, c[0].round() as i64);
+    fn emp_for_op(
+        &self,
+        db: &PerfDatabase,
+        op_name: &str,
+        num_tokens: u32,
+    ) -> Result<f64, AicError> {
+        let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+        let sol = |c: &[f64]| self.sol_ms(db, op_name, c[0].round() as i64, tc_flops);
         // Python keys the grid on (op_name, hc_mult, hidden_size, quant) —
         // NOT sinkhorn_iters, which is mirrored deliberately.
         let key = format!(

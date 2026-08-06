@@ -536,6 +536,353 @@ class GDNKernel(Operation):
         return self._weights * self._scale_factor
 
 
+class KDAKernel(GDNKernel):
+    """
+    Single KDA (Kimi Delta Attention) kernel op for Kimi-K3 linear_attention layers.
+
+    Same structural key as GDN — (d_model, num_k_heads, head_k_dim, num_v_heads,
+    head_v_dim, d_conv) — but a distinct kernel family (per-K full-rank gate,
+    fp32 recurrent state) collected into kda_perf. Covers:
+      Context phase:
+        - "causal_conv1d_fn_qkv3": the 3-call Q/K/V causal-conv sequence
+        - "chunk_kda": chunked delta-rule scan (raw per-K gates)
+      Generation phase:
+        - "causal_conv1d_update": packed single-step conv update (3P channels)
+        - "fused_recurrent_kda_packed_decode": packed KDA recurrence (T=1)
+      Verify phase (speculative target-verify; 2-axis batch x draft_tokens):
+        - "causal_conv1d_update": conv update over batch*draft_tokens rows
+        - "fused_sigmoid_gating_delta_rule_update": fused chain-verify recurrence
+
+    Dims are passed per attention-TP shard (num heads / tp), matching the
+    collector's per-shard kda rows. ``draft_tokens`` fixes the verify width
+    (speculative block size + 1) for verify-phase ops.
+
+    Owns ``_data_cache`` for the packaged kda_perf Parquet perf table.
+    """
+
+    _data_cache: ClassVar[dict] = {}
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        kernel_source: str,
+        phase: str,
+        d_model: int,
+        num_k_heads: int,
+        head_k_dim: int,
+        num_v_heads: int,
+        head_v_dim: int,
+        d_conv: int,
+        seq_split: int = 1,
+        draft_tokens: int = 0,
+    ) -> None:
+        super().__init__(
+            name,
+            scale_factor,
+            kernel_source,
+            phase,
+            d_model,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            d_conv,
+            seq_split=seq_split,
+        )
+        self._draft_tokens = draft_tokens
+
+    @classmethod
+    def load_data(cls, database: PerfDatabase) -> None:
+        """Idempotent. Loads the packaged kda_perf Parquet perf table and binds
+        ``database._kda_data``."""
+        import os
+
+        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+
+        key = cls._cache_key(database)
+        if key not in cls._data_cache:
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.kda.value
+            )
+            sources = database._build_op_sources(PerfDataFilename.kda, primary_path, system_data_root)
+            cls._data_cache[key] = LoadedOpData(load_kda_data(sources), PerfDataFilename.kda, primary_path)
+            cls._record_load()
+
+        if "_kda_data" not in database.__dict__:
+            database._kda_data = cls._data_cache[key]
+
+    @classmethod
+    def _query_kda_table(
+        cls,
+        database: PerfDatabase,
+        phase: str,
+        kernel_source: str,
+        batch_size: int,
+        seq_len: int | None,
+        d_model: int,
+        num_k_heads: int,
+        head_k_dim: int,
+        num_v_heads: int,
+        head_v_dim: int,
+        d_conv: int,
+    ) -> PerformanceResult:
+        """Query KDA kernel table. Context and verify are 2-axis (batch, seq);
+        generation is 1-axis (batch). SOL fallback uses a memory-bound byte
+        model with the KDA fp32 recurrent state."""
+        cls.load_data(database)
+        kda_data = database._kda_data
+        if not getattr(kda_data, "loaded", False):
+            kda_data = {}
+
+        # SM100 sglang serving runs DSPARK target-verify through the fused
+        # CuTeDSL kernel (fused_kda_decode_mtp_dspark) — one row per verify
+        # step covering BOTH the conv update and the chain-verify recurrence
+        # (the collector dispatch mirrors kda_backend._can_run_dspark_cutedsl_mtp
+        # @ kimi-k3 branch). Datasets collected there carry no Triton verify
+        # rows, so route the recurrence op onto the fused table and fold the
+        # conv op to zero (its cost is inside the fused row).
+        if phase == "verify" and kda_data:
+
+            def _has_verify_rows(source: str) -> bool:
+                try:
+                    return bool(kda_data[source]["verify"])
+                except KeyError:
+                    return False
+
+            if (
+                kernel_source in ("fused_sigmoid_gating_delta_rule_update", "causal_conv1d_update")
+                and not _has_verify_rows(kernel_source)
+                and _has_verify_rows("fused_kda_decode_mtp_dspark")
+            ):
+                if kernel_source == "causal_conv1d_update":
+                    return PerformanceResult(0.0, energy=0.0, source="silicon")
+                kernel_source = "fused_kda_decode_mtp_dspark"
+
+        proj_size = num_v_heads * head_v_dim
+        state_bytes = num_v_heads * head_k_dim * head_v_dim * 4  # fp32 delta-rule state
+
+        def get_sol(b: int = batch_size, s: int | None = seq_len) -> float:
+            x = (b * s) if phase in ("context", "verify") and s else b
+            if kernel_source in ("chunk_kda_with_fused_gate", "flashkda_fwd"):
+                # vLLM prefill cores: same chunked-scan byte model as chunk_kda.
+                kernel_source_local = "chunk_kda"
+            elif kernel_source == "fused_kda_decode":
+                # vLLM fused decode = conv update + recurrence + gated norm.
+                kernel_source_local = "fused_recurrent_kda_packed_decode"
+            elif kernel_source == "fused_recurrent_kda":
+                # vLLM chain-verify kernel: same traffic as the sglang verify op.
+                kernel_source_local = "fused_sigmoid_gating_delta_rule_update"
+            else:
+                kernel_source_local = kernel_source
+            if kernel_source_local == "causal_conv1d_fn_qkv3":
+                # Three sequential convs, each over proj_size channels.
+                read_bytes = 3 * (x * proj_size * (d_conv + 1) * 2)
+                write_bytes = 3 * (x * proj_size * 2)
+            elif kernel_source_local == "causal_conv1d_update":
+                conv_channels = 3 * proj_size
+                read_bytes = x * conv_channels * (d_conv + 1) * 2
+                write_bytes = x * conv_channels * 2
+            elif kernel_source_local == "chunk_kda":
+                # Chunked delta-rule scan; per-chunk states h [B, NT, H, K, V]
+                # round-trip through global memory (fp32 state).
+                chunk_size = 64
+                num_chunks = (s // chunk_size) if s else 0
+                h_chunks_bytes = num_chunks * state_bytes * b
+                # q/k/v plus the per-K gate g are all x * proj_size wide.
+                read_bytes = x * 4 * proj_size * 2 + state_bytes * b + h_chunks_bytes
+                write_bytes = x * proj_size * 2 + state_bytes * b + h_chunks_bytes
+            elif kernel_source_local == "fused_recurrent_kda_packed_decode":
+                read_bytes = x * (3 * proj_size + proj_size) * 2 + state_bytes * b
+                write_bytes = x * proj_size * 2 + state_bytes * b
+            elif kernel_source_local == "fused_sigmoid_gating_delta_rule_update":
+                # Verify: reads committed state once per request, writes one
+                # intermediate fp32 state per draft token.
+                read_bytes = x * 4 * proj_size * 2 + state_bytes * b
+                write_bytes = x * proj_size * 2 + state_bytes * x
+            elif kernel_source_local == "fused_kda_decode_mtp_dspark":
+                # SM100 sglang fused CuTeDSL DSPARK verify: conv update +
+                # chain-verify recurrence in one kernel (sum of the two
+                # constituent byte models above).
+                conv_channels = 3 * proj_size
+                read_bytes = x * conv_channels * (d_conv + 1) * 2 + (x * 4 * proj_size * 2 + state_bytes * b)
+                write_bytes = x * conv_channels * 2 + (x * proj_size * 2 + state_bytes * x)
+            elif kernel_source_local == "kda_fused_decode":
+                # Fused attempt-and-verify decode (12-head TP8 shard): conv
+                # update + packed recurrence + gated RMSNorm in one launch
+                # (sum of the two constituent decode byte models above).
+                conv_channels = 3 * proj_size
+                read_bytes = x * conv_channels * (d_conv + 1) * 2 + (
+                    x * (3 * proj_size + proj_size) * 2 + state_bytes * b
+                )
+                write_bytes = x * conv_channels * 2 + (x * proj_size * 2 + state_bytes * b)
+            else:
+                read_bytes = x * d_model * 2
+                write_bytes = x * d_model * 2
+            return (read_bytes + write_bytes) / database.system_spec["gpu"]["mem_bw"] * 1000
+
+        if not kda_data:
+            return PerformanceResult(get_sol(), energy=0.0, source="sol")
+
+        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
+        try:
+            by_key = kda_data[kernel_source][phase]
+        except KeyError:
+            by_key = {}
+
+        # Serving decodes the K3 TP8 12-head shard through the fused
+        # attempt-and-verify kernel (kda_fused_decode: conv + recurrence +
+        # gated RMSNorm in one launch), so SM100-era datasets carry a single
+        # "kda_fused_decode" generation row for that shard and no Triton pair.
+        # Route per model key — BEFORE the nearest-shard fallback, which would
+        # otherwise silently price the fused shard with another shard's Triton
+        # rows. Rust twin: operators/mamba.rs::KdaOp::query.
+        if (
+            phase == "generation"
+            and kernel_source in ("fused_recurrent_kda_packed_decode", "causal_conv1d_update")
+            and model_key not in by_key
+        ):
+            try:
+                fused_by_key = kda_data["kda_fused_decode"]["generation"]
+            except KeyError:
+                fused_by_key = {}
+            if model_key in fused_by_key:
+                if kernel_source == "causal_conv1d_update":
+                    return PerformanceResult(0.0, energy=0.0, source="silicon")
+                kernel_source = "kda_fused_decode"
+                by_key = fused_by_key
+
+        if model_key not in by_key:
+            # Nearest same-d_model shard fallback (collector rows are per-TP shard).
+            keys_same_d_model = [k for k in by_key if k[0] == d_model]
+            if keys_same_d_model:
+                model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
+            else:
+                return PerformanceResult(get_sol(), energy=0.0, source="sol")
+
+        table = by_key[model_key]
+
+        if phase in ("context", "verify"):
+            if seq_len is None or seq_len <= 0:
+                return PerformanceResult(get_sol(), energy=0.0, source="sol")
+            config = perf_interp.OpInterpConfig(
+                axes=("batch", "seq_len"),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v, s_v: get_sol(b_v, s_v),
+            )
+            try:
+                result = perf_interp.query(config, table, batch_size, seq_len)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol(), energy=0.0, source="sol")
+            return database._interp_pr(
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
+            )
+        else:
+            config = perf_interp.OpInterpConfig(
+                axes=("batch",),
+                resolver=perf_interp.Grid(),
+                sol_fn=lambda b_v: get_sol(b_v, None),
+            )
+            try:
+                result = perf_interp.query(config, table, batch_size)
+            except (InterpolationDataNotAvailableError, KeyError, ValueError):
+                return PerformanceResult(get_sol(), energy=0.0, source="sol")
+            return database._interp_pr(
+                perf_interp.get_value(result, "latency"),
+                energy=perf_interp.get_value(result, "energy"),
+            )
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        if self._phase == "context":
+            seq_len = s
+        elif self._phase == "verify":
+            # The backend scales the generation batch by (nextn + 1) to model
+            # the verify token width; the verify table is keyed by (requests,
+            # draft_tokens), so divide the scaled batch back down.
+            seq_len = self._draft_tokens
+            if self._draft_tokens > 0:
+                batch_size = max(1, round(batch_size / self._draft_tokens))
+        else:
+            seq_len = None
+        result = self._query_kda_table(
+            database,
+            phase=self._phase,
+            kernel_source=self._kernel_source,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            d_model=self._d_model,
+            num_k_heads=self._num_k_heads,
+            head_k_dim=self._head_k_dim,
+            num_v_heads=self._num_v_heads,
+            head_v_dim=self._head_v_dim,
+            d_conv=self._d_conv,
+        )
+        return PerformanceResult(
+            latency=float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source=getattr(result, "source", "silicon"),
+        )
+
+
+def load_kda_data(kda_file: str):
+    """
+    Load KDA kernel performance data from kda_perf.parquet.
+
+    Same columns as gdn_perf. Returns data[kernel_source][phase][model_key];
+    "context" and "verify" phases nest [batch_size][seq_len] (seq_len carries
+    the per-request draft-token count for verify rows); "generation" nests
+    [batch_size] only. Returns None if the file does not exist.
+    """
+    rows = _read_filtered_rows(kda_file)
+    if rows is None:
+        logger.debug(f"KDA data file {kda_file} not found.")
+        return None
+
+    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
+
+    for row in rows:
+        kernel_source = row["kernel_source"]
+        phase = row["phase"]
+        batch_size = int(row["batch_size"])
+        seq_len = int(row["seq_len"])
+        d_model = int(row["d_model"])
+        d_conv = int(row["d_conv"])
+        num_k_heads = int(row["num_k_heads"])
+        head_k_dim = int(row["head_k_dim"])
+        num_v_heads = int(row["num_v_heads"])
+        head_v_dim = int(row["head_v_dim"])
+        latency = float(row["latency"])
+        power = float(row.get("power", 0.0))
+        energy = power * latency
+
+        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
+        entry = {"latency": latency, "power": power, "energy": energy}
+
+        by_model = data[kernel_source][phase][model_key]
+        if phase in ("context", "verify"):
+            if batch_size in by_model and seq_len in by_model[batch_size]:
+                logger.debug(f"value conflict in kda data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
+            else:
+                by_model.setdefault(batch_size, {})[seq_len] = entry
+        else:
+            if batch_size in by_model:
+                logger.debug(f"value conflict in kda data: {kernel_source} {phase} {model_key} {batch_size}")
+            else:
+                by_model[batch_size] = entry
+
+    result = {}
+    for ks, by_phase in data.items():
+        result[ks] = {}
+        for ph, by_key in by_phase.items():
+            result[ks][ph] = dict(by_key)
+
+    return result
+
+
 class Mamba2(Operation):
     """
     Mamba2 operation for NemotronH hybrid models.

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang
+  # Harness-pinned first branch build (collector/framework_manifest.yaml
+  # families.kda pin at collection time).
+  image_digest: sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b
+tables:
+  kda_perf:
+    collected_at: '2026-07-29'
+    rows: 976
+    # First fused-decode-collector lane (SM103 lifted from the sglang kda
+    # unverified_sms). Same dispatch and failure spectrum as the gb200 /
+    # gb300 lanes of the 2026-08-01 campaign: kda_fused_decode on the
+    # 12-head shard, Triton pair on 24/48/96; 52 context cells = by-design
+    # int32 conv-guard raises; 1 verify cell (batch=256, draft=8, 96
+    # heads) = the known fused CuTeDSL kernel-limit IMA.
+    # collector_ref/collector_hash/case_plan_hash were not captured by
+    # this pre-provenance-writer run (structured fields backfilled
+    # 2026-08-04, review); row-content parity with the gb300 meta (976
+    # rows, identical spectrum) is the corroborating record.
+    status: complete
