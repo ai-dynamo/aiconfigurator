@@ -509,13 +509,13 @@ def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
 
 
 @pytest.mark.integration
-def test_forward_pass_perf_model_native_end_to_end() -> None:
+def test_forward_pass_perf_model_native_directional_bounds_end_to_end() -> None:
     """End-to-end native forward-pass model over a real fixture.
 
     Builds a native model via ``compile_engine`` (crossing into the Rust core),
-    estimates a prefill iteration, then tunes with an observation engineered to
-    drive the correction factor to exactly 2.0 off the model's own native
-    estimate. Requires the compiled ``aiconfigurator_core`` extension.
+    estimates a prefill iteration, then drives one correction bucket through
+    its slower ceiling, faster floor, and recovery between them. Requires the
+    compiled ``aiconfigurator_core`` extension.
     """
     pytest.importorskip("aiconfigurator_core")
     from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
@@ -539,7 +539,15 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
         "nextn": None,
         "extra": {},
     }
-    model = RustForwardPassPerfModel.from_native(config, {"min_observations": 2})
+    model = RustForwardPassPerfModel.from_native(
+        config,
+        {
+            "min_observations": 2,
+            "max_observations": 2,
+            "min_faster_correction_factor": 0.5,
+            "max_slower_correction_factor": 2.0,
+        },
+    )
 
     prefill = [
         {
@@ -560,7 +568,7 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
     obs = [
         {
             "version": 1,
-            "wall_time": native_ms * 2.0 / 1000.0,
+            "wall_time": native_ms * 8.0 / 1000.0,
             "scheduled_requests": {
                 "num_prefill_requests": 2,
                 "sum_prefill_tokens": 2048,
@@ -573,7 +581,39 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
     corrected = model.estimate_forward_pass_time_ms(prefill)
     assert corrected == pytest.approx(native_ms * 2.0)
     assert model.get_min_correction_factor() == pytest.approx(2.0)
+    assert model.get_max_correction_factor() == pytest.approx(2.0)
     assert model.diagnostics()["source"] == "aic_with_correction"
+
+    faster_obs = [
+        {
+            "version": 1,
+            "wall_time": native_ms * 0.1 / 1000.0,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    model.tune_with_fpms([faster_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 1.25)
+
+    model.tune_with_fpms([faster_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 0.5)
+
+    recovery_obs = [
+        {
+            "version": 1,
+            "wall_time": native_ms * 1.25 / 1000.0,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    model.tune_with_fpms([recovery_obs, recovery_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 1.25)
 
 
 @pytest.mark.integration
