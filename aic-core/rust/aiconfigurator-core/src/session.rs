@@ -64,15 +64,15 @@ pub(crate) fn run_context_ops(
 /// breakdown collect through it). The no-op-sink wrapper above monomorphizes
 /// to the pre-sink code, so the scalar hot path pays nothing.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_context_ops_with(
-    ops: &[Op],
+pub(crate) fn run_context_ops_with<'a>(
+    ops: &'a [Op],
     db: &PerfDatabase,
     batch_size: u32,
     effective_isl: u32,
     prefix: u32,
     seq_imbalance_correction_scale: f64,
     filter: ContextOpFilter,
-    mut on_op: impl FnMut(&Op, PerformanceResult),
+    mut on_op: impl FnMut(&'a Op, PerformanceResult),
 ) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {
@@ -191,15 +191,15 @@ pub(crate) fn run_generation_ops_step_beamed(
 /// [`run_generation_ops_step_beamed`] with a per-op sink (see
 /// [`run_context_ops_with`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_generation_ops_step_beamed_with(
-    ops: &[Op],
+pub(crate) fn run_generation_ops_step_beamed_with<'a>(
+    ops: &'a [Op],
     db: &PerfDatabase,
     batch_size: u32,
     beam_width: u32,
     kv_seq_tokens: u32,
     gen_seq_imbalance_correction_scale: f64,
     only_generation_attention: bool,
-    mut on_op: impl FnMut(&Op, PerformanceResult),
+    mut on_op: impl FnMut(&'a Op, PerformanceResult),
 ) -> Result<f64, AicError> {
     let mut total = 0.0_f64;
     for op in ops {

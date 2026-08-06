@@ -1167,9 +1167,10 @@ class EngineHandle:
         stride: int = 32,
     ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
         """``run_static`` with the per-op values kept: ``(context, generation)``
-        lists of ``(name, latency_ms, energy_wms, source)``. Names repeat when
-        the op list repeats them and generation entries repeat per stride step
-        (already weighted by ``repeat_count``) — fold by name with ``+=``."""
+        lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
+        name appears once, accumulated with Python's phase-dict semantics;
+        generation values are per-step-folded, then weighted by
+        ``repeat_count``)."""
         return self._engine.run_static_per_op(
             int(batch_size),
             int(beam_width),

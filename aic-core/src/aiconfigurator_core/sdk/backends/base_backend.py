@@ -345,8 +345,12 @@ class BaseBackend:
         the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
         ``eff_s`` (the shape math above), each group serialized to OpSpec
         JSON and evaluated at ``batch=images_local, s=eff_s, x=batch*s``.
-        Accumulation mirrors the Python loop: latency/energy fold with
-        ``+=``, source is last-wins per name.
+        Accumulation matches the Python loop for the shipped encoder op
+        lists (unique names): latency/energy fold with ``+=``; sources are
+        last-wins ACROSS shape groups, while duplicate names WITHIN one
+        group would merge to ``"mixed"`` inside the engine (the Python loop
+        is last-wins there — divergent only for duplicate-name encoder ops,
+        which ``build_encoder_ops`` never emits today).
         """
         from aiconfigurator_core.sdk.engine import OpConversionError, build_ops_json
         from aiconfigurator_core.sdk.rust_engine_step import evaluate_ops_json_with_rust

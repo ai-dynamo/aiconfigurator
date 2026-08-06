@@ -61,7 +61,7 @@ pub(crate) fn resolve_op_sources(
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
 /// derived from `data_root` (`<data_dir>/<backend>/<version>`).
-fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
     let data_dir = data_root.parent()?.parent()?;

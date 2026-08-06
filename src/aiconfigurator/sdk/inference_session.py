@@ -1085,11 +1085,16 @@ class AFDInferenceSession:
 
         phase_ops = model.context_ops if is_context else model.generation_ops
         memo_attr = "_afd_rust_context_index" if is_context else "_afd_rust_generation_index"
-        index_by_id = getattr(model, memo_attr, None)
-        if index_by_id is None or len(index_by_id) != len(phase_ops):
+        # Memo keyed by the LIST OBJECT's identity, not its length: a rebuilt
+        # equal-length op list could otherwise serve stale id()->index
+        # mappings silently (CPython id reuse).
+        memo = getattr(model, memo_attr, None)
+        if memo is not None and memo[0] is phase_ops:
+            index_by_id = memo[1]
+        else:
             index_by_id = {id(op): i for i, op in enumerate(phase_ops)}
             try:
-                setattr(model, memo_attr, index_by_id)
+                setattr(model, memo_attr, (phase_ops, index_by_id))
             except (AttributeError, TypeError):
                 pass  # slotted/frozen model objects: recompute per call
         try:

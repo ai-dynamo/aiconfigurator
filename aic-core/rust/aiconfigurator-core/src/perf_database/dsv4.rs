@@ -35,7 +35,7 @@
 //! backends without DSV4 data.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,13 @@ pub struct Dsv4Table {
     /// Same source resolution as the module files; an absent file loads as
     /// `None` and the correction is a no-op (Python parity).
     topk_calib_sources: Vec<PerfSource>,
+    /// The PRIMARY (own-version) path of the topk calib file — the path
+    /// Python's `_load_csa_topk_top_last` resolves. The CP top_last grid
+    /// loads from this source only; a positional `sources[0]` is NOT a
+    /// reliable primary marker (Python's `_build_op_sources` omits the
+    /// primary entirely for partial-marked version dirs, so the list can
+    /// start with a donor).
+    topk_primary_path: PathBuf,
     /// Sparse-kernel table (`dsv4_paged_mqa_logits_module_perf.parquet`) for
     /// the CP prefill composition's mqa full/per-card deltas. Same source
     /// resolution as the module files (Python `_load_sparse` runs the file
@@ -252,6 +259,11 @@ impl Dsv4Table {
             "dsv4_hca_generation_module_perf.parquet",
             &data_root,
         );
+        let topk_primary_path = crate::perf_database::find_in_family_dirs(
+            &data_root,
+            "dsv4_csa_topk_calib_perf.parquet",
+        )
+        .unwrap_or_else(|| data_root.join("dsv4_csa_topk_calib_perf.parquet"));
         let topk_calib_sources = resolve_op_sources(
             perf_db_sources,
             "dsv4_csa_topk_calib_perf.parquet",
@@ -268,6 +280,7 @@ impl Dsv4Table {
             csa_generation_sources,
             hca_generation_sources,
             topk_calib_sources,
+            topk_primary_path,
             paged_mqa_sources,
             csa_context: OnceLock::new(),
             hca_context: OnceLock::new(),
@@ -518,9 +531,9 @@ impl Dsv4Table {
     /// which caches on the database object). `Ok(None)` when every source
     /// file is absent or no usable rows exist.
     fn load_topk_calib(&self) -> Result<Option<&TopkCalib>, AicError> {
-        let cell = self
-            .topk_calib
-            .get_or_init(|| load_topk_calib_parquet(&self.topk_calib_sources));
+        let cell = self.topk_calib.get_or_init(|| {
+            load_topk_calib_parquet(&self.topk_calib_sources, &self.topk_primary_path)
+        });
         match cell {
             Ok(calib) => Ok(calib.as_ref()),
             Err(err) => Err(clone_err(err)),
@@ -829,16 +842,20 @@ fn apply_topk_delta(
 /// Returns `Ok(None)` when every source file is absent (Python: rows is
 /// None) or no usable row exists (no DELTA pair AND no top_last row —
 /// behaviourally identical to Python's two separate None/{} outcomes).
-fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, AicError> {
+fn load_topk_calib_parquet(
+    sources: &[PerfSource],
+    top_last_primary_path: &Path,
+) -> Result<Option<TopkCalib>, AicError> {
     let mut by_mode: BTreeMap<u32, BTreeMap<(u32, u32, u32), BTreeMap<String, f64>>> =
         BTreeMap::new();
     let mut top_last: BTreeMap<Option<u32>, SparseGrid> = BTreeMap::new();
     let mut any_source = false;
-    for (source_index, source) in sources.iter().enumerate() {
-        // Python parity: the CP top_last grid loads from the PRIMARY source
-        // only (see the doc comment above); DELTA rows consume every source.
-        let primary_source = source_index == 0;
+    for source in sources {
         let path = source.path();
+        // Python parity: the CP top_last grid loads from the PRIMARY
+        // (own-version) path only — matched by PATH, not list position (see
+        // `topk_primary_path`); DELTA rows consume every source.
+        let primary_source = path == top_last_primary_path;
         if !path.exists() {
             continue;
         }
@@ -869,13 +886,15 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             // (skip-on-key-conflict; shared-layer contract, design §6.1).
             let native = row.u32_optional(num_heads_col)?;
             if primary_source && mode == "v1_top_last" {
+                // Python `_load_csa_topk_top_last` assigns per row (iterrows
+                // overwrite): within the primary file the LAST duplicate row
+                // wins.
                 top_last
                     .entry(native)
                     .or_default()
                     .entry(bs)
                     .or_default()
-                    .entry((isl, step))
-                    .or_insert(latency);
+                    .insert((isl, step), latency);
             }
             // DELTA rows without a native identity are unusable (Python's
             // generic loader skips rows with a missing key cell).
@@ -928,22 +947,17 @@ struct SparseKernelNodes {
     by_heads: BTreeMap<u32, BTreeMap<u32, Node>>,
 }
 
-/// Load one sparse-kernel parquet. Rows are nested with plain overwrite in
-/// read order — within a file the LAST row wins, and across shared-layer
-/// sources a later source overwrites an earlier one at a shared cell,
-/// matching Python (`_read_filtered_rows` concatenates sources in order and
-/// `load_dsv4_sparse_op_data` does a per-row dict overwrite; the module
-/// loader above follows the same policy). `Ok(None)` only when every source
-/// file is absent.
+/// Load one sparse-kernel parquet. Cells insert FIRST-wins in read order —
+/// within a file the first duplicate row wins and an earlier shared-layer
+/// source beats a later one at a shared cell, matching Python's
+/// `load_dsv4_sparse_op_data` skip-on-key-conflict contract (design §6.1).
+/// `Ok(None)` only when every source file is absent.
 fn load_sparse_kernel_parquet(
     sources: &[PerfSource],
 ) -> Result<Option<SparseKernelNodes>, AicError> {
     let mut by_heads: BTreeMap<u32, BTreeMap<u32, Node>> = BTreeMap::new();
     let mut any_source = false;
-    for (source_index, source) in sources.iter().enumerate() {
-        // Python parity: the CP top_last grid loads from the PRIMARY source
-        // only (see the doc comment above); DELTA rows consume every source.
-        let primary_source = source_index == 0;
+    for source in sources {
         let path = source.path();
         if !path.exists() {
             continue;
@@ -1413,10 +1427,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
     let mut raw_rows: Vec<RawRow> = Vec::new();
     let mut observed: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
     let mut any_source = false;
-    for (source_index, source) in sources.iter().enumerate() {
-        // Python parity: the CP top_last grid loads from the PRIMARY source
-        // only (see the doc comment above); DELTA rows consume every source.
-        let primary_source = source_index == 0;
+    for source in sources {
         let path = source.path();
         if !path.exists() {
             continue;
@@ -2062,7 +2073,7 @@ mod tests {
                 ("v1_flat", 8192, 512, 1, 64, 9.9),     // no top_last -> shape skipped
             ],
         );
-        let calib = load_topk_calib_parquet(&[PerfSource(path, None)])
+        let calib = load_topk_calib_parquet(&[PerfSource(path.clone(), None)], &path)
             .unwrap()
             .expect("calib must load");
         // Pairing (Python _build_topk_calib_from_rows): DELTA = max(0, flat - top_last).
@@ -2114,7 +2125,8 @@ mod tests {
     fn topk_calib_absent_file_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
-        let calib = load_topk_calib_parquet(&[PerfSource(missing, None)]).unwrap();
+        let calib =
+            load_topk_calib_parquet(&[PerfSource(missing.clone(), None)], &missing).unwrap();
         assert!(calib.is_none(), "absent file must load as None");
         // Missing calib -> DELTA machinery is a no-op (Python
         // `_dsv4_topk_delta_ms(None, ...) == 0.0`).

@@ -417,10 +417,10 @@ impl AicEngine {
 
     /// `run_static` with the per-op values kept: returns
     /// ``(context, generation)`` lists of ``(name, latency_ms, energy_wms,
-    /// source)`` tuples. Names repeat when the op list repeats them and
-    /// generation entries repeat per stride step — fold by name with `+=`
-    /// (Python phase-dict semantics). Generation values arrive pre-weighted
-    /// by the stride `repeat_count`; `latency_correction_scale` stays a
+    /// source)`` tuples, NAME-FOLDED (each name crosses once, accumulated
+    /// with Python's phase-dict semantics; sources merge to ``"mixed"`` on
+    /// mismatch). Generation values are per-step-folded, then weighted by
+    /// the stride `repeat_count`; `latency_correction_scale` stays a
     /// downstream Python multiply, exactly like `run_static`.
     #[pyo3(signature = (
         batch_size,
@@ -521,7 +521,9 @@ impl AicEngine {
     /// evaluate the ops at `indices` (positions in the compiled spec's
     /// `context_ops`, which mirror `model.context_ops` order) at the
     /// context-phase shape, returning ``(name, latency_ms, energy_wms,
-    /// source)`` per op in input order. Python-side orchestration (AFD A/F
+    /// source)`` tuples, NAME-FOLDED (repeated names accumulate with `+=`,
+    /// sources merge to ``"mixed"`` on mismatch — Python phase-dict
+    /// semantics; first-encounter order). Python-side orchestration (AFD A/F
     /// partitions) sources per-op values here; the orchestration itself
     /// stays in Python.
     #[pyo3(signature = (indices, batch_size, s, prefix=0, seq_imbalance_correction_scale=1.0, x=None))]

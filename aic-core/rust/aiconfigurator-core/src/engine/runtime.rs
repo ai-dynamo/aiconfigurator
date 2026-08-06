@@ -342,11 +342,13 @@ impl Engine {
         self.run_generation_phase_with(runtime, stride, |_, _| {})
     }
 
-    /// [`Self::run_generation_phase`] with a per-op sink. The sink observes
-    /// each op's result ALREADY weighted by the stride `repeat_count`, so
-    /// folding the sink values by name reproduces Python's
-    /// trajectory-integrated `generation_latency_dict` / `_energy_wms_dict`
-    /// (`base_backend.py:401-405`) exactly.
+    /// [`Self::run_generation_phase`] with a per-op sink. Python builds a
+    /// per-iteration dict (folding same-name results), THEN multiplies the
+    /// folded values by the stride `repeat_count` and merges them into the
+    /// trajectory dicts (`base_backend.py:378-405`) — so the sink here
+    /// observes ONE per-step-folded result per op name, already weighted by
+    /// `repeat_count`, in that exact order: `(r1 + r2) * k`, not
+    /// `r1*k + r2*k` (bit-identical for repeated-name model families).
     fn run_generation_phase_with(
         &self,
         runtime: &RuntimeConfig,
@@ -368,6 +370,10 @@ impl Engine {
             // bridge's `context_length = isl + i` packing convention.
             let s = runtime.isl + i + 1;
             let repeat_count = stride.min(upper - i);
+            // Per-step name fold FIRST (Python's per-iteration dict), with
+            // the phase-dict source merge (mismatch -> Mixed, no
+            // zero-identity — mirrors `base_backend.py:391-393`).
+            let mut step_fold: Vec<(&Op, PerformanceResult)> = Vec::new();
             let step = run_generation_ops_step_beamed_with(
                 &self.generation_ops,
                 &self.db,
@@ -376,8 +382,21 @@ impl Engine {
                 s,
                 runtime.gen_seq_imbalance_correction_scale,
                 false,
-                |op, r| on_op(op, r.scaled(repeat_count as f64)),
+                |op, r| {
+                    if let Some(entry) = step_fold.iter_mut().find(|(e, _)| e.name() == op.name()) {
+                        entry.1.latency_ms += r.latency_ms;
+                        entry.1.energy_wms += r.energy_wms;
+                        if entry.1.source != r.source {
+                            entry.1.source = crate::operators::base::Source::Mixed;
+                        }
+                    } else {
+                        step_fold.push((op, r));
+                    }
+                },
             )?;
+            for (op, folded) in step_fold {
+                on_op(op, folded.scaled(repeat_count as f64));
+            }
             total += step * repeat_count as f64;
             i += stride;
         }
@@ -497,9 +516,10 @@ impl Engine {
     }
 
     /// [`Self::mixed_step_breakdown`] with a per-op sink. The sink observes
-    /// `(pass, op, result)` for every queried op; pass-2 results arrive
-    /// ALREADY divided by the `ceil(isl/ctx)` scale (division is linear, so
-    /// the per-op values sum to the reported bucket exactly).
+    /// `(pass, op, result)` for every queried op with RAW (undivided) pass-2
+    /// values; the per-op wrapper applies the `ceil(isl/ctx)` division to the
+    /// FOLDED entries (fold-then-divide, matching Python and the scalar
+    /// bucket bit-for-bit).
     #[allow(clippy::too_many_arguments)]
     fn mixed_step_breakdown_with(
         &self,
@@ -568,7 +588,12 @@ impl Engine {
                 prefix,
                 seq_imbalance_correction_scale,
                 ContextOpFilter::OnlyContextAttention,
-                |op, r| on_op(MixedPass::ContextAttention, op, r.scaled(1.0 / scale2)),
+                // RAW results to the sink; the per-op wrapper divides the
+                // FOLDED values by scale2 with one true division per name
+                // (Python folds `context_attention` into one key, then
+                // `latency_dict["context_attention"] / scale_factor` —
+                // fold-then-divide, `base_backend.py:1244-1246`).
+                |op, r| on_op(MixedPass::ContextAttention, op, r),
             )?;
             context_attention = attn / scale2;
         }
@@ -630,10 +655,9 @@ impl Engine {
 
     /// [`Self::run_static`] with the per-op values kept instead of summed:
     /// `(context, generation)` lists of `(name, latency_ms, energy_wms,
-    /// source)`. Names repeat when the op list repeats them (per-block model
-    /// families) and generation entries repeat per stride step — callers fold
-    /// by name with `+=`, exactly like Python's phase dicts. Generation
-    /// values arrive pre-weighted by the stride `repeat_count`.
+    /// source)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
+    /// pre-accumulated with Python's phase-dict semantics. Generation values
+    /// are per-step-folded, then weighted by the stride `repeat_count`.
     pub fn run_static_per_op(
         &self,
         runtime: &RuntimeConfig,
@@ -701,11 +725,18 @@ impl Engine {
                 out.add(op, r);
             },
         )?;
-        Ok((
-            shared.into_values(),
-            ctx_attn.into_values(),
-            dec_attn.into_values(),
-        ))
+        let mut ctx_attn = ctx_attn.into_values();
+        if ctx_tokens > 0 {
+            // Mirror the scalar bucket and Python's fold-then-single-true-
+            // division (`base_backend.py:1244-1246`): one `/ scale2` per
+            // folded name, never a per-entry reciprocal multiply.
+            let scale2 = isl.max(1).div_ceil(ctx_tokens) as f64;
+            for entry in &mut ctx_attn {
+                entry.1 /= scale2;
+                entry.2 /= scale2;
+            }
+        }
+        Ok((shared.into_values(), ctx_attn, dec_attn.into_values()))
     }
 
     /// [`Self::decode_step_latency`] with the per-op values kept.

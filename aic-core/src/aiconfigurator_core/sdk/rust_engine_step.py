@@ -277,7 +277,7 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
 # empirical layer (HYBRID / EMPIRICAL, mirroring
 # `sdk/operations/util_empirical.py`), and SOL (per-op speed-of-light
 # dispatch, ported with the SOL_FULL retirement). The only excluded name is
-# the retired SOL_FULL, which can no longer be a database's active mode —
+# SOL_FULL, a per-call-only diagnostic that can never be a database's active mode —
 # the mode-based delegation below is vestigial belt-and-braces.
 _RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL", "SOL"}
 
@@ -298,7 +298,7 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
 
     The compiled engine answers every selectable database mode (SILICON /
     HYBRID / EMPIRICAL / SOL). The mode gate below only rejects unknown
-    names — in practice just the retired SOL_FULL, which mode entry already
+    names — in practice just SOL_FULL (per-call diagnostic only), which mode entry already
     refuses to activate — so the mode-based delegation is empty in practice.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
@@ -370,10 +370,11 @@ def _fold_per_op(
 ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
     """Fold the compiled engine's per-op tuples into the Python phase dicts.
 
-    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source), ...]``.
-    Duplicate names accumulate with ``+=`` (per-block model families repeat op
-    names; generation entries repeat per stride step) and sources merge to
-    ``"mixed"`` on mismatch — byte-for-byte the accumulation semantics of
+    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source), ...]``
+    — already name-folded inside the engine, so this is an idempotent re-fold
+    (it also keeps duck-typed handles in tests correct): duplicate names
+    accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
+    byte-for-byte the accumulation semantics of
     ``base_backend._run_context_phase``. ``scale`` is the flat
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
@@ -630,7 +631,8 @@ def evaluate_context_ops_with_rust(
     The thin op-list evaluation FFI: Python-side orchestration (AFD A/F
     partitions) passes positions into ``model.context_ops`` (the compiled
     spec preserves that order 1:1) and receives ``(name, latency_ms,
-    energy_wms, source)`` per op in input order — the orchestration itself
+    energy_wms, source)`` tuples, name-folded (repeated names accumulate,
+    sources merge to ``"mixed"`` on mismatch) — the orchestration itself
     stays in Python. ``x`` overrides the token count verbatim for callers
     with their own x policy (AFD's uniform ``batch * s``); ``None`` keeps
     the base-phase rule (logits-GEMM exception).
