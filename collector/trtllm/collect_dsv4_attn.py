@@ -396,6 +396,14 @@ def create_dsv4_kv_cache_and_metadata(
         total_tokens = batch_size
         seq_len_q = 1
         kv_cache_len = seq_len
+    # Serving's metadata max_seq_len is the ENGINE envelope, not the request
+    # length. The DSV4 metadata derives num_sparse_topk = window(128) +
+    # next_pow2(ceil(max_seq_len/128)) (sparse_deepseek_v4.py:435-444
+    # @1.3.0rc23) and the trtllmGen fmha kernel asserts it is a multiple of 4
+    # — request-sized max_seq (< 257) yields pow2 1/2 -> 129/130 and crashed
+    # every tiny-KV HCA decode case on B200 (smoke round 3). Floor the
+    # envelope so pow2 >= 4, as any real serving max_seq_len does.
+    max_seq = max(max_seq, 512)
 
     # KVCacheManagerV2 requires an explicit quota (max_tokens or
     # max_gpu_total_bytes; kv_cache_manager_v2.py "Quota not set" @1.3.0rc23)
@@ -569,17 +577,11 @@ def run_dsv4_attn(
 
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=torch_device)
 
-    # FIXME(kernel-limit): two framework-side failure clusters observed on
-    # B200/1.3.0rc23 (smoke 2026-08-06), both raising classified errors here:
-    # (1) HCA generation with tiny past-KV (step<=64): trtllmGen fmha asserts
-    #     "SparseAttnTopK must be a multiple of 4" (FmhaOptions.h) — effective
-    #     topk = kv/128 < 4. Unverified whether serving takes a dense/short-seq
-    #     path for such requests; audit against DeepseekV4TrtllmAttention's
-    #     decode dispatch on the next version bump.
-    # (2) context shapes at bs*sl == 262144 query tokens: cudaLaunchKernelEx
-    #     "invalid argument" (grid-dim limit). Serving chunks prefill at
-    #     max_num_tokens (<<262144), so these sweep extremes exceed the
-    #     serving envelope; unverified which kernel hits the limit.
+    # FIXME(kernel-limit): context shapes at bs*sl == 262144 query tokens
+    # fail with cudaLaunchKernelEx "invalid argument" (grid-dim limit) on
+    # B200/1.3.0rc23 — serving chunks prefill at max_num_tokens (<<262144),
+    # so these sweep extremes exceed the serving envelope; unverified which
+    # kernel hits the limit. Cases fail into the classified log.
     with model_extra_attrs(model_config.extra_attrs):
         get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
         try:
