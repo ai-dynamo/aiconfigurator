@@ -206,10 +206,13 @@ def run_gdn_context_benchmark(
                 kernel_func=run_conv1d,
                 num_warmups=num_warmups,
                 num_runs=num_runs,
+                # Production launches this op eagerly but back-to-back in a deep
+                # queue, so the row must hold GPU service time: graph replay
+                # (the helper default) matches production timeline activity to
+                # -0.3%, while a sync-bounded eager loop times the launch
+                # envelope instead (~4.9x high; qwen35_397b prefill
+                # qualification, 2026-08).
                 repeat_n=1,
-                # Qwen3.5 production prefill is eager in the alignment
-                # benchmark. Pin the collector to that same execution regime.
-                use_cuda_graph=False,
             ) as results:
                 log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
