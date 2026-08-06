@@ -216,7 +216,7 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
     ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
     [
         ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
-        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8)),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8, 16)),
     ],
 )
 def test_qwen35_gdn_getters_expand_tp_local_physical_keys(
@@ -704,13 +704,13 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
 
     # Base sweep expansion first (order preserved for checkpoint stability),
     # then model_case_values.gemm rows.
-    assert len(cases) == 36926
+    assert len(cases) == 37000
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
     assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
     assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
-    assert len(xpu_cases) == 9513
+    assert len(xpu_cases) == 9534
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
     assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
     assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
@@ -759,7 +759,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
-    assert len(get_common_gdn_test_cases()) == 64
+    assert len(get_common_gdn_test_cases()) == 70
     mhc_cases = get_common_mhc_test_cases()
     assert len(mhc_cases) == 8
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
