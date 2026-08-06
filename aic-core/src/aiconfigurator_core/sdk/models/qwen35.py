@@ -39,10 +39,12 @@ class Qwen35Model(BaseModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
+            backend_name=backend_name,
         )
 
-    def __init__(self, *args) -> None:
+    def __init__(self, *args, backend_name: str) -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
 
@@ -208,9 +210,11 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
-            # Layout-specific MoE collectives are priced inside MoEDispatch.
-            ops_list.extend(
-                [
+            # StandardDispatcher performs only local expert-id mapping before
+            # routed experts; unlike vLLM/DeepEP it has no pre-dispatch
+            # collective. The post-expert TP reduction remains physical.
+            if not (self._backend_name == "sglang" and self.config.moe_backend is None):
+                ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
                         count,
@@ -222,7 +226,10 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         True,
                         quant_mode=moe_q,
-                    ),
+                    )
+                )
+            ops_list.extend(
+                [
                     ops.MoE(
                         f"{prefix}_moe",
                         count,
@@ -253,13 +260,11 @@ class Qwen35Model(BaseModel):
             if cfg.shared_expert_inter_size > 0:
                 ops_list.extend(
                     [
-                        # Scalar expert gate (ReplicatedLinear hidden->1). True
-                        # N=1 is below the GEMM table grid; n=8 stands in as a
-                        # launch-floor proxy.
+                        # Scalar expert gate (ReplicatedLinear hidden->1).
                         ops.GEMM(
                             f"{prefix}_shared_expert_gate_gemm",
                             count,
-                            8,
+                            1,
                             h,
                             common.GEMMQuantMode.bfloat16,
                         ),
@@ -430,9 +435,11 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
-            # Layout-specific MoE collectives are priced inside MoEDispatch.
-            ops_list.extend(
-                [
+            # StandardDispatcher performs only local expert-id mapping before
+            # routed experts; unlike vLLM/DeepEP it has no pre-dispatch
+            # collective. The post-expert TP reduction remains physical.
+            if not (self._backend_name == "sglang" and self.config.moe_backend is None):
+                ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
                         count,
@@ -444,7 +451,10 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         True,
                         quant_mode=moe_q,
-                    ),
+                    )
+                )
+            ops_list.extend(
+                [
                     ops.MoE(
                         f"{prefix}_moe",
                         count,
@@ -475,13 +485,11 @@ class Qwen35Model(BaseModel):
             if cfg.shared_expert_inter_size > 0:
                 ops_list.extend(
                     [
-                        # Scalar expert gate (ReplicatedLinear hidden->1). True
-                        # N=1 is below the GEMM table grid; n=8 stands in as a
-                        # launch-floor proxy.
+                        # Scalar expert gate (ReplicatedLinear hidden->1).
                         ops.GEMM(
                             f"{prefix}_shared_expert_gate_gemm",
                             count,
-                            8,
+                            1,
                             h,
                             common.GEMMQuantMode.bfloat16,
                         ),
