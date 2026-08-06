@@ -56,6 +56,9 @@ class Qwen35Model(BaseModel):
                 f"num_v_heads={cfg.linear_num_value_heads}, tp_size={tp}"
             )
 
+        if self.config.cp_size > 1:
+            raise ValueError("Qwen3.5 does not model context parallelism; cp_size must be 1")
+
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
         if cfg.num_experts > 0:
@@ -78,6 +81,45 @@ class Qwen35Model(BaseModel):
             "linear": cfg.layer_types.count("linear_attention"),
             "full": cfg.layer_types.count("full_attention"),
         }
+
+    # ------------------------------------------------------------------
+    # Memory: paged KV on full-attention layers + constant GDN state
+    # ------------------------------------------------------------------
+
+    def get_kvcache_elements_per_token(self) -> int:
+        """Only full_attention layers hold token-linear KV; GDN layers keep a
+        constant per-request state priced in _gdn_state_bytes_per_request."""
+        cfg: common.Qwen35Config = self.extra_params
+        tp = self.config.tp_size
+        n_kv_per_tp = (self._num_kv_heads + tp - 1) // tp
+        return cfg.layer_types.count("full_attention") * 2 * n_kv_per_tp * self._head_size
+
+    def _gdn_state_bytes_per_request(self) -> float:
+        """Constant GDN state per request on one GPU: fp32 SSM state (Qwen3.5
+        pins mamba_ssm_dtype=float32) + model-dtype conv window, per GDN layer,
+        TP-sharded."""
+        cfg: common.Qwen35Config = self.extra_params
+        tp = self.config.tp_size
+        n_gdn = cfg.layer_types.count("linear_attention")
+        nk, hk = cfg.linear_num_key_heads, cfg.linear_key_head_dim
+        nv, hv = cfg.linear_num_value_heads, cfg.linear_value_head_dim
+        ssm_bytes = (nv // tp) * hk * hv * 4
+        conv_bytes = (2 * nk * hk + nv * hv) // tp * (cfg.linear_conv_kernel_dim - 1) * 2
+        return n_gdn * (ssm_bytes + conv_bytes)
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        seq_len = max(0, seq_len)
+        token_bytes = seq_len * self.config.kvcache_quant_mode.value.memory * self.get_kvcache_elements_per_token()
+        return token_bytes + self._gdn_state_bytes_per_request()
+
+    def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        # Single elastic byte pool holding one request's GDN state — same
+        # assumption as kimi_k3.get_kvcache_max_tokens.
+        per_token = self.config.kvcache_quant_mode.value.memory * self.get_kvcache_elements_per_token()
+        budget = kv_budget_bytes - self._gdn_state_bytes_per_request()
+        if budget <= 0 or per_token <= 0:
+            return 0
+        return int(budget // per_token)
 
     def _build_context_ops(self) -> None:
         cfg: common.Qwen35Config = self.extra_params
@@ -210,10 +252,10 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
-            # StandardDispatcher performs only local expert-id mapping before
-            # routed experts; unlike vLLM/DeepEP it has no pre-dispatch
-            # collective. The post-expert TP reduction remains physical.
-            if not (self._backend_name == "sglang" and self.config.moe_backend is None):
+            # StandardDispatcher (sglang default MoE path) has no pre-dispatch
+            # collective when attention_dp == 1; with DP the LayerCommunicator
+            # pre-MLP gather is priced by the dispatch op.
+            if not (self._backend_name == "sglang" and self.config.moe_backend is None and attn_dp == 1):
                 ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
@@ -226,6 +268,11 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         True,
                         quant_mode=moe_q,
+                        sms=self.config.sms,
+                        moe_backend=self.config.moe_backend,
+                        is_context=True,
+                        scale_num_tokens=tp,
+                        attn_ar_modeled=True,
                     )
                 )
             ops_list.extend(
@@ -242,6 +289,9 @@ class Qwen35Model(BaseModel):
                         moe_q,
                         workload_dist,
                         attn_dp,
+                        is_context=True,
+                        moe_backend=self.config.moe_backend,
+                        enable_eplb=self.config.enable_eplb,
                     ),
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
@@ -254,6 +304,10 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         False,
                         quant_mode=moe_q,
+                        sms=self.config.sms,
+                        moe_backend=self.config.moe_backend,
+                        is_context=True,
+                        attn_ar_modeled=True,
                     ),
                 ]
             )
@@ -435,10 +489,10 @@ class Qwen35Model(BaseModel):
                 ops_list.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
-            # StandardDispatcher performs only local expert-id mapping before
-            # routed experts; unlike vLLM/DeepEP it has no pre-dispatch
-            # collective. The post-expert TP reduction remains physical.
-            if not (self._backend_name == "sglang" and self.config.moe_backend is None):
+            # StandardDispatcher (sglang default MoE path) has no pre-dispatch
+            # collective when attention_dp == 1; with DP the LayerCommunicator
+            # pre-MLP gather is priced by the dispatch op.
+            if not (self._backend_name == "sglang" and self.config.moe_backend is None and attn_dp == 1):
                 ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
@@ -451,6 +505,10 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         True,
                         quant_mode=moe_q,
+                        sms=self.config.sms,
+                        moe_backend=self.config.moe_backend,
+                        is_context=False,
+                        attn_ar_modeled=True,
                     )
                 )
             ops_list.extend(
@@ -467,6 +525,9 @@ class Qwen35Model(BaseModel):
                         moe_q,
                         workload_dist,
                         attn_dp,
+                        is_context=False,
+                        moe_backend=self.config.moe_backend,
+                        enable_eplb=False,
                     ),
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
@@ -479,6 +540,10 @@ class Qwen35Model(BaseModel):
                         attn_dp,
                         False,
                         quant_mode=moe_q,
+                        sms=self.config.sms,
+                        moe_backend=self.config.moe_backend,
+                        is_context=False,
+                        attn_ar_modeled=True,
                     ),
                 ]
             )

@@ -872,6 +872,7 @@ class MoEDispatch(Operation):
         self._quant_mode = kwargs.get("quant_mode")
         self._reduce_results = kwargs.get("reduce_results", True)
         self._attn_cp_size = kwargs.get("attn_cp_size", 1)
+        self._attn_ar_modeled = kwargs.get("attn_ar_modeled", False)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1293,11 +1294,11 @@ class MoEDispatch(Operation):
 
             comm_latency = 0
 
-            # With attention_dp == 1 activations are already replicated by the
-            # attention-side all-reduce, so vLLM's FusedMoE has no pre-dispatch
-            # collective; the single final all-reduce covers both the TP
-            # partial-sum and the EP combine.
-            if self._attention_tp_size > 1 and not self._pre_dispatch:
+            # vLLM's FusedMoE has no pre-dispatch collective when attention_dp == 1;
+            # the pre-dispatch AR here doubles as the attention-output all-reduce
+            # for models that do not compose it explicitly. Models that price that
+            # AR themselves pass attn_ar_modeled=True.
+            if self._attention_tp_size > 1 and not (self._pre_dispatch and self._attn_ar_modeled):
                 comm_latency += database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
 
             if self._attention_dp_size > 1:

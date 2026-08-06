@@ -324,6 +324,7 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "moe_ep_size": op._moe_ep_size,
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
+        "attn_ar_modeled": op._attn_ar_modeled,
         "backend": backend,
         "flavor": _dispatch_flavor(backend, op),
         # DeepEP branches divide the dispatch token count by this (Python
