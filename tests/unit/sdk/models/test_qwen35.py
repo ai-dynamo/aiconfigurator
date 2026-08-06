@@ -100,3 +100,37 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
         # Explicit CustomAllReduce ops: 40 attention-side + 1 embedding.
         allreduce_ops = [op for op in phase_ops if isinstance(op, CustomAllReduce)]
         assert sum(op._scale_factor for op in allreduce_ops) == 41
+
+
+def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
+    """The runtime ReplicatedLinear scalar gate is hidden_size -> 1."""
+    model = models.get_model(
+        "Qwen/Qwen3.5-397B-A17B",
+        _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8),
+        "vllm",
+    )
+
+    for phase_ops in (model.context_ops, model.generation_ops):
+        scalar_gates = [
+            op
+            for op in phase_ops
+            if op._name.endswith("_shared_expert_gate_gemm")
+        ]
+        assert len(scalar_gates) == 2
+        assert {op._n for op in scalar_gates} == {1}
+
+
+def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
+    """SGLang StandardDispatcher has no collective before routed experts."""
+    model = models.get_model(
+        "Qwen/Qwen3.5-397B-A17B",
+        _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8),
+        "sglang",
+    )
+
+    for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
+        op_names = [op._name for op in phase_ops]
+        for prefix in (f"{phase}_gdn", f"{phase}_full"):
+            assert f"{prefix}_moe_pre_dispatch" not in op_names
+            assert f"{prefix}_moe" in op_names
+            assert f"{prefix}_moe_post_dispatch" in op_names
