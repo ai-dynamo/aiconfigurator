@@ -191,6 +191,7 @@ impl MoEDispatchOp {
             is_context: false,
             sms: default_sms(),
             scale_num_tokens: 1,
+            attn_ar_modeled: false,
         }
     }
 
