@@ -224,6 +224,7 @@ class Qwen35Model(BaseModel):
                         kvcache_q,
                         fmha_q,
                         head_size=self._head_size,
+                        use_qk_norm=True,
                     ),
                     ops.GEMM("context_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True),
                     ops.CustomAllReduce("context_full_ar", c, h, tp),
@@ -241,6 +242,52 @@ class Qwen35Model(BaseModel):
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
         )
+
+    def _sglang_deepep(self) -> bool:
+        return self._backend_name == "sglang" and self.config.moe_backend == "deepep_moe"
+
+    def _shared_expert_ops(self, prefix, count, h, tp, gemm_q, cfg: common.Qwen35Config):
+        """Shared-expert block: scalar gate + gated-SiLU MLP (Qwen2MoeMLP) with
+        a fused gate_up projection. DeepEP replicates the shared expert across
+        ranks (tp_size=1) instead of TP-sharding it."""
+        if self._sglang_deepep():
+            tp = 1
+        return [
+            # Scalar expert gate (ReplicatedLinear hidden->1).
+            ops.GEMM(
+                f"{prefix}_shared_expert_gate_gemm",
+                count,
+                1,
+                h,
+                common.GEMMQuantMode.bfloat16,
+            ),
+            ops.GEMM(
+                f"{prefix}_shared_gate_up_gemm",
+                count,
+                2 * cfg.shared_expert_inter_size // tp,
+                h,
+                gemm_q,
+            ),
+            ops.ElementWise(
+                f"{prefix}_shared_act_gate",
+                count,
+                2 * cfg.shared_expert_inter_size // tp,
+                cfg.shared_expert_inter_size // tp,
+                0.8,
+            ),
+            ops.GEMM(
+                f"{prefix}_shared_down_gemm",
+                count,
+                h,
+                cfg.shared_expert_inter_size // tp,
+                gemm_q,
+                low_precision_input=True,
+            ),
+        ]
+
+    def _shared_merge_op(self, prefix, count, h):
+        # sigmoid(expert gate) * shared output + routed output.
+        return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8)
 
     def _ffn_context_ops(
         self, prefix, count, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg: common.Qwen35Config
@@ -275,25 +322,29 @@ class Qwen35Model(BaseModel):
                         attn_ar_modeled=True,
                     )
                 )
-            ops_list.extend(
-                [
-                    ops.MoE(
-                        f"{prefix}_moe",
-                        count,
-                        h,
-                        cfg.moe_inter_size,
-                        cfg.topk,
-                        cfg.num_experts,
-                        moe_tp,
-                        moe_ep,
-                        moe_q,
-                        workload_dist,
-                        attn_dp,
-                        is_context=True,
-                        moe_backend=self.config.moe_backend,
-                        # EPLB is not modeled for Qwen3.5 (the load curve stays 1.2).
-                        enable_eplb=False,
-                    ),
+            ops_list.append(
+                ops.MoE(
+                    f"{prefix}_moe",
+                    count,
+                    h,
+                    cfg.moe_inter_size,
+                    cfg.topk,
+                    cfg.num_experts,
+                    moe_tp,
+                    moe_ep,
+                    moe_q,
+                    workload_dist,
+                    attn_dp,
+                    is_context=True,
+                    moe_backend=self.config.moe_backend,
+                    # EPLB is not modeled for Qwen3.5 (the load curve stays 1.2).
+                    enable_eplb=False,
+                )
+            )
+            # DeepEP rows hold the full dispatch+combine round trip; the pre
+            # op prices it once (SGLangEPMOEModel precedent), so no post op.
+            if not self._sglang_deepep():
+                ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
                         count,
@@ -309,46 +360,11 @@ class Qwen35Model(BaseModel):
                         moe_backend=self.config.moe_backend,
                         is_context=True,
                         attn_ar_modeled=True,
-                    ),
-                ]
-            )
-            if cfg.shared_expert_inter_size > 0:
-                ops_list.extend(
-                    [
-                        # Scalar expert gate (ReplicatedLinear hidden->1).
-                        ops.GEMM(
-                            f"{prefix}_shared_expert_gate_gemm",
-                            count,
-                            1,
-                            h,
-                            common.GEMMQuantMode.bfloat16,
-                        ),
-                        # Shared expert is a gated-SiLU MLP (Qwen2MoeMLP) with a
-                        # fused gate_up projection.
-                        ops.GEMM(
-                            f"{prefix}_shared_gate_up_gemm",
-                            count,
-                            2 * cfg.shared_expert_inter_size // tp,
-                            h,
-                            gemm_q,
-                        ),
-                        ops.ElementWise(
-                            f"{prefix}_shared_act_gate",
-                            count,
-                            2 * cfg.shared_expert_inter_size // tp,
-                            cfg.shared_expert_inter_size // tp,
-                            0.8,
-                        ),
-                        ops.GEMM(
-                            f"{prefix}_shared_down_gemm",
-                            count,
-                            h,
-                            cfg.shared_expert_inter_size // tp,
-                            gemm_q,
-                            low_precision_input=True,
-                        ),
-                    ]
+                    )
                 )
+            if cfg.shared_expert_inter_size > 0:
+                ops_list.extend(self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg))
+                ops_list.append(self._shared_merge_op(prefix, count, h))
         else:
             ops_list.extend(
                 [
@@ -460,6 +476,7 @@ class Qwen35Model(BaseModel):
                         n_kv_per_tp,
                         kvcache_q,
                         head_size=self._head_size,
+                        use_qk_norm=True,
                     ),
                     ops.GEMM(
                         "generation_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True
@@ -486,15 +503,16 @@ class Qwen35Model(BaseModel):
         """Return FFN ops for generation phase: dense SwiGLU or MoE."""
         ops_list = [ops.ElementWise(f"{prefix}_ffn_norm", count, 2 * h, 2 * h, 0.8)]
         if cfg.num_experts > 0:
+            routed_ops = []
             if cfg.num_experts >= 128:
-                ops_list.append(
+                routed_ops.append(
                     ops.GEMM(f"{prefix}_router_gemm", count, cfg.num_experts, h, common.GEMMQuantMode.bfloat16)
                 )
             # StandardDispatcher (sglang default MoE path) has no pre-dispatch
             # collective when attention_dp == 1; with DP the LayerCommunicator
             # pre-MLP gather is priced by the dispatch op.
             if not (self._backend_name == "sglang" and self.config.moe_backend is None and attn_dp == 1):
-                ops_list.append(
+                routed_ops.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_pre_dispatch",
                         count,
@@ -512,24 +530,28 @@ class Qwen35Model(BaseModel):
                         attn_ar_modeled=True,
                     )
                 )
-            ops_list.extend(
-                [
-                    ops.MoE(
-                        f"{prefix}_moe",
-                        count,
-                        h,
-                        cfg.moe_inter_size,
-                        cfg.topk,
-                        cfg.num_experts,
-                        moe_tp,
-                        moe_ep,
-                        moe_q,
-                        workload_dist,
-                        attn_dp,
-                        is_context=False,
-                        moe_backend=self.config.moe_backend,
-                        enable_eplb=False,
-                    ),
+            routed_ops.append(
+                ops.MoE(
+                    f"{prefix}_moe",
+                    count,
+                    h,
+                    cfg.moe_inter_size,
+                    cfg.topk,
+                    cfg.num_experts,
+                    moe_tp,
+                    moe_ep,
+                    moe_q,
+                    workload_dist,
+                    attn_dp,
+                    is_context=False,
+                    moe_backend=self.config.moe_backend,
+                    enable_eplb=False,
+                )
+            )
+            # DeepEP rows hold the full dispatch+combine round trip; the pre
+            # op prices it once (SGLangEPMOEModel precedent), so no post op.
+            if not self._sglang_deepep():
+                routed_ops.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
                         count,
@@ -545,46 +567,20 @@ class Qwen35Model(BaseModel):
                         moe_backend=self.config.moe_backend,
                         is_context=False,
                         attn_ar_modeled=True,
-                    ),
-                ]
-            )
-            if cfg.shared_expert_inter_size > 0:
-                ops_list.extend(
-                    [
-                        # Scalar expert gate (ReplicatedLinear hidden->1).
-                        ops.GEMM(
-                            f"{prefix}_shared_expert_gate_gemm",
-                            count,
-                            1,
-                            h,
-                            common.GEMMQuantMode.bfloat16,
-                        ),
-                        # Shared expert is a gated-SiLU MLP (Qwen2MoeMLP) with a
-                        # fused gate_up projection.
-                        ops.GEMM(
-                            f"{prefix}_shared_gate_up_gemm",
-                            count,
-                            2 * cfg.shared_expert_inter_size // tp,
-                            h,
-                            gemm_q,
-                        ),
-                        ops.ElementWise(
-                            f"{prefix}_shared_act_gate",
-                            count,
-                            2 * cfg.shared_expert_inter_size // tp,
-                            cfg.shared_expert_inter_size // tp,
-                            0.8,
-                        ),
-                        ops.GEMM(
-                            f"{prefix}_shared_down_gemm",
-                            count,
-                            h,
-                            cfg.shared_expert_inter_size // tp,
-                            gemm_q,
-                            low_precision_input=True,
-                        ),
-                    ]
+                    )
                 )
+            shared_ops = (
+                self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
+            )
+            # vLLM decode runs shared and routed experts on parallel CUDA
+            # streams; sglang runs them serially.
+            if shared_ops and self._backend_name == "vllm":
+                ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
+            else:
+                ops_list.extend(routed_ops)
+                ops_list.extend(shared_ops)
+            if cfg.shared_expert_inter_size > 0:
+                ops_list.append(self._shared_merge_op(prefix, count, h))
         else:
             ops_list.extend(
                 [
