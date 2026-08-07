@@ -590,6 +590,8 @@ DefaultHFModels = {
     "nvidia/Nemotron-H-56B-Base-8K",
     # Google Gemma 4 Models
     "google/gemma-4-26B-A4B",
+    # StepFun Step-3.7 Models
+    "stepfun-ai/Step-3.7-Flash",
 }
 
 """
@@ -632,6 +634,7 @@ ModelFamily = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -657,6 +660,8 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiniMaxM3ForCausalLM": "MINIMAXM3",
     "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
+    "Step3p7FlashForCausalLM": "STEP3P7",
+    "Step3p5FlashForCausalLM": "STEP3P7",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
