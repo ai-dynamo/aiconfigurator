@@ -860,6 +860,7 @@ class GEMM(Operation):
         latency = float(result)
         energy = result.energy
         source = getattr(result, "source", "silicon")
+        sol_base = source == "sol"
 
         # Static-FP8 GEMM is modeled from the dynamic FP8 base measurement
         # across backends; subtract the separately collected activation-
@@ -902,7 +903,8 @@ class GEMM(Operation):
         # rather than inventing energy when the latency floor fires.
         latency_clamped = max(latency_floor, latency)
         energy_clamped = max(0.0, energy)
-        if latency_clamped != latency or energy_clamped != energy:
+        # A SOL base clamps back to its own SOL by construction — not an anomaly.
+        if (latency_clamped != latency or energy_clamped != energy) and not sol_base:
             logger.warning(
                 "GEMM.query applied latency SOL floor / non-negative energy clamp. "
                 "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f) floor=%.6f",
