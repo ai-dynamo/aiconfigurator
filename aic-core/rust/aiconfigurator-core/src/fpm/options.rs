@@ -21,7 +21,7 @@ pub(crate) const DEFAULT_MAX_KV_TOKENS: u32 = 2_000_000;
 /// These defaults match the current planner regression behavior: retain a
 /// bounded sliding sample set, wait for enough observations before predicting
 /// from learned data, and bucket observations by workload kind.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ForwardPassPerfOptions {
     /// Maximum retained observations across all buckets for each inferred workload kind.
     #[serde(default = "default_max_observations")]
@@ -30,6 +30,22 @@ pub struct ForwardPassPerfOptions {
     /// correction is used for an inferred workload kind.
     #[serde(default = "default_min_observations")]
     pub min_observations: usize,
+    /// Optional absolute lower bound on native correction factors for
+    /// observations faster than the native estimate.
+    ///
+    /// Values must be finite, greater than `0.0`, and at most `1.0`. Setting
+    /// this to `1.0` disables faster corrections. `None` preserves the default
+    /// unbounded behavior. Regression fallback does not use this option.
+    #[serde(default)]
+    pub min_faster_correction_factor: Option<f64>,
+    /// Optional absolute upper bound on native correction factors for
+    /// observations slower than the native estimate.
+    ///
+    /// Values must be finite and at least `1.0`. Setting this to `1.0`
+    /// disables slower corrections. `None` preserves the default unbounded
+    /// behavior. Regression fallback does not use this option.
+    #[serde(default)]
+    pub max_slower_correction_factor: Option<f64>,
     /// Target bucket count for workload-specific sample retirement and correction lookup.
     #[serde(default = "default_bucket_count")]
     pub bucket_count: usize,
@@ -55,6 +71,8 @@ impl Default for ForwardPassPerfOptions {
         Self {
             max_observations: DEFAULT_MAX_OBSERVATIONS,
             min_observations: DEFAULT_MIN_OBSERVATIONS,
+            min_faster_correction_factor: None,
+            max_slower_correction_factor: None,
             bucket_count: DEFAULT_BUCKET_COUNT,
             max_num_tokens: DEFAULT_MAX_NUM_TOKENS,
             max_batch_size: DEFAULT_MAX_BATCH_SIZE,
@@ -69,6 +87,23 @@ pub(crate) fn validate_options(options: &ForwardPassPerfOptions) -> Result<(), A
     }
     if options.min_observations == 0 {
         return Err(invalid_perf_options("min_observations must be >= 1"));
+    }
+    if let Some(min_faster_correction_factor) = options.min_faster_correction_factor {
+        if !min_faster_correction_factor.is_finite()
+            || min_faster_correction_factor <= 0.0
+            || min_faster_correction_factor > 1.0
+        {
+            return Err(invalid_perf_options(
+                "min_faster_correction_factor must be finite and in (0.0, 1.0]",
+            ));
+        }
+    }
+    if let Some(max_slower_correction_factor) = options.max_slower_correction_factor {
+        if !max_slower_correction_factor.is_finite() || max_slower_correction_factor < 1.0 {
+            return Err(invalid_perf_options(
+                "max_slower_correction_factor must be finite and >= 1.0",
+            ));
+        }
     }
     if options.bucket_count == 0 {
         return Err(invalid_perf_options("bucket_count must be >= 1"));
