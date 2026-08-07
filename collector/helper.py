@@ -1770,8 +1770,11 @@ def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str)
     snapshot = os.path.join(base_dir, hasher.hexdigest()[:16])
 
     if not os.path.exists(os.path.join(snapshot, "config.json")):
-        staging = f"{snapshot}.{os.getpid()}.tmp"
-        os.makedirs(staging, exist_ok=True)
+        # mkdtemp, not a pid-derived name: threads share a pid, and a shared
+        # staging path would let one thread rename the dir out from under
+        # another mid-write.
+        os.makedirs(base_dir, exist_ok=True)
+        staging = tempfile.mkdtemp(prefix=f"{os.path.basename(snapshot)}.stage-", dir=base_dir)
         with open(os.path.join(staging, "config.json"), "wb") as f:
             f.write(desired)
         if quant_desired is not None:
