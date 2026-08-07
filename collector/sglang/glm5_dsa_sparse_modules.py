@@ -48,9 +48,14 @@ from collector.sglang.deepseekv4_sparse_modules import (
 )
 
 try:
-    from collector.sglang.helper import get_sm_version, log_perf
+    from collector.sglang.helper import (
+        aggregate_latency_weighted_power,
+        get_sm_version,
+        log_perf,
+        zero_work_power_stats,
+    )
 except ModuleNotFoundError:
-    from helper import get_sm_version, log_perf
+    from helper import aggregate_latency_weighted_power, get_sm_version, log_perf, zero_work_power_stats
 
 __all__ = [
     "get_glm5_dsa_attn_test_cases",
@@ -140,6 +145,7 @@ def _write_row(
     kernel_source=None,
     architecture: str = GLM5_ARCHITECTURE,
     op_name_map: dict | None = None,
+    power_stats: dict | None = None,
 ):
     # ``architecture`` / ``op_name_map`` default to GLM-5 so existing GLM-5
     # callers are unchanged; DeepSeek-V3.2 reuses this with its own values
@@ -172,6 +178,7 @@ def _write_row(
         op_name=op_name_map[kernel],
         kernel_source=kernel_source or KERNEL_TO_KERNEL_SOURCE[kernel],
         perf_filename=perf_filename,
+        power_stats=power_stats,
     ):
         raise RuntimeError(f"failed to persist {architecture} sparse row to {perf_filename}")
 
@@ -348,7 +355,8 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
     length_values, topk_offset_values, max_seqlen_k = _glm5_topk_metadata(bs, isl, past_kv)
     if max_seqlen_k <= topk:
         # nothing to select -> no data-dependent cost; DELTA is 0.
-        return [("flat", 0.0), ("top_last", 0.0)], kernel_src
+        stats = zero_work_power_stats(torch.device(device))
+        return [("flat", 0.0, stats), ("top_last", 0.0, stats)], kernel_src
 
     lengths = torch.tensor(length_values, dtype=torch.int32, device=device)
     generator = torch.Generator(device=device)
@@ -362,6 +370,7 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
         row_starts = torch.tensor(topk_offset_values, dtype=torch.int32, device=device)
         rows_per_chunk = _glm5_score_rows_per_chunk(M, full_k, device)
         mode_latency_ms = {"flat": 0.0, "top_last": 0.0}
+        mode_power_measurements = {"flat": [], "top_last": []}
         chunked = rows_per_chunk < M
         if fused:
             page_table = torch.arange(full_k, dtype=torch.int32, device=device).view(bs, max_seqlen_k)
@@ -429,6 +438,7 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
                 # graph timings inside one additive row would be ambiguous.
                 measured = _bench_cuda_graph(kernel_fn, allow_graph_fail=False, device=device)
                 mode_latency_ms[mode] += measured["latency_ms"]
+                mode_power_measurements[mode].append((measured["latency_ms"], measured.get("power_stats")))
                 del kernel_fn
             del score
             if fused:
@@ -438,7 +448,14 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
                 # workspace at batch size one.
                 del page_table_chunk, cu_seqlens_q_chunk
 
-        return [(mode, round(mode_latency_ms[mode], 6)) for mode in ("flat", "top_last")], kernel_src
+        return [
+            (
+                mode,
+                round(mode_latency_ms[mode], 6),
+                aggregate_latency_weighted_power(mode_power_measurements[mode]),
+            )
+            for mode in ("flat", "top_last")
+        ], kernel_src
 
     # Production _get_topk_paged omits row_starts for decode.  In sgl-kernel
     # that optional argument is also the dispatch signal for the dedicated
@@ -465,7 +482,7 @@ def _bench_glm5_topk(M, past_kv, isl, bs, *, topk, device):  # noqa: N803
     for mode in ("flat", "top_last"):
         score = _make_glm5_topk_scores(mode, lengths, max_seqlen_k, device, generator, topk)
         r = _bench_cuda_graph(make_fn(score), allow_graph_fail=False, device=device)
-        results.append((mode, round(r["latency_ms"], 6)))
+        results.append((mode, round(r["latency_ms"], 6), r.get("power_stats")))
     return results, kernel_src
 
 
@@ -523,7 +540,7 @@ def _bench_glm5_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device):
         )
     else:
         raise ValueError(f"unknown glm5 kernel={kernel}")
-    return KERNEL_TO_KERNEL_SOURCE[kernel], [(None, r["latency_ms"])]
+    return KERNEL_TO_KERNEL_SOURCE[kernel], [(None, r["latency_ms"], r.get("power_stats"))]
 
 
 def _dsa_context_derived_shapes(model_path):
@@ -709,12 +726,12 @@ def run_glm5_dsa_sparse_kernel_worker(
             continue
         kernel_source, results = out
         expected_modes = {"flat", "top_last"} if kernel == "topk" else {None}
-        if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
+        if len(results) != len(expected_modes) or {score_mode for score_mode, _, _ in results} != expected_modes:
             message = f"expected score modes {expected_modes}, got {results}"
             print(f"  incomplete result at {shape_label}: {message}")
             failures.append(f"{shape_label}: RuntimeError: {message}")
             continue
-        for score_mode, latency_ms in results:
+        for score_mode, latency_ms, power_stats in results:
             _write_row(
                 perf_path,
                 kernel=kernel,
@@ -730,6 +747,7 @@ def run_glm5_dsa_sparse_kernel_worker(
                 kernel_source=kernel_source,
                 architecture=architecture,
                 op_name_map=op_name_map,
+                power_stats=power_stats,
             )
         n_ok += 1
     error_count = len(failures)

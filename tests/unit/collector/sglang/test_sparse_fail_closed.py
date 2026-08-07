@@ -157,3 +157,72 @@ def test_glm5_grouped_worker_reports_every_inner_exception():
     message = str(exc_info.value)
     assert "bs=3 isl=2 past_kv=13: KeyError: 'missing first'" in message
     assert "bs=3 isl=4 past_kv=29: TypeError: bad second" in message
+
+
+def test_dsv4_grouped_worker_forwards_power_stats_to_writer():
+    fake_torch = _fake_torch()
+    power_stats = {"power": 410.0, "power_limit": 1000.0}
+    writes = []
+    worker = _load_functions(
+        DSV4_SOURCE,
+        "_guarded_bench",
+        "run_dsv4_sparse_kernel_worker",
+        namespace={
+            "Callable": Callable,
+            "KERNEL_TO_OP_NAME": {"paged_mqa_logits": "test_op"},
+            "_bench_sparse_kernel_shape": lambda *_args, **_kwargs: [(None, 1.25, power_stats)],
+            "_dsv4_context_derived_shapes": lambda _model: [(11, 2, 3)],
+            "_dsv4_generation_derived_shapes": lambda _model: [],
+            "_dsv4_sparse_config": lambda _model: SimpleNamespace(num_attention_heads=64),
+            "_make_perf_filename": lambda _kernel, output_dir: os.path.join(output_dir, "test.txt"),
+            "_write_row": lambda *_args, **kwargs: writes.append(kwargs),
+            "os": os,
+            "torch": fake_torch,
+            "traceback": SimpleNamespace(print_exc=lambda: None),
+        },
+    )["run_dsv4_sparse_kernel_worker"]
+
+    worker("test-model", "paged_mqa_logits", 3, perf_filename="out.txt")
+
+    assert len(writes) == 1
+    assert writes[0]["power_stats"] is power_stats
+
+
+def test_glm5_grouped_worker_forwards_power_stats_to_writer():
+    fake_torch = _fake_torch()
+    power_stats = {"power": 430.0, "power_limit": 1000.0}
+    writes = []
+    worker = _load_functions(
+        GLM5_SOURCE,
+        "run_glm5_dsa_sparse_kernel_worker",
+        namespace={
+            "GLM5_ARCHITECTURE": "GlmMoeDsaForCausalLM",
+            "KERNEL_TO_OP_NAME": {"dsa_attn": "test_op"},
+            "_bench_glm5_sparse_kernel_shape": lambda *_args, **_kwargs: (
+                "flash_mla_sparse_fwd",
+                [(None, 2.5, power_stats)],
+            ),
+            "_dsa_context_derived_shapes": lambda _model: [(13, 2, 3)],
+            "_dsa_generation_derived_shapes": lambda _model: [],
+            "_glm5_sparse_config": lambda _model: SimpleNamespace(num_attention_heads=64),
+            "_guarded_bench": _load_functions(
+                DSV4_SOURCE,
+                "_guarded_bench",
+                namespace={
+                    "Callable": Callable,
+                    "torch": fake_torch,
+                    "traceback": SimpleNamespace(print_exc=lambda: None),
+                },
+            )["_guarded_bench"],
+            "_make_perf_filename": lambda _kernel, output_dir, _op_name_map: os.path.join(output_dir, "test.txt"),
+            "_write_row": lambda *_args, **kwargs: writes.append(kwargs),
+            "os": os,
+            "sys": SimpleNamespace(argv=[]),
+            "torch": fake_torch,
+        },
+    )["run_glm5_dsa_sparse_kernel_worker"]
+
+    worker("test-model", "dsa_attn", 3, perf_filename="out.txt")
+
+    assert len(writes) == 1
+    assert writes[0]["power_stats"] is power_stats

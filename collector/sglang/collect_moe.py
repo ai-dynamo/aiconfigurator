@@ -257,6 +257,11 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
+def _current_cuda_device():
+    """Resolve bare ``cuda`` to the worker's explicit local device."""
+    return torch.device(f"cuda:{torch.cuda.current_device()}")
+
+
 def benchmark_config(
     config: BenchmarkConfig,
     num_tokens: int,
@@ -279,7 +284,7 @@ def benchmark_config(
     gemm1_alpha: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> tuple[float, dict]:
-    device = torch.device("cuda")
+    device = _current_cuda_device()
     expert_intermediate_size = shard_intermediate_size // (2 if is_gated else 1)
     if workloads is not None:
         num_iters = len(workloads)

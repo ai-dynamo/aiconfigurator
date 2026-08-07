@@ -101,8 +101,14 @@ class PowerMonitor:
     def __init__(self, device_id: int):
         """
         Args:
-            device_id: CUDA device index to monitor
+            device_id: CUDA device index to monitor (must not be None;
+                use torch.cuda.current_device() rather than torch.device("cuda").index)
         """
+        if isinstance(device_id, bool) or not isinstance(device_id, int):
+            raise TypeError(
+                f"PowerMonitor requires an explicit integer device index, got {device_id!r}. "
+                "Use torch.cuda.current_device() or torch.device('cuda:N').index."
+            )
         self.device_id = device_id
         self.interval_s = self.SAMPLE_INTERVAL_MS / 1000.0
         self._thread = None
@@ -167,6 +173,12 @@ class PowerMonitor:
             "power": float(np.mean(power_values_w)),
             "power_limit": float(self._power_limit_mw / 1000.0) if self._power_limit_mw else None,
         }
+
+    def get_power_limit(self) -> float | None:
+        """Return the device power-management limit without starting sampling."""
+        if not self._init_handle() or self._power_limit_mw is None:
+            return None
+        return float(self._power_limit_mw / 1000.0)
 
     def _monitoring_loop(self):
         """Background thread function that samples power every 100ms."""
@@ -427,6 +439,64 @@ def power_monitoring_only(device, measure_power: bool | None = None):
     finally:
         # Cleanup happens after yield returns
         pass
+
+
+def zero_work_power_stats(device, measure_power: bool | None = None) -> dict | None:
+    """Represent an intentional no-kernel row in a power-enabled collection.
+
+    The zero is exact work-attributable power, not a sampled idle-board value.
+    The accompanying limit is read from NVML so the row still carries real
+    device provenance. Perf-only runs preserve the historical ``None`` value.
+    """
+    if measure_power is None:
+        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+    if not measure_power:
+        return None
+
+    power_limit = PowerMonitor(device.index).get_power_limit()
+    if power_limit is None or not math.isfinite(power_limit) or power_limit <= 0:
+        raise RuntimeError("failed to read a finite positive power limit for a structural zero-work row")
+    return {"power": 0.0, "power_limit": power_limit}
+
+
+def aggregate_latency_weighted_power(measurements: Iterable[tuple[float, dict | None]]) -> dict | None:
+    """Combine serial measurements using energy-equivalent average power.
+
+    Each item is ``(latency_ms, power_stats)``. All-power-disabled input
+    returns ``None``. Mixed present/missing stats fail closed because silently
+    averaging only the successful chunks would bias the persisted row.
+    """
+    measurements = list(measurements)
+    if not measurements:
+        raise ValueError("at least one power measurement is required")
+
+    stats_present = [stats is not None for _, stats in measurements]
+    if not any(stats_present):
+        return None
+    if not all(stats_present):
+        raise RuntimeError("cannot aggregate a mixture of present and missing power statistics")
+
+    total_latency_ms = 0.0
+    energy_w_ms = 0.0
+    power_limits = []
+    for latency_ms, stats in measurements:
+        latency_ms = float(latency_ms)
+        power = float(stats["power"])
+        power_limit = float(stats["power_limit"])
+        if not math.isfinite(latency_ms) or latency_ms <= 0:
+            raise ValueError(f"power-bearing chunk latency must be finite and positive, got {latency_ms}")
+        if not math.isfinite(power) or power <= 0:
+            raise ValueError(f"measured chunk power must be finite and positive, got {power}")
+        if not math.isfinite(power_limit) or power_limit <= 0:
+            raise ValueError(f"measured power limit must be finite and positive, got {power_limit}")
+        total_latency_ms += latency_ms
+        energy_w_ms += latency_ms * power
+        power_limits.append(power_limit)
+
+    reference_limit = power_limits[0]
+    if any(not math.isclose(limit, reference_limit, rel_tol=1e-6, abs_tol=1e-6) for limit in power_limits[1:]):
+        raise RuntimeError(f"power limit changed across serial chunks: {power_limits}")
+    return {"power": energy_w_ms / total_latency_ms, "power_limit": reference_limit}
 
 
 def setup_signal_handlers(worker_id):
@@ -720,8 +790,20 @@ def log_perf(
             fieldnames = list(base_data.keys())
             if item_list:
                 fieldnames += list(item_list[0].keys())
-            # Add power_stats keys if present
-            if power_stats:
+            # Include power columns when either:
+            #   (a) this call has valid power_stats, or
+            #   (b) COLLECTOR_MEASURE_POWER is set in the environment.
+            # Checking the env var — rather than the file's existing header —
+            # guarantees consistent column counts for BOTH orderings:
+            #   (power row first, missing-power row later) and
+            #   (missing-power row first, power row later).
+            # When power_stats is None in a power-enabled run, an empty string is
+            # written so the row is parseable but the zero-sample root cause
+            # (tracked in the failure ledger) remains visible and actionable.
+            include_power_cols = bool(power_stats) or _parse_bool_env(
+                "COLLECTOR_MEASURE_POWER", default=False
+            )
+            if include_power_cols:
                 for key in ["power", "power_limit"]:
                     if key not in fieldnames:
                         fieldnames.append(key)
@@ -733,10 +815,9 @@ def log_perf(
 
             for item in item_list:
                 row = base_data | item
-                # Add power_stats values if present
-                if power_stats:
+                if include_power_cols:
                     for key in ["power", "power_limit"]:
-                        row[key] = power_stats.get(key, "")
+                        row[key] = power_stats.get(key, "") if power_stats else ""
                 writer.writerow(row)
 
             # Force disk write (for NFS)
