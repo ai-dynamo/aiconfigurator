@@ -41,10 +41,11 @@ def test_registry_wires_all_four_dsv4_module_ops():
         assert entry.module == "collector.trtllm.collect_dsv4_attn"
         assert entry.run_func == "run_dsv4_attn_worker"
         assert entry.perf_filename == perf_file
-        # Default-open: pre-Blackwell rejection comes from the framework at
-        # runtime (classified failure), not from registry markers.
+        # Pre-Blackwell rejection comes from the framework at runtime
+        # (classified failure). SM120 is parked with hardware probe evidence
+        # (RTX PRO 6000 campaign 2026-08-07: 100% classified failures).
         assert entry.unverified is False
-        assert entry.unverified_sms == ()
+        assert entry.unverified_sms == (120,)
 
 
 def test_trtllm_dsv4_plan_schedules_attention_modules():
