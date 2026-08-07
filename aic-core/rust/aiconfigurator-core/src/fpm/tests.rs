@@ -327,16 +327,44 @@ fn options_reject_zero_bounds() {
 }
 
 #[test]
-fn options_validate_directional_correction_factors() {
+fn options_default_directional_correction_factors() {
+    let defaults = ForwardPassPerfOptions::default();
     assert_eq!(
-        ForwardPassPerfOptions::default().min_faster_correction_factor,
-        None
+        defaults.min_faster_correction_factor,
+        Some(0.5)
     );
     assert_eq!(
-        ForwardPassPerfOptions::default().max_slower_correction_factor,
-        None
+        defaults.max_slower_correction_factor,
+        Some(2.0)
     );
 
+    let omitted: ForwardPassPerfOptions = serde_json::from_str("{}").unwrap();
+    assert_eq!(omitted.min_faster_correction_factor, Some(0.5));
+    assert_eq!(omitted.max_slower_correction_factor, Some(2.0));
+
+    let unbounded: ForwardPassPerfOptions = serde_json::from_str(
+        r#"{
+            "min_faster_correction_factor": null,
+            "max_slower_correction_factor": null
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(unbounded.min_faster_correction_factor, None);
+    assert_eq!(unbounded.max_slower_correction_factor, None);
+
+    let no_floor: ForwardPassPerfOptions =
+        serde_json::from_str(r#"{"min_faster_correction_factor": null}"#).unwrap();
+    assert_eq!(no_floor.min_faster_correction_factor, None);
+    assert_eq!(no_floor.max_slower_correction_factor, Some(2.0));
+
+    let no_ceiling: ForwardPassPerfOptions =
+        serde_json::from_str(r#"{"max_slower_correction_factor": null}"#).unwrap();
+    assert_eq!(no_ceiling.min_faster_correction_factor, Some(0.5));
+    assert_eq!(no_ceiling.max_slower_correction_factor, None);
+}
+
+#[test]
+fn options_validate_directional_correction_factors() {
     let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
         min_faster_correction_factor: Some(0.5),
         max_slower_correction_factor: Some(2.0),
@@ -794,14 +822,12 @@ fn native_correction_recovers_from_saturated_slower_ceiling() {
     assert_close(model.max_correction_factor().unwrap(), 1.0);
 }
 
-/// Directional limits are applied to each correction sample before taking the
-/// median, retaining the contribution of observations inside either bound.
+/// Default directional limits are applied to each correction sample before
+/// taking the median, retaining observations inside either bound.
 #[test]
-fn native_directional_correction_bounds_are_applied_at_observation_ingestion() {
+fn native_default_directional_correction_bounds_are_applied_at_observation_ingestion() {
     let mut model = native_model(ForwardPassPerfOptions {
         min_observations: 2,
-        min_faster_correction_factor: Some(0.5),
-        max_slower_correction_factor: Some(2.0),
         ..Default::default()
     });
     let metrics = prefill_fpm(20, 0.0);
@@ -837,6 +863,7 @@ fn native_directional_correction_bounds_are_applied_at_observation_ingestion() {
 fn native_slower_correction_ceiling_preserves_faster_corrections() {
     let mut model = native_model(ForwardPassPerfOptions {
         min_observations: 2,
+        min_faster_correction_factor: None,
         max_slower_correction_factor: Some(2.0),
         ..Default::default()
     });
@@ -868,6 +895,7 @@ fn native_faster_correction_floor_is_independent() {
     let options = ForwardPassPerfOptions {
         min_observations: 2,
         min_faster_correction_factor: Some(0.5),
+        max_slower_correction_factor: None,
         ..Default::default()
     };
 
@@ -904,6 +932,7 @@ fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_de
         min_observations: 2,
         bucket_count: 4,
         max_num_tokens: 100,
+        max_slower_correction_factor: None,
         ..Default::default()
     });
 

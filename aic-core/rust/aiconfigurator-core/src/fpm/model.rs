@@ -89,8 +89,9 @@ pub enum ForwardPassPerfReadiness {
 /// `ForwardPassPerfOptions`: `max_num_tokens` bounds `sum_prefill_tokens`,
 /// `max_batch_size` bounds `num_decode_requests`, and `max_kv_tokens` bounds
 /// `sum_decode_kv_tokens`. `min_faster_correction_factor` and
-/// `max_slower_correction_factor` optionally place independent absolute bounds
-/// on learned native correction factors in each direction.
+/// `max_slower_correction_factor` place independent absolute bounds on learned
+/// native correction factors in each direction, defaulting to `0.5` and `2.0`.
+/// Callers may explicitly disable either bound.
 ///
 /// Queued request fields are accepted for FPM schema parity but ignored by this
 /// forward-pass-level model. `estimate_forward_pass_time_ms` treats FPM as a
