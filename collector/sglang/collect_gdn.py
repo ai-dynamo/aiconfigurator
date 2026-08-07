@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from sglang.srt.layers.attention.fla.fused_recurrent import (
         fused_recurrent_gated_delta_rule_packed_decode,
     )
-    from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn
+    from sglang.srt.layers.attention.mamba.causal_conv1d_triton import causal_conv1d_update
 
 import torch
 
@@ -540,7 +541,12 @@ def run_gdn_torch(
         from sglang.srt.layers.attention.fla.fused_recurrent import (
             fused_recurrent_gated_delta_rule_packed_decode,
         )
-        from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+
+        # gdn_backend.py:13-16 @0.5.14 imports both conv entry points from
+        # causal_conv1d_triton and rebinds only causal_conv1d_fn to the CUDA
+        # wrapper (:34-39) — GDN decode keeps the Triton update kernel.
+        from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn
+        from sglang.srt.layers.attention.mamba.causal_conv1d_triton import causal_conv1d_update
 
     from importlib.metadata import version as _get_version
 
