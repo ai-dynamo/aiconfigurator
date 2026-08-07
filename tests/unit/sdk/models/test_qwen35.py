@@ -110,7 +110,9 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
         assert indices == sorted(indices)
 
     # Generation runs routed and shared experts on parallel CUDA streams
-    # (OverlapOp), followed by the merge.
+    # (OverlapOp); the merge and the post collective (all-reduce of the
+    # merged sum) are serial after the join.
+    generation_names = [op._name for op in model.generation_ops]
     generation_ops = {op._name: op for op in model.generation_ops}
     for prefix in ("generation_gdn", "generation_full"):
         overlap = generation_ops[f"{prefix}_moe_overlap"]
@@ -118,7 +120,6 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
             f"{prefix}_router_gemm",
             f"{prefix}_moe_pre_dispatch",
             f"{prefix}_moe",
-            f"{prefix}_moe_post_dispatch",
         ]
         assert [op._name for op in overlap._group_b] == [
             f"{prefix}_shared_expert_gate_gemm",
@@ -127,7 +128,7 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
             f"{prefix}_shared_down_gemm",
             f"{prefix}_shared_expert_gate_mul",
         ]
-        assert f"{prefix}_shared_merge" in generation_ops
+        assert generation_names.index(f"{prefix}_shared_merge") < generation_names.index(f"{prefix}_moe_post_dispatch")
 
     # Explicit CustomAllReduce ops: 40 attention-side + 1 embedding.
     for phase_ops in (model.context_ops, model.generation_ops):
@@ -150,8 +151,10 @@ def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
 
 
 def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
-    """SGLang StandardDispatcher has no collective before routed experts;
-    its CUDA-graph decode overlaps shared and routed experts."""
+    """SGLang StandardDispatcher has no collective before routed experts; its
+    CUDA-graph decode overlaps shared and routed experts, the scalar gate is
+    fused into the post-join merge kernel, and the post all-reduce is serial
+    (outside the overlap)."""
     model = models.get_model(
         "Qwen/Qwen3.5-397B-A17B",
         _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8),
@@ -164,6 +167,13 @@ def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
             assert f"{prefix}_moe_pre_dispatch" not in op_names
             assert f"{prefix}_moe" in op_names
             assert f"{prefix}_moe_post_dispatch" in op_names
+            assert f"{prefix}_shared_expert_gate_gemm" not in op_names
+            assert f"{prefix}_shared_expert_gate_mul" not in op_names
+            assert f"{prefix}_shared_merge" in op_names
+    for op in model.generation_ops:
+        if isinstance(op, OverlapOp):
+            group_names = [inner._name for inner in _flatten_ops([op])]
+            assert not any(name.endswith("_moe_post_dispatch") for name in group_names)
     assert any(isinstance(op, OverlapOp) for op in model.generation_ops)
 
 
