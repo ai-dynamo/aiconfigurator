@@ -57,6 +57,7 @@ from aiconfigurator_core.sdk.operations import (
     Embedding,
     EncoderAttention,
     FallbackOp,
+    FPMForwardOp,
     GDNKernel,
     GenerationAttention,
     GenerationDeepSeekV4AttentionModule,
@@ -107,7 +108,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
-ENGINE_SPEC_SCHEMA_VERSION = 6
+# - 7: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
+#   Claimed version 5 concurrently with #1460/#1435; renumbered at the merge.
+ENGINE_SPEC_SCHEMA_VERSION = 7
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -653,6 +656,27 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
                 "name": op._name,
                 "primary": recurse(op._primary),
                 "fallback": [recurse(c) for c in op._fallback],
+            }
+        }
+
+    # Whole-model FPM op (forward_model="fpm"): recursive like the composites —
+    # `sol_ops` carries the model's original granular list as the roofline
+    # source. The identity strings were normalized by _norm_identity at op
+    # construction; Rust compares them verbatim.
+    if isinstance(op, FPMForwardOp):
+        if op._sol_ops is None:
+            raise OpConversionError(
+                "FPMForwardOp with an injected sol_fn cannot compile to an EngineSpec; "
+                "build the model through get_model (sol_ops) instead."
+            )
+        return {
+            "FpmForward": {
+                "name": op._name,
+                "phase": op._phase,
+                "model_path": op._model_path,
+                "match_identity": list(op._match_identity),
+                "weight_bytes": op._weight_bytes,
+                "sol_ops": [recurse(c) for c in op._sol_ops],
             }
         }
 

@@ -34,7 +34,10 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
 //   branch concurrently with #1460, so the merge renumbered it (same
 //   precedent as the v3/v4 collision above).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 6;
+// - 7: `Op::FpmForward` whole-model variant added (forward_model="fpm").
+//   Claimed version 5 concurrently with #1460/#1435; renumbered at the
+//   merge.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

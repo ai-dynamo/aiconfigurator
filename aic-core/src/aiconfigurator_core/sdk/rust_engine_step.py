@@ -390,6 +390,26 @@ def _scale_or_one(value: Any) -> float:
     return 1.0 if value is None else float(value)
 
 
+# The PyO3 boundary collapses every Rust error into ValueError (py.rs::
+# aic_to_py — the uniform-ValueError contract). But the perf-DB miss class
+# ("not collected" / out-of-domain / no cell match / interp miss) is
+# semantically Python's PerfDataNotAvailableError, and callers above this
+# layer branch on that TYPE: sweep.py marks such points unanswerable and
+# skips them, where a genuine ValueError aborts the parallel config. All
+# `AicError::PerfDatabase` messages carry this display prefix; re-raise them
+# as the class the Python route raises for the same conditions, so both
+# routes expose ONE error taxonomy to the sweep.
+_RUST_PERF_MISS_PREFIX = "perf database error: "
+
+
+def _reraise_engine_error(exc: ValueError) -> None:
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
+    if str(exc).startswith(_RUST_PERF_MISS_PREFIX):
+        raise PerfDataNotAvailableError(str(exc)) from exc
+    raise exc
+
+
 def estimate_static_latency_breakdown_with_rust(
     model: Any,
     database: Any,
@@ -410,17 +430,20 @@ def estimate_static_latency_breakdown_with_rust(
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
-    context_latency_ms, generation_latency_ms, _ = handle.run_static(
-        batch_size=int(runtime_config.batch_size),
-        isl=int(runtime_config.isl),
-        osl=int(runtime_config.osl),
-        prefix=int(runtime_config.prefix or 0),
-        beam_width=int(runtime_config.beam_width or 1),
-        seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
-        mode=engine_mode,
-        stride=int(stride),
-    )
+    try:
+        context_latency_ms, generation_latency_ms, _ = handle.run_static(
+            batch_size=int(runtime_config.batch_size),
+            isl=int(runtime_config.isl),
+            osl=int(runtime_config.osl),
+            prefix=int(runtime_config.prefix or 0),
+            beam_width=int(runtime_config.beam_width or 1),
+            seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
+            mode=engine_mode,
+            stride=int(stride),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
     if latency_correction_scale != 1.0:
@@ -456,15 +479,18 @@ def estimate_mixed_step_latency_with_rust(
     straight through with no Python-side pre-math.
     """
     handle = _cached_engine_handle(model, database)
-    latency_ms = handle.mixed_step_latency(
-        int(ctx_tokens),
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        int(prefix or 0),
-        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        latency_ms = handle.mixed_step_latency(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix or 0),
+            seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
     return latency_ms
 
@@ -488,15 +514,18 @@ def estimate_mixed_step_breakdown_with_rust(
     scheduler can consume the shared/context-attention/decode-attention split.
     """
     handle = _cached_engine_handle(model, database)
-    total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
-        int(ctx_tokens),
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        int(prefix or 0),
-        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        total, shared_non_attention, context_attention, decode_attention = handle.mixed_step_breakdown(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix or 0),
+            seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
     return {
         "total": float(total),
@@ -524,12 +553,15 @@ def estimate_decode_step_latency_with_rust(
     applied internally, so the raw args pass straight through.
     """
     handle = _cached_engine_handle(model, database)
-    latency_ms = handle.decode_step_latency(
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        latency_ms = handle.decode_step_latency(
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
     return latency_ms
 
@@ -701,6 +733,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
+        # An op_level and an fpm model with identical parallel/quant configs
+        # compile to DIFFERENT engines (granular op list vs one whole-model op
+        # per phase); without this key they would share a cached handle and
+        # silently answer with the other mode's engine.
+        "forward_model": getattr(model, "forward_model", "op_level"),
+        # Same identity built against different systems roots reads different
+        # perf trees; the root is part of the engine identity.
+        "systems_root": str(getattr(database, "systems_root", "") or ""),
         # Mode + transfer policy are part of the engine identity: a HYBRID or
         # EMPIRICAL view of the same model/system must not reuse a SILICON
         # handle (the compiled engine bakes the mode into its query dispatch).

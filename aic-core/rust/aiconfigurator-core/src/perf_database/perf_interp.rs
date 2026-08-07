@@ -144,6 +144,12 @@ pub enum Resolver {
         max_site_distance: Option<f64>,
         require_curve_coverage: bool,
         k_tail: usize,
+        /// A collected site whose own curve does NOT cover the query defers to
+        /// neighbour-site transfer with the own site excluded, instead of
+        /// util-holding its own tail (degenerate sites must not anchor far
+        /// extrapolation). Mirrors the Python config flag of the same name;
+        /// `false` preserves the historical behaviour (GEMM).
+        own_curve_coverage_fallback: bool,
     },
 }
 
@@ -467,6 +473,7 @@ fn median(values: &mut [f64]) -> f64 {
 
 /// Site index for a scattered-sites table. Tables are immutable after load,
 /// so owners build this once (e.g. in a `OnceLock`) and reuse it.
+#[derive(Debug)]
 pub struct SiteIndex {
     /// site key -> sorted (curve coordinate, latency) sweep
     sites: BTreeMap<Vec<u32>, Vec<(u32, f64)>>,
@@ -492,9 +499,15 @@ impl SiteIndex {
         let (site_logs, curve_bounds): (Vec<(Vec<u32>, Vec<f64>)>, Vec<(u32, u32)>) = sites
             .iter()
             .map(|(k, curve)| {
+                // Python `_site_index`: `log2(max(v, 1e-12))` — the SAME floor
+                // as the query logs in `resolve`. A zero site coordinate (FPM
+                // prefill KV=0 sites) must land at ~-39.86 on BOTH sides so
+                // P=0 queries stay near P=0 sites; flooring sites at 1 (the
+                // old GEMM-era shortcut, identical for v >= 1) pushed those
+                // sites ~40 log2-units away from their own queries.
                 let logs = k
                     .iter()
-                    .map(|&v| (v.max(1) as f64).log2())
+                    .map(|&v| (v as f64).max(1e-12).log2())
                     .collect::<Vec<f64>>();
                 let bounds = (curve[0].0, curve[curve.len() - 1].0);
                 ((k.clone(), logs), bounds)
@@ -517,6 +530,7 @@ impl SiteIndex {
             nn_sites,
             max_site_distance,
             require_curve_coverage,
+            own_curve_coverage_fallback,
             ..
         } = &cfg.resolver
         else {
@@ -525,14 +539,22 @@ impl SiteIndex {
 
         let q = coords[*curve_axis];
         // Collected shape (integer site coords present in the index): its own
-        // curve answers alone.
+        // curve answers alone... unless the curve does not cover the query and
+        // the config opted into coverage fallback: treat the own site as
+        // absent for the transfer below.
+        let mut excluded_site: Option<&[u32]> = None;
         let site_ints: Option<Vec<u32>> = site_axes
             .iter()
             .map(|&p| as_exact_key(coords[p]))
             .collect();
         if let Some(key) = &site_ints {
             if let Some(curve) = self.sites.get(key) {
-                return self.eval_curve(cfg, curve, key, q, coords);
+                let covers =
+                    (curve[0].0 as f64) <= q && q <= (curve[curve.len() - 1].0 as f64);
+                if !(*own_curve_coverage_fallback && !covers) {
+                    return self.eval_curve(cfg, curve, key, q, coords);
+                }
+                excluded_site = self.sites.get_key_value(key).map(|(k, _)| k.as_slice());
             }
         }
 
@@ -560,20 +582,25 @@ impl SiteIndex {
         // comparator, plus separate dists/candidates/covering vecs, made this
         // resolve the dominant engine-step cost for query-heavy models (e.g.
         // per-block puzzle nets whose GEMM shapes miss the collected sites).
+        let is_excluded =
+            |i: usize| excluded_site.is_some_and(|e| self.site_logs[i].0.as_slice() == e);
         let mut ranked: Vec<(f64, usize)> = Vec::with_capacity(self.site_logs.len());
         if *require_curve_coverage {
             for (i, (_, logs)) in self.site_logs.iter().enumerate() {
                 let (lo, hi) = self.curve_bounds[i];
-                if (lo as f64) <= q && q <= (hi as f64) {
+                if (lo as f64) <= q && q <= (hi as f64) && !is_excluded(i) {
                     ranked.push((dist(logs), i));
                 }
             }
         }
         // No coverage requirement, or nothing covered q -> fall back to all
-        // sites (each later held at its own curve end).
+        // sites (each later held at its own curve end), still minus the
+        // coverage-fallback-excluded own site.
         if ranked.is_empty() {
             for (i, (_, logs)) in self.site_logs.iter().enumerate() {
-                ranked.push((dist(logs), i));
+                if !is_excluded(i) {
+                    ranked.push((dist(logs), i));
+                }
             }
         }
 
@@ -980,6 +1007,13 @@ mod tests {
     }
 
     fn gemm_cfg(sol: &dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'_> {
+        gemm_cfg_with_fallback(sol, false)
+    }
+
+    fn gemm_cfg_with_fallback(
+        sol: &dyn Fn(&[f64]) -> f64,
+        own_curve_coverage_fallback: bool,
+    ) -> OpInterpConfig<'_> {
         OpInterpConfig {
             axes: &["m", "n", "k"],
             resolver: Resolver::ScatteredSites {
@@ -989,6 +1023,7 @@ mod tests {
                 max_site_distance: Some(2.0),
                 require_curve_coverage: true,
                 k_tail: 3,
+                own_curve_coverage_fallback,
             },
             sol_fn: sol,
             value_transform: ValueTransform::Raw,
@@ -1047,6 +1082,100 @@ mod tests {
         let cfg = gemm_cfg(&gemm_lat);
         // (64, 64): > 2 octaves from every collected site -> miss, not a guess.
         assert!(query(&cfg, &t, &[64.0, 64.0, 64.0]).is_err());
+    }
+
+    /// Own site (4096, 1024) sweeps only m<=64 and its measured latencies run
+    /// at 2x the formula (util 0.5); neighbour (5120, 2048) covers the full
+    /// sweep at util 1. A query at the own site beyond its sweep must:
+    /// - fallback=false: util-hold the OWN tail -> 2x the formula;
+    /// - fallback=true: exclude the own site and transfer from the clean
+    ///   neighbour -> the formula exactly (Python own_curve_coverage_fallback).
+    fn short_own_site_table() -> Node {
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            t.insert(&[m, 4096, 1024], 2.0 * gemm_lat(&[m as f64, 4096.0, 1024.0]));
+        }
+        for m in [16u32, 32, 64, 128, 256, 512, 1024] {
+            t.insert(&[m, 5120, 2048], gemm_lat(&[m as f64, 5120.0, 2048.0]));
+        }
+        t
+    }
+
+    #[test]
+    fn own_curve_fallback_off_holds_own_tail() {
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, false);
+        approx(
+            query(&cfg, &t, &[512.0, 4096.0, 1024.0]).unwrap(),
+            2.0 * gemm_lat(&[512.0, 4096.0, 1024.0]),
+        );
+    }
+
+    #[test]
+    fn own_curve_fallback_on_transfers_from_neighbours() {
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        approx(
+            query(&cfg, &t, &[512.0, 4096.0, 1024.0]).unwrap(),
+            gemm_lat(&[512.0, 4096.0, 1024.0]),
+        );
+    }
+
+    #[test]
+    fn own_curve_fallback_in_range_still_answers_from_own_curve() {
+        // Inside the own sweep the flag must change nothing: m=48 lerps on the
+        // own (distorted) curve.
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        approx(
+            query(&cfg, &t, &[48.0, 4096.0, 1024.0]).unwrap(),
+            2.0 * gemm_lat(&[48.0, 4096.0, 1024.0]),
+        );
+    }
+
+    /// FPM prefill tables have legitimate KV=0 sites. A query at an
+    /// uncollected batch with KV=0 must transfer from the KV=0 neighbours
+    /// (both floored at 1e-12 -> distance is the batch axis alone), exactly
+    /// like Python `_site_index`.
+    #[test]
+    fn zero_valued_site_axis_stays_near_zero_valued_queries() {
+        // FPM-prefill-shaped table: axes (batch, P, KV), sites (batch, KV).
+        let mut t = Node::branch();
+        for b in [2u32, 4] {
+            for p in [1024u32, 2048, 4096] {
+                t.insert(&[b, p, 0], 1e-3 * (b * p) as f64);
+            }
+        }
+        let lat = |c: &[f64]| 1e-3 * c[0] * c[1];
+        let cfg = OpInterpConfig {
+            axes: &["batch_size", "total_prefill_tokens", "total_kv_read_tokens"],
+            resolver: Resolver::ScatteredSites {
+                site_axes: vec![0, 2],
+                curve_axis: 1,
+                nn_sites: 4,
+                max_site_distance: Some(2.0),
+                require_curve_coverage: true,
+                k_tail: 3,
+                own_curve_coverage_fallback: true,
+            },
+            sol_fn: &lat,
+            value_transform: ValueTransform::Raw,
+            transform_axis: None,
+        };
+        // B=3 is uncollected; KV=0 matches the collected sites' zero axis.
+        approx(query(&cfg, &t, &[3.0, 2048.0, 0.0]).unwrap(), lat(&[3.0, 2048.0]));
+    }
+
+    #[test]
+    fn own_curve_fallback_sole_site_is_a_structured_miss() {
+        // The excluded own site is the ONLY site: no candidates survive the
+        // distance gate -> miss, never self-anchor.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            t.insert(&[m, 4096, 1024], gemm_lat(&[m as f64, 4096.0, 1024.0]));
+        }
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        assert!(query(&cfg, &t, &[512.0, 4096.0, 1024.0]).is_err());
     }
 
     #[test]

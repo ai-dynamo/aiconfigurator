@@ -20,7 +20,8 @@ use crate::common::error::AicError;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
     Dsv4ModuleOp,
-    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
+    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, GdnOp, GemmOp,
+    GenerationAttentionOp,
     GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
     MsaModuleOp, TrtllmWideEpMoEDispatchOp,
     NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
@@ -160,8 +161,16 @@ pub enum Op {
     /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
     /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
     /// `Dsv4MegaMoe`); the new serialized variant bumped
-    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5.
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5 (renumbered to 6 at its merge).
     Kda(KdaOp),
+    /// Whole-model forward pass (Python `forward_model="fpm"`): with the FPM
+    /// rewrite each phase op list is exactly one of these, answering from the
+    /// collected `fpm_forward_perf` cells instead of a granular composition.
+    /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
+    /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
+    /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
+    /// renumbered to 7 at the merge.
+    FpmForward(FpmForwardOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -239,6 +248,7 @@ impl Op {
             Op::WideEpGenerationMla(o) => &o.name,
             Op::WideEpMoe(o) => &o.name,
             Op::WideEpMoeDispatch(o) => &o.name,
+            Op::FpmForward(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
@@ -324,6 +334,9 @@ impl Op {
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
             Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
+            // Whole-model op: consumes batch_size/s/prefix/beam_width from the
+            // context (num_tokens is ignored, mirroring Python's kwargs use).
+            Op::FpmForward(op) => op.query(db, ctx),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
                 // independently, then `max(group_a_total, group_b_total)` is
