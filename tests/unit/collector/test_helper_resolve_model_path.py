@@ -173,12 +173,12 @@ class TestResolveLocalModelPath:
 
 
 class TestBundledConfigRefresh:
-    """Regression for the #1487 review P1: a bundled-config update under an
-    unchanged slug must reach consumers on a reused host. The deterministic
-    materialized dir used to be write-once, so new bundled bytes never
-    refreshed it — and content-keyed caches downstream (the GLM DSA
-    normalized-config dir) hashed the stale bytes and kept serving the old
-    normalized copy."""
+    """Regressions for the #1487 review: a bundled-config update under an
+    unchanged slug must reach consumers on a reused host (the materialized
+    copy used to be write-once, so content-keyed caches downstream hashed
+    stale bytes), and config.json + hf_quant_config.json must publish as ONE
+    immutable snapshot so a concurrent reader can never copytree a torn pair
+    (new config with an old or removed side-car)."""
 
     def _bundle(self, tmp_path, monkeypatch, slug, config, quant=None):
         cache_dir = tmp_path / "model_configs"
@@ -209,30 +209,38 @@ class TestBundledConfigRefresh:
             {"model_type": "fake", "rev": 2, "auto_map": {"AutoConfig": "configuration_fake.FakeConfig"}},
         )
         second = _resolve_local_model_path("fake-org/refresh")
-        assert second == first  # the deterministic path is preserved...
+        assert second != first  # new content publishes a NEW immutable snapshot
         with open(os.path.join(second, "config.json")) as f:
             materialized = json.load(f)
-        assert materialized["rev"] == 2  # ...but the content is refreshed
+        assert materialized["rev"] == 2  # the update reaches new resolvers
         assert "auto_map" not in materialized  # the strip survives the refresh
+        with open(os.path.join(first, "config.json")) as f:
+            assert json.load(f)["rev"] == 1  # published snapshots are immutable
 
-    def test_quant_side_car_refreshes_and_stale_copy_is_removed(self, isolated_tmp, tmp_path, monkeypatch):
+    def test_quant_side_car_updates_and_removal_publish_fresh_snapshots(self, isolated_tmp, tmp_path, monkeypatch):
         slug, model_id = "fake-org--quant-refresh", "fake-org/quant-refresh"
         self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant={"quant": "fp8", "rev": 1})
-        path = _resolve_local_model_path(model_id)
-        quant_target = os.path.join(path, "hf_quant_config.json")
-        with open(quant_target) as f:
+        p1 = _resolve_local_model_path(model_id)
+        with open(os.path.join(p1, "hf_quant_config.json")) as f:
             assert json.load(f)["rev"] == 1
 
+        # A side-car-only update publishes a new snapshot; the pair travels
+        # together, so no reader can see new config with an old side-car.
         self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant={"quant": "fp8", "rev": 2})
-        _resolve_local_model_path(model_id)
-        with open(quant_target) as f:
+        p2 = _resolve_local_model_path(model_id)
+        assert p2 != p1
+        with open(os.path.join(p2, "hf_quant_config.json")) as f:
             assert json.load(f)["rev"] == 2
 
-        # A side-car removed from the bundle must not linger: a stale copy
-        # would keep feeding quant config to ModelConfig.from_pretrained.
+        # A side-car removed from the bundle must not linger for NEW
+        # resolvers: a stale copy would keep feeding quant config to
+        # ModelConfig.from_pretrained. In-flight readers of p1/p2 keep
+        # their consistent (immutable) snapshots.
         self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant=None)
-        _resolve_local_model_path(model_id)
-        assert not os.path.exists(quant_target)
+        p3 = _resolve_local_model_path(model_id)
+        assert p3 not in (p1, p2)
+        assert not os.path.exists(os.path.join(p3, "hf_quant_config.json"))
+        assert os.path.exists(os.path.join(p2, "hf_quant_config.json"))  # immutability
 
     def test_norm_cache_key_tracks_bundled_updates_end_to_end(self, isolated_tmp, tmp_path, monkeypatch):
         # The GLM DSA normalized-config cache keys on config_norm_cache_key;

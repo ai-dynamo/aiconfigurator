@@ -19,6 +19,7 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -1729,67 +1730,65 @@ _AIC_MODEL_CONFIG_DIR = os.path.join(
 )
 
 
-def _file_has_bytes(path: str, data: bytes) -> bool:
-    """True iff ``path`` exists and holds exactly ``data``."""
-    try:
-        with open(path, "rb") as f:
-            return f.read() == data
-    except OSError:
-        return False
-
-
 def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str) -> str:
-    """Copy a bundled AIC config into a deterministic per-model tempdir.
+    """Materialize a bundled AIC config as an immutable per-content snapshot.
 
     ``auto_map`` is stripped so that ``trust_remote_code=True`` consumers
     (e.g. SGLang's ServerArgs) do not try to import ``configuration_*.py``
-    files that AIC does not ship. A deterministic path (no random suffix,
-    no pid) lets parallel subprocesses / pytest-xdist workers converge on
-    the same directory; the JSON writes are atomic via ``os.replace``.
+    files that AIC does not ship.
 
-    Materialization is content-aware, not write-once: the target (and the
-    ``hf_quant_config.json`` side-car, including removing a stale copy when
-    the bundled side-car disappears) is refreshed whenever the bundled
-    source changes under the same slug. On a reused collector host a
-    write-once copy would keep serving old bytes to everything downstream —
-    including content-keyed caches like the GLM DSA normalized-config dir,
-    which hash exactly these bytes (#1487 review P1).
+    Snapshots live at ``<tmp>/aic_model_config_<slug>/<content-hash>/`` and
+    are published with ONE atomic directory rename covering ``config.json``
+    and the ``hf_quant_config.json`` side-car together, then never mutated.
+    Readers (e.g. collect_mla_module's normalized-config copytree) can
+    therefore never observe a torn pair — new config with an old or removed
+    side-car — no matter how materialization interleaves with their reads;
+    a bundled update under the same slug publishes a NEW snapshot at a new
+    path while in-flight readers keep their consistent old one (#1487
+    review: write-once staleness, then torn-pair publication). The path is
+    deterministic per (slug, content), so parallel subprocesses /
+    pytest-xdist workers converge on one directory, and losing the
+    publication race is tolerated (same protocol as the normalized-config
+    cache in collector/trtllm/collect_mla_module.py).
     """
-    tmp_dir = os.path.join(tempfile.gettempdir(), f"aic_model_config_{slug}")
-    os.makedirs(tmp_dir, exist_ok=True)
+    base_dir = os.path.join(tempfile.gettempdir(), f"aic_model_config_{slug}")
 
     with open(cached_config) as f:
         config = json.load(f)
     config.pop("auto_map", None)
     desired = json.dumps(config).encode()
 
-    target = os.path.join(tmp_dir, "config.json")
-    if not _file_has_bytes(target, desired):
-        tmp_target = f"{target}.{os.getpid()}.tmp"
-        with open(tmp_target, "wb") as f:
-            f.write(desired)
-        os.replace(tmp_target, target)
-
     quant_side_car = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_hf_quant_config.json")
-    quant_target = os.path.join(tmp_dir, "hf_quant_config.json")
+    quant_desired = None
     if os.path.exists(quant_side_car):
         with open(quant_side_car, "rb") as f:
             quant_desired = f.read()
-        if not _file_has_bytes(quant_target, quant_desired):
-            tmp_quant = f"{quant_target}.{os.getpid()}.tmp"
-            with open(tmp_quant, "wb") as f:
-                f.write(quant_desired)
-            os.replace(tmp_quant, quant_target)
-    elif os.path.exists(quant_target):
-        # The bundled side-car was removed under this slug; a stale copy
-        # would keep feeding quant config to ModelConfig.from_pretrained.
-        try:
-            os.remove(quant_target)
-        except FileNotFoundError:
-            pass  # a parallel worker removed it first
 
-    print(f"Resolved {model_id} from AIC model_configs cache: {tmp_dir}")
-    return tmp_dir
+    hasher = hashlib.sha1(b"config.json\0" + desired)
+    if quant_desired is not None:
+        hasher.update(b"\0hf_quant_config.json\0" + quant_desired)
+    snapshot = os.path.join(base_dir, hasher.hexdigest()[:16])
+
+    if not os.path.exists(os.path.join(snapshot, "config.json")):
+        staging = f"{snapshot}.{os.getpid()}.tmp"
+        os.makedirs(staging, exist_ok=True)
+        with open(os.path.join(staging, "config.json"), "wb") as f:
+            f.write(desired)
+        if quant_desired is not None:
+            with open(os.path.join(staging, "hf_quant_config.json"), "wb") as f:
+                f.write(quant_desired)
+        try:
+            os.replace(staging, snapshot)
+        except OSError:
+            # Another worker may have won the atomic-rename race — but
+            # verify before trusting that assumption: a permission or
+            # disk-full failure would otherwise be swallowed.
+            shutil.rmtree(staging, ignore_errors=True)
+            if not os.path.exists(os.path.join(snapshot, "config.json")):
+                raise
+
+    print(f"Resolved {model_id} from AIC model_configs cache: {snapshot}")
+    return snapshot
 
 
 def config_norm_cache_key(src: str) -> str:
