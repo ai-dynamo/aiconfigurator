@@ -273,14 +273,17 @@ class TestBundledConfigRefresh:
         # the directory out from under another mid-write.
         self._bundle(tmp_path, monkeypatch, "fake-org--threads", {"model_type": "fake", "rev": 1})
         results, errors = [], []
+        thread_count = 8
+        barrier = threading.Barrier(thread_count)
 
         def resolve():
             try:
+                barrier.wait()  # force every worker into materialization together
                 results.append(_resolve_local_model_path("fake-org/threads"))
             except Exception as e:  # pragma: no cover - the assertion below reports it
                 errors.append(e)
 
-        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        threads = [threading.Thread(target=resolve) for _ in range(thread_count)]
         for t in threads:
             t.start()
         for t in threads:
