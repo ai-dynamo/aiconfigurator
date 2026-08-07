@@ -36,7 +36,9 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   precedent as the v3/v4 collision above).
 // - 7: `MoEDispatchOp` gained `attn_ar_modeled` — a bincode op-layout
 //   change (same class as v5).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
+// - 8: `GemmOp` gained `below_grid_sol` — a bincode op-layout change (same
+//   class as v5).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 8;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

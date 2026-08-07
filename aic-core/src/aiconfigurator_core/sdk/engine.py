@@ -109,7 +109,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
 # - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
 #   decodes positionally).
-ENGINE_SPEC_SCHEMA_VERSION = 7
+# - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
+#   positionally).
+ENGINE_SPEC_SCHEMA_VERSION = 8
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,7 @@ def _gemm(op: GEMM) -> dict:
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
         "seq_split": op._seq_split,
+        "below_grid_sol": op._below_grid_sol,
     }
 
 
