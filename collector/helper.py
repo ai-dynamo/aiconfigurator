@@ -12,13 +12,13 @@ case files; this file should stay focused on reusable execution mechanics.
 
 import csv
 import functools
+import hashlib
 import heapq
 import json
 import logging
 import math
 import multiprocessing as mp
 import os
-import shutil
 import signal
 import sys
 import tempfile
@@ -1729,6 +1729,15 @@ _AIC_MODEL_CONFIG_DIR = os.path.join(
 )
 
 
+def _file_has_bytes(path: str, data: bytes) -> bool:
+    """True iff ``path`` exists and holds exactly ``data``."""
+    try:
+        with open(path, "rb") as f:
+            return f.read() == data
+    except OSError:
+        return False
+
+
 def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str) -> str:
     """Copy a bundled AIC config into a deterministic per-model tempdir.
 
@@ -1736,30 +1745,73 @@ def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str)
     (e.g. SGLang's ServerArgs) do not try to import ``configuration_*.py``
     files that AIC does not ship. A deterministic path (no random suffix,
     no pid) lets parallel subprocesses / pytest-xdist workers converge on
-    the same directory; the JSON write is atomic via ``os.replace``.
+    the same directory; the JSON writes are atomic via ``os.replace``.
+
+    Materialization is content-aware, not write-once: the target (and the
+    ``hf_quant_config.json`` side-car, including removing a stale copy when
+    the bundled side-car disappears) is refreshed whenever the bundled
+    source changes under the same slug. On a reused collector host a
+    write-once copy would keep serving old bytes to everything downstream —
+    including content-keyed caches like the GLM DSA normalized-config dir,
+    which hash exactly these bytes (#1487 review P1).
     """
     tmp_dir = os.path.join(tempfile.gettempdir(), f"aic_model_config_{slug}")
     os.makedirs(tmp_dir, exist_ok=True)
 
+    with open(cached_config) as f:
+        config = json.load(f)
+    config.pop("auto_map", None)
+    desired = json.dumps(config).encode()
+
     target = os.path.join(tmp_dir, "config.json")
-    if not os.path.exists(target):
-        with open(cached_config) as f:
-            config = json.load(f)
-        config.pop("auto_map", None)
+    if not _file_has_bytes(target, desired):
         tmp_target = f"{target}.{os.getpid()}.tmp"
-        with open(tmp_target, "w") as f:
-            json.dump(config, f)
+        with open(tmp_target, "wb") as f:
+            f.write(desired)
         os.replace(tmp_target, target)
 
     quant_side_car = os.path.join(_AIC_MODEL_CONFIG_DIR, f"{slug}_hf_quant_config.json")
     quant_target = os.path.join(tmp_dir, "hf_quant_config.json")
-    if os.path.exists(quant_side_car) and not os.path.exists(quant_target):
-        tmp_quant = f"{quant_target}.{os.getpid()}.tmp"
-        shutil.copy(quant_side_car, tmp_quant)
-        os.replace(tmp_quant, quant_target)
+    if os.path.exists(quant_side_car):
+        with open(quant_side_car, "rb") as f:
+            quant_desired = f.read()
+        if not _file_has_bytes(quant_target, quant_desired):
+            tmp_quant = f"{quant_target}.{os.getpid()}.tmp"
+            with open(tmp_quant, "wb") as f:
+                f.write(quant_desired)
+            os.replace(tmp_quant, quant_target)
+    elif os.path.exists(quant_target):
+        # The bundled side-car was removed under this slug; a stale copy
+        # would keep feeding quant config to ModelConfig.from_pretrained.
+        try:
+            os.remove(quant_target)
+        except FileNotFoundError:
+            pass  # a parallel worker removed it first
 
     print(f"Resolved {model_id} from AIC model_configs cache: {tmp_dir}")
     return tmp_dir
+
+
+def config_norm_cache_key(src: str) -> str:
+    """Cache key (16-hex sha1) for normalized copies of the config dir ``src``.
+
+    Hashes the source path plus the name and bytes of every ``*.json``
+    directly inside it — ``config.json`` AND side-cars like
+    ``hf_quant_config.json``, because normalizers materialize the whole dir
+    (``copytree``) and ``ModelConfig.from_pretrained`` reads the side-cars
+    too. A path-only key would keep serving a stale normalized copy when a
+    bundled config changes under an unchanged path (repo update).
+    """
+    if not os.path.exists(os.path.join(src, "config.json")):
+        raise FileNotFoundError(f"'{src}' does not contain config.json")
+    hasher = hashlib.sha1(src.encode())
+    for name in sorted(os.listdir(src)):
+        if not name.endswith(".json"):
+            continue
+        hasher.update(b"\0" + name.encode() + b"\0")
+        with open(os.path.join(src, name), "rb") as f:
+            hasher.update(f.read())
+    return hasher.hexdigest()[:16]
 
 
 def _resolve_local_model_path(model_id: str) -> str:
