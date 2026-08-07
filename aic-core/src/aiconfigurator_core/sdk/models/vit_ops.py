@@ -53,6 +53,8 @@ are responsible for choosing a projector_dims layout that is TP-correct.
 
 from __future__ import annotations
 
+import dataclasses
+
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 
@@ -221,3 +223,18 @@ def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int, enable_
             )
         )
     return result
+
+
+@dataclasses.dataclass
+class EncoderOnlyModel:
+    """Vision-encoder-only model for a disaggregated encode (EPD) worker.
+
+    Mirrors an encoder-only instance (e.g. SGLang ``--encoder-only``); only
+    ViT-side rules govern its tensor parallelism.  Duck-types the slice of
+    ``BaseModel`` the encoder phase reads: ``encoder_ops``,
+    ``encoder_config`` and ``config``.
+    """
+
+    encoder_ops: list
+    encoder_config: common.VisionEncoderConfig
+    config: object

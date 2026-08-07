@@ -168,6 +168,10 @@ def cli_default(
     image_width: int = 0,
     num_images: int = 1,
     enable_encoder_dp: bool = True,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -226,6 +230,14 @@ def cli_default(
             Used to filter batch sizes that would exceed KV cache capacity.
         max_seq_len: TRT-LLM ``--max_seq_len`` setting. Controls how many KV blocks are
             pre-allocated per sequence. Defaults to ``isl + osl`` when ``None``.
+        enable_epd: VL models -- serve the vision encoder from a dedicated
+            encode-worker pool (agg becomes E+agg, disagg becomes E+P+D).
+            Requires an image workload (image_height/image_width).
+        encoder_tp: EPD encode-worker TP sizes to sweep (default [1, 2, 4, 8]).
+        encoder_system: System (GPU type) for the encode workers; defaults to
+            the prefill/agg side's system.
+        encoder_latency_correction: Latency correction scale for the encode
+            workers.  Default 1.0.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -292,6 +304,10 @@ def cli_default(
         image_width=image_width,
         num_images=num_images,
         enable_encoder_dp=enable_encoder_dp,
+        enable_epd=enable_epd,
+        encoder_tp=encoder_tp,
+        encoder_system=encoder_system,
+        encoder_latency_correction=encoder_latency_correction,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -881,9 +897,22 @@ def _apply_power_coverage_gate(summary, result_dict: dict) -> dict:
     power is unavailable without treating the whole estimate as failed.
     """
     gated = dict(result_dict)
-    coverage = summary.get_power_data_coverage()
-    gated["power_coverage"] = coverage
-    if coverage < POWER_DATA_COVERAGE_THRESHOLD:
+    gated["power_coverage"] = summary.get_power_data_coverage()
+    return apply_row_power_coverage_gate(gated)
+
+
+def apply_row_power_coverage_gate(row: dict) -> dict:
+    """Hide ``power_w`` when ``power_coverage`` is missing, non-finite, or
+    below the coverage threshold (fail-closed)."""
+    import math
+
+    gated = dict(row)
+    coverage = gated.get("power_coverage")
+    if (
+        not isinstance(coverage, (int, float))
+        or not math.isfinite(coverage)
+        or coverage < POWER_DATA_COVERAGE_THRESHOLD
+    ):
         gated["power_w"] = None
     return gated
 

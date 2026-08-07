@@ -132,6 +132,13 @@ def _plot_worker_setup_table(
         top_configs["replicas"] = total_gpus // top_configs["num_total_gpus"]
         top_configs["total_gpus_used"] = top_configs["num_total_gpus"] * top_configs["replicas"]
 
+    def _power_cell(row) -> str:
+        # power_w == 0.0 on an EPD row is the no-data sentinel (incomplete
+        # encoder energy data), not a real 0 W estimate.
+        if (row.get("(e)workers") or 0) > 0 and row["power_w"] < 1.0:
+            return "n/a"
+        return _format_power(row["power_w"])
+
     ranking_label = "total_gpus_needed" if "replicas_needed" in top_configs.columns else "tokens/s/gpu"
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
@@ -143,6 +150,10 @@ def _plot_worker_setup_table(
     is_disagg = "(p)tp" in top_configs.columns and not is_afd
 
     top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
+
+    # EPD rows (disagg E+P+D or agg E+agg) carry a dedicated encode-worker
+    # pool; show it only when present.
+    has_encoder_pool = "(e)workers" in top_configs.columns and (top_configs["(e)workers"].fillna(0) > 0).any()
 
     if is_afd:
         field_names = [
@@ -226,6 +237,8 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
+        if has_encoder_pool:
+            field_names.extend(["(e)workers", "(e)tp", "(e)bs"])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -270,10 +283,12 @@ def _plot_worker_setup_table(
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))})"
                 )
+            e_workers = int(row.get("(e)workers", 0) or 0)
+            encoder_term = f"+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e)" if e_workers else ""
             gpus_replica_str = (
                 f"{row['num_total_gpus']} "
                 f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
+                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']}{encoder_term})"
             )
             row_data = [
                 i + 1,
@@ -300,8 +315,16 @@ def _plot_worker_setup_table(
                     row["(d)bs"],
                 ]
             )
+            if has_encoder_pool:
+                row_data.extend(
+                    [
+                        e_workers,
+                        int(row.get("(e)tp", 0) or 0),
+                        int(row.get("(e)bs", 0) or 0),
+                    ]
+                )
             if show_power:
-                row_data.append(_format_power(row["power_w"]))
+                row_data.append(_power_cell(row))
             table.add_row(row_data)
     else:  # agg
         field_names = [
@@ -320,6 +343,8 @@ def _plot_worker_setup_table(
             "parallel",
             "bs",
         ]
+        if has_encoder_pool:
+            field_names.extend(["(a)workers", "(e)workers", "(e)tp", "(e)bs"])
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -348,6 +373,17 @@ def _plot_worker_setup_table(
                 i + 1,
                 row["backend"],
             ]
+            a_workers = int(row.get("(a)workers", 0) or 0)
+            e_workers = int(row.get("(e)workers", 0) or 0)
+            if e_workers:
+                # E+agg cell: (a)workers language-only agg workers + encode pool.
+                worker_gpus = row["pp"] * row["tp"] * row["dp"]
+                gpus_replica = (
+                    f"{row['num_total_gpus']} "
+                    f"(={a_workers}x{worker_gpus}+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e))"
+                )
+            else:
+                gpus_replica = row["num_total_gpus"]
             row_data.extend(
                 [
                     _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
@@ -358,14 +394,23 @@ def _plot_worker_setup_table(
                     f"{display_concurrency} (={row['concurrency']}x{row['replicas']})",
                     f"{display_total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
                     row["replicas"],
-                    row["num_total_gpus"],
+                    gpus_replica,
                     gpus_worker,
                     parallel,
                     row["bs"],
                 ]
             )
+            if has_encoder_pool:
+                row_data.extend(
+                    [
+                        a_workers,
+                        e_workers,
+                        int(row.get("(e)tp", 0) or 0),
+                        int(row.get("(e)bs", 0) or 0),
+                    ]
+                )
             if show_power:
-                row_data.append(_format_power(row["power_w"]))
+                row_data.append(_power_cell(row))
             table.add_row(row_data)
 
     buf.append(table.get_string())
@@ -997,17 +1042,8 @@ def save_results(
                             afd_artifact_warning_emitted = True
                         continue
 
-                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
-                    cfg = task_config_to_generator_config(
-                        task_config=row_task,
-                        result_df=result_df,
-                        generator_overrides=generator_overrides,
-                    )
-
                     top_config_dir = os.path.join(exp_dir, f"top{i + 1}")
                     safe_mkdir(top_config_dir, exist_ok=True)
-                    with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
-                        yaml.safe_dump(cfg, f, sort_keys=False)
 
                     # Per-op PerformanceResult.source breakdown, pulled through
                     # the InferenceSummary.
@@ -1016,6 +1052,28 @@ def save_results(
                     if i < len(best_config_per_ops_source) and best_config_per_ops_source[i] is not None:
                         with open(os.path.join(top_config_dir, "per_ops_source.json"), "w") as f:
                             json.dump(best_config_per_ops_source[i], f, indent=2, sort_keys=True)
+
+                    enc_workers = result_df.get("(e)workers", 0)
+                    if pd.notna(enc_workers) and enc_workers > 0:
+                        logger.warning(
+                            "%s top%d is an EPD row ((e)workers=%d): generator artifacts skipped -- "
+                            "the generator bridge does not map the dedicated encode pool yet, and the "
+                            "emitted deploy configs would contradict the recommendation.",
+                            exp_name,
+                            i + 1,
+                            int(enc_workers),
+                        )
+                        continue
+
+                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
+                    cfg = task_config_to_generator_config(
+                        task_config=row_task,
+                        result_df=result_df,
+                        generator_overrides=generator_overrides,
+                    )
+
+                    with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
+                        yaml.safe_dump(cfg, f, sort_keys=False)
 
                     try:
                         deployment_target = getattr(args, "deployment_target", "dynamo-j2")
