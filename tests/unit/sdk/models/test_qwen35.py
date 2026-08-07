@@ -163,6 +163,7 @@ def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
 
     for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
         op_names = [op._name for op in _flatten_ops(phase_ops)]
+        assert any(name.endswith(("_gdn_ar", "_full_ar")) for name in op_names)
         for prefix in (f"{phase}_gdn", f"{phase}_full"):
             assert f"{prefix}_moe_pre_dispatch" not in op_names
             assert f"{prefix}_moe" in op_names
@@ -190,6 +191,8 @@ def test_qwen35_sglang_deepep_prices_one_dispatch_and_replicates_shared_expert()
 
     for phase, phase_ops in (("context", model.context_ops), ("generation", model.generation_ops)):
         op_names = [op._name for op in phase_ops]
+        # DeepEP scatters: the attn-TP reduction is NOT folded into a gather.
+        assert any(name.endswith(("_gdn_ar", "_full_ar")) for name in op_names)
         for prefix in (f"{phase}_gdn", f"{phase}_full"):
             assert f"{prefix}_moe_pre_dispatch" in op_names
             assert f"{prefix}_moe_post_dispatch" not in op_names
@@ -203,7 +206,9 @@ def test_qwen35_sglang_deepep_prices_one_dispatch_and_replicates_shared_expert()
 
 
 def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
-    """With DP attention the LayerCommunicator pre-MLP gather is real and priced."""
+    """With DP attention the LayerCommunicator pre-MLP gather is real and
+    priced; the attn-TP partial-sum reduction folds into that gather, so the
+    per-layer attention AR disappears."""
     model = models.get_model(
         "Qwen/Qwen3.5-35B-A3B",
         _model_config(tp_size=4, moe_tp_size=1, moe_ep_size=8, attention_dp_size=2),
@@ -213,6 +218,7 @@ def test_qwen35_sglang_default_moe_keeps_pre_dispatch_under_attention_dp():
     for phase_ops in (model.context_ops, model.generation_ops):
         op_names = [op._name for op in _flatten_ops(phase_ops)]
         assert any(name.endswith("_moe_pre_dispatch") for name in op_names)
+        assert not any(name.endswith(("_gdn_ar", "_full_ar")) for name in op_names)
 
 
 def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():

@@ -129,6 +129,7 @@ class Qwen35Model(BaseModel):
         moe_tp = self.config.moe_tp_size
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
+        attn_ar_folded = self._sglang_folds_attn_ar()
         gemm_q = self.config.gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
         fmha_q = self.config.fmha_quant_mode
@@ -198,7 +199,7 @@ class Qwen35Model(BaseModel):
                         d_conv,
                     ),
                     ops.GEMM("context_gdn_out_proj_gemm", c, h, gdn_out_proj_in, gemm_q, low_precision_input=True),
-                    ops.CustomAllReduce("context_gdn_ar", c, h, tp),
+                    *([] if attn_ar_folded else [ops.CustomAllReduce("context_gdn_ar", c, h, tp)]),
                 ]
             )
             self.context_ops.extend(
@@ -228,7 +229,7 @@ class Qwen35Model(BaseModel):
                         use_qk_norm=True,
                     ),
                     ops.GEMM("context_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True),
-                    ops.CustomAllReduce("context_full_ar", c, h, tp),
+                    *([] if attn_ar_folded else [ops.CustomAllReduce("context_full_ar", c, h, tp)]),
                 ]
             )
             self.context_ops.extend(
@@ -246,6 +247,17 @@ class Qwen35Model(BaseModel):
 
     def _sglang_deepep(self) -> bool:
         return self._backend_name == "sglang" and self.config.moe_backend == "deepep_moe"
+
+    def _sglang_folds_attn_ar(self) -> bool:
+        # sglang projections never all-reduce (reduce_results=False); with DP
+        # attention the attn-TP reduction folds into the pre-MLP gather that
+        # moe_pre_dispatch prices. DeepEP scatters and keeps the model-side AR.
+        return (
+            self._backend_name == "sglang"
+            and not self._sglang_deepep()
+            and self.extra_params.num_experts > 0
+            and self.config.attention_dp_size > 1
+        )
 
     def _sglang_fused_shared_gate(self) -> bool:
         # sglang (non-DeepEP) folds the scalar-gate GEMV + sigmoid + mul +
@@ -431,6 +443,7 @@ class Qwen35Model(BaseModel):
         moe_tp = self.config.moe_tp_size
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
+        attn_ar_folded = self._sglang_folds_attn_ar()
         gemm_q = self.config.gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
         moe_q = self.config.moe_quant_mode
@@ -495,7 +508,7 @@ class Qwen35Model(BaseModel):
                         d_conv,
                     ),
                     ops.GEMM("generation_gdn_out_proj_gemm", c, h, gdn_out_proj_in, gemm_q, low_precision_input=True),
-                    ops.CustomAllReduce("generation_gdn_ar", c, h, tp),
+                    *([] if attn_ar_folded else [ops.CustomAllReduce("generation_gdn_ar", c, h, tp)]),
                 ]
             )
             self.generation_ops.extend(
@@ -526,7 +539,7 @@ class Qwen35Model(BaseModel):
                     ops.GEMM(
                         "generation_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True
                     ),
-                    ops.CustomAllReduce("generation_full_ar", c, h, tp),
+                    *([] if attn_ar_folded else [ops.CustomAllReduce("generation_full_ar", c, h, tp)]),
                 ]
             )
             self.generation_ops.extend(

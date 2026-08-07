@@ -233,3 +233,19 @@ def test_below_grid_shape_degrades_to_sol_only_with_flag(comprehensive_perf_db):
     # int8_wo has system flops but no collected table: strict despite the flag.
     with pytest.raises(PerfDataNotAvailableError):
         db.query_gemm(4, 1, 256, common.GEMMQuantMode.int8_wo, below_grid_sol=True)
+
+
+def test_below_grid_flag_threads_from_op_and_leaves_hybrid_unchanged(comprehensive_perf_db):
+    db = comprehensive_perf_db
+    quant = common.GEMMQuantMode.bfloat16
+
+    # Op-level: the constructor kwarg must reach the table query.
+    assert GEMM("gate", 1, 1, 256, quant, below_grid_sol=True).query(db, x=4).source == "sol"
+    with pytest.raises(PerfDataNotAvailableError):
+        GEMM("gate", 1, 1, 256, quant).query(db, x=4)
+
+    # HYBRID keeps its empirical fallback regardless of the flag.
+    with_flag = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID, below_grid_sol=True)
+    without = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID)
+    assert with_flag.source == without.source == "empirical"
+    assert float(with_flag) == float(without)
