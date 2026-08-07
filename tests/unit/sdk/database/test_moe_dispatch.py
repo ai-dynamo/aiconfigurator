@@ -633,7 +633,9 @@ class TestVllmCommPath:
 
     def test_post_dispatch_prices_single_final_allreduce(self):
         db = _make_mock_db(sm_version=90, backend="vllm")
-        post = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=False)
+        post = _make_dispatch(
+            moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=False, attn_ar_modeled=True
+        )
 
         assert float(post.query(db, x=8)) == pytest.approx(1.5)
         db.query_custom_allreduce.assert_called_once()
