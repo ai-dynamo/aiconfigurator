@@ -246,62 +246,83 @@ class Qwen35Model(BaseModel):
     def _sglang_deepep(self) -> bool:
         return self._backend_name == "sglang" and self.config.moe_backend == "deepep_moe"
 
+    def _sglang_fused_shared_gate(self) -> bool:
+        # sglang (non-DeepEP) folds the scalar-gate GEMV + sigmoid + mul +
+        # final add into one kernel after the streams join; the shared branch
+        # itself is gate_up/act/down only. DeepEP and vLLM apply the gate
+        # inside the branch.
+        return self._backend_name == "sglang" and not self._sglang_deepep()
+
     def _shared_expert_ops(self, prefix, count, h, tp, gemm_q, cfg: common.Qwen35Config, *, scale_num_tokens=1):
-        """Shared-expert branch: scalar gate + gated-SiLU MLP with a fused
-        gate_up projection, ending in sigmoid(gate) * output (the gate is
-        applied inside the branch, so the whole branch overlaps with the
-        routed path). DeepEP replicates the shared expert across ranks
-        (tp_size=1) and runs it on the attn-TP scattered token slice in
-        context."""
+        """Shared-expert branch: gated-SiLU MLP with a fused gate_up
+        projection; the scalar expert gate is applied inside the branch
+        except on the sglang fused-gate path (merged into the post-join
+        kernel). DeepEP replicates the shared expert across ranks (tp_size=1)
+        and runs it on the attn-TP scattered token slice in context."""
         if self._sglang_deepep():
             tp = 1
-        return [
+        fused_gate = self._sglang_fused_shared_gate()
+        ops_list = []
+        if not fused_gate:
             # Scalar expert gate (ReplicatedLinear hidden->1).
-            ops.GEMM(
-                f"{prefix}_shared_expert_gate_gemm",
-                count,
-                1,
-                h,
-                common.GEMMQuantMode.bfloat16,
-                scale_num_tokens=scale_num_tokens,
-            ),
-            ops.GEMM(
-                f"{prefix}_shared_gate_up_gemm",
-                count,
-                2 * cfg.shared_expert_inter_size // tp,
-                h,
-                gemm_q,
-                scale_num_tokens=scale_num_tokens,
-            ),
-            ops.ElementWise(
-                f"{prefix}_shared_act_gate",
-                count,
-                2 * cfg.shared_expert_inter_size // tp,
-                cfg.shared_expert_inter_size // tp,
-                0.8,
-                scale_num_tokens=scale_num_tokens,
-            ),
-            ops.GEMM(
-                f"{prefix}_shared_down_gemm",
-                count,
-                h,
-                cfg.shared_expert_inter_size // tp,
-                gemm_q,
-                low_precision_input=True,
-                scale_num_tokens=scale_num_tokens,
-            ),
+            ops_list.append(
+                ops.GEMM(
+                    f"{prefix}_shared_expert_gate_gemm",
+                    count,
+                    1,
+                    h,
+                    common.GEMMQuantMode.bfloat16,
+                    scale_num_tokens=scale_num_tokens,
+                )
+            )
+        ops_list.extend(
+            [
+                ops.GEMM(
+                    f"{prefix}_shared_gate_up_gemm",
+                    count,
+                    2 * cfg.shared_expert_inter_size // tp,
+                    h,
+                    gemm_q,
+                    scale_num_tokens=scale_num_tokens,
+                ),
+                ops.ElementWise(
+                    f"{prefix}_shared_act_gate",
+                    count,
+                    2 * cfg.shared_expert_inter_size // tp,
+                    cfg.shared_expert_inter_size // tp,
+                    0.8,
+                    scale_num_tokens=scale_num_tokens,
+                ),
+                ops.GEMM(
+                    f"{prefix}_shared_down_gemm",
+                    count,
+                    h,
+                    cfg.shared_expert_inter_size // tp,
+                    gemm_q,
+                    low_precision_input=True,
+                    scale_num_tokens=scale_num_tokens,
+                ),
+            ]
+        )
+        if not fused_gate:
             # sigmoid(expert gate) * shared output.
-            ops.ElementWise(
-                f"{prefix}_shared_expert_gate_mul",
-                count,
-                h,
-                h,
-                0.8,
-                scale_num_tokens=scale_num_tokens,
-            ),
-        ]
+            ops_list.append(
+                ops.ElementWise(
+                    f"{prefix}_shared_expert_gate_mul",
+                    count,
+                    h,
+                    h,
+                    0.8,
+                    scale_num_tokens=scale_num_tokens,
+                )
+            )
+        return ops_list
 
     def _shared_merge_op(self, prefix, count, h, *, scale_num_tokens=1):
+        if self._sglang_fused_shared_gate():
+            # One fused kernel: scalar-gate GEMV + sigmoid + mul + final add
+            # (reads hidden, shared and routed outputs; writes h).
+            return ops.ElementWise(f"{prefix}_shared_merge", count, 3 * h, h, 0.8, scale_num_tokens=scale_num_tokens)
         # Final add of routed and gated shared outputs (after the streams join).
         return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8, scale_num_tokens=scale_num_tokens)
 
@@ -533,24 +554,28 @@ class Qwen35Model(BaseModel):
             # collective when attention_dp == 1; with DP the LayerCommunicator
             # pre-MLP gather is priced by the dispatch op.
             if not (self._backend_name == "sglang" and self.config.moe_backend is None and attn_dp == 1):
-                routed_ops.append(
-                    ops.MoEDispatch(
-                        f"{prefix}_moe_pre_dispatch",
-                        count,
-                        h,
-                        cfg.topk,
-                        cfg.num_experts,
-                        moe_tp,
-                        moe_ep,
-                        attn_dp,
-                        True,
-                        quant_mode=moe_q,
-                        sms=self.config.sms,
-                        moe_backend=self.config.moe_backend,
-                        is_context=False,
-                        attn_ar_modeled=True,
-                    )
+                pre_dispatch = ops.MoEDispatch(
+                    f"{prefix}_moe_pre_dispatch",
+                    count,
+                    h,
+                    cfg.topk,
+                    cfg.num_experts,
+                    moe_tp,
+                    moe_ep,
+                    attn_dp,
+                    True,
+                    quant_mode=moe_q,
+                    sms=self.config.sms,
+                    moe_backend=self.config.moe_backend,
+                    is_context=False,
+                    attn_ar_modeled=True,
                 )
+                # sglang's pre-MLP gather completes before the dual-stream
+                # fork; vLLM's DP dispatch runs on the main stream inside it.
+                if self._backend_name == "sglang":
+                    ops_list.append(pre_dispatch)
+                else:
+                    routed_ops.append(pre_dispatch)
             routed_ops.append(
                 ops.MoE(
                     f"{prefix}_moe",
@@ -569,10 +594,25 @@ class Qwen35Model(BaseModel):
                     enable_eplb=False,
                 )
             )
+            shared_ops = (
+                self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
+            )
+            # vLLM and sglang decode run shared and routed experts on
+            # parallel CUDA streams (vLLM only up to 256 tokens per rank —
+            # modeled as always overlapped); sglang DeepEP runs them serially.
+            if shared_ops and self._backend_name in ("vllm", "sglang") and not self._sglang_deepep():
+                ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
+            else:
+                ops_list.extend(routed_ops)
+                ops_list.extend(shared_ops)
+            if cfg.shared_expert_inter_size > 0:
+                ops_list.append(self._shared_merge_op(prefix, count, h))
             # DeepEP rows hold the full dispatch+combine round trip; the pre
             # op prices it once (SGLangEPMOEModel precedent), so no post op.
+            # Both frameworks all-reduce the merged shared+routed sum, so the
+            # post collective sits after the join, outside the overlap.
             if not self._sglang_deepep():
-                routed_ops.append(
+                ops_list.append(
                     ops.MoEDispatch(
                         f"{prefix}_moe_post_dispatch",
                         count,
@@ -590,19 +630,6 @@ class Qwen35Model(BaseModel):
                         attn_ar_modeled=True,
                     )
                 )
-            shared_ops = (
-                self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
-            )
-            # vLLM and sglang decode run shared and routed experts on
-            # parallel CUDA streams (vLLM only up to 256 tokens per rank —
-            # modeled as always overlapped); sglang DeepEP runs them serially.
-            if shared_ops and self._backend_name in ("vllm", "sglang") and not self._sglang_deepep():
-                ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
-            else:
-                ops_list.extend(routed_ops)
-                ops_list.extend(shared_ops)
-            if cfg.shared_expert_inter_size > 0:
-                ops_list.append(self._shared_merge_op(prefix, count, h))
         else:
             ops_list.extend(
                 [
