@@ -144,7 +144,7 @@ impl WideEpMoeTable {
             moe_tp_size,
             moe_ep_size,
         )?;
-        by_tokens.query(num_tokens as f64, "num_tokens", sol)
+        by_tokens.query(num_tokens as f64, sol)
     }
 
     /// Own-slice `num_tokens -> latency_ms` points, after the level-wise
@@ -350,7 +350,12 @@ fn load_compute_parquet(sources: &[PerfSource]) -> Result<WideEpMoeGrids, AicErr
     Ok(WideEpMoeGrids {
         index: index
             .into_iter()
-            .map(|(kernel, index)| (kernel, index.map_values(AxisCurve::from_map)))
+            .map(|(kernel, index)| {
+                (
+                    kernel,
+                    index.map_values(|curve| AxisCurve::from_map("num_tokens", curve)),
+                )
+            })
             .collect(),
     })
 }

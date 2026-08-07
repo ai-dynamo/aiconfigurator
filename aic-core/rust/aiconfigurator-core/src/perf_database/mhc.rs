@@ -128,7 +128,7 @@ impl MhcTable {
         // Engine 1-axis token curve; the caller-threaded per-op roofline
         // anchors beyond-range holds (Python `sol_fn=lambda t: get_sol(t,
         // op_name)[0]`).
-        by_tokens.query(num_tokens as f64, "num_tokens", &|t| sol(op, t))
+        by_tokens.query(num_tokens as f64, &|t| sol(op, t))
     }
 
     /// Collected `(num_tokens,) -> latency` points for one RESOLVED op half
@@ -236,7 +236,7 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
     Ok(MhcGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, AxisCurve::from_map(curve)))
+            .map(|(key, curve)| (key, AxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }

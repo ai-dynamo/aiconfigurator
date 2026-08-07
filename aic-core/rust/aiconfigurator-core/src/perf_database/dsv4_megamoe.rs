@@ -153,7 +153,7 @@ impl Dsv4MegaMoeTable {
         // Python: OpInterpConfig(axes=("num_tokens",), resolver=Grid(),
         // sol_fn=lambda t: float(t)) — in-range RAW lerp, boundary util-hold
         // beyond the collected range with the linear token proxy.
-        curve.query(f64::from(num_tokens), "num_tokens", &|t| t)
+        curve.query(f64::from(num_tokens), &|t| t)
     }
 
     fn load_module(&self) -> Result<&Dsv4MegaMoeGrids, AicError> {
@@ -293,7 +293,7 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
     Ok(Dsv4MegaMoeGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, AxisCurve::from_map(curve)))
+            .map(|(key, curve)| (key, AxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }

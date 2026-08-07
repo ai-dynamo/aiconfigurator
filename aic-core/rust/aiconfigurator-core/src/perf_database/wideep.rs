@@ -221,6 +221,7 @@ fn dispatch_fields(points: &BTreeMap<u32, DispatchPoint>) -> [AxisCurve; Dispatc
     std::array::from_fn(|index| {
         let field = DispatchField::ALL[index];
         AxisCurve::from_sorted_iter(
+            "num_tokens",
             points
                 .iter()
                 .map(|(&token, &point)| (token, field.value(point))),
@@ -625,7 +626,7 @@ impl WideEpTable {
                 self.data_root.display()
             ))
         })?;
-        by_tokens.query(num_tokens as f64, "num_tokens", &|t| t)
+        by_tokens.query(num_tokens as f64, &|t| t)
     }
 
     /// Collected `(num_tokens, latency)` points of one resolved alltoall
@@ -919,7 +920,7 @@ fn query_moe(
             )));
         }
     }
-    by_tokens.query(num_tokens as f64, "num_tokens", sol)
+    by_tokens.query(num_tokens as f64, sol)
 }
 
 /// Resolve one `DispatchPoint` field's token curve on the engine, with the
@@ -946,7 +947,7 @@ fn dispatch_field(
             return Ok(0.0);
         }
     }
-    fields[field.index()].query(num_tokens as f64, "num_tokens", &|t| t)
+    fields[field.index()].query(num_tokens as f64, &|t| t)
 }
 
 /// Resolve one `DispatchPoint` field on the DeepEP-normal 2-axis
@@ -1180,7 +1181,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
         )));
     }
     Ok(MoeGrids {
-        index: index.map_values(AxisCurve::from_map),
+        index: index.map_values(|curve| AxisCurve::from_map("num_tokens", curve)),
         quants_in_load_order,
     })
 }
@@ -1307,7 +1308,7 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
     Ok(AlltoallGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, AxisCurve::from_map(curve)))
+            .map(|(key, curve)| (key, AxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }
