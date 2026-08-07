@@ -184,6 +184,7 @@ mod tests {
             scale_num_tokens: 0,
             low_precision_input: true,
                 seq_split: 1,
+            below_grid_sol: false,
         }
     }
 

@@ -332,7 +332,7 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
             self.backend = common.BackendName.sglang.value
             self.calls: list[tuple[str, common.GEMMQuantMode]] = []
 
-        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None, below_grid_sol=False):
             if database_mode == common.DatabaseMode.SOL:
                 return PerformanceResult(2.0, energy=0.0, source="sol")
             self.calls.append(("gemm", quant_mode))
@@ -400,7 +400,7 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
 
 def test_gemm_query_fp8_static_uses_gemm_sol_latency_floor():
     class FakeDatabase:
-        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None, below_grid_sol=False):
             if database_mode == common.DatabaseMode.SOL:
                 return PerformanceResult(2.5, energy=0.0, source="sol")
             return PerformanceResult(4.0, energy=40.0)

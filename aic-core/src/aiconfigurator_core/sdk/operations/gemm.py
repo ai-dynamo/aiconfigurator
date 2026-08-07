@@ -200,6 +200,7 @@ class GEMM(Operation):
         self._weights = self._n * self._k * quant_mode.value.memory
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
         self._low_precision_input = kwargs.get("low_precision_input", False)
+        self._below_grid_sol = kwargs.get("below_grid_sol", False)
 
     # ------------------------------------------------------------------
     # Data ownership: load + cache + clear
@@ -469,6 +470,7 @@ class GEMM(Operation):
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
+        below_grid_sol: bool = False,
     ):
         """Query GEMM table — preserves PR #721 exact-hit → 1D → 3D fast path."""
         # Strict eager resolution (parity with the Rust engine, which resolves
@@ -614,6 +616,12 @@ class GEMM(Operation):
             try:
                 result = perf_interp.query(config, gemm_data, m, n, k)
             except InterpolationDataNotAvailableError as exc:
+                # Opt-in: shapes outside the collected grid degrade to SOL
+                # instead of failing SILICON; exact rows win once collected.
+                # Quant-mode misses (above) stay strict, and HYBRID keeps
+                # its empirical fallback.
+                if below_grid_sol and database_mode == common.DatabaseMode.SILICON:
+                    return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -848,7 +856,7 @@ class GEMM(Operation):
         latency_floor = 0.0
 
         # Query with energy
-        result = database.query_gemm(x, self._n, self._k, quant_mode)
+        result = database.query_gemm(x, self._n, self._k, quant_mode, below_grid_sol=self._below_grid_sol)
         latency = float(result)
         energy = result.energy
         source = getattr(result, "source", "silicon")

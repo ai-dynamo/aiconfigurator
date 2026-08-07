@@ -397,6 +397,9 @@ def run_gdn_generation_benchmark(
             a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             a_log = torch.zeros(num_v_heads, dtype=torch.float32, device=device)
+            # qwen3_5.py:237-239 @0.5.14 creates dt_bias with no explicit dtype
+            # (model dtype); the kernel upcasts it on load
+            # (fused_sigmoid_gating_recurrent.py:154-160).
             dt_bias = torch.ones(num_v_heads, dtype=dtype, device=device)
             output = torch.empty(
                 batch_size,

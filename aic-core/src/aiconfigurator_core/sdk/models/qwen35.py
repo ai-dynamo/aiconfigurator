@@ -171,7 +171,8 @@ class Qwen35Model(BaseModel):
                 [
                     ops.ElementWise("context_gdn_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("context_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
-                    ops.GEMM("context_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q),
+                    # 2*nv/tp drops below the collected GEMM n-grid at high TP.
+                    ops.GEMM("context_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q, below_grid_sol=True),
                     ops.GDNKernel(
                         "context_gdn_conv1d",
                         c,
@@ -264,7 +265,8 @@ class Qwen35Model(BaseModel):
         fused_gate = self._sglang_fused_shared_gate()
         ops_list = []
         if not fused_gate:
-            # Scalar expert gate (ReplicatedLinear hidden->1).
+            # Scalar expert gate (ReplicatedLinear hidden->1); n=1 sits below
+            # the collected GEMM n-grid.
             ops_list.append(
                 ops.GEMM(
                     f"{prefix}_shared_expert_gate_gemm",
@@ -273,6 +275,7 @@ class Qwen35Model(BaseModel):
                     h,
                     common.GEMMQuantMode.bfloat16,
                     scale_num_tokens=scale_num_tokens,
+                    below_grid_sol=True,
                 )
             )
         ops_list.extend(
@@ -466,7 +469,7 @@ class Qwen35Model(BaseModel):
                 [
                     ops.ElementWise("generation_gdn_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
-                    ops.GEMM("generation_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q),
+                    ops.GEMM("generation_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q, below_grid_sol=True),
                     ops.GDNKernel(
                         "generation_gdn_conv1d",
                         c,
