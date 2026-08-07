@@ -6,6 +6,7 @@
 import json
 import os
 import sys
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -265,3 +266,26 @@ class TestBundledConfigRefresh:
     def test_norm_cache_key_requires_config_json(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             config_norm_cache_key(str(tmp_path))
+
+    def test_concurrent_materialization_from_threads_is_safe(self, isolated_tmp, tmp_path, monkeypatch):
+        # Staging dirs must be unique per invocation, not per pid: threads
+        # share a pid, and a shared staging path would let one thread rename
+        # the directory out from under another mid-write.
+        self._bundle(tmp_path, monkeypatch, "fake-org--threads", {"model_type": "fake", "rev": 1})
+        results, errors = [], []
+
+        def resolve():
+            try:
+                results.append(_resolve_local_model_path("fake-org/threads"))
+            except Exception as e:  # pragma: no cover - the assertion below reports it
+                errors.append(e)
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert len(set(results)) == 1  # all threads converge on one snapshot
+        with open(os.path.join(results[0], "config.json")) as f:
+            assert json.load(f)["rev"] == 1
