@@ -91,6 +91,7 @@ model_case_values:
       num_v_heads: 32
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    # 122B/397B attention declares TP32, but num_k_heads=16 cannot shard 32 ways — no TP32 GDN geometry.
     - model_path: Qwen/Qwen3.5-122B-A10B
       d_model: 3072
       d_conv: 4
