@@ -247,11 +247,12 @@ class Qwen35Model(BaseModel):
         return self._backend_name == "sglang" and self.config.moe_backend == "deepep_moe"
 
     def _shared_expert_ops(self, prefix, count, h, tp, gemm_q, cfg: common.Qwen35Config, *, scale_num_tokens=1):
-        """Shared-expert block: scalar gate + gated-SiLU MLP (Qwen2MoeMLP) with
-        a fused gate_up projection. DeepEP replicates the shared expert across
-        ranks (tp_size=1) instead of TP-sharding it; in context it then runs on
-        the attn-TP scattered token slice (scale_num_tokens=tp, the
-        WideEPDeepSeekModel precedent)."""
+        """Shared-expert branch: scalar gate + gated-SiLU MLP with a fused
+        gate_up projection, ending in sigmoid(gate) * output (the gate is
+        applied inside the branch, so the whole branch overlaps with the
+        routed path). DeepEP replicates the shared expert across ranks
+        (tp_size=1) and runs it on the attn-TP scattered token slice in
+        context."""
         if self._sglang_deepep():
             tp = 1
         return [
@@ -289,10 +290,19 @@ class Qwen35Model(BaseModel):
                 low_precision_input=True,
                 scale_num_tokens=scale_num_tokens,
             ),
+            # sigmoid(expert gate) * shared output.
+            ops.ElementWise(
+                f"{prefix}_shared_expert_gate_mul",
+                count,
+                h,
+                h,
+                0.8,
+                scale_num_tokens=scale_num_tokens,
+            ),
         ]
 
     def _shared_merge_op(self, prefix, count, h, *, scale_num_tokens=1):
-        # sigmoid(expert gate) * shared output + routed output.
+        # Final add of routed and gated shared outputs (after the streams join).
         return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8, scale_num_tokens=scale_num_tokens)
 
     def _ffn_context_ops(
@@ -583,10 +593,9 @@ class Qwen35Model(BaseModel):
             shared_ops = (
                 self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
             )
-            # vLLM decode (aux-stream shared experts, <=256 tokens per rank)
-            # and sglang CUDA-graph decode (forward_normal_dual_stream) run
-            # shared and routed experts on parallel streams; sglang DeepEP
-            # runs them serially.
+            # vLLM and sglang decode run shared and routed experts on
+            # parallel CUDA streams (vLLM only up to 256 tokens per rank —
+            # modeled as always overlapped); sglang DeepEP runs them serially.
             if shared_ops and self._backend_name in ("vllm", "sglang") and not self._sglang_deepep():
                 ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
             else:

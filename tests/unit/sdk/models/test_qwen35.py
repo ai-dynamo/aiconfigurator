@@ -103,6 +103,7 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
             f"{prefix}_shared_gate_up_gemm",
             f"{prefix}_shared_act_gate",
             f"{prefix}_shared_down_gemm",
+            f"{prefix}_shared_expert_gate_mul",
             f"{prefix}_shared_merge",
         ]
         indices = [context_names.index(name) for name in expected_order]
@@ -124,6 +125,7 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
             f"{prefix}_shared_gate_up_gemm",
             f"{prefix}_shared_act_gate",
             f"{prefix}_shared_down_gemm",
+            f"{prefix}_shared_expert_gate_mul",
         ]
         assert f"{prefix}_shared_merge" in generation_ops
 
