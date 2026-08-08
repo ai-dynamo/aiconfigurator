@@ -437,9 +437,13 @@ impl Engine {
     }
 
     /// One mixed (chunked-prefill + decode) step latency. LITERAL mirror of
-    /// Python `_get_mix_step_latency` (`base_backend.py:925-1050`), which
-    /// composes three `run_static` calls and filters the per-op breakdown by
-    /// name:
+    /// Python `_get_mix_step_latency` / `run_mixed`, which composes three
+    /// filtered phase passes (`_run_context_phase` / `_run_generation_phase`
+    /// with `op_filter`) that query ONLY the ops each pass consumes — the
+    /// same name-keyed sets the `ContextOpFilter` /
+    /// `only_generation_attention` walks below visit (issue #1498
+    /// follow-through: Python used to run the full lists and discard, so a
+    /// raise in a discarded query was a one-sided error surface):
     ///
     /// ```text
     /// // Pass 1 — combined non-attention work:

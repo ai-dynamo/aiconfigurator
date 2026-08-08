@@ -1520,12 +1520,14 @@ CP_CASES = [
 # Rust was the original 34% static_ctx divergence). isl=8192 pins the
 # adjudicated repro shape.
 #
-# Kept OFF the mixed surface (its own `cp_static_ctx` list): the mix-step
-# decode pass trips a PRE-EXISTING asymmetry unrelated to #1498 — Python's
-# `run_mixed` pass 3 queries the generation MoE at num_tokens=1 and fails
-# loud on the singleton low-token underflow, while the rust mixed step does
-# not evaluate the generation MoE there (static_gen errors symmetrically on
-# both engines, so the gap is confined to the mixed orchestration).
+# Anchored on BOTH the `cp_static_ctx` surface (the adjudicated static repro,
+# 42.430756 ms) and the mixed surface. The mixed anchor additionally pins the
+# `run_mixed` pass-filter fix: Python's passes used to run the FULL op lists
+# and discard the non-consumed values, so the generation-MoE singleton
+# low-token miss in pass 3 (num_tokens=1, one measured point at 1024) raised
+# on the Python side only, while the rust mixed step never queries the ops it
+# does not consume. With the passes filtered to their consumed sets the case
+# computes bit-identically on both engines (46.0492671363915 ms).
 DSV4_CP_CASES = [
     pytest.param(
         EngineStepParityCase(
@@ -1549,7 +1551,7 @@ DSV4_CP_CASES = [
 class TestRustEngineStepCpMixedStepParity:
     """CP parity on the mix-step surface (CP ops run in the prefill chunk)."""
 
-    @pytest.mark.parametrize("case", CP_CASES)
+    @pytest.mark.parametrize("case", [*CP_CASES, *DSV4_CP_CASES])
     def test_cp_parity(
         self,
         case: EngineStepParityCase,
@@ -1958,7 +1960,7 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SMOKE_CASES, ENGINE_STEP_SURFACES),
     (POWER_CASES, ENGINE_STEP_SURFACES),
     (CP_CASES, ("mixed",)),
-    (DSV4_CP_CASES, ("cp_static_ctx",)),
+    (DSV4_CP_CASES, ("cp_static_ctx", "mixed")),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
     (TIE_AGG_CASES, ("agg",)),
