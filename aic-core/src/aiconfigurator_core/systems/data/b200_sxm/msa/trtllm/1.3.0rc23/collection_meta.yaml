@@ -10,6 +10,24 @@
 # (serving-unreachable, see collect_msa_module FIXME) and 54 ctx bare
 # AssertionErrors clustered at small-seq/large-batch shapes (s<=32,
 # b>=64; 0.9% of plan, classified; serving-parity audit pending).
+#
+# KNOWN ISSUES at rc23 (root-caused 2026-08-08, tracking issue #1509;
+# both fixed on upstream main -> re-collect on the next trtllm rc):
+# 1. Generation rows carry a full-index-K-pool copy per forward
+#    (msa_utils.cache_view_to_msa_paged@1.3.0rc23; 92% of the
+#    b=256 kv=65536 point, ~35 ns/pool-page). The copy is serving
+#    behavior in kind, but its magnitude scales with the collector's
+#    pool allocation (2x headroom in collect_msa_module) — see the
+#    NOTE(pool-size-dependent latency) at the allocation site.
+# 2. Context rows are eager-measured (rc23 MSA prefill is host-bound
+#    and CUDA-graph-uncapturable: inline fmha_sm100 planning does
+#    pageable H2D + .tolist() syncs). They include real per-layer host
+#    time AND campaign CPU contention from 8 concurrent workers —
+#    clean single-worker reruns measure ~2x lower on host-bound shapes
+#    (e.g. ctx b=1 s=16384 bf16: 15.9 shipped vs 7.6 solo), and
+#    sibling gemm-type rows of identical attention shapes vary widely.
+#    Kernel-truth floors (graph-captured diagnostic runs): ctx b=2
+#    s=512 0.53ms / b=1 s=16384 6.57ms / b=8 s=4096 12.38ms.
 schema_version: 1
 provenance: collected
 runtime:
