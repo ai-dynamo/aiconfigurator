@@ -1466,16 +1466,6 @@ mod tests {
         }
     }
 
-    /// Cross-language parity with the Python v2 engine on the real
-    /// b200_sxm/sglang/0.5.10 tables. Oracle values generated with
-    /// `PYTHONPATH=src AIC_DSV4_TOPK_CORRECTION=0 python3` via
-    /// `PerfDatabase.query_{context,generation}_deepseek_v4_attention_module`
-    /// (DatabaseMode.SILICON, shared layer off, DSV4-Pro dims with rank-local
-    /// num_heads=16 / o_groups=2). Covers, per phase: exact hit, interior
-    /// blend, and util-hold beyond the collected range (incl. the ragged
-    /// batch row and the step=0-only prefix axis).
-    // NOTE: oracle minted post (native, local) head-identity rekey + first-wins
-    // shared-layer merge; regenerate from the Python engine if this fails.
     #[test]
     fn dsv4_stale_native_semantics_guard() {
         // Mirrors Python `_validate_dsv4_local_head_semantics` (#1429): a
@@ -1502,6 +1492,22 @@ mod tests {
         validate_dsv4_local_head_semantics(&observed(&[(16, 8)])).unwrap();
     }
 
+    /// Cross-language parity with the Python v2 engine on the real
+    /// b200_sxm/sglang/0.5.10 tables. Oracle values generated with
+    /// `PYTHONPATH=src AIC_DSV4_TOPK_CORRECTION=0 python3` via
+    /// `PerfDatabase.query_{context,generation}_deepseek_v4_attention_module`
+    /// (DatabaseMode.SILICON, shared layer off, DSV4-Pro dims with
+    /// native_heads=128 / rank-local num_heads=16 / o_groups=2).
+    ///
+    /// Under the #1429 `[native][local]` keying the resolved `[128][16]`
+    /// slices carry only two collected leaves per phase (ctx: b=1,
+    /// s in {128, 129}; gen: b=2, s in {257, 385}), so apart from the ctx
+    /// (b=1, isl=128) exact hits every case below resolves via the
+    /// past-frontier joint-log2 util-hold (two leaves -> the taper's
+    /// support radius is infinite and the weights are plain inverse-distance).
+    // NOTE: oracle minted post (native, local) head-identity rekey +
+    // first-wins shared-layer merge + tapered grid hold; regenerate from the
+    // Python engine if this fails.
     #[test]
     fn dsv4_query_matches_python_v2_engine() {
         let root = b200_sglang_root();
@@ -1530,25 +1536,28 @@ mod tests {
                 "rust {got} vs python {want}"
             );
         };
-        // Context CSA: exact / interior isl / interior batch / isl util-hold /
-        // prefix util-hold (step axis has only the 0 anchor).
-        approx(q_ctx(AttnKind::Csa, 8, 512, 0), 2.4552209880967863);
-        approx(q_ctx(AttnKind::Csa, 8, 768, 0), 3.7488711534171295);
-        approx(q_ctx(AttnKind::Csa, 12, 512, 0), 3.6828314821451786);
-        approx(q_ctx(AttnKind::Csa, 8, 8192, 0), 56.7002185298143);
-        approx(q_ctx(AttnKind::Csa, 8, 512, 1024), 2.732701201869626);
-        // Context HCA: exact / isl util-hold.
+        // Context CSA: all five shapes sit past the two-leaf frontier
+        // (batch and/or isl and/or prefix beyond b=1, s<=129, step=0), so
+        // each resolves via the tapered util-hold on the context SOL.
+        approx(q_ctx(AttnKind::Csa, 8, 512, 0), 2.420168121549068);
+        approx(q_ctx(AttnKind::Csa, 8, 768, 0), 3.6953556020458156);
+        approx(q_ctx(AttnKind::Csa, 12, 512, 0), 3.630231679486889);
+        approx(q_ctx(AttnKind::Csa, 8, 8192, 0), 55.89053506569064);
+        approx(q_ctx(AttnKind::Csa, 8, 512, 1024), 2.693620664767868);
+        // Context HCA: exact hit at the collected (b=1, isl=128) leaf /
+        // isl+batch tapered util-hold.
         approx(q_ctx(AttnKind::Hca, 1, 128, 0), 0.1104);
-        approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 24.650714380395996);
-        // Generation CSA: exact / interior s / s util-hold / ragged batch.
+        approx(q_ctx(AttnKind::Hca, 8, 8192, 0), 24.400787721796174);
+        // Generation CSA: b=16 (and b=15) exceed the collected b=2 rows, so
+        // every case is a tapered util-hold on the decode SOL.
         // Util-hold oracle regenerated post-#1337: the generation SOL now
         // derives its fmha dtype from the kv dtype (fp8 here), not the label.
-        approx(q_gen(AttnKind::Csa, 16, 385), 0.141233770260747);
-        approx(q_gen(AttnKind::Csa, 16, 200), 0.13999621051889455);
-        approx(q_gen(AttnKind::Csa, 16, 100000), 0.19366927296217995);
-        approx(q_gen(AttnKind::Csa, 15, 385), 0.1410099295278365);
+        approx(q_gen(AttnKind::Csa, 16, 385), 0.14096129656201914);
+        approx(q_gen(AttnKind::Csa, 16, 200), 0.14026034674381602);
+        approx(q_gen(AttnKind::Csa, 16, 100000), 0.19331215178685213);
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1407382148927009);
         // Generation HCA.
-        approx(q_gen(AttnKind::Hca, 16, 385), 0.08636927786280785);
+        approx(q_gen(AttnKind::Hca, 16, 385), 0.08631992189686928);
     }
 
     /// Parity regression for the DeepSeek-V4-Pro b200_sxm/sglang/0.5.10 lookup.
@@ -1556,12 +1565,13 @@ mod tests {
     /// resolve to the Pro (native 128) bucket's tp8 slice (Python
     /// `_dsv4_resolve_head_axes`).
     /// Oracle values regenerated from the Python v2 engine (perf_interp):
-    /// exact grid points return the measured leaves; the ragged
-    /// `q_gen(Csa, 15, 385)` row now resolves through the engine
-    /// (single-survivor SOL-ratio correction) instead of the deleted
-    /// batch-scaling fallback.
-    // NOTE: oracle minted post (native, local) head-identity rekey + first-wins
-    // shared-layer merge; regenerate from the Python engine if this fails.
+    /// the resolved `[128][16]` gen slices collect only b=2 (s in {257, 385}),
+    /// so the b=16 and ragged b=15 rows resolve via the past-frontier tapered
+    /// util-hold (the deleted batch-scaling fallback returned 0.19556 for the
+    /// ragged row); the ctx (b=1, isl=128) lookups are exact collected leaves.
+    // NOTE: oracle minted post (native, local) head-identity rekey +
+    // first-wins shared-layer merge + tapered grid hold; regenerate from the
+    // Python engine if this fails.
     #[test]
     fn dsv4_pro_head_resolution_and_ragged_generation() {
         let root = b200_sglang_root();
@@ -1590,13 +1600,14 @@ mod tests {
                 "rust {got} vs python {want}"
             );
         };
-        // local=16 resolves to head-64; b=16/s=385 is an exact grid point.
-        approx(q_gen(AttnKind::Csa, 16, 385), 0.141233770260747);
-        approx(q_gen(AttnKind::Hca, 16, 385), 0.08636927786280785);
-        // RAGGED batch row: engine semantics (regenerated from Python v2;
+        // (native=128, local=16) resolves to the [128][16] slice; b=16 is
+        // past its collected b=2 rows -> tapered util-hold.
+        approx(q_gen(AttnKind::Csa, 16, 385), 0.14096129656201914);
+        approx(q_gen(AttnKind::Hca, 16, 385), 0.08631992189686928);
+        // RAGGED batch row: same tapered util-hold (regenerated from Python v2;
         // the deleted batch-scaling fallback returned 0.19556 here).
-        approx(q_gen(AttnKind::Csa, 15, 385), 0.1410099295278365);
-        // Context single-anchor lookups.
+        approx(q_gen(AttnKind::Csa, 15, 385), 0.1407382148927009);
+        // Context exact hits at the collected (b=1, isl=128) leaves.
         approx(q_ctx(AttnKind::Csa, 1, 128), 0.1659);
         approx(q_ctx(AttnKind::Hca, 1, 128), 0.1104);
     }
@@ -1738,12 +1749,16 @@ mod tests {
     /// but differ in (hidden, q_lora, index_topk, o_groups, native heads),
     /// so a Flash op spec must yield a DIFFERENT beyond-grid hold. Synthetic
     /// HCA table {isl 1024: 1.0, 2048: 2.0} at (n=64, b=1, step=0); querying
-    /// isl=8192 holds at the isl=2048 anchor:
-    /// `hold = 2.0 * sol(8192) / sol(2048)`. Oracles hand-computed from the
-    /// Python formula:
+    /// isl=8192 is past the frontier, so the hold blends util from the
+    /// nearest measured leaves in joint log2 space (two leaves -> the
+    /// taper's support radius is infinite, i.e. plain inverse-distance^2;
+    /// d=3 octaves to isl=1024, d=2 to isl=2048):
+    /// `hold = sol(8192) / idw2_blend(sol(1024)/1.0, sol(2048)/2.0)`.
+    /// Oracles hand-computed from the Python formula:
     ///
     /// ```text
     /// PYTHONPATH=src python3 -c "
+    /// import math
     /// from aiconfigurator.sdk.perf_database import PerfDatabase
     /// from aiconfigurator.sdk.operations.dsv4 import _deepseek_v4_attention_sol
     /// from aiconfigurator.sdk import common
@@ -1758,8 +1773,12 @@ mod tests {
     ///         fmha_quant_mode=common.FMHAQuantMode.bfloat16,
     ///         gemm_quant_mode=common.GEMMQuantMode.fp8_block)[0]
     /// for name, hidden, qlr, topk in [('flash',4096,1024,512), ('pro',7168,1536,1024)]:
-    ///     print(name, repr(2.0 * sol(8192, hidden, qlr, topk) / sol(2048, hidden, qlr, topk)))"
-    /// # -> flash 8.17467016968122 / pro 8.131309314148407
+    ///     scored = [(abs(math.log2(isl) - math.log2(8192)), sol(isl, hidden, qlr, topk) / lat)
+    ///               for isl, lat in [(1024, 1.0), (2048, 2.0)]]
+    ///     wsum = sum(1 / (d * d + 1e-12) for d, _ in scored)
+    ///     util = sum(u / (d * d + 1e-12) for d, u in scored) / wsum
+    ///     print(name, repr(sol(8192, hidden, qlr, topk) / util))"
+    /// # -> flash 8.190924981120823 / pro 8.143458149525658
     /// ```
     ///
     /// The old pinned-dims code returned the PRO hold for the Flash spec.
@@ -1823,11 +1842,11 @@ mod tests {
                 "rust {got} vs python {want}"
             );
         };
-        // isl=8192 is beyond the frontier -> util-hold on the SOL ratio.
+        // isl=8192 is beyond the frontier -> tapered util-hold on the SOL ratio.
         let flash_hold = q(Some(flash.sol_dims()), 8192);
         let pro_hold = q(None, 8192); // pinned default (old specs / direct queries)
-        approx(flash_hold, 8.17467016968122);
-        approx(pro_hold, 8.131309314148407);
+        approx(flash_hold, 8.190924981120823);
+        approx(pro_hold, 8.143458149525658);
         assert!(
             (flash_hold - pro_hold).abs() > 1e-3,
             "Flash dims must change the hold ({flash_hold} vs {pro_hold})"

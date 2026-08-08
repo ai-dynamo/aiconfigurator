@@ -871,16 +871,20 @@ mod tests {
         let db = b200_vllm_db();
         let op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
         // b=32 isl+step=2 n=64 n_kv=4. The query averages 5 interp samples
-        // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the densified grid,
-        // matching Python's `_query_generation_attention_table`. Verified
-        // against `PerfDatabase.query_generation_attention` (= 0.0086442669).
+        // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the raw grid,
+        // matching Python's `_query_generation_attention_table`; s=1 sits
+        // below the collected range, so it resolves via the past-frontier
+        // hold (util blended from the nearest measured leaves in joint log2
+        // space). Verified against
+        // `PerfDatabase.query_generation_attention(32, 2, 64, 4, fp8,
+        // SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
         let result = op
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
         assert!(
-            // Python v2 engine value (raw table, no densified lattice); the
-            // pre-perf_interp expectation was 0.008644266923268636.
-            (result.latency_ms - 0.008451361751014535).abs() < 1e-9,
+            // Python v2 engine value (tapered past-frontier hold); the
+            // nearest-path-snap expectation was 0.008451361751014535.
+            (result.latency_ms - 0.009131092737966444).abs() < 1e-9,
             "expected 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );

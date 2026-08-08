@@ -1124,10 +1124,11 @@ class MoEDispatch(Operation):
             else:
                 data = node_data
                 # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
-                # off-grid sms snaps to the nearest collected value (the legacy
-                # 2-D scattered interp simply failed on a single-sms cloud);
-                # tokens use the linear proxy SOL (see the DeepEP ll note; SOL is
-                # constant in sms — no data supports an sms scaling story yet).
+                # off-grid sms resolves through the hold path (joint-log kNN
+                # util transfer; the legacy 2-D scattered interp simply failed
+                # on a single-sms cloud); tokens use the linear proxy SOL (see
+                # the DeepEP ll note; SOL is constant in sms — no data supports
+                # an sms scaling story yet).
                 config = perf_interp.OpInterpConfig(
                     axes=("sms", "num_tokens"),
                     resolver=perf_interp.Grid(),
