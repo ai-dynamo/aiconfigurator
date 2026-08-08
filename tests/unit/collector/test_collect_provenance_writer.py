@@ -134,7 +134,10 @@ def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_pa
     assert table["collector_hash"].startswith("sha256:")
 
 
-def test_status_partial_when_checkpoint_has_unresolved_failures(tmp_path):
+def test_status_complete_with_recorded_case_failures(tmp_path):
+    """Recorded per-case failures are DATA and do not demote the table
+    (owner decision tianhaox 2026-08-08, PR #1486) — the failed case still
+    participates in case_plan_hash as an attempted case."""
     output_root = tmp_path / "out"
     parquet_path = output_root / "gemm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
@@ -153,7 +156,7 @@ def test_status_partial_when_checkpoint_has_unresolved_failures(tmp_path):
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
     table = doc["tables"]["gemm_perf"]
-    assert table["status"] == provenance.STATUS_PARTIAL
+    assert table["status"] == provenance.STATUS_COMPLETE
     assert table["case_plan_hash"] == provenance.case_plan_hash(["case-a", "case-b"])
 
 
