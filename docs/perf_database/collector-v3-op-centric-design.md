@@ -196,10 +196,17 @@ tables:
   declared shared dependencies (e.g. `helper.py`, the family's
   `cases/base_ops/*.yaml`); it is content-based, so it survives rebases.
 - `status` is derived, never asserted: at finalize the collector marks a table
-  `complete` iff its producing ops' checkpoints hold zero unresolved failed
-  cases and no module-level collection failure was recorded — anything else is
-  `partial`. The run's observed failure records are the only input; the mere
-  presence of provenance fields implies nothing about coverage.
+  `complete` iff no module-level collection failure was recorded for its
+  producing ops — anything else is `partial`. Recorded per-case failures do
+  NOT demote the table (owner decision tianhaox 2026-08-08, PR #1486):
+  failure_handling.md's doctrine is that a classified failure is DATA, and
+  deterministic framework limits (sweep-extreme OOM, kernel grid caps) land
+  in the failure log by design. The anti-false-success guarantees live
+  elsewhere: a run that dies mid-way never finalizes (parquet without a
+  matching `tables` entry fails the §8 coverage gate and strict loading),
+  and an op that produced zero rows demotes via the module-failure flag. The
+  run's observed failure records remain the only input; the mere presence of
+  provenance fields implies nothing about coverage.
   `case_plan_hash` attests the case set the run actually attempted, so a
   filtered subset/healing run stays distinguishable from a full-plan run even
   when both finish `complete`.
