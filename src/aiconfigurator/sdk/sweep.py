@@ -48,7 +48,7 @@ from aiconfigurator.sdk.errors import (
 )
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import PerfDatabase
-from aiconfigurator.sdk.picking import worker_gpus
+from aiconfigurator.sdk.picking import parallel_dim, worker_gpus
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
@@ -168,7 +168,7 @@ def _rate_match_dict(
         "(p)dp": p["dp"],
         "(p)moe_tp": p["moe_tp"],
         "(p)moe_ep": p["moe_ep"],
-        "(p)cp": p.get("cp", 1),
+        "(p)cp": parallel_dim(p.get("cp")),
         "(p)parallel": p["parallel"],
         "(p)gemm": p["gemm"],
         "(p)kvcache": p["kvcache"],

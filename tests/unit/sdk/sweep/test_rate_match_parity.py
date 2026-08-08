@@ -223,3 +223,56 @@ class TestWorkerGpus:
         from aiconfigurator.sdk.picking import worker_gpus
 
         assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "num_total_gpus": float("nan")}) == 2
+
+    def test_nan_dim_in_fallback_counts_as_one(self):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        # Schema-materialized legacy rows NaN-fill dims they predate.
+        assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "cp": float("nan")}) == 2
+
+
+class TestSchemaMaterializedRows:
+    """Legacy rows round-tripped through the schema column lists NaN-fill the
+    dims they predate; composing and rendering them must not crash (#1477
+    review): ``NaN or 1`` does not normalize because NaN is truthy."""
+
+    @staticmethod
+    def _materialize(d: dict, columns) -> dict:
+        import pandas as pd
+
+        return pd.DataFrame([d], columns=list(columns)).to_dict("records")[0]
+
+    def test_compose_and_render_schema_materialized_legacy_rows(self):
+        import pandas as pd
+
+        from aiconfigurator.cli.report_and_save import _plot_worker_setup_table
+        from aiconfigurator.sdk import common
+
+        # Legacy per-worker rows: no cp key; num_total_gpus authoritative.
+        p = self._materialize(_make_prefill_dict(tp=4, num_total_gpus=4), common.ColumnsStatic)
+        d = self._materialize(_make_decode_dict(tp=2, num_total_gpus=2), common.ColumnsStatic)
+        assert p["cp"] != p["cp"], "expected schema materialization to NaN-fill cp"
+
+        for result in (_rate_match_dict(p, 1, d, 1), _build_disagg_summary_dict(p, 1, d, 1)):
+            assert result["num_total_gpus"] == 4 + 2
+            assert result["(p)cp"] == 1  # normalized, not NaN
+
+        # A fully legacy composed row (e.g. reloaded CSV predating (p)cp)
+        # must still render: (p)cp materializes as NaN.
+        row = _rate_match_dict(p, 1, d, 1)
+        row.pop("(p)cp")
+        row = self._materialize(row, [*common.ColumnsDisagg, "backend", "replicas"])
+        row["backend"] = "trtllm"
+        row["replicas"] = 1
+        assert row["(p)cp"] != row["(p)cp"], "expected NaN-filled (p)cp"
+        out = _plot_worker_setup_table(
+            "disagg",
+            pd.DataFrame([row]),
+            total_gpus=8,
+            tpot_target=30.0,
+            top=5,
+            is_moe=False,
+            request_latency_target=None,
+            show_power=False,
+        )
+        assert "6 (=1x4+1x2)" in out.replace("\x1b[4m", "").replace("\x1b[0m", "")

@@ -44,6 +44,19 @@ _AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
 WORKER_GPU_DIMS = ("tp", "pp", "dp", "cp")
 
 
+def parallel_dim(value: object, default: int = 1) -> int:
+    """Normalize a parallelism-dimension cell to a positive int.
+
+    Rows materialized through the schema column lists NaN-fill dimensions
+    they predate (e.g. ``cp`` / ``(p)cp``), and ``NaN or default`` does not
+    catch that because NaN is truthy — so missing / None / NaN / non-positive
+    all normalize to ``default`` here.
+    """
+    if isinstance(value, (int, float)) and value == value and value > 0:  # value == value filters NaN
+        return int(value)
+    return default
+
+
 def worker_gpus(summary_dict: dict) -> int:
     """GPUs occupied by one worker, from a ``ColumnsStatic``-style row dict.
 
@@ -52,12 +65,12 @@ def worker_gpus(summary_dict: dict) -> int:
     back to the ``WORKER_GPU_DIMS`` product for partial dicts that predate
     the column.
     """
-    n = summary_dict.get("num_total_gpus")
-    if isinstance(n, (int, float)) and n == n and n > 0:  # n == n filters NaN
-        return int(n)
+    n = parallel_dim(summary_dict.get("num_total_gpus"), default=0)
+    if n:
+        return n
     gpus = 1
     for dim in WORKER_GPU_DIMS:
-        gpus *= int(summary_dict.get(dim) or 1)
+        gpus *= parallel_dim(summary_dict.get(dim))
     return gpus
 
 
@@ -149,7 +162,7 @@ def _build_disagg_summary_dict(
         "(p)dp": prefill_summary_dict["dp"],
         "(p)moe_tp": prefill_summary_dict["moe_tp"],
         "(p)moe_ep": prefill_summary_dict["moe_ep"],
-        "(p)cp": prefill_summary_dict.get("cp", 1),
+        "(p)cp": parallel_dim(prefill_summary_dict.get("cp")),
         "(p)parallel": prefill_summary_dict["parallel"],
         "(p)gemm": prefill_summary_dict["gemm"],
         "(p)kvcache": prefill_summary_dict["kvcache"],

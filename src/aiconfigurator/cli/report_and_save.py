@@ -24,7 +24,7 @@ from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
-from aiconfigurator.sdk.picking import WORKER_GPU_DIMS
+from aiconfigurator.sdk.picking import WORKER_GPU_DIMS, parallel_dim
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
 
@@ -87,7 +87,7 @@ def _composed_worker_gpus(row: dict, role: str) -> int:
     """
     gpus = 1
     for dim in WORKER_GPU_DIMS:
-        gpus *= int(row.get(f"({role}){dim}") or 1)
+        gpus *= parallel_dim(row.get(f"({role}){dim}"))
     return gpus
 
 
@@ -251,7 +251,7 @@ def _plot_worker_setup_table(
             # the cp display factor stays hidden when cp=1 for readability.
             p_gpus = _composed_worker_gpus(row, "p")
             d_gpus = _composed_worker_gpus(row, "d")
-            p_cp = int(row.get("(p)cp") or 1)
+            p_cp = parallel_dim(row.get("(p)cp"))
             p_cp_label = f"cp{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
             p_cp_factor = f"x{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
             if is_moe:
