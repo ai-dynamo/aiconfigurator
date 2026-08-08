@@ -537,6 +537,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -574,6 +578,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -608,6 +616,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -647,10 +659,22 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
                 prefill_pp_candidates: list = field(default_factory=lambda: [1])
                 prefill_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                prefill_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                prefill_dp_candidates: list = field(default_factory=lambda: [1])
+                prefill_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                prefill_moe_ep_candidates: list = field(default_factory=lambda: [1])
                 decode_pp_candidates: list = field(default_factory=lambda: [1])
                 decode_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                decode_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                decode_dp_candidates: list = field(default_factory=lambda: [1])
+                decode_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                decode_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask(), "disagg": FakeTask(serving_mode="disagg")}
 
@@ -723,6 +747,10 @@ class TestCLIRecommendUnit:
                 serving_mode: str = "agg"
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -780,3 +808,101 @@ def test_disagg_estimate_honors_explicit_free_gpu_memory_fraction():
     assert result is not None
     with pytest.raises(RuntimeError, match="OOM"):
         cli_estimate(**common_kw, free_gpu_memory_fraction=0.001)
+
+
+class TestBuildRecommendTasksScaling:
+    """Unit tests for _build_recommend_tasks GPU candidate scaling."""
+
+    def _make_task(self, *, is_moe: bool, serving_mode: str = "agg"):
+        task = MagicMock()
+        task.serving_mode = serving_mode
+        task.agg_tp_candidates = [1, 2, 4, 8]
+        task.agg_dp_candidates = [1, 2, 4, 8]
+        task.agg_moe_tp_candidates = [1, 2, 4, 8] if is_moe else [1]
+        task.agg_moe_ep_candidates = [1, 2, 4, 8] if is_moe else [1]
+        task.prefill_tp_candidates = [1, 2, 4, 8] if serving_mode == "disagg" else None
+        task.prefill_dp_candidates = [1, 2, 4, 8] if serving_mode == "disagg" else None
+        task.prefill_moe_tp_candidates = ([1, 2, 4, 8] if is_moe else [1]) if serving_mode == "disagg" else None
+        task.prefill_moe_ep_candidates = ([1, 2, 4, 8] if is_moe else [1]) if serving_mode == "disagg" else None
+        task.decode_tp_candidates = [1, 2, 4, 8] if serving_mode == "disagg" else None
+        task.decode_dp_candidates = [1, 2, 4, 8] if serving_mode == "disagg" else None
+        task.decode_moe_tp_candidates = ([1, 2, 4, 8] if is_moe else [1]) if serving_mode == "disagg" else None
+        task.decode_moe_ep_candidates = ([1, 2, 4, 8] if is_moe else [1]) if serving_mode == "disagg" else None
+        return task
+
+    def _run(self, task, budget):
+        from unittest.mock import patch
+
+        from aiconfigurator.cli.api import _build_recommend_tasks
+
+        result_mock = MagicMock()
+        with patch("dataclasses.replace", return_value=result_mock) as mock_replace:
+            _build_recommend_tasks({"agg": task}, budget)
+            _, kwargs = mock_replace.call_args
+        return kwargs
+
+    def test_base_budget_unchanged(self):
+        task = self._make_task(is_moe=True)
+        kw = self._run(task, 8)
+        assert kw["agg_num_gpu_candidates"] == [1, 2, 4, 8]
+        assert kw["agg_tp_candidates"] == [1, 2, 4, 8]
+        assert kw["agg_moe_ep_candidates"] == [1, 2, 4, 8]
+
+    def test_moe_candidates_scale_with_budget(self):
+        task = self._make_task(is_moe=True)
+        kw = self._run(task, 64)
+        assert kw["agg_num_gpu_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_dp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_moe_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_moe_ep_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+
+    def test_dp_pinned_at_one_not_scaled(self):
+        task = self._make_task(is_moe=True)
+        task.agg_dp_candidates = [1]  # non-MoE style dp=1 only
+        kw = self._run(task, 64)
+        assert kw["agg_dp_candidates"] == [1]
+
+    def test_non_moe_moe_dims_stay_pinned(self):
+        task = self._make_task(is_moe=False)
+        kw = self._run(task, 64)
+        assert kw["agg_num_gpu_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["agg_moe_tp_candidates"] == [1]
+        assert kw["agg_moe_ep_candidates"] == [1]
+
+    def test_intermediate_budget(self):
+        task = self._make_task(is_moe=True)
+        kw = self._run(task, 32)
+        assert kw["agg_num_gpu_candidates"] == [1, 2, 4, 8, 16, 32]
+        assert kw["agg_tp_candidates"] == [1, 2, 4, 8, 16, 32]
+        assert kw["agg_moe_ep_candidates"] == [1, 2, 4, 8, 16, 32]
+
+    def test_disagg_candidates_also_scale(self):
+        task = self._make_task(is_moe=True, serving_mode="disagg")
+        kw = self._run(task, 64)
+        assert kw["prefill_num_gpu_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["prefill_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["prefill_dp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["prefill_moe_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["prefill_moe_ep_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["decode_num_gpu_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["decode_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["decode_dp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["decode_moe_tp_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+        assert kw["decode_moe_ep_candidates"] == [1, 2, 4, 8, 16, 32, 64]
+
+    def test_disagg_non_moe_pinned_dims_unchanged(self):
+        task = self._make_task(is_moe=False, serving_mode="disagg")
+        kw = self._run(task, 64)
+        assert kw["prefill_moe_ep_candidates"] == [1]
+        assert kw["decode_moe_ep_candidates"] == [1]
+
+    def test_pp_and_cp_candidates_not_scaled(self):
+        """PP and CP are not parallelism dimensions that help fit the model."""
+        task = self._make_task(is_moe=True)
+        task.agg_pp_candidates = [1]
+        task.agg_cp_candidates = [1, 2]
+        kw = self._run(task, 64)
+        assert "agg_pp_candidates" not in kw
+        assert "agg_cp_candidates" not in kw
