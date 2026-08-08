@@ -354,16 +354,37 @@ def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
 
     num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
 
+    def _extend(candidates: list[int] | None) -> list[int] | None:
+        # Only extend dimensions that are already multi-valued (max > 1).
+        # Dimensions pinned to [1] (e.g. moe_ep for non-MoE models) are left alone.
+        if not candidates or max(candidates) <= 1:
+            return candidates
+        current_max = max(candidates)
+        extra = [1 << i for i in range(current_max.bit_length(), total_gpus.bit_length() + 1) if (1 << i) <= total_gpus]
+        return sorted(set(candidates) | set(extra)) if extra else candidates
+
     rebuilt = {}
     for name, task in base_tasks.items():
         overrides = {
             "total_gpus": total_gpus,
             "agg_num_gpu_candidates": num_gpu_candidates,
+            "agg_tp_candidates": _extend(task.agg_tp_candidates),
+            "agg_dp_candidates": _extend(task.agg_dp_candidates),
+            "agg_moe_tp_candidates": _extend(task.agg_moe_tp_candidates),
+            "agg_moe_ep_candidates": _extend(task.agg_moe_ep_candidates),
         }
         if task.serving_mode == "disagg":
             overrides.update(
                 prefill_num_gpu_candidates=num_gpu_candidates,
                 decode_num_gpu_candidates=num_gpu_candidates,
+                prefill_tp_candidates=_extend(task.prefill_tp_candidates),
+                prefill_dp_candidates=_extend(task.prefill_dp_candidates),
+                prefill_moe_tp_candidates=_extend(task.prefill_moe_tp_candidates),
+                prefill_moe_ep_candidates=_extend(task.prefill_moe_ep_candidates),
+                decode_tp_candidates=_extend(task.decode_tp_candidates),
+                decode_dp_candidates=_extend(task.decode_dp_candidates),
+                decode_moe_tp_candidates=_extend(task.decode_moe_tp_candidates),
+                decode_moe_ep_candidates=_extend(task.decode_moe_ep_candidates),
             )
         rebuilt[name] = dataclasses.replace(task, **overrides)
     return rebuilt
