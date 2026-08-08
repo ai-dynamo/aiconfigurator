@@ -22,12 +22,10 @@ interprets it — closer to a compiled query plan than a compiled executable. Th
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python.
 
-- `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
-  entry point for callers in other crates. The flat `build_aic_engine(...)`
-  function remains source-compatible through the 0.10 release for existing
-  consumers and is planned for removal in version 0.11.0. Both normalize into
-  one private build request and embed a Python interpreter only for the one-time
-  compile step.
+- `AicEngineBuilder` is the Rust → Python (`compile_engine`) → Rust entry point
+  for callers in other crates. It normalizes configuration into one private
+  build request and embeds a Python interpreter only for the one-time compile
+  step.
 - The returned `AicEngine` exposes GIL-free inherent methods
   (`prefill_latency_ms`, `decode_latency_ms`) for the pure-Rust hot path, plus
   `#[pymethods]` wrappers and an FPM-aggregate `estimate_forward_pass_time_ms`
@@ -46,8 +44,11 @@ aiconfigurator-core = { version = "0.11.0", features = ["embed-python"] }
 
 Applications that embed Python in an existing host may initialize the
 interpreter themselves instead. In either case, the matching
-`aiconfigurator-core` Python wheel and its bundled data must be available to the
-embedded interpreter.
+`aiconfigurator_core` Python package and its bundled data must be available to
+the embedded interpreter. Standard deployments should install the upper
+`aiconfigurator` distribution, which supplies that package: bundled in 0.10 and
+through a pinned core-wheel dependency in split-package releases. Core-only
+consumers may install `aiconfigurator-core` directly.
 
 ```rust,no_run
 use aiconfigurator_core::{AicEngineBuilder, BackendKind};
