@@ -35,29 +35,43 @@ _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR = 0.9
 _RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
 
 
-def prefill_queueing_ttft_factor(utilization: float, service_cv2: float = 0.0) -> float:
+def prefill_queueing_ttft_factor(utilization: float, service_cv2: float = 0.0, arrival_cv2: float = 1.0) -> float:
     """Mean-TTFT multiplier for a disagg prefill worker at a given utilization.
 
-    A prefill worker running at utilization ``rho`` queues incoming prompts;
-    the M/G/1 mean waiting time (Pollaczek-Khinchine) gives
-    ``TTFT ~= t_prefill * (1 + rho * (1 + cv^2) / (2 * (1 - rho)))``, where
-    ``cv^2`` is the squared coefficient of variation of the prefill service
-    time (0 for a fixed request shape). No fitted constants: the correction
-    is evaluated at the utilization the sizing itself targets. See
-    docs/design/autoscale_ttft_correction.md.
+    G/G/1 mean waiting time (Kingman):
+    ``TTFT ~= t_prefill * (1 + rho * (ca^2 + cs^2) / (2 * (1 - rho)))``, where
+    ``rho`` is the worker's operating utilization, ``cs^2`` the squared
+    coefficient of variation of the prefill service time (0 for a fixed
+    request shape) and ``ca^2`` that of the ARRIVALS the worker sees:
+    1.0 for Poisson (single worker fed by open traffic); substantially
+    lower in fleets where a router splits traffic across x prefill workers
+    (round-robin split of Poisson -> ca^2 ~= 1/x) and/or upstream
+    concurrency caps clip bursts — which is why high-utilization
+    deployments commonly observe ~2x rather than the Poisson 5.5x.
+    See docs/design/autoscale_ttft_correction.md for the regime map.
     """
     if not 0.0 <= utilization < 1.0:
         raise ValueError("utilization must be in [0, 1)")
     if not math.isfinite(service_cv2) or service_cv2 < 0.0:
         raise ValueError("service_cv2 must be finite and >= 0")
-    return 1.0 + utilization * (1.0 + service_cv2) / (2.0 * (1.0 - utilization))
+    if not math.isfinite(arrival_cv2) or arrival_cv2 < 0.0:
+        raise ValueError("arrival_cv2 must be finite and >= 0")
+    return 1.0 + utilization * (arrival_cv2 + service_cv2) / (2.0 * (1.0 - utilization))
 
 
-# TTFT pre-correction for prefill queueing, derived at the rate-matching
-# design utilization (0.9 -> 5.5x) instead of the former hand-tuned 1.8
-# (which corresponds to rho ~= 0.62). Override via
-# Task.autoscale_ttft_correction_factor to pin a different operating point.
-_AUTOSCALE_TTFT_CORRECTION_FACTOR = prefill_queueing_ttft_factor(_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR)
+# TTFT pre-correction for prefill queueing under concurrency. The value 1.8
+# is UNCHANGED from the legacy constant, now with provenance: it matches the
+# Kingman factor for a high-utilization worker behind router-regularized
+# arrivals (e.g. rho~=0.9 with ca^2~=0.18 — fleets commonly observe ~2x at
+# high utilization), equivalently a Poisson-fed worker at rho~=0.62. It is
+# deliberately NOT derived from the rate-matching degradation factor above:
+# that 0.9 is a THROUGHPUT capacity derate and stays in rate matching —
+# reusing it as a sustained queueing utilization double-counts (a
+# Poisson-fed worker at rho=0.9 would imply 5.5x, contradicted by fleet
+# observations). Pin a different operating point via
+# Task.autoscale_ttft_correction_factor or compute one with
+# prefill_queueing_ttft_factor.
+_AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
 
 
 # ---------------------------------------------------------------------------

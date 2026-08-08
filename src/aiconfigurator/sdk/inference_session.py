@@ -676,9 +676,9 @@ class DisaggInferenceSession:
             #    "1.x" is an empirical value. Default is 1.1.
 
             # only ttft is corrected here (other latency/throughput are not):
-            # M/G/1 queueing multiplier at the rate-matching design
-            # utilization — see picking.prefill_queueing_ttft_factor and
-            # docs/design/autoscale_ttft_correction.md.
+            # prefill queueing multiplier — see
+            # picking.prefill_queueing_ttft_factor and
+            # docs/design/autoscale_ttft_correction.md for provenance.
             correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
             prefill_candidates = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * correction_factor)
 

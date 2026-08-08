@@ -364,9 +364,7 @@ def test_sweep_disagg_kwargs_shape():
     # Rate-match degradation and autoscale TTFT correction defaults flow through.
     assert kwargs["rate_matching_prefill_degradation"] == 0.9
     assert kwargs["rate_matching_decode_degradation"] == 0.92
-    # None flows through; sweep_disagg resolves it to the derived M/G/1
-    # factor at the rate-matching design utilization (see picking)
-    assert kwargs["autoscale_ttft_correction_factor"] is None
+    assert kwargs["autoscale_ttft_correction_factor"] == 1.8
 
 
 def test_sweep_disagg_require_same_tp_sglang_non_wideep():
