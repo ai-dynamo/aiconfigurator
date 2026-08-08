@@ -158,6 +158,7 @@ mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+pub mod msa;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
@@ -174,6 +175,7 @@ pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
+pub use msa::MsaTable;
 pub use state_space::StateSpaceTable;
 pub use wideep::WideEpTable;
 pub use wideep_mla::WideEpMlaTable;
@@ -195,6 +197,7 @@ pub struct PerfTables {
     pub moe: MoeTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
+    pub msa: MsaTable,
     pub dsv4: Dsv4Table,
     pub dsv4_megamoe: Dsv4MegaMoeTable,
     pub mhc: MhcTable,
@@ -339,6 +342,7 @@ impl PerfDatabase {
                 perf_db_sources,
             ),
             dsa: DsaTable::with_sources(data_root.clone(), perf_db_sources),
+            msa: MsaTable::with_sources(data_root.clone(), perf_db_sources),
             dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
             // Single-primary by design: the Python MegaMoE loader reads one
             // unified path and never the shared-layer source list (see

@@ -175,6 +175,7 @@ _CONTEXT_FMHA_OP_TABLES: dict[str, tuple[str, ...]] = {
     "context_mla": ("_context_mla_data", "_context_mla_module_data"),
     "context_mla_granular": ("_context_mla_data",),
     "dsa_context_module": ("_context_dsa_module_data",),
+    "msa_context_module": ("_context_msa_module_data",),
     "deepseek_v4_context_module": ("_context_deepseek_v4_attention_module_data",),
 }
 
@@ -1463,6 +1464,12 @@ from aiconfigurator_core.sdk.operations.moe import (  # noqa: F401
     load_wideep_generation_moe_data,
     load_wideep_moe_compute_data,
 )
+from aiconfigurator_core.sdk.operations.msa import (  # noqa: F401
+    DEFAULT_MSA_ARCHITECTURE,
+    MSA_MODEL_DIMS,
+    load_context_msa_module_data,
+    load_generation_msa_module_data,
+)
 
 
 class LoadedOpData(UserDict):
@@ -1556,6 +1563,8 @@ class _LazySupportMatrix:
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
+            "msa_context_module",
+            "msa_generation_module",
             "deepseek_v4_context_module",
             "deepseek_v4_generation_module",
             "mla_bmm",
@@ -1576,6 +1585,8 @@ class _LazySupportMatrix:
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
+            "msa_context_module",
+            "msa_generation_module",
             "deepseek_v4_context_module",
             "deepseek_v4_generation_module",
             "mla_bmm",
@@ -1591,6 +1602,8 @@ class _LazySupportMatrix:
             "generation_mla",
             "dsa_context_module",
             "dsa_generation_module",
+            "msa_context_module",
+            "msa_generation_module",
             "deepseek_v4_context_module",
             "deepseek_v4_generation_module",
             "mla_bmm",
@@ -1709,6 +1722,18 @@ class _LazySupportMatrix:
 
             GenerationDSAModule.load_data(db)
             return _enum_key_names(getattr(db, "_generation_dsa_module_data", None))
+
+        if key == "msa_context_module":
+            from aiconfigurator_core.sdk.operations.msa import ContextMSAModule
+
+            ContextMSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_context_msa_module_data", None))
+
+        if key == "msa_generation_module":
+            from aiconfigurator_core.sdk.operations.msa import GenerationMSAModule
+
+            GenerationMSAModule.load_data(db)
+            return _enum_key_names(getattr(db, "_generation_msa_module_data", None))
 
         if key == "deepseek_v4_context_module":
             from aiconfigurator_core.sdk.operations.dsv4 import ContextDeepSeekV4AttentionModule
@@ -2148,6 +2173,8 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
+                "msa_context_module": _enum_key_names(getattr(self, "_context_msa_module_data", None)),
+                "msa_generation_module": _enum_key_names(getattr(self, "_generation_msa_module_data", None)),
                 "deepseek_v4_context_module": _enum_key_names(
                     getattr(self, "_context_deepseek_v4_attention_module_data", None)
                 ),
@@ -2176,6 +2203,8 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
+                "msa_context_module": _enum_key_names(getattr(self, "_context_msa_module_data", None)),
+                "msa_generation_module": _enum_key_names(getattr(self, "_generation_msa_module_data", None)),
                 "deepseek_v4_context_module": _enum_key_names(
                     getattr(self, "_context_deepseek_v4_attention_module_data", None)
                 ),
@@ -2199,6 +2228,8 @@ class PerfDatabase:
                 "generation_mla": _generation_mla_kv_modes(),
                 "dsa_context_module": _enum_key_names(getattr(self, "_context_dsa_module_data", None)),
                 "dsa_generation_module": _enum_key_names(getattr(self, "_generation_dsa_module_data", None)),
+                "msa_context_module": _enum_key_names(getattr(self, "_context_msa_module_data", None)),
+                "msa_generation_module": _enum_key_names(getattr(self, "_generation_msa_module_data", None)),
                 "deepseek_v4_context_module": _enum_key_names(
                     getattr(self, "_context_deepseek_v4_attention_module_data", None)
                 ),
@@ -3254,6 +3285,105 @@ class PerfDatabase:
             index_topk=index_topk,
             dsa_backend=dsa_backend,
             skip_indexer=skip_indexer,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # MSA (MiniMax Sparse Attention) Queries
+    # ═══════════════════════════════════════════════════════════════════
+
+    @functools.lru_cache(maxsize=32768)
+    def query_context_msa_module(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+        fmha_quant_mode: common.FMHAQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        database_mode: common.DatabaseMode | None = None,
+        *,
+        prefix: int = 0,
+        architecture: str = DEFAULT_MSA_ARCHITECTURE,
+        num_kv_heads: int | None = None,
+        hidden_size: int | None = None,
+        head_dim: int | None = None,
+        v_head_dim: int | None = None,
+        index_n_heads: int | None = None,
+        index_head_dim: int | None = None,
+        index_topk: int | None = None,
+        block_size: int | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """Query context MSA module latency. Delegates to
+        ``ContextMSAModule._query_context_msa_module_table``. Unset structural
+        dims default to the architecture's native shape (``MSA_MODEL_DIMS``)."""
+        from aiconfigurator_core.sdk.operations.msa import ContextMSAModule
+
+        return ContextMSAModule._query_context_msa_module_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kvcache_quant_mode,
+            fmha_quant_mode,
+            gemm_quant_mode,
+            database_mode,
+            prefix=prefix,
+            architecture=architecture,
+            num_kv_heads=num_kv_heads,
+            hidden_size=hidden_size,
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            block_size=block_size,
+        )
+
+    @functools.lru_cache(maxsize=32768)
+    def query_generation_msa_module(
+        self,
+        b: int,
+        s: int,
+        num_heads: int,
+        kv_cache_dtype: common.KVCacheQuantMode,
+        gemm_quant_mode: common.GEMMQuantMode = common.GEMMQuantMode.bfloat16,
+        database_mode: common.DatabaseMode | None = None,
+        *,
+        architecture: str = DEFAULT_MSA_ARCHITECTURE,
+        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
+        num_kv_heads: int | None = None,
+        hidden_size: int | None = None,
+        head_dim: int | None = None,
+        v_head_dim: int | None = None,
+        index_n_heads: int | None = None,
+        index_head_dim: int | None = None,
+        index_topk: int | None = None,
+        block_size: int | None = None,
+    ) -> PerformanceResult | tuple[float, float, float]:
+        """Query generation MSA module latency. Delegates to
+        ``GenerationMSAModule._query_generation_msa_module_table``.
+        ``fmha_quant_mode`` only feeds the SOL anchor (the table has no fmha
+        axis)."""
+        from aiconfigurator_core.sdk.operations.msa import GenerationMSAModule
+
+        return GenerationMSAModule._query_generation_msa_module_table(
+            self,
+            b,
+            s,
+            num_heads,
+            kv_cache_dtype,
+            gemm_quant_mode,
+            database_mode,
+            architecture=architecture,
+            fmha_quant_mode=fmha_quant_mode,
+            num_kv_heads=num_kv_heads,
+            hidden_size=hidden_size,
+            head_dim=head_dim,
+            v_head_dim=v_head_dim,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            block_size=block_size,
         )
 
     @staticmethod

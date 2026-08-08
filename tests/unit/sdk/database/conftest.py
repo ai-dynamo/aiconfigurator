@@ -75,6 +75,8 @@ _LOADER_STUBS: dict[str, tuple[str, object]] = {
     "load_generation_mla_module_data": (f"{_OPS_PKG}.mla", None),
     "load_context_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
     "load_generation_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
+    "load_context_msa_module_data": (f"{_OPS_PKG}.msa", None),
+    "load_generation_msa_module_data": (f"{_OPS_PKG}.msa", None),
     "load_mhc_module_data": (f"{_OPS_PKG}.dsv4", None),
     "load_custom_allreduce_data": (f"{_OPS_PKG}.communication", None),
     "load_nccl_data": (f"{_OPS_PKG}.communication", None),  # also used for oneccl

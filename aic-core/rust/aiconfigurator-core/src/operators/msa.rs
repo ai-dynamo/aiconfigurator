@@ -8,14 +8,17 @@
 //! the top-k blocks are selected, and full attention runs over only the
 //! selected tokens.
 //!
-//! There is NO collected MSA silicon data. These ops therefore answer only
-//! under HYBRID / EMPIRICAL: the SOL is analytic (same three-group split as
-//! DSA/DSV4 — GEMM projections, FP8 indexer, sparse attention) and the
-//! empirical value is a CROSS-OP (XOP) transfer from DSA's measured
-//! utilisation at the same workload, scaled by the manual `dsa_scale_k`
-//! level-alignment hook: `latency = SOL_msa / (util_dsa * k)`. SILICON mode
-//! raises the perf-data miss; a policy with XOP disabled raises the terminal
-//! empirical miss (there is nothing else to fall back on).
+//! MSA has its own module-level silicon tables (msa_context_module_perf /
+//! msa_generation_module_perf, DSA-module row schema — see
+//! `perf_database::msa`). SILICON resolves them on the raw grids via the
+//! perf_interp v2 engine (context `[heads][prefix][seq][batch]`, generation
+//! `[heads][batch][seq]`) with the analytic SOL below as the util-hold
+//! anchor. HYBRID / EMPIRICAL try that silicon path first; on a typed data
+//! miss (table or quant slice absent) they fall back to the CROSS-OP (XOP)
+//! transfer from DSA's measured utilisation at the same workload, scaled by
+//! the manual `dsa_scale_k` level-alignment hook:
+//! `latency = SOL_msa / (util_dsa * k)`. A policy with XOP disabled raises
+//! the terminal empirical miss when the silicon path also missed.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +35,10 @@ use crate::perf_database::dsa::{
 };
 use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+
+/// The architecture the MSA collector stamps on every row — the sole native
+/// head geometry in the msa tables (Python `DEFAULT_MSA_ARCHITECTURE`).
+const MSA_ARCHITECTURE: &str = "MiniMaxM3ForCausalLM";
 
 /// One MSA module block (context or generation — the phase is chosen by the
 /// `Op` variant). Field-for-field mirror of Python `_BaseMSAModule`.
@@ -59,7 +66,9 @@ pub struct MsaModuleOp {
 }
 
 impl MsaModuleOp {
-    /// Context (prefill) query. Mirrors `ContextMSAModule.query`.
+    /// Context (prefill) query. Mirrors `ContextMSAModule.query`: own silicon
+    /// table first (SILICON, and the preferred HYBRID/EMPIRICAL source), the
+    /// DSA XOP transfer only on a typed data miss.
     pub fn query_context(
         &self,
         db: &PerfDatabase,
@@ -72,41 +81,63 @@ impl MsaModuleOp {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
             }
-            DatabaseMode::Silicon => Err(AicError::PerfDatabase(
-                "MSA has no silicon data; use HYBRID or EMPIRICAL.".to_string(),
-            )),
+            DatabaseMode::Silicon => self
+                .silicon_context(db, batch_size, s, prefix)
+                .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
             DatabaseMode::Hybrid | DatabaseMode::Empirical => {
-                if !db.transfer_policy.contains(TransferKind::XOp) {
-                    return Err(AicError::EmpiricalNotImplemented(
-                        "MSA context: cross-op transfer (xop) is disabled by the transfer policy \
-                         and MSA has no own silicon data."
-                            .to_string(),
-                    ));
-                }
-                let util = self.dsa_context_util(db, batch_size, s, prefix);
-                match util {
-                    Some(util) if util > 0.0 => {
-                        let latency = sol / (util * self.dsa_scale_k);
-                        // Cross-op transfer from DSA (Python msa.py:297 "xop").
-                        db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
-                        Ok(PerformanceResult::new(
-                            latency * self.scale_factor,
-                            Source::Empirical,
-                        ))
+                match self.silicon_context(db, batch_size, s, prefix) {
+                    Ok(latency) => Ok(PerformanceResult::new(
+                        latency * self.scale_factor,
+                        Source::Silicon,
+                    )),
+                    Err(err) if err.is_missing_perf_data() => {
+                        self.xop_context(db, batch_size, s, prefix, sol)
                     }
-                    _ => Err(AicError::EmpiricalNotImplemented(format!(
-                        "MSA context: no DSA util to transfer from (arch={}, b={batch_size}, \
-                         s={s}); collect DSA data or set msa_dsa_scale_k against an available \
-                         quant.",
-                        self.dsa_architecture
-                    ))),
+                    Err(err) => Err(err),
                 }
             }
         }
     }
 
+    /// The legacy cross-op fallback: `SOL_msa / (util_dsa * k)`, gated by XOP.
+    fn xop_context(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        sol: f64,
+    ) -> Result<PerformanceResult, AicError> {
+        if !db.transfer_policy.contains(TransferKind::XOp) {
+            return Err(AicError::EmpiricalNotImplemented(
+                "MSA context: cross-op transfer (xop) is disabled by the transfer policy \
+                 and no MSA silicon data is available for this workload."
+                    .to_string(),
+            ));
+        }
+        let util = self.dsa_context_util(db, batch_size, s, prefix);
+        match util {
+            Some(util) if util > 0.0 => {
+                let latency = sol / (util * self.dsa_scale_k);
+                // Cross-op transfer from DSA (Python msa.py note_provenance("xop")).
+                db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
+                Ok(PerformanceResult::new(
+                    latency * self.scale_factor,
+                    Source::Empirical,
+                ))
+            }
+            _ => Err(AicError::EmpiricalNotImplemented(format!(
+                "MSA context: no DSA util to transfer from (arch={}, b={batch_size}, \
+                 s={s}); collect MSA/DSA data or set msa_dsa_scale_k against an available \
+                 quant.",
+                self.dsa_architecture
+            ))),
+        }
+    }
+
     /// Generation (decode) query; `s` is the total KV length. Mirrors
-    /// `GenerationMSAModule.query`.
+    /// `GenerationMSAModule.query`: own silicon table first, DSA XOP transfer
+    /// only on a typed data miss.
     pub fn query_generation(
         &self,
         db: &PerfDatabase,
@@ -118,37 +149,146 @@ impl MsaModuleOp {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
             }
-            DatabaseMode::Silicon => Err(AicError::PerfDatabase(
-                "MSA has no silicon data; use HYBRID or EMPIRICAL.".to_string(),
-            )),
+            DatabaseMode::Silicon => self
+                .silicon_generation(db, batch_size, s)
+                .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
             DatabaseMode::Hybrid | DatabaseMode::Empirical => {
-                if !db.transfer_policy.contains(TransferKind::XOp) {
-                    return Err(AicError::EmpiricalNotImplemented(
-                        "MSA generation: cross-op transfer (xop) is disabled by the transfer \
-                         policy and MSA has no own silicon data."
-                            .to_string(),
-                    ));
-                }
-                let util = self.dsa_generation_util(db, batch_size, s);
-                match util {
-                    Some(util) if util > 0.0 => {
-                        let latency = sol / (util * self.dsa_scale_k);
-                        // Cross-op transfer from DSA (Python msa.py:335 "xop").
-                        db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
-                        Ok(PerformanceResult::new(
-                            latency * self.scale_factor,
-                            Source::Empirical,
-                        ))
+                match self.silicon_generation(db, batch_size, s) {
+                    Ok(latency) => Ok(PerformanceResult::new(
+                        latency * self.scale_factor,
+                        Source::Silicon,
+                    )),
+                    Err(err) if err.is_missing_perf_data() => {
+                        self.xop_generation(db, batch_size, s, sol)
                     }
-                    _ => Err(AicError::EmpiricalNotImplemented(format!(
-                        "MSA generation: no DSA util to transfer from (arch={}, b={batch_size}, \
-                         s={s}); collect DSA data or set msa_dsa_scale_k against an available \
-                         quant.",
-                        self.dsa_architecture
-                    ))),
+                    Err(err) => Err(err),
                 }
             }
         }
+    }
+
+    /// The legacy cross-op fallback for decode, gated by XOP.
+    fn xop_generation(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        s: u32,
+        sol: f64,
+    ) -> Result<PerformanceResult, AicError> {
+        if !db.transfer_policy.contains(TransferKind::XOp) {
+            return Err(AicError::EmpiricalNotImplemented(
+                "MSA generation: cross-op transfer (xop) is disabled by the transfer \
+                 policy and no MSA silicon data is available for this workload."
+                    .to_string(),
+            ));
+        }
+        let util = self.dsa_generation_util(db, batch_size, s);
+        match util {
+            Some(util) if util > 0.0 => {
+                let latency = sol / (util * self.dsa_scale_k);
+                // Cross-op transfer from DSA (Python msa.py note_provenance("xop")).
+                db.note_provenance(crate::operators::util_empirical::ProvenanceTier::XOp);
+                Ok(PerformanceResult::new(
+                    latency * self.scale_factor,
+                    Source::Empirical,
+                ))
+            }
+            _ => Err(AicError::EmpiricalNotImplemented(format!(
+                "MSA generation: no DSA util to transfer from (arch={}, b={batch_size}, \
+                 s={s}); collect MSA/DSA data or set msa_dsa_scale_k against an available \
+                 quant.",
+                self.dsa_architecture
+            ))),
+        }
+    }
+
+    /// Own-table silicon lookup for context (Python
+    /// `ContextMSAModule._query_context_msa_module_table`): the analytic SOL
+    /// closure over the engine coordinates `(num_heads, prefix, seq, batch)`
+    /// anchors perf_interp's util-hold extrapolation.
+    fn silicon_context(
+        &self,
+        db: &PerfDatabase,
+        b: u32,
+        s: u32,
+        prefix: u32,
+    ) -> Result<f64, AicError> {
+        // Strict eager flops resolution (mirrors the Python table query's
+        // entry checks): an exact silicon hit never invokes the SOL closure.
+        let flops = msa_sol_flops(&db.system_spec, self.gemm_quant_mode, self.fmha_quant_mode)?;
+        let spec = &db.system_spec;
+        let sol = move |c: &[f64]| {
+            msa_attention_sol_ms_with(
+                spec,
+                true,
+                c[3] as i128, // b
+                c[2] as i128, // s
+                c[1] as i128, // prefix
+                c[0] as i128, // num_heads
+                self.num_kv_heads as i128,
+                self.hidden_size as i128,
+                self.head_dim as i128,
+                self.v_head_dim as i128,
+                self.index_n_heads as i128,
+                self.index_head_dim as i128,
+                self.index_topk as i128,
+                self.block_size as i128,
+                self.kv_cache_dtype,
+                self.fmha_quant_mode,
+                self.gemm_quant_mode,
+                flops,
+            )
+        };
+        db.msa.query_context(
+            b,
+            s,
+            prefix,
+            self.num_heads,
+            self.kv_cache_dtype,
+            self.fmha_quant_mode,
+            self.gemm_quant_mode,
+            MSA_ARCHITECTURE,
+            &sol,
+        )
+    }
+
+    /// Own-table silicon lookup for decode (Python
+    /// `GenerationMSAModule._query_generation_msa_module_table`); engine
+    /// coordinates `(num_heads, batch, seq)`, `seq` = total decode length.
+    fn silicon_generation(&self, db: &PerfDatabase, b: u32, s: u32) -> Result<f64, AicError> {
+        let flops = msa_sol_flops(&db.system_spec, self.gemm_quant_mode, self.fmha_quant_mode)?;
+        let spec = &db.system_spec;
+        let sol = move |c: &[f64]| {
+            msa_attention_sol_ms_with(
+                spec,
+                false,
+                c[1] as i128, // b
+                c[2] as i128, // s
+                0,            // prefix (decode SOL ignores it)
+                c[0] as i128, // num_heads
+                self.num_kv_heads as i128,
+                self.hidden_size as i128,
+                self.head_dim as i128,
+                self.v_head_dim as i128,
+                self.index_n_heads as i128,
+                self.index_head_dim as i128,
+                self.index_topk as i128,
+                self.block_size as i128,
+                self.kv_cache_dtype,
+                self.fmha_quant_mode,
+                self.gemm_quant_mode,
+                flops,
+            )
+        };
+        db.msa.query_generation(
+            b,
+            s,
+            self.num_heads,
+            self.kv_cache_dtype,
+            self.gemm_quant_mode,
+            MSA_ARCHITECTURE,
+            &sol,
+        )
     }
 
     fn sol_ms(
@@ -258,6 +398,29 @@ impl MsaModuleOp {
     }
 }
 
+/// Pre-resolved TC-FLOPS for the three MSA op groups (GEMM projections /
+/// always-FP8 indexer / fmha attention). Resolved once per query with the
+/// strict `quant_tc_flops` so the perf_interp SOL closure stays `-> f64`.
+#[derive(Clone, Copy)]
+struct MsaSolFlops {
+    gemm: f64,
+    indexer_fp8: f64,
+    attn: f64,
+}
+
+fn msa_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+    fmha_quant: FmhaQuantMode,
+) -> Result<MsaSolFlops, AicError> {
+    Ok(MsaSolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        // Python passes `common.FMHAQuantMode.fp8`.
+        indexer_fp8: quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, fmha_quant.mapping())?,
+    })
+}
+
 /// SOL for one MSA block. Verbatim port of Python `_msa_attention_sol`
 /// (`operations/msa.py`): GQA projections + per-block FP8 indexer + sparse
 /// attention over the top-k selected tokens, integer pair counts in i128.
@@ -281,6 +444,51 @@ fn msa_attention_sol_ms(
     fmha_quant: FmhaQuantMode,
     gemm_quant: GemmQuantMode,
 ) -> Result<f64, AicError> {
+    let flops = msa_sol_flops(spec, gemm_quant, fmha_quant)?;
+    Ok(msa_attention_sol_ms_with(
+        spec,
+        is_context,
+        b,
+        s,
+        prefix,
+        num_heads,
+        num_kv_heads,
+        hidden_size,
+        head_dim,
+        v_head_dim,
+        index_n_heads,
+        index_head_dim,
+        index_topk,
+        block_size,
+        kv_quant,
+        fmha_quant,
+        gemm_quant,
+        flops,
+    ))
+}
+
+/// The pure-`f64` SOL body over pre-resolved flops (the perf_interp anchor).
+#[allow(clippy::too_many_arguments)]
+fn msa_attention_sol_ms_with(
+    spec: &SystemSpec,
+    is_context: bool,
+    b: i128,
+    s: i128,
+    prefix: i128,
+    num_heads: i128,
+    num_kv_heads: i128,
+    hidden_size: i128,
+    head_dim: i128,
+    v_head_dim: i128,
+    index_n_heads: i128,
+    index_head_dim: i128,
+    index_topk: i128,
+    block_size: i128,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    gemm_quant: GemmQuantMode,
+    flops: MsaSolFlops,
+) -> f64 {
     let qk_head_dim = head_dim;
     let tokens = if is_context { b * s } else { b };
     // context: full prefill of `s` new tokens on top of `prefix` cached.
@@ -337,17 +545,18 @@ fn msa_attention_sol_ms(
     let q_io_bytes = (tokens * num_heads * qk_head_dim) as f64 * fmha_quant.mapping().memory * 2.0;
     let total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes;
 
-    let gemm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
-    // Python passes `common.FMHAQuantMode.fp8`.
-    let fp8_flops = quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?;
-    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let MsaSolFlops {
+        gemm: gemm_flops,
+        indexer_fp8: fp8_flops,
+        attn: attn_flops,
+    } = flops;
 
     let sol_math = (gemm_ops as f64 / gemm_flops
         + indexer_ops as f64 / fp8_flops
         + attention_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    Ok(sol_math.max(sol_mem))
+    sol_math.max(sol_mem)
 }
 
 #[cfg(test)]
@@ -444,8 +653,126 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Own silicon tables (msa_context_module / msa_generation_module).
+    // No parquet writer in the test deps, so the loaded-grid layer is
+    // injected directly (the loader itself is the shared, DSA-tested
+    // `load_dsa_parquet`).
+    // ------------------------------------------------------------------
+
+    use crate::perf_database::dsa::{DsaGrids, DsaHeadGrid, DsaKey};
+    use std::collections::BTreeMap;
+
+    fn msa_key() -> DsaKey {
+        DsaKey {
+            architecture: MSA_ARCHITECTURE.to_string(),
+            fmha_quant: "bfloat16".to_string(),
+            kv_quant: "bfloat16".to_string(),
+            gemm_quant: "bfloat16".to_string(),
+        }
+    }
+
+    /// One-point grids at the coordinates the loader would produce for
+    /// kernel_source="default" rows (flashmla_kv bucket): context
+    /// `[heads=8][prefix=0][isl=1024][b=1] = 10.0`; generation collapsed to
+    /// `[heads=8][step=0][seq=4097][b=1] = 0.5`.
+    fn inject_msa_grids(db: &PerfDatabase) {
+        let mut ctx_head = DsaHeadGrid::new();
+        ctx_head
+            .entry(8)
+            .or_default()
+            .entry(0)
+            .or_default()
+            .entry(1024)
+            .or_default()
+            .insert(1, 10.0);
+        let mut gen_head = DsaHeadGrid::new();
+        gen_head
+            .entry(8)
+            .or_default()
+            .entry(0)
+            .or_default()
+            .entry(4097)
+            .or_default()
+            .insert(1, 0.5);
+        let context = DsaGrids {
+            by_keys: BTreeMap::from([(
+                msa_key(),
+                BTreeMap::from([("flashmla_kv".to_string(), ctx_head)]),
+            )]),
+        };
+        let generation = DsaGrids {
+            by_keys: BTreeMap::from([(
+                msa_key(),
+                BTreeMap::from([("flashmla_kv".to_string(), gen_head)]),
+            )]),
+        };
+        db.msa.inject_for_test(context, generation);
+    }
+
+    /// With MSA data present, SILICON answers from the table and HYBRID
+    /// prefers it over the DSA XOP transfer (source stays Silicon, no xop
+    /// provenance is recorded).
+    #[test]
+    fn msa_silicon_table_hit_prefers_silicon_over_xop() {
+        for mode in [DatabaseMode::Silicon, DatabaseMode::Hybrid, DatabaseMode::Empirical] {
+            let mut db = db("vllm", "0.19.0");
+            db.database_mode = mode;
+            inject_msa_grids(&db);
+            let op = msa_op();
+
+            db.reset_provenance();
+            let ctx = op.query_context(&db, 1, 1024, 0).expect("context silicon hit");
+            approx(ctx.latency_ms, 10.0);
+            assert_eq!(ctx.source, Source::Silicon, "{mode:?}");
+
+            let gen = op.query_generation(&db, 1, 4097).expect("generation silicon hit");
+            approx(gen.latency_ms, 0.5);
+            assert_eq!(gen.source, Source::Silicon, "{mode:?}");
+            assert_eq!(
+                db.worst_provenance(),
+                crate::operators::util_empirical::ProvenanceTier::Silicon,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A quant slice absent from the injected table is a typed silicon miss:
+    /// SILICON propagates it; HYBRID falls through to the XOP transfer (which
+    /// still resolves against the real DSA tables — the pre-silicon
+    /// behaviour, unregressed).
+    #[test]
+    fn msa_missing_quant_slice_falls_back_to_xop_under_hybrid() {
+        let mut silicon = db("vllm", "0.19.0");
+        silicon.database_mode = DatabaseMode::Silicon;
+        inject_msa_grids(&silicon);
+        let mut op = msa_op();
+        op.kv_cache_dtype = KvCacheQuantMode::Fp8;
+        assert!(matches!(
+            op.query_context(&silicon, 1, 1024, 0),
+            Err(AicError::PerfDatabase(_))
+        ));
+
+        let hybrid = db("vllm", "0.19.0"); // Hybrid by default in `db()`
+        inject_msa_grids(&hybrid);
+        let bf16_op = msa_op(); // bf16 KV: DSA util source exists on vllm 0.19.0
+        let mut fp8_kv = msa_op();
+        fp8_kv.kv_cache_dtype = KvCacheQuantMode::Fp8;
+        // Injected slice is bf16-only -> fp8-KV misses silicon; the xop value
+        // differs from the bf16 silicon hit, proving the fallback fired.
+        let result = fp8_kv.query_context(&hybrid, 1, 1024, 0);
+        match result {
+            Ok(r) => assert_eq!(r.source, Source::Empirical),
+            Err(AicError::EmpiricalNotImplemented(_)) => {} // no fp8 DSA util source either
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+        // The bf16 op still hits silicon on the same db.
+        let hit = bf16_op.query_context(&hybrid, 1, 1024, 0).expect("silicon hit");
+        assert_eq!(hit.source, Source::Silicon);
+    }
+
     /// XOP disabled ("balanced" preset) -> the terminal empirical miss; and
-    /// SILICON mode -> the perf-data miss ("MSA has no silicon data").
+    /// SILICON mode -> the perf-data miss ("MSA module data missing").
     #[test]
     fn msa_policy_and_silicon_contracts() {
         let mut hybrid = db("vllm", "0.19.0");

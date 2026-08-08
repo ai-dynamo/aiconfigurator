@@ -1083,6 +1083,9 @@ class PerfDataFilename(Enum):
     # NOTE: GLM-5.2 skip-indexer (reuse-layer) rows live in the SAME
     # dsa_*_module file, tagged by the op_name column; the loader splits them
     # via op_kind="full"/"skip" — no separate filename needed here.
+    # MiniMax MSA modules share the DSA-module row schema (see operations/msa.py).
+    msa_context_module = "msa_context_module_perf.parquet"
+    msa_generation_module = "msa_generation_module_perf.parquet"
     mhc_module = "mhc_module_perf.parquet"
     # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
     # mode ∈ {context, generation}) = 4 files. Each file contains all
