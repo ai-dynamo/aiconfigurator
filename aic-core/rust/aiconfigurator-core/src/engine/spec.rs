@@ -473,6 +473,7 @@ mod tests {
             architecture: "DeepseekV4ForCausalLM".into(),
             sinkhorn_iters: 20,
             quant_mode: GemmQuantMode::Bfloat16,
+            seq_split: 1,
         }
     }
 

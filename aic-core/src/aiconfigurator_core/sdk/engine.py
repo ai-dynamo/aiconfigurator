@@ -107,7 +107,9 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
-ENGINE_SPEC_SCHEMA_VERSION = 6
+# - 7 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
+#   division) — a bincode op-layout change.
+ENGINE_SPEC_SCHEMA_VERSION = 7
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -515,6 +517,9 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         # anchor; mirrors `_query_mhc_table.get_sol`).
         "sinkhorn_iters": op._sinkhorn_iters,
         "quant_mode": _quant_name(op._quant_mode),
+        # CP: token-major module, per-rank tokens = ceil(x / seq_split)
+        # (issue #1498 — the missing division was the DSV4 CSA CP divergence).
+        "seq_split": op._seq_split,
     }
 
 
