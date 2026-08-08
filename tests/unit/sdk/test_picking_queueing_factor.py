@@ -34,3 +34,7 @@ class TestPrefillQueueingTtftFactor:
             prefill_queueing_ttft_factor(-0.1)
         with pytest.raises(ValueError):
             prefill_queueing_ttft_factor(0.5, service_cv2=-1.0)
+        with pytest.raises(ValueError):
+            prefill_queueing_ttft_factor(0.5, service_cv2=float("nan"))
+        with pytest.raises(ValueError):
+            prefill_queueing_ttft_factor(0.5, service_cv2=float("inf"))

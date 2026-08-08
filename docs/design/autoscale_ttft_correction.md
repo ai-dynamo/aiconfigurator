@@ -12,7 +12,7 @@ For a prefill worker at utilization `rho`, the M/G/1 mean waiting time
 (Pollaczek-Khinchine) gives the expected TTFT as a multiple of the solo
 prefill time:
 
-```
+```text
 factor(rho, cv^2) = 1 + rho * (1 + cv^2) / (2 * (1 - rho))
 ```
 

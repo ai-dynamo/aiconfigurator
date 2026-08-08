@@ -20,6 +20,7 @@ Three picking modes are supported:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Literal
 
 import pandas as pd
@@ -47,8 +48,8 @@ def prefill_queueing_ttft_factor(utilization: float, service_cv2: float = 0.0) -
     """
     if not 0.0 <= utilization < 1.0:
         raise ValueError("utilization must be in [0, 1)")
-    if service_cv2 < 0.0:
-        raise ValueError("service_cv2 must be >= 0")
+    if not math.isfinite(service_cv2) or service_cv2 < 0.0:
+        raise ValueError("service_cv2 must be finite and >= 0")
     return 1.0 + utilization * (1.0 + service_cv2) / (2.0 * (1.0 - utilization))
 
 
