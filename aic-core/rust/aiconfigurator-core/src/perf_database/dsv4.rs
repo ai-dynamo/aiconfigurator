@@ -35,7 +35,7 @@
 //! backends without DSV4 data.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -96,15 +96,10 @@ pub struct Dsv4Table {
     hca_generation_sources: Vec<PerfSource>,
     /// CSA topk DELTA calibration (`dsv4_csa_topk_calib_perf.parquet`).
     /// Same source resolution as the module files; an absent file loads as
-    /// `None` and the correction is a no-op (Python parity).
+    /// `None` and the correction is a no-op (Python parity). Serves BOTH the
+    /// DELTA pairs and the CP top_last grid (issue #1498: the Python CP
+    /// loader is reuse-aware now, so donors feed both consumers).
     topk_calib_sources: Vec<PerfSource>,
-    /// The PRIMARY (own-version) path of the topk calib file — the path
-    /// Python's `_load_csa_topk_top_last` resolves. The CP top_last grid
-    /// loads from this source only; a positional `sources[0]` is NOT a
-    /// reliable primary marker (Python's `_build_op_sources` omits the
-    /// primary entirely for partial-marked version dirs, so the list can
-    /// start with a donor).
-    topk_primary_path: PathBuf,
     /// Sparse-kernel table (`dsv4_paged_mqa_logits_module_perf.parquet`) for
     /// the CP prefill composition's mqa full/per-card deltas. Same source
     /// resolution as the module files (Python `_load_sparse` runs the file
@@ -259,11 +254,6 @@ impl Dsv4Table {
             "dsv4_hca_generation_module_perf.parquet",
             &data_root,
         );
-        let topk_primary_path = crate::perf_database::find_in_family_dirs(
-            &data_root,
-            "dsv4_csa_topk_calib_perf.parquet",
-        )
-        .unwrap_or_else(|| data_root.join("dsv4_csa_topk_calib_perf.parquet"));
         let topk_calib_sources = resolve_op_sources(
             perf_db_sources,
             "dsv4_csa_topk_calib_perf.parquet",
@@ -280,7 +270,6 @@ impl Dsv4Table {
             csa_generation_sources,
             hca_generation_sources,
             topk_calib_sources,
-            topk_primary_path,
             paged_mqa_sources,
             csa_context: OnceLock::new(),
             hca_context: OnceLock::new(),
@@ -531,9 +520,9 @@ impl Dsv4Table {
     /// which caches on the database object). `Ok(None)` when every source
     /// file is absent or no usable rows exist.
     fn load_topk_calib(&self) -> Result<Option<&TopkCalib>, AicError> {
-        let cell = self.topk_calib.get_or_init(|| {
-            load_topk_calib_parquet(&self.topk_calib_sources, &self.topk_primary_path)
-        });
+        let cell = self
+            .topk_calib
+            .get_or_init(|| load_topk_calib_parquet(&self.topk_calib_sources));
         match cell {
             Ok(calib) => Ok(calib.as_ref()),
             Err(err) => Err(clone_err(err)),
@@ -665,8 +654,10 @@ impl Dsv4Table {
     /// composition only — reads the RAW top_last rows the calib loader
     /// retains alongside the DELTA pairs (Python `_csa_topk_top_last` /
     /// `_load_csa_topk_top_last`; single load, no re-read of the parquet).
-    /// The num_heads filter applies only when the CSV carries the column
-    /// (Python: `df[df["num_heads"] == native_heads] if "num_heads" in df`).
+    /// Since issue #1498 the Python loader projects the generic
+    /// `load_dsv4_sparse_op_data` nesting, whose key columns REQUIRE
+    /// `num_heads` — rows lacking it never load, so the lookup keys on the
+    /// native identity with no column-absent fallback.
     /// Missing calib / head slice / batch grid -> `Ok(None)` (the operator
     /// fails loud); an `isl` beyond the collected grid errors via
     /// [`lookup_2d`] — same fail-loud as Python, which reuses
@@ -681,11 +672,7 @@ impl Dsv4Table {
         let Some(calib) = self.load_topk_calib()? else {
             return Ok(None);
         };
-        let Some(grid) = calib
-            .top_last
-            .get(&Some(native_heads))
-            .or_else(|| calib.top_last.get(&None))
-        else {
+        let Some(grid) = calib.top_last.get(&native_heads) else {
             return Ok(None);
         };
         let Some(bs_grid) = bs_slice(grid, b) else {
@@ -800,9 +787,10 @@ struct TopkCalib {
     /// RAW top_last rows for the CP composition (Python
     /// `_load_csa_topk_top_last` reads the same parquet; here they are
     /// retained in the ONE calib load pass instead of a second read). Keyed
-    /// by the row's `num_heads` (`None` when the CSV lacks the column) ->
+    /// by the row's `num_heads` (rows lacking one are skipped — the shared
+    /// generic loader's missing-key-cell contract) ->
     /// `{bs -> {(isl, step) -> top_last latency}}`.
-    top_last: BTreeMap<Option<u32>, SparseGrid>,
+    top_last: BTreeMap<u32, SparseGrid>,
 }
 
 /// Python apply formula shared by both apply sites:
@@ -831,31 +819,22 @@ fn apply_topk_delta(
 /// `(step, isl, batch_size, score_mode)`; a shape missing either mode is
 /// skipped; `DELTA = max(0, flat - top_last)`.
 /// The retained top_last grid mirrors `_load_csa_topk_top_last`'s
-/// `{bs: {(isl, step): latency}}` — and, like that Python loader, reads the
-/// PRIMARY source only. Python's CP top_last loader is primary-path-only
-/// (it predates the reuse sidecar and does not honor `reuse.yaml` donors),
-/// while its DELTA consumer IS reuse-aware; honoring donors here for
-/// top_last made the compiled engine compute CSA CP configs the Python step
-/// refuses (one-sided scan DRIFT), so the split mirrors Python exactly
-/// until the upstream loader gap + the CP composition divergence are fixed
-/// together (tracked upstream; see the PR-2 notes).
+/// `{bs: {(isl, step): latency}}`. Since issue #1498 BOTH consumers run
+/// through the reuse-aware source list — the Python CP loader now projects
+/// `load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)` like its DELTA
+/// sibling, so approved `reuse.yaml` donors serve the CP top_last rows on
+/// both engines (the former primary-source-only gate here existed solely to
+/// mirror the pre-fix Python loader's error surface).
 /// Returns `Ok(None)` when every source file is absent (Python: rows is
 /// None) or no usable row exists (no DELTA pair AND no top_last row —
 /// behaviourally identical to Python's two separate None/{} outcomes).
-fn load_topk_calib_parquet(
-    sources: &[PerfSource],
-    top_last_primary_path: &Path,
-) -> Result<Option<TopkCalib>, AicError> {
+fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, AicError> {
     let mut by_mode: BTreeMap<u32, BTreeMap<(u32, u32, u32), BTreeMap<String, f64>>> =
         BTreeMap::new();
-    let mut top_last: BTreeMap<Option<u32>, SparseGrid> = BTreeMap::new();
+    let mut top_last: BTreeMap<u32, SparseGrid> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
-        // Python parity: the CP top_last grid loads from the PRIMARY
-        // (own-version) path only — matched by PATH, not list position (see
-        // `topk_primary_path`); DELTA rows consume every source.
-        let primary_source = path == top_last_primary_path;
         if !path.exists() {
             continue;
         }
@@ -880,33 +859,32 @@ fn load_topk_calib_parquet(
             );
             let mode = row.str_owned(score_mode_col)?;
             let latency = row.f64(latency_col)?;
+            // Rows without a native identity are unusable — Python's generic
+            // loader (`load_dsv4_sparse_op_data`, now shared by BOTH the
+            // DELTA and CP top_last consumers) skips rows with a missing key
+            // cell. First-wins on duplicates (skip-on-key-conflict;
+            // shared-layer contract, design §6.1) for both grids too.
+            let Some(native) = row.u32_optional(num_heads_col)? else {
+                continue;
+            };
             // The CP composition consumes the context (v1) selector's raw
             // top_last latencies.
-            // First-wins parity with Python `load_dsv4_sparse_op_data`
-            // (skip-on-key-conflict; shared-layer contract, design §6.1).
-            let native = row.u32_optional(num_heads_col)?;
-            if primary_source && mode == "v1_top_last" {
-                // Python `_load_csa_topk_top_last` assigns per row (iterrows
-                // overwrite): within the primary file the LAST duplicate row
-                // wins.
+            if mode == "v1_top_last" {
                 top_last
                     .entry(native)
                     .or_default()
                     .entry(bs)
                     .or_default()
-                    .insert((isl, step), latency);
-            }
-            // DELTA rows without a native identity are unusable (Python's
-            // generic loader skips rows with a missing key cell).
-            if let Some(native) = native {
-                by_mode
-                    .entry(native)
-                    .or_default()
-                    .entry((step, isl, bs))
-                    .or_default()
-                    .entry(mode)
+                    .entry((isl, step))
                     .or_insert(latency);
             }
+            by_mode
+                .entry(native)
+                .or_default()
+                .entry((step, isl, bs))
+                .or_default()
+                .entry(mode)
+                .or_insert(latency);
         }
     }
     if !any_source {
@@ -2073,7 +2051,7 @@ mod tests {
                 ("v1_flat", 8192, 512, 1, 64, 9.9),     // no top_last -> shape skipped
             ],
         );
-        let calib = load_topk_calib_parquet(&[PerfSource(path.clone(), None)], &path)
+        let calib = load_topk_calib_parquet(&[PerfSource(path.clone(), None)])
             .unwrap()
             .expect("calib must load");
         // Pairing (Python _build_topk_calib_from_rows): DELTA = max(0, flat - top_last).
@@ -2125,8 +2103,7 @@ mod tests {
     fn topk_calib_absent_file_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
-        let calib =
-            load_topk_calib_parquet(&[PerfSource(missing.clone(), None)], &missing).unwrap();
+        let calib = load_topk_calib_parquet(&[PerfSource(missing.clone(), None)]).unwrap();
         assert!(calib.is_none(), "absent file must load as None");
         // Missing calib -> DELTA machinery is a no-op (Python
         // `_dsv4_topk_delta_ms(None, ...) == 0.0`).
@@ -2390,16 +2367,15 @@ mod tests {
     fn csa_topk_top_last_raw_rows_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
-        write_calib_parquet(
+        write_calib_parquet_with_heads(
             &path,
             &[
-                ("v1_top_last", 0, 16384, 1, 800.0),
-                ("v1_top_last", 0, 2048, 1, 100.0),
-                ("v1_flat", 0, 2048, 1, 130.0),
+                ("v1_top_last", 0, 16384, 1, 64, 800.0),
+                ("v1_top_last", 0, 2048, 1, 64, 100.0),
+                ("v1_flat", 0, 2048, 1, 64, 130.0),
             ],
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());
-        // num_heads column absent -> no filter (any native_heads resolves).
         assert_eq!(
             table.csa_topk_top_last(16384, 0, 64, 1).unwrap(),
             Some(800.0)
@@ -2409,10 +2385,6 @@ mod tests {
             table.csa_topk_top_last(2048, 0, 64, 1).unwrap(),
             Some(100.0)
         );
-        // Without a num_heads column the DELTA rows carry no native identity
-        // and pair nothing (#1460 review); only the top_last grid loads.
-        let calib = table.load_topk_calib().unwrap().expect("calib must load");
-        assert!(calib.exact_v1.is_empty());
         // isl beyond the collected grid -> fail loud (dsa::lookup_2d contract).
         let err = table.csa_topk_top_last(32768, 0, 64, 1).unwrap_err();
         assert!(
@@ -2423,6 +2395,71 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         let bare = Dsv4Table::new(empty.path().to_path_buf());
         assert_eq!(bare.csa_topk_top_last(2048, 0, 64, 1).unwrap(), None);
+    }
+
+    /// Rows without a `num_heads` key cell never load — for the top_last
+    /// grid AND the DELTA pairs alike. Since issue #1498 Python's CP loader
+    /// projects the generic `load_dsv4_sparse_op_data` nesting, whose
+    /// `_TOPK_CALIB_KEYS` require `num_heads` (a missing key cell skips the
+    /// row), so a calib file lacking the column yields no usable rows and
+    /// the whole calib loads as None (both consumers fail loud on top).
+    #[test]
+    fn csa_topk_calib_without_num_heads_column_loads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_calib_parquet(
+            &dir.path().join("dsv4_csa_topk_calib_perf.parquet"),
+            &[
+                ("v1_top_last", 0, 2048, 1, 100.0),
+                ("v1_flat", 0, 2048, 1, 130.0),
+            ],
+        );
+        let table = Dsv4Table::new(dir.path().to_path_buf());
+        assert!(table.load_topk_calib().unwrap().is_none());
+        assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), None);
+    }
+
+    /// Issue #1498: the CP top_last grid honors `reuse.yaml` donors exactly
+    /// like the DELTA pairs — the former PRIMARY-source-only gate is gone
+    /// (it mirrored the pre-fix Python loader's error surface). A donor-only
+    /// source list serves top_last rows; when the primary also carries the
+    /// shape, the primary wins (first-wins over the ordered source list,
+    /// Python `load_dsv4_sparse_op_data` skip-on-key-conflict).
+    #[test]
+    fn csa_topk_top_last_loads_from_donor_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary/dsv4_csa_topk_calib_perf.parquet");
+        let donor = dir.path().join("donor/dsv4_csa_topk_calib_perf.parquet");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(donor.parent().unwrap()).unwrap();
+        write_calib_parquet_with_heads(
+            &donor,
+            &[
+                ("v1_top_last", 0, 2048, 1, 64, 100.0),
+                ("v1_top_last", 0, 4096, 1, 64, 200.0),
+            ],
+        );
+        // Donor-only (the primary path does not exist — the reuse-dependent
+        // version layout): top_last must resolve from the donor.
+        let sources = vec![
+            PerfSource(primary.clone(), None),
+            PerfSource(donor.clone(), None),
+        ];
+        let calib = load_topk_calib_parquet(&sources)
+            .unwrap()
+            .expect("donor rows must load");
+        let grid = calib.top_last.get(&64).expect("native bucket");
+        assert_eq!(grid.get(&1).and_then(|g| g.get(&(2048, 0))), Some(&100.0));
+        assert_eq!(grid.get(&1).and_then(|g| g.get(&(4096, 0))), Some(&200.0));
+
+        // Primary + donor overlap: the primary's value wins the conflict.
+        write_calib_parquet_with_heads(&primary, &[("v1_top_last", 0, 2048, 1, 64, 42.0)]);
+        let calib = load_topk_calib_parquet(&sources)
+            .unwrap()
+            .expect("calib must load");
+        let grid = calib.top_last.get(&64).expect("native bucket");
+        assert_eq!(grid.get(&1).and_then(|g| g.get(&(2048, 0))), Some(&42.0));
+        // The donor still fills the shape the primary lacks.
+        assert_eq!(grid.get(&1).and_then(|g| g.get(&(4096, 0))), Some(&200.0));
     }
 
     /// num_heads filter parity: when the calib file carries the column,
