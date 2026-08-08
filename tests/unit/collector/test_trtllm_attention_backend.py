@@ -245,6 +245,40 @@ def test_backend_element_reaches_the_trtllm_case_tuples(monkeypatch):
     assert any(case[7] for case in context_cases)
 
 
+@pytest.mark.parametrize("phase", ["context", "generation"])
+def test_backend_is_a_function_of_the_shape_key(monkeypatch, phase):
+    # aic-core's dense-attention loaders strip kernel_source from the row key,
+    # so two backends sharing one (num_heads, num_kv_heads, head_dim,
+    # window_size) tuple would collide first-wins by parquet row order
+    # (sdk/operations/attention.py leaf probe; Rust or_insert parity) — and
+    # the collector deliberately keeps both rows (the dedup population key
+    # includes kernel_source). Today the invariant holds only because Gemma4's
+    # FLASHINFER geometries are unique in the sweep (AIC-1663). Lock it here
+    # so a second FLASHINFER-routed model or a widened base grid surfaces the
+    # collision at population time instead of as a silent row-order lottery
+    # in the perf database.
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    sweeps = (
+        get_attention_context_shape_sweeps("trtllm")
+        if phase == "context"
+        else get_attention_generation_shape_sweeps("trtllm")
+    )
+    backends_by_shape: dict[tuple, set] = {}
+    for sweep in sweeps:
+        for config in get_attention_head_configs(sweep, phase=phase, backend="trtllm"):
+            key = (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+            backends_by_shape.setdefault(key, set()).add(config.kernel_source)
+
+    assert backends_by_shape, "the full trtllm attention plan must populate"
+    conflicts = {key: sorted(backends) for key, backends in backends_by_shape.items() if len(backends) > 1}
+    assert not conflicts, (
+        "distinct trtllm attention backends share an SDK shape key; the perf-database "
+        "loaders cannot disambiguate them (first-wins by row order). Either change the "
+        "colliding profile's geometry or bucket kernel_source into the attention lookup "
+        f"key (operations/dsa.py precedent) before shipping this plan: {conflicts}"
+    )
+
+
 def test_out_scale_mirrors_serving_use_quantize_output():
     # out_scale must mirror serving's Attention._use_quantize_output()
     # (_torch/modules/attention.py:648-670,758-761@1.3.0rc20): only a quantized
