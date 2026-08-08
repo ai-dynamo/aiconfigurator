@@ -230,6 +230,18 @@ class TestWorkerGpus:
         # Schema-materialized legacy rows NaN-fill dims they predate.
         assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "cp": float("nan")}) == 2
 
+    @pytest.mark.parametrize("cp", [None, 0, -1])
+    def test_invalid_dim_in_fallback_defaults_to_one(self, cp):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "cp": cp}) == 2
+
+    @pytest.mark.parametrize("n", [None, 0, -8])
+    def test_invalid_num_total_gpus_falls_back(self, n):
+        from aiconfigurator.sdk.picking import worker_gpus
+
+        assert worker_gpus({"tp": 2, "pp": 1, "dp": 1, "num_total_gpus": n}) == 2
+
 
 class TestSchemaMaterializedRows:
     """Legacy rows round-tripped through the schema column lists NaN-fill the
