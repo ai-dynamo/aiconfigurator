@@ -274,6 +274,22 @@ class MoE(Operation):
         cls._wideep_context_data_cache.clear()
         cls._wideep_generation_data_cache.clear()
 
+    @staticmethod
+    def _normalize_moe_quant_mode_for_table(
+        quant_mode: common.MoEQuantMode,
+    ) -> common.MoEQuantMode:
+        """Normalize MoE quant modes for perf table lookup.
+
+        ``nvfp4_wo`` (non-Blackwell software dequant) runs the identical
+        BF16 compute kernel, so the bfloat16 perf data is exact.
+        Normalization is preferred over XPROFILE transfer here because the
+        1:1 compute equivalence makes direct lookup more accurate than
+        util-ratio rescaling.
+        """
+        if quant_mode == common.MoEQuantMode.nvfp4_wo:
+            return common.MoEQuantMode.bfloat16
+        return quant_mode
+
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_moe)
     # ------------------------------------------------------------------
@@ -363,13 +379,15 @@ class MoE(Operation):
                 workload_distribution,
             )[0]
 
+            tqm = cls._normalize_moe_quant_mode_for_table(quant_mode)
+
             # Mirror get_silicon's kernel selection: nvfp4 + small tokens + gated
             # uses the low-latency kernel table (~3x faster than the regular one).
             # Building util from the wrong table over-estimates by that factor.
             def _use_low_latency():
                 return (
                     num_tokens <= 128
-                    and quant_mode == common.MoEQuantMode.nvfp4
+                    and tqm == common.MoEQuantMode.nvfp4
                     and is_gated
                     and database._moe_low_latency_data is not None
                     and not (database.backend == common.BackendName.sglang.value and moe_backend == "deepep_moe")
@@ -382,7 +400,7 @@ class MoE(Operation):
                 if _use_low_latency():
                     ll = database._moe_low_latency_data
                     try:
-                        quant_data = util_empirical.require_data_slice(ll, quant_mode)
+                        quant_data = util_empirical.require_data_slice(ll, tqm)
                         ll_wl = workload_distribution if workload_distribution in quant_data else "uniform"
                         util_empirical.require_data_slice(
                             quant_data,
@@ -412,7 +430,7 @@ class MoE(Operation):
 
             def _slice():
                 moe_table.raise_if_not_loaded()
-                quant_data = util_empirical.require_data_slice(moe_table, quant_mode)
+                quant_data = util_empirical.require_data_slice(moe_table, tqm)
                 wl = workload_distribution if workload_distribution in quant_data else "uniform"
                 return util_empirical.require_data_slice(
                     quant_data,
@@ -614,6 +632,8 @@ class MoE(Operation):
         else:
             # SILICON or HYBRID mode - use database
             def get_silicon():
+                sqm = cls._normalize_moe_quant_mode_for_table(quant_mode)
+
                 def _resolve_tokens(moe_dict, query_tokens, used_workload_distribution):
                     # Guard first: singleton-underflow must stay a structured miss
                     # (a 1024-token row cannot define the low-token launch floor).
@@ -657,7 +677,7 @@ class MoE(Operation):
 
                     moe_data.raise_if_not_loaded()
 
-                    quant_data = util_empirical.require_data_slice(moe_data, quant_mode)
+                    quant_data = util_empirical.require_data_slice(moe_data, sqm)
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in quant_data else "uniform"
                     )
@@ -684,11 +704,11 @@ class MoE(Operation):
                     if (
                         num_tokens <= 128
                         and database._moe_low_latency_data
-                        and quant_mode == common.MoEQuantMode.nvfp4
+                        and sqm == common.MoEQuantMode.nvfp4
                         and is_gated
                     ):
                         try:
-                            quant_data = util_empirical.require_data_slice(database._moe_low_latency_data, quant_mode)
+                            quant_data = util_empirical.require_data_slice(database._moe_low_latency_data, sqm)
                             used_workload_distribution = (
                                 workload_distribution if workload_distribution in quant_data else "uniform"
                             )
@@ -713,7 +733,7 @@ class MoE(Operation):
                                 f"{inter_size} {moe_tp_size} {moe_ep_size}."
                             )
                         except PerfDataNotAvailableError:
-                            quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
+                            quant_data = util_empirical.require_data_slice(database._moe_data, sqm)
                             used_workload_distribution = (
                                 workload_distribution if workload_distribution in quant_data else "uniform"
                             )
@@ -728,7 +748,7 @@ class MoE(Operation):
                                 moe_ep_size,
                             )
                     else:
-                        quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
+                        quant_data = util_empirical.require_data_slice(database._moe_data, sqm)
                         used_workload_distribution = (
                             workload_distribution if workload_distribution in quant_data else "uniform"
                         )
@@ -745,7 +765,7 @@ class MoE(Operation):
                     return _resolve_tokens(moe_dict, num_tokens, used_workload_distribution)
                 elif database.backend == common.BackendName.vllm.value:
                     database._moe_data.raise_if_not_loaded()
-                    quant_data = util_empirical.require_data_slice(database._moe_data, quant_mode)
+                    quant_data = util_empirical.require_data_slice(database._moe_data, sqm)
                     used_workload_distribution = (
                         workload_distribution if workload_distribution in quant_data else "uniform"
                     )
@@ -2043,6 +2063,8 @@ class TrtLLMWideEPMoEDispatch(Operation):
         """
         if quant_mode == common.MoEQuantMode.fp8_block:
             return common.MoEQuantMode.fp8
+        if quant_mode == common.MoEQuantMode.nvfp4_wo:
+            return common.MoEQuantMode.bfloat16
         return quant_mode
 
     @classmethod

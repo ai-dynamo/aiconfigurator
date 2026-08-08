@@ -199,6 +199,7 @@ pub enum GemmQuantMode {
     Fp8Block,
     Fp8Ootb,
     Nvfp4,
+    Nvfp4Wo,
 }
 
 impl GemmQuantMode {
@@ -258,6 +259,12 @@ impl GemmQuantMode {
                 name: "nvfp4",
                 compute_dtype: Some(ComputeDtype::Fp4),
             },
+            Self::Nvfp4Wo => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 1.0,
+                name: "nvfp4_wo",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
         }
     }
 
@@ -276,6 +283,7 @@ pub enum MoeQuantMode {
     Fp8Block,
     W4afp8,
     Nvfp4,
+    Nvfp4Wo,
     W4a16Mxfp4,
     W4a8Mxfp4Mxfp8,
     /// Blackwell trtllm-gen MXFP4xMXFP8 kernel rows
@@ -327,6 +335,12 @@ impl MoeQuantMode {
                 compute: 4.0,
                 name: "nvfp4",
                 compute_dtype: Some(ComputeDtype::Fp4),
+            },
+            Self::Nvfp4Wo => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 1.0,
+                name: "nvfp4_wo",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
             },
             Self::W4a16Mxfp4 => QuantMapping {
                 memory: 0.5,

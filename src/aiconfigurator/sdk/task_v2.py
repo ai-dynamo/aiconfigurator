@@ -172,21 +172,22 @@ def build_disagg_parallel_lists(
     Kept here so the new sdk.task_v2 module does not depend on V1 (sdk.task).
     Algorithm identical; locked by integration parity test.
     """
+    base = [1, 2, 4, 8, 16] if is_moe else [1, 2, 4, 8]
     prefill_cfg: dict[str, list[int]] = {
-        "num_gpu_per_worker": [1, 2, 4, 8],
-        "tp_list": [1, 2, 4, 8],
+        "num_gpu_per_worker": base,
+        "tp_list": base,
         "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
         "dp_list": [1],
         "moe_tp_list": [1],
-        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+        "moe_ep_list": base if is_moe else [1],
     }
     decode_cfg: dict[str, list[int]] = {
-        "num_gpu_per_worker": [1, 2, 4, 8],
-        "tp_list": [1, 2, 4, 8],
+        "num_gpu_per_worker": base,
+        "tp_list": base,
         "pp_list": [1, 2, 4, 8] if should_enable_pp else [1],
-        "dp_list": [1, 2, 4, 8] if is_moe else [1],
+        "dp_list": base if is_moe else [1],
         "moe_tp_list": [1],
-        "moe_ep_list": [1, 2, 4, 8] if is_moe else [1],
+        "moe_ep_list": base if is_moe else [1],
     }
     if not is_moe:
         if prefill_system in ("gb200", "gb300"):
@@ -210,7 +211,7 @@ def build_disagg_parallel_lists(
                 "moe_ep_list": [4, 8, 16, 32],
             }
         else:
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16]
             prefill_cfg = {
                 "num_gpu_per_worker": x,
                 "tp_list": x,
@@ -229,7 +230,7 @@ def build_disagg_parallel_lists(
                 "moe_ep_list": [4, 8, 16, 32, 64],
             }
         else:
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16]
             decode_cfg = {
                 "num_gpu_per_worker": x,
                 "tp_list": x,
@@ -260,23 +261,23 @@ def build_disagg_parallel_lists(
             prefill_cfg = _sglang_megamoe_parallel_lists(prefill_system, should_enable_pp)
             decode_cfg = _sglang_megamoe_parallel_lists(decode_system, should_enable_pp)
         elif moe_backend == "deepep_moe":
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16]
             for cfg in (prefill_cfg, decode_cfg):
                 cfg["num_gpu_per_worker"] = x
                 cfg["tp_list"] = x
                 cfg["pp_list"] = x if should_enable_pp else [1]
                 cfg["dp_list"] = x
                 cfg["moe_tp_list"] = [1]
-                cfg["moe_ep_list"] = [1, 2, 4, 8]
+                cfg["moe_ep_list"] = [1, 2, 4, 8, 16]
         else:
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16]
             prefill_cfg = {
                 "num_gpu_per_worker": x,
                 "tp_list": x,
                 "pp_list": x if should_enable_pp else [1],
                 "dp_list": x,
                 "moe_tp_list": x,
-                "moe_ep_list": [1, 2, 4, 8],
+                "moe_ep_list": [1, 2, 4, 8, 16],
             }
             decode_cfg = {
                 "num_gpu_per_worker": x,
@@ -284,10 +285,10 @@ def build_disagg_parallel_lists(
                 "pp_list": x if should_enable_pp else [1],
                 "dp_list": x,
                 "moe_tp_list": x,
-                "moe_ep_list": [1, 2, 4, 8],
+                "moe_ep_list": [1, 2, 4, 8, 16],
             }
     elif backend_name == "vllm":
-        x = [1, 2, 4, 8]
+        x = [1, 2, 4, 8, 16]
         prefill_cfg = {
             "num_gpu_per_worker": x,
             "tp_list": x,
@@ -995,22 +996,24 @@ class Task:
         # data-driven fp8->bf16 fallback so those roles are not downgraded.
         for role in roles:
             backend_name = self._role_attr(role, "backend_name")
-            # DeepSeek-V3 only: the WideEP MLA ops and perf tables are specific to
-            # its shape, and models/deepseek.py likewise routes only this
-            # architecture to WideEPDeepSeekModel.
             is_deepseek_mla = self._architecture == "DeepseekV3ForCausalLM"
-            # WideEP routes DeepSeek attention through the wideep_*_mla tables,
-            # which the collector records from a bf16 run but LABELS fp8_block (fmha) /
-            # fp8 (kv) -- see collect_mla_module.py: _build_wideep_mla_test_cases runs
-            # bfloat16, then the log_* overrides tag the rows fp8_block/fp8. The SDK
-            # must query with those same labels, so resolve fmha->fp8_block (context
-            # roles) and kvcache->fp8 (all roles) instead of the narrow-EP bf16 values.
             is_wideep = backend_name == "sglang" and self.moe_backend == "deepep_moe"
             if is_wideep and is_deepseek_mla:
                 if role != "decode" and not fmha_explicit.get(role, False):
                     self._set_role_attr(role, "fmha_quant_mode", common.FMHAQuantMode.fp8_block)
                 if not kv_explicit.get(role, False):
                     self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
+
+        # NVFP4 software fallback: on non-Blackwell systems, remap nvfp4 to
+        # nvfp4_wo (FP4 weight memory, BF16 compute speed) so the perf model
+        # queries BF16 data instead of native FP4 data.
+        for role in roles:
+            system = self._role_attr(role, "system_name")
+            if not is_blackwell_system(system):
+                if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.nvfp4:
+                    self._set_role_attr(role, "gemm_quant_mode", common.GEMMQuantMode.nvfp4_wo)
+                if self._role_attr(role, "moe_quant_mode") == common.MoEQuantMode.nvfp4:
+                    self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.nvfp4_wo)
 
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16
@@ -1263,20 +1266,20 @@ class Task:
             _set("agg_moe_tp_candidates", [1])
             _set("agg_moe_ep_candidates", [8, 16, 32, 64])
         elif self.backend_name == "sglang" and not self.enable_wideep:
-            _set("agg_num_gpu_candidates", [1, 2, 4, 8])
-            _set("agg_tp_candidates", [1, 2, 4, 8])
+            _set("agg_num_gpu_candidates", [1, 2, 4, 8, 16])
+            _set("agg_tp_candidates", [1, 2, 4, 8, 16])
             _set("agg_pp_candidates", [1])
-            _set("agg_dp_candidates", [1, 2, 4, 8])
+            _set("agg_dp_candidates", [1, 2, 4, 8, 16])
             if self.moe_backend == "deepep_moe":
                 # Intra-node DeepEP (ep 1-8, NVLink): EP-only
                 _set("agg_moe_tp_candidates", [1])
-                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
+                _set("agg_moe_ep_candidates", [1, 2, 4, 8, 16])
             else:
                 # Standard comm (fused_moe + allgather/RS)
-                _set("agg_moe_tp_candidates", [1, 2, 4, 8])
-                _set("agg_moe_ep_candidates", [1, 2, 4, 8])
+                _set("agg_moe_tp_candidates", [1, 2, 4, 8, 16])
+                _set("agg_moe_ep_candidates", [1, 2, 4, 8, 16])
         elif self.backend_name in ("trtllm", "vllm"):
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16]
             _set("agg_num_gpu_candidates", x)
             _set("agg_tp_candidates", x)
             _set("agg_pp_candidates", [1])

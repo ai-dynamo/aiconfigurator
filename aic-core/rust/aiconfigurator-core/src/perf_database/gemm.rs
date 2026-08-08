@@ -437,6 +437,7 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "fp8_block" => Fp8Block,
         "fp8_ootb" => Fp8Ootb,
         "nvfp4" => Nvfp4,
+        "nvfp4_wo" => Nvfp4Wo,
         _ => return None,
     })
 }

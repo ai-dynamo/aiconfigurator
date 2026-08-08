@@ -127,7 +127,7 @@ class NemotronHModel(BaseModel):
             count = layer_counts["M"]
             nheads_per_gpu = cfg.mamba_num_heads // tp_size
             d_inner_per_gpu = nheads_per_gpu * cfg.mamba_head_dim
-            n_groups_per_gpu = cfg.n_groups // tp_size
+            n_groups_per_gpu = max(cfg.n_groups // tp_size, 1)
             in_proj_out_per_gpu = 2 * d_inner_per_gpu + 2 * n_groups_per_gpu * cfg.ssm_state_size + nheads_per_gpu
             self.context_ops.extend(
                 [
@@ -149,7 +149,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.Mamba2Kernel(
@@ -162,7 +162,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.GEMM(
@@ -418,7 +418,7 @@ class NemotronHModel(BaseModel):
             count = layer_counts["M"] * mtp
             nheads_per_gpu = cfg.mamba_num_heads // tp_size
             d_inner_per_gpu = nheads_per_gpu * cfg.mamba_head_dim
-            n_groups_per_gpu = cfg.n_groups // tp_size
+            n_groups_per_gpu = max(cfg.n_groups // tp_size, 1)
             in_proj_out_per_gpu = 2 * d_inner_per_gpu + 2 * n_groups_per_gpu * cfg.ssm_state_size + nheads_per_gpu
             self.generation_ops.extend(
                 [
@@ -440,7 +440,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.Mamba2Kernel(
@@ -453,7 +453,7 @@ class NemotronHModel(BaseModel):
                         head_dim=cfg.mamba_head_dim,
                         d_state=cfg.ssm_state_size,
                         d_conv=cfg.conv_kernel,
-                        n_groups=cfg.n_groups,
+                        n_groups=n_groups_per_gpu,
                         chunk_size=cfg.chunk_size,
                     ),
                     ops.GEMM(
