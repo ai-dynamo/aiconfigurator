@@ -22,7 +22,7 @@
 # Backend vocabulary (keep names serving-visible and framework-neutral where
 # the kernel library is the identity): cublas, cutlass, deepgemm, trt_plugin,
 # torch, sgl_kernel, vllm_kernel, fa2, fa3, fa4, flash_attn, flashinfer,
-# flashmla, triton, trtllm_mha, trtllm_mla, trtllm_ragged (trtllm-gen ragged
+# flashmla, triton, trtllm_mha, trtllm_mla, trtllm_mhc, trtllm_ragged (trtllm-gen ragged
 # prefill, shared by sglang DSA dense-MHA and vllm MLA prefill),
 # trtllm_internal (TRT-LLM unified op, kernel chosen inside TRT-LLM and not
 # observable from the label), triton_fused_moe, marlin, flashinfer_cutlass,
@@ -155,6 +155,23 @@ mappings:
   - {framework: trtllm, kernel_source: moe_torch_flow_min_latency, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py (min-latency mode)"}
   - {framework: trtllm, kernel_source: moe_torch_flow_nongated, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py"}
   - {framework: trtllm, kernel_source: wideep_compute_cutlass, backend: cutlass, source: "collector/wideep/trtllm"}
+
+  # DeepSeek-V4 mHC module labels. The collector observes the actual
+  # pre_mapping dispatch per row (AutoTuner tactic -> mhc_gemm_rms_fma_cuda /
+  # mhc_gemm_rms_dg_cuda, tensorrt_llm/_torch/modules/mhc/mhc_cuda.py:333-347
+  # @1.3.0rc20), so these labels name the real kernel family per row —
+  # no trtllm_internal coarseness.
+  - {framework: trtllm, kernel_source: trtllm_mhc_pre_fma, backend: trtllm_mhc, source: "collector/trtllm/collect_mhc_module.py (observed FMA tactic: mhc_gemm_sqrsum_fma + mhc_big_fuse CUDA kernels)"}
+  - {framework: trtllm, kernel_source: trtllm_mhc_pre_dg_splitk, backend: deepgemm, source: "collector/trtllm/collect_mhc_module.py (observed dg_splitk tactic: deep_gemm tf32_hc_prenorm_gemm split-K + mhc_big_fuse)"}
+  - {framework: trtllm, kernel_source: trtllm_mhc_pre_dg_nosplit, backend: deepgemm, source: "collector/trtllm/collect_mhc_module.py (observed dg_nosplit tactic: deep_gemm tf32_hc_prenorm_gemm + mhc_big_fuse)"}
+  - {framework: trtllm, kernel_source: trtllm_mhc_post_mapping, backend: trtllm_mhc, source: "collector/trtllm/collect_mhc_module.py (single kernel torch.ops.trtllm.mhc_post_mapping, mhc_cuda.py:472-510 @1.3.0rc20)"}
+
+  # DeepSeek-V4 attention module label: the attention backend class TRT-LLM's
+  # own selector returns for sparse algorithm "deepseek_v4"
+  # (get_attention_backend -> DeepseekV4TrtllmAttention @1.3.0rc23). The
+  # module internally dispatches indexer (DeepGEMM), sparse MLA and
+  # compressor kernels not observable from one label -> trtllm_internal.
+  - {framework: trtllm, kernel_source: DeepseekV4TrtllmAttention, backend: trtllm_internal, source: "collector/trtllm/collect_dsv4_attn.py (framework-selected backend class name)"}
 
   # Mamba/GDN kernels.
   - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
