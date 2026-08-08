@@ -90,6 +90,41 @@ def resolve_nextn_auto(model_path: str) -> int:
     return int(cfg.get("num_nextn_predict_layers") or 0)
 
 
+# Conservative nextn_accepted fraction for DSPARK recommend mode.
+# nextn_accepted has no backend equivalent — it is AIC's throughput planning
+# assumption (average accepted tokens per step as a fraction of the block size).
+# 0.8 is conservative for a well-aligned draft model.
+_DSPARK_DEFAULT_ACCEPTANCE = 0.8
+
+
+def resolve_dspark_nextn(model_path: str) -> tuple[int, float] | None:
+    """Resolve DSPARK speculative parameters for the recommend/sizing path.
+
+    DSPARK architectures use a standalone trained draft model whose block size
+    is a fixed architectural constant — not stored in the main checkpoint, so
+    ``nextn='auto'`` always returns 0 for these models.
+
+    Returns ``(nextn, nextn_accepted)`` when the model is a DSPARK architecture,
+    where ``nextn`` is the architectural block size and ``nextn_accepted`` is a
+    conservative throughput planning assumption (no backend equivalent).
+    Returns ``None`` when the model is not DSPARK or the config cannot be fetched.
+    Raises ``ValueError`` when ``model_path`` is empty, matching ``resolve_nextn_auto``.
+    """
+    from aiconfigurator_core.sdk.common import DSPARK_NEXTN
+    from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+    if not model_path:
+        raise ValueError("resolve_dspark_nextn requires a model path.")
+    try:
+        info = get_model_config_from_model_path(model_path)
+        block_size = DSPARK_NEXTN.get(info.get("architecture", ""), 0)
+        if block_size:
+            return block_size, block_size * _DSPARK_DEFAULT_ACCEPTANCE
+    except Exception:
+        pass
+    return None
+
+
 def apply_nextn(
     model_config: ModelConfig,
     nextn: int | None,
