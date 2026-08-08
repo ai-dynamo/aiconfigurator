@@ -220,7 +220,8 @@ class TestScanCommFamilyExclusion:
         with caplog.at_level(logging.INFO, logger="migrate_markers"):
             mod.scan_tree(repo)
         assert any(
-            "comm family excluded from sibling reuse (design §6.5 rule 5); marker dropped without declaration"
+            "comm uses implicit reuse for validated framework backends or primary-only data otherwise "
+            "(design §6.5 rule 5); marker dropped without declaration"
             in record.message
             and "h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt" in record.message
             for record in caplog.records
@@ -801,7 +802,10 @@ class TestCli:
         rc = mod.main(["--data-root", str(repo)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "git rm h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt  # comm family excluded" in out
+        assert (
+            "git rm h200_sxm/comm/sglang/0.5.12/SHARED_LAYER_REUSE.txt  # comm uses implicit reuse for "
+            "validated framework backends or primary-only data otherwise" in out
+        )
         assert "git add" not in out  # no reuse.yaml ever staged for a comm marker
         assert "comm_exclusions=1" in out
         assert "marker_deletions=1" in out

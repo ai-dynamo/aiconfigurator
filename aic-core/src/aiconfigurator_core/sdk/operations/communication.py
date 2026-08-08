@@ -98,7 +98,9 @@ class CustomAllReduce(Operation):
             primary_path = resolve_op_data_path(
                 system_data_root, database.backend, database.version, PerfDataFilename.custom_allreduce.value
             )
-            sources = database._build_op_sources(PerfDataFilename.custom_allreduce, primary_path, system_data_root)
+            sources = database._build_communication_op_sources(
+                PerfDataFilename.custom_allreduce, primary_path, system_data_root
+            )
             cls._data_cache[key] = LoadedOpData(
                 load_custom_allreduce_data(sources), PerfDataFilename.custom_allreduce, primary_path
             )
@@ -331,7 +333,9 @@ class NCCL(Operation):
             # shared-layer sibling rows.
             nccl_version = database.system_spec["misc"]["nccl_version"]
             nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
-            nccl_sources = database._build_op_sources(PerfDataFilename.nccl, nccl_primary, system_data_root)
+            nccl_sources = database._build_communication_op_sources(
+                PerfDataFilename.nccl, nccl_primary, system_data_root, storage_backend="nccl"
+            )
             cls._data_cache[key] = LoadedOpData(load_nccl_data(nccl_sources), PerfDataFilename.nccl, nccl_primary)
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
@@ -341,7 +345,9 @@ class NCCL(Operation):
                 oneccl_primary = resolve_op_data_path(
                     system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value
                 )
-                oneccl_sources = database._build_op_sources(PerfDataFilename.oneccl, oneccl_primary, system_data_root)
+                oneccl_sources = database._build_communication_op_sources(
+                    PerfDataFilename.oneccl, oneccl_primary, system_data_root, storage_backend="oneccl"
+                )
                 cls._oneccl_data_cache[key] = LoadedOpData(
                     load_nccl_data(oneccl_sources), PerfDataFilename.oneccl, oneccl_primary
                 )

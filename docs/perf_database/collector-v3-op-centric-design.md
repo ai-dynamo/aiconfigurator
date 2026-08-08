@@ -325,9 +325,15 @@ The loader's source ordering (§7) in one list:
    declaration says so.
 4. Cross-backend fill only for kernel sources whitelisted by
    `op_kernel_source_manifest.yaml`, and only after channels 1–2.
-5. The `comm` family is excluded from sibling-version reuse entirely — NCCL
-   curves are topology-bound, so shape-filling across versions is wrong there
-   (current NCCL/oneCCL behavior, now stated as policy).
+5. Communication policy follows the storage namespace and fails closed for a
+   new backend. The validated framework-versioned folders `comm/sglang`,
+   `comm/trtllm`, and `comm/vllm` use implicit earlier-version reuse within the
+   same framework, but never `reuse.yaml` or cross-framework fill. Every other
+   `comm/<backend>` folder is primary-only by default, including `comm/nccl`
+   and `comm/oneccl`, whose versions identify the communication libraries
+   themselves. Therefore a new op under a validated framework inherits older
+   measurements automatically, while a new communication backend must remain
+   primary-only until its version semantics are explicitly validated.
 
 Guardrails:
 

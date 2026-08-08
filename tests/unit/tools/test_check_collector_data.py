@@ -114,12 +114,13 @@ def _build_compliant_tree(root: Path) -> None:
         _collection_meta({"context_attention_perf": "complete"}),
     )
 
-    # comm family: real data, NO reuse.yaml anywhere under it (R3).
-    _touch(root, "h200_sxm/comm/nccl/2.23/custom_allreduce_perf.parquet")
+    # comm family: real data, no reuse.yaml. Framework-owned tables reuse
+    # earlier versions implicitly; every other comm backend stays primary-only.
+    _touch(root, "h200_sxm/comm/sglang/0.5.12/wideep_deepep_normal_perf.parquet")
     _write(
         root,
-        "h200_sxm/comm/nccl/2.23/collection_meta.yaml",
-        _collection_meta({"custom_allreduce_perf": "complete"}),
+        "h200_sxm/comm/sglang/0.5.12/collection_meta.yaml",
+        _collection_meta({"wideep_deepep_normal_perf": "complete"}),
     )
 
 
@@ -255,9 +256,20 @@ class TestR2ReuseValidity:
 
 
 class TestR3CommExclusion:
-    def test_reuse_yaml_under_comm_is_named(self, mod, tmp_path):
-        _touch(tmp_path, "h200_sxm/comm/nccl/2.23/custom_allreduce_perf.parquet")
-        _write(tmp_path, "h200_sxm/comm/nccl/2.19/reuse.yaml", _reuse_yaml([("custom_allreduce_perf", "2.23")]))
+    def test_framework_owned_comm_reuse_yaml_is_rejected(self, mod, tmp_path):
+        _touch(tmp_path, "h200_sxm/comm/sglang/0.5.12/wideep_deepep_normal_perf.parquet")
+        _write(
+            tmp_path,
+            "h200_sxm/comm/sglang/0.5.14/reuse.yaml",
+            _reuse_yaml([("wideep_deepep_normal_perf", "0.5.12")]),
+        )
+        failures = mod.check_r3_comm_exclusion(tmp_path)
+        assert len(failures) == 1
+        assert "h200_sxm/comm/sglang/0.5.14/reuse.yaml" in failures[0]
+
+    def test_nccl_reuse_under_comm_is_named(self, mod, tmp_path):
+        _touch(tmp_path, "h200_sxm/comm/nccl/2.23/nccl_perf.parquet")
+        _write(tmp_path, "h200_sxm/comm/nccl/2.19/reuse.yaml", _reuse_yaml([("nccl_perf", "2.23")]))
         failures = mod.check_r3_comm_exclusion(tmp_path)
         assert len(failures) == 1
         assert "h200_sxm/comm/nccl/2.19/reuse.yaml" in failures[0]
@@ -267,11 +279,17 @@ class TestR3CommExclusion:
         _write(tmp_path, "h200_sxm/gemm/sglang/0.5.10/reuse.yaml", _reuse_yaml([("gemm_perf", "0.5.14")]))
         assert mod.check_r3_comm_exclusion(tmp_path) == []
 
-    def test_multiple_comm_offenders_all_named(self, mod, tmp_path):
-        _write(tmp_path, "h200_sxm/comm/nccl/2.19/reuse.yaml", _reuse_yaml([("custom_allreduce_perf", "2.23")]))
-        _write(tmp_path, "b200_sxm/comm/sglang/0.5.10/reuse.yaml", _reuse_yaml([("custom_allreduce_perf", "0.5.14")]))
+    def test_multiple_comm_offenders_are_all_named(self, mod, tmp_path):
+        _write(tmp_path, "h200_sxm/comm/nccl/2.19/reuse.yaml", _reuse_yaml([("nccl_perf", "2.23")]))
+        _write(
+            tmp_path,
+            "b200_sxm/comm/sglang/0.5.14/reuse.yaml",
+            _reuse_yaml([("custom_allreduce_perf", "0.5.12")]),
+        )
         failures = mod.check_r3_comm_exclusion(tmp_path)
         assert len(failures) == 2
+        assert "b200_sxm/comm/sglang/0.5.14/reuse.yaml" in failures[0]
+        assert "h200_sxm/comm/nccl/2.19/reuse.yaml" in failures[1]
 
 
 # ---------------------------------------------------------------------------

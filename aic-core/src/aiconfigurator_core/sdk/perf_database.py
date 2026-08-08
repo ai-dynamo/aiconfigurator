@@ -802,9 +802,7 @@ def _is_family_layout_version_dir(version_path: str, data_dir: str) -> bool:
     family-layout-paired concept (design §7 item 1: "family tree first,
     legacy layout as deprecated fallback for one transition window") -- a
     legacy-shaped dir predates the V3 metadata regime entirely, so strict
-    provenance does not apply to it, mirroring how ``_op_file_family_from_path``
-    already treats legacy-shaped paths as structurally outside the comm-family
-    exclusion (Task 1's FIX-2).
+    provenance does not apply to it.
     """
     try:
         rel = os.path.relpath(version_path, data_dir)
@@ -1840,52 +1838,13 @@ def _gemm_key_names(database) -> list[str]:
     return sorted(names)
 
 
-# ``comm`` is the one family design §6.5 rule 5 hard-excludes from every reuse
-# channel (NCCL curves are topology-bound; shape-filling across versions is
-# wrong there). Detected structurally off the op's resolved primary path.
-_COMM_FAMILY_DIR = "comm"
-
-
-def _op_file_family_from_path(primary_path: str, system_data_root: str) -> str | None:
-    """Best-effort family-dir name for an op's resolved primary path.
-
-    Structural: the family-first layout is
-    ``<data_dir>/<family>/<backend>/<version>/<file>``, so the family is the
-    path's first component relative to ``system_data_root`` when that
-    component isn't a known backend dir. Returns ``None`` for legacy-layout
-    paths (``<data_dir>/<backend>/<version>/<file>``, 3 components) or
-    otherwise-unresolved paths — comm exclusion then simply does not trigger;
-    detection is deliberately primary-path-only (see ``_build_op_sources``).
-
-    Deliberate exception, not a bug (AIC-1503 PR4 task 1, FIX 2): design
-    §6.5 rule 5's "comm" family is a structural concept that only exists in
-    the family-first layout. A comm op file (custom_allreduce_perf.parquet,
-    trtllm_alltoall_perf.parquet, wideep_deepep_*_perf.parquet, ...) resolved
-    under a legacy-shaped 3-component path has no family component to
-    detect, so this function returns ``None`` for it and `_build_op_sources`
-    does NOT apply the comm hard exclusion — that op keeps the pre-V3
-    sibling-reuse behavior for as long as its tree stays legacy-shaped. This
-    was adjudicated deliberately over the alternative of recognizing these
-    op files by table-name identity: that would smuggle catalog knowledge
-    ("which tables are comm") into a loader that must stay catalog-free. The
-    real committed tree is fully family-first today (zero live exposure);
-    this only matters for the transition window if a legacy-shaped tree is
-    ever loaded again. Pinned by
-    ``test_reuse_ordering.py::test_legacy_layout_comm_op_keeps_pre_v3_siblings``
-    — any future change to this behavior must update that test deliberately.
-    """
-    try:
-        rel = os.path.relpath(primary_path, system_data_root)
-    except ValueError:
-        return None
-    parts = rel.split(os.sep)
-    if len(parts) == 4 and parts[0] not in KNOWN_BACKEND_DIRS:
-        return parts[0]
-    # Legacy-layout (3-component) or otherwise-unresolved path: no family
-    # component exists structurally, so we can't detect "comm" here. This is
-    # the transition-window exception described above, not a bug — legacy
-    # comm op files simply keep pre-V3 sibling-reuse behavior.
-    return None
+# Communication reuse follows the storage namespace, not an op allowlist.
+# Only framework-versioned directories have validated cross-version semantics;
+# every other ``comm/<backend>`` directory is primary-only by default. This is
+# deliberately fail-closed for new communication backends while letting a new
+# op under an existing framework inherit older measurements automatically.
+_COMM_FAMILY = "comm"
+_COMM_FRAMEWORK_VERSIONED_BACKENDS = frozenset(("sglang", "trtllm", "vllm"))
 
 
 def _requested_version_reuse_entries(
@@ -2212,11 +2171,36 @@ class PerfDatabase:
         else:
             self.supported_quant_mode = {}
 
+    def _build_communication_op_sources(
+        self,
+        op_filename_enum: PerfDataFilename,
+        primary_path: str,
+        system_data_root: str,
+        *,
+        storage_backend: str | None = None,
+    ) -> list[tuple[str, Optional[set[str]]]]:
+        """Build sources for a table requested from ``comm/<backend>``.
+
+        Keeping the communication family and storage backend explicit makes
+        the policy reliable even when the requested primary file is missing
+        and its path therefore cannot reveal the family-first namespace.
+        """
+        return self._build_op_sources(
+            op_filename_enum,
+            primary_path,
+            system_data_root,
+            storage_family=_COMM_FAMILY,
+            storage_backend=storage_backend or self.backend,
+        )
+
     def _build_op_sources(
         self,
         op_filename_enum: PerfDataFilename,
         primary_path: str,
         system_data_root: str,
+        *,
+        storage_family: str | None = None,
+        storage_backend: str | None = None,
     ) -> list[tuple[str, Optional[set[str]]]]:
         """Build the priority-ordered list of source files for one op (design §6).
 
@@ -2248,10 +2232,15 @@ class PerfDatabase:
         warning; channels 2-4 still fill.
 
         Returns just the primary tuple (still recorded) when the shared layer
-        is disabled, when the op file is framework-agnostic (nccl / oneccl),
-        or when the op's primary path resolves under the `comm` family dir
-        (design §6.5 rule 5 — comm is hard-excluded from every reuse channel,
-        declarations included; NCCL curves are topology-bound). The
+        is disabled or when the op lives under a communication backend other
+        than the validated framework-versioned namespaces (SGLang, TRT-LLM,
+        and vLLM). Those
+        framework communication folders skip declared and cross-backend
+        channels but use the ordinary nearest-earlier same-backend chain. This
+        lets a new serving-framework version reuse existing communication ops
+        automatically while a new communication backend remains primary-only
+        until its version semantics are explicitly validated (design §6.5
+        rule 5). The
         kernel-source filter on cross-backend sources is essential — `load_*`
         functions strip `kernel_source` from dict keys, so an unfiltered
         cross-backend row would silently clobber an active-backend row on key
@@ -2296,12 +2285,14 @@ class PerfDatabase:
 
         if not self.enable_shared_layer:
             return _finish()
-        if op_filename_enum in (PerfDataFilename.nccl, PerfDataFilename.oneccl):
-            return _finish()
-        if _op_file_family_from_path(primary_path, system_data_root) == _COMM_FAMILY_DIR:
-            return _finish()
 
-        backend_lower = self.backend.lower()
+        storage_family_lower = storage_family.lower() if storage_family else None
+        backend_lower = (storage_backend or self.backend).lower()
+        comm_implicit_same_backend = (
+            storage_family_lower == _COMM_FAMILY and backend_lower in _COMM_FRAMEWORK_VERSIONED_BACKENDS
+        )
+        if storage_family_lower == _COMM_FAMILY and not comm_implicit_same_backend:
+            return _finish()
 
         # Channel 2 (design §6.3): declared donors from the REQUESTED version
         # dir's reuse.yaml, in file order. Duplicate (table, from_version)
@@ -2311,30 +2302,31 @@ class PerfDatabase:
         # from_version) dedupe key; first occurrence wins (AIC-1503 PR4
         # task 5, FIX 2).
         declared_donor_versions: set[str] = set()
-        for reuse_entry in _requested_version_reuse_entries(
-            system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
-        ):
-            from_version = reuse_entry["from_version"]
-            if from_version in declared_donor_versions:
-                logger.debug(
-                    "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
-                    reuse_entry["table"],
-                    from_version,
-                    system_data_root,
+        if not comm_implicit_same_backend:
+            for reuse_entry in _requested_version_reuse_entries(
+                system_data_root, backend_lower, self.version, op_file_basename, strict=self.strict_provenance
+            ):
+                from_version = reuse_entry["from_version"]
+                if from_version in declared_donor_versions:
+                    logger.debug(
+                        "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
+                        reuse_entry["table"],
+                        from_version,
+                        system_data_root,
+                    )
+                    continue
+                donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
+                if not os.path.isfile(donor_path):
+                    continue
+                records.append(
+                    {
+                        "version": from_version,
+                        "path": donor_path,
+                        "channel": "declared_reuse",
+                        "ks_filter": None,
+                    }
                 )
-                continue
-            donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
-            if not os.path.isfile(donor_path):
-                continue
-            records.append(
-                {
-                    "version": from_version,
-                    "path": donor_path,
-                    "channel": "declared_reuse",
-                    "ks_filter": None,
-                }
-            )
-            declared_donor_versions.add(from_version)
+                declared_donor_versions.add(from_version)
 
         # Channel 1 aka §6.2 (nearest-earlier same-backend fallback). Unparseable
         # sibling versions can't be ordered against the requested version, so
@@ -2366,6 +2358,9 @@ class PerfDatabase:
                 records.append(
                     {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
                 )
+
+        if comm_implicit_same_backend:
+            return _finish()
 
         # Channel 4 aka §6.4 (cross-backend fill, kernel-identity gated). Same
         # mechanism as before; the active backend is excluded from

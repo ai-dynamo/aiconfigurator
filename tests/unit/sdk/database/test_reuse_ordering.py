@@ -10,13 +10,16 @@ REQUESTED version dir's ``reuse.yaml`` (any direction, channel
 requested, nearest first (channel ``fallback`` — never admits a version newer
 than requested implicitly), (4) cross-backend kernel-source-gated fill
 (channel ``cross_backend``, mechanism unchanged from before this PR). The
-``comm`` family is hard-excluded from every non-primary channel. Every
-admitted source is recorded into ``PerfDatabase.data_provenance``.
+Known framework-versioned ``comm`` folders use only implicit earlier
+same-backend reuse; their declared and cross-backend channels stay disabled.
+Every other communication backend, including NCCL and oneCCL, defaults to
+primary-only. Every admitted source is recorded into
+``PerfDatabase.data_provenance``.
 
-These tests call ``PerfDatabase._build_op_sources`` directly against
-synthetic on-disk trees — no CSV/parquet content is ever read by that
-function, only path existence, so stub file contents are fine (mirrors
-``tests/unit/sdk/database/test_dual_layout_discovery.py``).
+These tests call ``PerfDatabase._build_op_sources`` or its communication
+wrapper directly against synthetic on-disk trees — no CSV/parquet content is
+ever read by those functions, only path existence, so stub file contents are
+fine (mirrors ``tests/unit/sdk/database/test_dual_layout_discovery.py``).
 """
 
 from __future__ import annotations
@@ -95,6 +98,19 @@ def _sources_for(db: PerfDatabase, systems_root: Path, op: common.PerfDataFilena
     system_data_root = str(systems_root / "data" / "h100_sxm")
     primary_path = resolve_op_data_path(system_data_root, db.backend, db.version, op.value)
     return db._build_op_sources(op, primary_path, system_data_root)
+
+
+def _comm_sources_for(
+    db: PerfDatabase,
+    systems_root: Path,
+    op: common.PerfDataFilename,
+    *,
+    storage_backend: str | None = None,
+):
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    backend = storage_backend or db.backend
+    primary_path = resolve_op_data_path(system_data_root, backend, db.version, op.value)
+    return db._build_communication_op_sources(op, primary_path, system_data_root, storage_backend=backend)
 
 
 def _channels(db: PerfDatabase, op_file_basename: str) -> list[str]:
@@ -379,69 +395,147 @@ def test_self_overlap_declared_donor_admitted_after_primary(systems_root: Path) 
 
 
 # ---------------------------------------------------------------------------
-# comm family hard exclusion (design §6.5 rule 5)
+# comm family: implicit framework reuse or primary-only (design §6.5 rule 5)
 # ---------------------------------------------------------------------------
 
 
-def test_comm_family_custom_allreduce_gets_primary_only(systems_root: Path) -> None:
-    """custom_allreduce lives under the comm family. Today it inherits
-    newest-first sibling rows via the kernel-source manifest (same mechanism
-    as any other op); this PR tightens that to primary-only, regardless of a
-    stray declaration or a matching cross-backend manifest entry."""
-    backend, requested, older = "trtllm", "1.3.0", "1.2.0"
-    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/custom_allreduce_perf.parquet")
+@pytest.mark.parametrize(
+    ("backend", "op"),
+    (
+        ("sglang", common.PerfDataFilename.custom_allreduce),
+        ("sglang", common.PerfDataFilename.wideep_deepep_ll),
+        ("sglang", common.PerfDataFilename.wideep_deepep_normal),
+        ("trtllm", common.PerfDataFilename.custom_allreduce),
+        ("trtllm", common.PerfDataFilename.trtllm_alltoall),
+        ("vllm", common.PerfDataFilename.custom_allreduce),
+    ),
+)
+def test_framework_comm_ops_implicitly_reuse_earlier_same_backend(
+    systems_root: Path, backend: str, op: common.PerfDataFilename
+) -> None:
+    requested, older = "2.0.0", "1.0.0"
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/{op.value}")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _comm_sources_for(db, systems_root, op)
+
+    assert len(sources) == 2
+    assert _channels(db, op.value) == ["primary", "fallback"]
+    assert _versions(db, op.value) == [requested, older]
+
+
+def test_framework_comm_ignores_declaration_and_cross_backend(systems_root: Path) -> None:
+    """Comm reuse is automatic and same-framework only: a comm reuse.yaml is
+    ignored, and even a shared kernel-source entry cannot admit another
+    framework's table."""
+    backend, requested, older, declared = "trtllm", "2.0.0", "1.0.0", "3.0.0"
+    op = common.PerfDataFilename.custom_allreduce
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/sglang/0.5.14/{op.value}")
     _write_yaml(
         systems_root,
         f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
-        {"reuse": [_reuse_entry("custom_allreduce_perf", older)]},
+        {"reuse": [_reuse_entry(op.value.removesuffix(".parquet"), declared)]},
     )
-    _write_manifest(systems_root, [("custom_allreduce_perf.parquet", "TRTLLM", "shared", [backend])])
+    _write_manifest(systems_root, [(op.value, "shared_comm", "shared", [backend, "sglang"])])
 
     db = _build_db(systems_root, backend=backend, version=requested)
-    sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
+    sources = _comm_sources_for(db, systems_root, op)
+
+    assert len(sources) == 2
+    assert _channels(db, op.value) == ["primary", "fallback"]
+    assert _versions(db, op.value) == [requested, older]
+
+
+def test_trtllm_alltoall_missing_rc20_primary_reuses_rc10(systems_root: Path) -> None:
+    """Pins the supported GB200-style case that regressed when comm reuse was
+    changed to declaration-only: rc20 has no all-to-all table, so rc10 fills."""
+    backend, requested, older = "trtllm", "1.3.0rc20", "1.3.0rc10"
+    op = common.PerfDataFilename.trtllm_alltoall
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/{op.value}")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _comm_sources_for(db, systems_root, op)
+
+    provenance = db.data_provenance[op.value]
+    assert [entry["channel"] for entry in provenance] == ["primary", "fallback"]
+    assert [entry["exists"] for entry in provenance] == [False, True]
+    assert provenance[1]["version"] == older
+    assert [path for path, _ in sources] == [entry["path"] for entry in provenance]
+
+
+def test_new_framework_comm_op_without_prior_table_stays_unsupported(systems_root: Path) -> None:
+    """A genuinely new op has nothing to inherit and keeps only its missing
+    primary path until the first measurements are collected."""
+    op = common.PerfDataFilename.trtllm_alltoall
+    db = _build_db(systems_root, backend="trtllm", version="1.0.0")
+    sources = _comm_sources_for(db, systems_root, op)
 
     assert len(sources) == 1
-    assert sources[0][0].endswith(f"comm/{backend}/{requested}/custom_allreduce_perf.parquet")
-    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+    assert _channels(db, op.value) == ["primary"]
+    assert db.data_provenance[op.value][0]["exists"] is False
 
 
-def test_legacy_layout_comm_op_keeps_pre_v3_siblings(systems_root: Path) -> None:
-    """Pins the documented AIC-1503 PR4 task-1 FIX-2 exception
-    (``_op_file_family_from_path`` docstring): design §6.5 rule 5's comm
-    hard-exclusion is detected structurally off the primary path's family
-    component, which only exists in the family-first layout. A LEGACY-shaped
-    comm op (3-component path, no ``comm/`` family dir) therefore does NOT
-    get the exclusion applied — it keeps pre-V3 sibling-reuse behavior for
-    as long as its tree stays legacy-shaped. Contrast with
-    ``test_comm_family_custom_allreduce_gets_primary_only`` above, which
-    pins the family-shaped case (exclusion DOES apply, primary-only)."""
+def test_legacy_layout_framework_comm_uses_same_policy(systems_root: Path) -> None:
+    """The explicit communication namespace preserves the framework policy
+    even when the physical table is still in the legacy layout."""
     backend, requested, older = "trtllm", "1.3.0", "1.2.0"
     _write(systems_root, f"data/h100_sxm/{backend}/{requested}/custom_allreduce_perf.parquet")
     _write(systems_root, f"data/h100_sxm/{backend}/{older}/custom_allreduce_perf.parquet")
 
     db = _build_db(systems_root, backend=backend, version=requested)
-    sources = _sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
+    sources = _comm_sources_for(db, systems_root, common.PerfDataFilename.custom_allreduce)
 
     assert len(sources) == 2
     assert _channels(db, "custom_allreduce_perf.parquet") == ["primary", "fallback"]
     assert _versions(db, "custom_allreduce_perf.parquet") == [requested, older]
 
 
-def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:
-    """NCCL is comm-family too, but this proves the pre-existing op-name
-    early-exit (kept per the PR3 carry-in) independently still short-circuits,
-    not just the new family-based check."""
-    _write(systems_root, "data/h100_sxm/comm/nccl/2.26.2/nccl_perf.parquet")
-    _write(systems_root, "data/h100_sxm/comm/nccl/2.20.0/nccl_perf.parquet")  # older sibling, must be ignored
+@pytest.mark.parametrize(
+    ("storage_backend", "op"),
+    (("nccl", common.PerfDataFilename.nccl), ("oneccl", common.PerfDataFilename.oneccl)),
+)
+def test_library_versioned_comm_ops_are_primary_only(
+    systems_root: Path, storage_backend: str, op: common.PerfDataFilename
+) -> None:
+    """NCCL and oneCCL versions identify the communication library itself,
+    so an older library version is never an implicit donor."""
+    requested, older = "2.26.2", "2.20.0"
+    _write(systems_root, f"data/h100_sxm/comm/{storage_backend}/{requested}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{storage_backend}/{older}/{op.value}")
 
-    db = _build_db(systems_root, backend="trtllm", version="2.26.2")
-    system_data_root = str(systems_root / "data" / "h100_sxm")
-    primary_path = resolve_op_data_path(system_data_root, "nccl", "2.26.2", common.PerfDataFilename.nccl.value)
-    sources = db._build_op_sources(common.PerfDataFilename.nccl, primary_path, system_data_root)
+    db = _build_db(systems_root, backend="trtllm", version=requested)
+    sources = _comm_sources_for(db, systems_root, op, storage_backend=storage_backend)
 
     assert len(sources) == 1
-    assert _channels(db, "nccl_perf.parquet") == ["primary"]
+    assert _channels(db, op.value) == ["primary"]
+
+
+def test_unknown_comm_storage_backend_defaults_primary_only(systems_root: Path) -> None:
+    """A new communication backend admits no implicit, declared, or
+    cross-backend donor until its version namespace is explicitly validated."""
+    backend, requested, older, declared = "future_framework", "2.0.0", "1.0.0", "3.0.0"
+    op = common.PerfDataFilename.custom_allreduce
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{requested}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{older}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/{backend}/{declared}/{op.value}")
+    _write(systems_root, f"data/h100_sxm/comm/sglang/0.5.14/{op.value}")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/comm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry(op.value.removesuffix(".parquet"), declared)]},
+    )
+    _write_manifest(systems_root, [(op.value, "shared_comm", "shared", [backend, "sglang"])])
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _comm_sources_for(db, systems_root, op)
+
+    assert len(sources) == 1
+    assert _channels(db, op.value) == ["primary"]
+    assert _versions(db, op.value) == [requested]
 
 
 # ---------------------------------------------------------------------------
