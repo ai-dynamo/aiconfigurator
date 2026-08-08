@@ -584,8 +584,12 @@ class Task:
     # TTFT pre-correction applied to prefill candidates before the SLA filter,
     # accounting for queueing-under-concurrency in the deployed system.
     # Used by both ``_find_best_disagg_under_constraint`` and
-    # ``picking.pick_autoscale``; default 1.8 locked by parity test.
-    autoscale_ttft_correction_factor: float = 1.8
+    # ``picking.pick_autoscale``. None (default) resolves to the derived
+    # M/G/1 factor at the rate-matching design utilization
+    # (picking.prefill_queueing_ttft_factor(0.9) = 5.5); set a float to pin
+    # a different operating point (the former hand-tuned value was 1.8,
+    # i.e. utilization ~0.62).
+    autoscale_ttft_correction_factor: float | None = None
 
     # ====== 8.5 Predictor strategy ======
     # Optional Predictor that decides how each single config point is
