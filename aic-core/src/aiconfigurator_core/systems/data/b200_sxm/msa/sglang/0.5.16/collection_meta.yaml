@@ -10,6 +10,25 @@
 # Accepted gaps: 4 subprocess-group failures (3 ctx bf16/fp8-kv b>=8 h64
 # groups with partial rows present, 1 gen fp8-kv h8 group) — classified
 # in the campaign error log.
+#
+# COVERAGE NOTE (2026-08-08, issue #1509): the generation table's 994
+# rows stop at batch*kv <= 262144 — the sglang sweep section in
+# cases/base_ops/mla_module.yaml has no generation max_tokens override,
+# so it inherits the shared 262144 default while the trtllm/vllm
+# sections set 33554432 (128x). Large decode points (e.g. b=256
+# kv=65536) are absent BY PLAN, not by failure ("status: complete" is
+# per-plan). Spot-measured b=256 kv=65536 h=8 runs fine on B200
+# (0.796 ms, 2026-08-08); raising the budget is a sweep-cost decision
+# deferred to the next campaign.
+# Prefill-slowness root cause (same date): the Triton reference kernel
+# _gqa_share_sparse_fwd_kernel runs at ~5.7% of B200 bf16 peak; the
+# fmha_sm100-bundled dev-minimax-m3 images (or a future release that
+# bundles the wheel) recover ~1.9x on long-context prefill but REGRESS
+# small shapes (ctx b=2 s=512: 0.69 -> 1.52 ms, host-side planning) —
+# evaluate at re-pin time. v0.5.17 (released 2026-08-08) does NOT
+# bundle the wheel and measures identical to 0.5.16 on bf16; its
+# fp8-KV path re-routes to trtllm_mha + fp8 attn GEMMs and needs
+# collector kernel_source support before collection.
 schema_version: 1
 provenance: collected
 runtime:
