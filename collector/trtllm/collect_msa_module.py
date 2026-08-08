@@ -636,8 +636,19 @@ def create_kv_cache_and_metadata(
     # 2x headroom: KVCacheManagerV2 draws the M3 INDEX_KEY side-cache pages
     # from the same max_tokens page budget as main K/V, and the is_gen dummy
     # path resizes to capacity+1 — an exact budget makes add_dummy_requests
-    # fail (return None after releasing resources). Oversizing is free for a
-    # benchmark: pages are virtual until touched.
+    # fail (return None after releasing resources).
+    #
+    # NOTE(pool-size-dependent latency, 1.3.0rc23): oversizing is NOT free on
+    # the MSA path. select_blocks does a permute().contiguous() copy of the
+    # ENTIRE index-K pool every forward (msa_utils.cache_view_to_msa_paged
+    # @1.3.0rc23, called from msa_indexer.select_blocks:147), so the measured
+    # latency carries a term linear in the pool pages this budget allocates
+    # (~35 ns/page measured on B200 2026-08-08; 92% of the gen b=256 kv=65536
+    # point). Serving pays the same copy over its own (memory-budget-sized)
+    # pool, so this is framework truth in kind but collector-sized in
+    # magnitude — keep this factor stable across campaigns for comparability.
+    # Upstream main removes the copy (get_index_k_buffer(kv_layout="HND")
+    # zero-copy view); re-check on the next version bump.
     kv_cache_config = KvCacheConfig(
         max_tokens=2 * batch_size * (_round_up(max_seq, tokens_per_block) + 2 * tokens_per_block),
         enable_block_reuse=False,
