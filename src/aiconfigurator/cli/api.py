@@ -26,6 +26,7 @@ from aiconfigurator.cli.report_and_save import save_results
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
+from aiconfigurator.sdk.config_builders import resolve_dspark_nextn as _resolve_dspark_nextn
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
 from aiconfigurator.sdk.errors import ExperimentOutcome, NoFeasibleConfigError, is_gpu_retriable
 from aiconfigurator.sdk.models import (
@@ -372,6 +373,13 @@ def cli_default(
 
 _MAX_GPUS_PER_WORKER = 64
 
+# Conservative nextn_accepted fraction used when recommend auto-enables DSPARK.
+# nextn_accepted has no backend equivalent — it is AIC's throughput modeling
+# assumption (accepted tokens per step as a fraction of the block size).
+# Users who have empirical acceptance data can override via cli_recommend's
+# nextn_accepted parameter. 0.8 is conservative for a well-aligned draft model.
+_DSPARK_DEFAULT_ACCEPTANCE = 0.8
+
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
     """Scale GPU candidates for recommend mode."""
@@ -513,6 +521,17 @@ def cli_recommend(
     # nextn="auto" resolves the draft depth from the checkpoint first.
     if nextn == "auto":
         nextn = _resolve_nextn_auto(model_path)
+
+    # DSPARK architectures (e.g. Kimi-K3) always run with a standalone draft
+    # model in production. Their block size is an architectural constant absent
+    # from the checkpoint, so nextn="auto" returns 0. Auto-enable here so that
+    # recommend produces accurate throughput estimates without requiring callers
+    # to know about DSPARK internals.
+    if nextn == 0 and (dspark := _resolve_dspark_nextn(model_path)):
+        nextn, dspark_accepted = dspark
+        if nextn_accepted is None:
+            nextn_accepted = dspark_accepted
+
     nextn, nextn_accepted = _normalize_nextn(nextn, nextn_accepted)
 
     base_tasks = build_default_tasks(
