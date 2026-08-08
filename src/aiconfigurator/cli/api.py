@@ -183,6 +183,7 @@ def cli_default(
     generator_config: str | None = None,
     generator_dynamo_version: str | None = None,
     engine_step_backend: str | None = None,
+    forward_model: str | None = None,
 ) -> CLIResult:
     """
     Run the default CLI mode: compare aggregated vs disaggregated serving.
@@ -234,6 +235,7 @@ def cli_default(
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
         engine_step_backend: Experimental static latency backend ("python" or "rust").
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
 
     Returns:
         CLIResult with chosen experiment, best configs, pareto fronts, and throughputs.
@@ -301,6 +303,7 @@ def cli_default(
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
         engine_step_backend=engine_step_backend,
+        forward_model=forward_model,
     )
 
     result = _execute_and_wrap_result(tasks, mode="default", top_n=top_n, strict_sla=strict_sla)
@@ -959,6 +962,7 @@ def cli_estimate(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
+    forward_model: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int | str = 0,
@@ -1199,6 +1203,7 @@ def cli_estimate(
             nextn_accepted=nextn_accepted,
             stride=stride,
             engine_step_backend=engine_step_backend,
+            forward_model=forward_model,
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
@@ -1235,6 +1240,7 @@ def cli_estimate(
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
+            forward_model=forward_model,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1301,11 +1307,17 @@ def cli_estimate(
             get_backend=get_backend,
             get_model=get_model,
             engine_step_backend=engine_step_backend,
+            forward_model=forward_model,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
         )
     elif mode == "afd":
+        if forward_model == "fpm":
+            raise ValueError(
+                "forward_model='fpm' is not supported in afd mode: AFD splits attention and FFN "
+                "across workers, which is incompatible with whole-model forward-pass data."
+            )
         for name, val in [
             ("n_a_nodes", n_a_nodes),
             ("n_f_nodes", n_f_nodes),
@@ -1450,6 +1462,7 @@ def _run_agg_estimate(
     free_gpu_memory_fraction=None,
     max_seq_len=None,
     engine_step_backend=None,
+    forward_model=None,
     # Common (also accepted by disagg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1474,6 +1487,7 @@ def _run_agg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
@@ -1585,6 +1599,7 @@ def _run_static_estimate(
     load_database,
     get_backend,
     get_model,
+    forward_model=None,
 ) -> EstimateResult:
     """Run a single-pass static-batching estimation.
 
@@ -1614,6 +1629,7 @@ def _run_static_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
@@ -1728,6 +1744,7 @@ def _run_disagg_estimate(
     get_backend,
     get_model,
     engine_step_backend=None,
+    forward_model=None,
     # Common (also accepted by agg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1765,6 +1782,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
     decode_model_config = _build_model_config(
@@ -1778,6 +1796,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker

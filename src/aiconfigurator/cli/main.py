@@ -156,6 +156,14 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         "crosses the FFI); use 'python' as the escape hatch or 'rust' to force the "
         "compiled engine.",
     )
+    common_parser.add_argument(
+        "--forward-model",
+        choices=["op_level", "fpm"],
+        default=None,
+        help="Forward-pass modeling mode. Default 'op_level' keeps granular op-level modeling; "
+        "'fpm' predicts from collected whole-model forward-pass data (requires fpm_forward "
+        "perf data for the exact model/system/backend/version).",
+    )
     add_generator_override_arguments(common_parser)
     return common_parser
 
@@ -1492,6 +1500,7 @@ def build_default_tasks(
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
+    forward_model: str | None = None,
     serving_mode: str = "auto",
     afd_max_a_batch_size: int = 1024,
     afd_max_candidates: int = 10_000,
@@ -1527,6 +1536,9 @@ def build_default_tasks(
             unset defaults to the compiled Rust engine (power-carrying databases
             delegate to the Python step, as do SDK callers passing synthetic
             database objects the compiled engine cannot re-load from disk).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
+            keeps the default. "fpm" always runs on the Python step (it
+            compiles to no Rust op variant yet).
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.
@@ -1661,6 +1673,8 @@ def build_default_tasks(
         "max_seq_len": max_seq_len,
         "engine_step_backend": engine_step_backend,
     }
+    if forward_model is not None:
+        global_kwargs["forward_model"] = forward_model
     if nextn == "auto" or (isinstance(nextn, int) and nextn > 0):
         global_kwargs["nextn"] = nextn
         global_kwargs["nextn_accepted"] = nextn_accepted
@@ -1804,6 +1818,7 @@ def build_experiment_tasks(
     yaml_path: str | None = None,
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
+    forward_model: str | None = None,
 ) -> dict[str, Task]:
     """Build task configs from YAML file or config dict.
 
@@ -1814,6 +1829,8 @@ def build_experiment_tasks(
         engine_step_backend: Optional global engine-step latency backend override.
             Per-experiment ``engine_step_backend`` entries take precedence;
             unset defaults to the compiled Rust engine.
+        forward_model: Optional global forward-pass modeling mode ("op_level"/"fpm").
+            Per-experiment ``forward_model`` entries take precedence.
 
     Returns:
         Dict mapping experiment names to Task objects.
@@ -1906,10 +1923,12 @@ def build_experiment_tasks(
                     seen_combos.add((sys_name, bname, bver))
                     _ensure_backend_version_available(sys_name, bname, bver)
 
-        # Per-experiment engine_step_backend wins over the global default.
+        # Per-experiment engine_step_backend / forward_model win over the global defaults.
         overrides: dict[str, Any] = {}
         if engine_step_backend is not None and "engine_step_backend" not in exp_config:
             overrides["engine_step_backend"] = engine_step_backend
+        if forward_model is not None and "forward_model" not in exp_config:
+            overrides["forward_model"] = forward_model
 
         try:
             task_config = {**exp_config, "database_mode": database_mode}
@@ -2459,6 +2478,7 @@ def _run_estimate_mode(args):
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
         max_seq_len=args.max_seq_len,
         engine_step_backend=args.engine_step_backend,
+        forward_model=args.forward_model,
         prefix=args.prefix,
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
@@ -2908,6 +2928,7 @@ def main(args):
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
             engine_step_backend=args.engine_step_backend,
+            forward_model=args.forward_model,
             serving_mode=args.serving_mode,
             afd_max_a_batch_size=getattr(args, "afd_max_a_batch_size", 1024),
             afd_max_candidates=getattr(args, "afd_max_candidates", 10_000),
@@ -2920,6 +2941,8 @@ def main(args):
             build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
             if args.engine_step_backend is not None:
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
+            if args.forward_model is not None:
+                build_kwargs["forward_model"] = args.forward_model
             tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")
