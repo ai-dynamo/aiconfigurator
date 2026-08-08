@@ -735,7 +735,7 @@ class MLAModulePrecisionSpec:
     attention_types: tuple[str, ...] = ("mla", "dsa")
 
 
-_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa")
+_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa", "msa")
 
 
 def get_mla_module_model_specs(
@@ -790,7 +790,7 @@ def get_mla_module_model_specs(
         canonical_specs = {}
         collapsed: dict[tuple, list[str]] = {}
         for spec in specs:
-            key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
+            key = (spec.attention_type, spec.architecture if spec.attention_type in ("dsa", "msa") else None)
             if key in canonical_specs:
                 collapsed.setdefault(key, []).append(spec.model_path)
             else:

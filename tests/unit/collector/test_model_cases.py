@@ -656,7 +656,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
-    assert len(moe_cases) == 5025
+    # +114 for MiniMax-M3's MoE row (6144/3072, 128x4).
+    assert len(moe_cases) == 5139
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -1035,6 +1036,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("mla", "deepseek-ai/DeepSeek-V3", "DeepseekV3ForCausalLM"),
         ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
         ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
+        ("msa", "MiniMaxAI/MiniMax-M3", "MiniMaxM3ForCausalLM"),
     }
     assert trtllm_specs == vllm_specs
 

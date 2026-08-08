@@ -286,6 +286,31 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GLM5_DSA_ATTN_MODULE,
         unverified_sms=(120,),
     ),
+    # MiniMax-M3 MSA sparse-attention modules — requires the msa-family image
+    # pin (framework_manifest sglang families.msa → official v0.5.16, the
+    # first release with models/minimax_m3.py; the module declares
+    # __compat__ = "sglang>=0.5.16"). Hardware-validated on SM90:
+    # the sparse layers run the Triton sparse path there (SGLang's own M3
+    # server-args override, arg_groups/overrides.py:521-537@v0.5.16 — MSA
+    # fmha_sm100 is SM100-only). Other SMs carry maturity markers until a
+    # hardware pass validates them, mirroring the trtllm msa entries.
+    OpEntry(
+        op="msa_context_module",
+        module="collector.sglang.collect_msa_module",
+        get_func="get_msa_context_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_CONTEXT_MODULE,
+        unverified_sms=(120, 121),
+    ),
+    OpEntry(
+        op="msa_generation_module",
+        module="collector.sglang.collect_msa_module",
+        get_func="get_msa_generation_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_GENERATION_MODULE,
+        # See msa_context_module marker rationale.
+        unverified_sms=(120, 121),
+    ),
     OpEntry(
         op="gdn",
         module="collector.sglang.collect_gdn",

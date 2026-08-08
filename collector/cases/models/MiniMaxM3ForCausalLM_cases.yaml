@@ -8,6 +8,69 @@ model_paths:
   - MiniMaxAI/MiniMax-M3
 include_base: true
 description: >
-  MiniMax-M3 model-centric collection plan. Base-op coverage only for now:
-  the MSA attention module has no collector op yet, so MSA-dependent support
-  stays HYBRID/estimated until that op and its model shapes are authored.
+  MiniMax-M3 MoE + MSA sparse-attention model-centric collection plan.
+  Layers 0-2 are dense (GQA attention + 12288 dense MLP), layers 3-59 are
+  MSA sparse attention + 128-expert top-4 MoE with one shared expert
+  (shared_intermediate_size 3072). The MSA module is collected via the
+  msa_*_module ops (attention_type: msa under mla_module); the dense
+  layers' cost is approximated as MSA+MoE by the SDK model
+  (aiconfigurator_core/sdk/models/minimax_m3.py docstring), so no dense
+  attention profile is declared.
+
+model_case_values:
+  moe:
+    # BF16 checkpoint. DeepSeekV3-style routing: fp32 sigmoid scoring +
+    # e_score_correction_bias + routed_scaling_factor 2.0, no expert
+    # groups (TRT-LLM modeling_minimaxm3.py MiniMaxM3Gate@1.3.0rc20;
+    # HF config scoring_func=sigmoid, use_routing_bias=true,
+    # routed_scaling_factor=2.0). The shared expert
+    # (shared_intermediate_size 3072) is modeled by the SDK as separate
+    # GEMM ops, not part of the routed-MoE benchmark shape.
+    - model_path: MiniMaxAI/MiniMax-M3
+      hidden_size: 6144
+      inter_size: 3072
+      topk: 4
+      num_experts: 128
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.0
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      # BF16 artifact serves BF16 MoE. The MXFP8 and NVFP4 checkpoint
+      # artifacts get their own rows (with their own model_path) when
+      # declared — never merged here (case_authoring.md: quant-distinct
+      # artifacts are separate rows).
+      framework_quantization:
+        trtllm:
+          allowed_modes: [bfloat16]
+        sglang:
+          allowed_modes: [bfloat16]
+        vllm:
+          allowed_modes: [bfloat16]
+  mla_module:
+    - model_path: MiniMaxAI/MiniMax-M3
+      attention_type: msa
+      native_num_heads: 64
+
+all_frameworks_op_cases:
+  gemm:
+    cases: all
+  moe:
+    cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    msa_context_module:
+      cases: all
+    msa_generation_module:
+      cases: all
+  vllm:
+    msa_context_module:
+      cases: all
+    msa_generation_module:
+      cases: all
+  sglang:
+    msa_context_module:
+      cases: all
+    msa_generation_module:
+      cases: all

@@ -386,8 +386,9 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
 
     # 1926 = 1887 pre-Kimi-K3 + 39 K3 w4a16_mxfp4 cases (grouped-topk mapping
     # for model_type kimi_linear).
-    assert len(cases) == 1926
-    assert sum(len(case[1]) for case in cases) == 52002
+    # +39 for MiniMax-M3's MoE row (6144/3072, 128x4, bf16).
+    assert len(cases) == 1965
+    assert sum(len(case[1]) for case in cases) == 53055
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —

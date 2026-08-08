@@ -97,6 +97,29 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
     OpEntry(
+        op="msa_context_module",
+        module="collector.vllm.collect_msa_module",
+        get_func="get_msa_context_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_CONTEXT_MODULE,
+        # MiniMax-M3 MSA hardware-validated on SM90 only. On the
+        # SM100 family vLLM's own dispatch switches the attend + indexer to
+        # the fmha_sm100 "MSA" impls (select_main_impl_cls /
+        # select_indexer_impl_cls @0.24.0) — a different kernel path that has
+        # not been probed; SM120/121 keep the Triton path but are equally
+        # unprobed. Clear the markers after a validation run on each SM.
+        unverified_sms=(120, 121),
+    ),
+    OpEntry(
+        op="msa_generation_module",
+        module="collector.vllm.collect_msa_module",
+        get_func="get_msa_generation_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_GENERATION_MODULE,
+        # See msa_context_module above.
+        unverified_sms=(120, 121),
+    ),
+    OpEntry(
         op="dsv4_csa_context_module",
         module="collector.vllm.collect_dsv4_attn",
         get_func="get_dsv4_csa_context_test_cases",
