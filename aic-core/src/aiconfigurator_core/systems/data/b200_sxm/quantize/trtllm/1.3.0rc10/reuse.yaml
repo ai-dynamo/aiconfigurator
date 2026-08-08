@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: computescale_perf
+  from_version: 1.3.0rc15
+  reason: 'wave-2 loose prune: <10% unique interior grid rows, interpolation-covered;
+    pruned 2026-08-02'
+  approved_by: tianhaox
+- table: scale_matrix_perf
+  from_version: 1.3.0rc15
+  reason: 'wave-2 loose prune: <10% unique interior grid rows, interpolation-covered;
+    pruned 2026-08-02'
+  approved_by: tianhaox

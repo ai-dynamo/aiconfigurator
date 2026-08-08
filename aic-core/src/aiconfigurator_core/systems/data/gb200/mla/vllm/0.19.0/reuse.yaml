@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: mla_generation_module_perf
+  from_version: 0.22.0
+  reason: 'per-op dedup: every row key is covered by newer-version primaries; pruned
+    2026-08-02'
+  approved_by: tianhaox
+- table: mla_context_module_perf
+  from_version: 0.22.0
+  reason: 'wave-2 loose prune: <10% unique interior grid rows, interpolation-covered;
+    pruned 2026-08-02'
+  approved_by: tianhaox

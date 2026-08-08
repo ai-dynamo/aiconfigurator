@@ -5,9 +5,11 @@ schema_version: 1
 reuse:
 - table: context_mla_perf
   from_version: 1.3.0rc10
-  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
-  approved_by: yimingl
+  reason: 'per-op dedup: every row key is covered by newer-version primaries; pruned
+    2026-08-02'
+  approved_by: tianhaox
 - table: generation_mla_perf
   from_version: 1.3.0rc10
-  reason: migrated from SHARED_LAYER_REUSE.txt (legacy newest-first effective donor)
-  approved_by: yimingl
+  reason: 'per-op dedup: every row key is covered by newer-version primaries; pruned
+    2026-08-02'
+  approved_by: tianhaox
