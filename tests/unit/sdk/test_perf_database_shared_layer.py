@@ -184,7 +184,7 @@ def test_shared_layer_on_when_mode_unspecified(env: Path) -> None:
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
 
 
-@pytest.mark.parametrize("mode", ["EMPIRICAL", "SOL", "SOL_FULL"])
+@pytest.mark.parametrize("mode", ["EMPIRICAL", "SOL"])
 def test_shared_layer_off_in_estimate_modes(env: Path, mode: str) -> None:
     """Formula-only modes do not reuse sibling silicon rows."""
     active_csv = _backend_csv(env)

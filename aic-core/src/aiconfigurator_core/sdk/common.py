@@ -969,7 +969,11 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    SOL_FULL = 4  # Provide SOL time and details
+    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
+    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
+    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
+    # database's DEFAULT mode — mode entry raises (perf_database).
+    SOL_FULL = 4
 
 
 class TransferKind(Enum):

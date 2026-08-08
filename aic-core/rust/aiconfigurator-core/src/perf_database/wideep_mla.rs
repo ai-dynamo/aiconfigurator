@@ -115,8 +115,11 @@ impl WideEpMlaTable {
         system_spec: SystemSpec,
         perf_db_sources: &PerfDbSources,
     ) -> Self {
-        let context_sources =
-            resolve_op_sources(perf_db_sources, "wideep_context_mla_perf.parquet", &data_root);
+        let context_sources = resolve_op_sources(
+            perf_db_sources,
+            "wideep_context_mla_perf.parquet",
+            &data_root,
+        );
         let generation_sources = resolve_op_sources(
             perf_db_sources,
             "wideep_generation_mla_perf.parquet",
@@ -399,8 +402,9 @@ pub(crate) fn wideep_context_mla_sol_ms(
 
     // attention output projection
     let attn_out_flop = 2.0 * num_head * v_head_dim * hidden_size * b * s;
-    let attn_out_mem =
-        b * num_head * v_head_dim * s + num_head * v_head_dim * hidden_size + 2.0 * b * hidden_size * s;
+    let attn_out_mem = b * num_head * v_head_dim * s
+        + num_head * v_head_dim * hidden_size
+        + 2.0 * b * hidden_size * s;
 
     let ops = q_b_flop + kv_b_flop + attn_out_flop;
     let mem_bytes =
@@ -539,7 +543,10 @@ fn load_context_parquet(sources: &[PerfSource]) -> Result<WideEpContextMlaGrids,
         return Err(AicError::PerfDatabase(format!(
             "no WideEP context MLA rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -596,7 +603,10 @@ fn load_generation_parquet(sources: &[PerfSource]) -> Result<WideEpGenerationMla
         return Err(AicError::PerfDatabase(format!(
             "no WideEP generation MLA rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -749,15 +759,19 @@ mod tests {
         // fmha=fp8_block, 'flashinfer'). The Rust query derives the SOL's
         // fmha mode from the fp8 KV cache (same mapping as fp8_block).
         let gen_cases: &[(u32, u32, f64)] = &[
-            (1, 4096, 0.1017),               // exact hit
-            (1, 3000, 0.09988046874999999),  // seq interior (raw blend)
+            (1, 4096, 0.1017),                // exact hit
+            (1, 3000, 0.09988046874999999),   // seq interior (raw blend)
             (1, 100000, 0.17286183638702504), // beyond seq range (util-hold)
         ];
         for &(b, s, expected) in gen_cases {
             let got = table
                 .query_generation(b, s, 128, KvCacheQuantMode::Fp8, "flashinfer")
                 .unwrap();
-            assert_rel(got, expected, &format!("wideep_generation_mla(b={b}, s={s})"));
+            assert_rel(
+                got,
+                expected,
+                &format!("wideep_generation_mla(b={b}, s={s})"),
+            );
         }
     }
 }

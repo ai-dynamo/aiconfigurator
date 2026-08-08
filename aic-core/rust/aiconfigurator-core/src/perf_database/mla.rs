@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use super::attention::generation_attn_flops;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig};
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
@@ -111,7 +111,11 @@ fn resolve_module_native<T>(buckets: &BTreeMap<u32, T>, native_heads: Option<u32
     }
     let native = match native_heads {
         None => {
-            return if buckets.len() == 1 { buckets.values().next() } else { None };
+            return if buckets.len() == 1 {
+                buckets.values().next()
+            } else {
+                None
+            };
         }
         Some(native) => native,
     };
@@ -185,8 +189,11 @@ impl MlaTable {
             resolve_op_sources(perf_db_sources, "generation_mla_perf.parquet", &data_root);
         let mla_bmm_sources =
             resolve_op_sources(perf_db_sources, "mla_bmm_perf.parquet", &data_root);
-        let mla_context_module_sources =
-            resolve_op_sources(perf_db_sources, "mla_context_module_perf.parquet", &data_root);
+        let mla_context_module_sources = resolve_op_sources(
+            perf_db_sources,
+            "mla_context_module_perf.parquet",
+            &data_root,
+        );
         let mla_generation_module_sources = resolve_op_sources(
             perf_db_sources,
             "mla_generation_module_perf.parquet",
@@ -208,7 +215,9 @@ impl MlaTable {
         }
     }
 
-    /// Op-level context MLA latency in ms (raw — no prefix correction).
+    /// Op-level context MLA value (latency ms + power/energy; raw — no
+    /// prefix correction, which the operator layer applies to latency AND
+    /// energy).
     pub fn query_context(
         &self,
         b: u32,
@@ -216,7 +225,7 @@ impl MlaTable {
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -234,21 +243,21 @@ impl MlaTable {
         // c = (num_heads, seq_len, batch), prefix = 0 (see module docs).
         let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
-        perf_interp::query(
+        perf_interp::query_value(
             &cfg,
             node,
             &[num_heads as f64, full_seq_tokens as f64, b as f64],
         )
     }
 
-    /// Op-level generation MLA latency in ms.
+    /// Op-level generation MLA value (latency ms + power/energy).
     pub fn query_generation(
         &self,
         b: u32,
         s: u32,
         num_heads: u32,
         kv_quant: KvCacheQuantMode,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -267,10 +276,13 @@ impl MlaTable {
         let sol =
             move |c: &[f64]| generation_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
-        perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
+        perf_interp::query_value(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
 
-    /// MLA BMM (pre or post) latency in ms.
+    /// MLA BMM (pre or post) value (latency ms + power/energy; raw — the
+    /// operator layer applies the exact-head-routing `head_scale` to latency
+    /// AND energy, mirroring Python's `_interp_pr(lat * head_scale,
+    /// energy=energy * head_scale)`).
     ///
     /// Falls back to `bfloat16` if the requested quant mode is absent,
     /// matching Python's `quant_mode_lookup` behavior. The SOL keeps using
@@ -281,13 +293,17 @@ impl MlaTable {
         num_heads: u32,
         quant: GemmQuantMode,
         is_pre: bool,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
         let bmm_flops = quant_tc_flops(&self.system_spec, quant.mapping())?;
         let grids = self.load_bmm()?;
-        let pre_or_post = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
+        let pre_or_post = if is_pre {
+            "mla_gen_pre"
+        } else {
+            "mla_gen_post"
+        };
 
         // Try the requested quant first; fall back to bfloat16 if missing.
         let key = BmmKey {
@@ -302,7 +318,11 @@ impl MlaTable {
             grids.by_keys.get(&fallback)
         });
         let by_heads = chosen.ok_or_else(|| {
-            missing("MLA BMM", &self.data_root, format!("quant={}, {pre_or_post}", quant.name()))
+            missing(
+                "MLA BMM",
+                &self.data_root,
+                format!("quant={}, {pre_or_post}", quant.name()),
+            )
         })?;
 
         let node = by_heads.get(&num_heads).ok_or_else(|| {
@@ -317,10 +337,12 @@ impl MlaTable {
         let spec = &self.system_spec;
         let sol = move |c: &[f64]| mla_bmm_sol_ms(spec, quant, num_heads as f64, c[0], bmm_flops);
         let cfg = OpInterpConfig::grid(BMM_AXES, &sol);
-        perf_interp::query(&cfg, node, &[num_tokens as f64])
+        perf_interp::query_value(&cfg, node, &[num_tokens as f64])
     }
 
-    /// Module-level context MLA latency in ms (raw — no prefix correction).
+    /// Module-level context MLA value (latency ms + power/energy; raw — no
+    /// prefix correction, which the operator layer applies to latency AND
+    /// energy).
     pub fn query_context_module(
         &self,
         b: u32,
@@ -330,7 +352,7 @@ impl MlaTable {
         fmha_quant: FmhaQuantMode,
         gemm_quant: GemmQuantMode,
         native_heads: Option<u32>,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -358,15 +380,16 @@ impl MlaTable {
         // was deliberately deferred there too).
         let sol = move |c: &[f64]| context_mla_sol_ms(spec, kv_quant, c[0], c[1], c[2], attn_flops);
         let cfg = OpInterpConfig::grid_sqrt_axis(CONTEXT_AXES, 1, &sol);
-        perf_interp::query(
+        perf_interp::query_value(
             &cfg,
             node,
             &[num_heads as f64, full_seq_tokens as f64, b as f64],
         )
     }
 
-    /// Module-level generation MLA latency in ms. No fmha axis: decode
-    /// compute dtype follows the kv-cache dtype (see [`GenModuleGrids`]).
+    /// Module-level generation MLA value (latency ms + power/energy). No
+    /// fmha axis: decode compute dtype follows the kv-cache dtype (see
+    /// [`GenModuleGrids`]).
     pub fn query_generation_module(
         &self,
         b: u32,
@@ -375,7 +398,7 @@ impl MlaTable {
         kv_quant: KvCacheQuantMode,
         gemm_quant: GemmQuantMode,
         native_heads: Option<u32>,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -386,9 +409,10 @@ impl MlaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let buckets = grids.by_keys.get(&key).ok_or_else(|| {
-            missing("generation MLA module", &self.data_root, format!("{key:?}"))
-        })?;
+        let buckets = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("generation MLA module", &self.data_root, format!("{key:?}")))?;
         let node = resolve_module_native(buckets, native_heads).ok_or_else(|| {
             missing(
                 "generation MLA module",
@@ -406,7 +430,7 @@ impl MlaTable {
             )
         };
         let cfg = OpInterpConfig::grid(GENERATION_AXES, &sol);
-        perf_interp::query(&cfg, node, &[num_heads as f64, b as f64, s as f64])
+        perf_interp::query_value(&cfg, node, &[num_heads as f64, b as f64, s as f64])
     }
 
     // -----------------------------------------------------------------------
@@ -464,7 +488,11 @@ impl MlaTable {
             .by_keys
             .keys()
             .any(|key| key.bmm_quant == quant.name());
-        Ok(if has_quant { quant } else { GemmQuantMode::Bfloat16 })
+        Ok(if has_quant {
+            quant
+        } else {
+            GemmQuantMode::Bfloat16
+        })
     }
 
     /// Collected `(num_tokens,) -> latency` points of the
@@ -479,7 +507,11 @@ impl MlaTable {
         num_heads: u32,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_bmm()?;
-        let pre_or_post = if is_pre { "mla_gen_pre" } else { "mla_gen_post" };
+        let pre_or_post = if is_pre {
+            "mla_gen_pre"
+        } else {
+            "mla_gen_post"
+        };
         let key = BmmKey {
             bmm_quant: quant.name().to_string(),
             pre_or_post: pre_or_post.to_string(),
@@ -492,7 +524,10 @@ impl MlaTable {
                 missing(
                     "MLA BMM",
                     &self.data_root,
-                    format!("quant={}, {pre_or_post}, num_heads={num_heads}", quant.name()),
+                    format!(
+                        "quant={}, {pre_or_post}, num_heads={num_heads}",
+                        quant.name()
+                    ),
                 )
             })?;
         non_empty_points(node, "MLA BMM", &self.data_root)
@@ -513,7 +548,12 @@ impl MlaTable {
         let grids = self.load_bmm()?;
         let key = BmmKey {
             bmm_quant: quant.name().to_string(),
-            pre_or_post: if is_pre { "mla_gen_pre" } else { "mla_gen_post" }.to_string(),
+            pre_or_post: if is_pre {
+                "mla_gen_pre"
+            } else {
+                "mla_gen_post"
+            }
+            .to_string(),
         };
         Ok(grids
             .by_keys
@@ -565,9 +605,10 @@ impl MlaTable {
             kv_quant: kv_quant.name().to_string(),
             gemm_quant: gemm_quant.name().to_string(),
         };
-        let buckets = grids.by_keys.get(&key).ok_or_else(|| {
-            missing("generation MLA module", &self.data_root, format!("{key:?}"))
-        })?;
+        let buckets = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing("generation MLA module", &self.data_root, format!("{key:?}")))?;
         let node = resolve_module_native(buckets, native_heads).ok_or_else(|| {
             missing(
                 "generation MLA module",
@@ -749,22 +790,22 @@ pub(crate) fn generation_mla_module_sol_ms(
     sol_math.max(sol_mem)
 }
 
-fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {
     let mut node = Node::branch();
     for (&a, by_b) in grid {
         for (&b, by_c) in by_b {
-            for (&c, &lat) in by_c {
-                node.insert(&[a, b, c], lat);
+            for (&c, &leaf) in by_c {
+                node.insert_value(&[a, b, c], leaf);
             }
         }
     }
     node
 }
 
-fn curve_to_node(curve: &BTreeMap<u32, f64>) -> Node {
+fn curve_to_node(curve: &BTreeMap<u32, LeafValue>) -> Node {
     let mut node = Node::branch();
-    for (&t, &lat) in curve {
-        node.insert(&[t], lat);
+    for (&t, &leaf) in curve {
+        node.insert_value(&[t], leaf);
     }
     node
 }
@@ -776,7 +817,7 @@ fn curve_to_node(curve: &BTreeMap<u32, f64>) -> Node {
 /// skipped (a sibling declared in the manifest need not exist for every
 /// system); an error is returned only when no source yields rows.
 fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMlaGrids, AicError> {
-    let mut raw: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<ContextKey, Grid3<LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -792,6 +833,7 @@ fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMl
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -803,7 +845,13 @@ fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMl
                 kv_quant: row.str_owned(kv_cache_dtype_col)?,
             };
             let isl = row.u32(isl_col)?;
-            let y_axis = if is_context { isl } else { isl + row.u32(step_col)? };
+            let y_axis = if is_context {
+                isl
+            } else {
+                isl + row.u32(step_col)?
+            };
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_mla_data` (context branch),
             // extended across shared-layer sources (earlier source wins).
             raw.entry(key)
@@ -813,14 +861,17 @@ fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMl
                 .entry(y_axis)
                 .or_default()
                 .entry(row.u32(batch_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA op rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -834,7 +885,7 @@ fn load_op_parquet(sources: &[PerfSource], is_context: bool) -> Result<ContextMl
 /// first-wins-across-sources + missing-file-skip semantics as
 /// [`load_op_parquet`].
 fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, AicError> {
-    let mut raw: BTreeMap<KvOnlyKey, Grid3<f64>> = BTreeMap::new();
+    let mut raw: BTreeMap<KvOnlyKey, Grid3<LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -849,6 +900,7 @@ fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, Aic
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -859,6 +911,8 @@ fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, Aic
                 kv_quant: row.str_owned(kv_cache_dtype_col)?,
             };
             let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // Python uses (num_heads, b, s) axis order for generation MLA.
             // First-wins parity with Python `load_mla_data` (generation branch).
             raw.entry(key)
@@ -868,14 +922,17 @@ fn load_op_gen_parquet(sources: &[PerfSource]) -> Result<GenerationMlaGrids, Aic
                 .entry(row.u32(batch_size_col)?)
                 .or_default()
                 .entry(sequence_tokens)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no generation MLA rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -920,7 +977,7 @@ fn module_row_native_heads(
 }
 
 fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, AicError> {
-    let mut raw: BTreeMap<ModuleKey, BTreeMap<u32, Grid3<f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<ModuleKey, BTreeMap<u32, Grid3<LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -938,6 +995,7 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
         let batch_size_col = reader.col("batch_size")?;
         let isl_col = reader.col("isl")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -959,6 +1017,7 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
             let batch_size = row.u32(batch_size_col)?;
             let isl = row.u32(isl_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_context_mla_module_data`,
             // which now guards with the standard skip-on-key-conflict idiom
             // (shared-layer contract: the primary version's rows must not be
@@ -975,14 +1034,19 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
                 .or_default()
                 .entry(isl)
                 .or_default();
-            inner.entry(batch_size).or_insert(latency);
+            inner
+                .entry(batch_size)
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA module rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -1001,7 +1065,7 @@ fn load_context_module_parquet(sources: &[PerfSource]) -> Result<ModuleGrids, Ai
 }
 
 fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGrids, AicError> {
-    let mut raw: BTreeMap<GenModuleKey, BTreeMap<u32, Grid3<f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<GenModuleKey, BTreeMap<u32, Grid3<LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -1022,6 +1086,7 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -1042,6 +1107,7 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
             let batch_size = row.u32(batch_size_col)?;
             let isl = row.u32(isl_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // Generation module: (num_heads, b, s) axis order. First-wins on
             // duplicate rows -- see the note in `load_context_module_parquet`.
             let sequence_tokens = isl + row.u32(step_col)?;
@@ -1054,14 +1120,19 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
                 .or_default()
                 .entry(batch_size)
                 .or_default();
-            inner.entry(sequence_tokens).or_insert(latency);
+            inner
+                .entry(sequence_tokens)
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA module rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -1080,7 +1151,7 @@ fn load_generation_module_parquet(sources: &[PerfSource]) -> Result<GenModuleGri
 }
 
 fn load_bmm_parquet(sources: &[PerfSource]) -> Result<BmmGrids, AicError> {
-    let mut raw: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<BmmKey, BTreeMap<u32, BTreeMap<u32, LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -1094,6 +1165,7 @@ fn load_bmm_parquet(sources: &[PerfSource]) -> Result<BmmGrids, AicError> {
         let num_tokens_col = reader.col("num_tokens")?;
         let num_heads_col = reader.col("num_heads")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -1104,20 +1176,25 @@ fn load_bmm_parquet(sources: &[PerfSource]) -> Result<BmmGrids, AicError> {
                 bmm_quant: row.str_owned(bmm_dtype_col)?,
                 pre_or_post: row.str_owned(op_name_col)?,
             };
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_mla_bmm_data`.
             raw.entry(key)
                 .or_default()
                 .entry(row.u32(num_heads_col)?)
                 .or_default()
                 .entry(row.u32(num_tokens_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MLA BMM rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_keys = raw
@@ -1248,7 +1325,13 @@ mod tests {
         // is not present. Expect a clear IO error from the lazy loader.
         let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let err = table
-            .query_context(1, 1024, 128, KvCacheQuantMode::Bfloat16, FmhaQuantMode::Bfloat16)
+            .query_context(
+                1,
+                1024,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
             .unwrap_err();
         match err {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}
@@ -1272,7 +1355,8 @@ mod tests {
                 GemmQuantMode::Bfloat16,
                 None,
             )
-            .expect("module context MLA query must succeed");
+            .expect("module context MLA query must succeed")
+            .latency;
         assert!(
             (latency - 0.1351).abs() < 1e-6,
             "expected recorded module latency, got {latency}"
@@ -1293,7 +1377,7 @@ mod tests {
             None,
         );
         match result {
-            Ok(latency) => assert!(latency > 0.0, "expected positive latency"),
+            Ok(value) => assert!(value.latency > 0.0, "expected positive latency"),
             Err(AicError::PerfDatabase(_)) => {
                 // Shape may be outside recorded range; either loader-OK or
                 // interpolation-range error is acceptable for this smoke check.
@@ -1314,8 +1398,16 @@ mod tests {
         let cases: &[(u32, u32, f64)] = &[(8, 4097, 0.0693), (64, 4096, 0.1146884765625)];
         for &(b, s, expected) in cases {
             let got = table
-                .query_generation_module(b, s, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block, None)
-                .unwrap();
+                .query_generation_module(
+                    b,
+                    s,
+                    16,
+                    KvCacheQuantMode::Fp8,
+                    GemmQuantMode::Fp8Block,
+                    None,
+                )
+                .unwrap()
+                .latency;
             let rel = ((got - expected) / expected.max(1e-12)).abs();
             assert!(
                 rel < 1e-9,
@@ -1333,7 +1425,7 @@ mod tests {
         // We just verify no panic and the result is a number; if Sq has no
         // bfloat16 fallback either, expect a clean error.
         match result {
-            Ok(latency) => assert!(latency.is_finite() && latency > 0.0),
+            Ok(value) => assert!(value.latency.is_finite() && value.latency > 0.0),
             Err(AicError::PerfDatabase(_)) => {}
             Err(other) => panic!("unexpected error: {other:?}"),
         }
@@ -1370,8 +1462,15 @@ mod tests {
         ];
         for &(b, s, expected) in ctx_cases {
             let got = table
-                .query_context(b, s, 128, KvCacheQuantMode::Bfloat16, FmhaQuantMode::Bfloat16)
-                .unwrap();
+                .query_context(
+                    b,
+                    s,
+                    128,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                )
+                .unwrap()
+                .latency;
             assert_rel(got, expected, &format!("context_mla(b={b}, s={s})"));
         }
 
@@ -1384,26 +1483,31 @@ mod tests {
         for &(b, s, expected) in gen_cases {
             let got = table
                 .query_generation(b, s, 128, KvCacheQuantMode::Bfloat16)
-                .unwrap();
+                .unwrap()
+                .latency;
             assert_rel(got, expected, &format!("generation_mla(b={b}, s={s})"));
         }
 
         // db.query_mla_bmm(num_tokens, num_heads=128, quant=bf16, if_pre=True)
         let bmm_cases: &[(u32, f64)] = &[
-            (256, 0.010847999900579452),  // exact hit
-            (100, 0.008607199974358081),  // tokens interior (raw blend)
-            (20000, 0.5326748099591996),  // beyond tokens range (util-hold)
+            (256, 0.010847999900579452), // exact hit
+            (100, 0.008607199974358081), // tokens interior (raw blend)
+            (20000, 0.5326748099591996), // beyond tokens range (util-hold)
         ];
         for &(t, expected) in bmm_cases {
             let got = table
                 .query_bmm(t, 128, GemmQuantMode::Bfloat16, true)
-                .unwrap();
+                .unwrap()
+                .latency;
             assert_rel(got, expected, &format!("mla_bmm(t={t})"));
         }
         // fp8 is absent in the gb200 BMM table -> data falls back to bfloat16
         // (Python quant_mode_lookup). The util-hold SOL uses the requested
         // quant in both languages.
-        let got = table.query_bmm(20000, 128, GemmQuantMode::Fp8, true).unwrap();
+        let got = table
+            .query_bmm(20000, 128, GemmQuantMode::Fp8, true)
+            .unwrap()
+            .latency;
         assert_rel(got, 0.5326748099591996, "mla_bmm fp8 fallback (t=20000)");
 
         // db.query_context_mla_module(b, s, prefix=0, num_heads=128, bf16^3)
@@ -1423,7 +1527,8 @@ mod tests {
                     GemmQuantMode::Bfloat16,
                     None,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert_rel(got, expected, &format!("context_mla_module(b={b}, s={s})"));
         }
 
@@ -1443,8 +1548,51 @@ mod tests {
                     GemmQuantMode::Bfloat16,
                     None,
                 )
-                .unwrap();
-            assert_rel(got, expected, &format!("generation_mla_module(b={b}, s={s})"));
+                .unwrap()
+                .latency;
+            assert_rel(
+                got,
+                expected,
+                &format!("generation_mla_module(b={b}, s={s})"),
+            );
         }
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_generation_mla(1, 1536, 128, KVCacheQuantMode.bfloat16, SILICON)
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    ///
+    /// s=1536 RAW-lerps the seq axis between (s=1024, lat 1.0, power 100)
+    /// and (s=2048, lat 3.0, power 200): power 150, energy 150 * 2.0.
+    #[test]
+    fn generation_mla_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("generation_mla_perf.parquet"),
+            &[
+                Col::Str("kv_cache_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("num_heads", vec![128, 128]),
+                Col::I64("batch_size", vec![1, 1]),
+                Col::I64("isl", vec![1023, 2047]),
+                Col::I64("step", vec![1, 1]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = MlaTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let v = table
+            .query_generation(1, 1536, 128, KvCacheQuantMode::Bfloat16)
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
     }
 }

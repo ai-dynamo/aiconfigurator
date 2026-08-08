@@ -26,12 +26,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::perf_interp::{self, Node, OpInterpConfig};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct CommunicationTable {
@@ -61,12 +61,12 @@ pub struct CommunicationTable {
 
 struct CustomAllReduceGrids {
     /// (quant_name, tp_size) -> {message_size -> latency_ms}
-    by_keys: BTreeMap<(String, u32), BTreeMap<u64, f64>>,
+    by_keys: BTreeMap<(String, u32), BTreeMap<u64, LeafValue>>,
 }
 
 struct NcclGrids {
     /// (dtype_name, operation, num_gpus) -> {message_size -> latency_ms}
-    by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, f64>>,
+    by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, LeafValue>>,
 }
 
 impl CommunicationTable {
@@ -110,8 +110,8 @@ impl CommunicationTable {
         }
     }
 
-    /// Raw custom-allreduce latency in ms, 1-D interpolated along
-    /// `message_size`.
+    /// Raw custom-allreduce value (latency ms + power/energy), 1-D
+    /// interpolated along `message_size`.
     ///
     /// `tp_size_effective` is the per-node fan-out the caller wants to look
     /// up. For TP > num_gpus_per_node the operator caps this to
@@ -121,9 +121,9 @@ impl CommunicationTable {
         quant: CommQuantMode,
         tp_size_effective: u32,
         message_size: f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         if tp_size_effective <= 1 {
-            return Ok(0.0);
+            return Ok(LeafValue::latency_only(0.0));
         }
         let grids = self.load_custom_allreduce()?;
         let key = (quant.name().to_string(), tp_size_effective);
@@ -152,24 +152,27 @@ impl CommunicationTable {
         quant: CommQuantMode,
         tp_size: u32,
         message_size: f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         if tp_size <= 1 {
-            return Ok(0.0);
+            return Ok(LeafValue::latency_only(0.0));
         }
         let per_node = spec.node.num_gpus_per_node;
         if per_node == 72 && tp_size > 4 {
             return self.query_nccl_scaled(spec, quant, "all_reduce", tp_size, message_size);
         }
         let effective_tp = tp_size.min(per_node);
-        let mut latency = self.query_custom_allreduce(quant, effective_tp, message_size)?;
+        let mut value = self.query_custom_allreduce(quant, effective_tp, message_size)?;
         if tp_size > per_node {
             let base_bw = spec.get_p2p_bandwidth(per_node);
             let target_bw = spec.get_p2p_bandwidth(tp_size);
             let f_tp = tp_size as f64;
             let f_pn = per_node as f64;
-            latency *= (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
+            let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
+            // Python scales latency AND energy by the beyond-node factor.
+            value.latency *= scale;
+            value.energy *= scale;
         }
-        Ok(latency)
+        Ok(value)
     }
 
     /// NCCL collective latency at a RAW num_gpus, mirroring the Python
@@ -183,24 +186,29 @@ impl CommunicationTable {
         operation: &str,
         num_gpus: u32,
         message_size: f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         if num_gpus <= 1 {
-            return Ok(0.0);
+            return Ok(LeafValue::latency_only(0.0));
         }
-        let max_recorded = self.nccl_max_num_gpus(dtype, operation)?.unwrap_or(num_gpus);
+        let max_recorded = self
+            .nccl_max_num_gpus(dtype, operation)?
+            .unwrap_or(num_gpus);
         let effective = num_gpus.min(max_recorded);
-        let mut latency = self.query_nccl(dtype, operation, effective, message_size)?;
+        let mut value = self.query_nccl(dtype, operation, effective, message_size)?;
         if num_gpus > max_recorded {
             let max_bw = spec.get_p2p_bandwidth(max_recorded);
             let req_bw = spec.get_p2p_bandwidth(num_gpus);
             let f_n = num_gpus as f64;
             let f_m = max_recorded as f64;
-            latency *= (f_n - 1.0) / f_n * f_m / (f_m - 1.0).max(1.0) * max_bw / req_bw;
+            let scale = (f_n - 1.0) / f_n * f_m / (f_m - 1.0).max(1.0) * max_bw / req_bw;
+            // Python scales latency AND energy by the fan-out correction.
+            value.latency *= scale;
+            value.energy *= scale;
         }
-        Ok(latency)
+        Ok(value)
     }
 
-    /// Raw NCCL collective latency in ms.
+    /// Raw NCCL collective value (latency ms + power/energy).
     ///
     /// `operation` is one of `"all_reduce"`, `"all_gather"`,
     /// `"reduce_scatter"`, `"alltoall"`. `num_gpus_effective` should be
@@ -215,11 +223,15 @@ impl CommunicationTable {
         operation: &str,
         num_gpus_effective: u32,
         message_size: f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         if num_gpus_effective <= 1 {
-            return Ok(0.0);
+            return Ok(LeafValue::latency_only(0.0));
         }
-        let key = (dtype.name().to_string(), operation.to_string(), num_gpus_effective);
+        let key = (
+            dtype.name().to_string(),
+            operation.to_string(),
+            num_gpus_effective,
+        );
 
         if let Ok(grids) = self.load_nccl() {
             if let Some(by_size) = grids.by_keys.get(&key) {
@@ -261,7 +273,10 @@ impl CommunicationTable {
                 self.data_root.display()
             )));
         }
-        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+        Ok(by_size
+            .iter()
+            .map(|(&size, leaf)| (vec![size as f64], leaf.latency))
+            .collect())
     }
 
     /// The single NCCL source the empirical path calibrates from, with
@@ -324,7 +339,10 @@ impl CommunicationTable {
                 self.data_root.display()
             )));
         }
-        Ok(by_size.iter().map(|(&size, &lat)| (vec![size as f64], lat)).collect())
+        Ok(by_size
+            .iter()
+            .map(|(&size, leaf)| (vec![size as f64], leaf.latency))
+            .collect())
     }
 
     /// Maximum recorded `num_gpus` for an NCCL (dtype, operation) tuple.
@@ -350,9 +368,9 @@ impl CommunicationTable {
     }
 
     fn load_custom_allreduce(&self) -> Result<&CustomAllReduceGrids, AicError> {
-        let cell = self.custom_allreduce.get_or_init(|| {
-            load_custom_allreduce_parquet(&self.custom_allreduce_sources)
-        });
+        let cell = self
+            .custom_allreduce
+            .get_or_init(|| load_custom_allreduce_parquet(&self.custom_allreduce_sources));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -403,23 +421,26 @@ impl CommunicationTable {
 /// Python keeps float element counts (e.g. the gemma4 CP KV all-gather sizes
 /// `kvcache_bytes_per_token / comm_bytes`), and the engine query coordinate
 /// is float anyway. Truncating to integer first shifted the lerp point.
-fn interp_message_size(by_size: &BTreeMap<u64, f64>, message_size: f64) -> Result<f64, AicError> {
+fn interp_message_size(
+    by_size: &BTreeMap<u64, LeafValue>,
+    message_size: f64,
+) -> Result<LeafValue, AicError> {
     if by_size.is_empty() {
         return Err(AicError::PerfDatabase(
             "comm data has no message_size points".to_string(),
         ));
     }
     let mut node = Node::branch();
-    for (&size, &latency) in by_size {
-        node.insert(&[size.min(u32::MAX as u64) as u32], latency);
+    for (&size, &leaf) in by_size {
+        node.insert_value(&[size.min(u32::MAX as u64) as u32], leaf);
     }
     let sol = |c: &[f64]| c[0];
     let cfg = OpInterpConfig::grid(&["message_bytes"], &sol);
-    perf_interp::query(&cfg, &node, &[message_size])
+    perf_interp::query_value(&cfg, &node, &[message_size])
 }
 
 fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllReduceGrids, AicError> {
-    let mut by_keys: BTreeMap<(String, u32), BTreeMap<u64, f64>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<(String, u32), BTreeMap<u64, LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -431,6 +452,7 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
         let num_gpus_col = reader.col("num_gpus")?;
         let message_size_col = reader.col("message_size")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let kernel_source_col = reader.col_optional("kernel_source");
         let backend_col = reader.col_optional("backend");
         let ks_col = reader.col_optional("kernel_source");
@@ -457,20 +479,25 @@ fn load_custom_allreduce_parquet(sources: &[PerfSource]) -> Result<CustomAllRedu
             // under `CommQuantMode.half` regardless of the CSV's
             // `allreduce_dtype` column (Python has a `TODO` here but the
             // behavior is stable in production).
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_custom_allreduce_data`,
             // extended across shared-layer sources (earlier source wins).
             by_keys
                 .entry(("half".to_string(), row.u32(num_gpus_col)?))
                 .or_default()
                 .entry(row.u64(message_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(CustomAllReduceGrids { by_keys })
@@ -483,10 +510,13 @@ fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
     let num_gpus_col = reader.col("num_gpus")?;
     let message_size_col = reader.col("message_size")?;
     let latency_col = reader.col("latency")?;
+    let power_col = reader.col_optional("power");
 
-    let mut by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, f64>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<(String, String, u32), BTreeMap<u64, LeafValue>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
+        let latency = row.f64(latency_col)?;
+        let power = row.f64_optional(power_col)?.unwrap_or(0.0);
         // First-wins parity with Python `load_nccl_data`.
         by_keys
             .entry((
@@ -496,7 +526,7 @@ fn load_nccl_parquet(path: &Path) -> Result<NcclGrids, AicError> {
             ))
             .or_default()
             .entry(row.u64(message_size_col)?)
-            .or_insert(row.f64(latency_col)?);
+            .or_insert(LeafValue::with_power(latency, power));
     }
     if by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
@@ -540,10 +570,11 @@ mod tests {
     #[test]
     fn custom_allreduce_tp1_is_zero() {
         let table = CommunicationTable::new(b200_vllm_data_root(), None, None);
-        let latency = table
+        let value = table
             .query_custom_allreduce(CommQuantMode::Half, 1, 1024.0)
             .expect("tp=1 is a no-op");
-        assert_eq!(latency, 0.0);
+        assert_eq!(value.latency, 0.0);
+        assert_eq!(value.energy, 0.0);
     }
 
     #[test]
@@ -561,7 +592,7 @@ mod tests {
         // and a TP that exists.
         let result = table.query_custom_allreduce(CommQuantMode::Half, 2, 1024.0);
         match result {
-            Ok(latency) => assert!(latency > 0.0, "expected positive latency"),
+            Ok(value) => assert!(value.latency > 0.0, "expected positive latency"),
             Err(AicError::PerfDatabase(_)) => {
                 // Tp=2 may not be in this dataset — acceptable failure mode.
             }
@@ -572,10 +603,11 @@ mod tests {
     #[test]
     fn nccl_num_gpus_1_is_zero() {
         let table = CommunicationTable::new(b200_vllm_data_root(), None, None);
-        let latency = table
+        let value = table
             .query_nccl(CommQuantMode::Half, "all_reduce", 1, 1024.0)
             .expect("num_gpus=1 is a no-op");
-        assert_eq!(latency, 0.0);
+        assert_eq!(value.latency, 0.0);
+        assert_eq!(value.energy, 0.0);
     }
 
     #[test]
@@ -586,7 +618,9 @@ mod tests {
         // and the table loads successfully — NOT
         // `<vllm/0.19.0>/nccl_perf.parquet` which never existed.
         let table = CommunicationTable::new(b200_vllm_data_root(), b200_nccl_root(), None);
-        let _ = table.load_nccl().expect("NCCL parquet must load from system-wide path");
+        let _ = table
+            .load_nccl()
+            .expect("NCCL parquet must load from system-wide path");
     }
 
     /// Cross-language parity with the Python v2 engine. Expected values from:
@@ -620,7 +654,8 @@ mod tests {
         for &(msg, expected) in cases {
             let got = table
                 .query_nccl(CommQuantMode::Half, "all_gather", 8, msg as f64)
-                .expect("query must succeed");
+                .expect("query must succeed")
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "msg={msg}: rust {got} vs python {expected}"
@@ -646,5 +681,44 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture at `data/nccl/test/nccl_perf.parquet`,
+    /// `energy_test_fixtures` spec with `misc.nccl_version: test`):
+    ///
+    /// ```text
+    /// db.query_nccl(CommQuantMode.half, 8, "all_gather", 1536, SILICON)
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    #[test]
+    fn nccl_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("nccl_perf.parquet"),
+            &[
+                Col::Str("nccl_dtype", vec!["half", "half"]),
+                Col::Str("op_name", vec!["all_gather", "all_gather"]),
+                Col::I64("num_gpus", vec![8, 8]),
+                Col::I64("message_size", vec![1024, 2048]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = CommunicationTable::new(
+            tmp.path().to_path_buf(),
+            Some(tmp.path().to_path_buf()),
+            None,
+        );
+        let v = table
+            .query_nccl(CommQuantMode::Half, "all_gather", 8, 1536.0)
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
     }
 }

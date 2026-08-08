@@ -36,14 +36,16 @@
 //! SOL (`sol_fn = lambda t: float(t)` — routed-expert work scales ~linearly
 //! with tokens at fixed topk/experts/hidden, and util-hold only needs the
 //! SOL RATIO). The SILICON/HYBRID-only mode contract lives on the operator
-//! (`operators/dsv4.rs::Dsv4MegaMoeOp`), matching Python's split. Latency
-//! only — the Rust engine does not track energy.
+//! (`operators/dsv4.rs::Dsv4MegaMoeOp`), matching Python's split. The query
+//! returns the full measured value `{latency, power, energy}` (Python
+//! `PerformanceResult(latency, energy=energy)`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::token_curve::TokenCurve;
+use super::moe::LeafTokenCurve;
+use super::perf_interp::LeafValue;
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::perf_database::parquet_loader::PerfReader;
@@ -56,7 +58,7 @@ pub struct Dsv4MegaMoeTable {
 }
 
 struct Dsv4MegaMoeGrids {
-    by_keys: BTreeMap<Dsv4MegaMoeKey, TokenCurve>,
+    by_keys: BTreeMap<Dsv4MegaMoeKey, LeafTokenCurve>,
 }
 
 /// Full table key (every level of the Python nested dict except the trailing
@@ -96,11 +98,14 @@ impl Dsv4MegaMoeTable {
         }
     }
 
-    /// Query the measured MegaMoE routed-module latency (ms) at `num_tokens`
-    /// (rank-LOCAL token count — callers must NOT pre-multiply by
-    /// attention_dp_size). Mirrors the table body of Python
-    /// `_query_megamoe_table`: exact key walk, then the 1-axis Grid engine
-    /// with the linear token-proxy SOL.
+    /// Query the measured MegaMoE routed-module value (latency ms +
+    /// power/energy) at `num_tokens` (rank-LOCAL token count — callers must
+    /// NOT pre-multiply by attention_dp_size). Mirrors the table body of
+    /// Python `_query_megamoe_table`: exact key walk, then the 1-axis Grid
+    /// engine with the linear token-proxy SOL. Blends interpolate the
+    /// measured POWER and re-derive `energy = power * latency` (the
+    /// canonical case from `test_data_loaders.py::`
+    /// `test_query_dsv4_megamoe_module_interpolates_energy_from_rows`).
     #[allow(clippy::too_many_arguments)]
     pub fn query_module(
         &self,
@@ -119,7 +124,7 @@ impl Dsv4MegaMoeTable {
         num_fused_shared_experts: u32,
         kernel_source: &str,
         kernel_dtype: &str,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load_module()?;
         let phase = if is_context { "context" } else { "generation" };
         let key = Dsv4MegaMoeKey {
@@ -206,12 +211,14 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
     let used_cuda_graph_col = reader.col("used_cuda_graph")?;
     let includes_gate_topk_col = reader.col("includes_gate_topk")?;
     let includes_routed_scale_col = reader.col("includes_routed_scale")?;
-    // Optional columns with Python defaults.
+    // Optional columns with Python defaults. `power` mirrors Python's
+    // `float(row.get("power") or 0.0)` (absent column / null -> 0.0).
     let kernel_source_col = reader.col_optional("kernel_source");
     let num_fused_shared_col = reader.col_optional("num_fused_shared_experts");
     let moe_tp_size_col = reader.col_optional("moe_tp_size");
+    let power_col = reader.col_optional("power");
 
-    let mut by_keys: BTreeMap<Dsv4MegaMoeKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<Dsv4MegaMoeKey, BTreeMap<u32, LeafValue>> = BTreeMap::new();
     for row in reader.rows()? {
         let row = row?;
         for (col, expected, error) in [
@@ -253,7 +260,8 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
             )));
         };
         // routed_scaling_factor: read for the required-column/parse contract
-        // only (the query never consumes it; energy is not modeled in Rust).
+        // only (the query never consumes it — Python stores it in the leaf
+        // metadata but `_query_megamoe_table` reads latency/energy only).
         let _ = row.f64(routed_scaling_col)?;
         let key = Dsv4MegaMoeKey {
             phase,
@@ -276,12 +284,13 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
         };
         let num_tokens = row.u32(num_tokens_col)?;
         let latency = row.f64(latency_col)?;
+        let power = row.f64_optional(power_col)?.unwrap_or(0.0);
         // Python `_put_nested`: a duplicate leaf is a load ERROR, not
         // last-wins.
         if by_keys
             .entry(key.clone())
             .or_default()
-            .insert(num_tokens, latency)
+            .insert(num_tokens, LeafValue::with_power(latency, power))
             .is_some()
         {
             return Err(AicError::PerfDatabase(format!(
@@ -293,7 +302,7 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
     Ok(Dsv4MegaMoeGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .map(|(key, curve)| (key, LeafTokenCurve::from_map(curve)))
             .collect(),
     })
 }
@@ -347,5 +356,80 @@ mod tests {
         assert!(err
             .to_string()
             .contains("DSv4 MegaMoE module data not loaded"));
+    }
+
+    /// The canonical energy-blend oracle, mirroring Python
+    /// `tests/unit/sdk/database/test_data_loaders.py::`
+    /// `test_query_dsv4_megamoe_module_interpolates_energy_from_rows` on a
+    /// power-carrying fixture:
+    ///
+    /// ```text
+    /// db.query_dsv4_megamoe_module(num_tokens=1536, hidden_size=7168,
+    ///     inter_size=3072, topk=6, num_experts=384, moe_tp_size=1,
+    ///     moe_ep_size=8, quant_mode=w4a8_mxfp4_mxfp8,
+    ///     workload_distribution="balanced", is_context=True)
+    /// # -> latency=2.0, power=150.0, energy=300.0
+    /// ```
+    ///
+    /// perf_interp blends the measured POWER column (100, 200 -> 150) and
+    /// re-derives energy = power * latency; a legacy energy-lerp would give
+    /// 350 (power 175), conflating the latency growth into the blend.
+    #[test]
+    fn megamoe_energy_blend_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("dsv4_megamoe_module_perf.parquet"),
+            &[
+                Col::Str("phase", vec!["context", "context"]),
+                Col::Str("kernel_source", vec!["deepgemm_megamoe"; 2]),
+                Col::Str("kernel_dtype", vec!["fp8_fp4", "fp8_fp4"]),
+                Col::Str("moe_dtype", vec!["w4a8_mxfp4_mxfp8"; 2]),
+                Col::Str("pre_dispatch", vec!["sglang_jit", "sglang_jit"]),
+                Col::Str("source_policy", vec!["random", "random"]),
+                Col::Str("distribution", vec!["balanced", "balanced"]),
+                Col::I64("topk", vec![6, 6]),
+                Col::I64("num_experts", vec![384, 384]),
+                Col::I64("num_fused_shared_experts", vec![0, 0]),
+                Col::I64("hidden_size", vec![7168, 7168]),
+                Col::I64("inter_size", vec![3072, 3072]),
+                Col::I64("moe_tp_size", vec![1, 1]),
+                Col::I64("moe_ep_size", vec![8, 8]),
+                Col::I64("num_tokens", vec![1024, 2048]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+                Col::F64("routed_scaling_factor", vec![2.5, 2.5]),
+                Col::Bool("used_cuda_graph", vec![true, true]),
+                Col::Bool("includes_gate_topk", vec![false, false]),
+                Col::Bool("includes_routed_scale", vec![true, true]),
+            ],
+        );
+        let table = Dsv4MegaMoeTable::new(tmp.path().to_path_buf());
+        let v = table
+            .query_module(
+                1536,
+                7168,
+                3072,
+                6,
+                384,
+                1,
+                8,
+                MoeQuantMode::W4a8Mxfp4Mxfp8,
+                "balanced",
+                true,
+                "random",
+                "sglang_jit",
+                0,
+                "deepgemm_megamoe",
+                "fp8_fp4",
+            )
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!((v.power - 150.0).abs() < 1e-9 * 150.0, "power {}", v.power);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
     }
 }

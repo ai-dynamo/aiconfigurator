@@ -18,13 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-    Dsv4ModuleOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
     GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    MsaModuleOp, TrtllmWideEpMoEDispatchOp,
-    NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
-    WideEpGenerationMlaOp, WideEpMoeOp,
+    MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source, TrtllmWideEpMoEDispatchOp,
+    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -326,23 +324,29 @@ impl Op {
             Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
-                // independently, then `max(group_a_total, group_b_total)` is
-                // returned. Source tag follows the additive combine rule.
+                // independently, then latency = max(group_a_total,
+                // group_b_total) while ENERGY = group_a + group_b (both
+                // groups consume power even though they overlap in time).
+                // Source tag follows the additive combine rule.
                 let mut total_a = 0.0_f64;
+                let mut energy_a = 0.0_f64;
                 let mut source_a: Option<Source> = None;
                 for inner in &op.group_a {
                     let r = inner.query(db, ctx)?;
                     total_a += r.latency_ms;
+                    energy_a += r.energy_wms;
                     source_a = Some(match source_a {
                         None => r.source,
                         Some(prev) => prev.combine(r.source),
                     });
                 }
                 let mut total_b = 0.0_f64;
+                let mut energy_b = 0.0_f64;
                 let mut source_b: Option<Source> = None;
                 for inner in &op.group_b {
                     let r = inner.query(db, ctx)?;
                     total_b += r.latency_ms;
+                    energy_b += r.energy_wms;
                     source_b = Some(match source_b {
                         None => r.source,
                         Some(prev) => prev.combine(r.source),
@@ -353,7 +357,12 @@ impl Op {
                     (Some(s), None) | (None, Some(s)) => s,
                     (None, None) => Source::Silicon,
                 };
-                Ok(PerformanceResult::new(total_a.max(total_b), source).clamp_non_negative())
+                Ok(PerformanceResult::with_energy(
+                    total_a.max(total_b),
+                    energy_a + energy_b,
+                    source,
+                )
+                .clamp_non_negative())
             }
             Op::Fallback(op) => {
                 // Mirrors Python `FallbackOp.query`: try the primary; on
@@ -378,20 +387,31 @@ impl Op {
                         db
                     };
                 match op.primary.query(primary_db, ctx) {
+                    // Primary result passes through verbatim — its energy
+                    // rides along (Python returns `self._primary.query(...)`).
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
+                        // Fallback chain: Python sums PerformanceResults
+                        // (`total += op.query(...)`), so latency AND energy
+                        // both accumulate.
                         let mut total = 0.0_f64;
+                        let mut energy = 0.0_f64;
                         let mut source: Option<Source> = None;
                         for inner in &op.fallback {
                             let r = inner.query(db, ctx)?;
                             total += r.latency_ms;
+                            energy += r.energy_wms;
                             source = Some(match source {
                                 None => r.source,
                                 Some(prev) => prev.combine(r.source),
                             });
                         }
-                        Ok(PerformanceResult::new(total, source.unwrap_or(Source::Silicon))
-                            .clamp_non_negative())
+                        Ok(PerformanceResult::with_energy(
+                            total,
+                            energy,
+                            source.unwrap_or(Source::Silicon),
+                        )
+                        .clamp_non_negative())
                     }
                     Err(other) => Err(other),
                 }
@@ -406,4 +426,3 @@ impl Op {
         }
     }
 }
-

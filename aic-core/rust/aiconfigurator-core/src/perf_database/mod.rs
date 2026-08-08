@@ -61,7 +61,7 @@ pub(crate) fn resolve_op_sources(
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
 /// derived from `data_root` (`<data_dir>/<backend>/<version>`).
-fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
     let data_dir = data_root.parent()?.parent()?;
@@ -449,6 +449,155 @@ impl PerfDatabase {
             delta_lookups: Arc::clone(&self.delta_lookups),
             provenance: Arc::clone(&self.provenance),
         }
+    }
+}
+
+/// Shared fixtures for the per-family ENERGY oracle tests.
+///
+/// The shipped perf databases carry no `power` column (their energies are
+/// all 0.0), so the energy oracles run on synthetic power-carrying parquet
+/// fixtures. Each test documents its fixture rows and query; the pinned
+/// values were minted by rebuilding the identical fixture with pandas and
+/// querying the frozen Python SDK, e.g.:
+///
+/// ```text
+/// cd <repo> && uv run python - <<'PY'
+/// import pandas as pd, yaml, tempfile, os
+/// from aiconfigurator_core.sdk.perf_database import PerfDatabase
+/// from aiconfigurator_core.sdk import common
+/// root = tempfile.mkdtemp(); data = os.path.join(root, "data", "vllm", "1.0")
+/// os.makedirs(data)
+/// yaml.safe_dump({...the testsys spec below...},
+///                open(os.path.join(root, "testsys.yaml"), "w"))
+/// pd.DataFrame([...the test's rows...]).to_parquet(
+///     os.path.join(data, "<family>_perf.parquet"))
+/// db = PerfDatabase("testsys", "vllm", "1.0", root)
+/// r = db.query_<family>(..., database_mode=common.DatabaseMode.SILICON)
+/// print(float(r), r.energy)
+/// PY
+/// ```
+///
+/// The system spec here mirrors that script's `testsys.yaml` byte for byte
+/// so SOL-dependent paths (the GEMM load clamp, the fp8_static latency
+/// floor) agree across both engines.
+#[cfg(test)]
+pub(crate) mod energy_test_fixtures {
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, DoubleType, Int64Type};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
+    use parquet::schema::parser::parse_message_type;
+
+    use crate::common::system_spec::{GpuSpec, MiscSpec, NodeSpec, SystemSpec};
+
+    /// One parquet column of the fixture: name + values (row-aligned).
+    pub(crate) enum Col {
+        Str(&'static str, Vec<&'static str>),
+        I64(&'static str, Vec<i64>),
+        F64(&'static str, Vec<f64>),
+        Bool(&'static str, Vec<bool>),
+    }
+
+    fn write_typed<T: DataType>(rg: &mut SerializedRowGroupWriter<'_, File>, values: &[T::T]) {
+        let mut col = rg.next_column().unwrap().expect("column");
+        col.typed::<T>().write_batch(values, None, None).unwrap();
+        col.close().unwrap();
+    }
+
+    /// Write one single-row-group parquet with the given columns.
+    pub(crate) fn write_parquet(path: &Path, cols: &[Col]) {
+        let fields: Vec<String> = cols
+            .iter()
+            .map(|c| match c {
+                Col::Str(name, _) => format!("REQUIRED BYTE_ARRAY {name} (UTF8);"),
+                Col::I64(name, _) => format!("REQUIRED INT64 {name};"),
+                Col::F64(name, _) => format!("REQUIRED DOUBLE {name};"),
+                Col::Bool(name, _) => format!("REQUIRED BOOLEAN {name};"),
+            })
+            .collect();
+        let schema = format!("message energy_fixture {{ {} }}", fields.join(" "));
+        let schema = Arc::new(parse_message_type(&schema).expect("schema must parse"));
+        let file = File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        for col in cols {
+            match col {
+                Col::Str(_, v) => {
+                    let bytes: Vec<ByteArray> = v.iter().map(|s| ByteArray::from(*s)).collect();
+                    write_typed::<ByteArrayType>(&mut rg, &bytes);
+                }
+                Col::I64(_, v) => write_typed::<Int64Type>(&mut rg, v),
+                Col::F64(_, v) => write_typed::<DoubleType>(&mut rg, v),
+                Col::Bool(_, v) => write_typed::<BoolType>(&mut rg, v),
+            }
+        }
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// The oracle script's `testsys.yaml` gpu/node numbers, as an in-code
+    /// spec for family tables constructed directly from a data dir.
+    pub(crate) fn energy_test_spec() -> SystemSpec {
+        SystemSpec {
+            data_dir: "data".into(),
+            gpu: GpuSpec {
+                mem_bw: 7.7e12,
+                mem_bw_empirical_scaling_factor: 0.92,
+                mem_empirical_constant_latency: 2e-6,
+                mem_capacity: None,
+                bfloat16_tc_flops: Some(2.25e15),
+                int8_tc_flops: Some(4.5e15),
+                fp8_tc_flops: Some(4.5e15),
+                fp4_tc_flops: Some(9e15),
+                power: None,
+                sm_version: Some(100),
+            },
+            node: NodeSpec {
+                num_gpus_per_node: 8,
+                intra_node_bw: 900e9,
+                inter_node_bw: 50e9,
+                pcie_bw: None,
+                p2p_latency: 2e-6,
+                num_gpus_per_rack: None,
+                inter_rack_bw: None,
+            },
+            misc: MiscSpec::default(),
+        }
+    }
+
+    /// Write `testsys.yaml` (the YAML twin of [`energy_test_spec`]) into a
+    /// synthetic systems root and return the fixture data dir
+    /// `<root>/data/vllm/1.0` — the layout `PerfDatabase::load(root,
+    /// "testsys", "vllm", "1.0")` resolves.
+    pub(crate) fn write_energy_systems_root(root: &Path) -> std::path::PathBuf {
+        let yaml = r#"
+data_dir: data
+gpu:
+  mem_bw: 7.7e12
+  mem_bw_empirical_scaling_factor: 0.92
+  mem_empirical_constant_latency: 2.0e-6
+  bfloat16_tc_flops: 2.25e15
+  int8_tc_flops: 4.5e15
+  fp8_tc_flops: 4.5e15
+  fp4_tc_flops: 9.0e15
+  sm_version: 100
+node:
+  num_gpus_per_node: 8
+  intra_node_bw: 900.0e9
+  inter_node_bw: 50.0e9
+  p2p_latency: 2.0e-6
+misc:
+  nccl_version: test
+"#;
+        std::fs::write(root.join("testsys.yaml"), yaml).expect("write yaml");
+        let data = root.join("data").join("vllm").join("1.0");
+        std::fs::create_dir_all(&data).expect("mkdir data");
+        data
     }
 }
 
