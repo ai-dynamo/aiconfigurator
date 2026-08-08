@@ -140,6 +140,18 @@ def test_rate_match_with_custom_degradation_factors():
         )
 
 
+def test_rate_match_prefill_ttft_capacity_can_bound_throughput():
+    p = _make_prefill_dict(bs=1, ttft=500.0, **{"seq/s": 100.0})
+    d = _make_decode_dict(**{"seq/s": 100.0})
+
+    new_result = _rate_match_dict(p, 2, d, 2)
+    old_result = _build_disagg_summary_dict(p, 2, d, 2)
+
+    assert new_result["seq/s"] == 4.0
+    for key in new_result:
+        assert new_result[key] == old_result[key]
+
+
 def test_rate_match_zero_osl_does_not_divide_by_zero():
     """request_latency uses max(osl - 1, 0); osl=1 keeps decode_time=0."""
     p = _make_prefill_dict(osl=1)

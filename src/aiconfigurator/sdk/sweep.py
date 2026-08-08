@@ -113,10 +113,10 @@ def _rate_match_dict(
     d = decode_summary_dict
     osl = p["osl"]
 
-    seq_s = min(
-        p["seq/s"] * prefill_num_worker * prefill_degradation,
-        d["seq/s"] * decode_num_worker * decode_degradation,
-    )
+    prefill_capacity = p["seq/s"] * prefill_num_worker * prefill_degradation
+    decode_capacity = d["seq/s"] * decode_num_worker * decode_degradation
+    prefill_ttft_capacity = p["bs"] * prefill_num_worker * 1000.0 / p["ttft"]
+    seq_s = min(prefill_capacity, decode_capacity, prefill_ttft_capacity)
     prefill_gpus = p["pp"] * p["tp"] * p["dp"]
     decode_gpus = d["pp"] * d["tp"] * d["dp"]
     num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
