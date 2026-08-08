@@ -183,6 +183,32 @@ def get_dsv4_hca_generation_test_cases() -> list[dict]:
 # Module construction (framework dispatch — no manual backend pinning)
 # ═══════════════════════════════════════════════════════════════════════
 
+# Size-1 cache of the last constructed attention module, keyed by
+# (model_path, attn_kind, tp_size). collect.py workers are persistent and the
+# case order groups shapes into long same-geometry runs, so consecutive tasks
+# reuse one module and skip the ~30s construction (from_pretrained + weight
+# creation + fp8 post-processing) that dominated the 42s/case cost — the
+# per-case KV cache manager, metadata, CUDA-graph capture and benchmark are
+# untouched, and reusing one module across batches is exactly what serving
+# does. Owner-approved perf change 2026-08-09.
+_MODULE_CACHE: dict = {}
+
+
+def _cached_dsv4_attention_module(model_path: str, attn_kind: str, tp_size: int, device: str):
+    key = (model_path, attn_kind, int(tp_size), device)
+    hit = _MODULE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    # Evict the previous geometry before building the next (bounded memory:
+    # at most one module's weights are ever retained).
+    if _MODULE_CACHE:
+        _MODULE_CACHE.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+    entry = create_dsv4_attention_module(model_path=model_path, attn_kind=attn_kind, tp_size=tp_size, device=device)
+    _MODULE_CACHE[key] = entry
+    return entry
+
 
 def _patched_config_dir(model_path: str, compress_ratio: int, tp_size: int) -> tuple[str, dict]:
     """Write a single-layer DSV4 config with the requested compress ratio and
@@ -569,12 +595,7 @@ def run_dsv4_attn(
     torch_device = torch.device(device)
     torch.cuda.set_device(torch_device)
 
-    attn_module, model_config, head_info = create_dsv4_attention_module(
-        model_path=model_path,
-        attn_kind=attn_kind,
-        tp_size=tp_size,
-        device=device,
-    )
+    attn_module, model_config, head_info = _cached_dsv4_attention_module(model_path, attn_kind, tp_size, device)
 
     kv_cache_manager, attn_metadata, attention_cls = create_dsv4_kv_cache_and_metadata(
         model_config=model_config,

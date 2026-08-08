@@ -4,7 +4,7 @@
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -25,7 +25,9 @@ DSV4_MODULE_OPS = {
 
 
 def _load_module_with_torch_stub(monkeypatch):
-    monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
+    torch_stub = ModuleType("torch")
+    torch_stub.cuda = SimpleNamespace(empty_cache=lambda: None)
+    monkeypatch.setitem(sys.modules, "torch", torch_stub)
     module_path = REPO_ROOT / "collector" / "trtllm" / "collect_dsv4_attn.py"
     spec = importlib.util.spec_from_file_location("trtllm_dsv4_target", module_path)
     assert spec and spec.loader
@@ -119,3 +121,29 @@ def test_dsv4_worker_infers_mode_from_perf_filename(monkeypatch):
     )
     assert captured["mode"] == "generation"
     assert captured["attn_kind"] == "hca"
+
+
+def test_module_cache_reuses_same_geometry_and_evicts_on_change(monkeypatch):
+    """Size-1 cache: consecutive same-(model, kind, tp) cases share one build;
+    a geometry change evicts and rebuilds (bounded memory)."""
+    module = _load_module_with_torch_stub(monkeypatch)
+
+    builds = []
+
+    def fake_build(*, model_path, attn_kind, tp_size, device):
+        builds.append((model_path, attn_kind, tp_size))
+        return (object(), object(), {"local_heads": 8, "native_heads": 64})
+
+    monkeypatch.setattr(module, "create_dsv4_attention_module", fake_build)
+    module._MODULE_CACHE.clear()
+
+    a1 = module._cached_dsv4_attention_module("m/flash", "csa", 4, "cuda:0")
+    a2 = module._cached_dsv4_attention_module("m/flash", "csa", 4, "cuda:0")
+    assert a1 is a2
+    assert len(builds) == 1
+
+    b1 = module._cached_dsv4_attention_module("m/flash", "hca", 4, "cuda:0")
+    assert len(builds) == 2
+    assert list(module._MODULE_CACHE) == [("m/flash", "hca", 4, "cuda:0")]
+    assert b1 is not a1
+    module._MODULE_CACHE.clear()
