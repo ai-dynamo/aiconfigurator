@@ -41,7 +41,10 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 9: `Op::FpmForward` whole-model variant added (forward_model="fpm").
 //   Claimed 5, 7 and 8 concurrently with other landings; renumbered at
 //   each merge (same precedent as the v3/v4 collision above).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 9;
+// - 10 (issue #1498): `MhcModuleOp` gained `seq_split` (CP per-rank token
+//   division) — a bincode op-layout change. Claimed 7 concurrently with
+//   `attn_ar_modeled`; renumbered at the rebase.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 10;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
