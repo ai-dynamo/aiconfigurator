@@ -249,11 +249,9 @@ impl StateSpaceTable {
             num_v_heads,
             head_v_dim,
         };
-        // Mirror Python `_query_gdn_table`: on exact-shape miss, fall back to
-        // any same-d_model entry, breaking ties by minimum `|num_v_heads -
-        // query.num_v_heads|`. (Mamba2 uses "first by d_model"; GDN uses
-        // "nearest by num_v_heads" — keep them distinct.) Surface as
-        // `PerfDatabase` if no d_model match exists.
+        // Mirror Python `_query_gdn_table`: exact geometry (or an exact
+        // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
+        // the operator degrades to SOL.
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
             None => {
@@ -299,19 +297,7 @@ impl StateSpaceTable {
                     return engine_query(node, phase, batch_size, seq_len, sol);
                 }
 
-                let nearest = grids
-                    .by_keys
-                    .iter()
-                    .filter(|(k, _)| {
-                        k.kernel_source == key.kernel_source
-                            && k.phase == key.phase
-                            && k.d_model == key.d_model
-                    })
-                    .min_by_key(|(k, _)| (k.num_v_heads as i64 - key.num_v_heads as i64).abs());
-                match nearest {
-                    Some((_, node)) => node,
-                    None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
-                }
+                return Err(missing("GDN", &self.data_root, format!("{key:?}")));
             }
         };
         engine_query(node, phase, batch_size, seq_len, sol)
@@ -896,7 +882,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_preserves_logical_source_nearest_fallback() {
+    fn vllm_024_gdn_does_not_borrow_nearest_shape_within_logical_source() {
+        // Exact geometry only: nearest-num_v_heads rows are never returned as
+        // silicon (mirrors the Python twin test).
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -906,10 +894,7 @@ mod tests {
                 ("chunk_gated_delta_rule", "context", 64, 5.0),
             ],
         );
-        assert_eq!(
-            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            5.0
-        );
+        assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
     }
 
     /// In-memory KDA table over one fixed model shape (d_model=4096, heads
@@ -1057,8 +1042,9 @@ mod tests {
         let bw = h100_sxm_mem_bw();
 
         // GDN causal_conv1d kernels: read = x*conv_channels*(d_conv+1)*2,
-        // write = x*conv_channels*2; x = b*s (context) or b (generation).
-        let conv_channels = (16 * 128 + 32 * 128) as f64;
+        // write = x*conv_channels*2; x = b*s (context) or b (generation);
+        // conv_channels is the packed q/k/v width (2K + V).
+        let conv_channels = (2 * 16 * 128 + 32 * 128) as f64;
         let gdn_conv_sol = move |x: f64| {
             (x * conv_channels * (4.0 + 1.0) * 2.0 + x * conv_channels * 2.0) / bw * 1000.0
         };

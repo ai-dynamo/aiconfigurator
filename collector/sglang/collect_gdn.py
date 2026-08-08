@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from sglang.srt.layers.attention.fla.fused_recurrent import (
         fused_recurrent_gated_delta_rule_packed_decode,
     )
-    from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn
+    from sglang.srt.layers.attention.mamba.causal_conv1d_triton import causal_conv1d_update
 
 import torch
 
@@ -255,7 +256,7 @@ def run_gdn_context_benchmark(
                     kernel_func=run_conv1d,
                     num_warmups=num_warmups,
                     num_runs=num_runs,
-                    repeat_n=1,
+                    repeat_n=10,
                 ) as results:
                     if not log_perf(
                         item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -288,7 +289,7 @@ def run_gdn_context_benchmark(
                     kernel_func=run_gdn_scan,
                     num_warmups=num_warmups,
                     num_runs=num_runs,
-                    repeat_n=1,
+                    repeat_n=10,
                 ) as results:
                     if not log_perf(
                         item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -396,7 +397,10 @@ def run_gdn_generation_benchmark(
             a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             a_log = torch.zeros(num_v_heads, dtype=torch.float32, device=device)
-            dt_bias = torch.ones(num_v_heads, dtype=torch.float32, device=device)
+            # qwen3_5.py:237-239 @0.5.14 creates dt_bias with no explicit dtype
+            # (model dtype); the kernel upcasts it on load
+            # (fused_sigmoid_gating_recurrent.py:154-160).
+            dt_bias = torch.ones(num_v_heads, dtype=dtype, device=device)
             output = torch.empty(
                 batch_size,
                 1,
@@ -435,7 +439,7 @@ def run_gdn_generation_benchmark(
                 kernel_func=run_conv1d_update,
                 num_warmups=num_warmups,
                 num_runs=num_runs,
-                repeat_n=1,
+                repeat_n=10,
             ) as results:
                 if not log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -468,7 +472,7 @@ def run_gdn_generation_benchmark(
                 kernel_func=run_gdn_update,
                 num_warmups=num_warmups,
                 num_runs=num_runs,
-                repeat_n=1,
+                repeat_n=10,
             ) as results:
                 if not log_perf(
                     item_list=[{**common_log_data, "latency": results["latency_ms"]}],
@@ -540,7 +544,12 @@ def run_gdn_torch(
         from sglang.srt.layers.attention.fla.fused_recurrent import (
             fused_recurrent_gated_delta_rule_packed_decode,
         )
-        from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+
+        # gdn_backend.py:13-16 @0.5.14 imports both conv entry points from
+        # causal_conv1d_triton and rebinds only causal_conv1d_fn to the CUDA
+        # wrapper (:34-39) — GDN decode keeps the Triton update kernel.
+        from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn
+        from sglang.srt.layers.attention.mamba.causal_conv1d_triton import causal_conv1d_update
 
     from importlib.metadata import version as _get_version
 

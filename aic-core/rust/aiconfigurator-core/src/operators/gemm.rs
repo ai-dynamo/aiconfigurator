@@ -39,6 +39,11 @@ pub struct GemmOp {
     /// The per-rank token count is `ceil(m / seq_split)`. Defaults to 1 (no CP).
     #[serde(default = "default_seq_split")]
     pub seq_split: u32,
+    /// Opt-in: a shape outside the collected grid degrades to SOL instead of
+    /// erroring (SILICON only; quant-mode misses stay strict, HYBRID keeps
+    /// its empirical fallback). Mirrors Python `below_grid_sol`.
+    #[serde(default)]
+    pub below_grid_sol: bool,
 }
 
 pub(crate) fn default_seq_split() -> u32 {
@@ -58,6 +63,7 @@ impl GemmOp {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         }
     }
 
@@ -81,7 +87,32 @@ impl GemmOp {
         let m = m.div_ceil(self.seq_split.max(1));
         let quant = quant_override.unwrap_or(self.quant_mode);
 
-        let (mut latency, mut source) = query_gemm_table(db, quant, m, self.n, self.k)?;
+        let (mut latency, mut source) = match query_gemm_table(db, quant, m, self.n, self.k) {
+            // Opt-in below-grid degrade (Python `_query_gemm_table`): a
+            // SILICON shape miss falls to SOL when the quant's table exists;
+            // quant-mode misses stay strict and HYBRID keeps its empirical
+            // fallback.
+            Err(err)
+                if self.below_grid_sol
+                    && db.database_mode == DatabaseMode::Silicon
+                    && err.is_missing_perf_data()
+                    && db.gemm.has_quant(quant)? =>
+            {
+                let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
+                (
+                    gemm_sol_latency_ms_with_flops(
+                        &db.system_spec,
+                        quant,
+                        tc_flops,
+                        m as f64,
+                        self.n as f64,
+                        self.k as f64,
+                    ),
+                    Source::Sol,
+                )
+            }
+            other => other?,
+        };
         let mut latency_floor = 0.0_f64;
 
         if quant == GemmQuantMode::Fp8Static {
@@ -493,6 +524,7 @@ mod tests {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let result = op.query(&db, 32768, None).expect("query must succeed");
         assert!(
@@ -515,11 +547,35 @@ mod tests {
             scale_num_tokens: 2,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let result = op.query(&db, 65536, None).expect("query must succeed");
         assert!(
             (result.latency_ms - 41.59673055013021).abs() < 1e-9,
             "scale_num_tokens must divide x: got {}",
+            result.latency_ms
+        );
+    }
+
+    /// Oracle from the Python reference on the same data:
+    /// `float(db.query_gemm(8, 1, 2048, GEMMQuantMode.bfloat16,
+    /// database_mode=DatabaseMode.SOL))` = 4.78961038961039e-06.
+    #[test]
+    fn gemm_op_below_grid_sol_flag_degrades_shape_miss_to_sol() {
+        let db = b200_vllm_db();
+        // n=1 is ~5 octaves below the smallest collected n: a strict miss.
+        let strict = GemmOp::new("gate", 1, 2048, GemmQuantMode::Bfloat16);
+        assert!(strict.query(&db, 8, None).is_err());
+
+        let op = GemmOp {
+            below_grid_sol: true,
+            ..strict
+        };
+        let result = op.query(&db, 8, None).expect("below-grid opt-in must degrade to SOL");
+        assert_eq!(result.source, Source::Sol);
+        assert!(
+            (result.latency_ms - 4.78961038961039e-06).abs() < 1e-15,
+            "expected the Python SOL oracle, got {}",
             result.latency_ms
         );
     }

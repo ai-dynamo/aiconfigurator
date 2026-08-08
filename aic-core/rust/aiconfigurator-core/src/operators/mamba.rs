@@ -165,7 +165,8 @@ impl GdnOp {
         let hk = self.head_k_dim as f64;
         let nv = self.num_v_heads as f64;
         let hv = self.head_v_dim as f64;
-        let conv_channels = nk * hk + nv * hv;
+        // Packed q/k/v convolution width (2K + V), matching the collector's conv_dim.
+        let conv_channels = 2.0 * nk * hk + nv * hv;
         let d_conv = self.d_conv as f64;
         let d_model = self.d_model as f64;
         let state_size = nv * hk * hv;
@@ -184,13 +185,15 @@ impl GdnOp {
                 x * conv_channels * (d_conv + 1.0) * 2.0,
                 x * conv_channels * 2.0,
             ),
+            // q/k/v reads are 2K + V wide; the recurrent state is FP32 (Qwen3.5
+            // pins mamba_ssm_dtype=float32) while h_chunks stay input-dtype BF16.
             "chunk_gated_delta_rule" => (
-                x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
-                x * nv * hv * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
+                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
+                x * nv * hv * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
             ),
             "fused_sigmoid_gating_delta_rule_update" => (
-                x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs,
-                x * nv * hv * 2.0 + state_size * 2.0 * bs,
+                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs,
+                x * nv * hv * 2.0 + state_size * 4.0 * bs,
             ),
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };

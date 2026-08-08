@@ -290,7 +290,8 @@ class GDNKernel(Operation):
         - "causal_conv1d_update": Single-step causal conv state update
         - "fused_sigmoid_gating_delta_rule_update": Single-step GDN recurrence
 
-    Uses full (unsharded) dimensions for database lookup; collector data is per-layer.
+    Uses the runtime kernel dimensions supplied by the model builder for database
+    lookup. Tensor-parallel model builders therefore pass per-rank head counts.
 
     Owns ``_data_cache`` for the packaged gdn_perf Parquet perf table.
     """
@@ -383,34 +384,36 @@ class GDNKernel(Operation):
         def get_sol(b: int = batch_size, s: int | None = seq_len) -> tuple[float, float, float]:
             x = (b * s) if phase == "context" and s else b
             if kernel_source in ("causal_conv1d_fn", "causal_conv1d_update"):
-                conv_channels = num_k_heads * head_k_dim + num_v_heads * head_v_dim
+                # Packed q/k/v convolution width (2K + V), matching the collector's conv_dim.
+                conv_channels = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
                 read_bytes = x * conv_channels * (d_conv + 1) * 2
                 write_bytes = x * conv_channels * 2
             elif kernel_source == "chunk_gated_delta_rule":
-                # GDN chunked scan (context phase).
-                # State shape: [num_v_heads, head_k_dim, head_v_dim], stored as BF16 in global memory.
-                # Intermediate h_chunks [B, NT, H, K, V] are written by chunk_delta_h and read by
-                # chunk_o via global memory (separate kernel launches). Allocated via k.new_empty()
-                # (no dtype override), so matches input dtype: FP16/BF16 → 2 bytes.
+                # GDN chunked scan (context phase). Reads q/k/v (2K + V wide);
+                # state [num_v_heads, head_k_dim, head_v_dim] is FP32 (Qwen3.5 pins
+                # mamba_ssm_dtype=float32). Intermediate h_chunks [B, NT, H, K, V]
+                # are written by chunk_delta_h and read by chunk_o via global
+                # memory, allocated at input dtype (BF16 -> 2 bytes).
                 chunk_size = 64  # flash-linear-attention default for chunk_gated_delta_rule
                 state_size = num_v_heads * head_k_dim * head_v_dim
                 num_chunks = (s // chunk_size) if s else 0
                 h_chunks_bytes = num_chunks * state_size * 2 * b
                 read_bytes = (
-                    x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
-                    + state_size * 2 * b
+                    x * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
+                    + state_size * 4 * b
                     + h_chunks_bytes  # chunk_o reads h_chunks from global memory
                 )
                 write_bytes = (
                     x * num_v_heads * head_v_dim * 2
-                    + state_size * 2 * b
+                    + state_size * 4 * b
                     + h_chunks_bytes  # chunk_delta_h writes h_chunks to global memory
                 )
             elif kernel_source == "fused_sigmoid_gating_delta_rule_update":
-                # GDN single-step decode. State stored as BF16 in global memory.
+                # GDN single-step decode: reads q/k/v (2K + V wide) plus the FP32
+                # recurrent state.
                 state_size = num_v_heads * head_k_dim * head_v_dim
-                read_bytes = x * (num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 2 * b
-                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 2 * b
+                read_bytes = x * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * b
+                write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * b
             else:
                 read_bytes = x * d_model * 2
                 write_bytes = x * d_model * 2
@@ -448,16 +451,11 @@ class GDNKernel(Operation):
 
             if len(exact_aliases) == 1:
                 by_key = exact_aliases[0]
-            elif exact_aliases:
-                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
             else:
-                # Preserve the legacy fallback only within the logical source;
-                # physical aliases must match the complete model shape.
-                keys_same_d_model = [k for k in by_key if k[0] == d_model]
-                if keys_same_d_model:
-                    model_key = min(keys_same_d_model, key=lambda k: abs(k[3] - num_v_heads))
-                else:
-                    return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+                # Exact geometry only — ambiguous physical aliases or a genuine
+                # miss degrade to SOL; nearest-shape rows are never returned as
+                # silicon.
+                return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]
 

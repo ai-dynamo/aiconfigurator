@@ -46,6 +46,7 @@ fn context_ops() -> Vec<Op> {
             scale_num_tokens: 0,
             low_precision_input: false,
                 seq_split: 1,
+            below_grid_sol: false,
         }),
         Op::ContextAttention(ContextAttentionOp {
             name: "context_attention".into(),
