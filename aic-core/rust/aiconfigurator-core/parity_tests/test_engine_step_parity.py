@@ -1083,6 +1083,37 @@ def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
     return float(latency_ms)
 
 
+def _cp_static_ctx_ms(case: EngineStepParityCase, *, engine_step_backend: str) -> float:
+    """Context-phase static sum through the cp-aware model builder.
+
+    The "static" surface goes through `cli_estimate`, which has no cp knob —
+    a cp>1 case fails model validation there before any op runs. CP cases
+    anchor the context phase (the only phase the CP composition runs on)
+    with the same `_case_model_config` construction the mixed surface uses,
+    routed to the requested engine per RuntimeConfig (the golden capture
+    pins "python"; the live test side passes "rust").
+    """
+    database = _case_database(case)
+    if database is None:
+        raise RuntimeError(
+            f"failed to load perf database for {case.system_name}/{case.backend_name}/{case.backend_version}"
+        )
+    model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+    backend = get_backend(case.backend_name)
+    runtime_config = config.RuntimeConfig(
+        batch_size=case.batch_size,
+        beam_width=1,
+        isl=case.isl,
+        osl=max(case.osl, 2),
+        prefix=case.prefix,
+        engine_step_backend=engine_step_backend,
+    )
+    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
+        backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
+    )
+    return float(sum(ctx_lat.values()))
+
+
 def _rust_mixed_step_ms(case: EngineStepParityCase) -> float:
     """Rust mix-step latency for the case's mix-step shape (same FPM)."""
     database = _case_database(case)
@@ -1199,6 +1230,8 @@ def _surface_metrics(
     if surface == "mixed":
         step_ms = _python_mixed_step_ms if engine_step_backend == "python" else _rust_mixed_step_ms
         return {"mixed_step": _safe_value(lambda: step_ms(case))}
+    if surface == "cp_static_ctx":
+        return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case, engine_step_backend=engine_step_backend))}
     if surface == "agg":
         metrics = _agg_metrics(case, engine_step_backend=engine_step_backend)
         return {
@@ -1460,8 +1493,8 @@ CP_CASES = [
     ),
     # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
     # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
-    # would need the uncollected fp8-FMHA context-MLA slice; DSA/dsv4 CP need
-    # uncollected sparse mqa/topk tables — both out of scope until collected.)
+    # would need the uncollected fp8-FMHA context-MLA slice; DSA CP needs
+    # uncollected sparse mqa/topk tables — out of scope until collected.)
     pytest.param(
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K2.5",
@@ -1478,6 +1511,40 @@ CP_CASES = [
     ),
 ]
 
+# DeepSeek-V4 CSA context-parallelism on a REUSE-carrying version (issue
+# #1498): 0.5.12 ships no primary dsv4 sparse tables — the mqa/topk lookups
+# resolve through the approved `reuse.yaml` donors (from_version 0.5.14) —
+# so this case anchors the reuse-aware CP top_last loader on both engines
+# AND the CP composition itself (the `_query_cp` full/cp deltas +
+# all-gathers, plus the token-major mHC seq_split division whose absence in
+# Rust was the original 34% static_ctx divergence). isl=8192 pins the
+# adjudicated repro shape.
+#
+# Kept OFF the mixed surface (its own `cp_static_ctx` list): the mix-step
+# decode pass trips a PRE-EXISTING asymmetry unrelated to #1498 — Python's
+# `run_mixed` pass 3 queries the generation MoE at num_tokens=1 and fails
+# loud on the singleton low-token underflow, while the rust mixed step does
+# not evaluate the generation MoE there (static_gen errors symmetrically on
+# both engines, so the gap is confined to the mixed orchestration).
+DSV4_CP_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V4-Flash",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.12",
+            isl=8192,
+            osl=8,
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            cp_size=8,
+        ),
+        id="dsv4-flash-b200-sglang-0512-cp8-reuse",
+    ),
+]
+
 
 class TestRustEngineStepCpMixedStepParity:
     """CP parity on the mix-step surface (CP ops run in the prefill chunk)."""
@@ -1491,6 +1558,28 @@ class TestRustEngineStepCpMixedStepParity:
         _prepare_rust_core(monkeypatch)
 
         reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case))
+        assert reason is None, reason
+
+
+class TestRustEngineStepCpStaticCtxParity:
+    """CP parity on the context-phase static surface (issue #1498 anchor).
+
+    Pins the adjudicated DSV4 CSA CP repro shape end to end on a
+    reuse-carrying version: the composition's four sparse-gate lookups
+    resolve through approved donors, the mHC ops divide by seq_split, and
+    the static_ctx sums agree. See DSV4_CP_CASES for why the mixed surface
+    is deliberately not used here.
+    """
+
+    @pytest.mark.parametrize("case", DSV4_CP_CASES)
+    def test_cp_static_ctx_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_comparison_metrics(case, "cp_static_ctx"))
         assert reason is None, reason
 
 
@@ -1869,6 +1958,7 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SMOKE_CASES, ENGINE_STEP_SURFACES),
     (POWER_CASES, ENGINE_STEP_SURFACES),
     (CP_CASES, ("mixed",)),
+    (DSV4_CP_CASES, ("cp_static_ctx",)),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
     (TIE_AGG_CASES, ("agg",)),
