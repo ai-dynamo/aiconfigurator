@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::token_curve::TokenCurve;
+use super::axis_curve::AxisCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
@@ -42,7 +42,7 @@ pub struct MhcTable {
 }
 
 struct MhcGrids {
-    by_keys: BTreeMap<MhcKey, TokenCurve>,
+    by_keys: BTreeMap<MhcKey, AxisCurve>,
 }
 
 /// Python `load_mhc_module_data` keys `data[op][hc_mult][hidden_size]` — NO
@@ -236,7 +236,7 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
     Ok(MhcGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .map(|(key, curve)| (key, AxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }

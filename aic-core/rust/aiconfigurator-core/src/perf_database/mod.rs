@@ -152,6 +152,7 @@ pub(crate) fn kernel_source_ok(
 }
 
 pub mod attention;
+mod axis_curve;
 pub mod communication;
 pub mod dsa;
 pub mod dsv4;
@@ -165,7 +166,6 @@ mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
-mod token_curve;
 pub mod wideep;
 pub mod wideep_mla;
 pub mod wideep_moe;
