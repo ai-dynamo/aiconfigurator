@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+
 schema_version: 1
 runtime:
   framework: trtllm
@@ -14,4 +15,4 @@ tables:
     case_plan_hash: sha256:4251dd697ea2e18fcaeed92b1a7cbdf452549a75d3a38284340d5da8502e03a1
     collected_at: '2026-08-05'
     rows: 139
-    status: partial
+    status: complete
