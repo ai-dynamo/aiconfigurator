@@ -1206,7 +1206,10 @@ class BaseBackend:
                 beam_width=1,
                 isl=num_tokens_combined,
                 osl=1,
-                prefix=prefix * np.floor(step.context_tokens / isl),
+                # int(): np.floor yields a float64 that contaminates the ops'
+                # s = isl - prefix (the DSV4 CP composition chunks s with
+                # range()); the product is integral, so the cast is lossless.
+                prefix=int(prefix * np.floor(step.context_tokens / isl)),
                 seq_imbalance_correction_scale=ctx_scale,
                 engine_step_backend=runtime_config.engine_step_backend,
             ),
