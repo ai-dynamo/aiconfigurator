@@ -480,8 +480,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=1.0,
-        help="Fraction of free GPU memory TRT-LLM allocates for KV cache (default: 1.0). "
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise). "
         "Used to filter batch sizes that would exceed KV cache capacity.",
     )
     parser.add_argument(
@@ -653,8 +657,12 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=1.0,
-        help="Fraction of free GPU memory allocated for KV cache (default: 1.0).",
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise).",
     )
     parser.add_argument(
         "--max-seq-len",
@@ -1159,8 +1167,12 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=0.9,
-        help="Fraction of free GPU memory available for KV cache (default: 0.9). "
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise). "
         "Used to estimate max concurrent sequences and warn when batch_size "
         "exceeds KV cache capacity.",
     )
