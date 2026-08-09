@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 8x L40S campaign via internal collection CI (2026-08-09).
+# complete: zero failures across the plan (bfloat16 + fp8_block gemm x
+# bf16 + fp8 KV; the nvfp4 gemm axis is absent BY PLAN — min_sm 100, so
+# SM89 drops it at case generation). kernel_source =
+# MiniMaxM3SparseTritonImpl (the SM89 triton sparse path; no fmha_sm100
+# on this family). fp8_block does not route through DeepGEMM on SM89 —
+# all fp8_block cells collected. Generation sweep is memory-budget
+# pruned on the 48GB card (fewer large decode cells than the 80GB+
+# systems), not failure-gapped.
+schema_version: 1
+provenance: collected
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 7808
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 5850
+    status: complete
