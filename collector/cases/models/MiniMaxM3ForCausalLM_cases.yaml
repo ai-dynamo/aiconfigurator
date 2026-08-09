@@ -6,6 +6,7 @@ architecture: MiniMaxM3ForCausalLM
 model_path: MiniMaxAI/MiniMax-M3
 model_paths:
   - MiniMaxAI/MiniMax-M3
+  - nvidia/MiniMax-M3-NVFP4
 include_base: true
 description: >
   MiniMax-M3 MoE + MSA sparse-attention model-centric collection plan.
@@ -36,10 +37,10 @@ model_case_values:
       sglang_moe_routed_scaling_factor: 2.0
       sglang_moe_renormalize: true
       sglang_moe_has_correction_bias: true
-      # BF16 artifact serves BF16 MoE. The MXFP8 and NVFP4 checkpoint
-      # artifacts get their own rows (with their own model_path) when
-      # declared — never merged here (case_authoring.md: quant-distinct
-      # artifacts are separate rows).
+      # BF16 artifact serves BF16 MoE. Quant-distinct artifacts get their
+      # own rows (with their own model_path) — never merged here
+      # (case_authoring.md: quant-distinct artifacts are separate rows);
+      # see the nvidia/MiniMax-M3-NVFP4 row below.
       framework_quantization:
         trtllm:
           allowed_modes: [bfloat16]
@@ -47,6 +48,30 @@ model_case_values:
           allowed_modes: [bfloat16]
         vllm:
           allowed_modes: [bfloat16]
+    # nvidia/MiniMax-M3-NVFP4 (ModelOpt MIXED_PRECISION): routed experts
+    # w1/w2/w3 are NVFP4 group_size 16 — the dtype this MoE row collects.
+    # Attention/dense-MLP/shared-expert projections are MXFP8 (priced by the
+    # SDK as fp8_block; not a routed-MoE artifact axis), block_sparse_moe.gate
+    # stays unquantized. Same 6144/3072 topk4 x128 geometry and DeepSeekV3
+    # sigmoid routing as the BF16 parent above. The base nvfp4 quant-mode axis
+    # carries the min_sm 100 hardware floor (Blackwell-only collection).
+    - model_path: nvidia/MiniMax-M3-NVFP4
+      hidden_size: 6144
+      inter_size: 3072
+      topk: 4
+      num_experts: 128
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.0
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      framework_quantization:
+        trtllm:
+          allowed_modes: [nvfp4]
+        sglang:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mla_module:
     - model_path: MiniMaxAI/MiniMax-M3
       attention_type: msa

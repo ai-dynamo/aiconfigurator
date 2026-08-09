@@ -1606,6 +1606,35 @@ class TestBundledModelConfigsOffline:
         assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
         sdk_utils._load_model_config_from_model_path.cache_clear()
 
+    def test_minimax_m3_nvfp4_bundle_resolves_mixed_precision_modes(self, monkeypatch):
+        """nvidia/MiniMax-M3-NVFP4 end-to-end: bundled MIXED_PRECISION metadata
+        resolves gemm=fp8_block (MXFP8 approximation, owner decision 2026-08-09),
+        moe=nvfp4 (routed experts), kv=bfloat16 (kv_cache_quant_algo null)."""
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
+        cfg = sdk_utils.get_model_config_from_model_path("nvidia/MiniMax-M3-NVFP4")
+        raw = cfg["raw_config"]
+        assert cfg["architecture"] == "MiniMaxM3ForCausalLM"
+        assert raw["quant_algo"] == "mixed_precision"
+        assert raw.get("kv_cache_quant_algo") is None
+
+        model_config = config.ModelConfig(tp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("nvidia/MiniMax-M3-NVFP4", model_config, backend_name="trtllm")
+
+        assert model.model_family == "MINIMAXM3"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
 
 class TestWideEPAttentionExclusions:
     """TRT-LLM WideEP must inherit the checkpoint's per-projection attention

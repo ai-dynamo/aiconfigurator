@@ -485,6 +485,10 @@ def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
         "MiniMaxAI/MiniMax-M2.7": {"fp8_block"},
         "nvidia/MiniMax-M2.5-NVFP4": {"nvfp4"},
         "nvidia/MiniMax-M2.7-NVFP4": {"nvfp4"},
+        "MiniMaxAI/MiniMax-M3": {"bfloat16"},
+        # MIXED_PRECISION artifact: routed experts NVFP4 gs16 (the MoE axis);
+        # its MXFP8 attention/dense/shared-expert side is not a MoE mode.
+        "nvidia/MiniMax-M3-NVFP4": {"nvfp4"},
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {"bfloat16"},
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {"nvfp4"},
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": {"bfloat16"},
@@ -657,7 +661,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # registered in moe.yaml base_ops.
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
     # +114 for MiniMax-M3's MoE row (6144/3072, 128x4).
-    assert len(moe_cases) == 5139
+    # +114 for the nvidia/MiniMax-M3-NVFP4 row (same 6144/3072, 128x4
+    # geometry; quant-distinct artifact — NVFP4 routed experts — so it is a
+    # separate row, never merged with the BF16 parent).
+    assert len(moe_cases) == 5253
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -1441,6 +1448,7 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         "nvidia/DeepSeek-V3.1-NVFP4": "nvidia/DeepSeek-V3.1-NVFP4",
         "nvidia/MiniMax-M2.5-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
         "nvidia/MiniMax-M2.7-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/MiniMax-M3-NVFP4": "nvidia/MiniMax-M3-NVFP4",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",

@@ -138,6 +138,7 @@ common_case_values:
       - nvidia/Kimi-K2.5-NVFP4
       - nvidia/MiniMax-M2.5-NVFP4
       - nvidia/MiniMax-M2.7-NVFP4
+      - nvidia/MiniMax-M3-NVFP4
       - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
       - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
       - Qwen/Qwen3-235B-A22B
