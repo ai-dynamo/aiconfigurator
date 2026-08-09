@@ -41,6 +41,7 @@ import pandas as pd
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.factory import get_backend
+from aiconfigurator.sdk.closed_loop_ttft import price_closed_loop_row
 from aiconfigurator.sdk.errors import (
     InsufficientMemoryError,
     KVCacheCapacityError,
@@ -268,6 +269,7 @@ def _sweep_one_parallel_agg(
     max_seq_len: int | None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    refined_sla: bool = False,
 ) -> tuple[pd.DataFrame, bool, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
@@ -351,7 +353,27 @@ def _sweep_one_parallel_agg(
             if model_oom or kv_cache_oom:
                 break  # ctx_tokens monotonic → larger will also OOM
             result_dict = summary.get_result_dict()
-            if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
+            keep = bool(result_dict) and result_dict["tpot"] <= tpot_target
+            if keep and refined_sla:
+                # the static ttft is NOT a bound on the refined value (deep
+                # saturation moves cycle time from TTFT into TPOT), so gate
+                # on the true lower bound — the solo chunked prefill time —
+                # then enforce the SLA on the refined values. Unpriceable
+                # points (NaN) fall back to the legacy verdict.
+                eff = max(1, isl - int(result_dict.get("prefix", 0) or 0))
+                chunk = max(1, min(int(result_dict["ctx_tokens"]), eff))
+                solo_ms = float(result_dict["prefill_step_ms"]) * -(-eff // chunk)
+                if solo_ms > ttft_target:
+                    keep = False
+                else:
+                    ttft_r, tpot_r, _ = price_closed_loop_row(result_dict)
+                    if ttft_r == ttft_r:  # priced
+                        keep = ttft_r <= ttft_target and tpot_r <= tpot_target
+                    else:
+                        keep = result_dict["ttft"] <= ttft_target
+            elif keep:
+                keep = result_dict["ttft"] <= ttft_target
+            if keep:
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
 
@@ -382,6 +404,7 @@ def sweep_agg(
     max_seq_len: int | None = None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    refined_sla: bool = False,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -496,6 +519,7 @@ def sweep_agg(
                     max_seq_len=max_seq_len,
                     predictor=predictor,
                     speculative_profile=speculative_profile,
+                    refined_sla=refined_sla,
                 )
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
@@ -671,6 +695,7 @@ def _find_best_disagg_under_constraint(
     decode_degradation: float,
     match_workers: Any,
     autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
+    refined_sla: bool = False,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
@@ -683,9 +708,15 @@ def _find_best_disagg_under_constraint(
     matches.
     """
 
+    # refined mode gates on the raw solo TTFT only (a necessary condition:
+    # the refined closed-loop TTFT is never below solo), then enforces the
+    # SLA on the refined value of each rate-matched combination below —
+    # applying the fixed factor here would pre-kill combinations the
+    # refined check accepts.
+    gate_factor = 1.0 if refined_sla else autoscale_ttft_correction_factor
     p_corrected = prefill_summary_df.assign(
         prefill_step_ms=prefill_summary_df["ttft"],  # raw solo, pre-correction
-        ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor,
+        ttft=prefill_summary_df["ttft"] * gate_factor,
     )
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
     if len(p_candidates) == 0:
@@ -743,7 +774,21 @@ def _find_best_disagg_under_constraint(
                     decode_degradation=decode_degradation,
                 )
                 category_results.append(disagg_dict)
-        if category_results:
+        if refined_sla and category_results:
+            # walk the category best-first and keep the first combination
+            # whose refined closed-loop values meet the SLA — prices only as
+            # many combos as needed. NaN (unpriceable) keeps legacy verdict.
+            best = None
+            for cand in sorted(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]), reverse=True):
+                ttft_r, tpot_r, _ = price_closed_loop_row(cand)
+                if not (ttft_r > ttft_target or tpot_r > tpot_target):
+                    best = cand
+                    break
+            if best is not None:
+                all_category_results.append(best)
+            else:
+                logger.debug("sweep_disagg: no refined-SLA result for decode parallel %s", parallel_value)
+        elif category_results:
             best = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
             all_category_results.append(best)
         else:
@@ -785,6 +830,7 @@ def sweep_disagg(
     rate_matching_prefill_degradation: float | None = None,
     rate_matching_decode_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
+    refined_sla: bool = False,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
     free_gpu_memory_fraction: float | None = None,
@@ -975,6 +1021,7 @@ def sweep_disagg(
             decode_degradation=d_deg,
             match_workers=_match_workers,
             autoscale_ttft_correction_factor=ttft_corr,
+            refined_sla=refined_sla,
         )
         if partial is not None:
             disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)

@@ -587,6 +587,12 @@ class Task:
     # ``picking.pick_autoscale``; default 1.8 locked by parity test.
     autoscale_ttft_correction_factor: float = 1.8
 
+    # Enforce the TTFT/TPOT targets on the refined steady closed-loop values
+    # (sdk/closed_loop_ttft) instead of the fixed-factor-corrected ones:
+    # candidate operating points are re-priced by the pass-calendar
+    # estimators during the sweep. Default off (legacy behavior unchanged).
+    refined_sla: bool = False
+
     # ====== 8.5 Predictor strategy ======
     # Optional Predictor that decides how each single config point is
     # predicted.  None (default) uses sdk.predictor.AnalyticPredictor --
@@ -1955,6 +1961,7 @@ class Task:
             "enable_chunked_prefill": self.enable_chunked_prefill,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            "refined_sla": self.refined_sla,
         }
 
     def sweep_disagg_kwargs(self, *, prefill_database, decode_database) -> dict[str, Any]:
@@ -2008,6 +2015,7 @@ class Task:
             "rate_matching_decode_degradation": self.rate_match_decode_degradation,
             "autoscale_ttft_correction_factor": self.autoscale_ttft_correction_factor,
             "require_same_tp": require_same_tp,
+            "refined_sla": self.refined_sla,
         }
 
     def sweep_afd_kwargs(self, *, database) -> dict[str, Any]:

@@ -311,51 +311,90 @@ def refine_closed_loop_latency(df):
     cannot be priced keep NaN.
     """
     out = df.copy()
-    ttfts, tpots, xs = [], [], []
-    disagg = "(p)workers" in out.columns
-    for _, row in out.iterrows():
-        try:
-            if disagg:
-                r = estimate_disagg_closed_loop_latency(
-                    concurrency=int(row["concurrency"]),
-                    isl=int(row["isl"]),
-                    osl=int(row["osl"]),
-                    prefill_workers=int(row["(p)workers"]),
-                    decode_workers=int(row["(d)workers"]),
-                    prefill_step_ms=float(row["(p)prefill_step_ms"]),
-                    decode_step_ms=float(row["tpot"]),
-                    prefill_batch=int(row["(p)bs"]),
-                    decode_max_seqs=int(row["(d)bs"]),
-                )
-            else:
-                chunk_ref = max(1, min(int(row["ctx_tokens"]), int(row["isl"]) - int(row.get("prefix", 0) or 0)))
-                step = float(row["prefill_step_ms"])
-                t_gen = float(row["genonly_step_ms"])
-                r = estimate_closed_loop_latency(
-                    concurrency=int(row["bs"]),
-                    isl=int(row["isl"]),
-                    osl=int(row["osl"]),
-                    # linear-in-tokens reconstruction of the recorded
-                    # per-chunk prefill cost; decode priced at the recorded
-                    # operating-point iteration time
-                    prefill_ms=lambda b, i, p, _s=step, _c=chunk_ref: _s * (b * max(1, i - p)) / _c,
-                    decode_ms=lambda b, c, _g=t_gen: _g,
-                    max_num_batched_tokens=int(row["ctx_tokens"]),
-                    prefix=int(row.get("prefix", 0) or 0),
-                )
-            if not (r["ttft_steady_mean"] == r["ttft_steady_mean"]):  # NaN guard
-                raise ValueError("estimate returned NaN")
-            ttfts.append(r["ttft_steady_mean"])
-            tpots.append(r["tpot_mean"])
-            xs.append(r["throughput_rps"])
-        except (KeyError, ValueError, TypeError, RuntimeError):
-            ttfts.append(float("nan"))
-            tpots.append(float("nan"))
-            xs.append(float("nan"))
-    out["ttft_refined"] = ttfts
-    out["tpot_refined"] = tpots
-    out["throughput_refined"] = xs
+    priced = [price_closed_loop_row(row) for _, row in out.iterrows()]
+    out["ttft_refined"] = [p[0] for p in priced]
+    out["tpot_refined"] = [p[1] for p in priced]
+    out["throughput_refined"] = [p[2] for p in priced]
     return out
+
+
+def price_closed_loop_row(row):
+    """Price one result row -> ``(ttft_ms, tpot_ms, rps)``.
+
+    ``row`` is any mapping (a summary ``dict`` or a DataFrame row); disagg
+    rows are recognized by the ``(p)workers`` key. Returns a NaN triple when
+    the row cannot be priced. Results are memoized on the pricing inputs —
+    sweeps re-encounter the same operating point once per latency-target
+    pair, and its refined values do not depend on the target.
+    """
+    try:
+        if "(p)workers" in row:
+            key = tuple(
+                row[k]
+                for k in (
+                    "concurrency",
+                    "isl",
+                    "osl",
+                    "(p)workers",
+                    "(d)workers",
+                    "(p)prefill_step_ms",
+                    "tpot",
+                    "(p)bs",
+                    "(d)bs",
+                )
+            )
+        else:
+            key = tuple(row[k] for k in ("bs", "isl", "osl", "ctx_tokens", "prefill_step_ms", "genonly_step_ms")) + (
+                row.get("prefix", 0) or 0,
+            )
+    except (KeyError, TypeError):
+        return float("nan"), float("nan"), float("nan")
+    cached = _PRICE_CACHE.get(key)
+    if cached is None:
+        cached = _price_closed_loop_row_uncached(row)
+        if len(_PRICE_CACHE) < 65536:
+            _PRICE_CACHE[key] = cached
+    return cached
+
+
+_PRICE_CACHE: dict = {}
+
+
+def _price_closed_loop_row_uncached(row):
+    try:
+        if "(p)workers" in row:
+            r = estimate_disagg_closed_loop_latency(
+                concurrency=int(row["concurrency"]),
+                isl=int(row["isl"]),
+                osl=int(row["osl"]),
+                prefill_workers=int(row["(p)workers"]),
+                decode_workers=int(row["(d)workers"]),
+                prefill_step_ms=float(row["(p)prefill_step_ms"]),
+                decode_step_ms=float(row["tpot"]),
+                prefill_batch=int(row["(p)bs"]),
+                decode_max_seqs=int(row["(d)bs"]),
+            )
+        else:
+            chunk_ref = max(1, min(int(row["ctx_tokens"]), int(row["isl"]) - int(row.get("prefix", 0) or 0)))
+            step = float(row["prefill_step_ms"])
+            t_gen = float(row["genonly_step_ms"])
+            r = estimate_closed_loop_latency(
+                concurrency=int(row["bs"]),
+                isl=int(row["isl"]),
+                osl=int(row["osl"]),
+                # linear-in-tokens reconstruction of the recorded
+                # per-chunk prefill cost; decode priced at the recorded
+                # operating-point iteration time
+                prefill_ms=lambda b, i, p, _s=step, _c=chunk_ref: _s * (b * max(1, i - p)) / _c,
+                decode_ms=lambda b, c, _g=t_gen: _g,
+                max_num_batched_tokens=int(row["ctx_tokens"]),
+                prefix=int(row.get("prefix", 0) or 0),
+            )
+        if not (r["ttft_steady_mean"] == r["ttft_steady_mean"]):  # NaN guard
+            raise ValueError("estimate returned NaN")
+        return r["ttft_steady_mean"], r["tpot_mean"], r["throughput_rps"]
+    except (KeyError, ValueError, TypeError, RuntimeError):
+        return float("nan"), float("nan"), float("nan")
 
 
 def filter_closed_loop_sla(df, ttft_ms=None, tpot_ms=None):
