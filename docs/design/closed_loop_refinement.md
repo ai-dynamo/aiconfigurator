@@ -104,10 +104,23 @@ post-filtering a picked table can return empty even when a
 lower-concurrency point of the same deployment complies;
 `pick_under_closed_loop_sla(df, ...)` closes that gap — feed it the full
 per-operating-point summary (sweep with a loose TTFT target) and it
-re-picks each deployment's best surviving row, which is equivalent to
-enforcing the SLA at the original filter. Moving this comparison into
-the pipeline filter itself (replacing the legacy columns) is a product
-decision left to a follow-up. AFD frames pass through unpriced (refined
-NaN, legacy verdict kept): their closed-loop mapping — the mini tandem
-over `prefill_t_step`/`decode_t_step` — needs its own validation pass
-first.
+re-picks each deployment's best surviving row.
+
+For full in-pipeline enforcement, `Task(refined_sla=True)` (default off)
+makes the sweep itself compare the targets against the refined values:
+agg candidate points gate on the solo chunked-prefill lower bound (the
+static TTFT is NOT a bound — deep saturation moves cycle time into TPOT,
+so gating on it would discard compliant points) and are then priced;
+disagg drops the 1.8 prefill gate to the solo bound and keeps, per
+decode-parallel category, the best rate-matched combination whose
+refined values comply. Pricing is memoized on the operating-point
+inputs. Two effects observed on an 8-GPU Qwen3-32B sweep
+(isl4096/osl256, ttft 2000ms): points the fixed factor wrongly killed
+come back (disagg: a 3-worker tp2 prefill pool, solo x1.8 = 2070ms >
+target but refined 1145ms, +57% tokens/s/gpu over the legacy pick; agg:
+deep-saturation rows with static TTFT above target but refined below,
++6% on the top pick), and rate-matched combinations whose refined TTFT
+explodes under queueing are dropped. AFD frames pass through unpriced
+(refined NaN, legacy verdict kept): their closed-loop mapping — the mini
+tandem over `prefill_t_step`/`decode_t_step` — needs its own validation
+pass first.
