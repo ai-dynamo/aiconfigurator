@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 8x RTX PRO 6000 Blackwell Server campaign via internal collection CI
+# (2026-08-09). kernel_source = MiniMaxM3SparseTritonImpl (the SM120
+# triton sparse path). Table finalized host-side from the collector's
+# CSV staging (collector.helper.finalize_perf_files).
+# Classified failures: the fp8_block gemm columns are absent BY FAILURE
+# — every fp8_block case asserts in vllm's deepgemm on SM120
+# (deep_gemm layout.hpp:59; 3904 ctx + 2941 gen, exactly the fp8_block
+# third of the full plan) — known SM120 framework gap, re-collect when
+# vllm/DeepGEMM ships SM120 fp8_block support. bfloat16 + nvfp4 gemm x
+# bf16 + fp8 KV collected complete with zero failures (heads 1-128; no
+# num_heads=128 shard-class failures — vllm rides the KV shard).
+schema_version: 1
+provenance: collected
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 7808
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 5882
+    status: complete
