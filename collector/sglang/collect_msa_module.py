@@ -856,6 +856,37 @@ def _log_msa_row(
         raise PerfLogWriteError(f"failed to persist MSA row to {perf_filename}")
 
 
+def _alloc_prefix_indices_compat(model_runner, batch_size: int, prefix_len: int) -> list:
+    """Prefix-cache emulation across BOTH SGLang allocator families.
+
+    ``runtime_limits.alloc_prefix_indices`` drives the PAGED allocator's
+    ``alloc_extend`` — correct on every page>1 platform (fa3/fa4 + page 128
+    on SM90/SM100). At page_size==1 SGLang builds ``TokenToKVPoolAllocator``
+    instead (mem_cache/kv_cache_configurator.py:1464-1476@v0.5.16), whose
+    inherited ``alloc_extend`` raises NotImplementedError("alloc_extend is
+    only for paged allocator") (mem_cache/allocator/base.py:95) — the SM120
+    smoke failure signature (every prefix>0 context case died there while
+    prefix==0 and decode passed; 2026-08-09). Serving never calls
+    ``alloc_extend`` at page 1: extend batches take the token branch
+    ``alloc_token_slots`` → ``allocator.alloc(N)``
+    (mem_cache/allocation.py:350-351 in alloc_for_extend, :146
+    alloc_token_slots; allocator/token.py:55-63 free-list slice), and a
+    radix-cache prefix hit hands back exactly such token-granular
+    ``req.prefix_indices``. Mirror that same call for the synthetic prefix;
+    eviction is moot here (collector runs a disabled ChunkCache and clears
+    the pool between shapes).
+    """
+    if prefix_len <= 0 or kv_pool_page_size(model_runner) > 1:
+        return alloc_prefix_indices(model_runner, batch_size, prefix_len)
+    allocator = model_runner.token_to_kv_pool_allocator
+    flat = allocator.alloc(batch_size * prefix_len)
+    if flat is None:
+        raise RuntimeError(
+            f"failed to allocate token-level prefix cache: batch_size={batch_size}, prefix_len={prefix_len}"
+        )
+    return [flat[i * prefix_len : (i + 1) * prefix_len].contiguous() for i in range(batch_size)]
+
+
 def _run_prefill_point(
     model_runner,
     attention_module,
@@ -882,7 +913,7 @@ def _run_prefill_point(
     model_runner.req_to_token_pool.clear()
     model_runner.token_to_kv_pool_allocator.clear()
 
-    prefix_indices = alloc_prefix_indices(model_runner, batch_size, prefix_len)
+    prefix_indices = _alloc_prefix_indices_compat(model_runner, batch_size, prefix_len)
     full_length = prefix_len + seq_len
     reqs = _make_reqs(
         batch_size,
