@@ -224,19 +224,31 @@ def estimate_disagg_closed_loop_latency(
     for _ in range(concurrency):
         dispatch(0.0, 0.0)
 
+    # For osl >= 2 every dispatch comes from a decode completion and events
+    # are processed in non-decreasing time, so each queue is FIFO in visible
+    # time: the earliest entry is [0] and the eligible set is a leading run.
+    # That turns the per-iteration O(C) min-scans (the profile's 78%) into
+    # O(1) lookups with bit-identical results. osl == 1 interleaves prefill
+    # and decode completions inside one event and keeps the full scans.
+    fifo = osl >= 2
+
     now = 0.0
     max_iters = 400 * (target + 1) * osl
     for _ in range(max_iters):
         if state["completions"] >= target:
             break
-        t_p = min(
-            (max(p_free[i], min(r[0] for r in q)) for i, q in enumerate(p_queues) if q),
-            default=float("inf"),
-        )
-        t_d = min(
-            (max(d_free[i], min(r[0] for r in run)) for i, run in enumerate(d_running) if run),
-            default=float("inf"),
-        )
+        if fifo:
+            t_p = min((max(p_free[i], q[0][0]) for i, q in enumerate(p_queues) if q), default=float("inf"))
+            t_d = min((max(d_free[i], run[0][0]) for i, run in enumerate(d_running) if run), default=float("inf"))
+        else:
+            t_p = min(
+                (max(p_free[i], min(r[0] for r in q)) for i, q in enumerate(p_queues) if q),
+                default=float("inf"),
+            )
+            t_d = min(
+                (max(d_free[i], min(r[0] for r in run)) for i, run in enumerate(d_running) if run),
+                default=float("inf"),
+            )
         now = min(t_p, t_d)
         if now == float("inf"):
             raise RuntimeError("tandem stalled — invalid configuration")
@@ -244,13 +256,23 @@ def estimate_disagg_closed_loop_latency(
         for i, q in enumerate(p_queues):  # whole-prompt prefill batches
             if not q or p_free[i] > now:
                 continue
-            batch = [r for r in q if r[0] <= now][:prefill_batch]
+            if fifo:
+                k = 0
+                for r in q:
+                    if r[0] > now or k >= prefill_batch:
+                        break
+                    k += 1
+                batch = q[:k]
+                del q[:k]
+            else:
+                batch = [r for r in q if r[0] <= now][:prefill_batch]
             if not batch:
                 continue
             end = now + prefill_step_ms
             p_free[i] = end
             for r in batch:
-                q.remove(r)
+                if not fifo:
+                    q.remove(r)
                 first = end + handoff_ms  # decode-attach: TTFT includes handoff
                 r[2] = 1
                 r[3] = first
@@ -267,7 +289,15 @@ def estimate_disagg_closed_loop_latency(
         for i, run in enumerate(d_running):  # one token per iteration
             if not run or d_free[i] > now:
                 continue
-            batch = [r for r in run if r[0] <= now][:decode_max_seqs]
+            if fifo:
+                k = 0
+                for r in run:
+                    if r[0] > now or k >= decode_max_seqs:
+                        break
+                    k += 1
+                batch = run[:k]
+            else:
+                batch = [r for r in run if r[0] <= now][:decode_max_seqs]
             if not batch:
                 continue
             end = now + decode_step_ms
