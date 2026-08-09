@@ -780,7 +780,8 @@ ColumnsAgg = [
     "backend",
     "version",
     "system",
-    "power_w",  # NEW: E2E weighted average power in watts    # operating-point step timings, recorded so result rows are
+    "power_w",  # NEW: E2E weighted average power in watts
+    # operating-point step timings, recorded so result rows are
     # self-contained for post-processing refinement (sdk/closed_loop_ttft)
     "mix_step_ms",
     "genonly_step_ms",
