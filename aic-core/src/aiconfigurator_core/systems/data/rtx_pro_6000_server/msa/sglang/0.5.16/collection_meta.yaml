@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# kernel_source = sglang_minimax_prefill_triton_sparse (context),
+# sglang_minimax_decode_triton_sparse_topk_{split,radix} (generation).
+# SM120 attention-backend exception (owner-authorized, 2026-08-09):
+# v0.5.16's M3 server-args handler has no CC-12 branch (HIP/SM100/SM90
+# only; the SM predicates are capability-major-exact), so ServerArgs falls
+# to the generic MHA default = flashinfer + page_size 1, which crashes at
+# backend init on every M3 case (the M3 sparse KV pool carries no
+# quant_method -> flashinfer AttributeError). Default-config serving
+# crashes identically, so there is no framework-selected default to record
+# on this platform. The collector therefore passes the user-facing
+# ServerArgs escape hatch --attention-backend triton — a legitimate
+# serving knob, not a collector invention — and prefix cases use the
+# token-level (page 1) allocator emulation. Full failure-evidence and
+# source citations: collector/sglang/collect_msa_module.py (SM120 block).
+# context: 2 tp=1 sweep tails died at the plan's two largest prefixes
+# (1000000/1032192 — per-GPU KV extent ~2^31 elements, triton
+# illegal-memory-access, giant-shape boundary class; 4 cells lost of
+# 26474; the same shapes at tp>=2 are present). generation: zero failures.
+# Collected on 8x RTX PRO 6000 Blackwell Server via internal collection
+# CI, 2026-08-09.
+schema_version: 1
+provenance: collected
+runtime:
+  framework: sglang
+  version: 0.5.16
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 26470
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 1467
+    status: complete
