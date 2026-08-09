@@ -160,6 +160,7 @@ def _rate_match_dict(
         "tokens/s/gpu": tokens_s_gpu,
         "tokens/s/user": d["tokens/s/user"],
         "(p)seq/s/worker": p["seq/s"],
+        "(p)prefill_step_ms": p.get("prefill_step_ms"),
         "(d)seq/s/worker": d["seq/s"],
         "num_total_gpus": num_total_gpus,
         "(p)tp": p["tp"],
@@ -682,7 +683,10 @@ def _find_best_disagg_under_constraint(
     matches.
     """
 
-    p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
+    p_corrected = prefill_summary_df.assign(
+        prefill_step_ms=prefill_summary_df["ttft"],  # raw solo, pre-correction
+        ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor,
+    )
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
     if len(p_candidates) == 0:
         logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)

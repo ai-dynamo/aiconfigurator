@@ -161,39 +161,194 @@ def estimate_closed_loop_latency(
     }
 
 
-def refine_closed_loop_ttft(
-    df,
-    prefill_ms: Callable[[int, int, int], float],
-    decode_ms: Callable[[int, int], float],
+def estimate_disagg_closed_loop_latency(
+    concurrency: int,
+    isl: int,
+    osl: int,
+    prefill_workers: int,
+    decode_workers: int,
+    prefill_step_ms: float,
+    decode_step_ms: float,
+    prefill_batch: int = 1,
+    decode_max_seqs: int = 256,
     turnaround_ms: float = 0.0,
-    enable_chunked_prefill: bool = True,
-):
-    """Post-process an agg result DataFrame (``ColumnsAgg`` schema): run the
-    pass-calendar estimate per row and RETURN A COPY with additive columns
+    handoff_ms: float = 0.0,
+    warmup_generations: int = 4,
+    window_generations: int = 4,
+) -> dict:
+    """Closed-loop latency for a P/D-disaggregated deployment (mini tandem).
+
+    Serving flow: each prefill worker runs one batch of up to
+    ``prefill_batch`` whole prompts per pass at ``prefill_step_ms`` (the raw
+    solo context latency the disagg row records as ``(p)prefill_step_ms`` —
+    TRT-LLM native disagg deploys ctx workers without chunked prefill); a
+    static round-robin router assigns arrivals; the first token becomes
+    user-visible after the KV handoff (decode-attach flow, ``handoff_ms``
+    per request — ~0 on NVLink at ms scale); decode workers emit one token
+    per ``decode_step_ms`` iteration (the row's ``tpot`` — disagg decode has
+    no prefill interference) for up to ``decode_max_seqs`` running
+    sequences. Closed loop: a completed request's replacement dispatches
+    immediately and becomes visible after ``turnaround_ms``.
+    """
+    if min(concurrency, isl, osl, prefill_workers, decode_workers, prefill_batch) < 1:
+        raise ValueError("concurrency/isl/osl/workers/prefill_batch must be >= 1")
+
+    # request = [visible_ms, arrival_ms, generated, first_ms, last_ms, gaps]
+    p_free = [0.0] * prefill_workers
+    p_queues: list[list] = [[] for _ in range(prefill_workers)]
+    d_free = [0.0] * decode_workers
+    d_running: list[list] = [[] for _ in range(decode_workers)]
+    state = {"rr_p": 0, "rr_d": 0, "completions": 0, "steady_start": None, "steady_completions": 0}
+    warmup = warmup_generations * concurrency
+    target = (warmup_generations + window_generations) * concurrency
+    ttfts: list = []
+    gaps: list = []
+    tpots: list = []
+
+    def dispatch(arrival_ms: float, visible_ms: float) -> None:
+        r = [visible_ms, arrival_ms, 0, -1.0, -1.0, []]
+        p_queues[state["rr_p"] % prefill_workers].append(r)
+        state["rr_p"] += 1
+
+    def complete(r: list, end_ms: float) -> None:
+        state["completions"] += 1
+        if state["completions"] == warmup:
+            state["steady_start"] = end_ms
+        if state["completions"] > warmup:
+            state["steady_completions"] += 1
+            gaps.extend(r[5])
+            if r[5]:
+                tpots.append(sum(r[5]) / len(r[5]))
+        dispatch(end_ms, end_ms + turnaround_ms)
+
+    for _ in range(concurrency):
+        dispatch(0.0, 0.0)
+
+    now = 0.0
+    max_iters = 400 * (target + 1) * osl
+    for _ in range(max_iters):
+        if state["completions"] >= target:
+            break
+        t_p = min(
+            (max(p_free[i], min(r[0] for r in q)) for i, q in enumerate(p_queues) if q),
+            default=float("inf"),
+        )
+        t_d = min(
+            (max(d_free[i], min(r[0] for r in run)) for i, run in enumerate(d_running) if run),
+            default=float("inf"),
+        )
+        now = min(t_p, t_d)
+        if now == float("inf"):
+            raise RuntimeError("tandem stalled — invalid configuration")
+
+        for i, q in enumerate(p_queues):  # whole-prompt prefill batches
+            if not q or p_free[i] > now:
+                continue
+            batch = [r for r in q if r[0] <= now][:prefill_batch]
+            if not batch:
+                continue
+            end = now + prefill_step_ms
+            p_free[i] = end
+            for r in batch:
+                q.remove(r)
+                first = end + handoff_ms  # decode-attach: TTFT includes handoff
+                r[2] = 1
+                r[3] = first
+                r[4] = first
+                if state["completions"] >= warmup:
+                    ttfts.append(first - r[1])
+                if r[2] >= osl:
+                    complete(r, first)
+                else:
+                    r[0] = first  # joins its decode worker when the KV lands
+                    d_running[state["rr_d"] % decode_workers].append(r)
+                    state["rr_d"] += 1
+
+        for i, run in enumerate(d_running):  # one token per iteration
+            if not run or d_free[i] > now:
+                continue
+            batch = [r for r in run if r[0] <= now][:decode_max_seqs]
+            if not batch:
+                continue
+            end = now + decode_step_ms
+            d_free[i] = end
+            for r in batch:
+                r[2] += 1
+                r[5].append(end - r[4])
+                r[4] = end
+                if r[2] >= osl:
+                    run.remove(r)
+                    complete(r, end)
+    else:
+        raise RuntimeError("tandem did not converge within max_iters")
+
+    window = now - (state["steady_start"] or 0.0)
+
+    def q(v: list, x: float) -> float:
+        return sorted(v)[min(len(v) - 1, max(0, round(x * len(v)) - 1))] if v else float("nan")
+
+    return {
+        "ttft_steady_mean": sum(ttfts) / len(ttfts) if ttfts else float("nan"),
+        "ttft_steady_p50": q(ttfts, 0.5),
+        "ttft_steady_p99": q(ttfts, 0.99),
+        "tpot_mean": sum(tpots) / len(tpots) if tpots else float("nan"),
+        "itl_p50": q(gaps, 0.5),
+        "itl_p99": q(gaps, 0.99),
+        "throughput_rps": state["steady_completions"] / (window / 1000.0) if window > 0 else 0.0,
+    }
+
+
+def refine_closed_loop_latency(df):
+    """Post-process a result DataFrame using only its own columns.
+
+    Agg rows (``ColumnsAgg`` + the recorded step timings) replay the fused
+    pass calendar; disagg rows (``ColumnsDisagg`` with ``(p)prefill_step_ms``)
+    replay the mini tandem. Returns a COPY with additive columns
     ``ttft_refined`` / ``tpot_refined`` / ``throughput_refined`` — existing
-    columns (including the legacy ``ttft``) are untouched, so downstream
-    consumers opt in per column. Rows it cannot price (missing/invalid
-    inputs) keep NaN in the new columns.
+    columns (including the legacy ``ttft``) are untouched, and the three
+    refined columns are jointly consistent (they satisfy the closed-loop
+    identity C/X = TTFT + (osl-1)*TPOT), so consume them as a set. Rows that
+    cannot be priced keep NaN.
     """
     out = df.copy()
     ttfts, tpots, xs = [], [], []
+    disagg = "(p)workers" in out.columns
     for _, row in out.iterrows():
         try:
-            r = estimate_closed_loop_latency(
-                concurrency=int(row["bs"]),
-                isl=int(row["isl"]),
-                osl=int(row["osl"]),
-                prefill_ms=prefill_ms,
-                decode_ms=decode_ms,
-                max_num_batched_tokens=int(row["ctx_tokens"]),
-                prefix=int(row.get("prefix", 0) or 0),
-                turnaround_ms=turnaround_ms,
-                enable_chunked_prefill=enable_chunked_prefill,
-            )
+            if disagg:
+                r = estimate_disagg_closed_loop_latency(
+                    concurrency=int(row["concurrency"]),
+                    isl=int(row["isl"]),
+                    osl=int(row["osl"]),
+                    prefill_workers=int(row["(p)workers"]),
+                    decode_workers=int(row["(d)workers"]),
+                    prefill_step_ms=float(row["(p)prefill_step_ms"]),
+                    decode_step_ms=float(row["tpot"]),
+                    prefill_batch=int(row["(p)bs"]),
+                    decode_max_seqs=int(row["(d)bs"]),
+                )
+            else:
+                chunk_ref = max(1, min(int(row["ctx_tokens"]), int(row["isl"]) - int(row.get("prefix", 0) or 0)))
+                step = float(row["prefill_step_ms"])
+                t_gen = float(row["genonly_step_ms"])
+                r = estimate_closed_loop_latency(
+                    concurrency=int(row["bs"]),
+                    isl=int(row["isl"]),
+                    osl=int(row["osl"]),
+                    # linear-in-tokens reconstruction of the recorded
+                    # per-chunk prefill cost; decode priced at the recorded
+                    # operating-point iteration time
+                    prefill_ms=lambda b, i, p, _s=step, _c=chunk_ref: _s * (b * max(1, i - p)) / _c,
+                    decode_ms=lambda b, c, _g=t_gen: _g,
+                    max_num_batched_tokens=int(row["ctx_tokens"]),
+                    prefix=int(row.get("prefix", 0) or 0),
+                )
+            if not (r["ttft_steady_mean"] == r["ttft_steady_mean"]):  # NaN guard
+                raise ValueError("estimate returned NaN")
             ttfts.append(r["ttft_steady_mean"])
             tpots.append(r["tpot_mean"])
             xs.append(r["throughput_rps"])
-        except (KeyError, ValueError, RuntimeError):
+        except (KeyError, ValueError, TypeError, RuntimeError):
             ttfts.append(float("nan"))
             tpots.append(float("nan"))
             xs.append(float("nan"))

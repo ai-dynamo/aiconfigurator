@@ -270,6 +270,7 @@ class DisaggInferenceSession:
         Get the disagg summary df based on prefill and decode summary df
         """
         prefill_dict = prefill_summary_df.iloc[0].to_dict()
+        prefill_dict["prefill_step_ms"] = prefill_dict["ttft"]  # raw solo, pre-correction
         prefill_dict["ttft"] = prefill_dict["ttft"] * _AUTOSCALE_TTFT_CORRECTION_FACTOR
         decode_dict = decode_summary_df.iloc[0].to_dict()
 
@@ -729,7 +730,10 @@ class DisaggInferenceSession:
             # correction factor. as we need to get the lc after rate matching, we cannot get the
             # exact value now. Let's make it simple to do pre-correction instead of post-correction.
             correction_factor = _AUTOSCALE_TTFT_CORRECTION_FACTOR
-            prefill_candidates = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * correction_factor)
+            prefill_candidates = prefill_summary_df.assign(
+                prefill_step_ms=prefill_summary_df["ttft"],  # raw solo, pre-correction
+                ttft=prefill_summary_df["ttft"] * correction_factor,
+            )
 
             prefill_candidates = prefill_candidates[prefill_candidates["ttft"] < ttft]
             if len(prefill_candidates) == 0:

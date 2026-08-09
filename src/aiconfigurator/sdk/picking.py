@@ -119,6 +119,7 @@ def _build_disagg_summary_dict(
         "tokens/s/gpu": tokens_s_gpu,
         "tokens/s/user": decode_summary_dict["tokens/s/user"],
         "(p)seq/s/worker": prefill_summary_dict["seq/s"],
+        "(p)prefill_step_ms": prefill_summary_dict.get("prefill_step_ms"),
         "(d)seq/s/worker": decode_summary_dict["seq/s"],
         "num_total_gpus": num_total_gpus,
         "(p)tp": prefill_summary_dict["tp"],
@@ -441,6 +442,7 @@ def pick_autoscale(
 
     # -- Filter prefill candidates by TTFT --
     prefill_candidates = prefill_df.copy()
+    prefill_candidates["prefill_step_ms"] = prefill_candidates["ttft"]  # raw solo, pre-correction
     prefill_candidates["ttft_corrected"] = prefill_candidates["ttft"] * correction_factor
     prefill_meets_sla = prefill_candidates[prefill_candidates["ttft_corrected"] < target_ttft]
 
