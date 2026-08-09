@@ -54,7 +54,7 @@ def estimate_closed_loop_latency(
     eff_isl = max(1, isl - prefix)
 
     # slot = [remaining_prefill, generated, arrival_ms, first_token_ms,
-    #         last_token_ms, gap_sum, gap_count, gaps_list_or_None]
+    #         last_token_ms, gaps]
     def new_slot(arrival: float) -> list:
         return [eff_isl, 0, arrival, -1.0, -1.0, []]
 

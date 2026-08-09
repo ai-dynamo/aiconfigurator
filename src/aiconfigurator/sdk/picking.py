@@ -119,7 +119,14 @@ def _build_disagg_summary_dict(
         "tokens/s/gpu": tokens_s_gpu,
         "tokens/s/user": decode_summary_dict["tokens/s/user"],
         "(p)seq/s/worker": prefill_summary_dict["seq/s"],
-        "(p)prefill_step_ms": prefill_summary_dict.get("prefill_step_ms"),
+        # float when present (keeps the column numeric); None sentinel when
+        # absent — the rate-match parity test compares by equality, which a
+        # NaN default would break. Mirrored in sweep._rate_match_dict.
+        "(p)prefill_step_ms": (
+            float(prefill_summary_dict["prefill_step_ms"])
+            if prefill_summary_dict.get("prefill_step_ms") is not None
+            else None
+        ),
         "(d)seq/s/worker": decode_summary_dict["seq/s"],
         "num_total_gpus": num_total_gpus,
         "(p)tp": prefill_summary_dict["tp"],
@@ -442,7 +449,9 @@ def pick_autoscale(
 
     # -- Filter prefill candidates by TTFT --
     prefill_candidates = prefill_df.copy()
-    prefill_candidates["prefill_step_ms"] = prefill_candidates["ttft"]  # raw solo, pre-correction
+    prefill_candidates["prefill_step_ms"] = prefill_candidates["ttft"] - prefill_candidates.get(
+        "encoder_latency", 0.0
+    )  # raw solo context, pre-correction
     prefill_candidates["ttft_corrected"] = prefill_candidates["ttft"] * correction_factor
     prefill_meets_sla = prefill_candidates[prefill_candidates["ttft_corrected"] < target_ttft]
 

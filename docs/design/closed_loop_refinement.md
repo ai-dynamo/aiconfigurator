@@ -47,6 +47,14 @@ effects emerge from iterating the budget arithmetic.
 
 ## Validation
 
+The figures below are one-off measurements (August 2026, Qwen3-32B,
+H20 trtllm perf data, isl4096/osl256), recorded with their configuration
+rather than reproduced in CI; the evaluator comparisons ran against the
+gated evaluator on the queueing-model branch. The in-repo unit tests
+(`tests/unit/sdk/test_closed_loop_ttft.py`) lock the estimator semantics
+these results rely on (closed-loop identity, P/D imbalance signatures,
+admission rules, DataFrame refinement).
+
 Against the full queueing-model evaluator on identical timing (Qwen3-32B,
 H20, isl4096/osl256):
 

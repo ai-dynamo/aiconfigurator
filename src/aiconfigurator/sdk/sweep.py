@@ -166,7 +166,8 @@ def _rate_match_dict(
         "tokens/s/gpu": tokens_s_gpu,
         "tokens/s/user": d["tokens/s/user"],
         "(p)seq/s/worker": p["seq/s"],
-        "(p)prefill_step_ms": p.get("prefill_step_ms"),
+        # float-or-None mirrors picking._build_disagg_summary_dict (parity)
+        "(p)prefill_step_ms": (float(p["prefill_step_ms"]) if p.get("prefill_step_ms") is not None else None),
         "(d)seq/s/worker": d["seq/s"],
         "num_total_gpus": num_total_gpus,
         "(p)tp": p["tp"],
@@ -817,7 +818,7 @@ def _find_best_disagg_under_constraint(
     # refined check accepts.
     gate_factor = 1.0 if refined_sla else autoscale_ttft_correction_factor
     p_corrected = prefill_summary_df.assign(
-        prefill_step_ms=prefill_summary_df["ttft"],  # raw solo, pre-correction
+        prefill_step_ms=prefill_summary_df["ttft"] - prefill_summary_df.get("encoder_latency", 0.0),  # raw solo context
         ttft=prefill_summary_df["ttft"] * gate_factor,
     )
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
