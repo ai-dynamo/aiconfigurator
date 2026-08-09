@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
 import logging
 from typing import Any
 
@@ -682,7 +683,25 @@ def _get_disagg_worker_candidates(
     return pd.concat(result_rows, axis=0, ignore_index=True)
 
 
-def _refined_tune_combo(cand: dict, ttft_target: float, tpot_target: float) -> dict | None:
+def _decode_step_from_ladder(ladder: list[tuple[float, float]], n_d: float, default: float) -> float:
+    """Interpolate the decode step (ms) at per-worker occupancy ``n_d`` from
+    the decode ladder's (concurrency, tpot) rungs; clamped at the ends."""
+    if not ladder:
+        return default
+    if n_d <= ladder[0][0]:
+        return ladder[0][1]
+    for (b0, t0), (b1, t1) in itertools.pairwise(ladder):
+        if n_d <= b1:
+            return t0 + (t1 - t0) * (n_d - b0) / (b1 - b0) if b1 > b0 else t1
+    return ladder[-1][1]
+
+
+def _refined_tune_combo(
+    cand: dict,
+    ttft_target: float,
+    tpot_target: float,
+    ladder: list[tuple[float, float]] | None = None,
+) -> dict | None:
     """Knee-tune one rate-matched combo under the refined closed-loop SLA.
 
     Searches the largest concurrency <= the inherited one whose refined
@@ -696,10 +715,28 @@ def _refined_tune_combo(cand: dict, ttft_target: float, tpot_target: float) -> d
     (legacy verdict, fail-open).
     """
     c_inh = int(cand["concurrency"])
+    osl = cand["osl"]
+    d_workers = max(1, int(cand.get("(d)workers", 1) or 1))
 
     def priced(c: int):
-        t, p, x = price_closed_loop_row(dict(cand, concurrency=c))
-        return (t, p, x) if t == t else None
+        # occupancy-consistent decode step: the row's tpot is priced at its
+        # ladder point's batch, but the tandem's actual decode occupancy at
+        # concurrency c can sit well below it (Little: n_d = X*osl*step) —
+        # iterate step lookup on the decode ladder to the fixed point.
+        # Real-metal arbitration measured the scalar variant off by ~29% on
+        # TPOT at the knee, with cycle conservation pushing it into TTFT.
+        step = float(cand["tpot"])
+        t = p = x = float("nan")
+        for _ in range(3):
+            t, p, x = price_closed_loop_row(dict(cand, concurrency=c, tpot=step))
+            if t != t:
+                return None
+            n_d = x * osl * step / 1000.0 / d_workers
+            new_step = _decode_step_from_ladder(ladder, n_d, step) if ladder else step
+            if abs(new_step - step) < 0.3:
+                break
+            step = new_step
+        return (t, p, x)
 
     def ok(tpx) -> bool:
         return tpx is not None and tpx[0] <= ttft_target and tpx[1] <= tpot_target
@@ -811,6 +848,11 @@ def _find_best_disagg_under_constraint(
             .head(_MAX_DECODE_WORKERS_PER_CATEGORY)
         )
         decode_records = group_sorted.to_dict("records")
+        # per-worker (concurrency, tpot) rungs for occupancy-consistent
+        # decode-step lookup in the refined knee search
+        ladder = sorted(
+            zip(parallel_group["concurrency"].astype(float), parallel_group["tpot"].astype(float), strict=True)
+        )
         category_results: list[dict] = []
         for d_worker in decode_records:
             d_throughput = float(d_worker["seq/s"])
@@ -846,7 +888,7 @@ def _find_best_disagg_under_constraint(
             ranked = sorted(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]), reverse=True)
             tuned = []
             for cand in ranked[:_REFINED_KNEE_TOP_K]:
-                t = _refined_tune_combo(cand, ttft_target, tpot_target)
+                t = _refined_tune_combo(cand, ttft_target, tpot_target, ladder=ladder)
                 if t is not None:
                     tuned.append(t)
             best = max(tuned, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"])) if tuned else None
