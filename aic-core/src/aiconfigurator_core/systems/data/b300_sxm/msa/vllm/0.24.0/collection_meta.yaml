@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 8x B300 SXM campaign via internal collection CI (2026-08-09).
+# complete: zero failures across the full plan (bfloat16 + fp8_block +
+# nvfp4 gemm x bf16 + fp8 KV). kernel_source = MiniMaxM3SparseMSAImpl
+# (fmha_sm100 auto-dispatch on the SM100 family).
+schema_version: 1
+provenance: collected
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 11712
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 8832
+    status: complete
