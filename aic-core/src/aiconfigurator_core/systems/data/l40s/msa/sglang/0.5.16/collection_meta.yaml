@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# 8x L40S campaign via internal collection CI (2026-08-09).
+# kernel_source = sglang_minimax_prefill_triton_sparse (context),
+# sglang_minimax_decode_triton_sparse_topk_{split,radix} (generation).
+# SM89 attention-backend exception (owner-authorized, 2026-08-09):
+# v0.5.16's M3 server-args handler has no CC-major-8 branch either (the
+# SM predicates are capability-major-exact), so the generic flashinfer +
+# page-1 default crashes at backend init on every M3 case — identical to
+# the SM120 gap. The collector passes the user-facing ServerArgs escape
+# hatch --attention-backend triton (a legitimate serving knob) with the
+# token-level (page 1) allocator prefix emulation; every subprocess
+# group in this campaign resolved attention_backend=triton, page_size=1.
+# Full evidence and source citations: the owner-authorized block in
+# collector/sglang/collect_msa_module.py (SM89/SM120 section).
+# The fp8-KV axis is absent BY PLAN: the mla_module_sglang precision
+# combos carry min_sm 90 for kv_cache_dtype=fp8, so SM89 drops those
+# cases at generation (bf16-KV plan only — about half the row count of
+# the SM90+ systems).
+# context accepted gaps: 6 sweep-tail CUDA OOMs at the largest
+# batch*prefix cells of their sweeps (b=256/512/1024 large-batch tails
+# and b=8 s=16384 prefix=524288) on the 48GB card — giant-shape OOM
+# class, 6 cells. generation: zero failures (sweep is memory-budget
+# pruned on 48GB, not failure-gapped).
+schema_version: 1
+provenance: collected
+runtime:
+  framework: sglang
+  version: 0.5.16
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 12669
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 715
+    status: complete
