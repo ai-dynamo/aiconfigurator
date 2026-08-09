@@ -1041,6 +1041,39 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert trtllm_specs == vllm_specs
 
 
+def test_vllm_msa_module_precision_combos_declare_fp8_kv_cache():
+    """The vLLM MSA collector declares its precision combos in-file (not via
+    mla_module.yaml). vLLM 0.24.0's M3 sparse backend accepts an fp8 (e4m3)
+    main KV cache on every platform — Triton in-kernel dequant off the SM100
+    family, MSA attend on it (supported_kv_cache_dtypes common/
+    sparse_attention.py:56-62, view :352, select_main_impl_cls :391-422
+    @v0.24.0) — so every gemm tier pairs with both KV dtypes; only the gemm
+    axis is SM-gated."""
+    source_path = REPO_ROOT / "collector/vllm/collect_msa_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_get_precision_combos"
+    )
+
+    def combos(sm, phase):
+        namespace = {"get_sm_version": lambda: sm}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+        return set(namespace["_get_precision_combos"](phase))
+
+    sm90_expected = {
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+    }
+    for phase in ("context", "generation"):
+        assert combos(90, phase) == sm90_expected
+        assert combos(100, phase) == sm90_expected | {
+            ("bfloat16", "bfloat16", "nvfp4"),
+            ("bfloat16", "fp8", "nvfp4"),
+        }
+
+
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 

@@ -35,6 +35,7 @@ Supported models and micro-sweeps come from collector v2 YAML
 Usage:
     python collect_msa_module.py --mode context --model MiniMaxAI/MiniMax-M3
     python collect_msa_module.py --mode generation --quick --batch-size 4 --seq-len 2048 --num-heads 64
+    python collect_msa_module.py --mode context --quick --kv-cache-dtype fp8
 """
 
 import argparse
@@ -109,12 +110,27 @@ def _get_precision_combos(phase: str):
                    linear quant dispatch
 
       (compute_dtype, kv_cache_dtype) — attention compute + KV cache
-        Declared bf16/bf16 only, matching the TRT-LLM MSA dataset this
-        table is queried against. vLLM's M3 backend does also accept fp8
-        KV (supported_kv_cache_dtypes, common/sparse_attention.py:56-62
-        @v0.24.0; the Triton kernels dequantize before the dots), so an
-        fp8-KV combo is a legitimate future extension once the SDK's MSA
-        consumer keys on it — not declared until then.
+        bf16/bf16: the BF16 checkpoint's default serving config
+                   (cache_dtype "auto" resolves to the model dtype).
+        bf16/fp8:  serving's global ``--kv-cache-dtype fp8`` (vLLM
+                   CacheDType "fp8" = fp8_e4m3 on CUDA, config/cache.py
+                   :75-78@v0.24.0), declared on every SM this collector
+                   runs on: the M3 sparse backend accepts fp8 KV on all
+                   platforms (supported_kv_cache_dtypes, common/
+                   sparse_attention.py:56-62@v0.24.0 — "bf16 or fp8
+                   (e4m3/e5m2): the Triton kernels dequant fp8 before the
+                   dots"). Off the SM100 family the Triton attend
+                   reinterprets the cache as the platform fp8 dtype and
+                   dequantizes in-kernel (:298-306, view at :352); on the
+                   SM100 family select_main_impl_cls excludes only
+                   "fp8_e5m2", so "fp8" (e4m3) rides the MSA attend
+                   (:391-422, gate :407; the MSA impl shares the base
+                   impl's fp8 view, nvidia/sparse_attention_msa.py:49).
+                   The indexer's K side-cache is governed by the
+                   independent attention_config.indexer_kv_dtype knob and
+                   stays at its serving default "bf16" (config/attention
+                   .py:55; nvidia/model.py:490-491) — an fp8 indexer
+                   cache is a non-default opt-in, not collected here.
     """
     sm = get_sm_version()
 
@@ -124,7 +140,7 @@ def _get_precision_combos(phase: str):
     if sm >= 100:
         gemm_types.append("nvfp4")
 
-    attn_combos = [("bfloat16", "bfloat16")]
+    attn_combos = [("bfloat16", "bfloat16"), ("bfloat16", "fp8")]
     return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
 
 
@@ -152,17 +168,20 @@ def _device_total_memory_bytes():
     return None
 
 
-def _generation_kv_footprint_bytes(total_tokens: int, num_heads: int) -> int:
+def _generation_kv_footprint_bytes(total_tokens: int, num_heads: int, kv_cache_dtype: str) -> int:
     """Lower bound of a generation case's peak device footprint.
 
     run_msa_module allocates the paged main K/V cache (2 x kv_heads x 128
-    elems/token, bf16) plus the indexer's key side-cache (128 elems/token,
+    elems/token; 2 B/elem for bf16, 1 B/elem for the fp8 cache's uint8
+    storage — STR_DTYPE_TO_TORCH_DTYPE["fp8"], utils/torch_utils.py:38
+    @v0.24.0) plus the indexer's key side-cache (128 elems/token, always
     bf16). Module weights, metadata, and the top-k buffer are deliberately
     excluded so the estimate stays a provable lower bound: a case this
     filter drops cannot fit on the device, on any platform.
     """
     kv_heads = _emulated_kv_heads(num_heads)
-    entry_bytes = (2 * kv_heads * _M3_HEAD_DIM + _M3_INDEX_DIM) * 2  # bf16
+    main_bytes_per_elem = 1 if kv_cache_dtype == "fp8" else 2
+    entry_bytes = 2 * kv_heads * _M3_HEAD_DIM * main_bytes_per_elem + _M3_INDEX_DIM * 2
     return total_tokens * entry_bytes
 
 
@@ -220,7 +239,7 @@ def get_generation_test_cases():
                     ):
                         continue
                     considered += 1
-                    if budget is not None and _generation_kv_footprint_bytes(b * s, num_heads) > budget:
+                    if budget is not None and _generation_kv_footprint_bytes(b * s, num_heads, kv_dtype) > budget:
                         dropped += 1
                         continue
                     cases.append([s, b, num_heads, kv_dtype, compute_dtype, gemm_type])
@@ -314,6 +333,7 @@ def _create_msa_attention_module(
     model_path: str,
     num_heads: int,
     gemm_type: str,
+    kv_cache_dtype: str,
     max_seq_len: int,
     max_batch_size: int,
     is_context: bool,
@@ -327,7 +347,9 @@ def _create_msa_attention_module(
     sparse layers (``MiniMaxM3DecoderLayer.__init__``,
     nvidia/model.py:671-679@v0.24.0). Backend selection happens inside the
     module constructor exactly as in serving (select_main_impl_cls /
-    select_indexer_impl_cls).
+    select_indexer_impl_cls); ``kv_cache_dtype`` must therefore be baked
+    into cache_config before construction — "fp8" here models serving's
+    global ``--kv-cache-dtype fp8``.
     """
     from vllm.platforms import current_platform
 
@@ -367,7 +389,15 @@ def _create_msa_attention_module(
         num_gpu_blocks=1 + _ceil_div(max_seq_len + 1, block_size) * max_batch_size,
         max_num_seqs=max_batch_size,
         max_num_batched_tokens=max(max_batch_size * max_seq_len, 131072) if is_context else max_batch_size,
-        use_fp8_kv_cache=False,
+        # Serving's global --kv-cache-dtype: use_fp8_kv_cache=True sets
+        # cache_config.cache_dtype "fp8" (= fp8_e4m3 on CUDA, config/cache.py
+        # :75-78@v0.24.0), False leaves "auto" (model dtype, bf16). The module
+        # reads it at construction (self.kv_cache_dtype =
+        # cache_config.cache_dtype, nvidia/model.py:483-488@v0.24.0) and
+        # selects the attend impl off it (select_main_impl_cls(
+        # kv_cache_dtype=...), nvidia/model.py:501-513), so the dtype must be
+        # set before the module is built for dispatch to match serving.
+        use_fp8_kv_cache=(kv_cache_dtype == "fp8"),
         trust_remote_code=False,
         # The HF release config declares architectures
         # ["MiniMaxM3ForCausalLM"], which vLLM 0.24.0's model registry does
@@ -546,22 +576,25 @@ def _create_kv_caches_and_metadata(
             query_lens=[1] * batch_size,
         )
 
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec, block_size, torch_device, arange_block_indices=True
-    )
+    common_attn_metadata = create_common_attn_metadata(batch_spec, block_size, torch_device, arange_block_indices=True)
     num_blocks = _rebase_block_table_and_slots(common_attn_metadata, block_size)
 
     # Main paged K/V cache: shape from the layer's own backend
     # ((num_blocks, 2, block_size, num_kv_heads, head_size) — MiniMaxM3
     # SparseBackend.get_kv_cache_shape, common/sparse_attention.py:90-98
     # @v0.24.0; NHD stride order is the natural layout, :100-114), dtype
-    # from the layer's KV-cache spec (bf16 for cache_dtype "auto").
+    # from the layer's KV-cache spec (nvidia/model.py:540-549@v0.24.0:
+    # spec.dtype = kv_cache_dtype_str_to_dtype(cache_dtype) — bf16 for
+    # "auto", uint8 storage for "fp8", utils/torch_utils.py:38,394-400).
+    # Serving allocates the same way: a raw per-layer buffer viewed with the
+    # spec dtype and backend shape (gpu_model_runner
+    # ._reshape_kv_cache_tensors:7081-7180@v0.24.0); the impl then
+    # reinterprets the uint8 storage as the platform fp8 (e4m3) at use
+    # (common/sparse_attention.py:298-306, view at :352).
     backend_cls = attn_module.get_attn_backend()
     kv_cache_spec = attn_module.get_kv_cache_spec(vllm_config)
     kv_cache = torch.zeros(
-        backend_cls.get_kv_cache_shape(
-            num_blocks, block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size
-        ),
+        backend_cls.get_kv_cache_shape(num_blocks, block_size, kv_cache_spec.num_kv_heads, kv_cache_spec.head_size),
         dtype=kv_cache_spec.dtype,
         device=torch_device,
     )
@@ -619,10 +652,11 @@ def run_msa_module(
     test_ite: int = 6,
 ):
     """Run a single MiniMax-M3 MSA module-level benchmark point."""
-    if kv_cache_dtype != "bfloat16" or compute_dtype != "bfloat16":
+    if kv_cache_dtype not in ("bfloat16", "fp8") or compute_dtype != "bfloat16":
         raise ValueError(
-            f"MSA combos are declared bf16-only at vllm {vllm_version} "
-            f"(see _get_precision_combos); got compute={compute_dtype}, kv={kv_cache_dtype}"
+            f"MSA combos are declared with bf16 compute and bf16/fp8 KV cache at "
+            f"vllm {vllm_version} (see _get_precision_combos); "
+            f"got compute={compute_dtype}, kv={kv_cache_dtype}"
         )
 
     setup_distributed(device)
@@ -644,6 +678,7 @@ def run_msa_module(
         model_path=model_path,
         num_heads=num_heads,
         gemm_type=gemm_type,
+        kv_cache_dtype=kv_cache_dtype,
         max_seq_len=prefix_len + seq_len,
         max_batch_size=batch_size,
         is_context=is_context,
@@ -652,16 +687,14 @@ def run_msa_module(
 
     # 2. Create KV caches + metadata via the framework's builders.
     with set_current_vllm_config(vllm_config):
-        kv_cache, index_kv_cache, attn_metadata, index_metadata, common_attn_metadata = (
-            _create_kv_caches_and_metadata(
-                vllm_config=vllm_config,
-                attn_module=attn_module,
-                batch_size=batch_size,
-                seq_len=seq_len,
-                is_context=is_context,
-                prefix_len=prefix_len,
-                device=device,
-            )
+        kv_cache, index_kv_cache, attn_metadata, index_metadata, common_attn_metadata = _create_kv_caches_and_metadata(
+            vllm_config=vllm_config,
+            attn_module=attn_module,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            is_context=is_context,
+            prefix_len=prefix_len,
+            device=device,
         )
 
     # 2b. Bind the caches to the registered layers — the benchmark analog of
@@ -672,6 +705,29 @@ def run_msa_module(
     forward_ctx = vllm_config.compilation_config.static_forward_context
     forward_ctx[_ATTN_LAYER_NAME].kv_cache = kv_cache
     forward_ctx[_INDEX_CACHE_LAYER_NAME].kv_cache = index_kv_cache
+
+    # 2c. Prove the requested KV precision actually reached the framework
+    # path — a benchmark that silently ran bf16 under an "fp8" label would be
+    # wrong data, worse than a crash. For "fp8": the layer must have been
+    # built with cache_dtype "fp8" (nvidia/model.py:483-488@v0.24.0), the
+    # cache storage must be the fp8 uint8 layout (utils/torch_utils.py:38),
+    # and the framework-selected impl must be in fp8 mode (use_fp8_kv,
+    # common/sparse_attention.py:298-306). The indexer side-cache stays bf16
+    # in both combos (default indexer_kv_dtype, config/attention.py:55).
+    want_fp8_kv = kv_cache_dtype == "fp8"
+    expected_cache_dtype = torch.uint8 if want_fp8_kv else torch.bfloat16
+    impl_use_fp8_kv = bool(getattr(attn_module.impl, "use_fp8_kv", False))
+    if (
+        kv_cache.dtype != expected_cache_dtype
+        or impl_use_fp8_kv != want_fp8_kv
+        or index_kv_cache.dtype != torch.bfloat16
+    ):
+        raise RuntimeError(
+            f"KV-cache precision mismatch: requested kv={kv_cache_dtype}, allocated "
+            f"main cache {kv_cache.dtype}, impl use_fp8_kv={impl_use_fp8_kv}, "
+            f"index cache {index_kv_cache.dtype} "
+            f"(layer cache_dtype={attn_module.kv_cache_dtype!r})"
+        )
 
     # 3. Input tensors. Positions are absolute (cached prefix precedes the
     # current chunk); generation decodes token seq_len-1 with seq_len-1
@@ -714,9 +770,7 @@ def run_msa_module(
         _INDEX_CACHE_LAYER_NAME: common_attn_metadata.slot_mapping,
     }
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
-    exit_stack.enter_context(
-        set_forward_context(attn_metadata_dict, vllm_config, slot_mapping=slot_mapping_dict)
-    )
+    exit_stack.enter_context(set_forward_context(attn_metadata_dict, vllm_config, slot_mapping=slot_mapping_dict))
 
     # 5. Dry run
     try:
@@ -794,7 +848,8 @@ def run_msa_module(
 
     print(
         f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"prefix={prefix_len}, gemm={gemm_type}, backend={kernel_source}: {latency:.4f} ms"
+        f"prefix={prefix_len}, gemm={gemm_type}, kv={kv_cache_dtype} "
+        f"(cache storage {kv_cache.dtype}), backend={kernel_source}: {latency:.4f} ms"
     )
 
     _cleanup()
@@ -861,6 +916,13 @@ def main():
     parser.add_argument("--seq-len", type=int, default=None)
     parser.add_argument("--prefix-len", type=int, default=0)
     parser.add_argument("--gemm-type", type=str, choices=["bfloat16", "fp8_block", "nvfp4"], default=None)
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=["bfloat16", "fp8"],
+        default=None,
+        help="KV cache dtype (default: run both bfloat16 and fp8)",
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()
@@ -880,7 +942,7 @@ def main():
                 seq_len=args.seq_len or 2048,
                 batch_size=args.batch_size or 4,
                 num_heads=args.num_heads or 64,
-                kv_cache_dtype="bfloat16",
+                kv_cache_dtype=args.kv_cache_dtype or "bfloat16",
                 compute_dtype="bfloat16",
                 gemm_type=args.gemm_type or "bfloat16",
                 prefix_len=args.prefix_len,
@@ -893,6 +955,8 @@ def main():
         test_cases = get_context_test_cases() if args.mode == "context" else get_generation_test_cases()
         if args.num_heads is not None:
             test_cases = [tc for tc in test_cases if tc[2] == args.num_heads]
+        if args.kv_cache_dtype is not None:
+            test_cases = [tc for tc in test_cases if tc[3] == args.kv_cache_dtype]
         if args.gemm_type is not None:
             test_cases = [tc for tc in test_cases if tc[5] == args.gemm_type]
 
@@ -914,11 +978,11 @@ def main():
                     device=args.device,
                 )
             except torch.cuda.OutOfMemoryError:
-                print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}")
+                print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}")
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
-                print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}: {e}")
+                print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}: {e}")
                 traceback.print_exc()
                 torch.cuda.empty_cache()
                 gc.collect()
