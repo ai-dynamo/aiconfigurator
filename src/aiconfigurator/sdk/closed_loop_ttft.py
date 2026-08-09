@@ -356,3 +356,22 @@ def refine_closed_loop_latency(df):
     out["tpot_refined"] = tpots
     out["throughput_refined"] = xs
     return out
+
+
+def filter_closed_loop_sla(df, ttft_ms=None, tpot_ms=None):
+    """Approximate SLA post-filter on the refined closed-loop values.
+
+    Refines ``df`` (see :func:`refine_closed_loop_latency`) and drops rows
+    whose ``ttft_refined`` / ``tpot_refined`` exceed the given targets — the
+    steady closed-loop values a fixed-concurrency benchmark at the row's
+    operating point would measure. Rows that cannot be priced (refined NaN)
+    are KEPT: they already passed the pipeline's legacy SLA filter and this
+    post-filter only ever tightens that verdict where it has evidence.
+    Returns the refined copy, filtered.
+    """
+    out = refine_closed_loop_latency(df)
+    if ttft_ms is not None:
+        out = out[~(out["ttft_refined"] > float(ttft_ms))]
+    if tpot_ms is not None:
+        out = out[~(out["tpot_refined"] > float(tpot_ms))]
+    return out

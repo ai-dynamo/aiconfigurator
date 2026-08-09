@@ -89,13 +89,15 @@ estimator does not model. Open-loop arrivals, shape distributions,
 prefix-cache dynamics and latency *distributions* (p50/p99 structure,
 transients) belong to the full queueing-model evaluator work.
 
-## Relation to SLA filtering (non-goal here)
+## Relation to SLA filtering
 
-The refined columns are report-only: sweep, SLA-target filtering, pareto
-and picking all still read the legacy `ttft`/`tpot` columns, so results
-are unchanged by this PR. If refined values should ever drive SLA
-filtering, the wiring is: refine before the filter and compare
-`ttft_refined`/`tpot_refined` against the targets, behind an opt-in flag
-(default off) — the refined steady closed-loop TTFT at the row's
-operating point is the quantity an SLA on served latency actually
-constrains. Left to a follow-up change.
+The pipeline is untouched: sweep, SLA-target filtering, pareto and picking
+all still read the legacy `ttft`/`tpot` columns, so default results are
+unchanged by this PR. For consumers who want the SLA verdict on the
+values a fixed-concurrency benchmark would actually measure,
+`filter_closed_loop_sla(df, ttft_ms=..., tpot_ms=...)` is an approximate
+post-filter: it refines the rows and drops those whose refined values
+exceed the targets (rows it cannot price are kept — it only ever tightens
+the legacy verdict where it has evidence). Moving this comparison into
+the pipeline filter itself (replacing the legacy columns) is a product
+decision left to a follow-up.

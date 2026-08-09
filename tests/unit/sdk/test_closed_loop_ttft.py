@@ -8,6 +8,7 @@ import pytest
 from aiconfigurator.sdk.closed_loop_ttft import (
     estimate_closed_loop_latency,
     estimate_disagg_closed_loop_latency,
+    filter_closed_loop_sla,
     refine_closed_loop_latency,
 )
 
@@ -127,6 +128,32 @@ class TestRefineDataFrame:
         # refined triple is jointly consistent (closed-loop identity)
         cycle = 4 / out["throughput_refined"].iloc[0] * 1000.0
         assert cycle == pytest.approx(out["ttft_refined"].iloc[0] + 31 * out["tpot_refined"].iloc[0], rel=0.02)
+
+    def test_sla_post_filter_drops_on_refined_keeps_nan(self):
+        step = prefill_ms(1, 2048, 0)
+        row = {
+            "bs": 4,
+            "isl": 2048,
+            "osl": 32,
+            "ctx_tokens": 8192,
+            "prefix": 0,
+            "ttft": 123.0,
+            "prefill_step_ms": step,
+            "genonly_step_ms": 5.0,
+            "mix_step_ms": step + 5.0,
+            "num_mix_steps": 1,
+            "num_genonly_steps": 31,
+        }
+        bad = dict(row, bs=0, ttft=456.0)  # unpriceable -> refined NaN
+        df = pd.DataFrame([row, bad])
+        refined = refine_closed_loop_latency(df)["ttft_refined"].iloc[0]
+
+        tight = filter_closed_loop_sla(df, ttft_ms=refined - 1.0)
+        assert tight["ttft"].tolist() == [456.0]  # violator dropped, NaN row kept
+        loose = filter_closed_loop_sla(df, ttft_ms=refined + 1.0, tpot_ms=1e9)
+        assert loose["ttft"].tolist() == [123.0, 456.0]
+        assert "ttft_refined" in loose.columns  # returns the refined copy
+        assert "ttft_refined" not in df.columns  # input untouched
 
     def test_disagg_rows_use_tandem(self):
         df = pd.DataFrame(
