@@ -11,6 +11,13 @@
 # groups with partial rows present, 1 gen fp8-kv h8 group) — classified
 # in the campaign error log.
 #
+# 2026-08-09: generation table recollected gen-only at the raised decode
+# budget (33554432, matching the trtllm/vllm sections) and merged
+# keep-last: all 994 truncated rows replaced by fresh measurements plus
+# 483 new large-decode cells -> 1477 rows (b=256 kv=65536-class points
+# now present), zero failures. Context table untouched. The coverage
+# note below is HISTORICAL and resolved by this recollection.
+#
 # COVERAGE NOTE (2026-08-08, issue #1509): the generation table's 994
 # rows stop at batch*kv <= 262144 — the sglang sweep section in
 # cases/base_ops/mla_module.yaml has no generation max_tokens override,
@@ -40,6 +47,6 @@ tables:
     rows: 26933
     status: complete
   msa_generation_module_perf:
-    collected_at: '2026-08-08'
-    rows: 994
+    collected_at: '2026-08-09'
+    rows: 1477
     status: complete
