@@ -71,6 +71,10 @@ _DECODE_FILTER_RATIO_MAX = 1.0
 _MAX_DECODE_WORKERS_PER_CATEGORY = 16
 _MAX_PREFILL_WORKERS = 32
 
+# refined-SLA mode: how many top combos per decode-parallel category get the
+# concurrency knee search (each search is ~10 tandem pricings).
+_REFINED_KNEE_TOP_K = 3
+
 # Default decode batch-size schedule for disagg worker enumeration.
 _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
     list(range(1, 16, 1)) + list(range(16, 32, 2)) + list(range(32, 128, 4)) + list(range(128, 512, 8)) + [512]
@@ -678,6 +682,67 @@ def _get_disagg_worker_candidates(
     return pd.concat(result_rows, axis=0, ignore_index=True)
 
 
+def _refined_tune_combo(cand: dict, ttft_target: float, tpot_target: float) -> dict | None:
+    """Knee-tune one rate-matched combo under the refined closed-loop SLA.
+
+    Searches the largest concurrency <= the inherited one whose refined
+    TTFT/TPOT meet the targets, then reprices the row's latency/throughput
+    columns from the tandem estimate at that point. The inherited
+    concurrency is the decode ladder's memory-validated operating point, so
+    the search never exceeds it (decode steps are priced at that point's
+    batch — conservative below it); pushing beyond it is represented by the
+    ladder's next rung, which is its own combo. Returns ``None`` when no
+    concurrency complies and the combo unchanged when it cannot be priced
+    (legacy verdict, fail-open).
+    """
+    c_inh = int(cand["concurrency"])
+
+    def priced(c: int):
+        t, p, x = price_closed_loop_row(dict(cand, concurrency=c))
+        return (t, p, x) if t == t else None
+
+    def ok(tpx) -> bool:
+        return tpx is not None and tpx[0] <= ttft_target and tpx[1] <= tpot_target
+
+    at_inh = priced(c_inh)
+    if at_inh is None:
+        return dict(cand)  # unpriceable — keep the legacy verdict
+    if ok(at_inh):
+        best_c, best = c_inh, at_inh
+    else:
+        best_c, best = None, None
+        lo, hi = 1, c_inh  # hi is known non-compliant
+        while lo < hi:
+            mid = (lo + hi) // 2
+            tpx = priced(mid)
+            if ok(tpx):
+                best_c, best = mid, tpx
+                lo = mid + 1
+            else:
+                hi = mid
+        if best_c is None:
+            return None
+    ttft_r, tpot_r, x_r = best
+    gpus = cand.get("num_total_gpus") or 0
+    osl = cand["osl"]
+    out = dict(cand)
+    out.update(
+        {
+            "concurrency": best_c,
+            "ttft": ttft_r,
+            "tpot": tpot_r,
+            "request_latency": ttft_r + tpot_r * max(osl - 1, 0),
+            "request_rate": x_r,
+            "seq/s": x_r,
+            "seq/s/gpu": x_r / gpus if gpus else 0.0,
+            "tokens/s": x_r * osl,
+            "tokens/s/gpu": x_r * osl / gpus if gpus else 0.0,
+            "tokens/s/user": 1000.0 / tpot_r if tpot_r > 0 else 0.0,
+        }
+    )
+    return out
+
+
 def _find_best_disagg_under_constraint(
     *,
     ttft_target: float,
@@ -775,15 +840,22 @@ def _find_best_disagg_under_constraint(
                 )
                 category_results.append(disagg_dict)
         if refined_sla and category_results:
-            # walk the category best-first and keep the first combination
-            # whose refined closed-loop values meet the SLA — prices only as
-            # many combos as needed. NaN (unpriceable) keeps legacy verdict.
-            best = None
-            for cand in sorted(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]), reverse=True):
-                ttft_r, tpot_r, _ = price_closed_loop_row(cand)
-                if not (ttft_r > ttft_target or tpot_r > tpot_target):
-                    best = cand
-                    break
+            # knee-tune the top combos of the category (max compliant
+            # concurrency + tandem repricing), keep the best; fall back to a
+            # best-first accept/reject walk over the rest if none complies.
+            ranked = sorted(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]), reverse=True)
+            tuned = []
+            for cand in ranked[:_REFINED_KNEE_TOP_K]:
+                t = _refined_tune_combo(cand, ttft_target, tpot_target)
+                if t is not None:
+                    tuned.append(t)
+            best = max(tuned, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"])) if tuned else None
+            if best is None:
+                for cand in ranked[_REFINED_KNEE_TOP_K:]:
+                    ttft_r, tpot_r, _ = price_closed_loop_row(cand)
+                    if not (ttft_r > ttft_target or tpot_r > tpot_target):
+                        best = cand
+                        break
             if best is not None:
                 all_category_results.append(best)
             else:

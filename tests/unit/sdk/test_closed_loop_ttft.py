@@ -191,6 +191,43 @@ class TestRefineDataFrame:
         assert best["bs"].tolist() == [2]
         assert best["ttft_refined"].iloc[0] <= target
 
+    def test_knee_search_finds_max_compliant_concurrency(self):
+        from aiconfigurator.sdk.sweep import _refined_tune_combo
+
+        cand = {
+            "concurrency": 64,
+            "isl": 4096,
+            "osl": 64,
+            "(p)workers": 1,
+            "(d)workers": 1,
+            "(p)bs": 1,
+            "(d)bs": 64,
+            "(p)prefill_step_ms": 2000.0,
+            "tpot": 21.0,
+            "ttft": 2000.0,
+            "num_total_gpus": 2,
+            "request_rate": 0.0,
+            "seq/s": 0.4,
+            "seq/s/gpu": 0.2,
+            "tokens/s": 25.6,
+            "tokens/s/gpu": 12.8,
+            "tokens/s/user": 47.6,
+            "request_latency": 0.0,
+        }
+        # deep queue at the inherited point: TTFT far above target
+        target = 6000.0
+        assert refine_closed_loop_latency(pd.DataFrame([cand]))["ttft_refined"].iloc[0] > target
+        tuned = _refined_tune_combo(cand, ttft_target=target, tpot_target=30.0)
+        assert tuned is not None and tuned["concurrency"] < 64
+        assert tuned["ttft"] <= target  # knee point complies...
+        again = dict(tuned, concurrency=tuned["concurrency"] + 1)
+        assert refine_closed_loop_latency(pd.DataFrame([again]))["ttft_refined"].iloc[0] > target  # ...maximally
+        # throughput columns repriced consistently from the tandem
+        assert tuned["tokens/s"] == pytest.approx(tuned["seq/s"] * 64, rel=1e-6)
+        assert tuned["tokens/s/gpu"] == pytest.approx(tuned["tokens/s"] / 2, rel=1e-6)
+        # an impossible target yields None
+        assert _refined_tune_combo(cand, ttft_target=1.0, tpot_target=30.0) is None
+
     def test_disagg_rows_use_tandem(self):
         df = pd.DataFrame(
             [
