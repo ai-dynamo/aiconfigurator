@@ -36,10 +36,10 @@ sparse path (arg_groups/overrides.py:521-537@v0.5.16 — "MSA is SM100-only;
 sparse attention runs on the Triton path"); on SM100/103 the main sparse
 attention step upgrades to the fmha_sm100 MSA kernel when available
 (minimax_sparse_backend.py:68-88, minimax_sparse_ops/msa.py:41-56
-@v0.5.16). On CC major 12 (SM120/121) the M3 override has NO branch and
-SGLang's generic default (flashinfer + page 1) crashes at backend init on
-the M3 KV pool, so the collector passes the serving user's own escape
-hatch ``attention_backend="triton"`` — the one owner-authorized
+@v0.5.16). On CC 8.9 (SM89) and CC major 12 (SM120/121) the M3 override
+has NO branch and SGLang's generic default (flashinfer + page 1) crashes
+at backend init on the M3 KV pool, so the collector passes the serving
+user's own escape hatch ``attention_backend="triton"`` — the one owner-authorized
 explicit-backend exception (2026-08-09; full evidence at the ServerArgs
 construction in ``load_model_runner``). Beyond that knob the collector
 never pins a kernel: it records what the backend actually selected in
@@ -589,12 +589,13 @@ def load_model_runner(
         raw_config = json.load(f)
     override_args = _build_model_override_args(raw_config, num_heads, target_tp_size, num_layers)
 
-    # ── SM120/121 (CC major 12, e.g. RTX PRO 6000 Blackwell): explicit
-    # attention_backend="triton" — owner-authorized exception (2026-08-09).
+    # ── SM89 (CC 8.9, e.g. L40S) and SM120/121 (CC major 12, e.g. RTX PRO
+    # 6000 Blackwell): explicit attention_backend="triton" —
+    # owner-authorized exception (2026-08-09).
     #
-    # Failure evidence: v0.5.16's M3 server-args handler has no CC-12 branch
-    # (arg_groups/overrides.py:465-548 — is_hip() → triton :480-482,
-    # elif is_sm100_supported() → fa4 + page 128 :502-511,
+    # Failure evidence: v0.5.16's M3 server-args handler has no branch for
+    # CC major 8 or 12 (arg_groups/overrides.py:465-548 — is_hip() → triton
+    # :480-482, elif is_sm100_supported() → fa4 + page 128 :502-511,
     # elif is_sm90_supported() → fa3 + page 128 :520-529; the predicates are
     # capability-major-exact, utils/common.py:296/:286 majors [9]/[10], and
     # is_sm120_supported :281-285 is never consulted by the handler), so
@@ -607,9 +608,12 @@ def load_model_runner(
     # get_kv_cache_quant_method() (memory_pool.py:1661-1676) returns None
     # and flashinfer_backend.py:328 raises AttributeError: 'NoneType' object
     # has no attribute 'resolve_attention_access' — observed as 16/16
-    # context + 8/8 generation failures in the SM120 smoke run (2026-08-09).
-    # Default-config serving crashes identically, so there is no
-    # framework-selected default to record on this platform.
+    # context + 8/8 generation failures in the SM120 smoke run (2026-08-09)
+    # and, with the identical resolved args (flashinfer + page 1) and
+    # identical traceback, as 44/44 context + 4/4 generation subprocess-group
+    # failures in the SM89 l40s full run (2026-08-09). Default-config
+    # serving crashes identically, so there is no framework-selected default
+    # to record on these platforms.
     #
     # The pin is a legitimate serving knob, not a collector invention:
     # --attention-backend triton is the user-facing ServerArgs escape hatch
@@ -629,9 +633,10 @@ def load_model_runner(
     # Dispatch-not-skip: this changes HOW the case is constructed (a
     # ServerArgs knob), never WHETHER it runs; kernel_source still records
     # the sparse path the backend actually selected. Smoke-validated on
-    # SM120; SM121 shares the identical source-level gap (major-12
-    # predicates) and stays registry-gated (unverified_sms) until validated.
-    attention_backend = "triton" if get_sm_version() in (120, 121) else None
+    # SM120; SM89 evidenced by the l40s full-run failure log above; SM121
+    # shares the identical source-level gap (major-12 predicates) and stays
+    # registry-gated (unverified_sms) until validated.
+    attention_backend = "triton" if get_sm_version() in (89, 120, 121) else None
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -1119,8 +1124,8 @@ def run_msa_module(
         )
 
     # Pre-load allocation-feasibility bound. 128 is the M3 serving page on
-    # SM90/SM100 (overrides.py:502-529); on CC 12 the triton escape hatch
-    # resolves page_size=1 (see load_model_runner), for which page-128
+    # SM90/SM100 (overrides.py:502-529); on SM89 and CC 12 the triton escape
+    # hatch resolves page_size=1 (see load_model_runner), for which page-128
     # rounding is a strict upper bound — post-load drops re-check against
     # the real kv_pool_page_size(model_runner) below.
     page_size_guess = 128
