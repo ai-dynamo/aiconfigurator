@@ -108,7 +108,7 @@ REGISTRY: list[OpEntry] = [
         # select_indexer_impl_cls @0.24.0) — a different kernel path that has
         # not been probed; SM120/121 keep the Triton path but are equally
         # unprobed. Clear the markers after a validation run on each SM.
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="msa_generation_module",
@@ -117,7 +117,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_GENERATION_MODULE,
         # See msa_context_module above.
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="dsv4_csa_context_module",

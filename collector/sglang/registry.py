@@ -300,7 +300,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_msa_context_module_test_cases",
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_CONTEXT_MODULE,
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="msa_generation_module",
@@ -309,7 +309,7 @@ REGISTRY: list[OpEntry] = [
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_GENERATION_MODULE,
         # See msa_context_module marker rationale.
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="gdn",

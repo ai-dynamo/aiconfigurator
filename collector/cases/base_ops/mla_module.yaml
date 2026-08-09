@@ -148,6 +148,15 @@ common_case_values:
         - 524288
         - 1000000
         - 1048575
+    generation:
+      # 2026-08-09: raise the decode budget to match the trtllm/vllm sections
+      # (33554432). The sglang section previously inherited the shared 262144
+      # default, silently capping large-batch x long-kv decode coverage
+      # (documented in the b200_sxm msa collection_meta coverage note); a
+      # spot-measured large decode point runs fine on hardware.
+      max_tokens: 33554432
+      large_sequence_min: 8192
+      large_sequence_max_batch_size: 1024
   mla_module_trtllm:
     description: Exact TRT-LLM full MLA/DSA module micro-benchmark sweep.
     context_batch_sizes:

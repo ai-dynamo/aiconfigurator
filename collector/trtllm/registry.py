@@ -143,7 +143,7 @@ REGISTRY: list[OpEntry] = [
         # this bring-up PR (rc23 implementation="msa" fmha_sm100 path,
         # see collect_msa_module). SM120/121 remain unvalidated (Triton
         # path expected, never run there).
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
     OpEntry(
         op="msa_generation_module",
@@ -152,6 +152,6 @@ REGISTRY: list[OpEntry] = [
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_GENERATION_MODULE,
         # See msa_context_module marker rationale.
-        unverified_sms=(120, 121),
+        unverified_sms=(121,),
     ),
 ]
