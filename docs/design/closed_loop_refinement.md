@@ -98,6 +98,16 @@ values a fixed-concurrency benchmark would actually measure,
 `filter_closed_loop_sla(df, ttft_ms=..., tpot_ms=...)` is an approximate
 post-filter: it refines the rows and drops those whose refined values
 exceed the targets (rows it cannot price are kept — it only ever tightens
-the legacy verdict where it has evidence). Moving this comparison into
+the legacy verdict where it has evidence). Because the pipeline picks
+each deployment's operating point before any post-processing runs,
+post-filtering a picked table can return empty even when a
+lower-concurrency point of the same deployment complies;
+`pick_under_closed_loop_sla(df, ...)` closes that gap — feed it the full
+per-operating-point summary (sweep with a loose TTFT target) and it
+re-picks each deployment's best surviving row, which is equivalent to
+enforcing the SLA at the original filter. Moving this comparison into
 the pipeline filter itself (replacing the legacy columns) is a product
-decision left to a follow-up.
+decision left to a follow-up. AFD frames pass through unpriced (refined
+NaN, legacy verdict kept): their closed-loop mapping — the mini tandem
+over `prefill_t_step`/`decode_t_step` — needs its own validation pass
+first.

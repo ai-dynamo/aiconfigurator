@@ -375,3 +375,43 @@ def filter_closed_loop_sla(df, ttft_ms=None, tpot_ms=None):
     if tpot_ms is not None:
         out = out[~(out["tpot_refined"] > float(tpot_ms))]
     return out
+
+
+# deployment identity: the columns that stay fixed while the concurrency
+# ladder sweeps the operating point
+_AGG_CONFIG_KEYS = ["model", "parallel"]
+_DISAGG_CONFIG_KEYS = [
+    "model",
+    "(p)parallel",
+    "(p)bs",
+    "(p)workers",
+    "(d)parallel",
+    "(d)bs",
+    "(d)workers",
+]
+
+
+def pick_under_closed_loop_sla(df, ttft_ms=None, tpot_ms=None):
+    """Re-pick each deployment's operating point under the refined SLA.
+
+    The pipeline picks operating points before this module runs, so
+    post-filtering an already-picked table can drop a deployment whose
+    lower-concurrency rows were still compliant. Feed this the FULL
+    per-operating-point summary frame instead (sweep with a loose TTFT
+    target so those rows survive): it applies
+    :func:`filter_closed_loop_sla` and keeps each deployment's best
+    surviving row — equivalent to enforcing the SLA at the original
+    filter. Priced rows rank by ``throughput_refined``; rows the refiner
+    cannot price keep their legacy verdict and rank by recorded
+    ``tokens/s``.
+    """
+    out = filter_closed_loop_sla(df, ttft_ms=ttft_ms, tpot_ms=tpot_ms)
+    if out.empty:
+        return out
+    keys = _DISAGG_CONFIG_KEYS if "(p)workers" in out.columns else _AGG_CONFIG_KEYS
+    keys = [k for k in keys if k in out.columns]
+    sort_cols = [c for c in ("throughput_refined", "tokens/s") if c in out.columns]
+    ranked = out.sort_values(sort_cols, ascending=False, na_position="last")
+    if not keys:
+        return ranked
+    return ranked.groupby(keys, dropna=False, sort=False).head(1)

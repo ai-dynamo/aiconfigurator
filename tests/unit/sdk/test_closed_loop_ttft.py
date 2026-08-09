@@ -9,6 +9,7 @@ from aiconfigurator.sdk.closed_loop_ttft import (
     estimate_closed_loop_latency,
     estimate_disagg_closed_loop_latency,
     filter_closed_loop_sla,
+    pick_under_closed_loop_sla,
     refine_closed_loop_latency,
 )
 
@@ -154,6 +155,41 @@ class TestRefineDataFrame:
         assert loose["ttft"].tolist() == [123.0, 456.0]
         assert "ttft_refined" in loose.columns  # returns the refined copy
         assert "ttft_refined" not in df.columns  # input untouched
+
+    def test_repick_recovers_lower_concurrency_point(self):
+        step = prefill_ms(1, 2048, 0)
+        ladder = []
+        for bs in (2, 16):  # same deployment, two operating points
+            ladder.append(
+                {
+                    "model": "m",
+                    "parallel": "tp4",
+                    "bs": bs,
+                    "isl": 2048,
+                    "osl": 32,
+                    "ctx_tokens": 8192,
+                    "prefix": 0,
+                    "ttft": 100.0,
+                    "tokens/s": 100.0 * bs,
+                    "prefill_step_ms": step,
+                    "genonly_step_ms": 5.0,
+                    "mix_step_ms": step + 5.0,
+                    "num_mix_steps": 1,
+                    "num_genonly_steps": 31,
+                }
+            )
+        df = pd.DataFrame(ladder)
+        refined = refine_closed_loop_latency(df)["ttft_refined"]
+        assert refined.iloc[1] > refined.iloc[0]  # deeper point queues more
+        target = (refined.iloc[0] + refined.iloc[1]) / 2.0
+
+        # naive post-filter of the PICKED row (the bs=16 one) yields nothing
+        picked = df.iloc[[1]]
+        assert filter_closed_loop_sla(picked, ttft_ms=target).empty
+        # re-pick over the full ladder recovers the compliant bs=2 row
+        best = pick_under_closed_loop_sla(df, ttft_ms=target)
+        assert best["bs"].tolist() == [2]
+        assert best["ttft_refined"].iloc[0] <= target
 
     def test_disagg_rows_use_tandem(self):
         df = pd.DataFrame(
