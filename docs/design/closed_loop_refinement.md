@@ -58,26 +58,14 @@ H20, isl4096/osl256):
   and batched prefill, shallow to deep queueing): bit-identical TTFT and
   throughput at all nine validation points.
 
-Against the dynamo mocker (independent discrete-event serving simulation,
-wall clock, same perf-DB timing; 31 closed-loop operating points: 9 agg tp4
-+ 22 disagg across 1P1D/2P1D/1P2D, isl 1024-8192, osl 128-2048, C 4-48; the
-16 extended-disagg predictions were generated before their measurements):
-
-- throughput: within 1.3% on agg and the extended disagg grid (3.8% on the
-  first disagg matrix);
-- TTFT mean: within ~11% on 25 of 31 points; TPOT within ~10% everywhere;
-- structural cross-checks confirmed by the DES: prefill-saturated regime
-  shift (TTFT recedes past the knee while TPOT grows), and the closed-loop
-  conservation result that adding decode capacity to a prefill-bound tandem
-  leaves throughput unchanged while nearly doubling steady TTFT.
-
 Against real serving (trtllm-serve 1.3.0rc20, H20 tp4, chunked prefill,
-same 9 agg closed-loop points, predictions unchanged): throughput within
-5.3% on 7 of 9 points and TTFT p99 within a few percent at low/moderate
-concurrency; the residual splits cleanly into the structure component
-(bounded by the DES comparison above) and a perf-DB timing component that
-dominates only in deep-churn small-prompt corners (real mixed passes up to
-2x the DB pricing) — a timing-data issue, not an estimator issue.
+9 agg closed-loop points, isl 1024-8192, osl 128-256, C 4-48, predictions
+generated before the measurements): throughput within 5.3% on 7 of 9
+points and TTFT p99 within a few percent at low/moderate concurrency; the
+residual concentrates in deep-churn small-prompt corners where real mixed
+passes cost up to 2x the perf-DB pricing — a timing-data gap, not an
+estimator-structure one (refined TTFT errs on the conservative side
+there).
 
 Known error modes (measured, understood, not corrected for):
 
