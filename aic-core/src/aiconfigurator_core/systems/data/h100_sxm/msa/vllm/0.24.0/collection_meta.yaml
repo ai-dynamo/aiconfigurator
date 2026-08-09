@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# complete: zero failures across the plan (bfloat16 + fp8_block gemm x
+# bf16 + fp8 KV; 8x H100 via internal collection CI, 2026-08-09).
+# kernel_source = MiniMaxM3SparseTritonImpl (the SM90 triton sparse path).
+schema_version: 1
+provenance: collected
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 7808
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 5870
+    status: complete
