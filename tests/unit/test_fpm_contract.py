@@ -92,6 +92,11 @@ def test_every_gate_accepted_path_is_discoverable_by_every_glob_consumer():
 
 
 def test_fpm_expected_result_paths_window_covers_the_node_local_rank_range():
+    # Global rank zero keeps the unsuffixed benchmark.json.
+    assert fpm_expected_result_paths("/results/benchmark.json", 0, 2) == [
+        "/results/benchmark.json",
+        "/results/benchmark_dp1.json",
+    ]
     assert fpm_expected_result_paths("/results/benchmark.json", 1, 2) == [
         "/results/benchmark_dp2.json",
         "/results/benchmark_dp3.json",
