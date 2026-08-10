@@ -1166,6 +1166,30 @@ class EncoderAttention(Operation):
 # ─────────────────────────────────────────────────────────
 
 
+def _log_attention_row_conflict(attention_kind, key, kept_provenance, dropped_row):
+    """Warn only when two named kernel sources at the same version collapse to one key.
+
+    First-wins overlap from earlier-version or legacy reuse sources is expected and
+    remains at debug level.
+    """
+    kept_kernel_source, kept_version = kept_provenance
+    dropped_kernel_source = dropped_row.get("kernel_source")
+    dropped_version = dropped_row.get("version")
+    is_backend_collision = (
+        kept_kernel_source
+        and dropped_kernel_source
+        and kept_kernel_source != dropped_kernel_source
+        and kept_version
+        and kept_version == dropped_version
+    )
+    log = logger.warning if is_backend_collision else logger.debug
+    log(
+        f"value conflict in {attention_kind} attention data: {key} — keeping first row "
+        f"(kernel_source={kept_kernel_source}, version={kept_version}), dropping later row "
+        f"(kernel_source={dropped_kernel_source}, version={dropped_version})"
+    )
+
+
 def load_context_attention_data(context_attention_file):
     """
     Load the context attention data with power support (backward compatible).
@@ -1186,6 +1210,7 @@ def load_context_attention_data(context_attention_file):
             )
         )
     )
+    context_attention_provenance = {}
 
     # Check if power columns exist (backward compatibility)
     has_power = len(rows) > 0 and "power" in rows[0]
@@ -1227,14 +1252,10 @@ def load_context_attention_data(context_attention_file):
 
         quant_mode = common.FMHAQuantMode[quant_mode]
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+        key = (quant_mode, kv_cache_dtype, kv_n, head_size, window_size, n, s, b)
 
         try:
-            # Check for conflict
             context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
-            logger.debug(
-                f"value conflict in context attention data: {quant_mode} {kv_cache_dtype} "
-                f"{head_size} {window_size} {kv_n} {n} {s}"
-            )
         except KeyError:
             # Store all three values
             context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = {
@@ -1242,6 +1263,9 @@ def load_context_attention_data(context_attention_file):
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
             }
+            context_attention_provenance[key] = (row.get("kernel_source"), row.get("version"))
+        else:
+            _log_attention_row_conflict("context", " ".join(map(str, key)), context_attention_provenance[key], row)
 
     return context_attention_data
 
@@ -1262,6 +1286,7 @@ def load_generation_attention_data(generation_attention_file):
             lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
         )
     )
+    generation_attention_provenance = {}
 
     # Check if power columns exist (backward compatibility)
     has_power = len(rows) > 0 and "power" in rows[0]
@@ -1305,14 +1330,10 @@ def load_generation_attention_data(generation_attention_file):
         s = s + step
 
         kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
+        key = (kv_cache_dtype, kv_n, head_size, window_size, n, b, s)
 
         try:
-            # Check for conflict
             generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
-            logger.debug(
-                f"value conflict in generation attention data: {kv_cache_dtype} {kv_n} "
-                f"{head_size} {window_size} {n} {b}"
-            )
         except KeyError:
             # Store all three values
             generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = {
@@ -1320,6 +1341,11 @@ def load_generation_attention_data(generation_attention_file):
                 "power": power,
                 "energy": energy,  # NEW: precomputed energy
             }
+            generation_attention_provenance[key] = (row.get("kernel_source"), row.get("version"))
+        else:
+            _log_attention_row_conflict(
+                "generation", " ".join(map(str, key)), generation_attention_provenance[key], row
+            )
 
     return generation_attention_data
 
