@@ -18,40 +18,64 @@ exactly, ``N = b * s_bar`` and ``P = b * p_bar``, so the label
 cancels every term that depends on the totals alone and leaves the cost of the
 spread.
 
-Three prices, not two. A request whose full length stays at or below ``topk``
-short-circuits the indexer and runs the dense kernel; one above it runs the
-indexer and the capped-attention kernel. Those are different kernels with
-different prices, so a batch that straddles the bound cannot be charged with a
-single attention coefficient:
+Two prices, grouped by the GEOMETRY the work follows rather than by which
+kernel runs it:
 
     y = c_idx * x_idx  +  c_mla * x_mla
 
-The three columns are what :func:`work_columns` returns. Splitting them is not
-a refinement -- in the measured grid the dense rows carry between 1% and 88% of
-a mixed batch's attention work, so lumping them prices most of that work at the
-wrong rate.
+``x_idx`` counts the trapezoid ``s*p + s^2/2`` -- the candidate scoring a
+request presents to the indexer -- and ``x_mla`` counts the attention pairs
+actually read, which the index budget caps at ``topk`` per query. Two shapes,
+two prices.
+
+An earlier revision split the attention column by kernel path, capped and
+uncapped, on the theory that a capped read and an uncapped one are different
+kernels at different rates. They are, but they are not separately
+identifiable: both count attention pairs, so under the conserved totals a
+batch that moves a row from one path to the other moves both columns in
+lockstep. Across the measured grid the two sat at 170-177 degrees, and only
+their sum was ever determined.
+
+WHICH ROWS ENTER ``x_idx``. Only rows above the bound, and this is a
+deliberate choice rather than a claim about the hardware. vLLM's indexer has
+no short-circuit -- every request scores its whole sequence, whatever its
+length -- so the physically literal column would include the short rows too.
+It is not used, because a pure unsaturated segment cannot then isolate
+anything: within it, indexer work and attention work are the SAME trapezoid,
+so the two columns are exactly collinear and only their sum is determined.
+
+So the basis is the one the segments can actually resolve:
+
+    c_idx   the cost of a row that crosses topk, over and above what the same
+            row would have cost staying below it
+    c_mla   the whole cost of a row that stays below topk -- its attention AND
+            its indexer scan, which no measurement here can separate
+
+Naming ``c_idx`` after the indexer is therefore shorthand: it is the price of
+crossing the bound, not the price of running the indexer. Short rows are not
+free of indexer work; their indexer work is inside ``c_mla``.
 
 Which column a segment can move follows from the regime, and that is what lets
-one segment pin one coefficient without a joint fit:
+one segment pin one price without a joint fit:
 
-    pure saturated    every row is above topk, the indexer is pinned there for
-                      all of them, so the attention term is linear in s and its
-                      deviation cancels exactly -- only x_idx survives.
-    pure unsaturated  every row short-circuits the indexer, so x_idx is
-                      identically zero -- only x_mla survives.
-    mixed             all three are live; the segment is solved against
-                      whichever coefficients the cell's other segment and the
-                      global dense fit already fixed.
+    pure saturated    every row is above topk, so the attention term is linear
+                      in s and its deviation cancels exactly -- only x_idx
+                      survives.
+    pure unsaturated  no row crosses the bound, so x_idx is identically zero
+                      by the definition above -- only x_mla survives.
+    mixed             both are live, and the cell's pure segment has already
+                      fixed one, so the rungs close the other with a degree of
+                      freedom left over.
 
-Each cell owns all three of its prices. An earlier revision fitted
-``c_mla`` once across the unsaturated cells and handed it to the rest
-as a known constant, on the theory that it is a property of the dense
-kernel rather than of an average point. Measurement did not support that:
-the ratio varies by orders of magnitude between cells, because at a cell
-whose average request is long the dense column tops out at
-``(b - 1) * topk^2 / 2`` while the cell's own work grows with ``s_bar^2``,
-so the same nominal price buys a different share of the step. Solving it
-where it is used costs one rung and removes a cross-cell dependency.
+Each cell owns both of its prices. An earlier revision fitted ``c_mla`` once
+across the unsaturated cells and handed it to the rest as a known constant, on
+the theory that it is a property of the dense kernel rather than of an average
+point. Measurement did not support that: the ratio varies by orders of
+magnitude between cells, because at a cell whose average request is long the
+dense column tops out at ``(b - 1) * topk^2 / 2`` while the cell's own work
+grows with ``s_bar^2``, so the same nominal price buys a very different share
+of the step. Solving it where it is used costs one rung and removes a
+cross-cell dependency.
 """
 
 from __future__ import annotations
@@ -62,6 +86,7 @@ __all__ = [
     "CalibrationBatch",
     "CellPlan",
     "Regime",
+    "classify",
     "idx_work",
     "key_column",
     "mla_work",
@@ -81,23 +106,26 @@ Regime = str
 
 
 def idx_work(s: float, p: float, topk: int) -> float:
-    """Indexer scoring work for one request: every query against every key.
+    """Candidate-scoring work for one request: every query against every key.
 
-    NOT gated on ``topk``. The gate was an assumption and it is wrong: vLLM's
+    Not gated on ``topk``, because the hardware is not: vLLM's
     ``sparse_attn_indexer`` has no short-circuit for sequences at or below the
     index budget. It scores the whole sequence with ``fp8_fp4_mqa_logits`` and
-    then runs the top-k selection regardless, padding the index buffer with -1
-    when there are fewer candidates than ``topk``. The only skip in that path is
-    for an empty sequence.
+    runs the top-k selection regardless, padding the index buffer with -1 when
+    there are fewer candidates than ``topk``. The only skip in that path is for
+    an empty sequence.
 
-    Charging zero here made every request below the bound look free, which is
-    exactly the requests a mixed batch is full of.
+    Whether a given row's scan is charged to ``x_idx`` is a separate question,
+    answered by :func:`work_columns`: short rows do run the indexer, but their
+    scan is inseparable from their attention work and is priced through
+    ``c_mla``. Read the two together -- this function is the geometry, that one
+    is the basis.
     """
     return s * (2.0 * p + s) / 2.0
 
 
 def mla_work(s: float, p: float, topk: int) -> float:
-    """Attention pairs actually read for one request, in three segments.
+    """Attention pairs actually read for one request, in three ranges.
 
     Each of the ``s`` new queries reads ``min(p + i + 1, topk)`` keys. Which
     segment applies depends on where the request sits relative to ``topk``:
@@ -124,25 +152,30 @@ def runs_sparse(s: float, p: float, topk: int) -> bool:
 def work_columns(rows: list[tuple[int, int]], s_bar: float, p_bar: float, topk: int) -> tuple[float, float]:
     """``(x_idx, x_mla)`` against the cell's uniform batch.
 
-    Two columns, grouped by the GEOMETRY the work follows rather than by which
-    kernel runs it. The indexer scans the full trapezoid ``s*p + s^2/2`` whether
-    or not the top-k selection had anything to discard, so MQA and top-k share
-    one column. Attention reads pairs capped at ``topk``, which is a different
-    shape, so it gets the other.
+    ``x_idx`` collects the scoring trapezoid of the rows that CROSS ``topk``;
+    ``x_mla`` collects the attention pairs of every row. Both are deviations
+    from the uniform batch of the same cell, and the subtrahend is credited to
+    whichever columns that uniform batch itself occupies -- decided by the
+    average point's own length, not by this batch's regime.
 
-    An earlier revision split the attention column by kernel path -- capped and
-    uncapped -- on the theory that they are different kernels at different
-    prices. They are, but they are not separately identifiable: both count
-    attention pairs, so under the conserved totals a batch that moves a row from
-    one path to the other moves both columns in lockstep. Measured across the
-    calibration grid the two sat at 170-177 degrees, near-antiparallel, and only
-    their sum was determined. Splitting them also left saturated average points
-    with a dense price no segment could isolate, which rejected nine of eighteen
-    such cells outright.
+    Short rows run the indexer too (see :func:`idx_work`), and they are still
+    left out of ``x_idx`` on purpose. Include them and a pure unsaturated
+    segment stops identifying anything: within it every row's scan and every
+    row's attention are the same trapezoid, so the two columns become exactly
+    collinear and only their sum is determined. Excluding them puts that sum
+    where it is identifiable -- inside ``c_mla``, which then prices the whole
+    cost of a sub-``topk`` row rather than its attention alone.
 
-    The subtrahend goes to whichever columns the UNIFORM batch runs on -- decided
-    by the average point's own length, not by the calibration batch's regime --
-    so an unsaturated average point contributes nothing to the indexer column.
+    So ``x_idx`` is not "indexer work". It is the work a row adds by crossing
+    the bound, over and above what the same row would have cost below it.
+
+    The attention column is not split by kernel path. Capped and uncapped reads
+    are different kernels at different rates, but they are not separately
+    identifiable: both count attention pairs, so a batch moving a row from one
+    path to the other moves both columns in lockstep under the conserved
+    totals. Across the measured grid the two sat at 170-177 degrees, and
+    splitting them also left saturated average points with a dense price no
+    segment could isolate -- nine of eighteen such cells were rejected outright.
     """
     b = len(rows)
     x_idx = sum(idx_work(s, p, topk) for s, p in rows if runs_sparse(s, p, topk))
@@ -361,7 +394,7 @@ def mixed_rows(
 
 @dataclass(frozen=True)
 class CalibrationBatch:
-    """One constructed batch and the three work columns it moves."""
+    """One constructed batch and the two work columns it moves."""
 
     regime: Regime
     m: int
@@ -371,7 +404,7 @@ class CalibrationBatch:
     x_mla: float
 
     @property
-    def columns(self) -> tuple[float, float, float]:
+    def columns(self) -> tuple[float, float]:
         return self.x_idx, self.x_mla
 
     @property
@@ -453,7 +486,7 @@ def _pick_rungs(rungs: list[tuple[float, CalibrationBatch]], want: int) -> list[
 
 # A mixed segment at a saturated average point is solved for one unknown, so two
 # rungs already leave a degree of freedom; at an unsaturated one it carries two
-# unknowns and needs three. A pure segment carries one.
+# unknown and needs two. A pure segment carries one.
 _RUNGS_NEEDED = {SAT: 2, UNSAT: 2, MIXED: 2}
 
 

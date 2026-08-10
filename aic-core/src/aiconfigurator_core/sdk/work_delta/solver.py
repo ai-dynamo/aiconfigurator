@@ -8,12 +8,13 @@ depends on the totals alone and leaves the cost of the spread:
 
     y = T_batch - T_uniform
 
-Three prices, because a prefill batch that straddles ``topk`` runs two different
-attention kernels at once:
+Two prices, because a prefill batch is charged on two different shapes: the
+candidate-scoring trapezoid a row presents by crossing ``topk``, and the
+attention pairs every row actually reads. See :mod:`planner` for what each
+column does and does not include -- in particular, a sub-``topk`` row's indexer
+scan is priced through ``c_mla``, not ``c_idx``.
 
-    y = c_idx * x_idx  +  c_mla * x_mla
-
-Nothing here fits all three at once. The order is forced by what each segment
+Nothing here fits both at once. The order is forced by what each segment
 can move, and each step subtracts what the previous one already fixed:
 
     1. c_mla  from the unsaturated segments. Those batches short-circuit the
@@ -46,11 +47,12 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
+from typing import Protocol
 
 __all__ = [
-    "RESIDUAL_TOLERANCE",
     "CellFit",
     "Measurement",
+    "Prices",
     "predict_delta",
     "solve_cell",
 ]
@@ -58,19 +60,6 @@ __all__ = [
 UNSAT = "unsat"
 MIXED = "mixed"
 SAT = "sat"
-
-# A fit whose points scatter further than this around the line is reporting
-# that the linear form is wrong for the cell, not that the timing was noisy:
-# the rungs span the segment's whole range, so a genuine linear relation leaves
-# little room for scatter.
-# Swept on the collected grid rather than chosen. At 0.10 only 5 of 33 cells
-# were accepted and NO average point had two calibrated batch sizes, so the
-# bracketing requirement in ``field`` had nothing to bracket and every query
-# fell through to a single-ended guess -- the source of every regression we
-# measured. At 0.30 ten cells are accepted, four average points bracket, and
-# no point in either run is made worse. Past 0.50 a badly-measured cell gets
-# in and does real damage, so this is a measured ceiling, not a preference.
-RESIDUAL_TOLERANCE = 0.30
 
 # How far a label must clear the engine's own latency spread at that shape
 # before it is allowed into a fit. Measured on GLM-5: at cells whose average
@@ -80,25 +69,6 @@ RESIDUAL_TOLERANCE = 0.30
 # measurements of an effect the step does not have.
 MIN_LABEL_SNR = 3.0
 
-# Smallest work deviation, as a fraction of the cell's own total work, that is
-# worth correcting at all. A batch whose columns barely move has little to
-# correct, and a coefficient carrying even a modest relative error will spend
-# that error on a label of the same small size -- the absolute miss is small but
-# the relative one is not.
-#
-# Measured on GLM-5 this does NOT separate cleanly: the points the correction
-# hurt sit at a 10th percentile of 0.048 and the points it helped at 0.051, so
-# any threshold that blocks the former costs one to two of the latter and the
-# median error gets worse. Swept on the full grid with a clean bytecode cache:
-#     0.00 -> 27 better /  7 worse, median 1.39%
-#     0.10 -> 23 better /  9 worse, median 1.68%
-#     0.30 -> 16 better / 14 worse, median 2.80%
-# and the WORST case never moves (23.1%) at any threshold, because the batch it
-# comes from moves the work by 2.2x the cell's own -- no magnitude gate reaches
-# it. Left at 0 (off); raise it only if a deployment would rather under-correct.
-# 绝对门(单位 M pairs)。物理依据是 slide 6:prefill 的三个 kernel 在
-# 低工作量段都是水平线,过了拐点才 ∝work,拐点是个**绝对**工作量(~10^0 M),
-# 跟本 cell 有多大无关。设为 0 则退回相对门。
 # Smallest column deviation worth pricing, in millions of attention-pair reads.
 # Absolute, not a fraction of the cell's own work: a relative gate divides a
 # real 200 ms delta by a large cell's large denominator and discards it, while
@@ -107,22 +77,23 @@ MIN_LABEL_SNR = 3.0
 # column's measured price, so below it the correction is smaller than the
 # spread it would have to be verified against.
 #
-#   indexer  0.96 ms per M reads (0.943-0.999 across 12 cells, near-constant)
-#   MLA      ~5 ms per M, five times dearer
-#   jitter   9.0 ms median 3-sigma   ->  9.0/0.96 = 9.4 -> 10 M,  9.0/5 -> 2 M
+# Sized from the MEDIAN price, not a typical one -- the prices are not constant
+# across cells and are not meant to be, since cells run at different MFU:
 #
-# Re-derive both when the model, parallelism or hardware changes: the formula
-# transfers, these two numbers do not.
+#   c_idx    1.09 ms per M reads (median of 18 cells, spread 0.14-3.05)
+#   c_mla    6.13 ms per M       (median of 14 cells, spread 2.13-44.18)
+#   jitter   9.0 ms median 3-sigma  ->  9.0/1.09 = 8.3 -> 10 M,  9.0/6.13 -> 2 M
+#
+# A cell far from the median therefore gets a gate that is loose or tight for
+# it. That is the intended trade: a per-cell gate would be derived from the very
+# fit it is supposed to guard. Re-derive all three when the model, parallelism
+# or hardware changes -- the formula transfers, these numbers do not.
 MIN_ABS_DELTA_IDX_M = 10.0
 MIN_ABS_DELTA_MLA_M = 2.0
 
 
 MIN_USABLE_COLUMN = 1e-9
 
-# Squared cosine between two feature columns at which their split stops being
-# determined by the data. Their sum stays well conditioned either way, which is
-# what makes this worth rejecting rather than reporting a large coefficient.
-MAX_COLLINEARITY = 1.0 - 1e-6
 
 # Smallest pivot the normalised Gram matrix may present before its columns are
 # treated as dependent. Set well above float noise: at 1e-3 the prices are
@@ -156,6 +127,17 @@ class Measurement:
     @property
     def cell(self) -> tuple[int, int, int]:
         return self.b, self.s_bar, self.p_bar
+
+
+class Prices(Protocol):
+    """Anything that carries a calibrated price pair.
+
+    Both `CellFit` and `field.Interpolated` satisfy it, which is what lets the
+    exact-hit and interpolated paths share one gated application.
+    """
+
+    c_idx: float | None
+    c_mla: float | None
 
 
 @dataclass
@@ -222,11 +204,14 @@ def _solve_n(points, cols, target) -> tuple[float, ...] | None:
     sum is well determined, and reporting them would be inventing numbers.
     """
     n = len(cols)
-    # n+1, not n. With exactly n rungs the system is square: it reproduces the
-    # labels perfectly whatever the prices are, so the residual is zero by
-    # construction and reports nothing. A fit nobody can check is worse than no
-    # fit, because it looks like it passed.
-    if len(points) <= n:
+    # n, not n+1. With exactly n rungs the system is square, so it reproduces
+    # its labels whatever the prices are and leaves no residual to read. That is
+    # a reason to report no residual, not a reason to refuse: residuals are
+    # diagnostics here and never reject a fit, and collection cannot afford a
+    # spare rung -- the planner emits two mixed rungs because two is what a
+    # mixed segment needs. Demanding a third rejected 2 cells outright whose
+    # prices were fully determined.
+    if len(points) < n:
         return None
     norms = [math.sqrt(sum(c(p) ** 2 for p in points)) for c in cols]
     if any(v <= MIN_USABLE_COLUMN for v in norms):
@@ -249,26 +234,6 @@ def _solve_n(points, cols, target) -> tuple[float, ...] | None:
             aug[r] = [v - factor * w for v, w in zip(aug[r], aug[col], strict=True)]
     # Undo the normalisation so the prices are in the original units.
     return tuple(aug[i][n] / norms[i] for i in range(n))
-
-
-def _solve_two(points, col_a, col_b, target) -> tuple[float, float] | None:
-    """Joint least squares for two prices, used when no pure segment fixed one.
-
-    Returns ``None`` when the two columns are close to parallel: the normal
-    equations are then near-singular and the split between the coefficients is
-    decided by noise even though their sum is well determined.
-    """
-    a11 = sum(col_a(p) ** 2 for p in points)
-    a12 = sum(col_a(p) * col_b(p) for p in points)
-    a22 = sum(col_b(p) ** 2 for p in points)
-    if a11 <= MIN_USABLE_COLUMN or a22 <= MIN_USABLE_COLUMN:
-        return None
-    if a12 * a12 >= MAX_COLLINEARITY * a11 * a22:
-        return None
-    b1 = sum(target(p) * col_a(p) for p in points)
-    b2 = sum(target(p) * col_b(p) for p in points)
-    det = a11 * a22 - a12 * a12
-    return (b1 * a22 - b2 * a12) / det, (b2 * a11 - b1 * a12) / det
 
 
 def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: list[Measurement]) -> CellFit:
@@ -360,26 +325,47 @@ def column_gate(x_idx: float, x_mla: float) -> tuple:
     return (abs(x_idx) >= MIN_ABS_DELTA_IDX_M * 1e6, abs(x_mla) >= MIN_ABS_DELTA_MLA_M * 1e6)
 
 
-def predict_delta(x_idx: float, x_mla: float, fit: CellFit, noise: float = 0.0) -> float:
+def predict_delta(x_idx: float, x_mla: float, prices: Prices, noise: float = 0.0) -> float:
     """Latency to add for a batch with these column deviations.
 
-    Two gates, in order, and both are all-or-nothing: a partial correction
-    leaves the surviving column to explain the whole delta and overshoots
-    (measured max error 87.6% -> 207.8%, worse than not correcting at all).
+    ``prices`` is anything carrying ``c_idx`` and ``c_mla`` -- a `CellFit` from
+    the batch's own cell, or the pair `CoefficientField` carried in from
+    neighbouring batch sizes. Both go through the same gates here rather than
+    each re-deriving them, so an interpolated correction is held to what a
+    calibrated one is.
 
-    1. A price is the marginal cost of one more unit of that kernel's work and
+    Three gates, in order, and all-or-nothing: a partial correction leaves the
+    surviving column to explain the whole delta and overshoots (measured max
+    error 87.6% -> 207.8%, worse than not correcting at all).
+
+    1. An unpriced column must be carrying no work. A price comes back ``None``
+       when the cell's segments could not identify it, and the usual reason is
+       that the column is identically zero throughout the cell -- a purely
+       unsaturated cell prices nothing for crossing ``topk`` because none of
+       its batches can cross it. There the missing price multiplies zero and
+       the correction is complete as it stands. What is not allowed is the
+       other case: an unpriced column that does move work, where dropping it
+       silently leaves the priced column to explain that work too. The
+       threshold is the one from gate 3, so a column too small to be worth
+       pricing is also too small to block on.
+    2. A price is the marginal cost of one more unit of that column's work and
        cannot be below zero -- doing more does not take less time. A negative
        one means the fit is not describing the hardware, usually a mismeasured
        uniform batch, which is the subtrahend of every label in the cell.
-    2. Each column must move enough work to be worth pricing, and the resulting
+    3. Some column must move enough work to be worth pricing, and the resulting
        milliseconds must clear the step's own jitter when the caller knows it.
     """
-    for price in (fit.c_idx, fit.c_mla):
-        if price is not None and price < 0.0:
+    c_idx, c_mla = prices.c_idx, prices.c_mla
+    moves = column_gate(x_idx, x_mla)
+    for price, column_moves in zip((c_idx, c_mla), moves, strict=True):
+        if price is None:
+            if column_moves:
+                return 0.0
+        elif price < 0.0:
             return 0.0
-    if not any(column_gate(x_idx, x_mla)):
+    if not any(moves):
         return 0.0
-    delta = (fit.c_idx or 0.0) * x_idx + (fit.c_mla or 0.0) * x_mla
+    delta = (c_idx or 0.0) * x_idx + (c_mla or 0.0) * x_mla
     if noise > 0.0 and abs(delta) < MIN_LABEL_SNR * noise:
         return 0.0
     return delta

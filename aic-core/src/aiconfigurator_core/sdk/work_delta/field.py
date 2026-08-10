@@ -7,13 +7,19 @@ measured. This module is the bridge, and it is deliberately narrow: a query is
 answered from the cell's own fit, or from two fits that bracket it along the
 batch-size axis, or not at all.
 
-Why only that axis. The three grid axes are not interchangeable. Moving along
-``b`` holds ``avg_s + avg_p``, so every request keeps its kernel path and only
-the parallelism changes -- ``c_idx`` stays inside 0.943-0.999 across a fourfold
-span. Moving along ``avg_s`` lets a row cross ``topk``, and ``c_mla`` was measured at
-+6.0e-06 at one average point and -4.1e-06 at another. Carrying a value across
-that axis does not produce a worse estimate, it produces one with the wrong
-sign.
+Why only that axis, and the reason is structural rather than statistical.
+Moving along ``b`` holds ``avg_s + avg_p``, so every request keeps its kernel
+path and the cell goes on expressing the same regimes -- the two ends are
+answering the same question, and only the parallelism between them differs.
+Moving along ``avg_s`` lets a row cross ``topk``, so the far end may not even
+express the regime the near end was calibrated in, and blending them averages
+two different questions.
+
+Not a claim that the prices vary less along ``b``. Measured, they do not: at
+``avg_s=4096 avg_p=1024`` ``c_mla`` spans 20.7x across the batch sizes, while
+along ``avg_s`` at fixed ``b`` it spans 1.8-2.4x. Cells run at different MFU and
+a spread in the prices is expected either way. What the batch-size axis buys is
+that the two ends are commensurable, not that they are close.
 
 Why nothing weaker than bracketing. Earlier revisions fell back to single-ended
 extrapolation and then to inverse-distance weighting over the whole field, so
@@ -56,7 +62,7 @@ COLUMNS = ("c_idx", "c_mla")
 
 @dataclass(frozen=True)
 class Interpolated:
-    """A coefficient triple carried to an uncalibrated batch size."""
+    """A price pair carried to an uncalibrated batch size."""
 
     c_idx: float | None
     c_mla: float | None
@@ -119,7 +125,18 @@ class CoefficientField:
                 return None
             return a + (c - a) * weight
 
-        values = {name: blend(name) for name in COLUMNS}
-        if all(v is None for v in values.values()):
-            return None
+        # A column neither end priced stays unpriced and is carried through as
+        # ``None``: the usual reason both ends failed to identify it is that it
+        # is identically zero across this average point, and `predict_delta`
+        # checks that before applying anything. A column only ONE end priced is
+        # a different thing -- there is a real price at one size and nothing to
+        # blend it against, so the query is declined rather than answered by
+        # extrapolating a single end, which is where every measured regression
+        # came from.
+        values = {}
+        for name in COLUMNS:
+            a, c = getattr(lo, name), getattr(hi, name)
+            if (a is None) != (c is None):
+                return None
+            values[name] = blend(name)
         return Interpolated(values["c_idx"], values["c_mla"], f"b={b_lo}->{b_hi}")
