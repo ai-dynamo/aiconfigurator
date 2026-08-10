@@ -251,53 +251,51 @@ impl StateSpaceTable {
         // Mirror Python `_query_gdn_table`: exact geometry (or an exact
         // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
         // the operator degrades to SOL.
+        //
+        // The framework's own persisted physical kernels (vLLM 0.24 names its
+        // context scan chunk_gated_delta_rule_*) take precedence: after the
+        // shared-layer merge the logical lane can hold cross-backend donor
+        // rows, which only serve as gap fill when no own physical lane covers
+        // the shape. Ambiguous physical data fails closed.
+        let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+            match (key.kernel_source.as_str(), key.phase.as_str()) {
+                ("chunk_gated_delta_rule", "context") => &[
+                    "chunk_gated_delta_rule_flashinfer",
+                    "chunk_gated_delta_rule_triton",
+                    "chunk_gated_delta_rule_cutedsl",
+                ],
+                ("fused_sigmoid_gating_delta_rule_update", "generation") => {
+                    &["fused_recurrent_gated_delta_rule_packed_decode"]
+                }
+                _ => &[],
+            }
+        } else {
+            &[]
+        };
+        let alias_matches: Vec<_> = aliases
+            .iter()
+            .filter_map(|alias| {
+                let mut alias_key = key.clone();
+                alias_key.kernel_source = (*alias).to_string();
+                grids.by_keys.get_key_value(&alias_key)
+            })
+            .collect();
+        if alias_matches.len() > 1 {
+            let sources: Vec<_> = alias_matches
+                .iter()
+                .map(|(alias_key, _)| alias_key.kernel_source.as_str())
+                .collect();
+            return Err(AicError::PerfDatabase(format!(
+                "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                sources.join(", ")
+            )));
+        }
+        if let Some((_, node)) = alias_matches.first() {
+            return engine_query(node, phase, batch_size, seq_len, sol);
+        }
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
-            None => {
-                // vLLM 0.24 persists the selected physical recurrence
-                // implementation, while model operators retain stable logical
-                // kernel names. Resolve a physical source only for an exact
-                // model shape. Exact logical data always wins, and ambiguous
-                // physical data fails closed.
-                let aliases: &[&str] = if self.vllm_024_gdn_aliases {
-                    match (key.kernel_source.as_str(), key.phase.as_str()) {
-                        ("chunk_gated_delta_rule", "context") => &[
-                            "chunk_gated_delta_rule_flashinfer",
-                            "chunk_gated_delta_rule_triton",
-                            "chunk_gated_delta_rule_cutedsl",
-                        ],
-                        ("fused_sigmoid_gating_delta_rule_update", "generation") => {
-                            &["fused_recurrent_gated_delta_rule_packed_decode"]
-                        }
-                        _ => &[],
-                    }
-                } else {
-                    &[]
-                };
-                let alias_matches: Vec<_> = aliases
-                    .iter()
-                    .filter_map(|alias| {
-                        let mut alias_key = key.clone();
-                        alias_key.kernel_source = (*alias).to_string();
-                        grids.by_keys.get_key_value(&alias_key)
-                    })
-                    .collect();
-                if alias_matches.len() > 1 {
-                    let sources: Vec<_> = alias_matches
-                        .iter()
-                        .map(|(alias_key, _)| alias_key.kernel_source.as_str())
-                        .collect();
-                    return Err(AicError::PerfDatabase(format!(
-                        "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
-                        sources.join(", ")
-                    )));
-                }
-                if let Some((_, node)) = alias_matches.first() {
-                    return engine_query(node, phase, batch_size, seq_len, sol);
-                }
-
-                return Err(missing("GDN", &self.data_root, format!("{key:?}")));
-            }
+            None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
         };
         engine_query(node, phase, batch_size, seq_len, sol)
     }
@@ -843,7 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_exact_logical_key_wins_over_alias() {
+    fn vllm_024_gdn_own_physical_lane_wins_over_logical_lane() {
+        // The logical lane can hold cross-backend donor rows after the
+        // shared-layer merge; the own physical lane must beat it.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -854,7 +854,7 @@ mod tests {
         );
         assert_eq!(
             query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            1.0
+            2.0
         );
     }
 
@@ -872,10 +872,12 @@ mod tests {
 
     #[test]
     fn vllm_024_gdn_ambiguous_exact_aliases_error() {
+        // The logical-lane row must not mask the ambiguity between physical lanes.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
             &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
                 ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
                 ("chunk_gated_delta_rule_triton", "context", 48, 3.0),
             ],

@@ -424,37 +424,44 @@ class GDNKernel(Operation):
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        try:
-            by_key = gdn_data[kernel_source][phase]
-        except KeyError:
-            by_key = {}
-        if model_key not in by_key:
-            alias_sources = ()
-            if database.backend == "vllm" and database.version == "0.24.0":
-                if phase == "context" and kernel_source == "chunk_gated_delta_rule":
-                    alias_sources = (
-                        "chunk_gated_delta_rule_flashinfer",
-                        "chunk_gated_delta_rule_triton",
-                        "chunk_gated_delta_rule_cutedsl",
-                    )
-                elif phase == "generation" and kernel_source == "fused_sigmoid_gating_delta_rule_update":
-                    alias_sources = ("fused_recurrent_gated_delta_rule_packed_decode",)
+        # The framework's own persisted physical kernels (vLLM 0.24 names its
+        # context scan chunk_gated_delta_rule_*) take precedence: after the
+        # shared-layer merge the logical lane can hold cross-backend donor
+        # rows, which only serve as gap fill when no own physical lane covers
+        # the shape.
+        alias_sources = ()
+        if database.backend == "vllm" and database.version == "0.24.0":
+            if phase == "context" and kernel_source == "chunk_gated_delta_rule":
+                alias_sources = (
+                    "chunk_gated_delta_rule_flashinfer",
+                    "chunk_gated_delta_rule_triton",
+                    "chunk_gated_delta_rule_cutedsl",
+                )
+            elif phase == "generation" and kernel_source == "fused_sigmoid_gating_delta_rule_update":
+                alias_sources = ("fused_recurrent_gated_delta_rule_packed_decode",)
 
-            exact_aliases = []
-            for alias_source in alias_sources:
-                try:
-                    alias_by_key = gdn_data[alias_source][phase]
-                except KeyError:
-                    continue
-                if model_key in alias_by_key:
-                    exact_aliases.append(alias_by_key)
+        exact_aliases = []
+        for alias_source in alias_sources:
+            try:
+                alias_by_key = gdn_data[alias_source][phase]
+            except KeyError:
+                continue
+            if model_key in alias_by_key:
+                exact_aliases.append(alias_by_key)
 
-            if len(exact_aliases) == 1:
-                by_key = exact_aliases[0]
-            else:
-                # Exact geometry only — ambiguous physical aliases or a genuine
-                # miss degrade to SOL; nearest-shape rows are never returned as
-                # silicon.
+        if len(exact_aliases) == 1:
+            by_key = exact_aliases[0]
+        elif len(exact_aliases) > 1:
+            # Ambiguous physical aliases fail closed.
+            return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
+        else:
+            try:
+                by_key = gdn_data[kernel_source][phase]
+            except KeyError:
+                by_key = {}
+            if model_key not in by_key:
+                # Exact geometry only — a genuine miss degrades to SOL;
+                # nearest-shape rows are never returned as silicon.
                 return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
 
         table = by_key[model_key]

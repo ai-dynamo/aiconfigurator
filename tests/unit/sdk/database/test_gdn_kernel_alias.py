@@ -80,12 +80,13 @@ def test_query_gdn_vllm024_uses_exact_generation_physical_alias(vllm_gdn_db):
     assert result.source == "silicon"
 
 
-def test_query_gdn_exact_logical_shape_wins_over_physical_aliases(vllm_gdn_db):
+def test_query_gdn_own_physical_lane_wins_over_logical_lane(vllm_gdn_db):
+    """The framework's own persisted physical rows beat the logical lane,
+    which after the shared-layer merge can hold cross-backend donor rows."""
     vllm_gdn_db._gdn_data = LoadedOpData(
         {
             "chunk_gated_delta_rule": {"context": {MODEL_KEY: _context_table(2.0)}},
             "chunk_gated_delta_rule_flashinfer": {"context": {MODEL_KEY: _context_table(7.0)}},
-            "chunk_gated_delta_rule_triton": {"context": {MODEL_KEY: _context_table(8.0)}},
         },
         common.PerfDataFilename.gdn,
         "gdn_perf.txt",
@@ -99,13 +100,15 @@ def test_query_gdn_exact_logical_shape_wins_over_physical_aliases(vllm_gdn_db):
         **MODEL_SHAPE,
     )
 
-    assert float(result) == pytest.approx(2.0)
+    assert float(result) == pytest.approx(7.0)
     assert result.source == "silicon"
 
 
 def test_query_gdn_multiple_exact_physical_aliases_fail_closed(vllm_gdn_db):
+    # The logical-lane row must not mask the ambiguity between physical lanes.
     vllm_gdn_db._gdn_data = LoadedOpData(
         {
+            "chunk_gated_delta_rule": {"context": {MODEL_KEY: _context_table(2.0)}},
             "chunk_gated_delta_rule_flashinfer": {"context": {MODEL_KEY: _context_table(7.0)}},
             "chunk_gated_delta_rule_triton": {"context": {MODEL_KEY: _context_table(8.0)}},
         },
