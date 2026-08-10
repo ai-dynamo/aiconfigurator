@@ -15,6 +15,9 @@ import pytest
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
+from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
+from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+from aiconfigurator.sdk.backends.vllm_backend import VLLMBackend
 from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
@@ -1851,3 +1854,18 @@ class TestQwen3VLVisionEncoderParsing:
         cfg = {**_QWEN3VL_HF_CONFIG, "vision_config": vision_cfg}
         result = _parse_hf_config_json(cfg)
         assert result["extra_params"].deepstack_visual_indexes == (8, 17, 26)
+
+
+class TestBackendActivationCoefficients:
+    """Test activation coefficients for model families across backends."""
+
+    def test_muse_glimmer_activation_coefficients_dense_tier(self):
+        """Verify MUSEGLIMMER dense-tier activation coefficients across backends."""
+        trtllm_coefs = TRTLLMBackend.ACTIVATION_COEFFICIENTS
+        sglang_coefs = SGLANGBackend.ACTIVATION_COEFFICIENTS
+        vllm_coefs = VLLMBackend.ACTIVATION_COEFFICIENTS
+
+        assert trtllm_coefs["MUSEGLIMMER"] == trtllm_coefs["LLAMA"]
+        assert sglang_coefs["MUSEGLIMMER"] == sglang_coefs["LLAMA"]
+        assert vllm_coefs["MUSEGLIMMER"] == trtllm_coefs["MUSEGLIMMER"]
+        assert "MUSEGLIMMER" not in BaseBackend.MOE_WORKSPACE_FAMILIES

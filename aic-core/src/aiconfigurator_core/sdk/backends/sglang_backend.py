@@ -72,6 +72,7 @@ class SGLANGBackend(BaseBackend):
     ACTIVATION_COEFFICIENTS: ClassVar[dict[str, dict[int, float]]] = {
         "GPT": {1: 13, 2: 8, 4: 6.5, 8: 6.5},
         "LLAMA": {1: 14, 2: 8.5, 4: 6.5, 8: 6.5},
+        "MUSEGLIMMER": {1: 14, 2: 8.5, 4: 6.5, 8: 6.5},
         "MOE": {1: 28, 2: 17, 4: 13, 8: 13},
         "GEMMA4MIX": {1: 28, 2: 17, 4: 13, 8: 13},
         "DEEPSEEK": {1: 28, 2: 17, 4: 13, 8: 13},
