@@ -603,6 +603,8 @@ DefaultHFModels = {
     "nvidia/Nemotron-H-56B-Base-8K",
     # Google Gemma 4 Models
     "google/gemma-4-26B-A4B",
+    # Meta Muse Glimmer
+    "meta-models/Muse-Glimmer-30B",
 }
 
 """

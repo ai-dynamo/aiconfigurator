@@ -1075,6 +1075,15 @@ class TestMuseGlimmerModelBuilder:
         with pytest.raises(ValueError, match="layer_types length"):
             MuseGlimmerModel.create(model_info, self._make_model_config(tp_size=1), "sglang")
 
+    def test_get_model_muse_glimmer_end_to_end(self):
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model = get_model("meta-models/Muse-Glimmer-30B", self._make_model_config(tp_size=1), "sglang")
+        assert isinstance(model, MuseGlimmerModel)
+        counts = model._count_layer_types()
+        assert counts == {"swa": 39, "global": 13}
+
 
 class TestHybridMoEModelBuilder:
     """Builder-level tests that verify HybridMoEModel wiring through set_hybrid_config."""
