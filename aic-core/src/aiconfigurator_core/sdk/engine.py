@@ -669,6 +669,16 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
                 "FPMForwardOp with an injected sol_fn cannot compile to an EngineSpec; "
                 "build the model through get_model (sol_ops) instead."
             )
+        # The wire carries no backend-policy identity: the compiled engine
+        # pins cells to baseline/baseline_auto, so only requests that derive
+        # that identity may compile. Anything else falls back to the Python
+        # step, whose query reports the data miss (sweeps skip the point).
+        if op._requested_policy != ("baseline", "baseline_auto"):
+            raise OpConversionError(
+                f"FPMForwardOp backend-policy identity {op._requested_policy!r} "
+                f"(fields {op._policy_fields!r}) is not representable in the EngineSpec wire; "
+                "the compiled engine answers only the baseline_auto policy."
+            )
         return {
             "FpmForward": {
                 "name": op._name,

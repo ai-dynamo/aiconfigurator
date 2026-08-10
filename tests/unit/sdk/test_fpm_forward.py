@@ -242,20 +242,59 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
 
-    def test_model_path_unique_fallback(self, fake_db):
-        # Op's model path differs from the collected one, but the identity
-        # match is unique -> D1 fallback selects it.
-        result = _make_op("decode", model_path="local/checkout/of/model").query(fake_db(), batch_size=2, s=1024)
-        assert float(result) == pytest.approx(8.0)
+    def test_model_path_mismatch_never_falls_back(self, fake_db):
+        # The identity match is unique, but the identity carries no model
+        # fingerprint: borrowing the sole collected path would silently
+        # answer for a different model (D1 resolved to exact-only).
+        with pytest.raises(PerfDataNotAvailableError, match="never substitutes"):
+            _make_op("decode", model_path="local/checkout/of/model").query(fake_db(), batch_size=2, s=1024)
 
-    def test_ambiguous_model_path_raises(self, fake_db):
+    def test_exact_model_path_selects_among_collected(self, fake_db):
         rows = _default_rows() + [_row("decode", 2, 0, 2048, 9.0, model_path="other-org/other-model")]
         db = fake_db(rows)
-        with pytest.raises(PerfDataNotAvailableError, match="Ambiguous"):
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode", model_path="unrelated/path").query(db, batch_size=2, s=1024)
-        # An exact model_path still disambiguates.
         result = _make_op("decode", model_path="other-org/other-model").query(db, batch_size=2, s=1024)
         assert float(result) == pytest.approx(9.0)
+
+    def test_foreign_backend_policy_cell_not_matched(self, fake_db):
+        # A cell collected under a non-baseline policy must not answer a
+        # baseline request even when path and identity match.
+        rows = _default_rows()
+        for row in rows:
+            row["backend_policy"] = "wideep_v1"
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
+            _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
+            {"enable_eplb": True},
+            {"moe_backend": "megamoe"},
+            {"attention_backend": "fa3"},
+        ],
+    )
+    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
+        # The collector admits no policy for these field combinations, so the
+        # request's identity cannot exist in collected data: the query must
+        # fail as a data miss (sweeps skip the point) — never silently ride
+        # on baseline_auto curves.
+        op = _make_op("decode", model_config=_model_config(**overrides))
+        with pytest.raises(PerfDataNotAvailableError, match="backend fields"):
+            op.query(fake_db(), batch_size=2, s=1024)
+
+    def test_off_baseline_op_never_compiles_to_engine_spec(self):
+        # The EngineSpec wire carries no policy identity and the compiled
+        # engine pins baseline_auto, so an off-baseline op must refuse
+        # conversion (RustEngineUnsupportedError fallback lands on the Python
+        # step, whose query reports the data miss).
+        from aiconfigurator_core.sdk.engine import OpConversionError, _to_opspec
+
+        cfg = _model_config(enable_wideep=True, moe_tp_size=1, moe_ep_size=1)
+        op = FPMForwardOp("decode", cfg, MODEL_PATH, sol_ops=[], weight_bytes=1.0)
+        with pytest.raises(OpConversionError, match="backend-policy identity"):
+            _to_opspec(op, backend="vllm", architecture="test", database=None)
 
     def test_dp_identity_uses_local_batch(self, fake_db):
         rows = [

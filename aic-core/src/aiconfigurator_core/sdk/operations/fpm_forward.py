@@ -56,6 +56,36 @@ FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
 _PHASES = ("prefill", "decode")
 _SUPPORTED_BACKEND_AXIS = "baseline"
 
+
+def _requested_backend_policy(model_config) -> tuple[tuple[str, str] | None, dict]:
+    """Map the config's backend-policy fields to the collector's
+    ``(backend_axis, backend_policy)`` cell identity.
+
+    This mirrors the collector's admission table (fpm_forward/planner.py):
+    each admitted policy declares the AIC config fields it is valid for
+    (``aic_fields``). Today exactly one policy exists — ``baseline_auto``,
+    the AIC automatic baseline (no wideep/eplb, automatic MoE/attention
+    backends). A field combination with no admitted policy returns ``None``
+    plus the fields, and the query fails as a data miss: the request has an
+    identity the collected data cannot represent. Growing a real policy axis
+    on the collector side extends this table in the same change.
+    """
+    fields = {
+        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
+        "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
+        "moe_backend": getattr(model_config, "moe_backend", None) or None,
+        "attention_backend": getattr(model_config, "attention_backend", None) or None,
+    }
+    if (
+        not fields["enable_wideep"]
+        and not fields["enable_eplb"]
+        and fields["moe_backend"] is None
+        and fields["attention_backend"] in (None, "flashinfer")
+    ):
+        return (_SUPPORTED_BACKEND_AXIS, "baseline_auto"), fields
+    return None, fields
+
+
 # Identity columns that select a cell, in row-column order. ``model_path`` is
 # handled separately (see FPMForwardOp._select_cell); ``weight_quantization``
 # is redundant with ``gemm_quant_mode`` (the collector falls one back to the
@@ -458,6 +488,7 @@ class FPMForwardOp(Operation):
             _norm_identity(model_config.moe_ep_size if model_config.moe_ep_size is not None else 1),
             _norm_identity(model_config.cp_size),
         )
+        self._requested_policy, self._policy_fields = _requested_backend_policy(model_config)
         self._sol_ops = list(sol_ops) if sol_ops is not None else None
         self._interp_configs: dict[tuple, OpInterpConfig] = {}
         if sol_fn is not None:
@@ -514,36 +545,46 @@ class FPMForwardOp(Operation):
         perf_interp.clear_caches()
 
     # ------------------------------------------------------------------
-    # Cell selection (open decision D1: exact model_path, else unique fallback)
+    # Cell selection (decision D1 resolved: exact model_path only — the
+    # match identity carries no architecture fingerprint, so borrowing the
+    # sole collected path could silently answer for a different model)
     # ------------------------------------------------------------------
 
     def _select_cell(self, cells: dict) -> dict:
+        if self._requested_policy is None:
+            collected = sorted({(cell["backend_axis"], cell["backend_policy"]) for cell in cells.values()})
+            raise PerfDataNotAvailableError(
+                f"No collected FPM backend policy matches this config's backend fields: "
+                f"{self._policy_fields}. The collector admits no policy for this combination "
+                f"(collected policies: {collected}); FPM answers only from collected identities."
+            )
+        axis, policy = self._requested_policy
         matches = [
             cell
             for cell in cells.values()
-            if cell["match_identity"] == self._match_identity and cell["backend_axis"] == _SUPPORTED_BACKEND_AXIS
+            if cell["match_identity"] == self._match_identity
+            and cell["backend_axis"] == axis
+            and cell["backend_policy"] == policy
+            and cell["model_path"] == self._model_path
         ]
         if not matches:
-            available = sorted({(cell["model_path"], *cell["match_identity"]) for cell in cells.values()})
-            raise PerfDataNotAvailableError(
-                f"No FPM cell matches this model identity: "
-                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))}. "
-                f"Collected cell identities (model_path first): {available[:8]}"
+            available = sorted(
+                {(cell["model_path"], cell["backend_policy"], *cell["match_identity"]) for cell in cells.values()}
             )
-        exact = [cell for cell in matches if cell["model_path"] == self._model_path]
-        if exact:
-            matches = exact
-        distinct_paths = sorted({cell["model_path"] for cell in matches})
-        if len(distinct_paths) > 1:
             raise PerfDataNotAvailableError(
-                f"Ambiguous FPM cell selection: model_path={self._model_path!r} matched none exactly and "
-                f"multiple collected model paths share this identity: {distinct_paths}. "
-                "Collect/promote data under the exact model path, or query with the matching path."
+                f"No FPM cell matches model_path={self._model_path!r} with identity "
+                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))} under the "
+                f"{axis}/{policy} backend policy. FPM never "
+                "substitutes another model's curves; collect data under this exact model path or "
+                f"query with the collected path. Collected cells (model_path, backend_policy, identity): "
+                f"{available[:8]}"
             )
         if len(matches) > 1:
+            # Unreachable through the loader (cells are keyed by exactly these
+            # fields) but kept as a hard guard against future key widening.
             raise PerfDataNotAvailableError(
-                f"Ambiguous FPM cell selection: multiple backend policies for model_path={distinct_paths[0]!r}: "
-                f"{sorted(cell['backend_policy'] for cell in matches)}"
+                f"Ambiguous FPM cell selection for model_path={self._model_path!r}: "
+                f"{len(matches)} cells share this identity and backend policy."
             )
         return matches[0]
 

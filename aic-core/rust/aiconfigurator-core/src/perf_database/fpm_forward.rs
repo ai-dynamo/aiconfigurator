@@ -50,6 +50,12 @@ pub const FPM_FORWARD_SCHEMA_VERSION: u64 = 5;
 pub const FPM_FORWARD_COORDINATE_SYSTEM: &str = "iteration_totals_balanced_v1";
 pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
 pub const FPM_FORWARD_SUPPORTED_BACKEND_AXIS: &str = "baseline";
+/// The only policy the collector admits today. The Python spec builder
+/// refuses to compile FPM ops whose derived policy identity differs
+/// (OpConversionError -> Python-step fallback), so every request reaching
+/// this table is a baseline_auto request by construction; the pin below
+/// keeps foreign-policy cells from answering it.
+pub const FPM_FORWARD_SUPPORTED_BACKEND_POLICY: &str = "baseline_auto";
 
 /// Identity columns that select a cell, in row-column order (`model_path` is
 /// handled separately; `weight_quantization` is deliberately excluded).
@@ -146,25 +152,35 @@ impl FpmForwardTable {
     }
 
     /// Cell selection, mirroring Python `FPMForwardOp._select_cell` exactly:
-    /// identity + `backend_axis == "baseline"` filter, exact-`model_path`
-    /// preference, then the two ambiguity errors in order.
+    /// strict equality on identity, backend axis/policy, and `model_path`
+    /// (no fallback), then a hard ambiguity guard.
     pub fn select_cell(
         &self,
         match_identity: &[String],
         model_path: &str,
     ) -> Result<&FpmForwardCell, AicError> {
         let cells = self.cells()?;
+        // Exact matching on every identity dimension (D1 resolved: the match
+        // identity carries no architecture fingerprint, so borrowing the sole
+        // collected model_path could silently answer for a different model).
         let matches: Vec<&FpmForwardCell> = cells
             .iter()
             .filter(|cell| {
                 cell.match_identity == match_identity
                     && cell.backend_axis == FPM_FORWARD_SUPPORTED_BACKEND_AXIS
+                    && cell.backend_policy == FPM_FORWARD_SUPPORTED_BACKEND_POLICY
+                    && cell.model_path == model_path
             })
             .collect();
         if matches.is_empty() {
             let mut available: Vec<String> = cells
                 .iter()
-                .map(|cell| format!("({:?}, {:?})", cell.model_path, cell.match_identity))
+                .map(|cell| {
+                    format!(
+                        "({:?}, {:?}, {:?})",
+                        cell.model_path, cell.backend_policy, cell.match_identity
+                    )
+                })
                 .collect();
             available.sort();
             available.dedup();
@@ -175,39 +191,22 @@ impl FpmForwardTable {
                 .map(|(c, v)| format!("{c}={v:?}"))
                 .collect();
             return Err(structural(format!(
-                "No FPM cell matches this model identity: {{{}}}. \
-                 Collected cell identities (model_path first): [{}]",
+                "No FPM cell matches model_path={model_path:?} with identity {{{}}} under the \
+                 {FPM_FORWARD_SUPPORTED_BACKEND_AXIS}/{FPM_FORWARD_SUPPORTED_BACKEND_POLICY} \
+                 backend policy. FPM never substitutes another model's curves; collect data \
+                 under this exact model path or query with the collected path. Collected cells \
+                 (model_path, backend_policy, identity): [{}]",
                 identity.join(", "),
                 available.join(", ")
             )));
         }
-        let exact: Vec<&FpmForwardCell> = matches
-            .iter()
-            .copied()
-            .filter(|cell| cell.model_path == model_path)
-            .collect();
-        let matches = if exact.is_empty() { matches } else { exact };
-        let mut distinct_paths: Vec<&str> =
-            matches.iter().map(|cell| cell.model_path.as_str()).collect();
-        distinct_paths.sort_unstable();
-        distinct_paths.dedup();
-        if distinct_paths.len() > 1 {
-            return Err(structural(format!(
-                "Ambiguous FPM cell selection: model_path={model_path:?} matched none exactly and \
-                 multiple collected model paths share this identity: {distinct_paths:?}. \
-                 Collect/promote data under the exact model path, or query with the matching path."
-            )));
-        }
         if matches.len() > 1 {
-            let mut policies: Vec<&str> = matches
-                .iter()
-                .map(|cell| cell.backend_policy.as_str())
-                .collect();
-            policies.sort_unstable();
+            // Unreachable through the loader (cells are keyed by exactly
+            // these fields) but kept as a hard guard against key widening.
             return Err(structural(format!(
-                "Ambiguous FPM cell selection: multiple backend policies for \
-                 model_path={:?}: {policies:?}",
-                distinct_paths[0]
+                "Ambiguous FPM cell selection for model_path={model_path:?}: {} cells share \
+                 this identity and backend policy.",
+                matches.len()
             )));
         }
         Ok(matches[0])
@@ -1134,7 +1133,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn select_cell_prefers_exact_model_path_and_reports_ambiguity() {
+    fn select_cell_requires_exact_model_path() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let mut rows = default_rows();
         for row in default_rows() {
@@ -1148,15 +1147,46 @@ pub(crate) mod tests {
         let table = loaded_table(tmp.path());
         let identity = default_identity(4);
 
-        // Exact path wins.
+        // Exact path selects its own cell.
         let cell = table.select_cell(&identity, "org/model-a").expect("select");
         assert_eq!(cell.model_path, "org/model-a");
-        // Unknown path with two candidates: the multi-path ambiguity error.
+        // Unknown path: never borrows a collected cell (D1 exact-only).
         let err = table.select_cell(&identity, "org/other").unwrap_err();
-        assert!(err.to_string().contains("Ambiguous FPM cell selection"), "{err}");
+        assert!(err.to_string().contains("never substitutes"), "{err}");
         // Unknown identity: the no-match error listing what was collected.
         let err = table
             .select_cell(&default_identity(8), "org/model-a")
+            .unwrap_err();
+        assert!(err.to_string().contains("No FPM cell matches"), "{err}");
+    }
+
+    #[test]
+    fn select_cell_with_sole_foreign_path_is_a_miss() {
+        // A database collected for exactly one model must not answer any
+        // other model's request even when the quant/parallel identity matches.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &default_rows());
+        let err = loaded_table(tmp.path())
+            .select_cell(&default_identity(4), "some/other-model")
+            .unwrap_err();
+        assert!(err.to_string().contains("never substitutes"), "{err}");
+    }
+
+    #[test]
+    fn non_baseline_backend_policy_never_matches() {
+        // Foreign-policy cells (same path + identity) must not answer a
+        // baseline_auto request.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let rows: Vec<RowSpec> = default_rows()
+            .into_iter()
+            .map(|r| RowSpec {
+                backend_policy: "wideep_v1",
+                ..r
+            })
+            .collect();
+        write_pair(tmp.path(), &rows);
+        let err = loaded_table(tmp.path())
+            .select_cell(&default_identity(4), "org/model-a")
             .unwrap_err();
         assert!(err.to_string().contains("No FPM cell matches"), "{err}");
     }
