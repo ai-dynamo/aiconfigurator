@@ -115,7 +115,10 @@ per-operating-point summary (sweep with a loose TTFT target) and it
 re-picks each deployment's best surviving row.
 
 For full in-pipeline enforcement, `Task(refined_sla=True)` (default off)
-makes the sweep itself compare the targets against the refined values:
+makes the sweep itself compare the targets against the refined values,
+and the single-point estimates (`run_single_agg`/`run_single_disagg`)
+report the closed-loop repriced headline instead of the static/legacy
+value:
 agg candidate points gate on the solo chunked-prefill lower bound (the
 static TTFT is NOT a bound — deep saturation moves cycle time into TPOT,
 so gating on it would discard compliant points) and are then priced;
