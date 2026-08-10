@@ -219,9 +219,7 @@ def test_abbreviated_ops_spelling_selects_fpm_without_traceback(tmp_path):
     # CI containers run the collector source outside a git checkout; the
     # explicit revision override keeps this a pure CLI-surface test.
     env = {**os.environ, "FPM_COLLECTOR_SOURCE_REVISION": "cli-isolation-test"}
-    completed = subprocess.run(
-        command, cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False, env=env
-    )
+    completed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False, env=env)
 
     assert completed.returncode == 0, completed.stderr
     assert "Traceback" not in completed.stderr
