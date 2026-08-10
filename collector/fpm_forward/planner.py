@@ -107,7 +107,6 @@ def _canonical_mapping(payload: dict[str, Any], *, field_name: str) -> str:
 
 @dataclass(frozen=True, slots=True, init=False)
 class BackendPolicy:
-    axis: str
     policy_id: str
     _generator_overrides_json: str
     _expected_markers_json: str
@@ -116,14 +115,12 @@ class BackendPolicy:
 
     def __init__(
         self,
-        axis: str,
         policy_id: str,
         generator_overrides: dict[str, Any],
         expected_markers: dict[str, str],
         aic_fields: dict[str, object] | None = None,
         admission_reason: str = "",
     ) -> None:
-        object.__setattr__(self, "axis", axis)
         object.__setattr__(self, "policy_id", policy_id)
         object.__setattr__(
             self,
@@ -162,13 +159,35 @@ class BackendPolicy:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "axis": self.axis,
             "policy_id": self.policy_id,
             "generator_overrides": self.generator_overrides,
             "expected_markers": self.expected_markers,
             "aic_fields": self.aic_fields,
             "admission_reason": self.admission_reason,
         }
+
+
+def backend_identity_columns(policy: BackendPolicy) -> dict[str, str]:
+    """The four explicit backend identity columns (schema v6).
+
+    Unspecified knobs record "auto" (the engine decided); specified knobs
+    record the pinned value, with booleans lowered to "true"/"false".
+    """
+    fields = policy.aic_fields
+
+    def _norm(value: object) -> str:
+        if value is None:
+            return "auto"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return {
+        "moe_backend": _norm(fields.get("moe_backend")),
+        "attention_backend": _norm(fields.get("attention_backend")),
+        "enable_wideep": _norm(fields.get("enable_wideep")),
+        "enable_eplb": _norm(fields.get("enable_eplb")),
+    }
 
 
 def _backend_policies(
@@ -185,28 +204,71 @@ def _backend_policies(
             "FpmCollector.backend_variants is no longer an admission mechanism; backend policies must come from "
             "AIC structured capabilities"
         )
-    if "auto" in options.backend_axes and len(options.backend_axes) > 1:
-        raise ValueError("backend axis 'auto' cannot be combined with explicit backend axes")
-    requested = {"baseline"} if options.backend_axes == ("auto",) else set(options.backend_axes)
-    unsupported = requested - {"baseline"}
-    if unsupported:
-        raise ValueError(
-            f"AIC exposes no structured {backend} FPM backend variant for axes {sorted(unsupported)}; "
-            "arbitrary runtime overrides are not treated as modeled support"
+    moe = options.moe_backend
+    attention = options.attention_backend
+    wideep = options.enable_wideep
+    eplb = options.enable_eplb
+    specified = {
+        name: value
+        for name, value in (
+            ("moe_backend", moe),
+            ("attention_backend", attention),
+            ("enable_wideep", wideep),
+            ("enable_eplb", eplb),
         )
+        if value != "auto"
+    }
+
+    # Fail closed on anything the collector cannot deliver to the engine and
+    # verify: a row claiming a backend the engine never ran is worse than no
+    # row. vLLM plumbing exists for moe_backend (--kernel-config) and eplb
+    # (--enable-eplb); wide-EP is an SGLang concept; pinning the attention
+    # backend has no verified vLLM plumbing yet.
+    if specified and backend != "vllm":
+        raise ValueError(
+            f"explicit FPM backend identity is only plumbed for the vllm backend; got {backend} with "
+            f"{sorted(specified)} specified"
+        )
+    if wideep != "auto":
+        raise ValueError("enable_wideep cannot be pinned for vllm FPM collection (wide-EP is SGLang-only)")
+    if attention != "auto":
+        raise ValueError(
+            "attention_backend pinning has no verified vllm plumbing yet; collect with auto or add the "
+            "engine flag and its resolved-config marker first"
+        )
+
+    extra_cli_args: list[str] = []
+    expected_markers: dict[str, str] = {}
+    if moe != "auto":
+        extra_cli_args += ["--kernel-config", json.dumps({"moe_backend": moe})]
+        expected_markers["config.engine_args.kernel_config.moe_backend"] = moe
+    if eplb != "auto":
+        if eplb == "true":
+            extra_cli_args += ["--enable-eplb"]
+        expected_markers["config.engine_args.enable_eplb"] = "True" if eplb == "true" else "False"
+
+    generator_overrides: dict[str, Any] = (
+        {"params": {"agg": {"extra_cli_args": extra_cli_args}}} if extra_cli_args else {}
+    )
+    policy_id = (
+        "baseline_auto"
+        if not specified
+        else "explicit-" + "-".join(f"{name}={value}" for name, value in sorted(specified.items()))
+    )
     return (
         BackendPolicy(
-            "baseline",
-            "baseline_auto",
-            {},
-            {},
+            policy_id,
+            generator_overrides,
+            expected_markers,
             {
-                "moe_backend": None,
-                "attention_backend": None,
-                "enable_wideep": False,
-                "enable_eplb": False,
+                "moe_backend": None if moe == "auto" else moe,
+                "attention_backend": None if attention == "auto" else attention,
+                "enable_wideep": None if wideep == "auto" else (wideep == "true"),
+                "enable_eplb": None if eplb == "auto" else (eplb == "true"),
             },
-            "AIC automatic baseline for the selected model/backend",
+            "AIC automatic baseline for the selected model/backend"
+            if not specified
+            else "explicitly pinned backend identity",
         ),
     )
 
@@ -337,8 +399,7 @@ def _cell_id(
         "topology": topology.to_dict(),
         "weight_quantization": weight_quantization,
         "kv_cache_dtype": kv_cache_dtype,
-        "backend_axis": policy.axis,
-        "backend_policy": policy.policy_id,
+        **backend_identity_columns(policy),
         "point_source": "dynamo_native_self_benchmark",
     }
     return f"fpm-{_canonical_hash(payload)[:16]}"

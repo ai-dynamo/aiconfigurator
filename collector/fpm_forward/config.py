@@ -20,15 +20,6 @@ VLLM_AUTO_FIT_MAX_MODEL_LEN = -1
 
 PARALLEL_AXES = ("tp", "pp", "dp", "moe_tp", "moe_ep", "cp")
 PARALLEL_PRESETS = ("auto", "tp", "tep", "dep", "pure_tp")
-BACKEND_AXES = (
-    "auto",
-    "baseline",
-    "prefill_attention",
-    "decode_attention",
-    "moe",
-    "tp_communication",
-    "ep_communication",
-)
 
 
 def _positive_int(value: str) -> int:
@@ -187,7 +178,13 @@ class FPMCollectionOptions:
     gpu_counts: tuple[int, ...]
     parallel_presets: tuple[str, ...]
     parallel_axes: tuple[str, ...]
-    backend_axes: tuple[str, ...]
+    # Explicit backend identity knobs (v6): "auto" means the engine decides
+    # and the row records "auto"; any other value must reach the engine and
+    # be verified against resolved-config evidence.
+    moe_backend: str
+    attention_backend: str
+    enable_wideep: str
+    enable_eplb: str
     weight_quantizations: tuple[str, ...]
     kv_cache_dtypes: tuple[str, ...]
     tp_sizes: tuple[int, ...] | None = None
@@ -254,7 +251,10 @@ class FPMCollectionOptions:
             gpu_counts=tuple(counts),
             parallel_presets=requested_presets,
             parallel_axes=requested_axes,
-            backend_axes=tuple(dict.fromkeys(getattr(args, "fpm_backend_axes", None) or ("auto",))),
+            moe_backend=(getattr(args, "fpm_moe_backend", None) or "auto").strip(),
+            attention_backend=(getattr(args, "fpm_attention_backend", None) or "auto").strip(),
+            enable_wideep=(getattr(args, "fpm_enable_wideep", None) or "auto").strip(),
+            enable_eplb=(getattr(args, "fpm_enable_eplb", None) or "auto").strip(),
             weight_quantizations=tuple(
                 dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
             ),
@@ -283,7 +283,10 @@ class FPMCollectionOptions:
             "gpu_counts": list(self.gpu_counts),
             "parallel_presets": list(self.parallel_presets),
             "parallel_axes": list(self.parallel_axes),
-            "backend_axes": list(self.backend_axes),
+            "moe_backend": self.moe_backend,
+            "attention_backend": self.attention_backend,
+            "enable_wideep": self.enable_wideep,
+            "enable_eplb": self.enable_eplb,
             "weight_quantizations": list(self.weight_quantizations),
             "kv_cache_dtypes": list(self.kv_cache_dtypes),
             "tp_sizes": list(self.tp_sizes) if self.tp_sizes is not None else None,
@@ -336,11 +339,26 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         help="Deprecated compatibility filter; use --fpm-parallel-presets for new campaigns.",
     )
     group.add_argument(
-        "--fpm-backend-axes",
-        nargs="+",
-        choices=BACKEND_AXES,
+        "--fpm-moe-backend",
         default=None,
-        help="Baseline and one-axis-at-a-time backend policies to collect.",
+        help="Engine MoE backend to pin (e.g. flashinfer_cutlass); default auto lets the engine decide.",
+    )
+    group.add_argument(
+        "--fpm-attention-backend",
+        default=None,
+        help="Engine attention backend to pin; default auto lets the engine decide.",
+    )
+    group.add_argument(
+        "--fpm-enable-wideep",
+        choices=("auto", "true", "false"),
+        default=None,
+        help="Pin wide-EP on or off; default auto records the engine default.",
+    )
+    group.add_argument(
+        "--fpm-enable-eplb",
+        choices=("auto", "true", "false"),
+        default=None,
+        help="Pin expert-parallel load balancing on or off; default auto records the engine default.",
     )
     group.add_argument(
         "--fpm-weight-quantizations",
@@ -496,7 +514,10 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_cp_sizes",
         "fpm_parallel_axes",
         "fpm_parallel_presets",
-        "fpm_backend_axes",
+        "fpm_moe_backend",
+        "fpm_attention_backend",
+        "fpm_enable_wideep",
+        "fpm_enable_eplb",
         "fpm_warmup_iterations",
         "fpm_max_prefill_isl",
         "fpm_max_prefill_batch_size",

@@ -18,7 +18,12 @@ from collector.fpm_forward.config import FPMCollectionOptions, PrefillSamplingPr
 from collector.fpm_forward.database import aggregate_cell, write_formal_database
 from collector.fpm_forward.memory_admission import filter_memory_infeasible_topologies
 from collector.fpm_forward.model_capability import load_model_config
-from collector.fpm_forward.planner import BackendPolicy, FPMCell, build_collection_plan
+from collector.fpm_forward.planner import (
+    BackendPolicy,
+    FPMCell,
+    backend_identity_columns,
+    build_collection_plan,
+)
 from collector.fpm_forward.topology import enumerate_fpm_topologies
 from collector.fpm_forward.types import ParallelTopology
 
@@ -66,7 +71,10 @@ def _args(**overrides):
         "fpm_gpu_counts": [4],
         "fpm_parallel_presets": None,
         "fpm_parallel_axes": None,
-        "fpm_backend_axes": None,
+        "fpm_moe_backend": None,
+        "fpm_attention_backend": None,
+        "fpm_enable_wideep": None,
+        "fpm_enable_eplb": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
         "fpm_model_config": None,
@@ -237,7 +245,7 @@ def test_plan_contains_only_cell_matrix_and_native_point_contract():
 
 def test_backend_policy_is_deeply_immutable():
     source = {"nested": {"values": [1, 2]}}
-    policy = BackendPolicy("baseline", "baseline", source, {"runtime.mode": "FULL"})
+    policy = BackendPolicy("baseline", source, {"runtime.mode": "FULL"})
     original = policy.to_dict()
 
     source["nested"]["values"].append(3)
@@ -902,7 +910,7 @@ def _synthetic_plan_and_cell(tmp_path):
         topology=topology,
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
+        backend_policy=BackendPolicy("baseline_auto", {}, {}),
         parallel_strategy="dep",
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
@@ -1085,7 +1093,7 @@ def test_native_validation_rejects_sub_batch_token_totals(tmp_path):
         _expected_scheduled(decode_point)
 
 
-def test_formal_database_uses_schema_v5_and_rejects_conflicts(tmp_path):
+def test_formal_database_uses_schema_v6_and_rejects_conflicts(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
     rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
     parquet, metadata = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
@@ -1093,7 +1101,7 @@ def test_formal_database_uses_schema_v5_and_rejects_conflicts(tmp_path):
 
     assert parquet.exists()
     metadata_payload = json.loads(metadata.read_text())
-    assert metadata_payload["schema_version"] == 5
+    assert metadata_payload["schema_version"] == 6
     assert metadata_payload["coordinate_system"] == "iteration_totals_balanced_v1"
     assert metadata_payload["backend_version"] == "0.24.0"
     assert metadata_payload["collector_attempt_ids"] == ["attempt"]
@@ -1355,7 +1363,7 @@ def _args_cell(workload_kind: str) -> FPMCell:
         topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
+        backend_policy=BackendPolicy("baseline_auto", {}, {}),
         parallel_strategy="tep",
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
@@ -1432,7 +1440,7 @@ def _decode_cell_with_coordinate_collision(tmp_path, *, clamp_first):
         topology=topology,
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline_auto", {}, {}),
+        backend_policy=BackendPolicy("baseline_auto", {}, {}),
         parallel_strategy="single",
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
@@ -1557,3 +1565,89 @@ def test_native_aggregation_rejects_native_coordinate_collision(tmp_path):
 
     with pytest.raises(ValueError, match="unclamped samples share one key"):
         aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+
+def test_backend_identity_defaults_record_auto_everywhere():
+    """v6: unspecified knobs record "auto" (engine decided), plumb nothing."""
+
+    options = FPMCollectionOptions.from_args(_args())
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module"},
+        options=options,
+        generator_overrides={},
+    )
+    policy = plan.cells[0].backend_policy
+    assert backend_identity_columns(policy) == {
+        "moe_backend": "auto",
+        "attention_backend": "auto",
+        "enable_wideep": "auto",
+        "enable_eplb": "auto",
+    }
+    assert policy.policy_id == "baseline_auto"
+    assert policy.generator_overrides == {}
+    assert policy.expected_markers == {}
+
+
+def test_pinned_moe_backend_plumbs_kernel_config_and_moves_cell_identity():
+    """v6: a pinned value must reach the engine (kernel-config), demand
+    resolved-config evidence, land in the row columns, and change cell ids."""
+
+    kwargs = {
+        "backend": "vllm",
+        "model_path": "nvidia/GLM-5.2-NVFP4",
+        "system": "b200_sxm",
+        "selected_ops": {"dsa_context_module"},
+        "generator_overrides": {},
+    }
+    auto_plan = build_collection_plan(**kwargs, options=FPMCollectionOptions.from_args(_args()))
+    pinned_plan = build_collection_plan(
+        **kwargs, options=FPMCollectionOptions.from_args(_args(fpm_moe_backend="flashinfer_cutlass"))
+    )
+
+    policy = pinned_plan.cells[0].backend_policy
+    assert policy.expected_markers == {"config.engine_args.kernel_config.moe_backend": "flashinfer_cutlass"}
+    cli_args = policy.generator_overrides["params"]["agg"]["extra_cli_args"]
+    assert cli_args[0] == "--kernel-config"
+    assert json.loads(cli_args[1]) == {"moe_backend": "flashinfer_cutlass"}
+    assert backend_identity_columns(policy)["moe_backend"] == "flashinfer_cutlass"
+    assert policy.policy_id == "explicit-moe_backend=flashinfer_cutlass"
+    assert {cell.cell_id for cell in pinned_plan.cells}.isdisjoint({cell.cell_id for cell in auto_plan.cells})
+
+
+def test_pinned_eplb_sets_engine_flag_and_marker():
+    options = FPMCollectionOptions.from_args(_args(fpm_enable_eplb="true"))
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module"},
+        options=options,
+        generator_overrides={},
+    )
+    policy = plan.cells[0].backend_policy
+    assert policy.expected_markers == {"config.engine_args.enable_eplb": "True"}
+    assert "--enable-eplb" in policy.generator_overrides["params"]["agg"]["extra_cli_args"]
+    assert backend_identity_columns(policy)["enable_eplb"] == "true"
+
+
+def test_unplumbed_backend_identity_fails_closed():
+    """A pinned value the collector cannot deliver to the engine must be
+    rejected up front - a row claiming an unapplied backend would be a lie."""
+
+    for overrides, match in (
+        ({"fpm_enable_wideep": "true"}, "SGLang-only"),
+        ({"fpm_attention_backend": "fa3"}, "no verified vllm plumbing"),
+    ):
+        options = FPMCollectionOptions.from_args(_args(**overrides))
+        with pytest.raises(ValueError, match=match):
+            build_collection_plan(
+                backend="vllm",
+                model_path="nvidia/GLM-5.2-NVFP4",
+                system="b200_sxm",
+                selected_ops={"dsa_context_module"},
+                options=options,
+                generator_overrides={},
+            )

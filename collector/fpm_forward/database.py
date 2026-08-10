@@ -19,7 +19,7 @@ from typing import Any
 import yaml
 
 from .native_artifact import validate_native_collection
-from .planner import FPMCell, FPMCollectionPlan
+from .planner import FPMCell, FPMCollectionPlan, backend_identity_columns
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,10 @@ _ROW_KEY = (
     "moe_tp",
     "moe_ep",
     "cp",
-    "backend_axis",
-    "backend_policy",
+    "moe_backend",
+    "attention_backend",
+    "enable_wideep",
+    "enable_eplb",
     "workload_kind",
     "batch_size",
     "total_prefill_tokens",
@@ -176,8 +178,7 @@ def aggregate_cell(
                 "moe_tp": cell.topology.moe_tp,
                 "moe_ep": cell.topology.moe_ep,
                 "cp": cell.topology.cp,
-                "backend_axis": cell.backend_policy.axis,
-                "backend_policy": cell.backend_policy.policy_id,
+                **backend_identity_columns(cell.backend_policy),
                 "workload_kind": phase,
                 "batch_size": batch,
                 "total_prefill_tokens": total_prefill,
@@ -428,7 +429,7 @@ def write_formal_database(
             pq.write_table(pa.Table.from_pylist(merged), temporary, compression="zstd")
             metadata = {
                 "schema_name": "aic_fpm_forward_perf",
-                "schema_version": 5,
+                "schema_version": 6,
                 "coordinate_system": "iteration_totals_balanced_v1",
                 "measurement_policy": "dynamo_native_single_sample_v1",
                 "warmup_repeats": 0,

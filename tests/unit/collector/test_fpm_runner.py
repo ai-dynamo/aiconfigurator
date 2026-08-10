@@ -150,7 +150,7 @@ def _cell(*, phase: str = "prefill", dp: int = 1, strategy: str = "dep") -> FPMC
         topology=ParallelTopology(tp=1, pp=1, dp=dp, moe_tp=1, moe_ep=dp, cp=1),
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        backend_policy=BackendPolicy("baseline", {}, {}),
         parallel_strategy=strategy,
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
@@ -983,7 +983,6 @@ def test_policy_override_cannot_change_the_cell_identity_label():
 
     cell = _cell()
     hijacking_policy = BackendPolicy(
-        "baseline",
         "hijack",
         {"K8sConfig": {"fpm_resource_labels": {FPM_CELL_LABEL: "another-cell"}}},
         {},
@@ -1557,7 +1556,7 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
         topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
         weight_quantization=weight_quantization,
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        backend_policy=BackendPolicy("baseline", {}, {}),
         parallel_strategy="pure_tp",
         gemm_quant_mode=weight_quantization,
     )
@@ -1588,7 +1587,7 @@ def test_decode_render_pins_prefix_caching_off_and_prefill_keeps_it(tmp_path, wo
         topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
-        backend_policy=BackendPolicy("baseline", "baseline", {}, {}),
+        backend_policy=BackendPolicy("baseline", {}, {}),
         parallel_strategy="pure_tp",
         gemm_quant_mode="nvfp4",
     )
@@ -1640,7 +1639,10 @@ def test_render_uses_frozen_model_config_without_resolving_model_path(tmp_path, 
         fpm_gpu_counts=[4],
         fpm_parallel_presets=None,
         fpm_parallel_axes=None,
-        fpm_backend_axes=None,
+        fpm_moe_backend=None,
+        fpm_attention_backend=None,
+        fpm_enable_wideep=None,
+        fpm_enable_eplb=None,
         fpm_weight_quantizations=None,
         fpm_kv_cache_dtypes=None,
         fpm_tp_sizes=None,
