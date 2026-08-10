@@ -581,6 +581,14 @@ class TestParseHFConfig:
         with pytest.raises(ValueError, match="must contain only"):
             _parse_hf_config_json(hf_config)
 
+    def test_muse_glimmer_family_mapping(self):
+        """MuseGlimmerForConditionalGeneration maps to the dedicated MUSEGLIMMER family."""
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY["MuseGlimmerForConditionalGeneration"] == "MUSEGLIMMER"
+        assert common.MULTIMODAL_TEXT_CONFIG_KEY["MuseGlimmerForConditionalGeneration"] == "text_config"
+        assert "MUSEGLIMMER" in common.ModelFamily
+        cfg = common.MuseGlimmerConfig(layer_types=("sliding_attention", "full_attention"), sliding_window_size=2048)
+        assert cfg.sliding_window_size == 2048
+
 
 class TestGemma4MixModelBuilder:
     """Builder-level tests that verify Gemma4MixModel wiring through set_gemma4_config."""
