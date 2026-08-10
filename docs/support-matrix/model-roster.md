@@ -6,7 +6,7 @@ model configurations bundled with AIConfigurator.
 A bundled model remains available for explicit SDK and CLI use even after it
 is retired from default matrix generation. This keeps historical workflows and
 offline model loading working without requiring every superseded release to
-occupy the full model/system/backend/version cross product.
+occupy the full model/system/backend/version cross-product.
 
 ## Inclusion policy
 

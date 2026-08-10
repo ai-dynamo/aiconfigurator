@@ -20,6 +20,12 @@ def test_retired_models_are_excluded_only_from_default_matrix_generation():
     assert matrix.get_models() == common.SupportMatrixHFModels
 
 
+def test_retired_models_are_absent_from_checked_in_support_matrix():
+    checked_in_models = {row["HuggingFaceID"] for row in common.get_support_matrix()}
+
+    assert common.RetiredSupportMatrixHFModels.isdisjoint(checked_in_models)
+
+
 @pytest.mark.parametrize("model", sorted(common.RetiredSupportMatrixHFModels))
 def test_retired_matrix_models_keep_bundled_offline_configs(model, monkeypatch):
     def fail_network(*_args, **_kwargs):
@@ -28,6 +34,8 @@ def test_retired_matrix_models_keep_bundled_offline_configs(model, monkeypatch):
     monkeypatch.setattr("aiconfigurator.sdk.utils._download_hf_config", fail_network)
     get_model_config_from_model_path.cache_clear()
 
-    model_config = get_model_config_from_model_path(model)
-
-    assert model_config["architecture"] in common.ARCHITECTURE_TO_MODEL_FAMILY
+    try:
+        model_config = get_model_config_from_model_path(model)
+        assert model_config["architecture"] in common.ARCHITECTURE_TO_MODEL_FAMILY
+    finally:
+        get_model_config_from_model_path.cache_clear()
