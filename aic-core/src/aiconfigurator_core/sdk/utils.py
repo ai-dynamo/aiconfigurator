@@ -797,6 +797,28 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"num_experts={num_experts}, top_k={topk}, "
             f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
         )
+    elif architecture == "MuseGlimmerForConditionalGeneration":
+        # Muse Glimmer: dense hybrid SWA/global attention, uniform head geometry.
+        # NoPE on global layers, logit softcapping, and qk_scale are shape-neutral
+        # and deliberately not modeled.
+        layer_types_raw = config.get("layer_types", [])
+        if len(layer_types_raw) != layers:
+            raise ValueError(f"Muse Glimmer layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
+        if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
+            raise ValueError("Muse Glimmer layer_types must contain only 'sliding_attention' or 'full_attention'")
+        sliding_window = config.get("sliding_window", 0)
+        if not sliding_window or int(sliding_window) <= 0:
+            raise ValueError("Muse Glimmer requires a positive sliding_window")
+        extra_params = common.MuseGlimmerConfig(
+            layer_types=tuple(layer_types_raw),
+            sliding_window_size=int(sliding_window),
+        )
+        logger.info(
+            f"Muse Glimmer config: "
+            f"swa_layers={extra_params.layer_types.count('sliding_attention')}, "
+            f"global_layers={extra_params.layer_types.count('full_attention')}, "
+            f"sw={extra_params.sliding_window_size}"
+        )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.
         layer_types_raw = config.get("layer_types", [])

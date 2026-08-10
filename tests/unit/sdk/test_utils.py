@@ -581,6 +581,61 @@ class TestParseHFConfig:
         with pytest.raises(ValueError, match="must contain only"):
             _parse_hf_config_json(hf_config)
 
+    @staticmethod
+    def _muse_glimmer_config(layer_types, sliding_window=2048):
+        """Minimal valid Muse Glimmer HF config wrapping the text_config branch."""
+        return {
+            "architectures": ["MuseGlimmerForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": len(layer_types),
+                "hidden_size": 6656,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "intermediate_size": 19968,
+                "vocab_size": 202048,
+                "max_position_embeddings": 131072,
+                "layer_types": layer_types,
+                "sliding_window": sliding_window,
+            },
+        }
+
+    def test_parse_muse_glimmer_config(self):
+        """Real meta-models/Muse-Glimmer-30B shape: 3:1 SWA:global, 52 layers, dense."""
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"]) * 13
+        result = _parse_hf_config_json(self._muse_glimmer_config(layer_types))
+        assert result["architecture"] == "MuseGlimmerForConditionalGeneration"
+        assert result["layers"] == 52
+        assert result["n"] == 32
+        assert result["n_kv"] == 2
+        assert result["d"] == 128
+        assert result["hidden_size"] == 6656
+        assert result["inter_size"] == 19968
+        assert result["vocab"] == 202048
+        assert not result["topk"]  # dense: no routed MoE
+        cfg = result["extra_params"]
+        assert isinstance(cfg, common.MuseGlimmerConfig)
+        assert cfg.layer_types.count("sliding_attention") == 39
+        assert cfg.layer_types.count("full_attention") == 13
+        assert cfg.sliding_window_size == 2048
+
+    def test_muse_glimmer_layer_types_length_mismatch_raises(self):
+        hf_config = self._muse_glimmer_config(["sliding_attention"] * 5)
+        hf_config["text_config"]["num_hidden_layers"] = 52
+        with pytest.raises(ValueError, match="layer_types length"):
+            _parse_hf_config_json(hf_config)
+
+    def test_muse_glimmer_invalid_layer_type_raises(self):
+        hf_config = self._muse_glimmer_config(["sliding_attention", "linear_attention"])
+        with pytest.raises(ValueError, match="must contain only"):
+            _parse_hf_config_json(hf_config)
+
+    def test_muse_glimmer_missing_sliding_window_raises(self):
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"]) * 13
+        hf_config = self._muse_glimmer_config(layer_types, sliding_window=0)
+        with pytest.raises(ValueError, match="positive sliding_window"):
+            _parse_hf_config_json(hf_config)
+
     def test_muse_glimmer_family_mapping(self):
         """MuseGlimmerForConditionalGeneration maps to the dedicated MUSEGLIMMER family."""
         assert common.ARCHITECTURE_TO_MODEL_FAMILY["MuseGlimmerForConditionalGeneration"] == "MUSEGLIMMER"
