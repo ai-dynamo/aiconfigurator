@@ -427,6 +427,35 @@ def _price_closed_loop_row_uncached(row):
         return float("nan"), float("nan"), float("nan")
 
 
+def reprice_closed_loop_row(row):
+    """Copy of a summary row with headline latency/throughput repriced from
+    the closed-loop estimate at the row's own operating point.
+
+    Overwrites ``ttft``/``tpot``/``request_latency`` and the throughput
+    family so the row reads as one consistent closed-loop timeline (the raw
+    recorded columns stay). Rows that cannot be priced return unchanged.
+    """
+    t, p, x = price_closed_loop_row(row)
+    out = dict(row)
+    if t != t:  # NaN — unpriceable, keep the legacy verdict
+        return out
+    osl = int(row["osl"])
+    gpus = float(row.get("num_total_gpus") or 0.0)
+    out["ttft"] = t
+    out["tpot"] = p
+    out["request_latency"] = t + p * max(osl - 1, 0)
+    out["seq/s"] = x
+    out["tokens/s"] = x * osl
+    if gpus:
+        out["seq/s/gpu"] = x / gpus
+        out["tokens/s/gpu"] = x * osl / gpus
+    if "tokens/s/user" in out and p > 0:
+        out["tokens/s/user"] = 1000.0 / p
+    if "request_rate" in out:
+        out["request_rate"] = x
+    return out
+
+
 def filter_closed_loop_sla(df, ttft_ms=None, tpot_ms=None):
     """Approximate SLA post-filter on the refined closed-loop values.
 

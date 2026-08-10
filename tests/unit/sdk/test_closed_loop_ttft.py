@@ -11,6 +11,7 @@ from aiconfigurator.sdk.closed_loop_ttft import (
     filter_closed_loop_sla,
     pick_under_closed_loop_sla,
     refine_closed_loop_latency,
+    reprice_closed_loop_row,
 )
 
 pytestmark = pytest.mark.unit
@@ -190,6 +191,37 @@ class TestRefineDataFrame:
         best = pick_under_closed_loop_sla(df, ttft_ms=target)
         assert best["bs"].tolist() == [2]
         assert best["ttft_refined"].iloc[0] <= target
+
+    def test_reprice_row_overwrites_headline_consistently(self):
+        row = {
+            "concurrency": 8,
+            "isl": 4096,
+            "osl": 64,
+            "(p)workers": 1,
+            "(d)workers": 1,
+            "(p)bs": 1,
+            "(d)bs": 64,
+            "(p)prefill_step_ms": 2000.0,
+            "tpot": 21.0,
+            "ttft": 3600.0,  # legacy 1.8-style value
+            "request_latency": 0.0,
+            "num_total_gpus": 2,
+            "seq/s": 0.4,
+            "tokens/s": 25.6,
+            "tokens/s/gpu": 12.8,
+            "tokens/s/user": 47.6,
+            "request_rate": 0.4,
+        }
+        out = reprice_closed_loop_row(row)
+        assert out["ttft"] != 3600.0 and out["ttft"] > 2000.0  # tandem value
+        assert out["request_latency"] == pytest.approx(out["ttft"] + 63 * out["tpot"])
+        assert out["tokens/s"] == pytest.approx(out["seq/s"] * 64)
+        assert out["tokens/s/gpu"] == pytest.approx(out["tokens/s"] / 2)
+        assert row["ttft"] == 3600.0  # input untouched
+        # unpriceable rows pass through unchanged
+        broken = dict(row)
+        broken.pop("(p)prefill_step_ms")
+        assert reprice_closed_loop_row(broken)["ttft"] == 3600.0
 
     def test_knee_search_finds_max_compliant_concurrency(self):
         from aiconfigurator.sdk.sweep import _refined_tune_combo

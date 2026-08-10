@@ -2236,6 +2236,10 @@ class Task:
         result = summary.get_result_dict()
         if result is None:
             raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
+        if self.refined_sla:
+            from aiconfigurator.sdk.closed_loop_ttft import reprice_closed_loop_row
+
+            result = reprice_closed_loop_row(result)
         return result
 
     def run_single_disagg(
@@ -2347,7 +2351,15 @@ class Task:
         # --- Rate-match the pair ---
         p_dict = p_summary.get_summary_df().iloc[0].to_dict()
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
-        return _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+        # raw solo context latency, so the row is self-contained for the
+        # closed-loop refinement tier (mirrors the sweep-side stash sites)
+        p_dict["prefill_step_ms"] = p_dict["ttft"] - p_dict.get("encoder_latency", 0.0)
+        row = _rate_match_dict(p_dict, prefill_num_workers, d_dict, decode_num_workers)
+        if self.refined_sla:
+            from aiconfigurator.sdk.closed_loop_ttft import reprice_closed_loop_row
+
+            row = reprice_closed_loop_row(row)
+        return row
 
     def _run_afd_single_point(self, database):
         """Run a single pinned-topology AFD estimate via AFDInferenceSession."""
