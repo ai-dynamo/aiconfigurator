@@ -98,7 +98,10 @@ profiles:
 
       # === Runtime library paths ===
       # PATH: /opt/amazon/efa first so the patched libfabric is loaded at runtime.
-      PATH: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/bin:/usr/bin:/bin
+      # /usr/local/cuda/bin must survive the override: deep_gemm JITs grouped
+      # GEMM kernels with nvcc at runtime, and an empty compile blows up as
+      # DG_HOST_ASSERT(!cubin.empty() || isPathValid(path_)) inside flashinfer.
+      PATH: /opt/dynamo/venv/bin:/opt/amazon/efa/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
       # LD_LIBRARY_PATH: includes aarch64-linux-gnu/ for debian multiarch arm64 plugins.
       LD_LIBRARY_PATH: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
 

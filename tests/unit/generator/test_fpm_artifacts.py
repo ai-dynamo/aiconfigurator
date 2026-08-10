@@ -20,6 +20,7 @@ import re
 import shlex
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -205,9 +206,28 @@ def _export_value(script: str, name: str) -> str:
     return values[0]
 
 
+_NVCC_STUB_DIR: Path | None = None
+
+
+def _nvcc_stub_dir() -> Path:
+    """Execution tests run the rendered run.sh on hosts without a CUDA
+    toolchain, which would trip the multinode nvcc fail-fast guard. A stub
+    nvcc on PATH exercises the guard's healthy path instead; the guard's
+    failure path is covered by the rendering test."""
+    global _NVCC_STUB_DIR
+    if _NVCC_STUB_DIR is None:
+        stub_dir = Path(tempfile.mkdtemp(prefix="fpm-nvcc-stub-"))
+        stub = stub_dir / "nvcc"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        _NVCC_STUB_DIR = stub_dir
+    return _NVCC_STUB_DIR
+
+
 def _clean_env(**overrides: str) -> dict[str, str]:
     """Subprocess environment without host FPM/orchestrator contamination."""
     env = {name: value for name, value in os.environ.items() if not name.startswith(("FPM_", "LWS_", "GROVE_"))}
+    env["PATH"] = f"{_nvcc_stub_dir()}{os.pathsep}{env.get('PATH', '')}"
     env.update(overrides)
     return env
 
@@ -309,6 +329,19 @@ def test_fpm_run_script_is_collection_free_and_ends_with_foreground_exec(topolog
         assert token not in script, f"collection-side token {token!r} leaked into run.sh"
     last_line = [line for line in script.splitlines() if line.strip()][-1]
     assert last_line == _FOREGROUND_EXEC_LINE
+
+
+@pytest.mark.unit
+def test_fpm_run_script_guards_multinode_cuda_toolchain():
+    """Multinode transport profiles rewrite PATH; a profile that drops
+    /usr/local/cuda/bin starves deep_gemm's runtime nvcc JIT and only crashes
+    minutes later. run.sh must fail fast with an nvcc check before launching
+    the engine. The guard is rendered into every script but gated on
+    FPM_NODE_COUNT at runtime, the same shape as the other multinode blocks."""
+
+    script = _render(_topology_params("multinode-tp"))[FPM_RUN_SCRIPT_FILENAME]
+    assert "FPM_NODE_COUNT > 1 )) && ! command -v nvcc" in script
+    assert script.index("command -v nvcc") < script.index("exec python3 -c")
 
 
 def _consumed_fpm_variables(script: str) -> set[str]:
