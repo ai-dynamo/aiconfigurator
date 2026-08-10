@@ -300,8 +300,10 @@ def clear_all_op_caches() -> None:
       fixture clears only the counter, not data caches — clearing the
       caches would force a fresh-disk reload mid-suite)
 
-    Also clears empirical utilization grids and the shared instrumentation
-    counter. Util grids are derived from per-op data, so retaining them after
+    Also clears empirical utilization grids, the shared instrumentation
+    counter, and the compiled-engine handle LRU (each ``EngineHandle`` pins a
+    Rust-side perf-DB load, so it belongs to the same eviction contract).
+    Util grids are derived from per-op data, so retaining them after
     their source caches are evicted can mix an old custom ``systems_root`` or
     shared-layer view into newly loaded data.
 
@@ -318,6 +320,11 @@ def clear_all_op_caches() -> None:
 
     util_empirical.clear_grid_cache()
     Operation._load_data_call_count.clear()
+    # Lazy for the same cycle reason (rust_engine_step is imported by engine.py,
+    # which imports operation modules).
+    from aiconfigurator_core.sdk import rust_engine_step
+
+    rust_engine_step._engine_handle_cache_clear()
 
 
 def warm_all_op_data(database: PerfDatabase) -> None:

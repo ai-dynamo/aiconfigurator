@@ -63,6 +63,11 @@ models and missing or unreadable model, system, or performance data. Check
 `aic_with_correction`, or `fallback_regression`, and to inspect any fallback
 warning.
 
+Native online corrections default to an absolute factor range of `[0.5, 2.0]`.
+Pass `None` explicitly as `min_faster_correction_factor` or
+`max_slower_correction_factor` in the options dictionary to remove the bound
+in that direction. Regression fallback ignores both options.
+
 Use `from_native(...)` instead when native AIC support is required and an
 unsupported configuration or native data failure should surface rather than
 fall back.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,197 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
     assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
+
+
+def test_engine_step_backend_defaults_to_rust(monkeypatch, tmp_path: Path) -> None:
+    """With nothing requested, the compiled engine is the default for a real
+    database (one the compiled engine could re-load from disk)."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+    database = _power_probe_database(tmp_path, with_power=False)
+
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
+    # Unknown values keep their historical meaning: not rust.
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
+
+
+def _power_probe_database(tmp_path: Path, *, with_power: bool):
+    """A real ``PerfDatabase`` instance (loader bypassed) whose data tree the
+    power probe can scan. Default routing requires the real type: synthetic
+    database doubles delegate to the Python step."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+    system = f"probe_{'with' if with_power else 'without'}_power"
+    version_dir = tmp_path / "data" / system / "gemm" / "vllm" / "1.0.0"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    columns = {"latency": [1.0]}
+    if with_power:
+        columns["power"] = [512.0]
+    pq.write_table(pa.table(columns), version_dir / "gemm_perf.parquet")
+    database = PerfDatabase.__new__(PerfDatabase)
+    database.system = system
+    database.backend = "vllm"
+    database.version = "1.0.0"
+    database.systems_root = str(tmp_path)
+    database.system_spec = {"data_dir": f"data/{system}"}
+    database._default_database_mode = common.DatabaseMode.SILICON
+    return database
+
+
+def test_default_routing_delegates_power_carrying_databases(monkeypatch, tmp_path: Path) -> None:
+    """Energy does not cross the FFI yet: a database with measured power
+    columns stays on the Python step by default, but an explicit ``rust``
+    request keeps its force semantics."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+
+    power_db = _power_probe_database(tmp_path, with_power=True)
+    plain_db = _power_probe_database(tmp_path, with_power=False)
+
+    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), power_db)
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), plain_db)
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"), power_db)
+    # Synthetic database doubles have no on-disk identity the compiled engine
+    # could resolve: default routing delegates them to the Python step.
+    assert not rust_engine_step.should_use_rust_engine_step(
+        RuntimeConfig(), SimpleNamespace(system="mock", backend="vllm", version="1.0.0")
+    )
+
+
+@pytest.fixture
+def _handle_cache_harness(monkeypatch):
+    """Drive ``_cached_engine_handle`` end-to-end with the compile tail
+    stubbed at its import sources: models compile to sentinel handles (or an
+    ``OpConversionError`` when ``model.fail``), so cache-hit recency, negative
+    entries, and eviction are exercised through the production code path."""
+    import aiconfigurator_core
+    from aiconfigurator_core.sdk import engine as core_engine
+
+    monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE", OrderedDict())
+    monkeypatch.setattr(rust_engine_step, "_ENGINE_HANDLE_CACHE_MAX", 2)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda: None)
+    monkeypatch.setattr(rust_engine_step, "_engine_config_json", lambda model, database: model.key)
+
+    compiles: list[str] = []
+
+    def fake_build(model, **kwargs):
+        if getattr(model, "fail", False):
+            raise core_engine.OpConversionError(f"cannot express {model.key}")
+        compiles.append(model.key)
+        return "{}"
+
+    class _FakeHandle:
+        def __init__(self, spec_bytes, systems_path=None) -> None:
+            self.spec_bytes = spec_bytes
+
+    monkeypatch.setattr(core_engine, "build_engine_spec_json", fake_build)
+    monkeypatch.setattr(core_engine, "EngineHandle", _FakeHandle)
+    monkeypatch.setattr(aiconfigurator_core, "engine_spec_bincode_from_json", lambda spec: b"")
+
+    def model(key: str, *, fail: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(key=key, model_path=key, _nextn=None, fail=fail)
+
+    database = SimpleNamespace(system="test-system", backend="vllm", version="1.0.0")
+    return model, database, compiles
+
+
+def test_cached_engine_handle_hits_and_evicts_least_recently_used(_handle_cache_harness) -> None:
+    """Cache-hit recency and LRU eviction, through ``_cached_engine_handle``:
+    a hit refreshes recency, so inserting past the cap evicts the least
+    recently USED identity (recompiled on re-visit), not insertion order."""
+    model, database, compiles = _handle_cache_harness
+
+    m_a, m_b, m_c = model("a"), model("b"), model("c")
+    handle_a = rust_engine_step._cached_engine_handle(m_a, database)
+    rust_engine_step._cached_engine_handle(m_b, database)
+    assert rust_engine_step._cached_engine_handle(m_a, database) is handle_a  # hit refreshes "a"
+    assert compiles == ["a", "b"]
+
+    rust_engine_step._cached_engine_handle(m_c, database)  # cap 2: evicts "b"
+    rust_engine_step._cached_engine_handle(m_a, database)  # still cached
+    rust_engine_step._cached_engine_handle(m_b, database)  # evicted -> recompiles
+    assert compiles == ["a", "b", "c", "b"]
+
+
+def test_cached_engine_handle_negative_entries_raise_fresh_errors(_handle_cache_harness) -> None:
+    """An unsupported graph is remembered without re-walking it, but each hit
+    raises a FRESH ``RustEngineUnsupportedError`` — caching the raised
+    instance would pin model/database via ``__cause__`` and grow its traceback
+    on every re-raise."""
+    model, database, compiles = _handle_cache_harness
+
+    bad = model("bad", fail=True)
+    with pytest.raises(rust_engine_step.RustEngineUnsupportedError) as first:
+        rust_engine_step._cached_engine_handle(bad, database)
+    with pytest.raises(rust_engine_step.RustEngineUnsupportedError) as second:
+        rust_engine_step._cached_engine_handle(bad, database)
+
+    assert str(first.value) == str(second.value) == "cannot express bad"
+    assert first.value is not second.value
+    assert second.value.__cause__ is None  # cache hit: no pinned compile context
+    assert compiles == []  # the op graph was walked once, never re-walked
+
+
+def test_clear_all_op_caches_drops_engine_handles(_handle_cache_harness, monkeypatch) -> None:
+    from aiconfigurator.sdk.operations import clear_all_op_caches
+
+    model, database, compiles = _handle_cache_harness
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {("sys", "vllm", "1.0"): False})
+    rust_engine_step._cached_engine_handle(model("a"), database)
+    assert rust_engine_step._ENGINE_HANDLE_CACHE
+
+    clear_all_op_caches()
+    assert not rust_engine_step._ENGINE_HANDLE_CACHE
+    # The power probe is filesystem-derived: a stale ``False`` surviving a
+    # ``set_systems_paths`` switch would rust-route a power-carrying identity.
+    assert not rust_engine_step._POWER_DATA_CACHE
+
+
+def test_cached_engine_handle_mirrors_database_systems_root(_handle_cache_harness, monkeypatch) -> None:
+    """The compiled engine must resolve the system yaml from the root the
+    paired database actually matched (multi-root ``--systems-paths``), not the
+    process-wide env default; the env is only the fallback for duck-typed
+    databases without a ``systems_root``."""
+    from aiconfigurator_core.sdk import engine as core_engine
+
+    model, database, compiles = _handle_cache_harness
+    captured: list = []
+
+    def capturing_build(model, **kwargs):
+        captured.append(kwargs["systems_path"])
+        return "{}"
+
+    monkeypatch.setattr(core_engine, "build_engine_spec_json", capturing_build)
+    monkeypatch.setenv("AICONFIGURATOR_SYSTEMS_PATH", "/env/root")
+
+    database.systems_root = "/custom/root"
+    rust_engine_step._cached_engine_handle(model("mirrored"), database)
+    assert captured[-1] == "/custom/root"
+
+    del database.systems_root
+    rust_engine_step._cached_engine_handle(model("fallback"), database)
+    assert captured[-1] == "/env/root"
+
+
+def test_power_probe_memoizes_per_database_identity(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(rust_engine_step, "_POWER_DATA_CACHE", {})
+    database = _power_probe_database(tmp_path, with_power=True)
+
+    calls = []
+    real_scan = rust_engine_step._scan_for_power_columns
+    monkeypatch.setattr(
+        rust_engine_step,
+        "_scan_for_power_columns",
+        lambda db: calls.append(db) or real_scan(db),
+    )
+    assert rust_engine_step._database_has_power_data(database)
+    assert rust_engine_step._database_has_power_data(database)
+    assert len(calls) == 1
 
 
 def _dense_model() -> SimpleNamespace:
@@ -317,13 +509,13 @@ def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
 
 
 @pytest.mark.integration
-def test_forward_pass_perf_model_native_end_to_end() -> None:
-    """End-to-end native forward-pass model over a real fixture.
+def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() -> None:
+    """End-to-end native forward-pass model with default bounds over a real fixture.
 
     Builds a native model via ``compile_engine`` (crossing into the Rust core),
-    estimates a prefill iteration, then tunes with an observation engineered to
-    drive the correction factor to exactly 2.0 off the model's own native
-    estimate. Requires the compiled ``aiconfigurator_core`` extension.
+    estimates a prefill iteration, then drives one correction bucket through
+    its slower ceiling, faster floor, and recovery between them. Requires the
+    compiled ``aiconfigurator_core`` extension.
     """
     pytest.importorskip("aiconfigurator_core")
     from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
@@ -347,7 +539,13 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
         "nextn": None,
         "extra": {},
     }
-    model = RustForwardPassPerfModel.from_native(config, {"min_observations": 2})
+    model = RustForwardPassPerfModel.from_native(
+        config,
+        {
+            "min_observations": 2,
+            "max_observations": 2,
+        },
+    )
 
     prefill = [
         {
@@ -368,7 +566,7 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
     obs = [
         {
             "version": 1,
-            "wall_time": native_ms * 2.0 / 1000.0,
+            "wall_time": native_ms * 8.0 / 1000.0,
             "scheduled_requests": {
                 "num_prefill_requests": 2,
                 "sum_prefill_tokens": 2048,
@@ -381,7 +579,39 @@ def test_forward_pass_perf_model_native_end_to_end() -> None:
     corrected = model.estimate_forward_pass_time_ms(prefill)
     assert corrected == pytest.approx(native_ms * 2.0)
     assert model.get_min_correction_factor() == pytest.approx(2.0)
+    assert model.get_max_correction_factor() == pytest.approx(2.0)
     assert model.diagnostics()["source"] == "aic_with_correction"
+
+    faster_obs = [
+        {
+            "version": 1,
+            "wall_time": native_ms * 0.1 / 1000.0,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    model.tune_with_fpms([faster_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 1.25)
+
+    model.tune_with_fpms([faster_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 0.5)
+
+    recovery_obs = [
+        {
+            "version": 1,
+            "wall_time": native_ms * 1.25 / 1000.0,
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 2048,
+                "sum_prefill_kv_tokens": 0,
+            },
+        }
+    ]
+    model.tune_with_fpms([recovery_obs, recovery_obs])
+    assert model.estimate_forward_pass_time_ms(prefill) == pytest.approx(native_ms * 1.25)
 
 
 @pytest.mark.integration

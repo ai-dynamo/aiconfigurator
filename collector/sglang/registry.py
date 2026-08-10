@@ -294,6 +294,20 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.GDN,
     ),
     OpEntry(
+        op="kda",
+        module="collector.sglang.collect_kda",
+        get_func="get_kda_test_cases",
+        run_func="run_kda_torch",
+        perf_filename=PerfFile.KDA,
+        # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch; debugged
+        # on Hopper (SM90), B200 (SM100) and B300 (SM103), then verified on
+        # L40S/SM89 and RTX Pro 6000/SM120 via full-grid probe runs
+        # (2026-08-01, aic-auto-collector jobs 381312863/381312864: 1074 and
+        # 1085 clean rows; SM89 needs the fused-decode SM90 gate in
+        # collect_kda.py — the JIT kernel's mbarrier PTX rejects sm_89).
+        unverified_sms=(80,),
+    ),
+    OpEntry(
         op="mhc_module",
         module="collector.sglang.collect_mhc_module",
         get_func="get_mhc_module_test_cases",

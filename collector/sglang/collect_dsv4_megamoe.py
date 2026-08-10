@@ -69,6 +69,27 @@ DEFAULT_MODEL_CONFIGS = {
         "routed_scaling_factor": 2.5,
         "norm_topk_prob": True,
     },
+    # Kimi-K3 LatentMoE routed experts: the mega kernel runs in the 3584-wide
+    # latent space with SiTU activation, selected in the patched deep_gemm
+    # mega kernel by the activation_clamp == 0.03125 sentinel — pass
+    # `--activation-clamp 0.03125` when collecting this config (serving call:
+    # models/kimi_k3.py fp8_fp4_mega_moe(recipe=(1,1,32),
+    # activation_clamp=_K3_MEGA_SITU_SENTINEL_CLAMP) @ kimi-k3 branch).
+    "kimi_k3": {
+        "model": "moonshotai/Kimi-K3",
+        # SiTU sentinel: the patched deep_gemm mega kernel selects the K3
+        # SiTU path iff activation_clamp == 0.03125 (see comment above).
+        # Resolved as the default in main(); an explicit conflicting
+        # --activation-clamp raises rather than silently collecting the
+        # wrong kernel path under the kimi_k3 label.
+        "activation_clamp": 0.03125,
+        "hidden_size": 3584,
+        "inter_size": 3072,
+        "routed_num_experts": 896,
+        "routed_topk": 16,
+        "routed_scaling_factor": 1.0,
+        "norm_topk_prob": True,
+    },
 }
 
 DEFAULT_GPUS_PER_NODE = {
@@ -415,7 +436,17 @@ def make_pre_dispatch(pre_dispatch: str):
         return copy_pre_dispatch
 
     if pre_dispatch == "sglang_jit":
-        from sglang.jit_kernel.deepseek_v4 import mega_moe_pre_dispatch
+        # Import-path drift across sglang builds, same pre-dispatch kernel
+        # (deepseek_v4/mega_moe_pre_dispatch.cuh) and identical signature:
+        #   - kimi-k3 branch (0.5.16): serving imports it from
+        #     sglang.kernels.ops.attention.dsv4
+        #     (srt/layers/moe/mega_moe.py:24 @ image sha256:6d9594a4)
+        #   - deepseek-v4 wideep image (0.5.10): sglang.jit_kernel.deepseek_v4
+        # Each fallback matches that build's own serving import.
+        try:
+            from sglang.kernels.ops.attention.dsv4 import mega_moe_pre_dispatch
+        except ModuleNotFoundError:
+            from sglang.jit_kernel.deepseek_v4 import mega_moe_pre_dispatch
 
         def sglang_jit_pre_dispatch(hidden_states, topk_ids, topk_weights, buffer, num_tokens: int):
             del num_tokens
@@ -675,7 +706,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--pre-dispatch", choices=["sglang_jit", "copy"], default="sglang_jit")
-    parser.add_argument("--activation-clamp", type=float, default=10.0)
+    parser.add_argument(
+        "--activation-clamp", type=float, default=None
+    )  # None -> model-config default (10.0 unless declared)
     parser.add_argument("--fast-math", type=int, choices=[0, 1], default=1)
     parser.add_argument("--num-warmup", type=int, default=5)
     parser.add_argument("--num-iterations", type=int, default=20)
@@ -690,6 +723,15 @@ def main() -> None:
     gpus_per_node = args.gpus_per_node or _default_gpus_per_node(args.system_name)
     dist_info = init_distributed(gpus_per_node)
     model_config = DEFAULT_MODEL_CONFIGS[args.model_config]
+    config_clamp = float(model_config.get("activation_clamp", 10.0))
+    if args.activation_clamp is None:
+        args.activation_clamp = config_clamp
+    elif args.activation_clamp != config_clamp and "activation_clamp" in model_config:
+        raise ValueError(
+            f"--activation-clamp {args.activation_clamp} conflicts with the "
+            f"{args.model_config!r} kernel-path sentinel {config_clamp} — the mega "
+            "kernel would silently run the wrong activation path under this label."
+        )
     ep_size = dist_info.world_size
     cases = build_cases(args, ep_size)
 

@@ -32,6 +32,7 @@ class PerfFile(str, Enum):
     GENERATION_MLA = "generation_mla_perf.txt"
     MLA_BMM = "mla_bmm_perf.txt"
     GDN = "gdn_perf.txt"
+    KDA = "kda_perf.txt"
     MAMBA2 = "mamba2_perf.txt"
     COMPUTESCALE = "computescale_perf.txt"
     WIDEEP_MOE = "wideep_moe_perf.txt"

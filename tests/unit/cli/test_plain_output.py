@@ -12,7 +12,11 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from aiconfigurator.cli.report_and_save import _plot_worker_setup_table, log_final_summary
+from aiconfigurator.cli.report_and_save import (
+    _check_power_data_available,
+    _plot_worker_setup_table,
+    log_final_summary,
+)
 from aiconfigurator.logging_utils import setup_logging, use_plain_cli_output
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
 
@@ -81,6 +85,16 @@ def test_draw_pareto_to_string(use_ansi):
         highlight={"df": df.head(1), "label": "best"},
     )
     assert (_ESC in out) == use_ansi
+
+
+def test_power_availability_ignores_unknown_afd_rows():
+    best_configs = {
+        "agg": pd.DataFrame({"power_w": [400.0]}),
+        "afd": pd.DataFrame({"power_w": [float("nan")]}),
+    }
+
+    assert _check_power_data_available(best_configs) is True
+    assert _check_power_data_available({"afd": best_configs["afd"]}) is False
 
 
 @pytest.mark.parametrize("use_ansi", [True, False])

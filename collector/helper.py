@@ -688,15 +688,39 @@ def log_perf(
 ) -> bool:
     lock_file = perf_filename + ".lock"
 
-    # Try for 1 sec (10 * 0.1s)
+    # Try for 30s (300 * 0.1s). The old 1s window lost measured rows whenever
+    # a sibling worker was wedged in a CUDA crash storm while other workers
+    # queued behind the lock (H200 K3 moe 2026-08-01: 47 rows measured but
+    # dropped). A worker SIGKILLed inside its critical section (host OOM
+    # killer) skips `finally` and leaves the lock behind forever, so a lock
+    # older than the stale threshold is broken instead of waited on.
+    #
+    # Break via rename, not unlink: with two waiters, an unlink-based break
+    # lets waiter B (still holding its stat of the OLD lock) unlink the FRESH
+    # lock waiter A just created, and two writers then interleave appends
+    # inside the critical section. os.rename is atomic on POSIX, so exactly
+    # one breaker wins the stale lock; the loser's rename raises ENOENT and
+    # it simply retries against whatever fresh lock now exists.
+    stale_lock_seconds = 60.0
     got_lock = False
-    for _ in range(10):
+    for _ in range(300):
         try:
             fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             got_lock = True
             break
         except OSError:
+            try:
+                if time.time() - os.path.getmtime(lock_file) > stale_lock_seconds:
+                    broken_lock_file = f"{lock_file}.breaking-{os.getpid()}"
+                    os.rename(lock_file, broken_lock_file)
+                    print(f"Breaking stale lock for {perf_filename}")
+                    os.unlink(broken_lock_file)
+                    continue
+            except OSError:
+                # Lock vanished (or another breaker won the rename) between
+                # the open attempt and the stat/rename — retry immediately.
+                continue
             time.sleep(0.1)
 
     if not got_lock:

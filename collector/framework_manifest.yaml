@@ -17,7 +17,14 @@ frameworks:
       images:
         default: "lmsysorg/sglang:v0.5.14@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
         cu130: "lmsysorg/sglang:v0.5.14-cu130@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
-    # families: {}   # explicit per-family overrides go here (spec §4)
+    families:
+      # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch
+      # (https://github.com/sgl-project/sglang/tree/kimi-k3), whose build
+      # reports 0.5.16. Pin the branch image for the kda family only.
+      kda:
+        version: "0.5.16"
+        images:
+          default: "lmsysorg/sglang@sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b"
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:
@@ -55,6 +62,35 @@ frameworks:
       images:
         default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
         cu129: "vllm/vllm-openai:v0.24.0-cu129@sha256:6b005c78cd17a1f0215f31e95d183833f4dfd6167c4473241b80d1c8843b91e8"
+    families:
+      # Kimi-K3 KDA kernels exist only on the vLLM kimi-k3 branch
+      # (official preview image, CUDA 13 build with fused_kda_decode +
+      # FlashKDA; setuptools-scm version 0.1.dev19262+gb6bbf29dd).
+      kda:
+        version: "0.1.dev19262"
+        images:
+          default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
+      # moe: NO family pin (owner decision 2026-08-02, reverting the
+      # 2026-08-01 family-wide preview pin — a temporary preview build must
+      # not own a family default; a family pin here hijacks image selection
+      # for every model). ALL vllm moe collection — including K3 — runs on
+      # the stock v0.24.0 default image: K3 SITU cases use the
+      # owner-approved situ-as-silu Marlin approximation in collect_moe
+      # (serving truth is MarlinExperts W4A16 on every SM — the preview's
+      # CUTLASS whitelist rejects SITU; stock's device-only gate is forced
+      # off so Blackwell doesn't drift into CUTLASS W4A4, a kernel K3
+      # serving never runs; rows are marked kernel_source *_situ_as_silu,
+      # epilogue delta <~3%). Already-collected K3 rows (b200/b300,
+      # preview-native situ) stay merged in the 0.24.0 moe table with
+      # their honest runtime version column. Retire the approximation when
+      # upstream wires SITU into a quantized-activation kernel (kernel
+      # class flips) — re-audit at every tag bump.
+      # (2026-08-02 audit note kept for the preview image: the kimi-k3
+      # tag's amd64 image is IDENTICAL to the pin digest —
+      # 0.1.dev19262+gb6bbf29dd, no deep_gemm; the earlier "drift to
+      # sha256:d61e062d" observation was the manifest list's arm64 entry,
+      # not a new build. On aarch64 hosts (gb200/gb300) resolve the arm64
+      # entry of the same tag and re-verify the version string before use.)
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"

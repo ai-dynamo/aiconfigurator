@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.24.0
+tables:
+  # First vLLM MLA-BMM table (previously every vLLM MLA-BMM query fell back
+  # to the trtllm tables — the SDK's "low-fidelity fallback rows" warning).
+  # 636 rows collected 2026-08-02 on 8x B200 in the stock v0.24.0 image:
+  # bf16 torch.bmm only (NVIDIA vLLM has no fp8 BMM path — ROCm/AITER-gated;
+  # citations in collector/vllm/collect_mla_bmm.py), head grid includes the
+  # Kimi-K3 96-family shards (96/48/24/12) added alongside the DeepSeek
+  # 128-family. Zero failures.
+  mla_bmm_perf:
+    status: complete

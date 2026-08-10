@@ -34,7 +34,7 @@ from aiconfigurator.sdk.errors import (
 from aiconfigurator.sdk.models import check_is_moe
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
-from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -151,8 +151,10 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         "--engine-step-backend",
         choices=["python", "rust"],
         default=None,
-        help="Experimental static latency backend. Default keeps the existing Python SDK path; "
-        "use 'rust' to route static step estimates through the Rust FPM estimator.",
+        help="Engine-step latency backend. By default the compiled Rust engine answers "
+        "(databases with measured power data delegate to the Python step until energy "
+        "crosses the FFI); use 'python' as the escape hatch or 'rust' to force the "
+        "compiled engine.",
     )
     add_generator_override_arguments(common_parser)
     return common_parser
@@ -249,6 +251,26 @@ def _validate_model_path(model_path: str) -> str:
         ) from e
 
 
+def _parse_afd_max_a_batch_size(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("AFD max A batch size must be an integer >= 32.") from exc
+    if parsed < 32:
+        raise argparse.ArgumentTypeError("AFD max A batch size must be an integer >= 32.")
+    return parsed
+
+
+def _parse_afd_max_candidates(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("AFD max candidates must be a positive integer.") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("AFD max candidates must be a positive integer.")
+    return parsed
+
+
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model-path",
@@ -303,8 +325,38 @@ def _add_default_mode_arguments(parser):
         default=common.BackendName.trtllm.value,
         help="Backend name. Use a specific backend (trtllm, vllm, sglang) or 'auto' to sweep "
         "across all supported backends for the given system and compare results side by side. "
-        "When 'auto' is used, both agg and disagg results are merged across backends and the "
+        "When 'auto' is used, selected serving-mode results are merged across backends and the "
         "globally optimal configuration is selected. Default: trtllm.",
+    )
+    parser.add_argument(
+        "--serving-mode",
+        choices=["auto", "all", "agg", "disagg", "afd"],
+        type=str,
+        default="auto",
+        help="Serving modes to sweep and compare. 'auto' (default) compares agg and disagg; "
+        "'all' compares agg, disagg, and afd; pick a single mode to restrict the search. "
+        "The current node-granular AFD model requires one full A node and one full F node "
+        "(at least 2 nodes); 'all' skips AFD with a warning when that budget is unavailable.",
+    )
+    parser.add_argument(
+        "--afd-max-a-batch-size",
+        type=_parse_afd_max_a_batch_size,
+        default=1024,
+        help="[expert] Maximum total in-flight batch per A worker during the AFD auto-batch search. "
+        "Candidates are aligned down to a multiple of 8. Default: 1024.",
+    )
+    parser.add_argument(
+        "--afd-max-candidates",
+        type=_parse_afd_max_candidates,
+        default=10_000,
+        help="[expert] Maximum number of AFD topology candidates. Default: 10000.",
+    )
+    parser.add_argument(
+        "--afd-candidate-overflow",
+        choices=["error", "truncate"],
+        default="error",
+        help="[expert] Behavior when the AFD topology search exceeds --afd-max-candidates. "
+        "Default: error; use truncate only as an explicit bounded-search opt-in.",
     )
     parser.add_argument(
         "--perf-db-version",
@@ -1440,8 +1492,12 @@ def build_default_tasks(
     enable_wideep: bool = False,
     moe_backend: str | None = None,
     engine_step_backend: str | None = None,
+    serving_mode: str = "auto",
+    afd_max_a_batch_size: int = 1024,
+    afd_max_candidates: int = 10_000,
+    afd_candidate_overflow: str = "error",
 ) -> dict[str, Task]:
-    """Build agg and disagg task configs for default mode comparison.
+    """Build task configs for the selected default-mode serving modes.
 
     Args:
         model_path: HuggingFace model path or local path.
@@ -1467,15 +1523,30 @@ def build_default_tasks(
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step latency backend ("python" or "rust");
+            unset defaults to the compiled Rust engine (power-carrying databases
+            delegate to the Python step, as do SDK callers passing synthetic
+            database objects the compiled engine cannot re-load from disk).
+        serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
+            ``"all"`` also includes AFD, and an explicit mode builds only that mode.
+        afd_max_a_batch_size: Maximum attention batch size considered by AFD.
+        afd_max_candidates: Maximum AFD candidates to enumerate.
+        afd_candidate_overflow: Behavior when the AFD candidate limit is exceeded.
 
     Returns:
-        Dict with Task objects. When backend='auto', returns 6 configs
-        (agg_trtllm, agg_vllm, agg_sglang, disagg_trtllm, disagg_vllm, disagg_sglang).
-        Otherwise returns 2 configs ('agg' and 'disagg').
+        Task objects keyed by serving mode and, when requested, backend.
     """
     decode_system = decode_system or system
-    # Expand "auto" backend to all available backends
+    if serving_mode not in ("auto", "all", "agg", "disagg", "afd"):
+        raise ValueError(f"Invalid serving_mode: {serving_mode!r}. Use 'auto', 'all', 'agg', 'disagg', or 'afd'.")
+    if serving_mode == "auto":
+        modes_to_sweep = {"agg", "disagg"}
+    elif serving_mode == "all":
+        modes_to_sweep = {"agg", "disagg", "afd"}
+    else:
+        modes_to_sweep = {serving_mode}
+    needs_disagg = "disagg" in modes_to_sweep
+
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
     if backend == "auto" and moe_backend == "megamoe":
         backends_to_sweep = [common.BackendName.sglang.value]
@@ -1486,28 +1557,21 @@ def build_default_tasks(
         requires_declared_perf_database = _database_mode_requires_declared_perf_database(database_mode)
         for backend_name in backends_to_sweep:
             sys_backends = supported.get(system, {})
-            decode_backends = supported.get(decode_system, {}) if decode_system != system else sys_backends
             if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
-                decode_versions = decode_backends.get(backend_name, [])
-                if not sys_versions or (decode_system != system and not decode_versions):
+                if not sys_versions:
                     logger.warning(
-                        "No measured database for backend %s on system=%s%s; including it for %s estimates.",
+                        "No measured database for backend %s on system=%s; including it for %s estimates.",
                         backend_name,
                         system,
-                        f", decode_system={decode_system}" if decode_system != system else "",
                         database_mode,
                     )
-                elif backend_version is not None and (
-                    backend_version not in sys_versions
-                    or (decode_system != system and backend_version not in decode_versions)
-                ):
+                elif backend_version is not None and backend_version not in sys_versions:
                     logger.warning(
-                        "No measured database version %s for backend %s on system=%s%s; including it for %s estimates.",
+                        "No measured database version %s for backend %s on system=%s; including it for %s estimates.",
                         backend_version,
                         backend_name,
                         system,
-                        f", decode_system={decode_system}" if decode_system != system else "",
                         database_mode,
                     )
                 available.append(backend_name)
@@ -1515,26 +1579,14 @@ def build_default_tasks(
             if backend_name not in sys_backends:
                 logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
                 continue
-            if decode_system != system and backend_name not in decode_backends:
-                logger.warning("Skipping backend %s: not supported for decode system %s.", backend_name, decode_system)
+            if backend_version is not None and backend_version not in sys_backends.get(backend_name, []):
+                logger.warning(
+                    "Skipping backend %s: version %s not available for system %s.",
+                    backend_name,
+                    backend_version,
+                    system,
+                )
                 continue
-            if backend_version is not None:
-                if backend_version not in sys_backends.get(backend_name, []):
-                    logger.warning(
-                        "Skipping backend %s: version %s not available for system %s.",
-                        backend_name,
-                        backend_version,
-                        system,
-                    )
-                    continue
-                if decode_system != system and backend_version not in decode_backends.get(backend_name, []):
-                    logger.warning(
-                        "Skipping backend %s: version %s not available for decode system %s.",
-                        backend_name,
-                        backend_version,
-                        decode_system,
-                    )
-                    continue
             available.append(backend_name)
         if not available:
             logger.error(
@@ -1546,11 +1598,14 @@ def build_default_tasks(
         backends_to_sweep = available
     elif _database_mode_requires_declared_perf_database(database_mode):
         _ensure_backend_version_available(system, backend, backend_version)
-        if decode_system != system:
+        if needs_disagg and decode_system != system:
             _ensure_backend_version_available(decode_system, backend, backend_version)
     else:
         supported = perf_database.get_supported_databases()
-        for role, sys_name in (("prefill", system), ("decode", decode_system)):
+        systems_to_check = [("system", system)]
+        if needs_disagg:
+            systems_to_check = [("prefill", system), ("decode", decode_system)]
+        for role, sys_name in systems_to_check:
             versions = supported.get(sys_name, {}).get(backend, [])
             if backend_version is not None and versions and backend_version not in versions:
                 logger.warning(
@@ -1570,9 +1625,28 @@ def build_default_tasks(
                     database_mode,
                 )
 
-    # v2 Task uses a flat schema. Global (both-mode) fields stay top-level;
-    # worker-spec fields are top-level for agg but must be fanned out to
-    # prefill_* / decode_* for disagg (v2 forbids shared top-level worker fields).
+    def _disagg_backend_available(backend_name: str) -> bool:
+        if decode_system == system or not _database_mode_requires_declared_perf_database(database_mode):
+            return True
+        supported = perf_database.get_supported_databases()
+        decode_versions = supported.get(decode_system, {}).get(backend_name, [])
+        if not decode_versions:
+            logger.warning(
+                "Skipping disagg for backend %s: not supported for decode system %s.",
+                backend_name,
+                decode_system,
+            )
+            return False
+        if backend_version is not None and backend_version not in decode_versions:
+            logger.warning(
+                "Skipping disagg for backend %s: version %s not available for decode system %s.",
+                backend_name,
+                backend_version,
+                decode_system,
+            )
+            return False
+        return True
+
     global_kwargs: dict[str, Any] = {
         "isl": isl,
         "osl": osl,
@@ -1618,7 +1692,6 @@ def build_default_tasks(
         )
 
     def _make_disagg(backend_name: str, moe_backend_value: str | None) -> Task:
-        # Fan out the shared worker spec to both roles (v2 disagg forbids top-level worker fields).
         return Task(
             serving_mode="disagg",
             prefill_model_path=model_path,
@@ -1636,28 +1709,71 @@ def build_default_tasks(
             **global_kwargs,
         )
 
-    tasks: dict[str, Task] = {}
+    tasks: dict[str, Any] = {}
     is_moe_model = check_is_moe(model_path)
+
+    afd_feasible = False
+    if "afd" in modes_to_sweep:
+        afd_gpus_per_node = _lookup_num_gpus_per_node(system)
+        if afd_gpus_per_node is None:
+            logger.warning("Skipping afd: could not resolve num_gpus_per_node for system %s.", system)
+        elif total_gpus < 2 * afd_gpus_per_node:
+            logger.warning(
+                "Skipping afd: the current node-granular topology requires one full A node "
+                "and one full F node (%d GPUs total at %d GPUs/node), got total_gpus=%d.",
+                2 * afd_gpus_per_node,
+                afd_gpus_per_node,
+                total_gpus,
+            )
+        else:
+            afd_feasible = True
 
     for backend_name in backends_to_sweep:
         backend_moe = _sglang_moe_backend_override(backend_name)
-        exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
-        tasks[exp_name] = _make_agg(backend_name, backend_moe)
 
-        # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
-        if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-            skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
-            if skip_reason:
-                logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
-            else:
-                try:
-                    deepep_task = _make_agg(backend_name, "deepep_moe")
-                except UnsupportedWideepConfigError as exc:
-                    logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+        if "agg" in modes_to_sweep:
+            exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
+            tasks[exp_name] = _make_agg(backend_name, backend_moe)
+
+            if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
+                skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
+                if skip_reason:
+                    logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
                 else:
-                    deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                    tasks[deepep_name] = deepep_task
+                    try:
+                        deepep_task = _make_agg(backend_name, "deepep_moe")
+                    except UnsupportedWideepConfigError as exc:
+                        logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
+                    else:
+                        deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
+                        tasks[deepep_name] = deepep_task
 
+        if "afd" in modes_to_sweep and afd_feasible:
+            try:
+                afd_task = Task(
+                    serving_mode="afd",
+                    model_path=model_path,
+                    system_name=system,
+                    backend_name=backend_name,
+                    backend_version=backend_version,
+                    enable_wideep=enable_wideep,
+                    enable_chunked_prefill=enable_chunked_prefill,
+                    moe_backend=backend_moe,
+                    afd_max_a_batch_size=afd_max_a_batch_size,
+                    afd_max_candidates=afd_max_candidates,
+                    afd_candidate_overflow=afd_candidate_overflow,
+                    **global_kwargs,
+                )
+            except ValueError as exc:
+                logger.warning("Skipping afd for backend %s: %s", backend_name, exc)
+            else:
+                exp_name = f"afd_{backend_name}" if backend == "auto" else "afd"
+                tasks[exp_name] = afd_task
+
+        if "disagg" not in modes_to_sweep:
+            continue
+        if not _disagg_backend_available(backend_name):
+            continue
         if total_gpus < 2:
             logger.warning("Skipping disagg since it requires at least 2 GPUs.")
             continue
@@ -1665,7 +1781,6 @@ def build_default_tasks(
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         tasks[exp_name] = _make_disagg(backend_name, backend_moe)
 
-        # For SGLang MoE without --enable-wideep, also sweep DeepEP intra-node
         if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
             skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
             if skip_reason:
@@ -1678,6 +1793,10 @@ def build_default_tasks(
                 else:
                     deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
                     tasks[deepep_name] = deepep_disagg_task
+
+    if not tasks:
+        logger.error("No task configs could be built for serving_mode=%s.", serving_mode)
+        raise SystemExit(1)
     return tasks
 
 
@@ -1692,8 +1811,9 @@ def build_experiment_tasks(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
-        engine_step_backend: Optional global experimental static-latency backend.
-            Per-experiment ``engine_step_backend`` entries take precedence.
+        engine_step_backend: Optional global engine-step latency backend override.
+            Per-experiment ``engine_step_backend`` entries take precedence;
+            unset defaults to the compiled Rust engine.
 
     Returns:
         Dict mapping experiment names to Task objects.
@@ -1726,7 +1846,7 @@ def build_experiment_tasks(
     else:
         experiment_names = [name for name in experiment_data if name != "exps"]
 
-    tasks: dict[str, Task] = {}
+    tasks: dict[str, Any] = {}
 
     for exp_name in experiment_names:
         exp_config = experiment_data[exp_name]
@@ -1740,7 +1860,7 @@ def build_experiment_tasks(
         model_path = (
             exp_config.get("model_path") or exp_config.get("prefill_model_path") or exp_config.get("decode_model_path")
         )
-        if serving_mode not in {"agg", "disagg"} or not model_path:
+        if serving_mode not in {"agg", "disagg", "afd"} or not model_path:
             logger.warning("Skipping experiment '%s': missing serving_mode or model_path.", exp_name)
             continue
 
@@ -1791,16 +1911,14 @@ def build_experiment_tasks(
         if engine_step_backend is not None and "engine_step_backend" not in exp_config:
             overrides["engine_step_backend"] = engine_step_backend
 
-        # exp_config is a legacy V1 experiment dict (top-level fields + nested config /
-        # mode / profiles).  Task.from_yaml auto-detects and converts it to the flat V2
-        # schema (emitting a DeprecationWarning); a native V2 flat dict also works.
         try:
             task_config = {**exp_config, "database_mode": database_mode}
+            if serving_mode == "afd":
+                task_config.setdefault("model_path", model_path)
+                task_config.setdefault("system_name", system_name)
             tasks[exp_name] = Task.from_yaml(task_config, **overrides)
         except Exception as exc:
             if is_expected_cli_error(exc):
-                # Expected config/compatibility rejection (e.g. MegaMoE requires a
-                # Blackwell system): report cleanly and keep the traceback at DEBUG.
                 logger.log(logging.ERROR, "Failed to build Task for experiment '%s': %s", exp_name, exc)
                 logger.debug("Traceback for experiment %s", exp_name, exc_info=True)
             else:
@@ -2790,6 +2908,10 @@ def main(args):
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,
             engine_step_backend=args.engine_step_backend,
+            serving_mode=args.serving_mode,
+            afd_max_a_batch_size=getattr(args, "afd_max_a_batch_size", 1024),
+            afd_max_candidates=getattr(args, "afd_max_candidates", 10_000),
+            afd_candidate_overflow=getattr(args, "afd_candidate_overflow", "error"),
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
         )

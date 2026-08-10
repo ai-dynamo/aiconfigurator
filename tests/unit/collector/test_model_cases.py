@@ -655,7 +655,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    assert len(moe_cases) == 4911
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
+    assert len(moe_cases) == 5025
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -668,8 +669,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
-    assert len(get_context_mla_case_specs()) == 220
-    assert len(get_generation_mla_case_specs()) == 362
+    # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
+    # expanding the MLA spec grids.
+    assert len(get_context_mla_case_specs()) == 330
+    assert len(get_generation_mla_case_specs()) == 543
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
@@ -753,6 +756,33 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
     for backend in ("sglang", "trtllm"):
         plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K2.5")
         assert required_ops <= plan.selected_ops
+
+
+def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
+    # K3 has no trtllm serving lane. moe activation is framework-specific
+    # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
+    # planned-op zero-case expansion with no logged drop is structurally
+    # impossible (case_authoring.md; review 2026-08-04).
+    for backend in ("sglang", "vllm"):
+        plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K3")
+        assert "moe" in plan.selected_ops, backend
+    trtllm_plan = build_collection_case_plan(backend="trtllm", model_path="moonshotai/Kimi-K3")
+    assert "moe" not in trtllm_plan.selected_ops
+
+    # Cross-model trtllm sweeps (getter runs with no model filter) still see
+    # the K3 moe row: the declared empty trtllm allowlist rejects EVERY mode,
+    # and the trtllm getter logs the fully-dropped model instead of silently
+    # expanding to zero.
+    from collector.case_generator import get_moe_quantization_modes, moe_model_allows_quantization
+
+    modes = get_moe_quantization_modes(
+        "trtllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    )
+    assert modes  # the sweep itself is non-empty
+    for mode in modes:
+        assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K3", mode), mode
 
 
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
@@ -852,8 +882,10 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
     pre_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_pre")
     post_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_post")
 
-    assert len(pre_cases) == 400
-    assert len(post_cases) == 448
+    # 600/672 since the Kimi-K3 96-head family (96/48/24/12) joined the
+    # base head_counts grid alongside the DeepSeek 128-family (2026-08-02).
+    assert len(pre_cases) == 600
+    assert len(post_cases) == 672
     assert pre_cases[0] == MLABMMCommonTestCase(
         num_tokens=1,
         num_heads=128,
