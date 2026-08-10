@@ -175,11 +175,15 @@ def test_sglang_sm90_full_structural_population_is_stable(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     for phase, sweep_getter, expected in (
-        # 151/137 since the Kimi-K3 declarations added 8 SM90 head configs
+        # 155/141 since Muse Glimmer added 4 SM90 window=2048 head configs
+        # per phase (TP shards 32/2, 16/1, 8/1, 4/1 @hd128, all fa3-routed).
+        # Window=0 shards are deduped against the pre-existing base-grid points
+        # so they do not increase the count.
+        # Previous 151/137 since Kimi-K3 declarations added 8 SM90 head configs
         # (DSPARK draft GQA shards 64/32/16/8 q-heads @hd64 + MLA 96-family
         # 96/48/24/12 @hd128, all fa3-routed; net +4 context / +5 generation).
-        ("context", get_attention_context_shape_sweeps, 151),
-        ("generation", get_attention_generation_shape_sweeps, 137),
+        ("context", get_attention_context_shape_sweeps, 155),
+        ("generation", get_attention_generation_shape_sweeps, 141),
     ):
         configs = [
             config
@@ -244,6 +248,20 @@ def test_sglang_0514_model_runtime_contracts(monkeypatch):
     assert gpt_oss[128].runtime_window_size == 127
     assert all(config.has_attention_sink for config in gpt_oss.values())
     assert {config.kernel_source for config in gpt_oss.values()} == {"fa3"}
+
+    # Muse Glimmer: GQA 32/2/128, window 2048 uses sglang_runtime_window_size
+    # convention (window - 1 = 2047). No sinks, no scaling override, default
+    # fa3 dispatch on SM90.
+    muse = {
+        config.window_size: config
+        for config in _model_configs(monkeypatch, "meta-models/Muse-Glimmer-30B", 90, "context")
+        if config.num_heads == 32
+    }
+    assert set(muse) == {0, 2048}
+    assert muse[2048].runtime_window_size == 2047
+    assert muse[0].runtime_window_size == -1
+    assert not any(config.has_attention_sink for config in muse.values())
+    assert {config.kernel_source for config in muse.values()} == {"fa3"}
 
     assert {
         config.kernel_source for config in _model_configs(monkeypatch, "nvidia/Nemotron-H-56B-Base-8K", 100, "context")
