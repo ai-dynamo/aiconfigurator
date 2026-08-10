@@ -254,6 +254,27 @@ if (( fpm_is_follower )); then
   # teardown (leader etcd gone) as success so a completed multinode
   # measurement is not recorded as a follower failure; an engine crash while
   # the leader is still alive stays a real failure.
+  #
+  # Do NOT block on engine exit: the headless engine has been observed to
+  # hang forever when the DP master vanishes (leader crash and normal
+  # completion alike), burning the runner's whole exec budget. Actively
+  # probe the leader's etcd; once it stays gone, terminate the local engine
+  # and classify by the same leader-teardown rule.
+  leader_gone_probes=0
+  while kill -0 "$engine_pid" 2>/dev/null; do
+    if ! (exec 3<>"/dev/tcp/${FPM_MASTER_ADDR}/2379") 2>/dev/null; then
+      leader_gone_probes=$((leader_gone_probes + 1))
+    else
+      leader_gone_probes=0
+    fi
+    if (( leader_gone_probes >= 3 )); then
+      echo "Leader etcd is gone while the headless engine is still running; terminating engine and reporting success" >&2
+      terminate_engine "$engine_pid"
+      engine_pid=""
+      exit 0
+    fi
+    sleep 5
+  done
   set +e
   wait "$engine_pid"
   headless_status=$?

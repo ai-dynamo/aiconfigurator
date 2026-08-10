@@ -181,7 +181,7 @@ def _stage(
     script = script.replace("/results/", f"{results}/")
     assert script.count("2380") == 1
     script = script.replace("2380", str(peer_port))
-    assert script.count("2379") == 7
+    assert script.count("2379") == 8
     script = script.replace("2379", str(etcd_port))
     assert script.count("barrier_port=29511") == 1
     script = script.replace("barrier_port=29511", f"barrier_port={barrier_port}")
@@ -710,6 +710,31 @@ def test_fpm_exec_follower_crash_after_leader_teardown_is_success(tmp_path):
 
     assert completed.returncode == 0
     assert "Headless engine exited after leader teardown; reporting success" in completed.stderr
+
+
+def test_fpm_exec_follower_watchdog_terminates_a_hung_engine(tmp_path):
+    """A headless engine that never exits when the leader vanishes must be
+    actively terminated by the follower watchdog and classified as success —
+    not left to burn the runner's exec budget. Regression guard: the watchdog
+    must pass the pid to terminate_engine, or the reap crashes the script
+    under set -e and the pod is misrecorded as failed."""
+
+    # A long-lived engine that exits cleanly on SIGTERM; nothing listens on the
+    # staged etcd port, so the follower watchdog sees the leader gone and must
+    # actively terminate it. shadow_python3 stubs the leader-readiness probe so
+    # the run reaches the follower branch deterministically.
+    hung_engine = "#!/usr/bin/env bash\ntrap 'exit 0' TERM\nwhile true; do sleep 0.5; done\n"
+    staged = _stage(
+        tmp_path,
+        run_script=hung_engine,
+        env_overrides=_FOLLOWER_ENV,
+        shadow_python3=True,
+    )
+
+    completed = _run(staged, timeout=60)
+
+    assert completed.returncode == 0, completed.stderr
+    assert "terminating engine and reporting success" in completed.stderr
 
 
 def test_fpm_exec_follower_crash_while_leader_alive_stays_a_failure(tmp_path):
