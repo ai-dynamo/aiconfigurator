@@ -14,14 +14,14 @@ tables:
     collector_hash: sha256:551ed00dfc2b885c2450e88b9fed4ec245e7642b7ca584ae869e8e01f9cd25ba
     case_plan_hash: sha256:6d5cf64319d40c4ce0c622054ac34df07162efecbaa7125c600fc24d5a9a8acb
     collected_at: '2026-08-09'
+    rows: 5587
     status: complete
-    rows: 5600
   dsv4_hca_context_module_perf:
     collector_ref: 75f888f520abb40dcd7f4655acc7deeaff91b958
     collector_hash: sha256:551ed00dfc2b885c2450e88b9fed4ec245e7642b7ca584ae869e8e01f9cd25ba
     case_plan_hash: sha256:febfcf0d2e37fb0a91bef1f5fbaa5427147de4301b1a9056a76f0a8b15f539cb
     collected_at: '2026-08-09'
-    rows: 5600
+    rows: 5589
     status: complete
   dsv4_csa_generation_module_perf:
     collector_ref: 75f888f520abb40dcd7f4655acc7deeaff91b958
