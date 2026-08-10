@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -215,11 +216,17 @@ def test_abbreviated_ops_spelling_selects_fpm_without_traceback(tmp_path):
         "--plan-only",
     ]
 
-    completed = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False)
+    # CI containers run the collector source outside a git checkout; the
+    # explicit revision override keeps this a pure CLI-surface test.
+    env = {**os.environ, "FPM_COLLECTOR_SOURCE_REVISION": "cli-isolation-test"}
+    completed = subprocess.run(
+        command, cwd=tmp_path, capture_output=True, text=True, timeout=180, check=False, env=env
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert "Traceback" not in completed.stderr
     assert '"schema_name": "aic_fpm_collection_plan"' in completed.stdout
+    assert "cli-isolation-test" in completed.stdout
 
 
 def test_generator_arguments_without_fpm_op_fail_closed(tmp_path):

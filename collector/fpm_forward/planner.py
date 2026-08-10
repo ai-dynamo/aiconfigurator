@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,13 @@ def _canonical_hash(payload: object) -> str:
 
 
 def _git_revision() -> str:
+    # Hermetic environments (CI containers, wheel installs) run the collector
+    # outside a git checkout; an explicit revision keeps plan identity honest
+    # there while the default below stays fail-closed.
+    override = os.environ.get("FPM_COLLECTOR_SOURCE_REVISION", "").strip()
+    if override:
+        return override
+
     root = Path(__file__).resolve().parents[2]
 
     def _git(*args: str) -> str:
