@@ -17,14 +17,17 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 DSV4_MODULE_OPS = {
-    "dsv4_csa_context_module": PerfFile.DSV4_CSA_CONTEXT_MODULE,
-    "dsv4_hca_context_module": PerfFile.DSV4_HCA_CONTEXT_MODULE,
-    "dsv4_csa_generation_module": PerfFile.DSV4_CSA_GENERATION_MODULE,
-    "dsv4_hca_generation_module": PerfFile.DSV4_HCA_GENERATION_MODULE,
+    "dsv4_csa_context_module": (PerfFile.DSV4_CSA_CONTEXT_MODULE, "get_dsv4_csa_context_test_cases"),
+    "dsv4_hca_context_module": (PerfFile.DSV4_HCA_CONTEXT_MODULE, "get_dsv4_hca_context_test_cases"),
+    "dsv4_csa_generation_module": (PerfFile.DSV4_CSA_GENERATION_MODULE, "get_dsv4_csa_generation_test_cases"),
+    "dsv4_hca_generation_module": (PerfFile.DSV4_HCA_GENERATION_MODULE, "get_dsv4_hca_generation_test_cases"),
 }
 
 
 def _load_module_with_torch_stub(monkeypatch):
+    # exec_module runs the collector's import fallbacks, which append to
+    # sys.path; snapshot it so the mutation does not leak into later tests.
+    monkeypatch.setattr(sys, "path", list(sys.path))
     torch_stub = ModuleType("torch")
     torch_stub.cuda = SimpleNamespace(empty_cache=lambda: None)
     monkeypatch.setitem(sys.modules, "torch", torch_stub)
@@ -38,10 +41,14 @@ def _load_module_with_torch_stub(monkeypatch):
 
 def test_registry_wires_all_four_dsv4_module_ops():
     entries = {entry.op: entry for entry in REGISTRY}
-    for op, perf_file in DSV4_MODULE_OPS.items():
+    for op, (perf_file, get_func) in DSV4_MODULE_OPS.items():
         entry = entries[op]
         assert entry.module == "collector.trtllm.collect_dsv4_attn"
         assert entry.run_func == "run_dsv4_attn_worker"
+        # get_func <-> perf_filename pairing decides which population lands
+        # in which table; a CSA getter wired to the HCA file would otherwise
+        # pass and mislabel every row.
+        assert entry.get_func == get_func
         assert entry.perf_filename == perf_file
         # Pre-Blackwell rejection comes from the framework at runtime
         # (classified failure). SM120 is parked with hardware probe evidence
@@ -59,14 +66,16 @@ def test_trtllm_dsv4_plan_schedules_attention_modules():
 def test_dsv4_case_population_shape_and_budget(monkeypatch):
     module = _load_module_with_torch_stub(monkeypatch)
 
-    for mode, getter in (
-        ("context", module.get_dsv4_csa_context_test_cases),
-        ("generation", module.get_dsv4_hca_generation_test_cases),
+    for mode, expected_kind, getter in (
+        ("context", "csa", module.get_dsv4_csa_context_test_cases),
+        ("context", "hca", module.get_dsv4_hca_context_test_cases),
+        ("generation", "csa", module.get_dsv4_csa_generation_test_cases),
+        ("generation", "hca", module.get_dsv4_hca_generation_test_cases),
     ):
         cases = getter()
         assert cases
         ids = [case["id"] for case in cases]
-        assert len(ids) == len(set(ids)), f"duplicate ids in {mode}"
+        assert len(ids) == len(set(ids)), f"duplicate ids in {mode}/{expected_kind}"
         for case in cases:
             params = case["params"]
             if mode == "context":
@@ -79,7 +88,7 @@ def test_dsv4_case_population_shape_and_budget(monkeypatch):
                 assert bs * sl <= module.MAX_GENERATION_KV_TOKENS
             assert sl <= module.MAX_SEQ_LEN
             assert (kv, comp, gemm) == ("fp8", "bfloat16", "fp8_block")
-            assert kind in module.ATTN_KIND_TO_COMPRESS_RATIO
+            assert kind == expected_kind
             assert tp in (1, 2, 4, 8)
 
 

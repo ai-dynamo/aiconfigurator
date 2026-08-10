@@ -119,7 +119,16 @@ def _default_num_tokens() -> list[int]:
 
 
 def _make_mhc_site(hidden_size: int, hc_mult: int, *, device: str):
-    """One mHC parameter set (a real block holds two: attention and FFN)."""
+    """One mHC parameter set (a real block holds two: attention and FFN).
+
+    Serving-parity citations (TensorRT-LLM 1.3.0rc20,
+    tensorrt_llm/_torch/modules/mhc/hyper_connection.py):
+    parameter shapes/dtypes mirror ``mHC.__init__`` — ``fn`` [mix_hc, mult*hidden]
+    fp32, ``base`` [mix_hc] fp32, ``scale`` [3] fp32 (hyper_connection.py:99-105),
+    with mix_hc = (2+mult)*mult (hyper_connection.py:95). Random values stand in
+    for checkpoint weights: both pre/post kernels dispatch on shapes/dtypes only
+    (mhc_cuda.py tactic selection keys on num_tokens/hidden_size, never values).
+    """
     from tensorrt_llm._torch.modules.mhc.hyper_connection import mHC
 
     site = mHC(mult=hc_mult, hidden_size=hidden_size, sinkhorn_iters=MHC_SINKHORN_ITERS)
@@ -131,6 +140,14 @@ def _make_mhc_site(hidden_size: int, hc_mult: int, *, device: str):
 
 
 def _make_residual(num_tokens: int, hidden_size: int, hc_mult: int, *, device: str) -> torch.Tensor:
+    """Residual stream input in the exact ``pre_mapping`` contract (TensorRT-LLM
+    1.3.0rc20 hyper_connection.py): x layout [..., mult, hidden]
+    (hyper_connection.py:108), bfloat16 and trailing-dim shapes asserted at
+    hyper_connection.py:114-116, outer dims flattened to
+    [num_tokens, mult, hidden] at hyper_connection.py:117-119 — collapsing
+    batch*seq into ``num_tokens`` up front is therefore identity-preserving.
+    ``post_mapping`` consumes the same layout (hyper_connection.py:225-251).
+    """
     return torch.randn(num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=device)
 
 
@@ -287,6 +304,12 @@ def run_mhc_module(
             )
             print(f"[trtllm-mhc] op={op} tokens={num_tokens} kernel={kernel_source} latency={latency:.4f} ms")
             results.append({"op": op, "num_tokens": num_tokens, "kernel_source": kernel_source, "latency": latency})
+            # kernel_func retains site_inputs/post_inputs through its default
+            # argument; drop every reference before empty_cache() so the next
+            # token case doesn't allocate on top of the previous one.
+            del kernel_func
+            if op == "post":
+                del post_inputs
             del site_inputs
             torch.cuda.empty_cache()
     return results

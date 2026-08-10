@@ -107,9 +107,19 @@ _MODEL_CONFIG_DIR = os.path.join(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _filter_shapes(mode: str):
+def _filter_shapes(mode: str, drops: dict[str, int] | None = None):
     """(bs, sl, prefix) grid with the vllm collector's budget filters
-    (collector/vllm/collect_dsv4_attn.py:833-880)."""
+    (collector/vllm/collect_dsv4_attn.py:833-880).
+
+    Budget drops are counted per reason (layer_permissions.md memory-filter
+    rule 3: "drops are counted, never silent") — the caps are env-overridable,
+    so a misconfigured cap must be visible, not a silently-empty population.
+    """
+    drops = drops if drops is not None else {}
+
+    def _drop(reason: str) -> None:
+        drops[reason] = drops.get(reason, 0) + 1
+
     smoke = "--smoke" in sys.argv
     batch_sizes = [1] if smoke else _DSV4_MODULE_BATCH_SIZES
     seq_lens = [64] if smoke else _DSV4_MODULE_SEQ_LENGTHS
@@ -117,32 +127,35 @@ def _filter_shapes(mode: str):
     for bs in batch_sizes:
         for sl in seq_lens:
             if sl > MAX_SEQ_LEN:
+                _drop("seq_len_cap")
                 continue
             if mode == "context":
                 prefixes = (0, 128) if smoke else tuple(dict.fromkeys(CONTEXT_PREFIX_ANCHORS + (MAX_SEQ_LEN - sl,)))
                 for prefix in prefixes:
                     if prefix < 0 or prefix + sl > MAX_SEQ_LEN:
+                        _drop("prefix_bounds")
                         continue
                     if bs * sl > MAX_CONTEXT_QUERY_TOKENS:
+                        _drop("context_query_tokens_cap")
                         continue
                     if bs * (prefix + sl) > MAX_GENERATION_KV_TOKENS:
+                        _drop("context_kv_tokens_cap")
                         continue
                     shapes.append((bs, sl, prefix))
             else:
                 if bs * sl > MAX_GENERATION_KV_TOKENS:
+                    _drop("generation_kv_tokens_cap")
                     continue
                 # Decode batch ladder (vllm collector:867-878).
-                if sl >= 524288 and bs > 1:
-                    continue
-                if sl >= 262144 and bs > 2:
-                    continue
-                if sl >= 131072 and bs > 4:
-                    continue
-                if sl >= 65536 and bs > 8:
-                    continue
-                if sl >= 32768 and bs > 16:
-                    continue
-                if sl >= 8192 and bs > 64:
+                if (
+                    (sl >= 524288 and bs > 1)
+                    or (sl >= 262144 and bs > 2)
+                    or (sl >= 131072 and bs > 4)
+                    or (sl >= 65536 and bs > 8)
+                    or (sl >= 32768 and bs > 16)
+                    or (sl >= 8192 and bs > 64)
+                ):
+                    _drop("decode_batch_ladder")
                     continue
                 shapes.append((bs, sl, 0))
     return shapes
@@ -151,15 +164,29 @@ def _filter_shapes(mode: str):
 def _build_dsv4_test_cases(mode: str, attn_kind: str) -> list[dict]:
     cases: list[dict] = []
     tp_sizes = [1] if "--smoke" in sys.argv else _DSV4_MODULE_TP_SIZES
+    drops: dict[str, int] = {}
+    # Loop-invariant: same shape grid for every (model, tp) pair, so compute
+    # (and count drops) once. Case order is unchanged.
+    shapes = _filter_shapes(mode, drops)
+    if drops:
+        total_dropped = sum(drops.values())
+        print(
+            f"[trtllm-dsv4] {mode}/{attn_kind}: dropped {total_dropped} shape(s) at generation (budget filter): {drops}"
+        )
     for model_path in _selected_dsv4_models():
         for tp_size in tp_sizes:
-            for bs, sl, prefix in _filter_shapes(mode):
+            for bs, sl, prefix in shapes:
                 params = [sl, bs, tp_size, "fp8", "bfloat16", "fp8_block", model_path, attn_kind]
                 case_id = f"dsv4_{attn_kind}_{mode}_b{bs}_s{sl}_tp{tp_size}_{model_path.replace('/', '_')}"
                 if mode == "context":
                     params.append(prefix)
                     case_id += f"_p{prefix}"
                 cases.append({"id": case_id, "params": params})
+    if not cases:
+        # Zero cases with no logged reason is a population bug
+        # (layer_permissions.md); with the reasons logged it is an explicit
+        # configuration error (e.g. an env cap set below the whole grid).
+        raise RuntimeError(f"dsv4 {mode}/{attn_kind}: budget filter dropped every shape (drops={drops})")
     return cases
 
 
@@ -235,7 +262,15 @@ def _patched_config_dir(model_path: str, compress_ratio: int, tp_size: int) -> t
     # o_groups shards with TP like the SDK model's
     # local_o_groups = max(1, o_groups // tp_size)
     # (aic-core .../sdk/models/deepseek_v4.py:116).
-    o_groups = int(config.get("o_groups", 1))
+    if "o_groups" not in config:
+        # Fail loudly (case_authoring.md "unresolvable declarations"): a
+        # defaulted value would silently benchmark a different attention
+        # geometry, and o_groups is not part of the logged row. Both packaged
+        # DSV4 artifacts declare it (Flash 8, Pro 16).
+        raise KeyError(
+            f"AIC packaged config for {model_path!r} omits 'o_groups'; the TP-local geometry cannot be resolved"
+        )
+    o_groups = int(config["o_groups"])
     local_o_groups = max(1, o_groups // tp_size)
 
     config.pop("auto_map", None)
@@ -503,52 +538,62 @@ def create_dsv4_kv_cache_and_metadata(
         model_config=model_config,
     )
 
-    request_ids = list(range(batch_size))
-    token_nums = [request_tokens] * batch_size
-    # is_gen mirrors the request phase (KVCacheManagerV2.add_dummy_requests;
-    # generation metadata below declares num_contexts=0 with cached KV).
-    kv_cache_manager.add_dummy_requests(request_ids, token_nums, is_gen=not is_context)
+    # From here on the manager owns device memory: release it on ANY
+    # failure before re-raising, so a failed case cannot leak a
+    # batch x max_seq fp8 pool into the worker's next cases (which would
+    # then OOM for the wrong reason and pollute the failure log).
+    try:
+        request_ids = list(range(batch_size))
+        token_nums = [request_tokens] * batch_size
+        # is_gen mirrors the request phase (KVCacheManagerV2.add_dummy_requests;
+        # generation metadata below declares num_contexts=0 with cached KV).
+        kv_cache_manager.add_dummy_requests(request_ids, token_nums, is_gen=not is_context)
 
-    attention_cls = get_attention_backend(
-        model_config.attn_backend,
-        model_config.sparse_attention_config,
-    )
+        attention_cls = get_attention_backend(
+            model_config.attn_backend,
+            model_config.sparse_attention_config,
+        )
 
-    sparse_metadata_params = model_config.sparse_attention_config.to_sparse_metadata_params(pretrained_config=config)
+        sparse_metadata_params = model_config.sparse_attention_config.to_sparse_metadata_params(
+            pretrained_config=config
+        )
 
-    attn_metadata = attention_cls.Metadata(
-        max_num_requests=batch_size,
-        max_num_tokens=total_tokens,
-        kv_cache_manager=kv_cache_manager,
-        mapping=mapping,
-        seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32),
-        position_ids=None,
-        num_contexts=batch_size if is_context else 0,
-        kv_cache_params=KVCacheParams(
-            use_cache=True,
-            num_cached_tokens_per_seq=[kv_cache_len] * batch_size,
-        ),
-        cross=None,
-        request_ids=request_ids,
-        # Chunk-local prompt_lens + cached-KV flags: see the serving
-        # citations in collect_mla_module.create_kv_cache_and_metadata
-        # (model_engine.py prompt_tokens slicing / cache-reuse state).
-        prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
-        enable_context_mla_with_cached_kv=bool(is_context and prefix_len > 0),
-        runtime_features=AttentionRuntimeFeatures(
-            chunked_prefill=False,
-            cache_reuse=bool(is_context and prefix_len > 0),
-        ),
-        all_rank_num_tokens=None,
-        workspace=torch.tensor([], device=device, dtype=torch.int8),
-        sparse_metadata_params=sparse_metadata_params,
-    )
+        attn_metadata = attention_cls.Metadata(
+            max_num_requests=batch_size,
+            max_num_tokens=total_tokens,
+            kv_cache_manager=kv_cache_manager,
+            mapping=mapping,
+            seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32),
+            position_ids=None,
+            num_contexts=batch_size if is_context else 0,
+            kv_cache_params=KVCacheParams(
+                use_cache=True,
+                num_cached_tokens_per_seq=[kv_cache_len] * batch_size,
+            ),
+            cross=None,
+            request_ids=request_ids,
+            # Chunk-local prompt_lens + cached-KV flags: see the serving
+            # citations in collect_mla_module.create_kv_cache_and_metadata
+            # (model_engine.py prompt_tokens slicing / cache-reuse state).
+            prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
+            enable_context_mla_with_cached_kv=bool(is_context and prefix_len > 0),
+            runtime_features=AttentionRuntimeFeatures(
+                chunked_prefill=False,
+                cache_reuse=bool(is_context and prefix_len > 0),
+            ),
+            all_rank_num_tokens=None,
+            workspace=torch.tensor([], device=device, dtype=torch.int8),
+            sparse_metadata_params=sparse_metadata_params,
+        )
 
-    if hasattr(attn_module, "indexer") and attn_module.indexer is not None:
-        attn_metadata.indexer = attn_module.indexer
+        if hasattr(attn_module, "indexer") and attn_module.indexer is not None:
+            attn_metadata.indexer = attn_module.indexer
 
-    attn_metadata.prepare()
-    return kv_cache_manager, attn_metadata, attention_cls
+        attn_metadata.prepare()
+        return kv_cache_manager, attn_metadata, attention_cls
+    except Exception:
+        kv_cache_manager.shutdown()
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -597,116 +642,125 @@ def run_dsv4_attn(
 
     attn_module, model_config, head_info = _cached_dsv4_attention_module(model_path, attn_kind, tp_size, device)
 
-    kv_cache_manager, attn_metadata, attention_cls = create_dsv4_kv_cache_and_metadata(
-        model_config=model_config,
-        attn_module=attn_module,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        is_context=is_context,
-        prefix_len=prefix_len,
-        device=device,
-    )
-
-    hidden_size = model_config.pretrained_config.hidden_size
-    # int32 position_ids: serving populates them int32 and the DSV4 indexer
-    # rope op asserts it (sparse/deepseek_v4/deepseek_v4.py mla_rope_inplace
-    # "position_ids must be int32" @1.3.0rc23).
-    if is_context:
-        num_tokens = seq_len * batch_size
-        position_ids = (
-            torch.arange(prefix_len, prefix_len + seq_len, device=torch_device, dtype=torch.int32)
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-            .reshape(-1)
-            .contiguous()
+    # Ownership: the KV pool and the process-global extra-attrs slot are
+    # released/restored on EVERY exit path (success, dry-run failure,
+    # benchmark failure) — workers survive a failed case and run the next
+    # one, so a leaked pool would turn later cases into bogus OOM records
+    # and a stale attention_metadata weakref would outlive the case.
+    saved_extra_attrs = getattr(_trtllm_utils._model_extra_attrs, "attrs", None)
+    kv_cache_manager = None
+    try:
+        kv_cache_manager, attn_metadata, attention_cls = create_dsv4_kv_cache_and_metadata(
+            model_config=model_config,
+            attn_module=attn_module,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            is_context=is_context,
+            prefix_len=prefix_len,
+            device=device,
         )
-    else:
-        num_tokens = batch_size
-        position_ids = torch.full((batch_size,), seq_len - 1, device=torch_device, dtype=torch.int32)
 
-    hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=torch_device)
+        hidden_size = model_config.pretrained_config.hidden_size
+        # int32 position_ids: serving populates them int32 and the DSV4 indexer
+        # rope op asserts it (sparse/deepseek_v4/deepseek_v4.py mla_rope_inplace
+        # "position_ids must be int32" @1.3.0rc23).
+        if is_context:
+            num_tokens = seq_len * batch_size
+            position_ids = (
+                torch.arange(prefix_len, prefix_len + seq_len, device=torch_device, dtype=torch.int32)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+                .reshape(-1)
+                .contiguous()
+            )
+        else:
+            num_tokens = batch_size
+            position_ids = torch.full((batch_size,), seq_len - 1, device=torch_device, dtype=torch.int32)
 
-    # FIXME(kernel-limit): context shapes at bs*sl == 262144 query tokens
-    # fail with cudaLaunchKernelEx "invalid argument" (grid-dim limit) on
-    # B200/1.3.0rc23 — serving chunks prefill at max_num_tokens (<<262144),
-    # so these sweep extremes exceed the serving envelope; unverified which
-    # kernel hits the limit. Cases fail into the classified log.
-    with model_extra_attrs(model_config.extra_attrs):
-        get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
-        try:
-            with torch.inference_mode():
-                attn_module.forward(position_ids, hidden_states, attn_metadata)
-        except Exception:
-            print("  Dry run failed:")
-            traceback.print_exc()
-            _cleanup(kv_cache_manager)
-            raise
+        hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=torch_device)
 
-    _trtllm_utils._model_extra_attrs.attrs = model_config.extra_attrs
-    _trtllm_utils._model_extra_attrs.attrs["attention_metadata"] = weakref.ref(attn_metadata)
+        # FIXME(kernel-limit): context shapes at bs*sl == 262144 query tokens
+        # fail with cudaLaunchKernelEx "invalid argument" (grid-dim limit) on
+        # B200/1.3.0rc23 — serving chunks prefill at max_num_tokens (<<262144),
+        # so these sweep extremes exceed the serving envelope; unverified which
+        # kernel hits the limit. Cases fail into the classified log.
+        with model_extra_attrs(model_config.extra_attrs):
+            get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
+            try:
+                with torch.inference_mode():
+                    attn_module.forward(position_ids, hidden_states, attn_metadata)
+            except Exception:
+                print("  Dry run failed:")
+                traceback.print_exc()
+                raise  # the finally below releases the KV pool
 
-    def kernel_func():
-        attn_module.forward(position_ids, hidden_states, attn_metadata)
+        _trtllm_utils._model_extra_attrs.attrs = model_config.extra_attrs
+        _trtllm_utils._model_extra_attrs.attrs["attention_metadata"] = weakref.ref(attn_metadata)
 
-    with benchmark_with_power(
-        device=torch_device,
-        kernel_func=kernel_func,
-        num_warmups=warming_up,
-        num_runs=test_ite,
-        repeat_n=1,
-        allow_graph_fail=False,
-    ) as results:
-        pass
+        def kernel_func():
+            attn_module.forward(position_ids, hidden_states, attn_metadata)
 
-    latency = results["latency_ms"]
+        with benchmark_with_power(
+            device=torch_device,
+            kernel_func=kernel_func,
+            num_warmups=warming_up,
+            num_runs=test_ite,
+            repeat_n=1,
+            allow_graph_fail=False,
+        ) as results:
+            pass
 
-    if is_context:
-        isl, step = seq_len, prefix_len
-    else:
-        isl, step = 1, seq_len
+        latency = results["latency_ms"]
 
-    log_perf(
-        item_list=[
-            {
-                "model": model_path,
-                "architecture": ARCHITECTURE,
-                "mla_dtype": compute_dtype,
-                "kv_cache_dtype": kv_cache_dtype,
-                "gemm_type": gemm_type,
-                # Rank-LOCAL heads + mandatory tp_size (unified #1429; the
-                # SDK loader derives native = num_heads * tp_size and
-                # validates local semantics).
-                "num_heads": head_info["local_heads"],
-                "batch_size": batch_size,
-                "isl": isl,
-                "tp_size": tp_size,
-                "step": step,
-                "compress_ratio": ATTN_KIND_TO_COMPRESS_RATIO[attn_kind],
-                "latency": f"{latency:.4f}",
-            }
-        ],
-        framework="TRTLLM",
-        version=tensorrt_llm.__version__,
-        device_name=torch.cuda.get_device_name(device),
-        op_name=f"dsv4_{attn_kind}_{mode}_module",
-        # Ground truth: the attention backend class TRT-LLM's own selector
-        # returned for this sparse config (get_attention_backend); the many
-        # internal kernels (indexer deepgemm, sparse MLA, compressor) are
-        # not observable from one label — see kernel_source_backends.yaml.
-        kernel_source=attention_cls.__name__,
-        perf_filename=perf_filename,
-        power_stats=results["power_stats"],
-    )
+        if is_context:
+            isl, step = seq_len, prefix_len
+        else:
+            isl, step = 1, seq_len
 
-    print(
-        f"  [dsv4_{attn_kind}_{mode}] b={batch_size} s={seq_len} prefix={prefix_len} "
-        f"tp={tp_size} local_heads={head_info['local_heads']}: {latency:.4f} ms"
-    )
+        log_perf(
+            item_list=[
+                {
+                    "model": model_path,
+                    "architecture": ARCHITECTURE,
+                    "mla_dtype": compute_dtype,
+                    "kv_cache_dtype": kv_cache_dtype,
+                    "gemm_type": gemm_type,
+                    # Rank-LOCAL heads + mandatory tp_size (unified #1429; the
+                    # SDK loader derives native = num_heads * tp_size and
+                    # validates local semantics).
+                    "num_heads": head_info["local_heads"],
+                    "batch_size": batch_size,
+                    "isl": isl,
+                    "tp_size": tp_size,
+                    "step": step,
+                    "compress_ratio": ATTN_KIND_TO_COMPRESS_RATIO[attn_kind],
+                    "latency": f"{latency:.4f}",
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name=f"dsv4_{attn_kind}_{mode}_module",
+            # Ground truth: the attention backend class TRT-LLM's own selector
+            # returned for this sparse config (get_attention_backend); the many
+            # internal kernels (indexer deepgemm, sparse MLA, compressor) are
+            # not observable from one label — see kernel_source_backends.yaml.
+            kernel_source=attention_cls.__name__,
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
 
-    _cleanup(kv_cache_manager)
-    gc.collect()
-    torch.cuda.empty_cache()
-    return latency
+        print(
+            f"  [dsv4_{attn_kind}_{mode}] b={batch_size} s={seq_len} prefix={prefix_len} "
+            f"tp={tp_size} local_heads={head_info['local_heads']}: {latency:.4f} ms"
+        )
+
+        return latency
+    finally:
+        _trtllm_utils._model_extra_attrs.attrs = saved_extra_attrs
+        _cleanup(kv_cache_manager)
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def run_dsv4_attn_worker(
