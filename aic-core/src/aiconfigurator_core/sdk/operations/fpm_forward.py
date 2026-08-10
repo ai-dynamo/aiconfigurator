@@ -55,6 +55,11 @@ FPM_FORWARD_COORDINATE_SYSTEM = "iteration_totals_balanced_v1"
 FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
 _PHASES = ("prefill", "decode")
 _SUPPORTED_BACKEND_AXIS = "baseline"
+# The only policy the collector admits today (planner.py: "AIC automatic
+# baseline"). The op pins cells to it AND get_model refuses off-baseline
+# model configs, so a policy-changing config can never silently ride on
+# baseline-collected curves.
+_SUPPORTED_BACKEND_POLICY = "baseline_auto"
 
 # Identity columns that select a cell, in row-column order. ``model_path`` is
 # handled separately (see FPMForwardOp._select_cell); ``weight_quantization``
@@ -159,7 +164,7 @@ def _validate_sidecar(metadata_path: str, parquet_path: str) -> dict:
     return metadata
 
 
-def _validate_row(row: dict, index: int, expected_version: str) -> None:
+def _validate_row(row: dict, index: int, expected_version: str, expected_system: str, expected_backend: str) -> None:
     phase = row.get("workload_kind")
     if phase not in _PHASES:
         raise ValueError(f"FPM row {index} has unknown workload_kind={phase!r}")
@@ -172,6 +177,18 @@ def _validate_row(row: dict, index: int, expected_version: str) -> None:
         raise ValueError(
             f"FPM row {index} backend_version={row.get('backend_version')!r} does not match "
             f"the database version directory {expected_version!r}"
+        )
+    # `system`/`backend` are part of the physical row key but NOT the cell
+    # key, so a misplaced parquet (e.g. an h200 pair copied into a b200 tree)
+    # would otherwise merge into the same cells and silently serve wrong
+    # latencies. Pin them to the resolved database identity like the version.
+    if str(row.get("system")) != expected_system:
+        raise ValueError(
+            f"FPM row {index} system={row.get('system')!r} does not match the database system {expected_system!r}"
+        )
+    if str(row.get("backend")) != expected_backend:
+        raise ValueError(
+            f"FPM row {index} backend={row.get('backend')!r} does not match the database backend {expected_backend!r}"
         )
     latency = row.get("latency_ms")
     if not isinstance(latency, (int, float)) or not math.isfinite(float(latency)) or float(latency) <= 0:
@@ -190,7 +207,7 @@ def _validate_row(row: dict, index: int, expected_version: str) -> None:
         raise ValueError(f"FPM row {index} is a decode point carrying prefill tokens")
 
 
-def load_fpm_forward_data(primary_path: str, expected_version: str):
+def load_fpm_forward_data(primary_path: str, expected_version: str, expected_system: str, expected_backend: str):
     """Load and validate the fpm_forward parquet/metadata pair.
 
     Returns ``None`` when the parquet is absent (normal "no FPM data collected
@@ -211,7 +228,15 @@ def load_fpm_forward_data(primary_path: str, expected_version: str):
 
     metadata_path = os.path.splitext(primary_path)[0] + ".metadata.json"
     metadata = _validate_sidecar(metadata_path, primary_path)
-    rows = pq.read_table(primary_path).to_pylist()
+    try:
+        rows = pq.read_table(primary_path).to_pylist()
+    except ValueError:
+        raise
+    except Exception as exc:
+        # A truncated/corrupt parquet raises OSError/ArrowException; the
+        # documented contract is ValueError for every structural violation
+        # of the pair (the sha256 gate passed, so this is a data bug).
+        raise ValueError(f"FPM parquet is unreadable: {primary_path}: {exc}") from exc
     if metadata.get("row_count") != len(rows):
         raise ValueError(
             f"FPM row_count mismatch: sidecar={metadata.get('row_count')!r} actual={len(rows)}: {primary_path}"
@@ -220,9 +245,10 @@ def load_fpm_forward_data(primary_path: str, expected_version: str):
         raise ValueError(f"FPM database contains no rows: {primary_path}")
 
     seen_keys: set[tuple] = set()
+    seen_coords: set[tuple] = set()
     cells: dict[tuple, dict] = {}
     for index, row in enumerate(rows):
-        _validate_row(row, index, expected_version)
+        _validate_row(row, index, expected_version, expected_system, expected_backend)
         row_key = tuple(_norm_identity(row.get(column)) for column in _ROW_KEY_COLUMNS)
         if row_key in seen_keys:
             raise ValueError(f"FPM database contains a duplicate physical row key: {row_key}")
@@ -254,6 +280,21 @@ def load_fpm_forward_data(primary_path: str, expected_version: str):
         total_prefill = int(row["total_prefill_tokens"])
         total_kv = int(row["total_kv_read_tokens"])
         latency = float(row["latency_ms"])
+        # The physical row key includes cell_id/weight_quantization, which the
+        # cell key does not: two rows differing only there pass duplicate
+        # detection yet target the SAME table slot. Producing such rows is the
+        # collector's bug to prevent (aggregate_cell dedups; the formal writer
+        # keeps per-cell identities disjoint) — but a hand-merged pair must
+        # fail loudly here instead of silently last-winning.
+        coord_key = (cell_key, phase, batch, total_prefill, total_kv)
+        if coord_key in seen_coords:
+            raise ValueError(
+                f"FPM row {index} collides with an earlier row at the same cell "
+                f"coordinates (phase={phase!r}, batch_size={batch}, "
+                f"total_prefill_tokens={total_prefill}, total_kv_read_tokens={total_kv}); "
+                "refusing to silently overwrite latencies."
+            )
+        seen_coords.add(coord_key)
         table = cell["tables"][phase]
         if phase == "prefill":
             table.setdefault(batch, {}).setdefault(total_prefill, {})[total_kv] = latency
@@ -463,7 +504,7 @@ class FPMForwardOp(Operation):
                 system_data_root, database.backend, database.version, PerfDataFilename.fpm_forward.value
             )
             cls._data_cache[key] = LoadedOpData(
-                load_fpm_forward_data(primary_path, database.version),
+                load_fpm_forward_data(primary_path, database.version, database.system, database.backend),
                 PerfDataFilename.fpm_forward,
                 primary_path,
             )
@@ -478,36 +519,38 @@ class FPMForwardOp(Operation):
         perf_interp.clear_caches()
 
     # ------------------------------------------------------------------
-    # Cell selection (open decision D1: exact model_path, else unique fallback)
+    # Cell selection (decision D1 resolved: exact model_path only — the
+    # match identity carries no architecture fingerprint, so borrowing the
+    # sole collected path could silently answer for a different model)
     # ------------------------------------------------------------------
 
     def _select_cell(self, cells: dict) -> dict:
         matches = [
             cell
             for cell in cells.values()
-            if cell["match_identity"] == self._match_identity and cell["backend_axis"] == _SUPPORTED_BACKEND_AXIS
+            if cell["match_identity"] == self._match_identity
+            and cell["backend_axis"] == _SUPPORTED_BACKEND_AXIS
+            and cell["backend_policy"] == _SUPPORTED_BACKEND_POLICY
+            and cell["model_path"] == self._model_path
         ]
         if not matches:
-            available = sorted({(cell["model_path"], *cell["match_identity"]) for cell in cells.values()})
-            raise PerfDataNotAvailableError(
-                f"No FPM cell matches this model identity: "
-                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))}. "
-                f"Collected cell identities (model_path first): {available[:8]}"
+            available = sorted(
+                {(cell["model_path"], cell["backend_policy"], *cell["match_identity"]) for cell in cells.values()}
             )
-        exact = [cell for cell in matches if cell["model_path"] == self._model_path]
-        if exact:
-            matches = exact
-        distinct_paths = sorted({cell["model_path"] for cell in matches})
-        if len(distinct_paths) > 1:
             raise PerfDataNotAvailableError(
-                f"Ambiguous FPM cell selection: model_path={self._model_path!r} matched none exactly and "
-                f"multiple collected model paths share this identity: {distinct_paths}. "
-                "Collect/promote data under the exact model path, or query with the matching path."
+                f"No FPM cell matches model_path={self._model_path!r} with identity "
+                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))} under the "
+                f"{_SUPPORTED_BACKEND_AXIS}/{_SUPPORTED_BACKEND_POLICY} backend policy. FPM never "
+                "substitutes another model's curves; collect data under this exact model path or "
+                f"query with the collected path. Collected cells (model_path, backend_policy, identity): "
+                f"{available[:8]}"
             )
         if len(matches) > 1:
+            # Unreachable through the loader (cells are keyed by exactly these
+            # fields) but kept as a hard guard against future key widening.
             raise PerfDataNotAvailableError(
-                f"Ambiguous FPM cell selection: multiple backend policies for model_path={distinct_paths[0]!r}: "
-                f"{sorted(cell['backend_policy'] for cell in matches)}"
+                f"Ambiguous FPM cell selection for model_path={self._model_path!r}: "
+                f"{len(matches)} cells share this identity and backend policy."
             )
         return matches[0]
 

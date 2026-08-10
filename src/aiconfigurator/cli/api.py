@@ -403,6 +403,7 @@ def cli_recommend(
     top_n: int = 5,
     save_dir: str | None = None,
     engine_step_backend: str | None = None,
+    forward_model: str | None = None,
 ) -> CLIResult:
     """Find the minimum number of GPUs to meet a performance target.
 
@@ -453,6 +454,8 @@ def cli_recommend(
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Experimental static latency backend.
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm").
+            None keeps the default.
 
     Returns:
         CLIResult with best configs containing ``total_gpus_needed`` and
@@ -513,6 +516,7 @@ def cli_recommend(
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
         engine_step_backend=engine_step_backend,
+        forward_model=forward_model,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
     )

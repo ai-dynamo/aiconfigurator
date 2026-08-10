@@ -2779,6 +2779,7 @@ def _run_recommend(args) -> None:
             top_n=args.top_n,
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
+            forward_model=args.forward_model,
         )
     except NoResultsError as exc:
         logger.debug("Recommend mode traceback", exc_info=True)

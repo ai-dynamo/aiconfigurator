@@ -242,20 +242,29 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
 
-    def test_model_path_unique_fallback(self, fake_db):
-        # Op's model path differs from the collected one, but the identity
-        # match is unique -> D1 fallback selects it.
-        result = _make_op("decode", model_path="local/checkout/of/model").query(fake_db(), batch_size=2, s=1024)
-        assert float(result) == pytest.approx(8.0)
+    def test_model_path_mismatch_never_falls_back(self, fake_db):
+        # The identity match is unique, but the identity carries no model
+        # fingerprint: borrowing the sole collected path would silently
+        # answer for a different model (D1 resolved to exact-only).
+        with pytest.raises(PerfDataNotAvailableError, match="never substitutes"):
+            _make_op("decode", model_path="local/checkout/of/model").query(fake_db(), batch_size=2, s=1024)
 
-    def test_ambiguous_model_path_raises(self, fake_db):
+    def test_exact_model_path_selects_among_collected(self, fake_db):
         rows = _default_rows() + [_row("decode", 2, 0, 2048, 9.0, model_path="other-org/other-model")]
         db = fake_db(rows)
-        with pytest.raises(PerfDataNotAvailableError, match="Ambiguous"):
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode", model_path="unrelated/path").query(db, batch_size=2, s=1024)
-        # An exact model_path still disambiguates.
         result = _make_op("decode", model_path="other-org/other-model").query(db, batch_size=2, s=1024)
         assert float(result) == pytest.approx(9.0)
+
+    def test_foreign_backend_policy_cell_not_matched(self, fake_db):
+        # A cell collected under a non-baseline policy must not answer a
+        # baseline request even when path and identity match.
+        rows = _default_rows()
+        for row in rows:
+            row["backend_policy"] = "wideep_v1"
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
+            _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
 
     def test_dp_identity_uses_local_batch(self, fake_db):
         rows = [
@@ -342,6 +351,32 @@ class TestFPMForwardLoaderValidation:
         with pytest.raises(ValueError, match="backend_version"):
             self._query(fake_db(rows))
 
+    def test_misplaced_system_or_backend_fails_loudly(self, fake_db):
+        # system/backend are in the physical row key but NOT the cell key: a
+        # pair copied into the wrong tree would merge into the same cells and
+        # silently serve wrong latencies. Pin them like backend_version.
+        rows = _default_rows()
+        rows[0]["system"] = "gb200_nvl72"
+        with pytest.raises(ValueError, match="does not match the database system"):
+            self._query(fake_db(rows))
+        rows = _default_rows()
+        rows[0]["backend"] = "sglang"
+        with pytest.raises(ValueError, match="does not match the database backend"):
+            self._query(fake_db(rows))
+
+    def test_coordinate_collision_within_cell_fails_loudly(self, fake_db):
+        # Same cell identity + same (phase, batch, tokens) but a different
+        # cell_id passes the physical-row-key duplicate check yet targets the
+        # SAME table slot. Silent last-wins would serve arbitrary latencies;
+        # the loader must refuse (producing such rows is a collector bug).
+        rows = _default_rows()
+        clash = dict(rows[-1])
+        clash["cell_id"] = "fpm-test-another-attempt"
+        clash["latency_ms"] = clash["latency_ms"] * 2.0
+        rows.append(clash)
+        with pytest.raises(ValueError, match="collides with an earlier row"):
+            self._query(fake_db(rows))
+
     @pytest.mark.parametrize("bad_latency", [0.0, -1.0, float("nan"), float("inf"), float("-inf")])
     def test_non_finite_or_non_positive_latency(self, fake_db, bad_latency):
         rows = _default_rows()
@@ -398,6 +433,23 @@ class TestForwardModelRewrite:
     def test_mtp_rejected(self):
         cfg = _model_config(forward_model="fpm", nextn=1)
         with pytest.raises(NotImplementedError, match="MTP"):
+            models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
+            {"enable_eplb": True},
+            {"moe_backend": "megamoe"},
+            {"attention_backend": "fa3"},
+        ],
+    )
+    def test_off_baseline_backend_policy_rejected(self, overrides):
+        # FPM data is collected under the baseline_auto policy only; a
+        # policy-changing config must be refused, not priced with baseline
+        # curves.
+        cfg = _model_config(forward_model="fpm", **overrides)
+        with pytest.raises(NotImplementedError, match="baseline backend policy"):
             models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
 
 
