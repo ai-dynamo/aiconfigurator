@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
@@ -960,6 +961,116 @@ class TestGemma4MixModelBuilder:
                 bad_config,
                 None,
             )
+
+
+class TestMuseGlimmerModelBuilder:
+    """Builder-level tests for MuseGlimmerModel op wiring and KV accounting."""
+
+    LAYER_TYPES = tuple((["sliding_attention"] * 3 + ["full_attention"]) * 13)
+
+    @staticmethod
+    def _make_model_config(tp_size=1):
+        return config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+
+    def _build(self, tp_size=1):
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model_info = {
+            "model_path": "meta-models/Muse-Glimmer-30B",
+            "model_family": "MUSEGLIMMER",
+            "architecture": "MuseGlimmerForConditionalGeneration",
+            "layers": 52,
+            "n": 32,
+            "n_kv": 2,
+            "d": 128,
+            "hidden_size": 6656,
+            "inter_size": 19968,
+            "vocab": 202048,
+            "context": 131072,
+            "extra_params": common.MuseGlimmerConfig(layer_types=self.LAYER_TYPES, sliding_window_size=2048),
+        }
+        model_config = self._make_model_config(tp_size=tp_size)
+        return MuseGlimmerModel.create(model_info, model_config, "sglang")
+
+    def test_context_attention_split_by_window(self):
+        model = self._build(tp_size=1)
+        ctx_attn = [op for op in model.context_ops if isinstance(op, ops.ContextAttention)]
+        assert len(ctx_attn) == 2
+        windows = sorted(op._window_size for op in ctx_attn)
+        assert windows == [0, 2048]
+
+    def test_generation_attention_split_by_window(self):
+        model = self._build(tp_size=1)
+        gen_attn = [op for op in model.generation_ops if isinstance(op, ops.GenerationAttention)]
+        assert len(gen_attn) == 2
+        assert sorted(op._window_size for op in gen_attn) == [0, 2048]
+
+    def test_no_moe_ops(self):
+        model = self._build(tp_size=1)
+        assert not [op for op in model.context_ops + model.generation_ops if isinstance(op, ops.MoE)]
+        assert not [op for op in model.context_ops + model.generation_ops if isinstance(op, ops.MoEDispatch)]
+
+    def test_resolve_dims_tp_shards(self):
+        model = self._build(tp_size=1)
+        assert model._resolve_dims(1) == {
+            "n_kv_per_gpu": 2,
+            "qkv_out": 32 * 128 + 2 * 128 * 2,
+            "proj_in": 32 * 128,
+            "inter_per_tp": 19968,
+        }
+        assert model._resolve_dims(2)["n_kv_per_gpu"] == 1
+        assert model._resolve_dims(4)["n_kv_per_gpu"] == 1
+        assert model._resolve_dims(8) == {
+            "n_kv_per_gpu": 1,
+            "qkv_out": 32 * 128 // 8 + 1 * 128 * 2,
+            "proj_in": 32 * 128 // 8,
+            "inter_per_tp": 19968 // 8,
+        }
+
+    def test_kvcache_window_capped_math(self):
+        model = self._build(tp_size=1)
+        # per token per layer (bf16): 2 kv-heads * 128 hd * 2 tensors * 2 bytes = 1024 B
+        assert model.get_kvcache_elements_per_token() == 2 * 52 * 2 * 128
+        # below the window every layer grows linearly
+        assert model.get_kvcache_bytes_per_sequence(1024) == float(52 * 1024 * 1024)
+        # above the window SWA layers cap at 2048
+        expected = 39 * 1024 * 2048 + 13 * 1024 * 8192
+        assert model.get_kvcache_bytes_per_sequence(8192) == float(expected)
+
+    def test_kvcache_capacity_inverse_round_trips(self):
+        model = self._build(tp_size=1)
+        budget = model.get_kvcache_bytes_per_sequence(8192)
+        assert model.get_kvcache_max_tokens(budget) == 8192
+
+    def test_layer_types_length_mismatch_raises(self):
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model_info = {
+            "model_path": "x",
+            "model_family": "MUSEGLIMMER",
+            "architecture": "MuseGlimmerForConditionalGeneration",
+            "layers": 52,
+            "n": 32,
+            "n_kv": 2,
+            "d": 128,
+            "hidden_size": 6656,
+            "inter_size": 19968,
+            "vocab": 202048,
+            "context": 131072,
+            "extra_params": common.MuseGlimmerConfig(layer_types=("sliding_attention",), sliding_window_size=2048),
+        }
+        with pytest.raises(ValueError, match="layer_types length"):
+            MuseGlimmerModel.create(model_info, self._make_model_config(tp_size=1), "sglang")
 
 
 class TestHybridMoEModelBuilder:
