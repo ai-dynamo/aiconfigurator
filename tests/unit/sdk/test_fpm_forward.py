@@ -266,6 +266,24 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
 
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
+            {"enable_eplb": True},
+            {"moe_backend": "megamoe"},
+            {"attention_backend": "fa3"},
+        ],
+    )
+    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
+        # The collector admits no policy for these field combinations, so the
+        # request's identity cannot exist in collected data: the query must
+        # fail as a data miss (sweeps skip the point) — never silently ride
+        # on baseline_auto curves.
+        op = _make_op("decode", model_config=_model_config(**overrides))
+        with pytest.raises(PerfDataNotAvailableError, match="backend fields"):
+            op.query(fake_db(), batch_size=2, s=1024)
+
     def test_dp_identity_uses_local_batch(self, fake_db):
         rows = [
             _row("decode", 2, 0, 2048, 8.0, identity={"dp": "2"}),
@@ -433,23 +451,6 @@ class TestForwardModelRewrite:
     def test_mtp_rejected(self):
         cfg = _model_config(forward_model="fpm", nextn=1)
         with pytest.raises(NotImplementedError, match="MTP"):
-            models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [
-            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
-            {"enable_eplb": True},
-            {"moe_backend": "megamoe"},
-            {"attention_backend": "fa3"},
-        ],
-    )
-    def test_off_baseline_backend_policy_rejected(self, overrides):
-        # FPM data is collected under the baseline_auto policy only; a
-        # policy-changing config must be refused, not priced with baseline
-        # curves.
-        cfg = _model_config(forward_model="fpm", **overrides)
-        with pytest.raises(NotImplementedError, match="baseline backend policy"):
             models.get_model("Qwen/Qwen3-0.6B", cfg, "vllm")
 
 

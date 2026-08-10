@@ -76,26 +76,6 @@ def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
             f"forward_model='fpm' does not support MTP speculative decoding (nextn={model._nextn}). "
             "Use forward_model='op_level'."
         )
-    # The collected whole-model curves are admitted only under the AIC
-    # automatic baseline backend policy (collector planner: backend_axis
-    # "baseline", policy_id "baseline_auto"). A policy-changing config runs a
-    # different execution plan, so refuse it loudly instead of silently
-    # pricing it with baseline curves.
-    off_baseline = {}
-    if getattr(model.config, "enable_wideep", False):
-        off_baseline["enable_wideep"] = model.config.enable_wideep
-    if getattr(model.config, "enable_eplb", False):
-        off_baseline["enable_eplb"] = model.config.enable_eplb
-    if getattr(model.config, "moe_backend", None):
-        off_baseline["moe_backend"] = model.config.moe_backend
-    if getattr(model.config, "attention_backend", "flashinfer") not in (None, "flashinfer"):
-        off_baseline["attention_backend"] = model.config.attention_backend
-    if off_baseline:
-        raise NotImplementedError(
-            f"forward_model='fpm' supports only the baseline backend policy; this config sets "
-            f"{off_baseline}. FPM data is collected under 'baseline_auto' (no wideep/eplb, "
-            "automatic MoE/attention backends). Use forward_model='op_level'."
-        )
     # The ORIGINAL op-level lists stay alive inside the FPM ops as the
     # whole-model roofline (queried in DatabaseMode.SOL at interpolation
     # time) and as the weight-bytes inventory for memory estimation.

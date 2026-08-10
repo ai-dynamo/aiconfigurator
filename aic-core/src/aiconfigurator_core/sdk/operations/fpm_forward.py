@@ -55,11 +55,36 @@ FPM_FORWARD_COORDINATE_SYSTEM = "iteration_totals_balanced_v1"
 FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
 _PHASES = ("prefill", "decode")
 _SUPPORTED_BACKEND_AXIS = "baseline"
-# The only policy the collector admits today (planner.py: "AIC automatic
-# baseline"). The op pins cells to it AND get_model refuses off-baseline
-# model configs, so a policy-changing config can never silently ride on
-# baseline-collected curves.
-_SUPPORTED_BACKEND_POLICY = "baseline_auto"
+
+
+def _requested_backend_policy(model_config) -> tuple[tuple[str, str] | None, dict]:
+    """Map the config's backend-policy fields to the collector's
+    ``(backend_axis, backend_policy)`` cell identity.
+
+    This mirrors the collector's admission table (fpm_forward/planner.py):
+    each admitted policy declares the AIC config fields it is valid for
+    (``aic_fields``). Today exactly one policy exists — ``baseline_auto``,
+    the AIC automatic baseline (no wideep/eplb, automatic MoE/attention
+    backends). A field combination with no admitted policy returns ``None``
+    plus the fields, and the query fails as a data miss: the request has an
+    identity the collected data cannot represent. Growing a real policy axis
+    on the collector side extends this table in the same change.
+    """
+    fields = {
+        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
+        "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
+        "moe_backend": getattr(model_config, "moe_backend", None) or None,
+        "attention_backend": getattr(model_config, "attention_backend", None) or None,
+    }
+    if (
+        not fields["enable_wideep"]
+        and not fields["enable_eplb"]
+        and fields["moe_backend"] is None
+        and fields["attention_backend"] in (None, "flashinfer")
+    ):
+        return (_SUPPORTED_BACKEND_AXIS, "baseline_auto"), fields
+    return None, fields
+
 
 # Identity columns that select a cell, in row-column order. ``model_path`` is
 # handled separately (see FPMForwardOp._select_cell); ``weight_quantization``
@@ -463,6 +488,7 @@ class FPMForwardOp(Operation):
             _norm_identity(model_config.moe_ep_size if model_config.moe_ep_size is not None else 1),
             _norm_identity(model_config.cp_size),
         )
+        self._requested_policy, self._policy_fields = _requested_backend_policy(model_config)
         self._sol_ops = list(sol_ops) if sol_ops is not None else None
         self._interp_configs: dict[tuple, OpInterpConfig] = {}
         if sol_fn is not None:
@@ -525,12 +551,20 @@ class FPMForwardOp(Operation):
     # ------------------------------------------------------------------
 
     def _select_cell(self, cells: dict) -> dict:
+        if self._requested_policy is None:
+            collected = sorted({(cell["backend_axis"], cell["backend_policy"]) for cell in cells.values()})
+            raise PerfDataNotAvailableError(
+                f"No collected FPM backend policy matches this config's backend fields: "
+                f"{self._policy_fields}. The collector admits no policy for this combination "
+                f"(collected policies: {collected}); FPM answers only from collected identities."
+            )
+        axis, policy = self._requested_policy
         matches = [
             cell
             for cell in cells.values()
             if cell["match_identity"] == self._match_identity
-            and cell["backend_axis"] == _SUPPORTED_BACKEND_AXIS
-            and cell["backend_policy"] == _SUPPORTED_BACKEND_POLICY
+            and cell["backend_axis"] == axis
+            and cell["backend_policy"] == policy
             and cell["model_path"] == self._model_path
         ]
         if not matches:
@@ -540,7 +574,7 @@ class FPMForwardOp(Operation):
             raise PerfDataNotAvailableError(
                 f"No FPM cell matches model_path={self._model_path!r} with identity "
                 f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))} under the "
-                f"{_SUPPORTED_BACKEND_AXIS}/{_SUPPORTED_BACKEND_POLICY} backend policy. FPM never "
+                f"{axis}/{policy} backend policy. FPM never "
                 "substitutes another model's curves; collect data under this exact model path or "
                 f"query with the collected path. Collected cells (model_path, backend_policy, identity): "
                 f"{available[:8]}"
