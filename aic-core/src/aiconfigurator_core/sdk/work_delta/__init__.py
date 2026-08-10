@@ -10,6 +10,7 @@ from aiconfigurator_core.sdk.work_delta.planner import (
     CalibrationBatch,
     CellPlan,
     Regime,
+    classify,
     idx_work,
     key_column,
     mla_work,
@@ -19,22 +20,23 @@ from aiconfigurator_core.sdk.work_delta.planner import (
     work_columns,
 )
 from aiconfigurator_core.sdk.work_delta.solver import (
-    RESIDUAL_TOLERANCE,
     CellFit,
     Measurement,
+    Prices,
     predict_delta,
     solve_cell,
 )
 
 __all__ = [
     "COLUMNS",
-    "RESIDUAL_TOLERANCE",
     "CalibrationBatch",
     "CellFit",
     "CellPlan",
     "CoefficientField",
     "Measurement",
+    "Prices",
     "Regime",
+    "classify",
     "idx_work",
     "key_column",
     "mla_work",
