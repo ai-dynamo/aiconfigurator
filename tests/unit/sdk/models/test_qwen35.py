@@ -77,6 +77,13 @@ def test_qwen35_rejects_tensor_parallel_size_that_cannot_shard_gdn_heads():
         models.get_model("Qwen/Qwen3.5-27B", _model_config(tp_size=3), "sglang")
 
 
+def test_qwen35_rejects_megamoe_backend():
+    """MegaMoE is a DeepSeek-V4-only sglang module; modeling it here would
+    double-count the attention AR through the non-DeepEP dispatch branch."""
+    with pytest.raises(ValueError, match="megamoe"):
+        models.get_model("Qwen/Qwen3.5-35B-A3B", _model_config(tp_size=4, moe_backend="megamoe"), "sglang")
+
+
 @pytest.mark.parametrize(
     "model_config_kwargs",
     [

@@ -21,6 +21,9 @@ class Qwen35Model(BaseModel):
     All layers share the same FFN:
       - Dense models (27B):          SwiGLU dense FFN
       - MoE models (35B-A3B, 397B): All-MoE FFN (num_experts > 0)
+
+    TRT-LLM is not validated: its dispatch branch ignores attn_ar_modeled,
+    so the attention all-reduce is double-counted there (known error).
     """
 
     @classmethod
@@ -58,6 +61,9 @@ class Qwen35Model(BaseModel):
 
         if self.config.cp_size > 1:
             raise ValueError("Qwen3.5 does not model context parallelism; cp_size must be 1")
+
+        if self.config.moe_backend == "megamoe":
+            raise ValueError("Qwen3.5 does not model moe_backend='megamoe'; sglang MegaMoE serves DeepSeek-V4 only")
 
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
 
@@ -614,8 +620,10 @@ class Qwen35Model(BaseModel):
                 self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
             )
             # vLLM and sglang decode run shared and routed experts on
-            # parallel CUDA streams (vLLM only up to 256 tokens per rank —
-            # modeled as always overlapped); sglang DeepEP runs them serially.
+            # parallel CUDA streams; sglang DeepEP runs them serially.
+            # TODO: vLLM only overlaps up to 256 tokens per rank — always-
+            # overlapped is optimistic above that. OverlapOp.query sees x,
+            # so the gate could move to query time.
             if shared_ops and self._backend_name in ("vllm", "sglang") and not self._sglang_deepep():
                 ops_list.append(ops.OverlapOp(f"{prefix}_moe_overlap", group_a=routed_ops, group_b=shared_ops))
             else:

@@ -619,7 +619,8 @@ class GEMM(Operation):
                 # Opt-in: shapes outside the collected grid degrade to SOL
                 # instead of failing SILICON; exact rows win once collected.
                 # Quant-mode misses (above) stay strict, and HYBRID keeps
-                # its empirical fallback.
+                # its empirical fallback. SOL has no energy model, so
+                # energy=0.0 is a known (tiny) undercount in the ledger.
                 if below_grid_sol and database_mode == common.DatabaseMode.SILICON:
                     return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
                 raise PerfDataNotAvailableError(
