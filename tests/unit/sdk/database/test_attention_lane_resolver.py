@@ -123,6 +123,25 @@ def test_override_equal_to_map_default_not_duplicated(systems_root):
     assert result[0] == "triton", f"triton must still be first (it is the override); got {result}"
 
 
+def test_version_below_all_yaml_entries_warns(systems_root, caplog):
+    """Known backend with version below all YAML keys: no map hit, warning logged, sorted known lanes."""
+    # sglang YAML starts at "0.5.14"; "0.5.9" is below it → no valid floor-match
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.attention_lanes"):
+        result = _resolve("sglang", "0.5.9", 103, None, systems_root)
+
+    assert result[:-1] == _KNOWN_LANES_SORTED, f"expected sorted known lanes before 'default'; got {result}"
+    assert result[-1] == "default"
+
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning_records, "must log a WARNING when version is below all YAML entries for a known backend"
+
+
+def test_pep440_suffix_floor_matches_numeric_prefix(systems_root):
+    """'0.5.14.post1' must floor-match the '0.5.14' entry and yield triton for sm103."""
+    result = _resolve("sglang", "0.5.14.post1", 103, None, systems_root)
+    assert result[0] == "triton", f"'0.5.14.post1' should floor-match '0.5.14' and yield triton head; got {result}"
+
+
 def test_real_shipped_yaml_sglang_0514_sm103_triton():
     """Sanity-pin against the real shipped YAML: sglang/0.5.14/sm103 → triton head."""
     result = _resolve("sglang", "0.5.14", 103, None, None)
