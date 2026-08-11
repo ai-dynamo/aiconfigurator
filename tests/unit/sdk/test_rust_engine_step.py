@@ -680,8 +680,8 @@ def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
 
 
 @pytest.mark.integration
-def test_forward_pass_perf_model_native_directional_bounds_end_to_end() -> None:
-    """End-to-end native forward-pass model over a real fixture.
+def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() -> None:
+    """End-to-end native forward-pass model with default bounds over a real fixture.
 
     Builds a native model via ``compile_engine`` (crossing into the Rust core),
     estimates a prefill iteration, then drives one correction bucket through
@@ -715,8 +715,6 @@ def test_forward_pass_perf_model_native_directional_bounds_end_to_end() -> None:
         {
             "min_observations": 2,
             "max_observations": 2,
-            "min_faster_correction_factor": 0.5,
-            "max_slower_correction_factor": 2.0,
         },
     )
 

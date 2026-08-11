@@ -117,13 +117,14 @@ class RustForwardPassPerfModel:
     ``max_num_tokens`` bounds ``sum_prefill_tokens`` and defaults to ``8192``,
     ``max_batch_size`` bounds ``num_decode_requests`` and defaults to ``512``,
     and ``max_kv_tokens`` bounds ``sum_decode_kv_tokens`` and defaults to
-    ``2000000``. ``min_faster_correction_factor`` optionally places an absolute
-    lower bound on corrections below ``1.0`` and must be finite and in
-    ``(0.0, 1.0]``. ``max_slower_correction_factor`` independently places an
-    absolute upper bound on corrections above ``1.0`` and must be finite and at
-    least ``1.0``. For example, ``0.5`` limits learned speedups to ``2x``, while
-    ``2.0`` limits learned slowdowns to ``2x``. Omitting either option leaves
-    that direction unbounded. Regression fallback ignores both options.
+    ``2000000``. ``min_faster_correction_factor`` places an absolute lower bound
+    on corrections below ``1.0`` and must be finite and in ``(0.0, 1.0]``.
+    It defaults to ``0.5``, limiting learned speedups to ``2x``.
+    ``max_slower_correction_factor`` independently places an absolute upper
+    bound on corrections above ``1.0`` and must be finite and at least ``1.0``.
+    It defaults to ``2.0``, limiting learned slowdowns to ``2x``. Passing
+    ``None`` for either option leaves that direction unbounded. Regression
+    fallback ignores both options.
     """
 
     def __init__(self, inner: Any) -> None:

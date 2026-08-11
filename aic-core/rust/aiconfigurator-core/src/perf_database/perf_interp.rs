@@ -27,6 +27,11 @@
 //!   config rejects it for Grid too).
 //! - The GEMM site index is built once per table by the owner (tables are
 //!   immutable after load) instead of Python's id-keyed LRU cache.
+//!
+//! One-axis token and communication tables use the immutable `AxisCurve`
+//! fast path instead of constructing a `Node` per query. Its query contract
+//! must remain bit-identical to a RAW `Grid { k_tail: 1 }`; the differential
+//! tests in `axis_curve.rs` enforce that relationship.
 
 use std::collections::BTreeMap;
 

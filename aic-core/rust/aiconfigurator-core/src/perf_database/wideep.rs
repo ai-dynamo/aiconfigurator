@@ -48,10 +48,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::axis_curve::AxisCurve;
 use super::moe::MoeSiblingSlice;
 use super::moe_index::{MoeIndex, MoeShapeKey};
 use super::perf_interp::{self, Node, OpInterpConfig};
-use super::token_curve::TokenCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
@@ -79,7 +79,7 @@ pub struct WideEpTable {
 }
 
 struct MoeGrids {
-    index: MoeIndex<MoeShapeKey, TokenCurve>,
+    index: MoeIndex<MoeShapeKey, AxisCurve>,
     /// Distinct quant names in first-seen (file row) order — Python's dict
     /// insertion order, consumed by the operator-layer transfer ladder
     /// (same contract as `moe.rs::MoeTable::available_quants`).
@@ -92,7 +92,7 @@ struct MoeGrids {
 /// `distribution` axis (the parquet column is ignored, as in Python) and NO
 /// `inter_size`/`moe_tp_size`.
 struct AlltoallGrids {
-    by_keys: BTreeMap<AlltoallKey, TokenCurve>,
+    by_keys: BTreeMap<AlltoallKey, AxisCurve>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,13 +120,13 @@ struct NormalDispatchGrids {
 
 struct NormalDispatchSlice {
     by_sms: BTreeMap<u32, DispatchPoints>,
-    direct_fields: Option<[TokenCurve; DispatchField::COUNT]>,
+    direct_fields: Option<[AxisCurve; DispatchField::COUNT]>,
     fields: [Node; DispatchField::COUNT],
 }
 
 struct DispatchCurve {
     points: DispatchPoints,
-    fields: [TokenCurve; DispatchField::COUNT],
+    fields: [AxisCurve; DispatchField::COUNT],
 }
 
 struct DispatchPoints {
@@ -217,10 +217,11 @@ impl DispatchPoints {
     }
 }
 
-fn dispatch_fields(points: &BTreeMap<u32, DispatchPoint>) -> [TokenCurve; DispatchField::COUNT] {
+fn dispatch_fields(points: &BTreeMap<u32, DispatchPoint>) -> [AxisCurve; DispatchField::COUNT] {
     std::array::from_fn(|index| {
         let field = DispatchField::ALL[index];
-        TokenCurve::from_sorted_iter(
+        AxisCurve::from_sorted_iter(
+            "num_tokens",
             points
                 .iter()
                 .map(|(&token, &point)| (token, field.value(point))),
@@ -930,7 +931,7 @@ fn query_moe(
 /// Python's util-hold on the SUMMED curve (`q/b * 0 = 0`).
 fn dispatch_field(
     by_tokens: &DispatchPoints,
-    fields: &[TokenCurve; DispatchField::COUNT],
+    fields: &[AxisCurve; DispatchField::COUNT],
     field: DispatchField,
     num_tokens: u32,
 ) -> Result<f64, AicError> {
@@ -1180,7 +1181,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<MoeGrids, AicError> {
         )));
     }
     Ok(MoeGrids {
-        index: index.map_values(TokenCurve::from_map),
+        index: index.map_values(|curve| AxisCurve::from_map("num_tokens", curve)),
         quants_in_load_order,
     })
 }
@@ -1307,7 +1308,7 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
     Ok(AlltoallGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, TokenCurve::from_map(curve)))
+            .map(|(key, curve)| (key, AxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }

@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::moe::LeafTokenCurve;
+use super::axis_curve::LeafAxisCurve;
 use super::perf_interp::LeafValue;
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
@@ -58,7 +58,7 @@ pub struct Dsv4MegaMoeTable {
 }
 
 struct Dsv4MegaMoeGrids {
-    by_keys: BTreeMap<Dsv4MegaMoeKey, LeafTokenCurve>,
+    by_keys: BTreeMap<Dsv4MegaMoeKey, LeafAxisCurve>,
 }
 
 /// Full table key (every level of the Python nested dict except the trailing
@@ -302,7 +302,7 @@ fn load_module_parquet(path: &PathBuf) -> Result<Dsv4MegaMoeGrids, AicError> {
     Ok(Dsv4MegaMoeGrids {
         by_keys: by_keys
             .into_iter()
-            .map(|(key, curve)| (key, LeafTokenCurve::from_map(curve)))
+            .map(|(key, curve)| (key, LeafAxisCurve::from_map("num_tokens", curve)))
             .collect(),
     })
 }
