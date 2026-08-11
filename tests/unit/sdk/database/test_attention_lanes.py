@@ -257,6 +257,9 @@ _SLOW_LATENCY = 1.0
 _FAST_LATENCY = 0.25
 _LANE_RATIO = _FAST_LATENCY / _SLOW_LATENCY
 
+_CTX_DEPTH = 5  # [fmha][kv][kv_n][head][window]
+_GEN_DEPTH = 4  # [kv][kv_n][head][window]
+
 _GRID_N = (8, 16)
 _GRID_S = (32, 64, 128)
 _GRID_B = (1, 2)
@@ -612,11 +615,13 @@ def test_lanes_outside_the_known_vocabulary_stay_reachable(lane_systems_root, no
         context_lanes={"torch_flow": _ctx_lane(_SLOW_LATENCY), "torch_flow_flashinfer": _ctx_lane(_FAST_LATENCY)},
     )
 
-    assert float(_ctx_query(db)) == pytest.approx(_SLOW_LATENCY), "first table lane serves when no named lane exists"
+    assert float(_ctx_query(db)) == pytest.approx(_SLOW_LATENCY), "densest table lane serves when no named lane exists"
 
-    order = lane_walk_order(db._context_attention_data, ("triton", "default"))
+    # Hand-specified orders are honoured verbatim (no tier split), leftovers
+    # ride behind them; the two here are equally dense, so the name breaks the tie.
+    order = lane_walk_order(db._context_attention_data, ("triton", "default"), _CTX_DEPTH)
     assert order == ("triton", "default", "torch_flow", "torch_flow_flashinfer")
-    assert lane_walk_order({}, ("triton", "default")) == ("triton", "default")
+    assert lane_walk_order({}, ("triton", "default"), _CTX_DEPTH) == ("triton", "default")
 
 
 def test_opspec_lane_order_carries_the_table_leftovers(lane_systems_root, no_op_load_data):
@@ -632,3 +637,86 @@ def test_opspec_lane_order_carries_the_table_leftovers(lane_systems_root, no_op_
 
     assert spec["lane_order"][0] == "triton"
     assert spec["lane_order"][-1] == "torch_flow", "table leftovers ride at the end of the serialized order"
+
+
+def test_donor_tier_prefers_the_data_richest_lane_over_the_alphabetic_one(lane_systems_root, no_op_load_data):
+    """Gap-fill donors are ranked by measured coverage, not by name.
+
+    On gb200/sglang the resolver's alphabetical donor tier let ``flashinfer``
+    (10 slices / 2 584 rows) preempt ``trtllm_mha`` (64 / 31 141) purely because
+    "f" < "t". The map-resolved head lane keeps its position; only the donor
+    tiers re-order.
+    """
+    from aiconfigurator.sdk.operations.attention import lane_walk_order, resolve_lane_order
+
+    sparse = _ctx_lane(_SLOW_LATENCY, head_size=64)  # 1 slice
+    dense = _ctx_lane(_FAST_LATENCY, head_size=64)
+    for extra_head in (256, 512):  # 3 slices total -> strictly denser
+        dense[QM][KCD][KV_N][extra_head] = _ctx_lane(_FAST_LATENCY, head_size=extra_head)[QM][KCD][KV_N][extra_head]
+
+    db = _StubDatabase(lane_systems_root, context_lanes={"flashinfer": sparse, "trtllm_mha": dense})
+
+    order = lane_walk_order(db._context_attention_data, resolve_lane_order(db), _CTX_DEPTH)
+
+    assert order[0] == "triton", "the map-resolved head lane keeps its position"
+    assert order.index("trtllm_mha") < order.index("flashinfer"), "denser donor must precede the sparser one"
+    assert order[-1] == "default", "'default' stays the last resort of the known-lane tier"
+
+    # And the ranking is what actually serves: head lane 'triton' has no data.
+    assert float(_ctx_query(db, head_size=64)) == pytest.approx(_FAST_LATENCY)
+
+
+def test_ties_on_slice_count_are_broken_by_row_count(lane_systems_root, no_op_load_data):
+    """vllm's context table carries ``…trtllmprefill`` and ``…trtllmdecode`` with
+    an IDENTICAL slice footprint; only the row count identifies the substantive
+    lane, and a name tie-break would hand the context table to the decode variant."""
+    from aiconfigurator.sdk.operations.attention import lane_walk_order
+
+    prefill = _ctx_lane(_SLOW_LATENCY)  # full (n, s, b) grid
+    decode = _ctx_lane(_FAST_LATENCY)
+    # Same single slice, far fewer measured points.
+    decode[QM][KCD][KV_N][HEAD][WIN] = {_GRID_N[0]: {_GRID_S[0]: {_GRID_B[0]: _leaf(_FAST_LATENCY)}}}
+
+    db = _StubDatabase(
+        lane_systems_root,
+        context_lanes={"vllm_flashinfer_trtllmdecode": decode, "vllm_flashinfer_trtllmprefill": prefill},
+    )
+
+    order = lane_walk_order(db._context_attention_data, ("triton", "default"), _CTX_DEPTH)
+    leftovers = [lane for lane in order if lane.startswith("vllm_")]
+    assert leftovers == ["vllm_flashinfer_trtllmprefill", "vllm_flashinfer_trtllmdecode"]
+    assert float(_ctx_query(db)) == pytest.approx(_SLOW_LATENCY), "the substantive lane serves"
+
+
+def test_a_serving_lane_is_not_point_merged_with_later_lanes(lane_systems_root, no_op_load_data):
+    """DELIBERATE semantics: the first lane holding the slice serves it in FULL.
+
+    Points that only a later lane measured inside that same slice are invisible
+    — lane purity is the feature (blending two kernels' measurements into one
+    interpolated latency is the bug the lane axis exists to kill), and gap-fill
+    is whole-slice granularity, never per-point.
+    """
+    from aiconfigurator.sdk.operations.attention import ContextAttention, lane_walk_order, resolve_lane_order
+
+    head = _ctx_lane(_SLOW_LATENCY)
+    donor = _ctx_lane(_FAST_LATENCY)
+    # The donor additionally measured n=32; the head lane never did.
+    donor[QM][KCD][KV_N][HEAD][WIN][32] = {s: {b: _leaf(_FAST_LATENCY) for b in _GRID_B} for s in _GRID_S}
+
+    db = _StubDatabase(lane_systems_root, context_lanes={"triton": head, "trtllm_mha": donor})
+
+    order = lane_walk_order(db._context_attention_data, resolve_lane_order(db), _CTX_DEPTH)
+    assert order[0] == "triton" and "trtllm_mha" in order
+
+    # In-grid point: the head lane serves, at its own value.
+    assert float(_ctx_query(db)) == pytest.approx(_SLOW_LATENCY)
+    # A point ONLY the donor measured is NOT merged in: the head lane still
+    # serves the whole slice (extrapolating within itself), so the donor's
+    # 4x-faster measurement never contributes.
+    donor_only = float(
+        ContextAttention._query_context_attention_table(
+            db, B, 64, 0, 32, 32, KCD, QM, None, WIN, HEAD, resolve_lane_order(db)
+        )
+    )
+    assert donor_only != pytest.approx(_FAST_LATENCY), "the donor's own point must not leak into the head lane's slice"
+    assert donor_only >= _SLOW_LATENCY, "the value is the head lane's own out-of-grid extrapolation"
