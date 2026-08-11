@@ -48,6 +48,33 @@ def _load_defaults(systems_root: Optional[str]) -> dict:
         return {}
 
 
+def _donor_tier(pinned) -> tuple[str, ...]:
+    """The lanes NOT pinned by explicit intent, in default precedence order.
+
+    Remaining known lanes alphabetically, then ``"default"`` last. Callers that
+    hold a perf table may re-order this tier (e.g. by measured coverage — see
+    ``operations.attention.lane_walk_order``); this module ranks it by name
+    only, because the resolver is deliberately table-blind.
+    """
+    return tuple(lane for lane in sorted(_KNOWN_LANES) if lane not in pinned) + ("default",)
+
+
+def split_attention_lane_tiers(lane_order: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a resolved order into ``(pinned, donors)``.
+
+    *pinned* is the intent-ordered head this module produced from the override
+    and the framework-default map entry; *donors* is the generic tail
+    (:func:`_donor_tier`). A tuple this module did not produce — e.g. a
+    hand-specified order such as ``("triton",)`` — yields ``(lane_order, ())``
+    so explicit orders are always honoured verbatim.
+    """
+    lane_order = tuple(lane_order)
+    for k in range(len(lane_order) + 1):
+        if lane_order[k:] == _donor_tier(lane_order[:k]):
+            return lane_order[:k], lane_order[k:]
+    return lane_order, ()
+
+
 def _parse_version(v: str) -> tuple[int, ...]:
     """Parse a dotted version string into a comparable integer tuple.
 
@@ -126,14 +153,7 @@ def resolve_attention_lane_order(
                 backend,
             )
 
-    # Step 3: remaining known lanes in sorted order.
-    for lane in sorted(_KNOWN_LANES):
-        if lane not in listed:
-            listed.append(lane)
-
-    # Step 4: "default" always last, exactly once.
-    while "default" in listed:
-        listed.remove("default")
-    listed.append("default")
-
-    return tuple(listed)
+    # Steps 3-4: the donor tier — remaining known lanes alphabetically, then
+    # "default" last exactly once (so a pinned "default" moves to the tail).
+    pinned = tuple(lane for lane in listed if lane != "default")
+    return pinned + _donor_tier(pinned)

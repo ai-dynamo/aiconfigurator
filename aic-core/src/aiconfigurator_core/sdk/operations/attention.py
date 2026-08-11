@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
-from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order
+from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order, split_attention_lane_tiers
 from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
@@ -57,23 +58,96 @@ def resolve_lane_order(database, override: str | None = None) -> tuple[str, ...]
     return _lane_order_cached(database.backend, database.version, sm_version, override, database.systems_root)
 
 
-def lane_walk_order(table, lane_order: tuple[str, ...]) -> tuple[str, ...]:
-    """*lane_order* followed by the table's remaining lanes, in table order.
+# Depth of a measured "slice" below the lane key — the unit a lane serves in
+# full. Context adds the fmha level: [fmha][kv][kv_n][head][window]; generation
+# is [kv][kv_n][head][window].
+_CONTEXT_SLICE_DEPTH = 5
+_GENERATION_SLICE_DEPTH = 4
 
-    The resolver only knows the user-facing lane vocabulary; collected
-    ``kernel_source`` labels are richer (trtllm ships ``torch_flow`` /
-    ``torch_flow_flashinfer``, vllm ships ``vllm_*``, sglang also ships
-    ``flash_attention``) and some backends have no ``"default"`` lane at all.
-    Appending the leftovers keeps every collected row reachable and reproduces
-    the pre-lane behaviour (first lane loaded wins) for backends the map does
-    not cover yet. Table order is the loader's row order, so this is stable for
-    a given data set — and the ENGINE SPEC carries this extended order, so the
-    Rust twin replays it verbatim instead of re-deriving it.
+# Memo attribute for :func:`_lane_density`. Stashed on the (long-lived, class
+# cached) table object because a per-call recount walks every measured row.
+_LANE_DENSITY_ATTR = "_aic_lane_density"
+
+
+def _lane_density(table, slice_depth: int) -> dict[str, tuple[int, int]]:
+    """``{lane: (slice_count, row_count)}`` for *table*, memoized on the table.
+
+    Both numbers matter: vllm's context table carries ``…trtllmprefill`` and
+    ``…trtllmdecode`` with an identical 72-slice footprint, and only the row
+    count (44 664 vs 3 684) identifies the prefill lane as the substantive one.
+    The memo is keyed on ``(slice_depth, len(table))`` so a re-bound or
+    differently-shaped table recomputes; value mutation in place (``_correct_sol``
+    clamps latencies, never the key structure) cannot invalidate it.
+    """
+    stamp = (slice_depth, len(table))
+    cached = getattr(table, _LANE_DENSITY_ATTR, None)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    density: dict[str, tuple[int, int]] = {}
+    for lane in table:
+        if not isinstance(lane, str):
+            continue
+        nodes = [table[lane]]
+        for _ in range(slice_depth):
+            nxt = []
+            for node in nodes:
+                if not isinstance(node, Mapping):
+                    nxt = []
+                    break
+                nxt.extend(node.values())
+            nodes = nxt
+        slice_count = len(nodes)
+        rows = 0
+        for node in nodes:  # one slice = [n][s|b][b|s] -> measured points
+            for lvl1 in node.values() if isinstance(node, Mapping) else ():
+                for lvl2 in lvl1.values() if isinstance(lvl1, Mapping) else ():
+                    rows += len(lvl2) if isinstance(lvl2, Mapping) else 1
+        density[lane] = (slice_count, rows)
+
+    try:
+        setattr(table, _LANE_DENSITY_ATTR, (stamp, density))
+    except (AttributeError, TypeError):  # plain dict fixtures cannot hold attrs
+        pass
+    return density
+
+
+def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tuple[str, ...]:
+    """The concrete walk order for *table*: pinned lanes, then donors by density.
+
+    Three tiers, in order:
+
+    1. **Pinned** — the override and the framework-default map lane, in the
+       precedence the resolver produced. Never re-ordered: explicit intent wins.
+    2. **Donor tier** — the remaining known lanes (plus ``"default"`` last, per
+       the resolver's contract), ranked by measured coverage in THIS table
+       (slices, then rows, then name) instead of alphabetically. Gap-fill should
+       come from the data-richest lane: on gb200/sglang, plain ``sorted()`` let
+       ``flashinfer`` (10 slices / 2 584 rows) preempt ``trtllm_mha`` (64 /
+       31 141) on 5 context + 10 generation slices for no reason but its name.
+    3. **Table leftovers** — lanes present in the table but outside the resolver
+       vocabulary, same density ranking. The collected ``kernel_source`` labels
+       are richer than the map (trtllm ships ``torch_flow*``, vllm ``vllm_*``,
+       sglang also ``flash_attention``) and those backends have no ``"default"``
+       lane at all, so without this tier none of their rows would be reachable.
+
+    The ranking is a pure function of the table, so it is stable for a data set
+    and identical at spec-build time — the ENGINE SPEC carries this extended
+    order and the Rust twin replays it verbatim rather than re-deriving it.
     """
     if not table:
         return tuple(lane_order)
-    extra = tuple(lane for lane in table if isinstance(lane, str) and lane not in lane_order)
-    return tuple(lane_order) + extra
+    pinned, donors = split_attention_lane_tiers(tuple(lane_order))
+    density = _lane_density(table, slice_depth)
+
+    def _rank(lane: str) -> tuple[int, int, str]:
+        slices, rows = density.get(lane, (0, 0))
+        return (-slices, -rows, lane)
+
+    known = sorted((lane for lane in donors if lane != "default"), key=_rank)
+    tail = ("default",) if "default" in donors else ()
+    leftovers = sorted((lane for lane in density if lane not in lane_order), key=_rank)
+    return pinned + tuple(known) + tail + tuple(leftovers)
 
 
 # Extrapolation target grids — lifted verbatim from the legacy blocks in

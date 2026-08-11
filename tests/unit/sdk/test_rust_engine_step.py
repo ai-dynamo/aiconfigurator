@@ -1645,3 +1645,60 @@ def test_python_step_fallback_telemetry_counts_and_warns_once(caplog) -> None:
         assert len(warning_records) == 2  # warn-once per distinct reason
     finally:
         res._python_step_fallback_reset()
+
+
+def test_default_config_wideep_mla_spec_survives_the_real_bincode_decode():
+    """A DEFAULT `ModelConfig` must produce a spec Rust can decode.
+
+    `ModelConfig.attention_backend` is None ("no lane override", AIC-1715) while
+    the Rust twin types `attn_backend` as a non-optional `String`, so emitting
+    the raw value serialises `null` and `engine_spec_bincode_from_json` aborts
+    the sweep with a ValueError that no caller converts to
+    `RustEngineUnsupportedError`. sglang WideEP DeepSeek is exactly the config
+    that routes to the compiled engine, so this must round-trip through the REAL
+    extension — a monkeypatched stub is structurally blind to payload types.
+    """
+    import aiconfigurator_core
+    from aiconfigurator.sdk import common, engine
+    from aiconfigurator.sdk import config as sdk_config
+    from aiconfigurator.sdk.operations.mla import WideEPContextMLA, WideEPGenerationMLA
+
+    cfg = sdk_config.ModelConfig(
+        tp_size=8,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        enable_wideep=True,
+    )
+    assert cfg.attention_backend is None, "the regression under test needs the no-override default"
+
+    # Mirrors DeepSeekModel._build_*_ops: the op receives config.attention_backend verbatim.
+    ctx = WideEPContextMLA(
+        "context_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, cfg.attention_backend
+    )
+    gen = WideEPGenerationMLA(
+        "generation_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, cfg.attention_backend
+    )
+    model = SimpleNamespace(config=cfg, architecture="DeepseekV3ForCausalLM", context_ops=[ctx], generation_ops=[gen])
+
+    spec_json = engine.build_engine_spec_json(
+        model,
+        model_path="deepseek-ai/DeepSeek-V3",
+        system="gb200",
+        backend="sglang",
+        backend_version="0.5.14",
+        kv_block_size=None,
+        systems_path=None,
+        nextn=0,
+        database=None,
+    )
+    spec = json.loads(spec_json)
+    assert spec["context_ops"][0]["WideEpContextMla"]["attn_backend"] == "flashinfer"
+    assert spec["generation_ops"][0]["WideEpGenerationMla"]["attn_backend"] == "flashinfer"
+
+    # The JSON -> bincode conversion is NOT schema-gated (the version check lives
+    # in `from_bincode`), so this exercises field validation on today's tree.
+    assert len(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)) > 0
