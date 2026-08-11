@@ -174,7 +174,7 @@ def build_moe_block_ops(
     inference_phase: str,  # "context" | "generation"
     model_family: str = "*",  # registry family axis; "*" matches only wildcard registrations
     attn_cp_size: int = 1,
-    gpus_per_node: int = 8,
+    gpus_per_node: int | None = None,
     shared_gemm_quant_mode=None,  # common.GEMMQuantMode | None
 ) -> list:
     """Build the MoE-block op list: router, shared experts, dispatch/compute/combine.
@@ -200,6 +200,19 @@ def build_moe_block_ops(
         f"prefix {prefix!r} must equal the inference_phase-derived prefix {inference_phase!r} "
         "(context->'context', generation->'generation'); a mismatch is a caller bug"
     )
+    if gpus_per_node is None:
+        if getattr(cfg, "moe_comm_backend", None):
+            # Topology has no safe default (this PR's own rule): resolve the
+            # omitted argument from the config's validated value instead of a
+            # silent eight-GPU assumption — a GB200-style
+            # cfg.num_gpus_per_node=4 at EP16 is a four-node all-to-all, not
+            # two. Raises when the config carries no value either.
+            from aiconfigurator_core.sdk.models.helpers import large_ep_gpus_per_node
+
+            gpus_per_node = large_ep_gpus_per_node(cfg)
+        else:
+            # Fused block: no all-to-all is emitted, the coordinate is unused.
+            gpus_per_node = 0
     ctx = {
         "prefix": prefix,
         "shape": shape,

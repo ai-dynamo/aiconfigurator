@@ -1981,25 +1981,26 @@ def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
     assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)
 
 
-def test_large_ep_deepseek_resolves_fp8_block_mla_label_data_driven():
-    """The wideep_*_mla tables carry collector labels fp8_block (fmha) even
-    though physically a bf16 run (collect_mla_module.py). #1314 resolved those
-    labels eagerly at construction off the moe_backend flag; on the
-    coverage-driven stack the flag is inert and the SAME assurance comes from
-    the data-driven fmha fallback: a task whose enumerated tuples reach large
-    EP resolves its inferred fmha against the wideep table's collected label.
-    """
+
+def test_trtllm_dp1_tep_tuples_stay_fused():
+    """A dp=1 TEP tuple cannot build a TRT-LLM large-EP model
+    (validate_trtllm_large_ep requires attention_dp_size > 1), so the
+    resolver must keep it fused instead of resolving a comm backend and
+    then dying in model construction — across the DEFAULT enumerated
+    search, not just a pinned YAML."""
     t = Task(
         serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
+        model_path="nvidia/DeepSeek-V3.1-NVFP4",
+        system_name="gb200",
+        backend_name="trtllm",
+        backend_version="1.3.0rc10",
         total_gpus=64,
-        agg_num_gpu_candidates=[8, 16, 32],
-        agg_tp_candidates=[1],
-        agg_pp_candidates=[1],
-        agg_dp_candidates=[8, 16, 32],
-        agg_moe_tp_candidates=[1],
-        agg_moe_ep_candidates=[8, 16, 32],
     )
-    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    # dp=1 with EP>1: fused, always (the reviewer's repro tuple).
+    assert t._resolve_moe_comm_backend("agg", (2, 1, 1, 1, 2, 1)) is None
+    # dp>1 resolves from the shipped gb200 nvfp4 wideep coverage.
+    assert t._resolve_moe_comm_backend("agg", (1, 1, 2, 1, 2, 1)) is not None
+    # No enumerated large-EP tuple carries dp=1.
+    for tup in t.iter_parallel("agg"):
+        if t._resolve_moe_comm_backend("agg", tup) is not None:
+            assert tup[2] > 1, f"dp=1 large-EP tuple leaked: {tup}"

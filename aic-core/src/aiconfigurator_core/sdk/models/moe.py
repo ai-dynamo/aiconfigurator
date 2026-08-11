@@ -149,10 +149,15 @@ class MOEModel(BaseModel):
         else:
             attn_scale_factor = 1
 
-        # Large EP replicates the embedding table instead of sharding it over TP
-        # (transcribed from the deleted SGLangEPMOEModel, models/moe.py:490/588 at
-        # commit 8372e60, which also emitted no embedding all-reduce and no P2P).
-        embedding_vocab_size = self._vocab_size if self._is_large_ep else self._vocab_size // tp_size
+        # SGLANG large EP replicates the embedding table instead of sharding it
+        # over TP (transcribed from the deleted SGLangEPMOEModel,
+        # models/moe.py:490/588 at commit 8372e60, which also emitted no
+        # embedding all-reduce and no P2P). The transcription is
+        # backend-scoped: expert parallelism does not remove vLLM's
+        # vocabulary-TP or pipeline semantics, so the vLLM large-EP graph
+        # keeps the sharded embedding and every collective below.
+        sglang_large_ep = self._is_large_ep and self._backend_name == "sglang"
+        embedding_vocab_size = self._vocab_size if sglang_large_ep else self._vocab_size // tp_size
 
         self.context_ops.extend(
             [
@@ -284,10 +289,10 @@ class MOEModel(BaseModel):
             ]
         )
 
-        if self._is_large_ep:
-            # The legacy large-EP graph ends at the logits gemm: with the
-            # embedding replicated there is nothing to all-reduce, and it never
-            # modeled pipeline P2P.
+        if sglang_large_ep:
+            # The legacy sglang large-EP graph ends at the logits gemm: with
+            # the embedding replicated there is nothing to all-reduce, and it
+            # never modeled pipeline P2P.
             return
 
         # All-reduce after embedding: needed when tp > 1

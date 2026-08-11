@@ -1301,6 +1301,12 @@ class Task:
         _tp, _pp, _dp, moe_tp, moe_ep, _cp = tuple(parallel_tuple)
         if moe_tp != 1 or moe_ep <= 1:
             return None
+        if _dp <= 1 and self._role_attr(role, "backend_name") == "trtllm":
+            # TRT-LLM large-EP requires attention DP (model construction
+            # enforces attention_dp_size > 1 in validate_trtllm_large_ep);
+            # a dp=1 TEP tuple must stay on the fused path instead of
+            # resolving a comm backend and then failing to build.
+            return None
         coverage = self._large_ep_coverage(role)
         if not coverage:
             return None
@@ -1568,8 +1574,6 @@ class Task:
         # Large-EP ladder, offered when the perf data covers this model shape on
         # this system (no flag): the single task explores BOTH regimes, so the
         # lists are the union of the fused defaults and the multi-node ladder.
-        # vLLM has no shipped large-EP ladder to union in (its comm backends are
-        # registered but no data ships), so it keeps the fused lists.
         wide = None
         if self.backend_name == "trtllm":
             wide = {
@@ -1589,6 +1593,22 @@ class Task:
                 "moe_tp": [1],
                 "moe_ep": [8, 16, 32, 64],
             }
+        elif self.backend_name == "vllm":
+            # vLLM ships no static multi-node ladder (data-only enablement);
+            # derive it from the covered EP sizes so coverage that lands is
+            # actually explorable. Pure-EP tuples need num_gpu/dp/moe_ep
+            # candidates at each covered EP (tp=1 => dp == ep by the width
+            # identity tp*dp*cp == moe_tp*moe_ep).
+            eps = sorted(self._large_ep_eps("agg"))
+            if eps:
+                wide = {
+                    "num_gpu": eps,
+                    "tp": [1],
+                    "pp": [1],
+                    "dp": eps,
+                    "moe_tp": [1],
+                    "moe_ep": eps,
+                }
         if wide is not None and self._large_ep_eps("agg"):
             fused = {dim: sorted(set(values) | set(wide[dim])) for dim, values in fused.items()}
 
@@ -1619,6 +1639,17 @@ class Task:
         for role, src in fused_cfgs.items():
             if large_ep[role]:
                 src = {dim: sorted(set(values) | set(wide_cfgs[role][dim])) for dim, values in src.items()}
+                if self._role_attr(role, "backend_name") == "vllm":
+                    # Data-only vLLM enablement: the shared builder has no
+                    # vLLM wide branch, so derive the ladder from the covered
+                    # EP sizes (see _resolve_agg_search for the identity).
+                    eps = sorted(self._large_ep_eps(role))
+                    ladder = {
+                        "num_gpu_per_worker": eps,
+                        "dp_list": eps,
+                        "moe_ep_list": eps,
+                    }
+                    src = {dim: sorted(set(values) | set(ladder.get(dim, []))) for dim, values in src.items()}
             self._fill_role_search(role, src)
 
         # Replica defaults. Keyed on the resolved CANDIDATES, not on coverage:

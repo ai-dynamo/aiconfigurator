@@ -892,3 +892,53 @@ class TestAttentionOpKeys:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestVllmLargeEPKeepsVocabTPCollectives:
+    """Expert parallelism does not remove vLLM's vocabulary-TP or pipeline
+    semantics: the replicated-embedding / no-collective transcription from the
+    deleted SGLangEPMOEModel is sglang-scoped, and the vLLM large-EP graph
+    keeps the sharded embedding plus all four collectives."""
+
+    def test_qwen3_vllm_graph(self):
+        model = _build(
+            QWEN3,
+            "vllm",
+            tp_size=2,
+            pp_size=2,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            moe_quant_mode=common.MoEQuantMode.fp8,
+            moe_comm_backend=dict(SGLANG_COMM),
+            num_gpus_per_node=H200_GPUS_PER_NODE,
+        )
+        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
+        assert "context_embedding_ar" in ctx
+        assert "generation_embedding_ar" in gen
+        assert "context_p2p" in ctx
+        assert "generation_p2p" in gen
+        emb = next(op for op in model.context_ops if op._name == "context_embedding")
+        # 151936-row vocab stays TP-sharded over tp=2, not replicated.
+        assert 151936 // 2 in emb.__dict__.values()
+
+    def test_sglang_contrast_stays_transcribed(self):
+        model = _build(
+            QWEN3,
+            "sglang",
+            tp_size=2,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            moe_quant_mode=common.MoEQuantMode.fp8,
+            moe_comm_backend=dict(SGLANG_COMM),
+            num_gpus_per_node=H200_GPUS_PER_NODE,
+        )
+        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
+        assert "context_embedding_ar" not in ctx
+        assert "generation_embedding_ar" not in gen
+        emb = next(op for op in model.context_ops if op._name == "context_embedding")
+        assert 151936 in emb.__dict__.values()  # replicated

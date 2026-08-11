@@ -161,6 +161,7 @@ def _sglang_cfg(enable_eplb):
         enable_eplb=enable_eplb,
     )
     cfg.moe_comm_backend = dict(SGLANG_COMM)
+    cfg.num_gpus_per_node = 8
     return cfg
 
 
@@ -352,6 +353,8 @@ def _trtllm_cfg(enable_eplb, wideep_num_slots):
         wideep_num_slots=wideep_num_slots,
     )
     cfg.moe_comm_backend = dict(TRTLLM_COMM)
+    cfg.num_gpus_per_node = 8
+    cfg.num_gpus_per_node = 8
     return cfg
 
 
@@ -590,6 +593,7 @@ class TestA3RouterVariants:
             moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
         cfg.moe_comm_backend = {phase: comm_backend} if comm_backend else {}
+        cfg.num_gpus_per_node = 8
         shape = MoEBlockShape(
             hidden_size=1024, moe_inter_size=512, topk=4, num_experts=64, num_shared_experts=0, num_moe_layers=10
         )
@@ -713,6 +717,7 @@ class TestVllmG2Seed:
             moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
         cfg.moe_comm_backend = {"context": "deepep_ht", "generation": "deepep_ll"}
+        cfg.num_gpus_per_node = 8
         shape = MoEBlockShape(
             hidden_size=4096, moe_inter_size=1408, topk=4, num_experts=64, num_shared_experts=0, num_moe_layers=10
         )
@@ -768,6 +773,7 @@ class TestDeepEPAttentionTpTokenScaling:
             moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
         cfg.moe_comm_backend = {"context": "deepep_ht", "generation": "deepep_ll"}
+        cfg.num_gpus_per_node = 8
         shape = MoEBlockShape(
             hidden_size=4096, moe_inter_size=1408, topk=4, num_experts=64, num_shared_experts=0, num_moe_layers=10
         )
@@ -804,3 +810,42 @@ class TestDeepEPAttentionTpTokenScaling:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestBuilderGpusPerNodeResolution:
+    def test_omitted_gpus_per_node_resolves_from_config(self):
+        # Public-builder contract: topology has no safe default. An omitted
+        # gpus_per_node argument resolves cfg.num_gpus_per_node — a
+        # GB200-style 4-GPU node at EP32 is an eight-node all-to-all, never
+        # the old silent eight-GPU assumption's four.
+        cfg = _sglang_cfg(enable_eplb=False)
+        cfg.num_gpus_per_node = 4
+        built = build_moe_block_ops(
+            "context",
+            _dsr1_shape(),
+            cfg,
+            cfg.moe_quant_mode,
+            _sglang_distribution("context", False),
+            scale_factor=NUM_LAYERS,
+            backend_name="sglang",
+            inference_phase="context",
+            model_family="DEEPSEEK",
+        )
+        a2a = [op for op in built if isinstance(op, ops.MoEAllToAll)]
+        assert a2a and all(op._node_num == 8 for op in a2a)  # nodes_for(32*1, 4)
+
+    def test_omitted_gpus_per_node_with_unset_config_raises(self):
+        cfg = _sglang_cfg(enable_eplb=False)
+        cfg.num_gpus_per_node = None
+        with pytest.raises(ValueError, match="num_gpus_per_node"):
+            build_moe_block_ops(
+                "context",
+                _dsr1_shape(),
+                cfg,
+                cfg.moe_quant_mode,
+                _sglang_distribution("context", False),
+                scale_factor=NUM_LAYERS,
+                backend_name="sglang",
+                inference_phase="context",
+                model_family="DEEPSEEK",
+            )

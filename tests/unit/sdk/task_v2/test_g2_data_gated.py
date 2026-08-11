@@ -251,13 +251,13 @@ def test_task_resolution_produces_large_ep_candidates(synth_systems, synth_model
     assert t._resolve_moe_comm_backend("agg", (1, 1, 1, 1, 1, 1)) is None
 
     # The DEFAULT enumeration reaches the covered EPs: sglang unions its
-    # multi-node ladder in when coverage is non-empty; vllm has no shipped
-    # large-EP ladder to union (fused lists reach ep=8 only).
+    # static multi-node ladder in when coverage is non-empty; vllm derives
+    # its ladder FROM the covered EP sizes (data-only enablement, no static
+    # ladder ships), so both reach every covered EP.
     large = [tup for tup in t.iter_parallel("agg") if t._resolve_moe_comm_backend("agg", tup)]
     assert large, "default ladders must produce large-EP candidates for the covered shape"
     assert all(tup[3] == 1 for tup in large)  # moe_tp == 1 by the rule
-    expected_eps = {8, 16} if backend == "sglang" else {8}
-    assert {tup[4] for tup in large} == expected_eps
+    assert {tup[4] for tup in large} == {8, 16}
     if backend == "sglang":
         assert 16 in t.agg_moe_ep_candidates  # the unioned multi-node ladder
 
