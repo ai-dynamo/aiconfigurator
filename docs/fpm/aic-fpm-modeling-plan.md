@@ -2,12 +2,15 @@
 
 > Revision: 2026-07-19
 >
-> Supersedes: Task 2 sections (M0–M4, §5.6–§5.7) of `aic-fpm-integration-plan.md` (2026-07-13)
+> Historical context: An internal Task 2 draft dated 2026-07-13 assumed a
+> different Task 1 collector contract. That draft is not part of this
+> repository; this document is authoritative, and Section 1 records the
+> relevant assumptions that were superseded.
 >
 > Basis: `feature/fpm-collector` @ `cf1b3cbb` (Task 1 as built, 142 unit tests green) and
 > `feature/fpm-modeling` @ `cae1aef7` (upstream/main after the #1322 aic-core restructure)
 
-## 1. What changed since the original plan
+## 1. Differences from the earlier internal draft
 
 Task 1 was implemented with different mechanics than the 2026-07-13 plan assumed. Task 2
 consumes the **as-built** contract, not the planned one:
@@ -46,14 +49,27 @@ Location (post-restructure the canonical tree is `aic-core/src/aiconfigurator_co
 ```text
 systems/data/<system>/<backend>/<version>/
   fpm_forward_perf.parquet
-  fpm_forward_perf.metadata.json     # schema_name=aic_fpm_forward_perf, schema_version=5
+  fpm_forward_perf.metadata.json     # schema_name=aic_fpm_forward_perf, schema_version=6
 ```
 
-Row key (24 columns, `collector/fpm_forward/database.py:_ROW_KEY`):
+Row key (26 columns, `collector/fpm_forward/database.py:_ROW_KEY`):
 `cell_id, model_path, system, backend, backend_version, weight_quantization, gemm_quant_mode,
 moe_quant_mode, fmha_quant_mode, comm_quant_mode, kv_cache_dtype, tp, pp, dp, moe_tp, moe_ep,
-cp, backend_axis, backend_policy, workload_kind, batch_size, total_prefill_tokens,
-total_kv_read_tokens, partition_policy`. Value column: `latency_ms`.
+cp, moe_backend, attention_backend, enable_wideep, enable_eplb, workload_kind, batch_size,
+total_prefill_tokens, total_kv_read_tokens, partition_policy`. Value column: `latency_ms`.
+Schema v6 replaced the former `backend_axis`/`backend_policy` label pair with the four
+explicit backend identity columns (`"auto"` = the engine decided; the `enable_*` columns
+are real booleans).
+
+This V1 location is exact-version-only and is NOT presented as an immutable contract: FPM
+data deliberately bypasses `_build_op_sources()` (which merges shapes from several
+sources, unsafe for a whole-model pair that is one atomic campaign artifact) and performs
+no reuse of any kind. The planned follow-up is to align ownership with Collector V3 —
+treat `fpm_forward` as a managed family under `<system>/<family>/<backend>/<version>/`
+with `collection_meta.yaml`, and add stricter whole-model reuse semantics: exact
+requested backend/version first; explicit same-backend reuse of one complete
+parquet/metadata pair via `reuse.yaml`; no implicit nearest-earlier per-shape fill; no
+cross-backend reuse; end-to-end FPM validation before approving a reuse declaration.
 
 Coordinate semantics (verified against `native_artifact._expected_scheduled` /
 `_validate_fpm`): every DP rank executes the **same** point, so the workload columns are
@@ -103,10 +119,11 @@ Loader obligations (mirroring the writer's semantics):
 
 New code lives in the modeling core (`aic-core/src/aiconfigurator_core/sdk/`):
 
-1. `PerfDataFilename.fpm_forward = "fpm_forward_perf.parquet"` (`common.py:968`).
-2. A loader in `perf_database.py` producing per-cell tables + derived domains, with the §2
-   validations. Cells are keyed by the identity columns; the sidecar is validated once per
-   directory.
+1. `PerfDataFilename.fpm_forward = "fpm_forward_perf.parquet"` (`common.py`).
+2. A loader (`load_fpm_forward_data`, shipped in `operations/fpm_forward.py` — NOT in
+   `perf_database.py`; the op owns its data end to end) producing per-cell tables +
+   derived domains, with the §2 validations. Cells are keyed by the identity columns;
+   the sidecar is validated once per pair.
 3. `FPMForwardOp(phase)` in `operations/` (subclass of `Operation`,
    `operations/base.py:114`). `query()` mapping from the existing phase-loop kwargs
    (`base_backend.py:303-388`):
@@ -119,9 +136,10 @@ New code lives in the modeling core (`aic-core/src/aiconfigurator_core/sdk/`):
      real GLM-5.2 data — start with log-token axes like the attention configs);
    - `perf_interp` requires a whole-model `sol_fn` even without extrapolation: in-domain
      ragged-bracket recovery and ScatteredSites cross-site transfer both rescale by SOL
-     ratios. V1 ships a crude per-rank roofline built from the ORIGINAL op lists at rewrite
-     time (dense-FLOPs + attention-pair term for prefill; weight bytes + KV bytes for
-     decode) — only per-axis scaling trends matter, constants cancel in the ratios;
+     ratios. SHIPPED as `_oplevel_sol_fn`: the ORIGINAL op-level lists (captured at rewrite
+     time) queried on a `DatabaseMode.SOL` database view — each op's analytic max(compute,
+     mem) with the real physics, superseding the "crude per-rank roofline" sketched in
+     earlier drafts;
    - domain check happens **before** `perf_interp` (its boundary util-hold semantics are
      wrong for whole-model latency; out-of-domain must error, not hold);
    - energy: 0.0 (documented convention, §1.4).
@@ -138,9 +156,11 @@ Cell selection maps model/runtime identity onto row identity:
 - `system/backend/version` — from the `PerfDatabase` instance;
 - `gemm/moe/fmha/comm/kvcache` quant modes, `tp/pp/dp/moe_tp/moe_ep/cp` — from `ModelConfig`
   (names align one-to-one with row columns);
-- backend policy — V1 requires the `baseline_auto` profile
-  (`moe_backend=None, attention_backend=None, enable_wideep=False, enable_eplb=False`);
-  a ModelConfig that deviates fails with a clear unsupported-policy error;
+- backend knobs — schema v6 carries `moe_backend`/`attention_backend`/`enable_wideep`/
+  `enable_eplb` as ordinary identity columns; the request derives them from `ModelConfig`
+  (`None`/engine-default folds to `"auto"`, booleans compare as `str(bool)`), so data
+  collected under any knob combination answers exactly the configs that declare it and a
+  deviating config is a plain no-matching-cell `PerfDataNotAvailableError`;
 - `model_path` — see Open decision D1.
 
 ### M2 — Rust `FpmForward` op + schema bump
@@ -239,7 +259,7 @@ M0 + M1 + M3 + the Python half of M4 are implemented on `feature/fpm-modeling`:
 rewrite, `ModelConfig.forward_model` threaded through TaskV2 / v1-compat / CLI
 (`--forward-model`), the explicit FPM mixed/genonly branches with the Rust engine-step
 forced off, and `tests/unit/sdk/test_fpm_forward.py` (33 tests). D1 shipped as
-exact-model-path-then-unique-fallback; D2 shipped as ScatteredSites (per-phase configs,
+exact-model-path-only (the interim unique-path fallback was removed in review); D2 shipped as ScatteredSites (per-phase configs,
 one-line swap to Grid for the LOO bake-off); D3 shipped as zero-energy; D4 deferred to M2.
 The mixed step ships the marginal-decode composition (§M3), replacing the original plan's
 plain prefill+decode sum. M2 (Rust op + schema bump + parity) and real-data LOO
@@ -247,10 +267,11 @@ qualification remain.
 
 ## 5. Open decisions (need owner sign-off before implementation)
 
-- **D1 — model identity matching. RESOLVED (shipped).** Exact `model_path` match wins;
-  otherwise the identity columns must select a unique collected path, and any ambiguity
-  (several paths, or several backend policies for one path) raises
-  `PerfDataNotAvailableError` (see `FPMForwardOp._select_cell`).
+- **D1 — model identity matching. RESOLVED (shipped).** FPM requires the exact collected
+  `model_path` and never substitutes another model's curve: the request must match on
+  `model_path` plus the full identity-column tuple, and any miss raises
+  `PerfDataNotAvailableError` listing the collected identities (see
+  `FPMForwardOp._select_cell`; the interim unique-path fallback was removed in review).
 - **D2 — interpolation config. RESOLVED (shipped).** Not Grid: the runtime grid emits
   per-batch token curves that are not axis-aligned, so the shipped config is
   `ScatteredSites` (prefill sites = `(batch, kv)` owning the new-token curve; decode

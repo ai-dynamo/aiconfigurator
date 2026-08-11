@@ -147,13 +147,16 @@ class ScatteredSites:
     #: point) — k_tail is a robustness knob, not a data-sufficiency gate; a
     #: genuine miss is raised only when NO positive-util anchor exists.
     k_tail: int = 3
-    #: "A collected site answers alone" assumes every site owns a representative
-    #: curve — true for GEMM's real (n,k) shapes, violated by tables whose axis
-    #: rules emit stray coordinates backed by a few sweep points (FPM's
-    #: max-batch / capacity-endpoint orphans). When True, an own curve that
-    #: does NOT cover the query coordinate defers to neighbour-site transfer
-    #: (the own site is excluded from candidates) instead of holding its own
-    #: tail. In-range own-site behavior and exact hits are unchanged. Default
+    #: A "site" is one fixed combination of ``site_axes`` values; it owns a
+    #: one-dimensional curve over ``curve_axis``. Normally, when a query
+    #: matches a collected site, only that site's curve is used — which
+    #: assumes every site owns a representative curve. That holds for GEMM's
+    #: real (n,k) shapes but is violated by tables whose axis rules emit
+    #: stray coordinates backed by a few sweep points (FPM's max-batch /
+    #: capacity-endpoint orphans). When True, an own curve that does NOT
+    #: cover the query coordinate defers to neighbour-site transfer (the own
+    #: site is excluded from candidates) instead of holding its own tail.
+    #: In-range own-site behavior and exact hits are unchanged. Default
     #: False preserves stock behavior exactly.
     own_curve_coverage_fallback: bool = False
 
