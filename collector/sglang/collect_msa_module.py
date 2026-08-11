@@ -175,14 +175,13 @@ def _get_precision_combos(phase: str):
       assert q.dtype in (bf16, fp16), decode/flash_with_topk_idx.py:778-782).
     """
     combos = []
+    # The fp8_block combos are scoped to attention_types [mla, dsa] in
+    # cases/base_ops/mla_module.yaml (the M3 BF16 artifact has no quantized
+    # projections in SGLang serving), so the msa query yields only the
+    # combos this collector runs — no in-collector filtering.
     for spec in get_mla_module_precision_specs(
         "sglang", phase=phase, sm_version=get_sm_version(), attention_type="msa"
     ):
-        if spec.gemm_type != "bfloat16":
-            # BF16 artifact: no fp8_block M3 projections exist in serving
-            # (see docstring). Declaration-level filter, mirroring
-            # collect_mla_module._build_module_test_cases operator-gemm gate.
-            continue
         combos.append((spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type))
     return combos
 
@@ -229,17 +228,23 @@ def _filter_shapes_from_env(shapes, *, is_prefill: bool):
     return filtered
 
 
-def _model_max_position_embeddings(model_id: str) -> int | None:
+def _model_max_position_embeddings(model_id: str) -> int:
     """Max context (RoPE table size) from the bundled config — the same value
     SGLang uses for the M3 rotary cache (get_rope max_position,
-    models/minimax_m3.py:546-552) and default context_length."""
-    try:
-        config_dir = _resolve_local_model_path(model_id)
-        with open(os.path.join(config_dir, "config.json")) as f:
-            value = json.load(f).get("max_position_embeddings")
-        return int(value) if value else None
-    except Exception:
-        return None
+    models/minimax_m3.py:546-552) and default context_length.
+
+    Raises when the artifact config cannot be resolved: a silent ``None``
+    would disable every RoPE ceiling check and widen the sweep past the
+    rotary table size (unresolvable declarations fail loudly)."""
+    config_dir = _resolve_local_model_path(model_id)
+    with open(os.path.join(config_dir, "config.json")) as f:
+        value = json.load(f).get("max_position_embeddings")
+    if not value:
+        raise RuntimeError(
+            f"max_position_embeddings missing/empty in {model_id} config.json; "
+            "cannot bound the MSA sweep against the RoPE table size"
+        )
+    return int(value)
 
 
 def _context_shapes(batch_size: int, max_pos: int | None):
@@ -675,9 +680,14 @@ def load_model_runner(
             f"SGLang loaded architecture={actual_architecture!r} for {model_path}, expected {SGLANG_MSA_ARCHITECTURE!r}"
         )
 
-    import random
+    import socket
 
-    nccl_port = 29500 + random.randint(0, 10000) + gpu_id * 100
+    # Reserve an actually free port for NCCL init: arithmetic guesses can
+    # collide between concurrent per-GPU workers, and a collision surfaces
+    # as a framework failure that hides a harness bug.
+    with socket.socket() as _sock:
+        _sock.bind(("127.0.0.1", 0))
+        nccl_port = _sock.getsockname()[1]
 
     model_runner = ModelRunner(
         model_config=model_config,
@@ -779,8 +789,15 @@ def _decode_graph_covered(model_runner, num_tokens: int) -> bool:
         return False
     if decode_cfg.bs:
         return int(num_tokens) in set(decode_cfg.bs)
-    max_bs = decode_cfg.max_bs or 256
-    return 0 < int(num_tokens) <= int(max_bs)
+    if decode_cfg.max_bs is None:
+        # _handle_gpu_memory_settings resolves max_bs per GPU tier during
+        # server-args init; absent here means the contract moved. Guessing
+        # would change both the measured latency and the kernel_source label.
+        raise RuntimeError(
+            "cuda_graph_config.decode.max_bs is unresolved after model load; "
+            "cannot determine serving decode-graph coverage"
+        )
+    return 0 < int(num_tokens) <= int(decode_cfg.max_bs)
 
 
 def _decode_topk_variant(sparse_backend, max_seqlen_k: int) -> str:
@@ -807,7 +824,15 @@ def _prefill_kernel_source(model_runner) -> str:
 
 def _decode_kernel_source(model_runner, use_graph: bool, actual_kv: int) -> str:
     sparse = model_runner.attn_backend.sparse
-    main = "msa_fmha_sm100" if getattr(sparse, "_use_msa_decode", False) else "triton_sparse"
+    if not hasattr(sparse, "_use_msa_decode"):
+        # kernel_source records ground truth; a silent False default would
+        # mislabel every decode row as triton_sparse if SGLang renames the
+        # flag (minimax_sparse_backend.py@v0.5.16 sets it in __init__).
+        raise RuntimeError(
+            "MiniMaxSparseAttnBackend has no _use_msa_decode attribute "
+            "(renamed upstream?); refusing to guess the decode kernel identity"
+        )
+    main = "msa_fmha_sm100" if sparse._use_msa_decode else "triton_sparse"
     # Under a captured decode graph the indexer metadata is built with
     # in_capture=True → _max_seqlen_k = max_context_len
     # (minimax_sparse_backend.py:175-178), which is what gates the top-k
@@ -1175,15 +1200,12 @@ def run_msa_module(
             ]
             if before - len(shapes):
                 print(f"[MSA] dropped {before - len(shapes)} shapes beyond KV pool capacity={capacity} tokens")
-        if is_prefill:
-            chunk = runtime_chunk_size(model_runner)
-            before = len(shapes)
-            shapes = [(b, s, p) for (b, s, p) in shapes if b * s <= chunk]
-            if before - len(shapes):
-                print(
-                    f"[MSA] dropped {before - len(shapes)} shapes with bs*seq > "
-                    f"chunked_prefill_size={chunk} (multi-chunk in serving)"
-                )
+        # The requested chunked_prefill_size is sized to the max queued shape
+        # at load; SGLang may still clamp it per memory tier. Shapes above the
+        # resolved chunk would multi-chunk in serving, so a single-chunk
+        # measurement would misrepresent them — those cases raise per shape
+        # inside the loop (execute-or-raise; never a silent drop).
+        runtime_chunk = runtime_chunk_size(model_runner) if is_prefill else None
         if not shapes:
             raise RuntimeError(f"MSA module {phase} has no runnable shapes after runtime checks")
 
@@ -1196,6 +1218,12 @@ def run_msa_module(
             label = f"b={b}, s={s}, prefix={p}" if is_prefill else f"b={b}, kv={s}"
             print(f"[{i + 1}/{len(shapes)}] {phase} {label}, heads={num_heads}")
             try:
+                if is_prefill and runtime_chunk is not None and b * s > runtime_chunk:
+                    raise RuntimeError(
+                        f"bs*seq={b * s} exceeds resolved chunked_prefill_size={runtime_chunk}: "
+                        "serving would split this prefill into multiple chunks; a single-chunk "
+                        "measurement would misrepresent it"
+                    )
                 if is_prefill:
                     latency, power_stats = _run_prefill_point(
                         model_runner,

@@ -677,6 +677,17 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
+    # MiniMax-M3's model-owned MoE dims must be present directly (both the
+    # BF16 parent and the quant-distinct NVFP4 artifact row), not merely
+    # inside the aggregate count above.
+    assert any(
+        case.model_name == "MiniMaxAI/MiniMax-M3" and case.hidden_size == 6144 and case.inter_size == 3072
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/MiniMax-M3-NVFP4" and case.hidden_size == 6144 and case.inter_size == 3072
+        for case in moe_cases
+    )
     # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
     # expanding the MLA spec grids.
     assert len(get_context_mla_case_specs()) == 330

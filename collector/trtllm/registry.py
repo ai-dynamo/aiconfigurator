@@ -139,10 +139,11 @@ REGISTRY: list[OpEntry] = [
         get_func="get_msa_context_module_test_cases",
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_CONTEXT_MODULE,
-        # MiniMax-M3 MSA modules: hardware-validated on SM90 (        # 1.3.0rc20 Triton reference path); SM100/103 validation runs in
-        # this bring-up PR (rc23 implementation="msa" fmha_sm100 path,
-        # see collect_msa_module). SM120/121 remain unvalidated (Triton
-        # path expected, never run there).
+        # MiniMax-M3 MSA modules: hardware-validated on SM90 (h100/h200,
+        # rc23 Triton reference path) and SM100/103 (b200/b300/gb200/gb300,
+        # rc23 implementation="msa" fmha_sm100 path — see collect_msa_module).
+        # SM120 runs the Triton path and is being collected in this
+        # campaign; SM121 has never run on hardware and stays marked.
         unverified_sms=(121,),
     ),
     OpEntry(

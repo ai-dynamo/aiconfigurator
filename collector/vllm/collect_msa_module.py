@@ -959,8 +959,18 @@ def main():
             test_cases = [tc for tc in test_cases if tc[3] == args.kv_cache_dtype]
         if args.gemm_type is not None:
             test_cases = [tc for tc in test_cases if tc[5] == args.gemm_type]
+        # Honor the shape options outside --quick too, so a reproduction
+        # command narrows to the named case instead of silently running the
+        # whole sweep.
+        if args.seq_len is not None:
+            test_cases = [tc for tc in test_cases if tc[0] == args.seq_len]
+        if args.batch_size is not None:
+            test_cases = [tc for tc in test_cases if tc[1] == args.batch_size]
+        if args.prefix_len is not None:
+            test_cases = [tc for tc in test_cases if (tc[6] if len(tc) > 6 else 0) == args.prefix_len]
 
         print(f"Running {len(test_cases)} {args.mode} MSA module test cases...")
+        num_failed = 0
         for i, tc in enumerate(test_cases):
             s, b, h, kv_dtype, compute, gemm, *rest = tc
             print(f"[{i + 1}/{len(test_cases)}]", end="")
@@ -979,13 +989,21 @@ def main():
                 )
             except torch.cuda.OutOfMemoryError:
                 print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}")
+                num_failed += 1
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
                 print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}, kv={kv_dtype}: {e}")
                 traceback.print_exc()
+                num_failed += 1
                 torch.cuda.empty_cache()
                 gc.collect()
+        if num_failed:
+            # The registry/executor path records classified failures via the
+            # raising worker; this standalone repro CLI at least exits
+            # non-zero so a failed run is visible without scraping the log.
+            print(f"{num_failed}/{len(test_cases)} cases failed")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

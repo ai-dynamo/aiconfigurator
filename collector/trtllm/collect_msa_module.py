@@ -347,13 +347,24 @@ def create_msa_attention_layer(
     # DeepseekV32/GlmMoeDsa branch exists, model_config.py:617-647), so
     # build it here from the checkpoint's sparse dict — same field mapping
     # MiniMaxM3Attention.__init__ reads (modeling_minimaxm3.py:623-630).
+    def _required_sparse_field(key: str) -> int:
+        # Unresolvable artifact configuration fails loudly: substituting a
+        # literal here would benchmark a different sparse geometry and persist
+        # it under this model's identity.
+        if key not in sparse_cfg_dict:
+            raise RuntimeError(
+                f"checkpoint sparse_attention_config is missing '{key}' "
+                f"(present: {sorted(sparse_cfg_dict)}); refusing to default the sparse geometry"
+            )
+        return int(sparse_cfg_dict[key])
+
     sparse_kwargs = dict(
-        sparse_num_index_heads=int(sparse_cfg_dict.get("sparse_num_index_heads", 4)),
-        sparse_index_dim=int(sparse_cfg_dict.get("sparse_index_dim", 128)),
-        sparse_block_size=int(sparse_cfg_dict.get("sparse_block_size", 128)),
-        sparse_topk_blocks=int(sparse_cfg_dict.get("sparse_topk_blocks", 16)),
-        sparse_init_blocks=int(sparse_cfg_dict.get("sparse_init_block", 0)),
-        sparse_local_blocks=int(sparse_cfg_dict.get("sparse_local_block", 1)),
+        sparse_num_index_heads=_required_sparse_field("sparse_num_index_heads"),
+        sparse_index_dim=_required_sparse_field("sparse_index_dim"),
+        sparse_block_size=_required_sparse_field("sparse_block_size"),
+        sparse_topk_blocks=_required_sparse_field("sparse_topk_blocks"),
+        sparse_init_blocks=_required_sparse_field("sparse_init_block"),
+        sparse_local_blocks=_required_sparse_field("sparse_local_block"),
         sparse_disable_index_value=True,
     )
     # 1.3.0rc23 added implementation: Literal["triton","msa"] (default
@@ -874,91 +885,104 @@ def run_msa_module(
         device=torch_device,
     )
 
-    with model_extra_attrs(model_config.extra_attrs):
-        get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
-        try:
-            with torch.inference_mode():
-                attn_module.forward(position_ids, hidden_states, attn_metadata)
-        except Exception:
-            print("  Dry run failed:")
-            traceback.print_exc()
-            _cleanup(kv_cache_manager)
-            raise
-
     import tensorrt_llm._torch.utils as _trtllm_utils
 
-    _trtllm_utils._model_extra_attrs.attrs = model_config.extra_attrs
-    _trtllm_utils._model_extra_attrs.attrs["attention_metadata"] = weakref.ref(attn_metadata)
+    _prev_extra_attrs = getattr(_trtllm_utils._model_extra_attrs, "attrs", None)
+    try:
+        with model_extra_attrs(model_config.extra_attrs):
+            get_model_extra_attrs()["attention_metadata"] = weakref.ref(attn_metadata)
+            try:
+                with torch.inference_mode():
+                    attn_module.forward(position_ids, hidden_states, attn_metadata)
+            except Exception:
+                print("  Dry run failed:")
+                traceback.print_exc()
+                raise
 
-    def kernel_func():
-        attn_module.forward(position_ids, hidden_states, attn_metadata)
+        _trtllm_utils._model_extra_attrs.attrs = model_config.extra_attrs
+        _trtllm_utils._model_extra_attrs.attrs["attention_metadata"] = weakref.ref(attn_metadata)
 
-    # Measurement mode mirrors serving's execution mode per backend/phase.
-    # MSA prefill runs eagerly in serving — decode plans are cleared for
-    # prefill/mixed batches (msa_backend.py:434-436@1.3.0rc23) and the
-    # indexer then plans fmha_sm100 inline with host-side work
-    # (msa_indexer.py:149-191@1.3.0rc23), which is CUDA-graph-capture
-    # unsafe — so MSA context is measured eagerly. MSA decode replays the
-    # prebuilt graph-stable plans (built for capture) and keeps graph-mode
-    # measurement, as does the Triton path for both phases (unchanged from
-    # the SM90 rc20 collection).
-    use_cuda_graph = not (kernel_source == "msa_fmha_sm100" and is_context)
+        def kernel_func():
+            attn_module.forward(position_ids, hidden_states, attn_metadata)
 
-    with benchmark_with_power(
-        device=torch_device,
-        kernel_func=kernel_func,
-        num_warmups=warming_up,
-        num_runs=test_ite,
-        repeat_n=1,
-        allow_graph_fail=False,
-        use_cuda_graph=use_cuda_graph,
-    ) as results:
-        pass
+        # Measurement mode mirrors serving's execution mode per backend/phase.
+        # MSA prefill runs eagerly in serving — decode plans are cleared for
+        # prefill/mixed batches (msa_backend.py:434-436@1.3.0rc23) and the
+        # indexer then plans fmha_sm100 inline with host-side work
+        # (msa_indexer.py:149-191@1.3.0rc23), which is CUDA-graph-capture
+        # unsafe — so MSA context is measured eagerly. MSA decode replays the
+        # prebuilt graph-stable plans (built for capture) and keeps graph-mode
+        # measurement, as does the Triton path for both phases (unchanged from
+        # the SM90 rc20 collection).
+        use_cuda_graph = not (kernel_source == "msa_fmha_sm100" and is_context)
 
-    latency = results["latency_ms"]
+        with benchmark_with_power(
+            device=torch_device,
+            kernel_func=kernel_func,
+            num_warmups=warming_up,
+            num_runs=test_ite,
+            repeat_n=1,
+            allow_graph_fail=False,
+            use_cuda_graph=use_cuda_graph,
+        ) as results:
+            pass
 
-    if is_context:
-        isl = seq_len
-        step = prefix_len
-    else:
-        isl = 1
-        step = seq_len
+        latency = results["latency_ms"]
 
-    op_name = f"msa_{phase}_module"
+        if is_context:
+            isl = seq_len
+            step = prefix_len
+        else:
+            isl = 1
+            step = seq_len
 
-    log_perf(
-        item_list=[
-            {
-                "model": model_path,
-                "architecture": original_architecture,
-                "mla_dtype": compute_dtype,
-                "kv_cache_dtype": kv_cache_dtype,
-                "gemm_type": gemm_type,
-                "num_heads": num_heads,
-                "batch_size": batch_size,
-                "isl": isl,
-                "tp_size": 1,
-                "step": step,
-                "latency": f"{latency:.4f}",
-            }
-        ],
-        framework="TRTLLM",
-        version=tensorrt_llm.__version__,
-        device_name=torch.cuda.get_device_name(device),
-        op_name=op_name,
-        kernel_source=kernel_source,
-        perf_filename=perf_filename,
-        power_stats=results["power_stats"],
-    )
+        op_name = f"msa_{phase}_module"
 
-    print(
-        f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"prefix={prefix_len}, gemm={gemm_type}, backend={kernel_source}: "
-        f"{latency:.4f} ms"
-    )
+        if not log_perf(
+            item_list=[
+                {
+                    "model": model_path,
+                    "architecture": original_architecture,
+                    "mla_dtype": compute_dtype,
+                    "kv_cache_dtype": kv_cache_dtype,
+                    "gemm_type": gemm_type,
+                    "num_heads": num_heads,
+                    "batch_size": batch_size,
+                    "isl": isl,
+                    "tp_size": 1,
+                    "step": step,
+                    "latency": f"{latency:.4f}",
+                }
+            ],
+            framework="TRTLLM",
+            version=tensorrt_llm.__version__,
+            device_name=torch.cuda.get_device_name(device),
+            op_name=op_name,
+            kernel_source=kernel_source,
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        ):
+            # A failed write with a normal return would report the case as
+            # successful while silently shrinking the dataset.
+            raise RuntimeError(f"failed to persist MSA row to {perf_filename}")
 
-    _cleanup(kv_cache_manager)
-    return latency
+        print(
+            f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
+            f"prefix={prefix_len}, gemm={gemm_type}, backend={kernel_source}: "
+            f"{latency:.4f} ms"
+        )
+
+        return latency
+    finally:
+        # Restore the process-global extra-attrs slot and always release the
+        # KV pool: the CLI loop continues past a failed case, so a leaked
+        # pool would surface as spurious OOM in later cases, and a stale
+        # weakref here would point at the shut-down manager.
+        if _prev_extra_attrs is not None:
+            _trtllm_utils._model_extra_attrs.attrs = _prev_extra_attrs
+        elif hasattr(_trtllm_utils._model_extra_attrs, "attrs"):
+            del _trtllm_utils._model_extra_attrs.attrs
+        _cleanup(kv_cache_manager)
 
 
 def run_msa_module_worker(
@@ -1053,6 +1077,7 @@ def main():
             test_cases = [tc for tc in test_cases if tc[5] == args.gemm_type]
 
         print(f"Running {len(test_cases)} {args.mode} MSA module test cases...")
+        num_failed = 0
         for i, tc in enumerate(test_cases):
             s, b, h, kv_dtype, compute, gemm, *rest = tc
             print(f"[{i + 1}/{len(test_cases)}]", end="")
@@ -1071,13 +1096,20 @@ def main():
                 )
             except torch.cuda.OutOfMemoryError:
                 print(f"  OOM: b={b}, s={s}, heads={h}, gemm={gemm}")
+                num_failed += 1
                 torch.cuda.empty_cache()
                 gc.collect()
             except Exception as e:
                 print(f"  FAILED: b={b}, s={s}, heads={h}, gemm={gemm}: {e}")
                 traceback.print_exc()
+                num_failed += 1
                 torch.cuda.empty_cache()
                 gc.collect()
+        if num_failed:
+            # Exit non-zero so an operator (and CI) can see failures without
+            # scraping the log; per-case detail is printed above.
+            print(f"{num_failed}/{len(test_cases)} cases failed")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

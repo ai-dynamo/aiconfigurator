@@ -289,11 +289,16 @@ REGISTRY: list[OpEntry] = [
     # MiniMax-M3 MSA sparse-attention modules — requires the msa-family image
     # pin (framework_manifest sglang families.msa → official v0.5.16, the
     # first release with models/minimax_m3.py; the module declares
-    # __compat__ = "sglang>=0.5.16"). Hardware-validated on SM90:
-    # the sparse layers run the Triton sparse path there (SGLang's own M3
-    # server-args override, arg_groups/overrides.py:521-537@v0.5.16 — MSA
-    # fmha_sm100 is SM100-only). Other SMs carry maturity markers until a
-    # hardware pass validates them, mirroring the trtllm msa entries.
+    # __compat__ = "sglang>=0.5.16"). Hardware-validated per SM:
+    # SM90 (h100/h200 — SGLang's own M3 server-args override selects
+    # fa3 + page 128 and the Triton sparse path,
+    # arg_groups/overrides.py:521-537@v0.5.16), SM100/103
+    # (b200/b300/gb200/gb300 — same Triton sparse path on the official
+    # image; the fmha_sm100 upgrade is wheel-gated and kernel_source
+    # records what actually ran), and SM89/SM120 (l40s/rtx via the
+    # owner-authorized attention_backend="triton" escape hatch, see
+    # collect_msa_module). SM121 has never run on hardware and stays
+    # marked, mirroring the trtllm msa entries.
     OpEntry(
         op="msa_context_module",
         module="collector.sglang.collect_msa_module",

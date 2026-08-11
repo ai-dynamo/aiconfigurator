@@ -29,7 +29,7 @@ On top of that, three keying tiers:
 | MLA module | **`[native][local]`** | `model` column via `_MLA_MODULE_NATIVE_HEADS` |
 | DSV4 modules | **`[native][local]`** (`#1431`) | `num_heads * tp_size` (genuine tp chains) |
 | DSA modules | `[architecture][local]` | guardrail pins one native per arch |
-| MiniMax MSA | `[architecture][local]` (DSA-module schema) | collector stamps the single `MiniMaxM3ForCausalLM` native |
+| MiniMax MSA | `[architecture][local]` (DSA-module schema) | guardrail pins one native per arch (`test_shipped_msa_module_tables_keep_one_native_per_architecture`) |
 
 ## Native derivation differs per family
 

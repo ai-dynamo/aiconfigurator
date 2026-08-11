@@ -102,12 +102,13 @@ REGISTRY: list[OpEntry] = [
         get_func="get_msa_context_module_test_cases",
         run_func="run_msa_module_worker",
         perf_filename=PerfFile.MSA_CONTEXT_MODULE,
-        # MiniMax-M3 MSA hardware-validated on SM90 only. On the
-        # SM100 family vLLM's own dispatch switches the attend + indexer to
-        # the fmha_sm100 "MSA" impls (select_main_impl_cls /
-        # select_indexer_impl_cls @0.24.0) — a different kernel path that has
-        # not been probed; SM120/121 keep the Triton path but are equally
-        # unprobed. Clear the markers after a validation run on each SM.
+        # MiniMax-M3 MSA hardware-validated on SM90 (h100/h200, Triton
+        # impls), SM100/103 (b200/b300/gb200/gb300 — vLLM's own dispatch
+        # switches the attend + indexer to the fmha_sm100 "MSA" impls via
+        # select_main_impl_cls / select_indexer_impl_cls @0.24.0), SM89
+        # (l40s) and SM120 (Triton impls; fp8_block gemm cases fail
+        # classified on SM120 via DeepGEMM's SM120 assert). SM121 has never
+        # run on hardware and stays marked.
         unverified_sms=(121,),
     ),
     OpEntry(

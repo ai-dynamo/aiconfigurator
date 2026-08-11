@@ -74,14 +74,20 @@ common_case_values:
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 90
+      # fp8_block projections exist for MLA/DSA checkpoints only; the M3
+      # (msa) BF16 artifact has no quantized projections in SGLang serving
+      # (its quantized-M3 flow is MXFP8) — scope these away from msa at the
+      # declaration instead of filtering in the collector.
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: fp8_block
         min_sm: 89
+        attention_types: [mla, dsa]
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: fp8_block
         min_sm: 90
+        attention_types: [mla, dsa]
     context_sequence_lengths:
       - 1
       - 4

@@ -160,7 +160,13 @@ def _msa_sol_dims(architecture: str, num_heads: int, overrides: dict) -> dict:
     """Resolve the SOL-anchor dims for one MSA table query: caller overrides
     first, then the architecture's native dims (per-rank kv heads scaled from
     the native q:kv ratio when only ``num_heads`` is known)."""
-    dims = MSA_MODEL_DIMS.get(architecture, MSA_MODEL_DIMS[DEFAULT_MSA_ARCHITECTURE])
+    if architecture not in MSA_MODEL_DIMS:
+        raise ValueError(
+            f"Unknown MSA architecture '{architecture}'; known: {sorted(MSA_MODEL_DIMS)}. "
+            "Substituting another architecture's geometry would silently anchor the "
+            "SOL model on the wrong shape."
+        )
+    dims = MSA_MODEL_DIMS[architecture]
     resolved = {key: dims[key] for key in dims if key not in ("num_heads", "num_kv_heads")}
     resolved["num_kv_heads"] = max(1, num_heads * dims["num_kv_heads"] // dims["num_heads"])
     for key, value in overrides.items():
@@ -345,12 +351,15 @@ class ContextMSAModule(_BaseMSAModule):
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        primary_path = resolve_op_data_path(
-            system_data_root, database.backend, database.version, PerfDataFilename.msa_context_module.value
-        )
-        sources = database._build_op_sources(PerfDataFilename.msa_context_module, primary_path, system_data_root)
         if key not in cls._data_cache:
+            # Source resolution scans sibling/cross-backend directories; keep it
+            # inside the cache-miss branch (as the MLA/DSv4 loaders do) so
+            # per-query load_data calls stay O(1) after the first load.
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.msa_context_module.value
+            )
+            sources = database._build_op_sources(PerfDataFilename.msa_context_module, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_context_msa_module_data(sources), PerfDataFilename.msa_context_module, primary_path
             )
@@ -582,12 +591,14 @@ class GenerationMSAModule(_BaseMSAModule):
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        primary_path = resolve_op_data_path(
-            system_data_root, database.backend, database.version, PerfDataFilename.msa_generation_module.value
-        )
-        sources = database._build_op_sources(PerfDataFilename.msa_generation_module, primary_path, system_data_root)
         if key not in cls._data_cache:
+            # See ContextMSAModule.load_data: resolution stays inside the
+            # cache-miss branch so per-query calls do not rescan directories.
+            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+            primary_path = resolve_op_data_path(
+                system_data_root, database.backend, database.version, PerfDataFilename.msa_generation_module.value
+            )
+            sources = database._build_op_sources(PerfDataFilename.msa_generation_module, primary_path, system_data_root)
             cls._data_cache[key] = LoadedOpData(
                 load_generation_msa_module_data(sources), PerfDataFilename.msa_generation_module, primary_path
             )
