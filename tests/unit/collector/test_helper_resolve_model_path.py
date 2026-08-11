@@ -3,6 +3,7 @@
 
 """Tests for ``collector.helper._resolve_local_model_path``."""
 
+import builtins
 import json
 import os
 import sys
@@ -266,6 +267,25 @@ class TestBundledConfigRefresh:
     def test_norm_cache_key_requires_config_json(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             config_norm_cache_key(str(tmp_path))
+
+    def test_failed_staging_write_leaves_no_debris(self, isolated_tmp, tmp_path, monkeypatch):
+        # A write failure between mkdtemp and the publish rename must not
+        # leak the staging directory (repeated I/O failures would otherwise
+        # accumulate partial cache dirs), and must still surface the error.
+        self._bundle(tmp_path, monkeypatch, "fake-org--debris", {"model_type": "fake"})
+        real_open = builtins.open
+
+        def failing_open(file, *args, **kwargs):
+            if ".stage-" in str(file):
+                raise OSError(28, "No space left on device")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", failing_open)
+        with pytest.raises(OSError):
+            _resolve_local_model_path("fake-org/debris")
+        slug_dir = isolated_tmp / "aic_model_config_fake-org--debris"
+        leftovers = list(slug_dir.iterdir()) if slug_dir.exists() else []
+        assert leftovers == []  # no staging debris, no torn snapshot published
 
     def test_concurrent_materialization_from_threads_is_safe(self, isolated_tmp, tmp_path, monkeypatch):
         # Staging dirs must be unique per invocation, not per pid: threads
