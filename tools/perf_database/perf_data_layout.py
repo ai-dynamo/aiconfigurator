@@ -32,7 +32,7 @@ LEGACY_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm"})
 def iter_backend_dirs(system_dir: Path) -> Iterable[tuple[str, Path]]:
     """Yield ``(backend, path)`` pairs from legacy and family-first layouts."""
     for entry in sorted(system_dir.iterdir()):
-        if not entry.is_dir() or entry.name in SKIP_BACKEND_DIRS:
+        if not entry.is_dir() or entry.name.startswith(".") or entry.name in SKIP_BACKEND_DIRS:
             continue
         if entry.name in LEGACY_BACKEND_DIRS:
             yield entry.name, entry
