@@ -342,7 +342,8 @@ def _parse_registry_entries(repo_root: Path, rev: str, manifest: dict[str, Any],
                 # are not parsed — fail closed rather than silently omitting the
                 # op from its family's module set (see "Known gaps" above).
                 raise NotImplementedError(
-                    f"changed_ops does not support VersionRoute-versioned registry entries; extend the parser (op: {op})"
+                    "changed_ops does not support VersionRoute-versioned registry entries; "
+                    f"extend the parser (op: {op})"
                 )
             perf_filename = _resolve_perf_filename(kwargs.get("perf_filename"), perf_file_map)
             if not (op and module and perf_filename):
