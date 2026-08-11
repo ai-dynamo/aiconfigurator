@@ -1799,17 +1799,18 @@ def _materialize_aic_cached_config(model_id: str, slug: str, cached_config: str)
         # another mid-write.
         os.makedirs(base_dir, exist_ok=True)
         staging = tempfile.mkdtemp(prefix=f"{os.path.basename(snapshot)}.stage-", dir=base_dir)
-        with open(os.path.join(staging, "config.json"), "wb") as f:
-            f.write(desired)
-        if quant_desired is not None:
-            with open(os.path.join(staging, "hf_quant_config.json"), "wb") as f:
-                f.write(quant_desired)
         try:
+            with open(os.path.join(staging, "config.json"), "wb") as f:
+                f.write(desired)
+            if quant_desired is not None:
+                with open(os.path.join(staging, "hf_quant_config.json"), "wb") as f:
+                    f.write(quant_desired)
             os.replace(staging, snapshot)
         except OSError:
             # Another worker may have won the atomic-rename race — but
-            # verify before trusting that assumption: a permission or
-            # disk-full failure would otherwise be swallowed.
+            # verify before trusting that assumption: a staged-write or
+            # permission/disk-full failure would otherwise be swallowed.
+            # Either way the staging directory must not linger.
             shutil.rmtree(staging, ignore_errors=True)
             if not os.path.exists(os.path.join(snapshot, "config.json")):
                 raise
