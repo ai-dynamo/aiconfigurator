@@ -1583,8 +1583,8 @@ def test_backend_identity_defaults_record_auto_everywhere():
     assert backend_identity_columns(policy) == {
         "moe_backend": "auto",
         "attention_backend": "auto",
-        "enable_wideep": "auto",
-        "enable_eplb": "auto",
+        "enable_wideep": False,
+        "enable_eplb": False,
     }
     assert policy.policy_id == "baseline_auto"
     assert policy.generator_overrides == {}
@@ -1630,7 +1630,7 @@ def test_pinned_eplb_sets_engine_flag_and_marker():
     policy = plan.cells[0].backend_policy
     assert policy.expected_markers == {"config.engine_args.enable_eplb": "True"}
     assert "--enable-eplb" in policy.generator_overrides["params"]["agg"]["extra_cli_args"]
-    assert backend_identity_columns(policy)["enable_eplb"] == "true"
+    assert backend_identity_columns(policy)["enable_eplb"] is True
 
 
 def test_unplumbed_backend_identity_fails_closed():
@@ -1638,7 +1638,7 @@ def test_unplumbed_backend_identity_fails_closed():
     rejected up front - a row claiming an unapplied backend would be a lie."""
 
     for overrides, match in (
-        ({"fpm_enable_wideep": "true"}, "SGLang-only"),
+        ({"fpm_enable_wideep": "true"}, "SGLang-only"),  # true only; false is the default
         ({"fpm_attention_backend": "fa3"}, "no verified vllm plumbing"),
     ):
         options = FPMCollectionOptions.from_args(_args(**overrides))

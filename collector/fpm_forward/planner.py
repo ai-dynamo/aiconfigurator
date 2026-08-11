@@ -175,18 +175,17 @@ def backend_identity_columns(policy: BackendPolicy) -> dict[str, str]:
     """
     fields = policy.aic_fields
 
-    def _norm(value: object) -> str:
-        if value is None:
-            return "auto"
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        return str(value)
+    def _norm_backend(value: object) -> str:
+        return "auto" if value is None else str(value)
 
     return {
-        "moe_backend": _norm(fields.get("moe_backend")),
-        "attention_backend": _norm(fields.get("attention_backend")),
-        "enable_wideep": _norm(fields.get("enable_wideep")),
-        "enable_eplb": _norm(fields.get("enable_eplb")),
+        "moe_backend": _norm_backend(fields.get("moe_backend")),
+        "attention_backend": _norm_backend(fields.get("attention_backend")),
+        # Real booleans: the parquet column stays boolean and the
+        # modeling-side str() normalization yields "False"/"True",
+        # matching ModelConfig's Python bool defaults.
+        "enable_wideep": bool(fields.get("enable_wideep")),
+        "enable_eplb": bool(fields.get("enable_eplb")),
     }
 
 
@@ -216,7 +215,7 @@ def _backend_policies(
             ("enable_wideep", wideep),
             ("enable_eplb", eplb),
         )
-        if value != "auto"
+        if value not in ("auto", "false")
     }
 
     # Fail closed on anything the collector cannot deliver to the engine and
@@ -229,8 +228,8 @@ def _backend_policies(
             f"explicit FPM backend identity is only plumbed for the vllm backend; got {backend} with "
             f"{sorted(specified)} specified"
         )
-    if wideep != "auto":
-        raise ValueError("enable_wideep cannot be pinned for vllm FPM collection (wide-EP is SGLang-only)")
+    if wideep == "true":
+        raise ValueError("enable_wideep=true is not collectable on vllm (wide-EP is SGLang-only)")
     if attention != "auto":
         raise ValueError(
             "attention_backend pinning has no verified vllm plumbing yet; collect with auto or add the "
@@ -242,10 +241,9 @@ def _backend_policies(
     if moe != "auto":
         extra_cli_args += ["--kernel-config", json.dumps({"moe_backend": moe})]
         expected_markers["config.engine_args.kernel_config.moe_backend"] = moe
-    if eplb != "auto":
-        if eplb == "true":
-            extra_cli_args += ["--enable-eplb"]
-        expected_markers["config.engine_args.enable_eplb"] = "True" if eplb == "true" else "False"
+    if eplb == "true":
+        extra_cli_args += ["--enable-eplb"]
+        expected_markers["config.engine_args.enable_eplb"] = "True"
 
     generator_overrides: dict[str, Any] = (
         {"params": {"agg": {"extra_cli_args": extra_cli_args}}} if extra_cli_args else {}
@@ -263,8 +261,8 @@ def _backend_policies(
             {
                 "moe_backend": None if moe == "auto" else moe,
                 "attention_backend": None if attention == "auto" else attention,
-                "enable_wideep": None if wideep == "auto" else (wideep == "true"),
-                "enable_eplb": None if eplb == "auto" else (eplb == "true"),
+                "enable_wideep": wideep == "true",
+                "enable_eplb": eplb == "true",
             },
             "AIC automatic baseline for the selected model/backend"
             if not specified

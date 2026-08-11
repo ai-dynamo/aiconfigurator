@@ -178,9 +178,10 @@ class FPMCollectionOptions:
     gpu_counts: tuple[int, ...]
     parallel_presets: tuple[str, ...]
     parallel_axes: tuple[str, ...]
-    # Explicit backend identity knobs (v6): "auto" means the engine decides
-    # and the row records "auto"; any other value must reach the engine and
-    # be verified against resolved-config evidence.
+    # Explicit backend identity knobs (v6). The string backends use "auto"
+    # (engine decides, row records "auto"); the two booleans have no auto -
+    # they default to false and the row records a real boolean, so the
+    # modeling-side str() normalization yields "False"/"True".
     moe_backend: str
     attention_backend: str
     enable_wideep: str
@@ -253,8 +254,8 @@ class FPMCollectionOptions:
             parallel_axes=requested_axes,
             moe_backend=(getattr(args, "fpm_moe_backend", None) or "auto").strip(),
             attention_backend=(getattr(args, "fpm_attention_backend", None) or "auto").strip(),
-            enable_wideep=(getattr(args, "fpm_enable_wideep", None) or "auto").strip(),
-            enable_eplb=(getattr(args, "fpm_enable_eplb", None) or "auto").strip(),
+            enable_wideep=(getattr(args, "fpm_enable_wideep", None) or "false").strip(),
+            enable_eplb=(getattr(args, "fpm_enable_eplb", None) or "false").strip(),
             weight_quantizations=tuple(
                 dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
             ),
@@ -350,15 +351,15 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--fpm-enable-wideep",
-        choices=("auto", "true", "false"),
+        choices=("true", "false"),
         default=None,
-        help="Pin wide-EP on or off; default auto records the engine default.",
+        help="Wide-EP on or off (boolean identity column; defaults to false).",
     )
     group.add_argument(
         "--fpm-enable-eplb",
-        choices=("auto", "true", "false"),
+        choices=("true", "false"),
         default=None,
-        help="Pin expert-parallel load balancing on or off; default auto records the engine default.",
+        help="Expert-parallel load balancing on or off (boolean identity column; defaults to false).",
     )
     group.add_argument(
         "--fpm-weight-quantizations",
