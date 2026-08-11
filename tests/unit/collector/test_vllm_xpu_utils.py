@@ -3,6 +3,7 @@
 
 import ast
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -122,6 +123,8 @@ def test_xpu_attention_skips_explicit_update_when_backend_forward_includes_it():
 
 def test_xpu_flash_attention_kv_cache_keeps_backend_stride_order():
     torch = pytest.importorskip("torch")
+    if isinstance(torch, Mock):
+        pytest.skip("requires real torch tensor semantics")
     pack_cache = _load_xpu_attention_function("_pack_v1_fa_kv_cache")
 
     num_blocks, block_size, num_kv_heads, head_size = 3, 5, 7, 11

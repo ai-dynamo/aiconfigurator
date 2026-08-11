@@ -487,6 +487,14 @@ def _collector_code_differs(
     base_modules: set[str],
     head_modules: set[str],
 ) -> bool:
+    missing_head_closures = head_modules - head_ctx.closures.keys()
+    if missing_head_closures:
+        raise KeyError(
+            f"{head_ctx.rev}: missing hash_closures.yaml entries for {sorted(missing_head_closures)} (fail-closed)"
+        )
+    if base_modules - base_ctx.closures.keys():
+        return True
+
     for module in sorted(base_modules | head_modules):
         base_hash = None
         if module in base_modules:
@@ -521,7 +529,9 @@ def _diff_framework(
             reasons.append(REASON_PIN_VERSION)
         if _collector_code_differs(repo_root, base_ctx, head_ctx, base_modules, head_modules):
             reasons.append(REASON_COLLECTOR_CODE)
-        base_case_hash = _case_plan_hash_at_rev(repo_root, base_ctx.rev, base_modules, base_ctx.closures)
+        base_case_hash = None
+        if not (base_modules - base_ctx.closures.keys()):
+            base_case_hash = _case_plan_hash_at_rev(repo_root, base_ctx.rev, base_modules, base_ctx.closures)
         head_case_hash = _case_plan_hash_at_rev(repo_root, head_ctx.rev, head_modules, head_ctx.closures)
         if base_case_hash != head_case_hash:
             reasons.append(REASON_CASE_PLAN)
