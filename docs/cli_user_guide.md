@@ -17,6 +17,7 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
 - `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). When `--forward-model fpm` is selected, AIC evaluates step latency using the Python implementation; `--engine-step-backend rust` does not take effect because the compiled engine does not yet have an FPM operation (Rust support is tracked separately in PR #1461). V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -625,7 +626,7 @@ For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section be
 
 `--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
-**Deployment Target Selection**
+#### Deployment Target Selection
 
 Use `--deployment-target` to choose which orchestration platform to deploy to:
 - `dynamo-j2` (default): Generates typed Dynamo Kubernetes manifests
