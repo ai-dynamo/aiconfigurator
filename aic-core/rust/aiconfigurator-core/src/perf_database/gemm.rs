@@ -22,7 +22,9 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use quick_cache::{DefaultHashBuilder, OptionsBuilder, UnitWeighter};
 
 use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
+use super::perf_interp::{
+    self, LeafValue, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform,
+};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
@@ -46,7 +48,7 @@ struct GemmQueryKey {
 // memoization in the perf database. DSA's `sparse` map is deliberately
 // different: it holds a small, unbounded set of lazily loaded table objects,
 // rather than memoizing high-volume scalar results.
-fn gemm_query_cache() -> Cache<GemmQueryKey, f64> {
+fn gemm_query_cache() -> Cache<GemmQueryKey, LeafValue> {
     let options = OptionsBuilder::new()
         .estimated_items_capacity(GEMM_QUERY_CACHE_CAPACITY)
         .weight_capacity(GEMM_QUERY_CACHE_CAPACITY as u64)
@@ -63,12 +65,12 @@ fn gemm_query_cache() -> Cache<GemmQueryKey, f64> {
 
 #[inline(always)]
 fn resolve_gemm_query_cached<F>(
-    cache: &Cache<GemmQueryKey, f64>,
+    cache: &Cache<GemmQueryKey, LeafValue>,
     key: GemmQueryKey,
     resolve: F,
-) -> Result<f64, AicError>
+) -> Result<LeafValue, AicError>
 where
-    F: FnOnce() -> Result<f64, AicError>,
+    F: FnOnce() -> Result<LeafValue, AicError>,
 {
     if let Some(value) = cache.get(&key) {
         return Ok(value);
@@ -77,7 +79,7 @@ where
     let value = resolve()?;
     // Preserve resolver behavior by returning non-finite results, but do
     // not make them sticky cache hits for later queries.
-    if value.is_finite() {
+    if value.latency.is_finite() && value.power.is_finite() && value.energy.is_finite() {
         cache.insert(key, value);
     }
     Ok(value)
@@ -107,18 +109,62 @@ pub struct GemmTable {
     gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
-    /// Successful finite scalar GEMM queries, keyed by normalized quant and
-    /// shape and bounded independently for each shard.
-    query_cache: OnceLock<Cache<GemmQueryKey, f64>>,
+    /// Successful finite GEMM query leaves (`{latency, power, energy}`),
+    /// keyed by normalized quant and shape and bounded independently for
+    /// each shard.
+    query_cache: OnceLock<Cache<GemmQueryKey, LeafValue>>,
 }
 
-/// 3-D GEMM tables keyed by quant name -> m -> n -> k -> latency_ms.
+/// 3-D GEMM tables keyed by quant name -> m -> n -> k -> measured leaf
+/// (`{latency, power, energy}`, mirroring Python `load_gemm_data`).
 /// `quant_order` records first-seen (file row) order: the `BTreeMap` iterates
 /// alphabetically, but the quant-transfer ladder's tie-breaks are pinned to
 /// Python's dict-insertion (= file row) order.
 struct GemmGrids {
-    by_quant: BTreeMap<String, Grid3<f64>>,
+    by_quant: BTreeMap<String, Grid3<LeafValue>>,
     quant_order: Vec<String>,
+    /// Per-quant replica of Python's nested-dict KEY order (issue #1456):
+    /// the site-transfer tie-break is parity surface, and Python enumerates
+    /// (n, k) sites in the insertion order of its `data[m][n][k]` dict walk
+    /// — an order the sorted `BTreeMap` grids above destroy. Recorded at
+    /// row-accept time and replayed into the `SiteIndex` build.
+    site_walk_by_quant: BTreeMap<String, SiteWalkOrder>,
+}
+
+/// First-seen key order of the `data[m][n][k]` nested dict, per level —
+/// exactly what Python's insertion-ordered dicts remember. `site_order()`
+/// replays the walk (`m` first-seen → `n` first-seen under that `m` → `k`
+/// first-seen under that `(m, n)`) and yields each `(n, k)` site at its
+/// first encounter, which is the enumeration order Python's site index
+/// (`perf_interp/engine.py` `_site_index`) sees.
+#[derive(Default)]
+struct SiteWalkOrder {
+    m_order: Vec<u32>,
+    n_order: BTreeMap<u32, Vec<u32>>,
+    k_order: BTreeMap<(u32, u32), Vec<u32>>,
+}
+
+impl SiteWalkOrder {
+    fn site_order(&self) -> Vec<Vec<u32>> {
+        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut out: Vec<Vec<u32>> = Vec::new();
+        for &m in &self.m_order {
+            let Some(ns) = self.n_order.get(&m) else {
+                continue;
+            };
+            for &n in ns {
+                let Some(ks) = self.k_order.get(&(m, n)) else {
+                    continue;
+                };
+                for &k in ks {
+                    if seen.insert((n, k)) {
+                        out.push(vec![n, k]);
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Engine-ready GEMM tables: per quant, the nested table plus the scattered
@@ -128,7 +174,9 @@ struct GemmEngineGrids {
     quant_order: Vec<String>,
 }
 
-/// 2-D scale tables keyed by quant name -> m -> k -> latency_ms.
+/// 2-D scale tables keyed by quant name -> m -> k -> measured leaf
+/// (`{latency, power, energy}`, mirroring Python `load_compute_scale_data`
+/// / `load_scale_matrix_data`).
 struct TwoDGrids {
     by_quant: BTreeMap<String, Node>,
 }
@@ -167,14 +215,21 @@ impl GemmTable {
         }
     }
 
-    /// Query GEMM latency (ms) for the given shape and quant mode.
+    /// Query the GEMM measured value (`{latency ms, power W, energy W·ms}`)
+    /// for the given shape and quant mode.
     ///
     /// Mirrors the perf_interp v2 path of `GEMM._query_gemm_table`
     /// (`gemm_config`): (n, k) are scattered collected shapes, each owning
     /// an m-curve. Exact site -> its own curve (exact point / lerp /
     /// k_tail=3 util-hold beyond the sweep); unknown shape -> log2-IDW util
     /// transfer from <=4 covering neighbour sites within 2.0 octaves.
-    pub fn query(&self, quant: GemmQuantMode, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
+    pub fn query(
+        &self,
+        quant: GemmQuantMode,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<LeafValue, AicError> {
         // `fp8_static` is a behavioral mode that reuses `fp8` perf tables,
         // mirroring Python `GEMM._normalize_for_lookup`. The
         // compute_scale / scale_matrix tables apply the same
@@ -209,11 +264,11 @@ impl GemmTable {
                 gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
             };
             let cfg = gemm_engine_config(&sol);
-            index.resolve(&cfg, &[m as f64, n as f64, k as f64])
+            index.resolve_value(&cfg, &[m as f64, n as f64, k as f64])
         })
     }
 
-    /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
+    /// Query compute-scale measured value — used by `fp8_static` GEMM only.
     ///
     /// Like the main GEMM table, the compute_scale data is keyed by `fp8`
     /// (not `fp8_static`) in the perf-DB; normalize before lookup to mirror
@@ -221,39 +276,56 @@ impl GemmTable {
     ///
     /// compute_scale stores a quantization-overhead DELTA: beyond the grid
     /// it is deliberately held FLAT at the clamped boundary (Python
-    /// `_query_compute_scale_table` contract).
+    /// `_query_compute_scale_table` contract), energy included.
     pub fn query_compute_scale(
         &self,
         quant: GemmQuantMode,
         m: u32,
         k: u32,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load_compute_scale()?;
         let lookup = normalize_fp8_static_quant(quant);
         let spec = &self.system_spec;
         // sol_mem = 2 m k / bw * 1000 (read + write of the activation)
         let sol = move |c: &[f64]| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
-        query_scale_table(&grids.by_quant, lookup.name(), m, k, &sol, false, &self.data_root)
+        query_scale_table(
+            &grids.by_quant,
+            lookup.name(),
+            m,
+            k,
+            &sol,
+            false,
+            &self.data_root,
+        )
     }
 
-    /// Query scale-matrix latency (ms) — used by `fp8_static` GEMM only.
+    /// Query scale-matrix measured value — used by `fp8_static` GEMM only.
     /// Same `fp8_static -> fp8` normalization as the GEMM and
     /// compute_scale lookups.
     ///
     /// scale_matrix is a real memory kernel: outside the grid the boundary
     /// utilization is frozen and SOL(q)/SOL(boundary) carries the growth
-    /// (Python `_query_scale_matrix_table` contract).
+    /// for BOTH latency and energy (Python `_query_scale_matrix_table`
+    /// contract).
     pub fn query_scale_matrix(
         &self,
         quant: GemmQuantMode,
         m: u32,
         k: u32,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load_scale_matrix()?;
         let lookup = normalize_fp8_static_quant(quant);
         let spec = &self.system_spec;
         let sol = move |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
-        query_scale_table(&grids.by_quant, lookup.name(), m, k, &sol, true, &self.data_root)
+        query_scale_table(
+            &grids.by_quant,
+            lookup.name(),
+            m,
+            k,
+            &sol,
+            true,
+            &self.data_root,
+        )
     }
 
     /// Collected `(m, n, k) -> latency` points for the quant's table, for the
@@ -281,16 +353,32 @@ impl GemmTable {
 
     /// Collected `(m, k) -> delta` points of the compute_scale table (zeroes
     /// included — they are measured deltas). Typed miss when absent.
-    pub fn compute_scale_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+    pub fn compute_scale_points(
+        &self,
+        quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_compute_scale()?;
-        Self::two_d_points(grids, normalize_fp8_static_quant(quant), "compute_scale", &self.data_root)
+        Self::two_d_points(
+            grids,
+            normalize_fp8_static_quant(quant),
+            "compute_scale",
+            &self.data_root,
+        )
     }
 
     /// Collected `(m, k) -> latency` points of the scale_matrix table.
     /// Typed miss when absent.
-    pub fn scale_matrix_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
+    pub fn scale_matrix_points(
+        &self,
+        quant: GemmQuantMode,
+    ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_scale_matrix()?;
-        Self::two_d_points(grids, normalize_fp8_static_quant(quant), "scale_matrix", &self.data_root)
+        Self::two_d_points(
+            grids,
+            normalize_fp8_static_quant(quant),
+            "scale_matrix",
+            &self.data_root,
+        )
     }
 
     fn two_d_points(
@@ -340,18 +428,29 @@ impl GemmTable {
             // queries run. Off-grid interpolation/extrapolation therefore
             // sees the same monotone-bounded inputs as Python.
             clamp_gemm_grids_to_sol(&self.system_spec, &mut grids);
-            // Build the engine table + (n, k)-site index once per quant.
+            // Build the engine table + (n, k)-site index once per quant. The
+            // index enumerates sites in Python's dict-walk order (recorded at
+            // load) so exact-distance tie-breaks at the nearest-k cutoff match
+            // the frozen Python engine bit-for-bit (issue #1456).
             let quant_order = grids.quant_order;
+            let site_walks = grids.site_walk_by_quant;
             let by_quant = grids
                 .by_quant
                 .into_iter()
                 .map(|(quant_name, grid)| {
                     let node = grid3_to_node(&grid);
-                    let index = SiteIndex::build(&[1, 2], 0, &node);
+                    let site_order = site_walks
+                        .get(&quant_name)
+                        .map(|walk| walk.site_order())
+                        .unwrap_or_default();
+                    let index = SiteIndex::build_with_site_order(&[1, 2], 0, &node, &site_order);
                     (quant_name, (node, index))
                 })
                 .collect();
-            Ok(GemmEngineGrids { by_quant, quant_order })
+            Ok(GemmEngineGrids {
+                by_quant,
+                quant_order,
+            })
         });
         cell.as_ref().map_err(|err| clone_err(err))
     }
@@ -412,12 +511,14 @@ fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
         };
         for (&m, by_n) in grid.iter_mut() {
             for (&n, by_k) in by_n.iter_mut() {
-                for (&k, latency) in by_k.iter_mut() {
+                for (&k, leaf) in by_k.iter_mut() {
                     let sol = gemm_sol_latency_ms_with_flops(
                         spec, quant, tc_flops, m as f64, n as f64, k as f64,
                     );
-                    if sol > *latency {
-                        *latency = sol;
+                    if sol > leaf.latency {
+                        // Python `_correct_sol` raises only the "latency"
+                        // field, preserving power/energy unchanged.
+                        leaf.latency = sol;
                     }
                 }
             }
@@ -474,12 +575,12 @@ fn gemm_engine_config<'a>(sol: &'a dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'a> 
     }
 }
 
-fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {
     let mut node = Node::branch();
     for (&m, by_n) in grid {
         for (&n, by_k) in by_n {
-            for (&k, &lat) in by_k {
-                node.insert(&[m, n, k], lat);
+            for (&k, &leaf) in by_k {
+                node.insert_value(&[m, n, k], leaf);
             }
         }
     }
@@ -490,7 +591,9 @@ fn grid3_to_node(grid: &Grid3<f64>) -> Node {
 /// collected envelope FIRST (legacy contract), resolve the interior on the
 /// engine (RAW 2-axis grid), then either hold FLAT at the boundary
 /// (compute_scale: a quantization DELTA) or re-scale by SOL(q)/SOL(boundary)
-/// (scale_matrix: a real memory kernel). Mirrors Python
+/// (scale_matrix: a real memory kernel; latency AND energy scale by the
+/// ratio, mirroring Python's `PerformanceResult(latency * ratio,
+/// energy=interpolated.energy * ratio)`). Mirrors Python
 /// `_query_compute_scale_table` / `_query_scale_matrix_table`.
 fn query_scale_table(
     by_quant: &BTreeMap<String, Node>,
@@ -500,7 +603,7 @@ fn query_scale_table(
     sol: &dyn Fn(&[f64]) -> f64,
     sol_ratio_beyond_grid: bool,
     data_root: &Path,
-) -> Result<f64, AicError> {
+) -> Result<LeafValue, AicError> {
     let node = by_quant.get(quant_name).ok_or_else(|| {
         AicError::PerfDatabase(format!(
             "perf data missing for quant '{quant_name}' at {}; available: {:?}",
@@ -531,18 +634,24 @@ fn query_scale_table(
     let k_c = k.clamp(k_min, k_max);
 
     let cfg = OpInterpConfig::grid(&["m", "k"], sol);
-    let lat = perf_interp::query(&cfg, node, &[m_c as f64, k_c as f64])?;
+    let value = perf_interp::query_value(&cfg, node, &[m_c as f64, k_c as f64])?;
     if !sol_ratio_beyond_grid || (m_c == m && k_c == k) {
-        return Ok(lat);
+        return Ok(value);
     }
     // Outside the grid, freeze utilization at the clamped boundary:
-    // L(q) = L(boundary) * SOL(q)/SOL(boundary).
+    // L(q) = L(boundary) * SOL(q)/SOL(boundary); energy scales by the same
+    // ratio (average power is unchanged), mirroring Python.
     let boundary_sol = sol(&[m_c as f64, k_c as f64]);
     let query_sol = sol(&[m as f64, k as f64]);
     if boundary_sol > 0.0 && query_sol > 0.0 {
-        Ok(lat * (query_sol / boundary_sol))
+        let ratio = query_sol / boundary_sol;
+        Ok(LeafValue {
+            latency: value.latency * ratio,
+            power: value.power,
+            energy: value.energy * ratio,
+        })
     } else {
-        Ok(lat)
+        Ok(value)
     }
 }
 
@@ -551,10 +660,13 @@ fn query_scale_table(
 /// mirroring Python's `_read_filtered_rows` concatenation + `load_gemm_data`
 /// skip-on-key-conflict. Missing files are skipped (a sibling declared in the
 /// manifest need not exist for every system); an error is returned only when no
-/// source yields rows.
+/// source yields rows. The OPTIONAL `power` column feeds
+/// `LeafValue::with_power` (`energy = power * latency`, W·ms); absent column
+/// -> power 0.0, mirroring Python's `row.get("power", 0.0)`.
 fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
-    let mut by_quant: BTreeMap<String, Grid3<f64>> = BTreeMap::new();
+    let mut by_quant: BTreeMap<String, Grid3<LeafValue>> = BTreeMap::new();
     let mut quant_order: Vec<String> = Vec::new();
+    let mut site_walk_by_quant: BTreeMap<String, SiteWalkOrder> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -568,6 +680,7 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
         let n_col = reader.col("n")?;
         let k_col = reader.col("k")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -584,34 +697,56 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
             if !by_quant.contains_key(&dtype) {
                 quant_order.push(dtype.clone());
             }
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
+            let (m, n, k) = (row.u32(m_col)?, row.u32(n_col)?, row.u32(k_col)?);
             // First-wins parity with Python's `load_gemm_data` try/except
-            // KeyError, extended across shared-layer sources (earlier source wins).
-            by_quant
-                .entry(dtype)
-                .or_default()
-                .entry(row.u32(m_col)?)
-                .or_default()
-                .entry(row.u32(n_col)?)
-                .or_default()
-                .entry(row.u32(k_col)?)
-                .or_insert(row.f64(latency_col)?);
+            // KeyError, extended across shared-layer sources (earlier source
+            // wins). Per-level newness is recorded BEFORE the inserts — it is
+            // the Python dict insertion order the site-transfer tie-break
+            // depends on (issue #1456).
+            let grid = by_quant.entry(dtype.clone()).or_default();
+            let m_new = !grid.contains_key(&m);
+            let by_n = grid.entry(m).or_default();
+            let n_new = !by_n.contains_key(&n);
+            let by_k = by_n.entry(n).or_default();
+            let k_new = !by_k.contains_key(&k);
+            by_k.entry(k)
+                .or_insert(LeafValue::with_power(latency, power));
+            let walk = site_walk_by_quant.entry(dtype).or_default();
+            if m_new {
+                walk.m_order.push(m);
+            }
+            if n_new {
+                walk.n_order.entry(m).or_default().push(n);
+            }
+            if k_new {
+                walk.k_order.entry((m, n)).or_default().push(k);
+            }
         }
     }
     if !any_source || by_quant.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no GEMM rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
-    Ok(GemmGrids { by_quant, quant_order })
+    Ok(GemmGrids {
+        by_quant,
+        quant_order,
+        site_walk_by_quant,
+    })
 }
 
 /// Load a 2-D (compute_scale / scale_matrix) table from an ordered source list.
 /// Same first-wins-across-sources + missing-file-skip semantics as
-/// [`load_gemm_parquet`].
+/// [`load_gemm_parquet`], including the optional `power` column.
 fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
-    let mut raw: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
+    let mut raw: BTreeMap<String, BTreeMap<u32, BTreeMap<u32, LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -624,12 +759,15 @@ fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
         let m_col = reader.col("m")?;
         let k_col = reader.col("k")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity (compute_scale / scale_matrix tables in Python),
             // extended across shared-layer sources.
             raw.entry(row.str_owned(quant_dtype_col)?)
@@ -637,14 +775,17 @@ fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
                 .entry(row.u32(m_col)?)
                 .or_default()
                 .entry(row.u32(k_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || raw.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     let by_quant = raw
@@ -652,8 +793,8 @@ fn load_two_d_parquet(sources: &[PerfSource]) -> Result<TwoDGrids, AicError> {
         .map(|(quant, rows)| {
             let mut node = Node::branch();
             for (m, cols) in rows {
-                for (k, lat) in cols {
-                    node.insert(&[m, k], lat);
+                for (k, leaf) in cols {
+                    node.insert_value(&[m, k], leaf);
                 }
             }
             (quant, node)
@@ -675,6 +816,16 @@ mod tests {
 
     fn query_cache_len(table: &GemmTable) -> usize {
         table.query_cache.get().map_or(0, Cache::len)
+    }
+
+    /// Per-channel bit patterns of a query leaf, for exact-identity asserts
+    /// (`assert_eq!` on `f64` would treat `-0.0 == 0.0` and miss NaN).
+    fn leaf_bits(value: LeafValue) -> [u64; 3] {
+        [
+            value.latency.to_bits(),
+            value.power.to_bits(),
+            value.energy.to_bits(),
+        ]
     }
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
@@ -724,9 +875,11 @@ mod tests {
         let primary_only = load_gemm_parquet(&[PerfSource(primary.clone(), None)]).unwrap();
 
         // Sibling admitted unfiltered: never drops a primary shape, only adds.
-        let merged =
-            load_gemm_parquet(&[PerfSource(primary.clone(), None), PerfSource(sibling.clone(), None)])
-                .unwrap();
+        let merged = load_gemm_parquet(&[
+            PerfSource(primary.clone(), None),
+            PerfSource(sibling.clone(), None),
+        ])
+        .unwrap();
         assert!(
             gemm_shape_count(&merged) >= gemm_shape_count(&primary_only),
             "unfiltered sibling must not drop shapes"
@@ -755,7 +908,10 @@ mod tests {
         // row, so the merged table equals primary-only.
         let blocked = load_gemm_parquet(&[
             PerfSource(primary.clone(), None),
-            PerfSource(sibling.clone(), Some(vec!["__no_such_kernel_source__".to_string()])),
+            PerfSource(
+                sibling.clone(),
+                Some(vec!["__no_such_kernel_source__".to_string()]),
+            ),
         ])
         .unwrap();
         assert_eq!(
@@ -772,7 +928,8 @@ mod tests {
         // (bfloat16 32768x65536x16384).
         let latency = table
             .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert!(
             (latency - 41.59673055013021).abs() < 1e-9,
             "expected recorded latency, got {latency}"
@@ -785,7 +942,8 @@ mod tests {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query(GemmQuantMode::Bfloat16, 1024, 6144, 6144)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert!(latency > 0.0, "interpolated latency must be positive");
         assert!(latency < 100.0, "shape this small shouldn't take 100ms");
     }
@@ -797,8 +955,12 @@ mod tests {
         // hit the second query would still succeed, so verify both paths
         // return identical results (proxy for cache stability).
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let first = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
-        let second = table.query(GemmQuantMode::Bfloat16, 32768, 65536, 16384).unwrap();
+        let first = table
+            .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
+            .unwrap();
+        let second = table
+            .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
+            .unwrap();
         assert_eq!(first, second);
     }
 
@@ -816,8 +978,8 @@ mod tests {
             let uncached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
             let cached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
             assert_eq!(
-                cached.to_bits(),
-                uncached.to_bits(),
+                leaf_bits(cached),
+                leaf_bits(uncached),
                 "cache changed ({m},{n},{k})"
             );
         }
@@ -831,7 +993,7 @@ mod tests {
 
         let fp8 = table.query(GemmQuantMode::Fp8, 256, 32, 32).unwrap();
         let fp8_static = table.query(GemmQuantMode::Fp8Static, 256, 32, 32).unwrap();
-        assert_eq!(fp8.to_bits(), fp8_static.to_bits());
+        assert_eq!(leaf_bits(fp8), leaf_bits(fp8_static));
         assert_eq!(query_cache_len(&table), 1);
 
         for (quant, m, n, k) in [
@@ -887,7 +1049,7 @@ mod tests {
         assert_eq!(keys.len(), 2_049);
 
         for (value, key) in keys.into_iter().enumerate() {
-            cache.insert(key, value as f64);
+            cache.insert(key, LeafValue::latency_only(value as f64));
         }
 
         assert_eq!(cache.len(), per_shard_capacity);
@@ -920,7 +1082,7 @@ mod tests {
                     resolve_gemm_query_cached(&cache, key, || {
                         resolutions.fetch_add(1, Ordering::Relaxed);
                         barrier.wait();
-                        Ok(EXPECTED)
+                        Ok(LeafValue::latency_only(EXPECTED))
                     })
                     .unwrap()
                 })
@@ -933,15 +1095,18 @@ mod tests {
 
         assert!(values
             .windows(2)
-            .all(|pair| pair[0].to_bits() == pair[1].to_bits()));
+            .all(|pair| leaf_bits(pair[0]) == leaf_bits(pair[1])));
         assert_eq!(resolutions.load(Ordering::Relaxed), THREADS);
         assert_eq!(cache.len(), 1);
 
-        let cached = resolve_gemm_query_cached(&cache, key, || -> Result<f64, AicError> {
+        let cached = resolve_gemm_query_cached(&cache, key, || -> Result<LeafValue, AicError> {
             panic!("cache hit unexpectedly invoked the resolver")
         })
         .unwrap();
-        assert_eq!(cached.to_bits(), EXPECTED.to_bits());
+        assert_eq!(
+            leaf_bits(cached),
+            leaf_bits(LeafValue::latency_only(EXPECTED))
+        );
     }
 
     /// Values generated from the Python v2 engine on the same table
@@ -961,7 +1126,7 @@ mod tests {
             (256, 128, 96, 0.00187964537818),
         ];
         for &(m, n, k, expected) in cases {
-            let got = table.query(q, m, n, k).unwrap();
+            let got = table.query(q, m, n, k).unwrap().latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "({m},{n},{k}): rust {got} vs python {expected}"
@@ -976,7 +1141,10 @@ mod tests {
         // is genuinely absent for this slice.
         match table.query(GemmQuantMode::Int4Wo, 1024, 4096, 4096) {
             Err(AicError::PerfDatabase(msg)) => {
-                assert!(msg.contains("int4_wo"), "expected quant name in error: {msg}");
+                assert!(
+                    msg.contains("int4_wo"),
+                    "expected quant name in error: {msg}"
+                );
             }
             other => panic!("expected PerfDatabase error, got {other:?}"),
         }
@@ -1073,5 +1241,45 @@ mod tests {
         // b300 breaks the fixed 4x ratio: the YAML entry must win.
         spec.gpu.fp4_tc_flops = Some(1.4e16);
         assert_eq!(quant_tc_flops(&spec, Q::Nvfp4.mapping()).unwrap(), 1.4e16);
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture (the shipped
+    /// tables have no `power` column). Python twin (pandas fixture with the
+    /// SAME rows + the `testsys.yaml` spec of `energy_test_fixtures`):
+    ///
+    /// ```text
+    /// db.query_gemm(192, 1024, 1024, GEMMQuantMode.bfloat16, SILICON)
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    ///
+    /// m=192 lerps the (n=1024, k=1024) site curve between (m=128, lat 1.0,
+    /// power 100) and (m=256, lat 3.0, power 200): POWER blends to 150 and
+    /// energy re-derives as 150 * 2.0 (a naive energy-lerp would give 350).
+    #[test]
+    fn gemm_energy_blend_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("m", vec![128, 256]),
+                Col::I64("n", vec![1024, 1024]),
+                Col::I64("k", vec![1024, 1024]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let v = table
+            .query(GemmQuantMode::Bfloat16, 192, 1024, 1024)
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
+        assert!((v.power - 150.0).abs() < 1e-9 * 150.0, "power {}", v.power);
     }
 }

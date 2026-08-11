@@ -386,6 +386,7 @@ class TestContextDSAModule:
         assert float(result) > 0
 
     def test_sol_full_returns_three_tuple(self, comprehensive_perf_db):
+        """Per-call SOL_FULL diagnostic returns the raw (sol_time, sol_math, sol_mem) tuple."""
         result = comprehensive_perf_db.query_context_dsa_module(
             b=2,
             s=256,
@@ -741,6 +742,7 @@ class TestGenerationDSAModule:
         assert float(result) > 0
 
     def test_sol_full_returns_three_tuple(self, comprehensive_perf_db):
+        """Per-call SOL_FULL diagnostic returns the raw (sol_time, sol_math, sol_mem) tuple."""
         result = comprehensive_perf_db.query_generation_dsa_module(
             b=4,
             s=1024,

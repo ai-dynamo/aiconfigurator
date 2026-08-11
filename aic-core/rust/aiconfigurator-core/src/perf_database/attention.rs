@@ -26,9 +26,11 @@
 //! truncated large-seq x large-batch staircase corner — the engine holds the
 //! boundary util and lets the analytic SOL carry the growth.
 //!
-//! The query methods on this table return raw interpolated latency in ms.
-//! The operator layer wraps these with prefix correction, SOL/EMPIRICAL
-//! fallbacks, and extra fused-op accounting (qk_norm, rope, kv writes).
+//! The query methods on this table return the raw interpolated measured
+//! value (`{latency ms, power W, energy W·ms}`, mirroring the Python loader
+//! leaves). The operator layer wraps these with prefix correction,
+//! SOL/EMPIRICAL fallbacks, and extra fused-op accounting (qk_norm, rope,
+//! kv writes).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ use std::sync::OnceLock;
 
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig};
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
@@ -110,15 +112,21 @@ impl AttentionTable {
         system_spec: SystemSpec,
         perf_db_sources: &PerfDbSources,
     ) -> Self {
-        let context_sources =
-            resolve_op_sources(perf_db_sources, "context_attention_perf.parquet", &data_root);
+        let context_sources = resolve_op_sources(
+            perf_db_sources,
+            "context_attention_perf.parquet",
+            &data_root,
+        );
         let generation_sources = resolve_op_sources(
             perf_db_sources,
             "generation_attention_perf.parquet",
             &data_root,
         );
-        let encoder_sources =
-            resolve_op_sources(perf_db_sources, "encoder_attention_perf.parquet", &data_root);
+        let encoder_sources = resolve_op_sources(
+            perf_db_sources,
+            "encoder_attention_perf.parquet",
+            &data_root,
+        );
         Self {
             data_root,
             system_spec,
@@ -131,11 +139,12 @@ impl AttentionTable {
         }
     }
 
-    /// Raw interpolated context attention latency in ms.
+    /// Raw interpolated context attention value (latency ms + power/energy).
     ///
     /// `full_seq_tokens = isl + prefix` from the caller's perspective. The
     /// operator layer applies the prefix correction multiplier
-    /// `(full_s² - prefix²) / full_s²`.
+    /// `(full_s² - prefix²) / full_s²` to latency AND energy (mirroring
+    /// Python's `get_silicon`).
     pub fn query_context(
         &self,
         b: u32,
@@ -146,7 +155,7 @@ impl AttentionTable {
         window_size: u32,
         kv_quant: KvCacheQuantMode,
         fmha_quant: FmhaQuantMode,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -159,7 +168,10 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| missing_key(&self.data_root, &key))?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing_key(&self.data_root, &key))?;
         // Python `perf_interp.context_attention_config`: Grid resolver,
         // sqrt-space blend on the seq axis only (~seq^2 curvature; heads and
         // batch are ~linear). Past the staircase frontier (large seq x large
@@ -183,10 +195,14 @@ impl AttentionTable {
             )
         };
         let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
-        perf_interp::query(&cfg, node, &[n as f64, full_seq_tokens as f64, b as f64])
+        perf_interp::query_value(&cfg, node, &[n as f64, full_seq_tokens as f64, b as f64])
     }
 
-    /// Raw interpolated generation attention latency in ms.
+    /// Raw interpolated generation attention value (latency ms + energy,
+    /// each averaged over the 5 seq samples — Python sums
+    /// `get_value(r, "latency")` / `get_value(r, "energy")` and divides by
+    /// `sample_cnt`; the per-sample power is dropped at this boundary just
+    /// like Python's `_interp_pr(latency, energy=energy)`).
     ///
     /// `kv_seq_tokens` is the total decode context length (Python passes
     /// `s` from the caller; the CSV stores `isl + step`).
@@ -199,7 +215,7 @@ impl AttentionTable {
         head_size: u32,
         window_size: u32,
         kv_quant: KvCacheQuantMode,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -243,15 +259,24 @@ impl AttentionTable {
         let s_max = ((s as f64 * 1.1) as u32).max(s_min);
         const SAMPLE_CNT: u32 = 5;
         let mut latency_sum = 0.0_f64;
+        let mut energy_sum = 0.0_f64;
         for i in 0..SAMPLE_CNT {
             // Match Python integer arithmetic: multiply before integer divide.
-            let s_i = s_min + ((u64::from(s_max - s_min) * u64::from(i)) / u64::from(SAMPLE_CNT - 1)) as u32;
-            latency_sum += perf_interp::query(&cfg, node, &[n as f64, b as f64, s_i as f64])?;
+            let s_i = s_min
+                + ((u64::from(s_max - s_min) * u64::from(i)) / u64::from(SAMPLE_CNT - 1)) as u32;
+            let sample = perf_interp::query_value(&cfg, node, &[n as f64, b as f64, s_i as f64])?;
+            latency_sum += sample.latency;
+            energy_sum += sample.energy;
         }
-        Ok(latency_sum / SAMPLE_CNT as f64)
+        Ok(LeafValue {
+            latency: latency_sum / SAMPLE_CNT as f64,
+            power: 0.0, // dropped at this boundary, like Python `_interp_pr`
+            energy: energy_sum / SAMPLE_CNT as f64,
+        })
     }
 
-    /// Raw interpolated encoder (non-causal) attention latency in ms.
+    /// Raw interpolated encoder (non-causal) attention value
+    /// (latency ms + power/energy).
     pub fn query_encoder(
         &self,
         b: u32,
@@ -259,7 +284,7 @@ impl AttentionTable {
         n: u32,
         head_size: u32,
         fmha_quant: FmhaQuantMode,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -282,7 +307,7 @@ impl AttentionTable {
             encoder_attention_sol_ms(spec, head_size, c[0], c[1], c[2], attn_flops)
         };
         let cfg = OpInterpConfig::grid_sqrt_axis(&["num_heads", "seq_len", "batch"], 1, &sol);
-        perf_interp::query(&cfg, node, &[n as f64, s as f64, b as f64])
+        perf_interp::query_value(&cfg, node, &[n as f64, s as f64, b as f64])
     }
 
     /// Collected `(num_heads, full_seq, batch) -> latency` points of one
@@ -308,7 +333,10 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids.by_keys.get(&key).ok_or_else(|| missing_key(&self.data_root, &key))?;
+        let node = grids
+            .by_keys
+            .get(&key)
+            .ok_or_else(|| missing_key(&self.data_root, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
             return Err(missing_key(&self.data_root, &key));
@@ -395,7 +423,10 @@ impl AttentionTable {
         let kv = kv_quant.name();
         let mut sizes: Vec<u32> = Vec::new();
         for key in grids.by_keys.keys() {
-            if key.kv_quant == kv && key.n_kv_lookup == n_kv_lookup && !sizes.contains(&key.head_size) {
+            if key.kv_quant == kv
+                && key.n_kv_lookup == n_kv_lookup
+                && !sizes.contains(&key.head_size)
+            {
                 sizes.push(key.head_size);
             }
         }
@@ -438,7 +469,10 @@ impl AttentionTable {
             // No load-time SOL clamp: Python's `_correct_data` historically
             // skipped context attention, and v2 keeps that.
             Ok(ContextGrids {
-                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                by_keys: raw
+                    .into_iter()
+                    .map(|(k, g)| (k, grid3_to_node(&g)))
+                    .collect(),
             })
         });
         cell.as_ref().map_err(clone_err)
@@ -454,7 +488,10 @@ impl AttentionTable {
             // (clamped) data.
             clamp_generation_attention_grids_to_sol(&self.system_spec, &mut raw);
             Ok(GenerationGrids {
-                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                by_keys: raw
+                    .into_iter()
+                    .map(|(k, g)| (k, grid3_to_node(&g)))
+                    .collect(),
             })
         });
         cell.as_ref().map_err(clone_err)
@@ -464,7 +501,10 @@ impl AttentionTable {
         let cell = self.encoder.get_or_init(|| {
             let raw = load_encoder_parquet(&self.encoder_sources)?;
             Ok(EncoderGrids {
-                by_keys: raw.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                by_keys: raw
+                    .into_iter()
+                    .map(|(k, g)| (k, grid3_to_node(&g)))
+                    .collect(),
             })
         });
         cell.as_ref().map_err(clone_err)
@@ -480,12 +520,12 @@ fn normalize_kv(n: u32, n_kv: u32) -> u32 {
     }
 }
 
-fn grid3_to_node(grid: &Grid3<f64>) -> Node {
+fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {
     let mut node = Node::branch();
     for (&x, by_y) in grid {
         for (&y, by_z) in by_y {
-            for (&z, &lat) in by_z {
-                node.insert(&[x, y, z], lat);
+            for (&z, &leaf) in by_z {
+                node.insert_value(&[x, y, z], leaf);
             }
         }
     }
@@ -498,8 +538,8 @@ fn grid3_to_node(grid: &Grid3<f64>) -> Node {
 /// source yields rows.
 fn load_context_parquet(
     sources: &[PerfSource],
-) -> Result<BTreeMap<ContextKey, Grid3<f64>>, AicError> {
-    let mut by_keys: BTreeMap<ContextKey, Grid3<f64>> = BTreeMap::new();
+) -> Result<BTreeMap<ContextKey, Grid3<LeafValue>>, AicError> {
+    let mut by_keys: BTreeMap<ContextKey, Grid3<LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -516,6 +556,7 @@ fn load_context_parquet(
         let attn_dtype_col = reader.col("attn_dtype")?;
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let window_size_col = reader.col_optional("window_size");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
@@ -532,6 +573,8 @@ fn load_context_parquet(
                 head_size: row.u32(head_dim_col)?,
                 window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
             };
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_context_attention_data`,
             // extended across shared-layer sources (earlier source wins).
             by_keys
@@ -542,14 +585,17 @@ fn load_context_parquet(
                 .entry(row.u32(isl_col)?)
                 .or_default()
                 .entry(row.u32(batch_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no context-attention rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(by_keys)
@@ -560,8 +606,8 @@ fn load_context_parquet(
 /// [`load_context_parquet`].
 fn load_generation_parquet(
     sources: &[PerfSource],
-) -> Result<BTreeMap<GenerationKey, Grid3<f64>>, AicError> {
-    let mut by_keys: BTreeMap<GenerationKey, Grid3<f64>> = BTreeMap::new();
+) -> Result<BTreeMap<GenerationKey, Grid3<LeafValue>>, AicError> {
+    let mut by_keys: BTreeMap<GenerationKey, Grid3<LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -578,6 +624,7 @@ fn load_generation_parquet(
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let window_size_col = reader.col_optional("window_size");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
@@ -594,6 +641,8 @@ fn load_generation_parquet(
                 window_size: row.u32_optional(window_size_col)?.unwrap_or(0),
             };
             let sequence_tokens = row.u32(isl_col)? + row.u32(step_col)?;
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_generation_attention_data`,
             // extended across shared-layer sources.
             // Grid axis order is `[n][b][s]` to match Python's `interp_3d(n, b, s)`
@@ -607,14 +656,17 @@ fn load_generation_parquet(
                 .entry(row.u32(batch_size_col)?)
                 .or_default()
                 .entry(sequence_tokens)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no generation-attention rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(by_keys)
@@ -641,7 +693,11 @@ pub(crate) fn context_attention_sol_ms(
 ) -> f64 {
     let h = head_size as f64;
     let w = window_size as f64;
-    let n_kv = if n_kv_lookup == 0 { n } else { n_kv_lookup as f64 };
+    let n_kv = if n_kv_lookup == 0 {
+        n
+    } else {
+        n_kv_lookup as f64
+    };
     let ops = if window_size > 0 && s > w {
         2.0 * b * s * w * n * h * 2.0
     } else {
@@ -762,10 +818,7 @@ pub(crate) fn generation_attention_sol_ms(
 /// pipeline. That is how a100's shipped fp8-kv generation data was collected
 /// in the first place, so gating here keeps that silicon usable under the
 /// strict per-dtype resolution.
-pub(crate) fn generation_attn_mode(
-    spec: &SystemSpec,
-    kv_quant: KvCacheQuantMode,
-) -> FmhaQuantMode {
+pub(crate) fn generation_attn_mode(spec: &SystemSpec, kv_quant: KvCacheQuantMode) -> FmhaQuantMode {
     let has_fp8_mma = spec.gpu.sm_version.is_some_and(|sm| sm >= 89);
     if kv_quant == KvCacheQuantMode::Fp8 && has_fp8_mma {
         FmhaQuantMode::Fp8
@@ -785,7 +838,7 @@ pub(crate) fn generation_attn_flops(
 /// Mirrors Python `GenerationAttention._correct_sol` (which v2 keeps).
 fn clamp_generation_attention_grids_to_sol(
     spec: &SystemSpec,
-    grids: &mut BTreeMap<GenerationKey, Grid3<f64>>,
+    grids: &mut BTreeMap<GenerationKey, Grid3<LeafValue>>,
 ) {
     for (key, grid) in grids.iter_mut() {
         let Some(kv_quant) = kv_cache_quant_by_name(&key.kv_quant) else {
@@ -801,7 +854,7 @@ fn clamp_generation_attention_grids_to_sol(
         // Grid order is `[n][b][s]`: outer=n, middle=b, inner=s.
         for (&n, by_b) in grid.iter_mut() {
             for (&b, by_s) in by_b.iter_mut() {
-                for (&s, latency) in by_s.iter_mut() {
+                for (&s, leaf) in by_s.iter_mut() {
                     let sol = generation_attention_sol_ms(
                         spec,
                         key.n_kv_lookup,
@@ -813,8 +866,10 @@ fn clamp_generation_attention_grids_to_sol(
                         s as f64,
                         attn_flops,
                     );
-                    if sol > *latency {
-                        *latency = sol;
+                    if sol > leaf.latency {
+                        // Python `_correct_sol` raises only the "latency"
+                        // field, preserving power/energy unchanged.
+                        leaf.latency = sol;
                     }
                 }
             }
@@ -837,8 +892,8 @@ fn kv_cache_quant_by_name(name: &str) -> Option<KvCacheQuantMode> {
 /// [`load_context_parquet`].
 fn load_encoder_parquet(
     sources: &[PerfSource],
-) -> Result<BTreeMap<EncoderKey, Grid3<f64>>, AicError> {
-    let mut by_keys: BTreeMap<EncoderKey, Grid3<f64>> = BTreeMap::new();
+) -> Result<BTreeMap<EncoderKey, Grid3<LeafValue>>, AicError> {
+    let mut by_keys: BTreeMap<EncoderKey, Grid3<LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -853,6 +908,7 @@ fn load_encoder_parquet(
         let head_dim_col = reader.col("head_dim")?;
         let attn_dtype_col = reader.col("attn_dtype")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -863,6 +919,8 @@ fn load_encoder_parquet(
                 fmha_quant: row.str_owned(attn_dtype_col)?,
                 head_size: row.u32(head_dim_col)?,
             };
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_encoder_attention_data`,
             // extended across shared-layer sources.
             by_keys
@@ -873,14 +931,17 @@ fn load_encoder_parquet(
                 .entry(row.u32(isl_col)?)
                 .or_default()
                 .entry(row.u32(batch_size_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no encoder-attention rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(by_keys)
@@ -955,7 +1016,8 @@ mod tests {
         let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
         let latency = table
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
-            .expect("ragged-corner query must succeed");
+            .expect("ragged-corner query must succeed")
+            .latency;
         let expected = 0.4923998240128304;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
@@ -980,7 +1042,8 @@ mod tests {
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
             )
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert!(
             (latency - 19.820667266845703).abs() < 1e-9,
             "expected recorded latency, got {latency}"
@@ -1000,7 +1063,8 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         let expected = 0.008451361751014535;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
@@ -1036,7 +1100,8 @@ mod tests {
                     KvCacheQuantMode::Fp8,
                     FmhaQuantMode::Bfloat16,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "(b={b},s={s}): rust {got} vs python {expected}"
@@ -1062,7 +1127,8 @@ mod tests {
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
             )
-            .expect("MHA lookup must normalize and find the row");
+            .expect("MHA lookup must normalize and find the row")
+            .latency;
         assert!(
             (latency - 9.983466466267904).abs() < 1e-9,
             "expected recorded MHA latency, got {latency}"
@@ -1107,7 +1173,8 @@ mod tests {
         for &(b, s, expected) in cases {
             let got = table
                 .query_encoder(b, s, 16, 64, FmhaQuantMode::Bfloat16)
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "(b={b},s={s}): rust {got} vs python {expected}"
@@ -1154,5 +1221,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first, second);
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_context_attention(2, 1536, 0, 16, 16, bfloat16, bfloat16,
+    ///                            SILICON, window_size=0, head_size=128)
+    /// # -> latency=1.8660254037844386, energy=279.9038105676658
+    /// ```
+    ///
+    /// s=1536 sqrt-blends the seq axis between (isl 1024, lat 1.0, power
+    /// 100) and (isl 2048, lat 3.0, power 200): latency = ((1+sqrt 3)/2)^2,
+    /// POWER lerps linearly to 150, energy = 150 * latency.
+    #[test]
+    fn context_attention_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("context_attention_perf.parquet"),
+            &[
+                Col::Str("attn_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::Str("kv_cache_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("batch_size", vec![2, 2]),
+                Col::I64("isl", vec![1024, 2048]),
+                Col::I64("num_heads", vec![16, 16]),
+                Col::I64("num_key_value_heads", vec![16, 16]),
+                Col::I64("head_dim", vec![128, 128]),
+                Col::I64("step", vec![0, 0]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = AttentionTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let v = table
+            .query_context(
+                2,
+                1536,
+                16,
+                16,
+                128,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .unwrap();
+        assert!(
+            ((v.latency - 1.8660254037844386) / 1.8660254037844386).abs() < 1e-9,
+            "latency {}",
+            v.latency
+        );
+        assert!(
+            ((v.energy - 279.9038105676658) / 279.9038105676658).abs() < 1e-9,
+            "energy {}",
+            v.energy
+        );
     }
 }

@@ -693,7 +693,11 @@ mod tests {
 
     #[test]
     fn kvcache_compute_is_zero() {
-        for mode in [KvCacheQuantMode::Bfloat16, KvCacheQuantMode::Int8, KvCacheQuantMode::Fp8] {
+        for mode in [
+            KvCacheQuantMode::Bfloat16,
+            KvCacheQuantMode::Int8,
+            KvCacheQuantMode::Fp8,
+        ] {
             assert_eq!(mode.mapping().compute, 0.0);
         }
     }
@@ -714,9 +718,18 @@ mod tests {
             PerfDataFilename::ContextAttention.as_str(),
             "context_attention_perf.parquet"
         );
-        assert_eq!(PerfDataFilename::CustomAllreduce.as_str(), "custom_allreduce_perf.parquet");
-        assert_eq!(PerfDataFilename::WideepDeepepLl.as_str(), "wideep_deepep_ll_perf.parquet");
-        assert_eq!(PerfDataFilename::TrtllmAlltoall.as_str(), "trtllm_alltoall_perf.parquet");
+        assert_eq!(
+            PerfDataFilename::CustomAllreduce.as_str(),
+            "custom_allreduce_perf.parquet"
+        );
+        assert_eq!(
+            PerfDataFilename::WideepDeepepLl.as_str(),
+            "wideep_deepep_ll_perf.parquet"
+        );
+        assert_eq!(
+            PerfDataFilename::TrtllmAlltoall.as_str(),
+            "trtllm_alltoall_perf.parquet"
+        );
         assert_eq!(
             PerfDataFilename::Dsv4HcaGenerationModule.as_str(),
             "dsv4_hca_generation_module_perf.parquet"

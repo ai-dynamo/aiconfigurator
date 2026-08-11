@@ -256,12 +256,8 @@ impl MoEDispatchOp {
                     BackendKind::Vllm => {
                         let mut total = 0.0;
                         if attn_tp > 1 {
-                            let ar = CustomAllReduceOp::new(
-                                &self.name,
-                                1.0,
-                                self.hidden_size,
-                                num_gpus,
-                            );
+                            let ar =
+                                CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
                             total += ar.query(db, num_tokens)?.latency_ms;
                         }
                         if attn_dp > 1 {
@@ -300,10 +296,11 @@ impl MoEDispatchOp {
                                     num_tokens,
                                 )
                             };
-                            let n1 = NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus1, op1);
-                            let n2 = NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus2, op2);
-                            n1.query(db, tokens1)?.latency_ms
-                                + n2.query(db, tokens2)?.latency_ms
+                            let n1 =
+                                NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus1, op1);
+                            let n2 =
+                                NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus2, op2);
+                            n1.query(db, tokens1)?.latency_ms + n2.query(db, tokens2)?.latency_ms
                         } else if self.attn_cp_size > 1 {
                             // Context parallelism (Python moe.py:1279-1290 pre,
                             // :1318-1330 combine); volume = num_tokens * hidden:
@@ -319,8 +316,13 @@ impl MoEDispatchOp {
                             //    custom_allreduce(half, num_gpus, volume).
                             if self.is_context {
                                 let op_name = if pre { "all_gather" } else { "reduce_scatter" };
-                                let nccl =
-                                    NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
+                                let nccl = NcclOp::new(
+                                    &self.name,
+                                    1.0,
+                                    self.hidden_size as f64,
+                                    num_gpus,
+                                    op_name,
+                                );
                                 nccl.query(db, num_tokens)?.latency_ms
                             } else if pre {
                                 0.0
@@ -334,12 +336,8 @@ impl MoEDispatchOp {
                                 ar.query(db, num_tokens)?.latency_ms
                             }
                         } else if attn_tp > 1 {
-                            let ar = CustomAllReduceOp::new(
-                                &self.name,
-                                1.0,
-                                self.hidden_size,
-                                num_gpus,
-                            );
+                            let ar =
+                                CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
                             ar.query(db, num_tokens)?.latency_ms
                         } else if attn_dp > 1 {
                             let op_name = if pre { "all_gather" } else { "reduce_scatter" };
@@ -360,12 +358,7 @@ impl MoEDispatchOp {
                         // CustomAllReduce. Safety fallback: replicate the pre-fix
                         // single-term behavior (custom_allreduce on attn_tp) so
                         // downstream callers don't panic if a model mis-routes.
-                        let ar = CustomAllReduceOp::new(
-                            &self.name,
-                            1.0,
-                            self.hidden_size,
-                            attn_tp,
-                        );
+                        let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, attn_tp);
                         ar.query(db, num_tokens)?.latency_ms
                     }
                 };
@@ -384,11 +377,18 @@ impl MoEDispatchOp {
                 // yet")`), and HYBRID goes STRAIGHT to the silicon interp with
                 // no fallback (the method never routes through
                 // `_query_silicon_or_hybrid`) — so a silicon miss under HYBRID
-                // must propagate unchanged, not convert into an estimate.
+                // must propagate unchanged, not convert into an estimate. The
+                // SOL branch raises the same way (`get_sol` is
+                // `NotImplementedError("... sol is not implemented yet")`).
                 if db.database_mode == DatabaseMode::Empirical {
                     return Err(AicError::EmpiricalNotImplemented(
                         "WideEP deepep normal operation's empirical is not implemented yet"
                             .to_string(),
+                    ));
+                }
+                if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
+                    return Err(AicError::EmpiricalNotImplemented(
+                        "WideEP deepep normal operation's sol is not implemented yet".to_string(),
                     ));
                 }
                 let point = db.wideep.query_deepep_normal(
@@ -421,11 +421,16 @@ impl MoEDispatchOp {
                 // Python DeepEP branch: `num_tokens = num_tokens //
                 // self._scale_num_tokens` before the table lookup.
                 let num_tokens = num_tokens / self.scale_num_tokens.max(1);
-                // Same no-empirical rule as DeepEpNormal (Python
+                // Same no-empirical / no-sol rule as DeepEpNormal (Python
                 // `_query_wideep_deepep_ll_table`).
                 if db.database_mode == DatabaseMode::Empirical {
                     return Err(AicError::EmpiricalNotImplemented(
                         "WideEP deepep ll operation's empirical is not implemented yet".to_string(),
+                    ));
+                }
+                if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
+                    return Err(AicError::EmpiricalNotImplemented(
+                        "WideEP deepep ll operation's sol is not implemented yet".to_string(),
                     ));
                 }
                 let point = db.wideep.query_deepep_ll(
@@ -494,7 +499,11 @@ impl MoEDispatchOp {
                         _ => (1.0, 0.0),
                     };
                     if enable_alltoall {
-                        let op_name = if pre { "alltoall_dispatch" } else { "alltoall_combine" };
+                        let op_name = if pre {
+                            "alltoall_dispatch"
+                        } else {
+                            "alltoall_combine"
+                        };
                         // Mode-dispatched (EMPIRICAL/HYBRID estimate on a
                         // typed silicon miss); the silicon arm is the DB-level
                         // `query_trtllm_alltoall`.
@@ -524,7 +533,8 @@ impl MoEDispatchOp {
                                 num_gpus,
                                 "all_gather",
                             );
-                            nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
+                            nccl.query(db, num_tokens * self.attention_dp_size)?
+                                .latency_ms
                         } else {
                             let nccl = NcclOp::new(
                                 &self.name,
@@ -533,15 +543,16 @@ impl MoEDispatchOp {
                                 num_gpus,
                                 "reduce_scatter",
                             );
-                            nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
+                            nccl.query(db, num_tokens * self.attention_dp_size)?
+                                .latency_ms
                         }
                     } else if attention_tp > 1 {
-                        let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
+                        let ar =
+                            CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
                         ar.query(db, num_tokens)?.latency_ms
                     } else {
                         0.0
                     }
-
                 } else if attention_tp > 1 {
                     let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
                     ar.query(db, num_tokens)?.latency_ms
@@ -549,7 +560,8 @@ impl MoEDispatchOp {
                     let op_name = if pre { "all_gather" } else { "reduce_scatter" };
                     let nccl =
                         NcclOp::new(&self.name, 1.0, self.hidden_size as f64, num_gpus, op_name);
-                    nccl.query(db, num_tokens * self.attention_dp_size)?.latency_ms
+                    nccl.query(db, num_tokens * self.attention_dp_size)?
+                        .latency_ms
                 } else {
                     0.0
                 };
@@ -655,7 +667,11 @@ fn alltoall_sol_ms(
     let data_bytes = if op_name == "alltoall_prepare" {
         num_tokens * topk as f64 * 4.0 // token routing indices, ~4 bytes each
     } else if op_name.contains("combine") {
-        let bytes_per_element = if op_name.contains("low_precision") { 0.5 } else { 2.0 };
+        let bytes_per_element = if op_name.contains("low_precision") {
+            0.5
+        } else {
+            2.0
+        };
         num_tokens * remote_ranks * hidden_size as f64 * bytes_per_element
     } else {
         // dispatch: per-rank deduplication, use quant_mode precision
@@ -664,13 +680,14 @@ fn alltoall_sol_ms(
     data_bytes / bw * 1000.0
 }
 
-/// Verbatim port of `TrtLLMWideEPMoEDispatch._query_alltoall_table` (minus
-/// the SOL diagnostic modes, which never reach the compiled engine):
+/// Verbatim port of `TrtLLMWideEPMoEDispatch._query_alltoall_table`:
 /// normalize the table quant, default `node_num` from `moe_ep_size`, select
-/// the kernel, early-return 0 for `NotEnabled`, then dispatch on the
-/// database mode — EMPIRICAL always estimates `SOL(query)/util` from the
-/// own-slice token grid; HYBRID converts a typed silicon miss into the
-/// estimate; SILICON queries the table.
+/// the kernel, early-return 0 for `NotEnabled` (tagged "sol" under SOL
+/// mode), then dispatch on the database mode — SOL (and the retired
+/// SOL_FULL alias) returns the pure comm bound with `Source::Sol`;
+/// EMPIRICAL always estimates `SOL(query)/util` from the own-slice token
+/// grid; HYBRID converts a typed silicon miss into the estimate; SILICON
+/// queries the table.
 ///
 /// KNOWN PYTHON DIVERGENCE: Python's HYBRID fallback closure calls
 /// `get_empirical_from_sol` without its `kernel_source` argument and raises
@@ -714,9 +731,14 @@ fn query_alltoall_table(
 
     let kernel_source = select_alltoall_kernel(&db.system_spec, moe_ep_size, topk, moe_backend);
     if kernel_source == "NotEnabled" {
-        // Python returns PerformanceResult(0.0, source="empirical") for every
-        // non-SOL mode.
-        return Ok(PerformanceResult::new(0.0, Source::Empirical));
+        // Python: `source = "sol" if database_mode == SOL else "empirical"`
+        // (SOL_FULL's raw tuple collapses to the same 0.0 "sol" result).
+        let source = if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
+            Source::Sol
+        } else {
+            Source::Empirical
+        };
+        return Ok(PerformanceResult::new(0.0, source));
     }
 
     // The DB-level query redoes kernel selection / normalization / the
@@ -751,6 +773,23 @@ fn query_alltoall_table(
         )
     };
     match db.database_mode {
+        // Python `_query_alltoall_table`: `get_sol(num_tokens, hidden_size,
+        // topk, num_experts, moe_ep_size, quant_mode, node_num)[0]` — the RAW
+        // quant (not the table-normalized one) and the defaulted node_num.
+        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
+            alltoall_sol_ms(
+                &db.system_spec,
+                op_name,
+                quant,
+                node_num,
+                num_tokens as f64,
+                hidden_size,
+                topk,
+                num_experts,
+                moe_ep_size,
+            ),
+            Source::Sol,
+        )),
         DatabaseMode::Empirical => Ok(PerformanceResult::new(empirical()?, Source::Empirical)),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)),
@@ -783,7 +822,17 @@ fn alltoall_empirical(
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let sol = |c: &[f64]| {
-        alltoall_sol_ms(spec, op_name, quant, node_num, c[0], hidden_size, topk, num_experts, moe_ep_size)
+        alltoall_sol_ms(
+            spec,
+            op_name,
+            quant,
+            node_num,
+            c[0],
+            hidden_size,
+            topk,
+            num_experts,
+            moe_ep_size,
+        )
     };
     let sol_time = sol(&[num_tokens as f64]);
 
@@ -928,7 +977,9 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let f64_cols: [Vec<f64>; 4] = [
@@ -939,7 +990,9 @@ mod tests {
         ];
         for values in &f64_cols {
             let mut col = rg.next_column().expect("next col").expect("f64 col");
-            col.typed::<DoubleType>().write_batch(values, None, None).expect("write f64");
+            col.typed::<DoubleType>()
+                .write_batch(values, None, None)
+                .expect("write f64");
             col.close().expect("close col");
         }
         rg.close().expect("close row group");
@@ -980,7 +1033,9 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let f64_cols: [Vec<f64>; 2] = [
@@ -989,7 +1044,9 @@ mod tests {
         ];
         for values in &f64_cols {
             let mut col = rg.next_column().expect("next col").expect("f64 col");
-            col.typed::<DoubleType>().write_batch(values, None, None).expect("write f64");
+            col.typed::<DoubleType>()
+                .write_batch(values, None, None)
+                .expect("write f64");
             col.close().expect("close col");
         }
         rg.close().expect("close row group");
@@ -1044,7 +1101,8 @@ mod tests {
             &[(2, 16, 64, 100.0), (8, 16, 64, 900.0)],
         );
         let mut db = b200_sglang_db(); // b200_sxm: num_gpus_per_node = 8
-        db.tables_mut().wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+        db.tables_mut().wideep =
+            crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
 
         // num_gpus = moe_tp * moe_ep = 16 -> node_num = 16 / 8 = 2.
         let got = deepep_op(16, true, DispatchFlavor::DeepEpNormal)
@@ -1059,7 +1117,9 @@ mod tests {
         // num_gpus = 4 on an 8-GPU node: Python's fractional node_num (0.5)
         // never hits the int-keyed table; the Rust mirror errors instead of
         // floor-dividing into the node_num=1 slice.
-        assert!(deepep_op(4, true, DispatchFlavor::DeepEpNormal).query(&db, 64).is_err());
+        assert!(deepep_op(4, true, DispatchFlavor::DeepEpNormal)
+            .query(&db, 64)
+            .is_err());
     }
 
     /// Issue #1333 item 4.7-2: Python's SGLang DeepEP branch
@@ -1095,7 +1155,8 @@ mod tests {
             &[(1, 64, 30.0, 20.0)], // full sum = 50us
         );
         let mut db = b200_sglang_db();
-        db.tables_mut().wideep = crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
+        db.tables_mut().wideep =
+            crate::perf_database::wideep::WideEpTable::new(tmp.path().to_path_buf());
 
         // Context (DeepEP normal): pre == combine == full point sum.
         let pre = deepep_op(8, true, DispatchFlavor::DeepEpNormal)
@@ -1104,7 +1165,11 @@ mod tests {
         let combine = deepep_op(8, false, DispatchFlavor::DeepEpNormal)
             .query(&db, 64)
             .expect("normal combine query");
-        assert!((pre.latency_ms - 0.103).abs() < 1e-12, "pre got {}", pre.latency_ms);
+        assert!(
+            (pre.latency_ms - 0.103).abs() < 1e-12,
+            "pre got {}",
+            pre.latency_ms
+        );
         assert!(
             (combine.latency_ms - 0.103).abs() < 1e-12,
             "combine got {}",
@@ -1123,7 +1188,11 @@ mod tests {
         let combine = deepep_op(8, false, DispatchFlavor::DeepEpLowLatency)
             .query(&db, 64)
             .expect("ll combine query");
-        assert!((pre.latency_ms - 0.05).abs() < 1e-12, "ll pre got {}", pre.latency_ms);
+        assert!(
+            (pre.latency_ms - 0.05).abs() < 1e-12,
+            "ll pre got {}",
+            pre.latency_ms
+        );
         assert!(
             (combine.latency_ms - 0.05).abs() < 1e-12,
             "ll combine got {}",
@@ -1164,7 +1233,18 @@ mod tests {
         quant: MoeQuantMode,
         moe_backend: Option<&str>,
     ) -> Result<PerformanceResult, AicError> {
-        query_alltoall_table(db, op_name, num_tokens, 7168, 8, 256, 8, quant, None, moe_backend)
+        query_alltoall_table(
+            db,
+            op_name,
+            num_tokens,
+            7168,
+            8,
+            256,
+            8,
+            quant,
+            None,
+            moe_backend,
+        )
     }
 
     fn assert_oracle(result: &PerformanceResult, expected: f64, source: Source, label: &str) {
@@ -1198,23 +1278,71 @@ mod tests {
     fn alltoall_empirical_matches_python_oracles() {
         let db = gb200_trtllm_db(DatabaseMode::Empirical);
         let hit = a2a(&db, "alltoall_dispatch", 64, MoeQuantMode::Nvfp4, None).expect("exact hit");
-        assert_oracle(&hit, 0.018886399269104005, Source::Empirical, "emp_dispatch_t64");
+        assert_oracle(
+            &hit,
+            0.018886399269104005,
+            Source::Empirical,
+            "emp_dispatch_t64",
+        );
         let off = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, None).expect("off-grid");
-        assert_oracle(&off, 0.033548976838374114, Source::Empirical, "emp_dispatch_t333");
-        let combine = a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
-        assert_oracle(&combine, 0.07118654040018774, Source::Empirical, "emp_combine_t333");
+        assert_oracle(
+            &off,
+            0.033548976838374114,
+            Source::Empirical,
+            "emp_dispatch_t333",
+        );
+        let combine =
+            a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
+        assert_oracle(
+            &combine,
+            0.07118654040018774,
+            Source::Empirical,
+            "emp_combine_t333",
+        );
 
         // WideEP kernel + the ops only that path uses.
-        let wideep_dispatch =
-            a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Fp8, Some("wideep")).expect("wideep");
-        assert_oracle(&wideep_dispatch, 0.04266341407888801, Source::Empirical, "emp_wideep_fp8");
-        let prepare =
-            a2a(&db, "alltoall_prepare", 333, MoeQuantMode::Fp8, Some("wideep")).expect("prepare");
-        assert_oracle(&prepare, 0.015176159059580488, Source::Empirical, "emp_wideep_prepare");
-        let combine_lp =
-            a2a(&db, "alltoall_combine_low_precision", 333, MoeQuantMode::Nvfp4, Some("wideep"))
-                .expect("combine_lp");
-        assert_oracle(&combine_lp, 0.06946014693369004, Source::Empirical, "emp_wideep_combine_lp");
+        let wideep_dispatch = a2a(
+            &db,
+            "alltoall_dispatch",
+            333,
+            MoeQuantMode::Fp8,
+            Some("wideep"),
+        )
+        .expect("wideep");
+        assert_oracle(
+            &wideep_dispatch,
+            0.04266341407888801,
+            Source::Empirical,
+            "emp_wideep_fp8",
+        );
+        let prepare = a2a(
+            &db,
+            "alltoall_prepare",
+            333,
+            MoeQuantMode::Fp8,
+            Some("wideep"),
+        )
+        .expect("prepare");
+        assert_oracle(
+            &prepare,
+            0.015176159059580488,
+            Source::Empirical,
+            "emp_wideep_prepare",
+        );
+        let combine_lp = a2a(
+            &db,
+            "alltoall_combine_low_precision",
+            333,
+            MoeQuantMode::Nvfp4,
+            Some("wideep"),
+        )
+        .expect("combine_lp");
+        assert_oracle(
+            &combine_lp,
+            0.06946014693369004,
+            Source::Empirical,
+            "emp_wideep_combine_lp",
+        );
     }
 
     /// HYBRID with data present stays on silicon; the in-range interpolation
@@ -1223,21 +1351,69 @@ mod tests {
     fn alltoall_hybrid_prefers_silicon_when_covered() {
         let db = gb200_trtllm_db(DatabaseMode::Hybrid);
         let hit = a2a(&db, "alltoall_dispatch", 64, MoeQuantMode::Nvfp4, None).expect("exact hit");
-        assert_oracle(&hit, 0.018886399269104005, Source::Silicon, "hyb_dispatch_t64");
+        assert_oracle(
+            &hit,
+            0.018886399269104005,
+            Source::Silicon,
+            "hyb_dispatch_t64",
+        );
         let off = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, None).expect("off-grid");
-        assert_oracle(&off, 0.033547499962151055, Source::Silicon, "hyb_dispatch_t333");
-        let combine = a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
-        assert_oracle(&combine, 0.07116495203226805, Source::Silicon, "hyb_combine_t333");
-        let wideep_dispatch =
-            a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Fp8, Some("wideep")).expect("wideep");
-        assert_oracle(&wideep_dispatch, 0.042655749106779696, Source::Silicon, "hyb_wideep_fp8");
-        let prepare =
-            a2a(&db, "alltoall_prepare", 333, MoeQuantMode::Fp8, Some("wideep")).expect("prepare");
-        assert_oracle(&prepare, 0.015222300426103175, Source::Silicon, "hyb_wideep_prepare");
-        let combine_lp =
-            a2a(&db, "alltoall_combine_low_precision", 333, MoeQuantMode::Nvfp4, Some("wideep"))
-                .expect("combine_lp");
-        assert_oracle(&combine_lp, 0.069468751270324, Source::Silicon, "hyb_wideep_combine_lp");
+        assert_oracle(
+            &off,
+            0.033547499962151055,
+            Source::Silicon,
+            "hyb_dispatch_t333",
+        );
+        let combine =
+            a2a(&db, "alltoall_combine", 333, MoeQuantMode::Nvfp4, None).expect("combine");
+        assert_oracle(
+            &combine,
+            0.07116495203226805,
+            Source::Silicon,
+            "hyb_combine_t333",
+        );
+        let wideep_dispatch = a2a(
+            &db,
+            "alltoall_dispatch",
+            333,
+            MoeQuantMode::Fp8,
+            Some("wideep"),
+        )
+        .expect("wideep");
+        assert_oracle(
+            &wideep_dispatch,
+            0.042655749106779696,
+            Source::Silicon,
+            "hyb_wideep_fp8",
+        );
+        let prepare = a2a(
+            &db,
+            "alltoall_prepare",
+            333,
+            MoeQuantMode::Fp8,
+            Some("wideep"),
+        )
+        .expect("prepare");
+        assert_oracle(
+            &prepare,
+            0.015222300426103175,
+            Source::Silicon,
+            "hyb_wideep_prepare",
+        );
+        let combine_lp = a2a(
+            &db,
+            "alltoall_combine_low_precision",
+            333,
+            MoeQuantMode::Nvfp4,
+            Some("wideep"),
+        )
+        .expect("combine_lp");
+        assert_oracle(
+            &combine_lp,
+            0.069468751270324,
+            Source::Silicon,
+            "hyb_wideep_combine_lp",
+        );
     }
 
     /// The standalone WideEP dispatch op must route through the mode-aware
@@ -1268,21 +1444,31 @@ mod tests {
         };
 
         let emp = gb200_trtllm_db(DatabaseMode::Empirical);
-        let pre = wideep_op(true, MoeQuantMode::Fp8, false).query(&emp, 333).expect("emp pre");
+        let pre = wideep_op(true, MoeQuantMode::Fp8, false)
+            .query(&emp, 333)
+            .expect("emp pre");
         assert_oracle(
             &pre,
             0.015176159059580488 + 0.04266341407888801, // prepare + dispatch
             Source::Empirical,
             "standalone_emp_pre",
         );
-        let combine_lp =
-            wideep_op(false, MoeQuantMode::Nvfp4, true).query(&emp, 333).expect("emp combine_lp");
-        assert_oracle(&combine_lp, 0.06946014693369004, Source::Empirical, "standalone_emp_combine_lp");
+        let combine_lp = wideep_op(false, MoeQuantMode::Nvfp4, true)
+            .query(&emp, 333)
+            .expect("emp combine_lp");
+        assert_oracle(
+            &combine_lp,
+            0.06946014693369004,
+            Source::Empirical,
+            "standalone_emp_combine_lp",
+        );
 
         // HYBRID with data present stays on silicon (same values as the
         // covered-slice oracles above).
         let hyb = gb200_trtllm_db(DatabaseMode::Hybrid);
-        let pre = wideep_op(true, MoeQuantMode::Fp8, false).query(&hyb, 333).expect("hyb pre");
+        let pre = wideep_op(true, MoeQuantMode::Fp8, false)
+            .query(&hyb, 333)
+            .expect("hyb pre");
         assert_oracle(
             &pre,
             0.015222300426103175 + 0.042655749106779696,
@@ -1317,26 +1503,51 @@ mod tests {
     }
 
     /// `_select_alltoall_kernel` mirror + the NotEnabled early return
-    /// (0.0, source "empirical", regardless of mode — before any table I/O).
+    /// (0.0 before any table I/O; source "sol" under SOL mode, "empirical"
+    /// otherwise — Python moe.py `_query_alltoall_table`).
     #[test]
     fn alltoall_kernel_selection_matches_python() {
         let db = gb200_trtllm_db(DatabaseMode::Hybrid);
         let spec = &db.system_spec; // SM100, 4 GPUs per node
         assert_eq!(select_alltoall_kernel(spec, 8, 8, None), "NVLinkOneSided");
-        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("wideep")), "NVLinkTwoSided");
-        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("DEEPGEMM")), "NotEnabled");
-        assert_eq!(select_alltoall_kernel(spec, 8, 8, Some("cute_dsl")), "NotEnabled");
+        assert_eq!(
+            select_alltoall_kernel(spec, 8, 8, Some("wideep")),
+            "NVLinkTwoSided"
+        );
+        assert_eq!(
+            select_alltoall_kernel(spec, 8, 8, Some("DEEPGEMM")),
+            "NotEnabled"
+        );
+        assert_eq!(
+            select_alltoall_kernel(spec, 8, 8, Some("cute_dsl")),
+            "NotEnabled"
+        );
 
         // Pre-Blackwell WideEP: DeepEP when feasible, split on inter-node.
         let mut hopper = db.system_spec.clone();
         hopper.gpu.sm_version = Some(90);
-        assert_eq!(select_alltoall_kernel(&hopper, 8, 8, Some("wideep")), "DeepEP");
-        assert_eq!(select_alltoall_kernel(&hopper, 4, 8, Some("wideep")), "DeepEPLowLatency");
-        assert_eq!(select_alltoall_kernel(&hopper, 8, 16, Some("wideep")), "NotEnabled");
+        assert_eq!(
+            select_alltoall_kernel(&hopper, 8, 8, Some("wideep")),
+            "DeepEP"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&hopper, 4, 8, Some("wideep")),
+            "DeepEPLowLatency"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&hopper, 8, 16, Some("wideep")),
+            "NotEnabled"
+        );
         assert_eq!(select_alltoall_kernel(&hopper, 8, 8, None), "NotEnabled");
 
-        let zero = a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Nvfp4, Some("deepgemm"))
-            .expect("NotEnabled early return");
+        let zero = a2a(
+            &db,
+            "alltoall_dispatch",
+            333,
+            MoeQuantMode::Nvfp4,
+            Some("deepgemm"),
+        )
+        .expect("NotEnabled early return");
         assert_oracle(&zero, 0.0, Source::Empirical, "not_enabled_zero");
     }
 
@@ -1347,7 +1558,10 @@ mod tests {
     #[test]
     fn deepep_empirical_mode_is_typed_not_implemented() {
         let db = b200_sglang_db().with_mode(DatabaseMode::Empirical, TransferPolicy::ALL);
-        for flavor in [DispatchFlavor::DeepEpNormal, DispatchFlavor::DeepEpLowLatency] {
+        for flavor in [
+            DispatchFlavor::DeepEpNormal,
+            DispatchFlavor::DeepEpLowLatency,
+        ] {
             let result = deepep_op(8, true, flavor).query(&db, 64);
             assert!(
                 matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
@@ -1383,5 +1597,54 @@ mod tests {
         normal.sms = 20;
         let got = normal.query(&db, 64).expect("normal hybrid query");
         assert_oracle(&got, 0.20963, Source::Silicon, "hyb_deepep_normal_t64");
+    }
+
+    /// SOL mode: the alltoall table dispatch returns the pure comm bound
+    /// tagged `Source::Sol` at the RAW quant + defaulted node_num; NotEnabled
+    /// stays 0.0 but flips the tag to "sol"; the DeepEP tables raise the same
+    /// typed not-implemented Python's `get_sol` raises.
+    #[test]
+    fn alltoall_and_deepep_sol_mode_match_python() {
+        let db = gb200_trtllm_db(DatabaseMode::Sol);
+        let result =
+            a2a(&db, "alltoall_dispatch", 333, MoeQuantMode::Fp8, None).expect("alltoall sol");
+        let node_num = 8 / 4; // moe_ep_size=8 (a2a fixture), Python default ep//4
+        let expected = alltoall_sol_ms(
+            &db.system_spec,
+            "alltoall_dispatch",
+            MoeQuantMode::Fp8,
+            node_num,
+            333.0,
+            7168,
+            8,
+            256,
+            8,
+        );
+        assert_oracle(&result, expected, Source::Sol, "alltoall_sol");
+        assert_eq!(result.energy_wms, 0.0);
+
+        // NotEnabled early return keeps 0.0 but tags "sol" in SOL mode.
+        let zero = a2a(
+            &db,
+            "alltoall_dispatch",
+            333,
+            MoeQuantMode::Nvfp4,
+            Some("deepgemm"),
+        )
+        .expect("NotEnabled early return");
+        assert_oracle(&zero, 0.0, Source::Sol, "not_enabled_sol");
+
+        // DeepEP normal/LL: Python `get_sol` raises NotImplementedError.
+        let sglang = b200_sglang_db().with_mode(DatabaseMode::Sol, TransferPolicy::ALL);
+        for flavor in [
+            DispatchFlavor::DeepEpNormal,
+            DispatchFlavor::DeepEpLowLatency,
+        ] {
+            let result = deepep_op(8, true, flavor).query(&sglang, 64);
+            assert!(
+                matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+                "{flavor:?} SOL must raise the typed not-implemented, got {result:?}"
+            );
+        }
     }
 }
