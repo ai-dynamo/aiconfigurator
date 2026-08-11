@@ -22,7 +22,8 @@
 # Backend vocabulary (keep names serving-visible and framework-neutral where
 # the kernel library is the identity): cublas, cutlass, deepgemm, trt_plugin,
 # torch, sgl_kernel, vllm_kernel, fa2, fa3, fa4, flash_attn, flashinfer,
-# flashmla, triton, trtllm_mha, trtllm_mla, trtllm_mhc, trtllm_ragged (trtllm-gen ragged
+# flashmla, flashkda (MoonshotAI FlashKDA CUDA extension), triton,
+# trtllm_mha, trtllm_mla, trtllm_mhc, trtllm_ragged (trtllm-gen ragged
 # prefill, shared by sglang DSA dense-MHA and vllm MLA prefill),
 # trtllm_internal (TRT-LLM unified op, kernel chosen inside TRT-LLM and not
 # observable from the label), triton_fused_moe, marlin, flashinfer_cutlass,
@@ -78,8 +79,9 @@ mappings:
   - {framework: sglang, kernel_source: deepgemm_megamoe, backend: deepgemm, source: "collector/sglang/collect_dsv4_megamoe.py"}
 
   # GDN / conv sub-kernels are the actual kernels.
-  - {framework: sglang, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "sglang/srt causal-conv1d CUDA kernel"}
-  - {framework: sglang, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "sglang/srt causal-conv1d CUDA kernel"}
+  - {framework: sglang, kernel_source: causal_conv1d_fn, backend: unverified, source: "traced, but the truth splits across the shipped gdn_perf versions and this table cannot match on version. 0.5.9 -> causal_conv1d: python/sglang/srt/layers/attention/mamba/causal_conv1d.py:10,63@v0.5.9 calls sgl_kernel causal_conv1d_fwd unconditionally (the file has no Triton branch). 0.5.10 -> causal_conv1d: the wrapper's Triton branch (:76-81@v0.5.10) also requires seq_lens_cpu, which the pre-#1342 collector never passes (collector/sglang/collect_gdn.py:208,280-282@cb4d907c). 0.5.14 -> triton: collector/sglang/collect_gdn.py:217,250 feeds a transposed input plus seq_lens_cpu, so causal_conv1d.py:77-81@v0.5.14 dispatches _causal_conv1d_fn_triton (python/sglang/srt/layers/attention/mamba/causal_conv1d_triton.py:18-19@v0.5.14 @triton.jit _causal_conv1d_fwd_kernel), corroborated by the int32-offset guard at collector/sglang/collect_gdn.py:167-185"}
+  - {framework: sglang, kernel_source: causal_conv1d_update, match: {op_file: kda_perf}, backend: triton, source: "collector/sglang/collect_kda.py:65,921 imports causal_conv1d_update straight from the Triton module, bypassing the srt wrapper the GDN collector uses; rows at :506,528 (decode) and :795,817 (DSPARK verify); python/sglang/kernels/ops/mamba/causal_conv1d_triton.py:574-575,991@v0.5.16 (@triton.jit _causal_conv1d_update_kernel launched by causal_conv1d_update) — sibling of the causal_conv1d_fn_qkv3 entry below"}
+  - {framework: sglang, kernel_source: causal_conv1d_update, match: {op_file: gdn_perf}, backend: causal_conv1d, source: "collector/sglang/collect_gdn.py:543,424-431 (srt wrapper; the update path has no stride/seq_lens_cpu Triton trigger). python/sglang/srt/layers/attention/mamba/causal_conv1d.py:11,117@v0.5.9 calls sgl_kernel causal_conv1d_update unconditionally; :144-146,164@v0.5.10 and :145-147,165@v0.5.14 fall back to Triton only when sgl_kernel is absent, and it is not (sgl-kernel/csrc/common_extension.cc:467@v0.5.10 and :473@v0.5.14 register causal_conv1d_update on torch::kCUDA) — the vendored Dao-AILab causal-conv1d CUDA kernel per sgl-kernel/csrc/mamba/causal_conv1d.cu:2-3@v0.5.14"}
   - {framework: sglang, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "sglang/srt/layers/attention/fla (triton)"}
   - {framework: sglang, kernel_source: deep_gemm.fp8_paged_mqa_logits, backend: deepgemm, source: "collector/sglang/deepseekv4_sparse_modules.py"}
 
@@ -131,6 +133,18 @@ mappings:
   - {framework: sglang, kernel_source: sglang_tilelang_mhc_post, backend: tilelang, source: "PR#1342 collect_mhc_module.py"}
   - {framework: sglang, kernel_source: sglang_torch_mhc_pre, backend: torch, source: "PR#1342 collect_mhc_module.py (torch fallback leaf)"}
 
+  # --- Kimi-K3 (#1435) labels: KDA module kernels (0.5.16) and MoE
+  # situ-as-silu measurement variants (0.5.14; suffix marks the activation
+  # approximation, dispatch = base label).
+  - {framework: sglang, kernel_source: causal_conv1d_fn_qkv3, backend: triton, source: "collector/sglang/collect_kda.py:921 (runtime import from kernels/ops/mamba/causal_conv1d_triton); kernels/ops/mamba/causal_conv1d_triton.py:18@v0.5.16 (@triton.jit _causal_conv1d_fwd_kernel — Triton reimpl. of causal-conv1d, 3-call Q/K/V sequence)"}
+  - {framework: sglang, kernel_source: chunk_kda, backend: fla_triton, source: "collector/sglang/collect_kda.py:920 (import from fla.kda); kernels/ops/attention/fla/kda.py:1140@v0.5.16 (FLA Triton chunked KDA gated-delta-rule scan)"}
+  - {framework: sglang, kernel_source: kda_fused_decode, backend: sgl_kernel, source: "collector/sglang/collect_kda.py:356 (import kda_fused_decode module, kimi-k3 branch); jit_kernel/cutedsl_kda.py:55@v0.5.16 (@cute.kernel CuTeDSL fused conv+recurrence decode, SM90+)"}
+  - {framework: sglang, kernel_source: fused_recurrent_kda_packed_decode, backend: fla_triton, source: "collector/sglang/collect_kda.py:914-916 (import from fla.fused_recurrent); kernels/ops/attention/fla/fused_recurrent.py:405@v0.5.16 (@triton.jit fused_recurrent_kda_packed_decode_kernel — packed T=1 recurrence)"}
+  - {framework: sglang, kernel_source: fused_kda_decode_mtp_dspark, backend: sgl_kernel, source: "collector/sglang/collect_kda.py:608 (import kimi_k3.kda_decode_mtp, kimi-k3 branch); CuTeDSL fused conv+chain-verify recurrence (collector/sglang/collect_kda.py:27-28), SM10x (cc major == 10) only, collector/sglang/collect_kda.py:597"}
+  - {framework: sglang, kernel_source: fused_sigmoid_gating_delta_rule_update, backend: fla_triton, source: "collector/sglang/collect_kda.py:917-919 (import from fla.fused_sigmoid_gating_recurrent); kernels/ops/attention/fla/fused_sigmoid_gating_recurrent.py:8@v0.5.16 (@triton.jit fused_sigmoid_gating_delta_rule_update_kernel)"}
+  - {framework: sglang, kernel_source: sglang_fused_moe_triton_situ_as_silu, backend: triton_fused_moe, source: "collector/sglang/collect_moe.py:1163 (base label sglang_fused_moe_triton); data relabeled 2026-08-04 (l40s 0.5.14 K3 moe_perf collection_meta.yaml); suffix pattern vllm/collect_moe.py:712"}
+  - {framework: sglang, kernel_source: sglang_marlin_moe_situ_as_silu, backend: marlin, source: "collector/sglang/collect_moe.py:1165 (base label sglang_marlin_moe); data relabeled 2026-08-04 (h100_sxm 0.5.14 K3 moe_perf collection_meta.yaml); suffix pattern vllm/collect_moe.py:712"}
+
   # ---------------------------------------------------------------- trtllm
   # TRT-LLM's unified backend dispatches kernels internally; the static
   # labels cannot name the kernel. trtllm_internal = true-but-coarse,
@@ -143,6 +157,7 @@ mappings:
   - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf, gemm_dtype: fp8_block}, backend: cutlass, source: "collector/trtllm/collect_gemm.py:118-121 (SM90 CUTLASS; SM100 fp8_block is labeled deepgemm instead)"}
   - {framework: trtllm, kernel_source: torch_flow, match: {op_file: gemm_perf}, backend: trtllm_internal, source: "collector/trtllm/collect_gemm.py (nvfp4: kernel not named by label)"}
   - {framework: trtllm, kernel_source: torch_flow, backend: trtllm_internal, source: "collector/trtllm/collect_attn.py (unified TRTLLM attention backend; fmha kernel chosen inside TRT-LLM)"}
+  - {framework: trtllm, kernel_source: torch_flow_flashinfer, backend: flashinfer, source: "collector/trtllm/collect_attn.py (FlashInferAttention per get_attention_backend dispatch, utils.py:27-53@1.3.0rc20; flashinfer_backend='trtllm-gen' pinned mirroring modeling_gemma4.py:263-270, Blackwell-only per fmhaRunner.cuh:37 — sub-backend detail below the catalog's backend-class granularity)"}
   - {framework: trtllm, kernel_source: default, backend: trtllm_internal, source: "collector/trtllm/collect_mla.py, collect_mla_module.py (static label)"}
   - {framework: trtllm, kernel_source: deepgemm, backend: deepgemm, source: "collector/trtllm/collect_gemm.py:255 (fp8_block on SM100+)"}
   - {framework: trtllm, kernel_source: torch_ops, backend: torch, source: "collector/trtllm/collect_computescale.py"}
@@ -151,6 +166,7 @@ mappings:
 
   # MoE torch-flow labels.
   - {framework: trtllm, kernel_source: moe_torch_flow_cutlass, backend: cutlass, source: "collector/trtllm/collect_moe.py (CUTLASS backend arg)"}
+  - {framework: trtllm, kernel_source: moe_torch_flow_triton_fp8_block, backend: triton_fused_moe, source: "collector/trtllm/collect_moe.py (SM120 fp8_block: CutlassFusedMoE dispatches run_triton_fp8_block_scale_moe, fused_moe_cutlass.py:958-960@1.3.0rc20)"}
   - {framework: trtllm, kernel_source: moe_torch_flow, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py (backend chosen by trtllm per quant/SM; label does not split)"}
   - {framework: trtllm, kernel_source: moe_torch_flow_min_latency, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py (min-latency mode)"}
   - {framework: trtllm, kernel_source: moe_torch_flow_nongated, backend: trtllm_internal, source: "collector/trtllm/collect_moe.py"}
@@ -174,10 +190,11 @@ mappings:
   - {framework: trtllm, kernel_source: DeepseekV4TrtllmAttention, backend: trtllm_internal, source: "collector/trtllm/collect_dsv4_attn.py (framework-selected backend class name)"}
 
   # Mamba/GDN kernels.
-  - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
-  - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
+  - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "collector/trtllm/collect_gdn.py:652 and collect_mamba2.py:763 both import tensorrt_llm._torch.modules.mamba.causal_conv1d; that module is byte-identical at 1.3.0rc10/rc15/rc17/rc20 (the only shipped versions) and has no Triton path — causal_conv1d.py:26,70 calls torch.ops.trtllm.causal_conv1d_fwd, registered on CUDA at cpp/tensorrt_llm/thop/causalConv1dOp.cpp:322@v1.3.0rc20 and dispatching causal_conv1d_fwd_cuda (:192-193); vendored Dao-AILab causal-conv1d CUDA kernel per :2"}
+  - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "collector/trtllm/collect_gdn.py:652 and collect_mamba2.py:763 (same import); tensorrt_llm/_torch/modules/mamba/causal_conv1d.py:77,113 calls torch.ops.trtllm.causal_conv1d_update — no Triton path, byte-identical at 1.3.0rc10/rc15/rc17/rc20 — registered on CUDA at cpp/tensorrt_llm/thop/causalConv1dOp.cpp:323@v1.3.0rc20 and dispatching causal_conv1d_update_cuda (:288-289)"}
   - {framework: trtllm, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
   - {framework: trtllm, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
+  - {framework: trtllm, kernel_source: mamba_chunk_scan_combined, backend: flashinfer, source: "collector/trtllm/collect_mamba2.py:290 (mamba2 SSD chunk scan; tensorrt_llm/_torch/modules/mamba/ssd_combined.py:437-444@1.3.0rc15 flashinfer SSDCombined on SM100+ when _flashinfer_ssd_supported; Triton fallback on non-SM100 or unsupported tile sizes — no shipped row takes it: all rc15 scan rows are (chunk=128, dstate=128, headdim=64) on b200_sxm, flashinfer-eligible by construction; label split for future fallback coverage: AIC-1677)"}
 
   # Comm.
   - {framework: trtllm, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm custom AR)"}
@@ -200,7 +217,7 @@ mappings:
   - {framework: vllm, kernel_source: vllm_flashinfer_trtllm_moe_fp4, backend: flashinfer_trtllm_gen, source: "collector/vllm/collect_moe.py (nvfp4)"}
   - {framework: vllm, kernel_source: vllm_xpu_moe, backend: unverified, source: "XPU (ipex) path not traced"}
   - {framework: vllm, kernel_source: vllm_xpu_moe_mxfp4, backend: unverified, source: "XPU (ipex) path not traced"}
-  - {framework: vllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "vllm mamba/GDN modules"}
+  - {framework: vllm, kernel_source: causal_conv1d_update, backend: triton, source: "collector/vllm/collect_gdn.py:23,376,401 (gdn_perf at 0.18.0/0.19.0/0.22.0/0.24.0) and collect_kda.py:366,468 + :535,612 (kda_perf preview 0.1.dev19262; :194-210 pins v0.24.0 as the era file) all import vllm/model_executor/layers/mamba/ops/causal_conv1d.py, a pure Triton module at every shipped era — @triton.jit _causal_conv1d_update_kernel :748-749 and causal_conv1d_update :1069 @v0.18.0/v0.19.0/v0.24.0 (:750-751 / :1071@v0.22.0); it imports only vllm.triton_utils, no CUDA causal-conv1d dependency"}
   - {framework: vllm, kernel_source: default, backend: unverified, source: "label from before vLLM collectors recorded the selected backend"}
   - {framework: vllm, kernel_source: vllm_default, backend: unverified, source: "label from before vLLM collectors recorded the selected backend"}
   - {framework: vllm, kernel_source: vLLM_custom_eager, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py"}
@@ -264,10 +281,27 @@ mappings:
   - {framework: vllm, kernel_source: vllm_gptossmxfp4moe_triton_oaitritonmxfp4expertsmonolithic, backend: triton_fused_moe, source: "PR#1344 collect_moe.py (OAI triton mxfp4 experts)"}
   - {framework: vllm, kernel_source: vllm_gptossmxfp4moe_flashinfer_trtllm_mxfp4_bf16_trtllmmxfp4expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
   # GDN / mamba sub-kernels and mHC.
-  - {framework: vllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "PR#1344 collect_gdn.py"}
+  - {framework: vllm, kernel_source: causal_conv1d_fn, backend: triton, source: "collector/vllm/collect_gdn.py:23,164,195 (gdn_perf context rows at 0.22.0 and 0.24.0); vllm/model_executor/layers/mamba/ops/causal_conv1d.py is a pure Triton module at both — @triton.jit _causal_conv1d_fwd_kernel :15-16, launched by causal_conv1d_fn :469@v0.22.0 / :468@v0.24.0"}
   - {framework: vllm, kernel_source: chunk_gated_delta_rule_triton, backend: fla_triton, source: "PR#1344 collect_gdn.py"}
   - {framework: vllm, kernel_source: chunk_gated_delta_rule_flashinfer, backend: flashinfer, source: "PR#1344 collect_gdn.py (flashinfer gated-delta-rule kernel)"}
   - {framework: vllm, kernel_source: fused_recurrent_gated_delta_rule_packed_decode, backend: fla_triton, source: "PR#1344 collect_gdn.py"}
   - {framework: vllm, kernel_source: "vllm.model_executor.kernels.mhc.tilelang.mhc_pre_tilelang", backend: tilelang, source: "PR#1344 collect_mhc_module.py"}
   - {framework: vllm, kernel_source: "vllm.model_executor.kernels.mhc.tilelang.mhc_post_tilelang", backend: tilelang, source: "PR#1344 collect_mhc_module.py"}
   - {framework: vllm, kernel_source: "vllm.utils.deep_gemm.fp8_fp4_paged_mqa_logits", backend: deepgemm, source: "PR#1344 collect_dsv4_attn.py"}
+
+  # --- Kimi-K3 (#1435) labels: KDA kernels from the vLLM kimi-k3 preview
+  # build (0.1.dev19262+gb6bbf29dd; vllm.models.kimi_k3.* is not upstream —
+  # absent from every public tag through v0.26.1rc0 — so the collector is the
+  # citable dispatch source, corroborated by same-name public files where
+  # they exist), the pre-0.24 GDN label, torch bmm, and mxfp4 MoE labels.
+  - {framework: vllm, kernel_source: causal_conv1d_fn_qkv3, backend: triton, source: "collector/vllm/collect_kda.py:174 (import) + :237-248 (3-call Q/K/V conv sequence); model_executor/layers/mamba/ops/causal_conv1d.py:15-16,699@v0.24.0 (@triton.jit _causal_conv1d_fwd_kernel — Triton reimpl. adapted from the Dao-AILab causal-conv1d interface, not the CUDA lib; launched by causal_conv1d_fn:468). collect_kda.py:194-210 pins v0.24.0 as the preview's era file"}
+  - {framework: vllm, kernel_source: chunk_kda_with_fused_gate, backend: fla_triton, source: "collector/vllm/collect_kda.py:175,299-312 (Triton prefill fallback taken when FlashKDA is unsupported/unimportable, :142); preview module vllm.models.kimi_k3.nvidia.ops.third_party.kda is not public — identical op verified at model_executor/layers/fla/ops/kda.py:1492@v0.24.0 (flash-linear-attention copy per :5, triton kernels per :16)"}
+  - {framework: vllm, kernel_source: flashkda_fwd, backend: flashkda, source: "collector/vllm/collect_kda.py:132-139 (FlashKDA CUDA ext vllm._flashkda_C via preview build vllm.models.kimi_k3.nvidia.kda, mirroring serving's resolve_kda_prefill_backend); library identity = MoonshotAI/FlashKDA, a separate CUTLASS/CUDA kernel package (fla/ops/kda/backends/flash_kda.py:10,24-37@fla-org a3edffc3)"}
+  - {framework: vllm, kernel_source: fused_kda_decode, backend: vllm_kernel, source: "collector/vllm/collect_kda.py:365,416 (vllm._custom_ops.fused_kda_decode — vLLM's own CUDA fused conv+recurrence+gated-RMSNorm decode op, probed via is_fused_kda_decode_supported like serving :377); preview-build op, distinct from the vllm._flashkda_C extension"}
+  - {framework: vllm, kernel_source: fused_recurrent_kda, backend: fla_triton, source: "collector/vllm/collect_kda.py:536,620-634 (spec chain-verify recurrence from ops.third_party.kda); identical op verified at model_executor/layers/fla/ops/kda.py:109@v0.24.0 (flash-linear-attention copy)"}
+  - {framework: vllm, kernel_source: fused_recurrent_kda_packed_decode, backend: fla_triton, source: "collector/vllm/collect_kda.py:368,476-485 (packed T=1 decode recurrence, same ops.third_party.kda module as the two FLA ops above); op absent from public vllm tags, but sglang v0.5.16 vendors the identical FLA kernel (python/sglang/kernels/ops/attention/fla/fused_recurrent.py:405-406 @triton.jit fused_recurrent_kda_packed_decode_kernel)"}
+  - {framework: vllm, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "pre-0.24 GDN collector label (vllm 0.22.0 gdn_perf rows; superseded by chunk_gated_delta_rule_triton at 0.24.0); model_executor/layers/fla/ops/chunk.py:138@v0.22.0, re-exported unconditionally by fla/ops/__init__.py:9 (flash-linear-attention copy; @triton.jit chunk_gated_delta_rule_fwd_kernel_h_blockdim64 at chunk_delta_h.py:42-43)"}
+  - {framework: vllm, kernel_source: vllm_torch_bmm, backend: cublas, source: "collector/vllm/collect_mla_bmm.py:65 (label) + :87,:124 (torch.bmm; bf16-only lane, fp8 BMM is ROCm/AITER-gated)"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4mxfp4moe_marlin_marlinexperts, backend: marlin, source: "collector/vllm/collect_moe.py:700 label grammar (:667 selected mxfp4_backend value, :698 leaf experts class) — Mxfp4MoeBackend.MARLIN (fused_moe/oracle/mxfp4.py:106@v0.24.0) + MarlinExperts (fused_moe/experts/marlin_moe.py:701@v0.24.0); K3 rows collected on the 0.1.dev19262 preview (b200/b300 collection_meta.yaml)"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4mxfp4moe_marlin_marlinexperts_situ_as_silu, backend: marlin, source: "collector/vllm/collect_moe.py:712 (situ-as-silu suffix on stock v0.24.0; :702-711 refuses the row unless MarlinExperts actually ran, so dispatch = base label)"}
+  - {framework: vllm, kernel_source: vllm_mxfp4moe_flashinfer_trtllm_mxfp4_mxfp8_trtllmmxfp4expertsmodular, backend: flashinfer_trtllm_gen, source: "collector/vllm/collect_moe.py:700 label grammar; Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8 (fused_moe/oracle/mxfp4.py:99,156-166@v0.24.0) -> TrtLlmMxfp4ExpertsModular (experts/trtllm_mxfp4_moe.py:221,335@v0.24.0, wraps flashinfer.trtllm_fp4_block_scale_routed_moe)"}
