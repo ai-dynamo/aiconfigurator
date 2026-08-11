@@ -68,12 +68,6 @@
   "n_shared_experts": 1,
   "scoring_func": "sigmoid",
   "num_nextn_predict_layers": 3,
-  "quantization_config": {
-    "quant_method": "fp8",
-    "weight_block_size": [
-      128,
-      128
-    ],
-    "activation_scheme": "dynamic"
-  }
+  "use_moe_router_bias": true,
+  "moe_router_scaling_factor": 3.0
 }

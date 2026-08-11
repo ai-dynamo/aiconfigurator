@@ -3,6 +3,7 @@
 
 import ast
 import importlib.util
+import json
 import sys
 import types
 from dataclasses import replace
@@ -552,3 +553,34 @@ def test_vllm_standard_topk_does_not_require_group_fields(monkeypatch):
     assert runtime_config["use_grouped_topk"] is False
     assert runtime_config["num_expert_group"] is None
     assert runtime_config["topk_group"] is None
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["stepfun-ai--Step-3.7-Flash", "stepfun-ai--Step-3.7-Flash-FP8"],
+)
+def test_step3p7_preserves_vendor_routing_contract(monkeypatch, model_name):
+    """Step3p5/3p7 spell the routing contract with vendor keys.
+
+    The authoritative HF config declares ``use_moe_router_bias``/
+    ``moe_router_scaling_factor``; vLLM 0.24's Step3p5 expert block passes both
+    into FusedMoE. Reading only the canonical spellings resolved to unbiased
+    routing at scale 1.0, so timings were collected through a different MoE
+    invocation from the one that serves. The grouped-topk guard cannot catch
+    this because the vendor keys are not grouped/noaux_tc fields.
+    """
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    config_path = (
+        Path(__file__).resolve().parents[3]
+        / "aic-core/src/aiconfigurator_core/model_configs"
+        / f"{model_name}_config.json"
+    )
+    model_config = json.loads(config_path.read_text())
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: model_config)
+
+    runtime_config = module._resolve_moe_runtime_config(model_name, {})
+
+    assert runtime_config["use_routing_bias"] is True
+    assert runtime_config["routed_scaling_factor"] == 3.0
+    assert runtime_config["router_logits_float32"] is True

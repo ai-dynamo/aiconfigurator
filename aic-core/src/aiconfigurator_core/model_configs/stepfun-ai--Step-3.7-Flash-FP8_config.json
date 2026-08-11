@@ -75,5 +75,7 @@
       128
     ],
     "activation_scheme": "dynamic"
-  }
+  },
+  "use_moe_router_bias": true,
+  "moe_router_scaling_factor": 3.0
 }
