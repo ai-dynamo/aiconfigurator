@@ -10,6 +10,7 @@ model_paths:
   - Qwen/Qwen3.5-4B
   - Qwen/Qwen3.5-9B
   - Qwen/Qwen3.5-27B
+  - nvidia/Qwen3.6-27B-NVFP4
 include_base: true
 base_ops:
   - attention_context

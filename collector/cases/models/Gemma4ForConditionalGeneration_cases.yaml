@@ -6,6 +6,8 @@ architecture: Gemma4ForConditionalGeneration
 model_path: google/gemma-4-26B-A4B
 model_paths:
   - google/gemma-4-26B-A4B
+  - nvidia/Gemma-4-26B-A4B-NVFP4
+  - nvidia/Gemma-4-31B-IT-NVFP4
 include_base: true
 base_ops:
   - gemm

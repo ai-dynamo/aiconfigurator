@@ -7,6 +7,8 @@ model_path: sgl-project/DeepSeek-V4-Flash-FP8
 model_paths:
   - deepseek-ai/DeepSeek-V4-Flash
   - deepseek-ai/DeepSeek-V4-Pro
+  - nvidia/DeepSeek-V4-Flash-NVFP4
+  - nvidia/DeepSeek-V4-Pro-NVFP4
   - sgl-project/DeepSeek-V4-Flash-FP8
   - sgl-project/DeepSeek-V4-Pro-FP8
 include_base: true
