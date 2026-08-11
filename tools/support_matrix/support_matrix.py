@@ -696,8 +696,8 @@ class SupportMatrix:
         logger.info("Discovered perf databases for %d systems", len(self.databases))
 
     def get_models(self):
-        """Get the set of models to test - uses DefaultHFModels (models with cached configs)."""
-        return set[str](common.DefaultHFModels)
+        """Get the curated model roster used by default matrix generation."""
+        return set[str](common.SupportMatrixHFModels)
 
     def get_architecture(self, huggingface_id: str) -> str:
         """Get the HuggingFace architecture for a model."""
