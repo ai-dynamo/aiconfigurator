@@ -97,7 +97,7 @@ prune). All retrievable from branch history.
   stock-lane K3 rows suffixed `_situ_as_silu` (h100 541 / h200 488 / rtx
   551 marlin; l40s 2997 triton), mirroring the vllm standard.
 - **2026-08-04 — kda absence-dependence treated as a one-off; hardened
-  tool exclusion** (not the SDK fix): `check_kernel_source.py` carries the
+  tool exclusion** (not the SDK fix): `generate_perf_data_reuse_manifest.py` carries the
   documented ABSENCE_LOAD_BEARING denylist (see invariants).
 - **2026-08-04 — l40s h12 decode rows PRUNED** (22 rows, 1096→1074): no
   serving-truth backing (see findings); verify h12 rows kept

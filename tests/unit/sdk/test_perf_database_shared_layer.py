@@ -27,7 +27,7 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import (
     SHARED_LAYER_REUSE_MARKER,
     PerfDatabase,
-    _load_op_kernel_source_manifest_entries,
+    _load_perf_data_reuse_manifest_entries,
     databases_cache,
     get_database,
 )
@@ -87,7 +87,7 @@ def _make_manifest(
     systems_root: Path,
     entries: list[tuple[str, str, str, list[str]]],
 ) -> None:
-    """Write op_kernel_source_manifest.yaml. Each entry is (op_file, kernel_source, tier, frameworks)."""
+    """Write perf_data_reuse_manifest.yaml. Each entry is (op_file, kernel_source, tier, frameworks)."""
     lines = ["groups:"]
     for op_file, ks, tier, frameworks in entries:
         lines.extend(
@@ -98,7 +98,7 @@ def _make_manifest(
                 f"    frameworks: [{', '.join(frameworks)}]",
             ]
         )
-    (systems_root / "op_kernel_source_manifest.yaml").write_text("\n".join(lines) + "\n")
+    (systems_root / "perf_data_reuse_manifest.yaml").write_text("\n".join(lines) + "\n")
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def env(tmp_path: Path) -> Path:
         "framework,version,device,op_name,kernel_source,nccl_dtype,num_gpus,message_size,latency\n"
     )
     # Clear the manifest LRU cache so each test sees its own manifest.
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    _load_perf_data_reuse_manifest_entries.cache_clear()
     return systems_root
 
 

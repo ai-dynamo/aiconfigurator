@@ -14,7 +14,7 @@ deliberately-absent sglang keys and reroute decode onto the wrong kernel
 
 This test builds the manifest THROUGH the generator (render_manifest), so it
 fails if the ABSENCE_LOAD_BEARING exclusion in
-tools/perf_database/check_kernel_source.py is ever removed: the entries
+tools/perf_database/generate_perf_data_reuse_manifest.py is ever removed: the entries
 would come back as multi-framework `shared`, the vllm donor below would fill
 the 12-head Triton generation key, and the assertion on the fused latency
 would break. Rust needs no twin — it consumes Python's serialized source
@@ -31,7 +31,7 @@ import pytest
 
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
-    _load_op_kernel_source_manifest_entries,
+    _load_perf_data_reuse_manifest_entries,
 )
 from aiconfigurator_core.sdk.operations.mamba import KDAKernel
 
@@ -50,9 +50,9 @@ _DONOR_LATENCY = 0.015
 
 
 def _generator():
-    name = "check_kernel_source_under_test"
+    name = "generate_perf_data_reuse_manifest_under_test"
     spec = importlib.util.spec_from_file_location(
-        name, _REPO_ROOT / "tools" / "perf_database" / "check_kernel_source.py"
+        name, _REPO_ROOT / "tools" / "perf_database" / "generate_perf_data_reuse_manifest.py"
     )
     module = importlib.util.module_from_spec(spec)
     # Registered so the module's @dataclass processing can resolve itself.
@@ -147,8 +147,8 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
         _summary("kda_perf.parquet", "causal_conv1d_update", "shared", ["sglang", "vllm"]),
         _summary("kda_perf.parquet", "fused_recurrent_kda_packed_decode", "shared", ["sglang", "vllm"]),
     ]
-    (systems_root / "op_kernel_source_manifest.yaml").write_text(gen.render_manifest(summaries))
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    (systems_root / "perf_data_reuse_manifest.yaml").write_text(gen.render_manifest(summaries))
+    _load_perf_data_reuse_manifest_entries.cache_clear()
     KDAKernel.clear_cache()
 
     db = PerfDatabase("h100_sxm", "sglang", "1.0", str(systems_root), database_mode="SILICON")
@@ -179,5 +179,5 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
     assert float(conv) == 0.0  # folded into the fused row, not donor-priced
 
     # And the exclusion is visible in the generated manifest itself.
-    manifest_text = (systems_root / "op_kernel_source_manifest.yaml").read_text()
+    manifest_text = (systems_root / "perf_data_reuse_manifest.yaml").read_text()
     assert manifest_text.count("tier: absence_load_bearing") == 2
