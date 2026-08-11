@@ -1,0 +1,8 @@
+schema_version: 1
+provenance: gb300_dsv4_pro_collection
+runtime:
+  framework: sglang
+  version: 0.5.16
+tables:
+  mhc_module_perf:
+    status: complete

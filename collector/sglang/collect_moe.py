@@ -9,7 +9,7 @@ owns SGLang kernel compatibility, server-args mocking, routing-logit synthesis,
 rank-local workload construction, quantized weight setup, and perf logging.
 """
 
-__compat__ = "sglang==0.5.14"
+__compat__ = "sglang==0.5.16"
 
 import gc
 import importlib
@@ -29,18 +29,36 @@ import pkg_resources
 import sglang.srt.server_args as _server_args_module
 import torch
 
-if _server_args_module._global_server_args is None:
+try:
+    _current_server_args = _server_args_module.get_global_server_args()
+except Exception:
+    _current_server_args = None
+if _current_server_args is None:
     _mock_server_args = MagicMock()
     _mock_server_args.enable_deterministic_inference = False
-    _mock_server_args.enable_fused_moe_sum_all_reduce = (
-        False  # SGLang 0.5.14; prevents fused all-reduce in single-GPU benchmarks
-    )
+    _mock_server_args.enable_fused_moe_sum_all_reduce = False
     _mock_server_args.kt_weight_path = None
     _mock_server_args.flashinfer_mxfp4_moe_precision = "default"
-    _server_args_module._global_server_args = _mock_server_args
+    _mock_server_args.moe_runner_backend = "auto"
+    _mock_server_args.moe_a2a_backend = "none"
+    _mock_server_args.speculative_moe_runner_backend = None
+    _mock_server_args.speculative_moe_a2a_backend = None
+    _mock_server_args.deepep_mode = "auto"
+    _mock_server_args.deepep_config = None
+    _mock_server_args.enable_two_batch_overlap = False
+    _mock_server_args.enable_single_batch_overlap = False
+    _mock_server_args.tbo_token_distribution_threshold = 0.48
+    _mock_server_args.disable_flashinfer_cutlass_moe_fp4_allgather = False
+    _mock_server_args.quantization = None
+    _server_args_module.set_global_server_args_for_scheduler(_mock_server_args)
+
 
 import sglang.srt.layers.moe.fused_moe_triton.layer as _moe_layer_mod
-import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels as _fmoe_kernels_mod
+
+try:
+    import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels as _fmoe_kernels_mod
+except ImportError:
+    import sglang.kernels.ops.moe.fused_moe_triton_kernels as _fmoe_kernels_mod
 import sglang.srt.layers.moe.token_dispatcher.standard as _std_dispatch_mod
 import sglang.srt.layers.moe.topk as _topk_mod
 import sglang.srt.layers.moe.utils as _moe_utils
@@ -72,7 +90,7 @@ from sglang.srt.layers.moe.topk import (
     TopKOutputFormat,
     select_experts,
 )
-from sglang.srt.layers.moe.utils import MoeRunnerBackend, RoutingMethodType
+from sglang.srt.layers.moe.utils import RoutingMethodType
 from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config, ModelOptFp8Config
@@ -175,6 +193,15 @@ def get_moe_test_cases():
                 "w4a8_mxfp4_mxfp8",
             }
             moe_backend = get_sglang_moe_backend(common_moe_testcase, moe_type, sm_version)
+            local_inter_size = common_moe_testcase.inter_size // common_moe_testcase.tp
+            if (
+                moe_type == "w4a8_mxfp4_mxfp8"
+                and is_fp4_experts
+                and moe_backend == "flashinfer_mxfp4"
+                and sm_version in (100, 103)
+                and (common_moe_testcase.hidden_size % 128 != 0 or local_inter_size % 128 != 0)
+            ):
+                continue
             base_case = [
                 moe_type,
                 num_tokens,
@@ -559,10 +586,11 @@ def _benchmark_framework_quantized_moe(
     else:
         raise ValueError(f"Unsupported framework quantized MoE case: {moe_type=} {model_name=}")
 
-    previous_backend = _moe_utils.MOE_RUNNER_BACKEND
-    server_args = _server_args_module._global_server_args
+    server_args = _server_args_module.get_global_server_args()
+    previous_backend = getattr(server_args, "moe_runner_backend", "auto")
     previous_precision = server_args.flashinfer_mxfp4_moe_precision
-    _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend(moe_backend)
+    server_args.moe_runner_backend = moe_backend
+    _moe_utils.initialize_moe_config(server_args)
     if moe_backend == "flashinfer_mxfp4":
         server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(moe_type)
 
@@ -774,8 +802,9 @@ def _benchmark_framework_quantized_moe(
             parameter = None
             moe_layer = None
         _fmoe_kernels_mod._B_DESC_CACHE.clear()
-        _moe_utils.MOE_RUNNER_BACKEND = previous_backend
+        server_args.moe_runner_backend = previous_backend
         server_args.flashinfer_mxfp4_moe_precision = previous_precision
+        _moe_utils.initialize_moe_config(server_args)
         gc.collect()
         torch.cuda.empty_cache()
 

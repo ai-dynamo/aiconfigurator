@@ -13,10 +13,10 @@ frameworks:
   sglang:
     source_repo: "https://github.com/sgl-project/sglang.git"
     default:
-      version: "0.5.14"
+      version: "0.5.16"
       images:
-        default: "lmsysorg/sglang:v0.5.14@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
-        cu130: "lmsysorg/sglang:v0.5.14-cu130@sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
+        default: "lmsysorg/sglang:v0.5.16@sha256:d4a984cdeb9846ef0d433d80e8fff55d527fa84f91c0eec2c62d9dea7ab26426"
+        cu130: "lmsysorg/sglang:v0.5.16@sha256:d4a984cdeb9846ef0d433d80e8fff55d527fa84f91c0eec2c62d9dea7ab26426"
     families:
       # Kimi-K3 KDA kernels exist only on the sglang kimi-k3 branch
       # (https://github.com/sgl-project/sglang/tree/kimi-k3), whose build

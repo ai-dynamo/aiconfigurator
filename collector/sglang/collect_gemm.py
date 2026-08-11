@@ -9,7 +9,7 @@ available. The module owns SGLang-specific kernel selection, quantization
 helpers, SM filters, and perf logging.
 """
 
-__compat__ = "sglang==0.5.14"
+__compat__ = "sglang==0.5.16"
 
 import os
 import random
@@ -36,11 +36,11 @@ try:
 except ImportError:
     HAS_FLASHINFER_FP4 = False
 
+from sglang.kernels.ops.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 from sglang.srt.layers.deep_gemm_wrapper import (
     DEEPGEMM_SCALE_UE8M0,
     gemm_nt_f8f8bf16,
 )
-from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -231,7 +231,7 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
             b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
             del b_fp32
-            scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+            scale_b = torch.ones(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
             out = torch.empty((M, N), device=device, dtype=dtype)
 
             def gemm_op():

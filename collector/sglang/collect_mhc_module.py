@@ -8,7 +8,7 @@
 # capable image or put a matching SGLang source tree on PYTHONPATH.
 from __future__ import annotations
 
-__compat__ = "sglang==0.5.14"
+__compat__ = "sglang==0.5.16"
 
 import argparse
 import copy
@@ -173,6 +173,7 @@ def _load_one_layer_runner(
     mem_fraction_static: float,
 ):
     from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.distributed.parallel_state_wrapper import ParallelState
     from sglang.srt.entrypoints.engine import _set_envs_and_config
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.server_args import ServerArgs
@@ -205,19 +206,33 @@ def _load_one_layer_runner(
 
     _set_envs_and_config(server_args)
     model_config = ModelConfig.from_server_args(server_args)
-    return ModelRunner(
-        model_config=model_config,
-        mem_fraction_static=mem_fraction_static,
-        gpu_id=gpu_id,
-        tp_rank=0,
-        tp_size=1,
-        pp_rank=0,
-        pp_size=1,
-        moe_ep_rank=0,
-        moe_ep_size=1,
-        nccl_port=29500 + random.randint(0, 10000),
-        server_args=server_args,
-    )
+    import sglang.srt.model_loader.loader as _loader_mod
+
+    _orig_initialize_dummy_weights = _loader_mod.initialize_dummy_weights
+
+    def _initialize_safe_dummy_weights(model):
+        with torch.no_grad():
+            for param in model.parameters():
+                if param.is_floating_point():
+                    param.fill_(1.0)
+                else:
+                    param.zero_()
+            for buffer in model.buffers():
+                if buffer.is_floating_point():
+                    buffer.fill_(1.0)
+
+    _loader_mod.initialize_dummy_weights = _initialize_safe_dummy_weights
+    try:
+        return ModelRunner(
+            model_config=model_config,
+            mem_fraction_static=mem_fraction_static,
+            gpu_id=gpu_id,
+            ps=ParallelState.trivial(gpu_id=gpu_id),
+            nccl_port=29500 + random.randint(0, 10000),
+            server_args=server_args,
+        )
+    finally:
+        _loader_mod.initialize_dummy_weights = _orig_initialize_dummy_weights
 
 
 def _hidden_size(layer) -> int:

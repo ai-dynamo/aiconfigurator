@@ -33,7 +33,7 @@ CSA(=4) / HCA(=128).
 # Requires stock SGLang 0.5.14 with its matching ``sgl-kernel`` package.
 from __future__ import annotations
 
-__compat__ = "sglang==0.5.14"
+__compat__ = "sglang==0.5.16"
 
 import functools
 import json

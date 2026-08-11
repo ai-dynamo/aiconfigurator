@@ -445,37 +445,17 @@ def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Partial version dirs are never admitted as the primary source.
-# resolve_op_data_path skips partial FAMILY dirs, but its final legacy-layout
-# fallback returns an existing file with no partial check — the admission
-# chokepoint (_build_op_sources) must refuse that primary itself.
+# Partial collection semantics
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("marker", ["incomplete_txt", "meta_yaml_partial"])
-def test_partial_legacy_primary_not_admitted_donors_still_fill(
-    systems_root: Path, caplog: pytest.LogCaptureFixture, marker: str
+def test_legacy_incomplete_primary_not_admitted_donors_still_fill(
+    systems_root: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A legacy-layout dir holding the requested version's table but marked
-    partial (INCOMPLETE.txt legacy marker, or collection_meta.yaml with any
-    ``status: partial`` table) must NOT be admitted as the primary source.
-    Channels 2-4 still fill, and data_provenance lists admitted sources
-    only — no primary record for the refused file."""
+    """The unstructured legacy INCOMPLETE marker remains a whole-dir veto."""
     backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
     _write(systems_root, f"data/h100_sxm/{backend}/{requested}/gemm_perf.parquet")
-    if marker == "incomplete_txt":
-        _write(systems_root, f"data/h100_sxm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
-    else:
-        _write_yaml(
-            systems_root,
-            f"data/h100_sxm/{backend}/{requested}/collection_meta.yaml",
-            {
-                "schema_version": 1,
-                "runtime": {"framework": backend, "version": requested},
-                "tables": {"gemm_perf": {"status": "partial"}},
-            },
-        )
-    # A complete family-layout earlier sibling fills via channel 3 (fallback).
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
 
     db = _build_db(systems_root, backend=backend, version=requested)
@@ -487,17 +467,58 @@ def test_partial_legacy_primary_not_admitted_donors_still_fill(
     assert provenance[0]["version"] == earlier
     assert [path for path, _ in sources] == [e["path"] for e in provenance]
     assert not any(f"{backend}/{requested}/gemm_perf.parquet" in path for path, _ in sources)
-    assert any("partial" in r.getMessage() and requested in r.getMessage() for r in caplog.records)
+    assert any("INCOMPLETE.txt" in r.getMessage() and requested in r.getMessage() for r in caplog.records)
 
 
-def test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard(systems_root: Path) -> None:
-    """Scope guard: a family-layout primary can never be partial, because
-    resolve_op_data_path already skips partial family dirs — the admission
-    guard in _build_op_sources only ever fires for the legacy-layout
-    fallback path. Here the partial family dir is skipped upstream, so the
-    primary resolves to the (nonexistent) legacy-shaped path and keeps its
-    provenance record with exists=False, per the usual missing-primary
-    semantics."""
+def test_structured_partial_legacy_primary_is_admitted_before_fallback(systems_root: Path) -> None:
+    """Structured partial means missing coverage, not invalid successful rows."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/{backend}/{requested}/collection_meta.yaml",
+        {
+            "schema_version": 1,
+            "runtime": {"framework": backend, "version": requested},
+            "tables": {"gemm_perf": {"status": "partial"}},
+        },
+    )
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["primary", "fallback"]
+    assert [e["version"] for e in provenance] == [requested, earlier]
+    assert provenance[0]["exists"] is True
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+
+
+def test_structured_partial_family_primary_is_resolved_and_admitted(systems_root: Path) -> None:
+    """Family-layout partial data stays primary; older rows fill gaps only."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    primary_rel = f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet"
+    _write(systems_root, primary_rel)
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["primary", "fallback"]
+    assert provenance[0]["path"] == str(systems_root / primary_rel)
+    assert provenance[0]["exists"] is True
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+
+
+def test_legacy_incomplete_family_dir_is_skipped_by_resolver(systems_root: Path) -> None:
+    """Legacy INCOMPLETE still skips the family path because it has no coverage detail."""
     backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
@@ -508,7 +529,7 @@ def test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard(syste
 
     provenance = db.data_provenance["gemm_perf.parquet"]
     assert [e["channel"] for e in provenance] == ["primary", "fallback"]
-    assert provenance[0]["exists"] is False  # legacy-shaped path, not the partial family file
+    assert provenance[0]["exists"] is False
     assert f"gemm/{backend}/{requested}" not in provenance[0]["path"]
     assert provenance[1]["version"] == earlier
     assert [path for path, _ in sources] == [e["path"] for e in provenance]

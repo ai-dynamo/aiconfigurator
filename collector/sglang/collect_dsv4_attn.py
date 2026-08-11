@@ -26,7 +26,7 @@ Manual CLI use::
 # Requires stock SGLang 0.5.14 with its matching ``sgl-kernel`` package.
 from __future__ import annotations
 
-__compat__ = "sglang==0.5.14"
+__compat__ = "sglang==0.5.16"
 
 import argparse
 import contextlib
@@ -705,7 +705,11 @@ def _derive_csa_context_pool_cap(
     if not chunk_eligible_shapes:
         raise RuntimeError(f"DSV4 CSA context pool derivation has no shape within effective_chunk={effective_chunk}")
 
-    profiled_bytes = int(model_runner._profile_available_bytes(model_runner.pre_model_load_memory))
+    if not hasattr(model_runner, "kv_cache_configurator"):
+        model_runner.init_kv_cache_configurator()
+    profiled_bytes = int(
+        model_runner.kv_cache_configurator._profile_available_bytes(model_runner.pre_model_load_memory)
+    )
     profiled_config = configurator.calculate_pool_sizes(profiled_bytes, page_size)
     compress_ratio = ATTN_KIND_TO_COMPRESS_RATIO["csa"]
     if page_size % compress_ratio != 0:
@@ -824,6 +828,7 @@ def _load_model_runner(
     csa_context_shapes: Iterable[tuple[int, int, int]] | None = None,
 ):
     from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.distributed.parallel_state_wrapper import ParallelState
     from sglang.srt.entrypoints.engine import _set_envs_and_config
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.server_args import ServerArgs
@@ -908,21 +913,42 @@ def _load_model_runner(
 
     _set_envs_and_config(server_args)
     model_config = ModelConfig.from_server_args(server_args)
-    with _tp_load_model_patch(tp_size):
-        model_runner = ModelRunner(
-            model_config=model_config,
-            # Use sglang's own __post_init__-derived value, not a collector knob.
-            mem_fraction_static=server_args.mem_fraction_static,
-            gpu_id=gpu_id,
-            tp_rank=0,
-            tp_size=1,
-            pp_rank=0,
-            pp_size=1,
-            moe_ep_rank=0,
-            moe_ep_size=1,
-            nccl_port=nccl_port,
-            server_args=server_args,
-        )
+
+    # SGLang 0.5.16's DummyModelLoader initializes every tensor with arbitrary
+    # random bit patterns. FP8 block post-processing now requires scale tensors
+    # to contain positive power-of-two values (UE8M0-compatible); arbitrary
+    # float scales trigger DeepGEMM smxx_layout assertions. Use deterministic
+    # finite values for synthetic collector weights. Kernel shapes/timing do
+    # not depend on the values.
+    import sglang.srt.model_loader.loader as _loader_mod
+
+    _orig_initialize_dummy_weights = _loader_mod.initialize_dummy_weights
+
+    def _initialize_safe_dummy_weights(model):
+        with torch.no_grad():
+            for param in model.parameters():
+                if param.is_floating_point():
+                    param.fill_(1.0)
+                else:
+                    param.zero_()
+            for buffer in model.buffers():
+                if buffer.is_floating_point():
+                    buffer.fill_(1.0)
+
+    _loader_mod.initialize_dummy_weights = _initialize_safe_dummy_weights
+    try:
+        with _tp_load_model_patch(tp_size):
+            model_runner = ModelRunner(
+                model_config=model_config,
+                # Use sglang's own __post_init__-derived value, not a collector knob.
+                mem_fraction_static=server_args.mem_fraction_static,
+                gpu_id=gpu_id,
+                ps=ParallelState.trivial(gpu_id=gpu_id),
+                nccl_port=nccl_port,
+                server_args=server_args,
+            )
+    finally:
+        _loader_mod.initialize_dummy_weights = _orig_initialize_dummy_weights
     derived_requirements = None
     if csa_context_shapes is not None:
         if max_total_tokens is not None:
@@ -1036,7 +1062,15 @@ def _make_reqs(
         req.full_untruncated_fill_ids = array("q", req.origin_input_ids)
         req.fill_len = full_len
         req.logprob_start_len = 0
-        req.set_extend_input_len(seq_len if prefix_len else full_len)
+        extend_len = seq_len if prefix_len else full_len
+        if hasattr(req, "set_extend_input_len"):
+            req.set_extend_input_len(extend_len)
+        else:
+            # SGLang 0.5.16 replaced extend_input_len with an explicit
+            # half-open interval into full_untruncated_fill_ids.
+            from sglang.srt.utils.common import Range
+
+            req.extend_range = Range(full_len - extend_len, full_len)
         req.swa_evicted_seqlen = swa_evicted_seqlen
         if decode:
             req.cached_tokens = 0
@@ -1113,7 +1147,7 @@ def _build_forward_batch(
                 req.output_ids.append(0)
             batch.prepare_for_decode()
 
-    forward_batch = ForwardBatch.init_new(batch, model_runner)
+    forward_batch = ForwardBatch.init_new(batch, model_runner, return_hidden_states_before_norm=False)
     model_runner.attn_backend.init_forward_metadata(forward_batch)
     return forward_batch
 

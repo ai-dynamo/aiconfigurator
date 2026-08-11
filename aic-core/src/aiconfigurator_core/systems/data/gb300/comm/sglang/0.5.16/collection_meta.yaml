@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: measured_on_gb300_sglang_0.5.16
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang:v0.5.16
+  gpu_clock_mhz: 2070
+collection:
+  source_job: 1809110
+  node: gb300-nvl-022-compute15
+  rows: 92
+  tp_sizes: [2, 4]
+tables:
+  custom_allreduce_perf:
+    status: complete

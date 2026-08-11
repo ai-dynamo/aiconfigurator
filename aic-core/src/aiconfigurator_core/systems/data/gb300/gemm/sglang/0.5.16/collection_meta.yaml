@@ -1,0 +1,16 @@
+schema_version: 1
+provenance: measured_on_gb300_sglang_0.5.16
+runtime:
+  framework: sglang
+  version: 0.5.16
+  image: lmsysorg/sglang:v0.5.16
+  gpu_clock_mhz: 2070
+collection:
+  source_job_initial: 1797127
+  source_job_resume_allocation: 1797171
+  unique_cases: 130536
+  failed_cases: 0
+  deduplicated_resume_rows: 36
+tables:
+  gemm_perf:
+    status: complete
