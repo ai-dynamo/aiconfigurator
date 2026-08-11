@@ -3230,7 +3230,7 @@ class PerfDatabase:
         )
 
     @functools.lru_cache(maxsize=32768)
-    def query_moe_ep(
+    def query_moe_expert_compute(
         self,
         kernel_source: str,
         quant_mode: common.MoEQuantMode,
@@ -3249,10 +3249,10 @@ class PerfDatabase:
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """Query the unified large-EP MoE expert-compute table. Delegates to
-        ``EPMoE``; see ``operations.moe_comm.EPMoE._query_ep_table``."""
-        from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+        ``MoEExpertCompute``; see ``operations.moe_comm.MoEExpertCompute._query_ep_table``."""
+        from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
-        return EPMoE._query_ep_table(
+        return MoEExpertCompute._query_ep_table(
             self,
             kernel_source=kernel_source,
             quant_mode=quant_mode,
@@ -3308,7 +3308,7 @@ class PerfDatabase:
                 coverage[comm_backend] = covered
         return coverage
 
-    def moe_ep_compute_coverage(
+    def moe_expert_compute_coverage(
         self,
         hidden_size: int,
         inter_size: int,
@@ -3327,9 +3327,9 @@ class PerfDatabase:
         unloaded table yields an empty set. Deliberately not lru_cached: the
         returned set is mutable.
         """
-        from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+        from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
-        EPMoE.load_data(self)
+        MoEExpertCompute.load_data(self)
         table = self._moe_ep_data
         if not table:
             return set()

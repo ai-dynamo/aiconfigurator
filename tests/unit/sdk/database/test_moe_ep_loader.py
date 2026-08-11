@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the unified moe_ep_perf loader (operations/moe_comm.py).
+"""Unit tests for the unified moe_expert_compute_perf loader (operations/moe_comm.py).
 
 Key order under test: [kernel_source][quant(MoEQuantMode)][distribution]
 [inference_phase][topk][num_experts][num_slots][hidden_size][inter_size]
@@ -37,7 +37,7 @@ from aiconfigurator_core.sdk.operations.moe import (
     load_wideep_generation_moe_data,
     load_wideep_moe_compute_data,
 )
-from aiconfigurator_core.sdk.operations.moe_comm import load_moe_ep_data
+from aiconfigurator_core.sdk.operations.moe_comm import load_moe_expert_compute_data
 
 pytestmark = pytest.mark.unit
 
@@ -139,8 +139,8 @@ def _write_parquet(tmp_path, rows, name):
 
 def _load_adapted(tmp_path, **legacy_kwargs):
     """Run the loader with no new-schema data so only the adapters contribute."""
-    missing = str(tmp_path / "moe_ep_perf.parquet")
-    return load_moe_ep_data([(missing, None)], **legacy_kwargs)
+    missing = str(tmp_path / "moe_expert_compute_perf.parquet")
+    return load_moe_expert_compute_data([(missing, None)], **legacy_kwargs)
 
 
 def _leaf(store, key):
@@ -204,9 +204,9 @@ def _trtllm_mapped_key(row, inference_phase):
 
 
 def test_new_schema_row_nested_structure_ms_latency_and_energy(tmp_path):
-    path = _write_parquet(tmp_path, [dict(NEW_ROW)], "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, [dict(NEW_ROW)], "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     assert set(data.keys()) == {"deepep_moe"}
     assert set(data["deepep_moe"].keys()) == {MoEQuantMode.fp8_block}  # enum key, not string
@@ -223,9 +223,9 @@ def test_new_schema_phase_and_slots_are_distinct_axes(tmp_path):
         _row(NEW_ROW, inference_phase="generation", latency=0.5),
         _row(NEW_ROW, num_slots=384, latency=0.75),
     ]
-    path = _write_parquet(tmp_path, rows, "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, rows, "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     by_phase = data["deepep_moe"][MoEQuantMode.fp8_block]["uniform"]
     assert set(by_phase.keys()) == {"context", "generation"}
@@ -239,9 +239,9 @@ def test_new_schema_phase_and_slots_are_distinct_axes(tmp_path):
 def test_new_schema_absent_power_column_defaults_to_zero(tmp_path):
     row = dict(NEW_ROW)
     del row["power"]
-    path = _write_parquet(tmp_path, [row], "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, [row], "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     leaf = _leaf(data, NEW_KEY)
     assert leaf["power"] == 0.0
@@ -257,9 +257,9 @@ def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
         _row(NEW_ROW, power=None),
         _row(NEW_ROW, num_tokens=256, power=400.0),
     ]
-    path = _write_parquet(tmp_path, rows, "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, rows, "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     null_leaf = _leaf(data, NEW_KEY)
     assert null_leaf["latency"] == 0.25  # the row still contributes latency
@@ -272,20 +272,20 @@ def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
 def test_new_schema_null_latency_cell_refuses_load_with_named_error(tmp_path):
     # latency is schema-required (unlike power): a null cell is corrupt data
     # and must fail the load with a named error — never coerce to 0.0ms.
-    path = _write_parquet(tmp_path, [_row(NEW_ROW, latency=None)], "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, [_row(NEW_ROW, latency=None)], "moe_expert_compute_perf.parquet")
 
     with pytest.raises(ValueError, match="latency is schema-required"):
-        load_moe_ep_data([(path, None)])
+        load_moe_expert_compute_data([(path, None)])
 
 
 def test_missing_file_returns_none(tmp_path):
-    assert load_moe_ep_data([(str(tmp_path / "moe_ep_perf.parquet"), None)]) is None
+    assert load_moe_expert_compute_data([(str(tmp_path / "moe_expert_compute_perf.parquet"), None)]) is None
 
 
 def test_empty_rows_file_returns_empty_store(tmp_path):
-    path = _write_parquet(tmp_path, pd.DataFrame({column: [] for column in NEW_ROW}), "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, pd.DataFrame({column: [] for column in NEW_ROW}), "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     assert data is not None
     assert data == {}
@@ -293,10 +293,10 @@ def test_empty_rows_file_returns_empty_store(tmp_path):
 
 def test_new_schema_intra_source_collision_keeps_first_and_logs_debug(tmp_path, caplog):
     rows = [_row(NEW_ROW, latency=0.25), _row(NEW_ROW, latency=9.9)]
-    path = _write_parquet(tmp_path, rows, "moe_ep_perf.parquet")
+    path = _write_parquet(tmp_path, rows, "moe_expert_compute_perf.parquet")
 
     with caplog.at_level(logging.DEBUG, logger="aiconfigurator_core.sdk.operations.moe_comm"):
-        data = load_moe_ep_data([(path, None)])
+        data = load_moe_expert_compute_data([(path, None)])
 
     leaf = _leaf(data, NEW_KEY)
     assert leaf["latency"] == 0.25
@@ -304,7 +304,7 @@ def test_new_schema_intra_source_collision_keeps_first_and_logs_debug(tmp_path, 
 
 
 def test_legacy_source_kwargs_are_accepted(tmp_path):
-    missing = str(tmp_path / "absent" / "moe_ep_perf.parquet")
+    missing = str(tmp_path / "absent" / "moe_expert_compute_perf.parquet")
     legacy_kwargs = {
         "legacy_context_sources": [(str(tmp_path / "wideep_context_moe_perf.parquet"), None)],
         "legacy_generation_sources": [(str(tmp_path / "wideep_generation_moe_perf.parquet"), None)],
@@ -312,11 +312,11 @@ def test_legacy_source_kwargs_are_accepted(tmp_path):
     }
 
     # Nothing loads anywhere -> None.
-    assert load_moe_ep_data([(missing, None)], **legacy_kwargs) is None
+    assert load_moe_expert_compute_data([(missing, None)], **legacy_kwargs) is None
 
     # New-schema rows load identically with the (all-missing) legacy kwargs supplied.
-    path = _write_parquet(tmp_path, [dict(NEW_ROW)], "moe_ep_perf.parquet")
-    assert load_moe_ep_data([(path, None)], **legacy_kwargs) == load_moe_ep_data([(path, None)])
+    path = _write_parquet(tmp_path, [dict(NEW_ROW)], "moe_expert_compute_perf.parquet")
+    assert load_moe_expert_compute_data([(path, None)], **legacy_kwargs) == load_moe_expert_compute_data([(path, None)])
 
 
 # ---------------------------------------------------------------------------
@@ -466,9 +466,9 @@ def test_new_schema_row_overwrites_legacy_adapted_leaf(tmp_path):
         latency=9.5,
         power=100.0,
     )
-    new_path = _write_parquet(tmp_path, [new_row], "moe_ep_perf.parquet")
+    new_path = _write_parquet(tmp_path, [new_row], "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(new_path, None)], legacy_context_sources=[(legacy_path, None)])
+    data = load_moe_expert_compute_data([(new_path, None)], legacy_context_sources=[(legacy_path, None)])
 
     leaf = _leaf(data, ("deepep_moe", MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 2, 32))
     assert leaf["latency"] == 9.5  # the new-schema row won
@@ -491,9 +491,9 @@ def test_new_schema_overwrites_only_named_phase_of_trtllm_legacy(tmp_path):
         latency=7.0,
         power=50.0,
     )
-    new_path = _write_parquet(tmp_path, [new_row], "moe_ep_perf.parquet")
+    new_path = _write_parquet(tmp_path, [new_row], "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(new_path, None)], legacy_trtllm_wideep_sources=[(legacy_path, None)])
+    data = load_moe_expert_compute_data([(new_path, None)], legacy_trtllm_wideep_sources=[(legacy_path, None)])
 
     assert _leaf(data, (*TRT_KEY_BASE, "context", *TRT_KEY_SHAPE)) == {"latency": 7.0, "power": 50.0, "energy": 350.0}
     assert _leaf(data, (*TRT_KEY_BASE, "generation", *TRT_KEY_SHAPE))["latency"] == 0.0611904

@@ -47,7 +47,7 @@ EXEMPT: dict[str, str] = {
     # parity case land with that wiring; until then the op is unreachable
     # from the engine step.
     "MoEAllToAll": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
-    "EPMoE": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
+    "MoEExpertCompute": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
 }
 
 

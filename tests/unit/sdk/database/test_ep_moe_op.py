@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the unified ``EPMoE`` op and ``query_moe_ep``.
+"""Unit tests for the unified ``MoEExpertCompute`` op and ``query_moe_expert_compute``.
 
 Query semantics against an injected ``db._moe_ep_data`` store (the
 ``__dict__``-gated bind in ``load_data`` honors pre-set attributes): ADP token
@@ -20,7 +20,7 @@ import pytest
 
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
-from aiconfigurator_core.sdk.operations import EPMoE
+from aiconfigurator_core.sdk.operations import MoEExpertCompute
 
 pytestmark = pytest.mark.unit
 
@@ -104,7 +104,7 @@ def ep_db(stub_perf_db):
 
     ``stub_perf_db`` warm-up already bound ``_moe_ep_data`` (None on its
     unsupported stub backend); the assignment below replaces it and the
-    ``__dict__`` gate in ``EPMoE.load_data`` keeps the injected store.
+    ``__dict__`` gate in ``MoEExpertCompute.load_data`` keeps the injected store.
     """
     stub_perf_db._moe_ep_data = _build_injected_store()
     return stub_perf_db
@@ -124,7 +124,7 @@ def _make_op(scale_factor=1.0, **overrides):
         "kernel_source": "deepep_moe",
     }
     kwargs.update(overrides)
-    return EPMoE("test_ep_moe", scale_factor, **kwargs)
+    return MoEExpertCompute("test_ep_moe", scale_factor, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ def test_adp_token_scaling_interpolation_scales_by_scale_factor(ep_db):
 
 
 def test_exact_token_hit_returns_leaf_value(ep_db):
-    result = ep_db.query_moe_ep(
+    result = ep_db.query_moe_expert_compute(
         "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 16, 64
     )
     assert float(result) == pytest.approx(0.20, rel=1e-12)
@@ -183,7 +183,7 @@ def test_multi_distribution_without_uniform_falls_back_to_first_available(ep_db)
     # distribution in table insertion order answers — the trtllm oracle's
     # ``available_distributions[0]`` behavior (its shipped gb200 table has no
     # uniform, so this path is production-reachable, e.g. via "power_law").
-    result = ep_db.query_moe_ep(
+    result = ep_db.query_moe_expert_compute(
         "deepep_moe", common.MoEQuantMode.fp8, "power_law", "context", 8, 256, 256, 7168, 2048, 1, 16, 16
     )
     assert float(result) == pytest.approx(0.40, rel=1e-12)
@@ -193,7 +193,7 @@ def test_missing_phase_raises(ep_db):
     # bfloat16 has context data only: a generation query has no candidate
     # distribution carrying the phase.
     with pytest.raises(PerfDataNotAvailableError):
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe",
             common.MoEQuantMode.bfloat16,
             "power_law_1.2",
@@ -211,14 +211,14 @@ def test_missing_phase_raises(ep_db):
 
 def test_missing_slice_raises_named_miss(ep_db):
     with pytest.raises(PerfDataNotAvailableError, match="requested slice"):
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 999, 999, 7168, 2048, 1, 16, 32
         )
 
 
 def test_hybrid_missing_slice_raises_empirical_not_implemented(ep_db):
     with pytest.raises(EmpiricalNotImplementedError, match="silicon data required"):
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe",
             common.MoEQuantMode.fp8_block,
             "uniform",
@@ -240,10 +240,10 @@ def test_singleton_token_underflow_raises_but_overflow_holds(ep_db):
     # singleton cannot define the low-token launch floor — the sglang oracle
     # guard, adopted family-wide). Above it: boundary util-hold, unchanged.
     with pytest.raises(PerfDataNotAvailableError, match="singleton"):
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 32, 16
         )
-    result = ep_db.query_moe_ep(
+    result = ep_db.query_moe_expert_compute(
         "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 32, 128
     )
     assert float(result) > 0.0
@@ -261,7 +261,7 @@ def test_ctor_rejects_unknown_inference_phase():
 
 def test_query_rejects_unknown_inference_phase(ep_db):
     with pytest.raises(ValueError, match="inference_phase"):
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "prefill", 8, 256, 256, 7168, 2048, 1, 16, 32
         )
 
@@ -277,7 +277,7 @@ def test_gated_and_non_gated_weights_formula():
 @pytest.mark.parametrize("mode", [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL])
 def test_estimation_tiers_raise_empirical_not_implemented(ep_db, mode):
     with pytest.raises(EmpiricalNotImplementedError) as excinfo:
-        ep_db.query_moe_ep(
+        ep_db.query_moe_expert_compute(
             "deepep_moe",
             common.MoEQuantMode.fp8_block,
             "uniform",

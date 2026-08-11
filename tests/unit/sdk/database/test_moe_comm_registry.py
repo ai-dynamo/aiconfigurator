@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def test_perf_data_filename_enum_entries():
     assert common.PerfDataFilename.moe_a2a.value == "moe_a2a_perf.parquet"
-    assert common.PerfDataFilename.moe_ep.value == "moe_ep_perf.parquet"
+    assert common.PerfDataFilename.moe_expert_compute.value == "moe_expert_compute_perf.parquet"
 
 
 def test_registry_has_exactly_the_four_backends():

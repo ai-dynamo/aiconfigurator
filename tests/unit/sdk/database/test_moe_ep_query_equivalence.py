@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""L1 query-equivalence gate: ``query_moe_ep`` vs the legacy compute queries.
+"""L1 query-equivalence gate: ``query_moe_expert_compute`` vs the legacy compute queries.
 
 Shipped-data sweeps on real databases. For EVERY slice of the legacy tables
 and a token-probe set spanning exact hits, in-range interpolation, and the
@@ -26,7 +26,7 @@ on gb200 (whose table has no "uniform") it pins the ->first-available
 fallback against ``query_wideep_moe_compute``'s
 ``available_distributions[0]`` behavior.
 
-The 2 x max overflow probes compare like-for-like because ``query_moe_ep``
+The 2 x max overflow probes compare like-for-like because ``query_moe_expert_compute``
 reproduces the oracle boundary util-hold exactly: the same ``perf_interp``
 Grid token axis with the same wideep-MoE roofline SOL (num_slots-based; equal
 to the sglang oracle's num_experts-based SOL since the sglang-adapted slices
@@ -123,7 +123,7 @@ def test_l1_sglang_wideep_moe_query_equivalence():
                 for tok in probe_tokens:
                     # num_slots = num_experts: the legacy sglang tables have no
                     # EPLB redundancy axis (spec §4.2 adapter pin).
-                    unified = db.query_moe_ep(
+                    unified = db.query_moe_expert_compute(
                         "deepep_moe", quant, probe_dist, phase, topk, experts, experts, hidden, inter, tp, ep, tok
                     )
                     legacy = db.query_moe(
@@ -186,10 +186,10 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
                 context = f"trtllm wideep {kernel} {quant.name} {probe_dist} {slots=} {experts=} {hidden=} {ep=} {tok=}"
                 # The legacy table has no context/generation split: both unified
                 # phases carry the same rows and must return identical values.
-                unified_ctx = db.query_moe_ep(
+                unified_ctx = db.query_moe_expert_compute(
                     kernel, quant, probe_dist, "context", topk, experts, slots, hidden, inter, tp, ep, tok
                 )
-                unified_gen = db.query_moe_ep(
+                unified_gen = db.query_moe_expert_compute(
                     kernel, quant, probe_dist, "generation", topk, experts, slots, hidden, inter, tp, ep, tok
                 )
                 assert float(unified_ctx) == float(unified_gen), context
@@ -240,8 +240,19 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
         _iter_slices(legacy_table, 8), 6
     ):
         for tok in _token_probes(tokens)[:3]:
-            unified = db.query_moe_ep(
-                "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, tok,
+            unified = db.query_moe_expert_compute(
+                "deepep_moe",
+                quant,
+                dist,
+                "context",
+                topk,
+                experts,
+                experts,
+                hidden,
+                inter,
+                tp,
+                ep,
+                tok,
                 enable_eplb=True,
             )
             legacy = db.query_moe(
@@ -263,11 +274,22 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     assert comparisons >= 12, f"eplb sweep too small: {comparisons}"
     # Generation is NOT corrected — one probe pinning the asymmetry.
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
-    with_eplb = db.query_moe_ep(
-        "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens),
+    with_eplb = db.query_moe_expert_compute(
+        "deepep_moe",
+        quant,
+        dist,
+        "generation",
+        topk,
+        experts,
+        experts,
+        hidden,
+        inter,
+        tp,
+        ep,
+        min(tokens),
         enable_eplb=True,
     )
-    without = db.query_moe_ep(
+    without = db.query_moe_expert_compute(
         "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
     assert float(with_eplb) == float(without)
@@ -289,8 +311,19 @@ def test_l1_sglang_non_gated_overflow_equivalence():
         _iter_slices(legacy_table, 8), 6
     ):
         tok = 2 * max(tokens)
-        unified = db.query_moe_ep(
-            "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, tok,
+        unified = db.query_moe_expert_compute(
+            "deepep_moe",
+            quant,
+            dist,
+            "generation",
+            topk,
+            experts,
+            experts,
+            hidden,
+            inter,
+            tp,
+            ep,
+            tok,
             is_gated=False,
         )
         legacy = db.query_moe(
@@ -323,12 +356,12 @@ def test_epmoe_per_call_quant_mode_override_reaches_the_walk():
     # override can make the walk succeed.
     from aiconfigurator_core.sdk import common
     from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
-    from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+    from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
     db = get_database("h200_sxm", "sglang", "0.5.6.post2")
     legacy_table = load_wideep_context_moe_data(SGLANG_CONTEXT_PATH)
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
-    op = EPMoE(
+    op = MoEExpertCompute(
         "review_probe",
         1.0,
         hidden_size=hidden,
@@ -344,7 +377,7 @@ def test_epmoe_per_call_quant_mode_override_reaches_the_walk():
     with pytest.raises(PerfDataNotAvailableError):
         op.query(db, x=min(tokens))  # ctor mode alone must miss
     overridden = op.query(db, x=min(tokens), quant_mode=quant)  # override hits
-    direct = db.query_moe_ep(
+    direct = db.query_moe_expert_compute(
         "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
     assert float(overridden) == pytest.approx(float(direct), rel=1e-12)

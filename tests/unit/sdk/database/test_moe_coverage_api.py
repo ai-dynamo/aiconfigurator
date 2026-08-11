@@ -6,7 +6,7 @@
 ``moe_a2a_coverage``: ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
 dispatch AND combine phases carry a non-empty token curve for the shape (any
 comm_dtype, any sms; the prepare phase is neither required nor sufficient).
-``moe_ep_compute_coverage``: ``{moe_ep_size}`` with a non-empty token curve
+``moe_expert_compute_coverage``: ``{moe_ep_size}`` with a non-empty token curve
 for the shape, unioned across kernel_source/distribution/num_slots at
 ``moe_tp_size == 1`` (the large-EP constraint).
 
@@ -201,7 +201,7 @@ def test_a2a_probe_does_not_vivify_defaultdict_store(stub_perf_db):
 
 
 # ---------------------------------------------------------------------------
-# moe_ep_compute_coverage on a synthetic store
+# moe_expert_compute_coverage on a synthetic store
 # ---------------------------------------------------------------------------
 
 
@@ -233,50 +233,62 @@ def _build_ep_store():
 @pytest.fixture
 def ep_cov_db(stub_perf_db):
     """A stub PerfDatabase with an injected unified moe_ep store (same
-    ``__dict__``-gated injection as ``a2a_cov_db``, via ``EPMoE.load_data``)."""
+    ``__dict__``-gated injection as ``a2a_cov_db``, via ``MoEExpertCompute.load_data``)."""
     stub_perf_db._moe_ep_data = _build_ep_store()
     return stub_perf_db
 
 
 def test_ep_coverage_unions_kernel_sources_distributions_and_slots(ep_cov_db):
-    covered = ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
+    covered = ep_cov_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
     assert covered == {16, 32, 64}
 
 
 def test_ep_coverage_pins_moe_tp_to_one(ep_cov_db):
     # ep=128 is collected at moe_tp_size == 2 only.
-    assert 128 not in ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
+    assert 128 not in ep_cov_db.moe_expert_compute_coverage(
+        7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context"
+    )
 
 
 def test_ep_coverage_requires_non_empty_token_curve(ep_cov_db):
     # ep=256 has an (empty) token dict.
-    assert 256 not in ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
+    assert 256 not in ep_cov_db.moe_expert_compute_coverage(
+        7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context"
+    )
 
 
 def test_ep_coverage_missing_phase_returns_empty_set(ep_cov_db):
     # fp8_block is collected for "context" only.
-    assert ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "generation") == set()
+    assert (
+        ep_cov_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "generation") == set()
+    )
 
 
 def test_ep_coverage_filters_by_inference_phase(ep_cov_db):
     bf16 = common.MoEQuantMode.bfloat16
-    assert ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, bf16, "generation") == {8}
-    assert ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, bf16, "context") == set()
+    assert ep_cov_db.moe_expert_compute_coverage(7168, 2048, 8, 256, bf16, "generation") == {8}
+    assert ep_cov_db.moe_expert_compute_coverage(7168, 2048, 8, 256, bf16, "context") == set()
 
 
 def test_ep_coverage_unknown_shape_or_quant_returns_empty_set(ep_cov_db):
-    assert ep_cov_db.moe_ep_compute_coverage(4096, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
-    assert ep_cov_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "context") == set()
+    assert ep_cov_db.moe_expert_compute_coverage(4096, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
+    assert ep_cov_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "context") == set()
 
 
 def test_ep_absent_table_returns_empty_set(stub_perf_db):
     assert stub_perf_db._moe_ep_data is None
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
+    assert (
+        stub_perf_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
+    )
 
 
 def test_ep_unloaded_wrapper_returns_empty_set(stub_perf_db):
-    stub_perf_db._moe_ep_data = LoadedOpData(None, PerfDataFilename.moe_ep, "/nonexistent/moe_ep_perf.parquet")
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
+    stub_perf_db._moe_ep_data = LoadedOpData(
+        None, PerfDataFilename.moe_expert_compute, "/nonexistent/moe_expert_compute_perf.parquet"
+    )
+    assert (
+        stub_perf_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context") == set()
+    )
 
 
 def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
@@ -287,11 +299,13 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
     before = _key_paths(data)
 
     fp8_block = common.MoEQuantMode.fp8_block
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 2048, 8, 256, fp8_block, "context") == {16}
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "context") == set()
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 2048, 8, 256, fp8_block, "generation") == set()  # absent phase
-    assert stub_perf_db.moe_ep_compute_coverage(4096, 2048, 8, 256, fp8_block, "context") == set()  # absent hidden
-    assert stub_perf_db.moe_ep_compute_coverage(7168, 4096, 8, 256, fp8_block, "context") == set()  # absent inter
+    assert stub_perf_db.moe_expert_compute_coverage(7168, 2048, 8, 256, fp8_block, "context") == {16}
+    assert stub_perf_db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "context") == set()
+    assert (
+        stub_perf_db.moe_expert_compute_coverage(7168, 2048, 8, 256, fp8_block, "generation") == set()
+    )  # absent phase
+    assert stub_perf_db.moe_expert_compute_coverage(4096, 2048, 8, 256, fp8_block, "context") == set()  # absent hidden
+    assert stub_perf_db.moe_expert_compute_coverage(7168, 4096, 8, 256, fp8_block, "context") == set()  # absent inter
 
     assert _key_paths(data) == before
 
@@ -346,7 +360,7 @@ def test_shipped_h200_sglang_ep_compute_coverage():
     assert db is not None
 
     # deepep_moe fp8_block context data covers ep {2..256} at this shape.
-    covered = db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
+    covered = db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.fp8_block, "context")
     assert covered
 
 
@@ -360,7 +374,7 @@ def test_shipped_gb200_trtllm_ep_compute_coverage():
 
     # The legacy trtllm wideep table has no phase split; the adapter registers
     # each row under BOTH phases, so the generation probe answers here.
-    covered = db.moe_ep_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "generation")
+    covered = db.moe_expert_compute_coverage(7168, 2048, 8, 256, common.MoEQuantMode.nvfp4, "generation")
     assert covered
 
 

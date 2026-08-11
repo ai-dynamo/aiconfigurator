@@ -19,13 +19,13 @@ cache + ``load_data`` and the ``_query_a2a_table`` lookup behind
 ``PerfDatabase.query_moe_a2a``.
 
 The module also owns the large-EP compute side of the same family:
-``load_moe_ep_data`` loads the unified ``moe_ep_perf.parquet`` EP MoE compute
+``load_moe_expert_compute_data`` loads the unified ``moe_expert_compute_perf.parquet`` EP MoE compute
 table (with legacy sglang/trtllm wideep adapters) into one nested dict keyed
 by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
 [num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
-``EPMoE`` is the op class over that table: it owns the class-level cache +
+``MoEExpertCompute`` is the op class over that table: it owns the class-level cache +
 ``load_data`` and the ``_query_ep_table`` lookup behind
-``PerfDatabase.query_moe_ep``.
+``PerfDatabase.query_moe_expert_compute``.
 """
 
 from __future__ import annotations
@@ -724,7 +724,7 @@ class MoEAllToAll(Operation):
 
 
 # ---------------------------------------------------------------------------
-# EP MoE compute (moe_ep_perf.parquet) — same family, compute side
+# EP MoE compute (moe_expert_compute_perf.parquet) — same family, compute side
 # ---------------------------------------------------------------------------
 
 
@@ -900,13 +900,13 @@ def _load_legacy_ep(
     return loaded
 
 
-def load_moe_ep_data(
+def load_moe_expert_compute_data(
     sources,
     legacy_context_sources=None,
     legacy_generation_sources=None,
     legacy_trtllm_wideep_sources=None,
 ) -> dict | None:
-    """Load the unified EP MoE compute table (``moe_ep_perf.parquet``).
+    """Load the unified EP MoE compute table (``moe_expert_compute_perf.parquet``).
 
     ``sources`` is the new-schema source list (``(path, kernel_source_filter)``
     tuples, or a single path) read via ``_read_filtered_rows``; the three
@@ -957,7 +957,7 @@ def load_moe_ep_data(
             int(row["moe_ep_size"]),
             int(row["num_tokens"]),
         )
-        latency = _require_latency(row, "moe_ep_perf")  # already ms (spec §4.2) — stored raw
+        latency = _require_latency(row, "moe_expert_compute_perf")  # already ms (spec §4.2) — stored raw
         power = _row_power(row)
         energy = power * latency  # watt-milliseconds
 
@@ -976,7 +976,7 @@ def load_moe_ep_data(
 
 
 # ---------------------------------------------------------------------------
-# EPMoE — the op class over the unified moe_ep table
+# MoEExpertCompute — the op class over the unified moe_ep table
 # ---------------------------------------------------------------------------
 
 
@@ -1032,11 +1032,11 @@ def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_
     )
 
 
-class EPMoE(Operation):
+class MoEExpertCompute(Operation):
     """Unified large-EP MoE expert-compute op (one inference phase per instance).
 
     Owns ``_moe_ep_data`` — the unified compute table loaded by
-    :func:`load_moe_ep_data` (new-schema ``moe_ep_perf.parquet`` plus the
+    :func:`load_moe_expert_compute_data` (new-schema ``moe_expert_compute_perf.parquet`` plus the
     legacy sglang wideep context/generation and trtllm wideep adapters).
     Loaded on every inference backend ({"sglang", "vllm", "trtllm"} all have
     legacy compute sources); ``None`` otherwise. ``query(x=...)`` scales
@@ -1123,9 +1123,9 @@ class EPMoE(Operation):
                 system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
                 primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.moe_ep.value
+                    system_data_root, database.backend, database.version, PerfDataFilename.moe_expert_compute.value
                 )
-                sources = database._build_op_sources(PerfDataFilename.moe_ep, primary, system_data_root)
+                sources = database._build_op_sources(PerfDataFilename.moe_expert_compute, primary, system_data_root)
 
                 legacy_sources = {}
                 for kwarg, filename_enum in (
@@ -1139,8 +1139,8 @@ class EPMoE(Operation):
                     legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
 
                 cls._data_cache[key] = LoadedOpData(
-                    load_moe_ep_data(sources, **legacy_sources),
-                    PerfDataFilename.moe_ep,
+                    load_moe_expert_compute_data(sources, **legacy_sources),
+                    PerfDataFilename.moe_expert_compute,
                     primary,
                 )
             else:
@@ -1195,7 +1195,7 @@ class EPMoE(Operation):
         return preferred
 
     # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_ep)
+    # Query table (behind PerfDatabase.query_moe_expert_compute)
     # ------------------------------------------------------------------
 
     @classmethod
@@ -1347,7 +1347,7 @@ class EPMoE(Operation):
         kernel_source = self._kernel_source
         if kernel_source is None:
             kernel_source = self._resolve_kernel_source(database, quant_mode)
-        result = database.query_moe_ep(
+        result = database.query_moe_expert_compute(
             kernel_source,
             quant_mode,
             self._workload_distribution,
