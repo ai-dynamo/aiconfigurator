@@ -648,6 +648,12 @@ class TestParseHFConfig:
         cfg = common.MuseGlimmerConfig(layer_types=("sliding_attention", "full_attention"), sliding_window_size=2048)
         assert cfg.sliding_window_size == 2048
 
+    def test_muse_glimmer_attention_op_keys_default_routing(self):
+        from aiconfigurator.sdk.models.helpers import attention_op_keys
+
+        for backend in ("sglang", "trtllm", "vllm"):
+            assert attention_op_keys("MUSEGLIMMER", backend) == ("context_attention", "generation_attention")
+
 
 class TestGemma4MixModelBuilder:
     """Builder-level tests that verify Gemma4MixModel wiring through set_gemma4_config."""
@@ -1083,6 +1089,18 @@ class TestMuseGlimmerModelBuilder:
         assert isinstance(model, MuseGlimmerModel)
         counts = model._count_layer_types()
         assert counts == {"swa": 39, "global": 13}
+
+    def test_attention_block_scale_factors(self):
+        """SWA ops must be weighted 39, global 13 — a swap passes every other test."""
+        model = self._build(tp_size=1)
+        phase_pairs = [
+            (model.context_ops, ops.ContextAttention),
+            (model.generation_ops, ops.GenerationAttention),
+        ]
+        for phase_ops, op_cls in phase_pairs:
+            attn = [op for op in phase_ops if isinstance(op, op_cls)]
+            by_window = {op._window_size: op._scale_factor for op in attn}
+            assert by_window == {2048: 39, 0: 13}
 
 
 class TestHybridMoEModelBuilder:
