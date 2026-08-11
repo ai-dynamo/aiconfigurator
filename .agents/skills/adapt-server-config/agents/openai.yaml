@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adapt Server Config"
+  short_description: "Convert serving configs into AIC requests"
+  default_prompt: "Use $adapt-server-config to convert this serving configuration into validated AIC estimate requests."

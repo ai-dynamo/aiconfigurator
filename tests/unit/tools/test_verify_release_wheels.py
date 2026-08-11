@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -46,6 +47,8 @@ def test_release_verifier_rejects_stale_spica_archive_member(verifier, monkeypat
         "aiconfigurator/generator/api.py",
         "aiconfigurator/logging_utils.py",
         "aiconfigurator/sdk/_compat.py",
+        "aiconfigurator/sdk/config_adapter/__init__.py",
+        "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json",
         "aiconfigurator/sdk/engine.py",
         "aiconfigurator/sdk/task_v2.py",
     }
@@ -66,3 +69,28 @@ def test_release_verifier_rejects_stale_spica_archive_member(verifier, monkeypat
 
     with pytest.raises(RuntimeError, match=r"removed Spica payload.*spica/data/model\.bin"):
         verifier.main()
+
+
+def test_infra_scan_rejects_gap_skill_and_tool_payloads(verifier):
+    names = {
+        ".agents/skills/adapt-server-config/SKILL.md",
+        "aiconfigurator/gap_analysis/pipeline.py",
+        "aiconfigurator/skills/helper.py",
+        "aiconfigurator/tools/import.py",
+        "tools/private_helper.py",
+    }
+
+    assert verifier._infra_entries(names) == sorted(names)
+
+
+def test_rust_crate_package_rejects_upper_payload(verifier, monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=["cargo"],
+        returncode=0,
+        stdout="Cargo.toml\nsrc/lib.rs\naiconfigurator/sdk/config_adapter/api.py\n",
+        stderr="",
+    )
+    monkeypatch.setattr(verifier.subprocess, "run", lambda *args, **kwargs: result)
+
+    with pytest.raises(RuntimeError, match="config_adapter"):
+        verifier._verify_rust_crate_package()

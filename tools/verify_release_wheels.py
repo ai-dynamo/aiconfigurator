@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import zipfile
 from email import message_from_bytes
 from email.message import Message
@@ -48,6 +49,26 @@ def _spica_entries(names: set[str]) -> list[str]:
     return sorted(name for name in names if name.startswith("spica/"))
 
 
+def _infra_entries(names: set[str]) -> list[str]:
+    """Return gap-analysis, skill, tool, dataset, report, and web payloads."""
+    forbidden_roots = (".agents/", "tools/", "datasets/", "reports/", "web/")
+    forbidden_package_roots = (
+        "aiconfigurator/gap_analysis/",
+        "aiconfigurator/skills/",
+        "aiconfigurator/tools/",
+        "aiconfigurator/web/",
+        "aiconfigurator/webapp/",
+    )
+    return sorted(
+        name
+        for name in names
+        if name.startswith(forbidden_roots + forbidden_package_roots)
+        or any(segment in name for segment in ("/gap_analysis/", "/skills/", "/tools/", "/web/"))
+        or "auto_gap_analysis" in name
+        or "auto-gap-analysis" in name
+    )
+
+
 def _one_wheel(dist_dir: Path, pattern: str) -> Path:
     matches = sorted(dist_dir.glob(pattern))
     if len(matches) != 1:
@@ -69,9 +90,39 @@ def _source_payloads() -> tuple[set[str], set[str]]:
     upper: set[str] = set()
     core: set[str] = set()
 
-    _add_source_tree(upper, upper_source / "aiconfigurator", "aiconfigurator")
+    upper_package = upper_source / "aiconfigurator"
+    for path in upper_package.iterdir():
+        if path.is_file() and path.suffix in PAYLOAD_SUFFIXES:
+            upper.add((Path("aiconfigurator") / path.name).as_posix())
+    for package in ("cli", "generator", "sdk"):
+        _add_source_tree(upper, upper_package / package, f"aiconfigurator/{package}")
     _add_source_tree(core, core_source / "aiconfigurator_core", "aiconfigurator_core")
     return upper, core
+
+
+def _verify_rust_crate_package() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    manifest = repo_root / "aic-core" / "rust" / "aiconfigurator-core" / "Cargo.toml"
+    result = subprocess.run(
+        ["cargo", "package", "--list", "--allow-dirty", "--manifest-path", str(manifest)],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entries = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+    forbidden = sorted(
+        entry
+        for entry in entries
+        if entry.startswith((".agents/", "aiconfigurator/", "tools/", "web/"))
+        or "config_adapter" in entry
+        or "gap_analysis" in entry
+        or "auto-gap-analysis" in entry
+    )
+    if forbidden:
+        raise RuntimeError(f"Rust crate contains upper or infra payload: {forbidden}")
+    if not any(entry.startswith("src/") for entry in entries):
+        raise RuntimeError("Rust crate package list contains no core source files")
 
 
 def _requirement_name(requirement: str) -> str:
@@ -91,6 +142,8 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
         "aiconfigurator/logging_utils.py",
         "aiconfigurator/sdk/_compat.py",
         "aiconfigurator/sdk/engine.py",
+        "aiconfigurator/sdk/config_adapter/__init__.py",
+        "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json",
         "aiconfigurator/sdk/task_v2.py",
     }
     missing = sorted(required - payload)
@@ -110,6 +163,10 @@ def _verify_main_wheel(wheel: Path, expected_payload: set[str]) -> tuple[str, se
     removed = _spica_entries(names)
     if removed:
         raise RuntimeError(f"{wheel.name}: removed Spica payload is still present: {removed}")
+
+    infra = _infra_entries(names)
+    if infra:
+        raise RuntimeError(f"{wheel.name}: infra-only payload must not be packaged: {infra}")
 
     if "spica" in metadata.get_all("Provides-Extra", []):
         raise RuntimeError(f"{wheel.name}: removed Spica extra is still present in metadata")
@@ -158,6 +215,13 @@ def _verify_core_wheel(wheel: Path, aic_version: str, expected_payload: set[str]
     if misplaced:
         raise RuntimeError(f"{wheel.name}: core wheel must not own upper-layer payload: {misplaced}")
 
+    infra = _infra_entries(names)
+    if infra or any("config_adapter" in name for name in names):
+        raise RuntimeError(
+            f"{wheel.name}: core wheel contains upper or infra payload: "
+            f"{sorted(infra + [name for name in names if 'config_adapter' in name])}"
+        )
+
     checks = {
         "native core extension": any(
             name.startswith("aiconfigurator_core/_aiconfigurator_core.") and name.endswith((".so", ".pyd"))
@@ -196,6 +260,8 @@ def main() -> int:
     overlap = sorted(main_payload & core_payload)
     if overlap:
         raise RuntimeError(f"release wheels have overlapping payload ownership: {overlap}")
+
+    _verify_rust_crate_package()
 
     print(
         f"Verified upper {main_wheel.name} and standalone {core_wheel.name}: "

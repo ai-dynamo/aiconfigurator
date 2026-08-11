@@ -34,6 +34,14 @@ def _require_distribution_files(name: str, required: tuple[str, ...]) -> None:
         raise RuntimeError(f"distribution {name!r} is missing installed files: {missing}")
 
 
+def _forbid_distribution_files(name: str, fragments: tuple[str, ...]) -> None:
+    distribution = importlib.metadata.distribution(name)
+    files = tuple(str(path) for path in distribution.files or ())
+    forbidden = sorted(path for path in files if any(fragment in path for fragment in fragments))
+    if forbidden:
+        raise RuntimeError(f"distribution {name!r} contains forbidden files: {forbidden}")
+
+
 def _forbid_module(name: str) -> None:
     if importlib.util.find_spec(name) is not None:
         raise RuntimeError(f"module {name!r} belongs to an uninstalled layer")
@@ -55,6 +63,10 @@ def _verify_core(*, exercise_engine: bool) -> str:
             "aiconfigurator_core/sdk/memory.py",
             "aiconfigurator_core/systems/h100_sxm.yaml",
         ),
+    )
+    _forbid_distribution_files(
+        "aiconfigurator-core",
+        ("config_adapter", "gap_analysis", "auto-gap-analysis", "/skills/", "/tools/"),
     )
 
     core = importlib.import_module("aiconfigurator_core")
@@ -135,11 +147,20 @@ def _verify_upper(*, import_runtime: bool) -> str:
             "aiconfigurator/cli/main.py",
             "aiconfigurator/generator/api.py",
             "aiconfigurator/sdk/_compat.py",
+            "aiconfigurator/sdk/config_adapter/__init__.py",
+            "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json",
             "aiconfigurator/sdk/engine.py",
             "aiconfigurator/sdk/memory.py",
             "aiconfigurator/sdk/task_v2.py",
         ),
     )
+    _forbid_distribution_files(
+        "aiconfigurator",
+        ("gap_analysis", "auto-gap-analysis", "/skills/", "/tools/", ".agents/"),
+    )
+    config_adapter = importlib.import_module("aiconfigurator.sdk.config_adapter")
+    if config_adapter.EstimateRequestV1.schema_path().is_file() is False:
+        raise RuntimeError("upper package is missing the config-adapter JSON Schema")
     if import_runtime:
         for module in ("aiconfigurator.cli.main", "aiconfigurator.generator.api"):
             importlib.import_module(module)

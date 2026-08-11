@@ -73,6 +73,7 @@ dev = [
     "pytest-xdist==3.8.0",
     "prometheus-api-client==0.6.0",
     "import-ipynb==0.2",
+    "jsonschema>=4.23",
 ]
 service = [
     "fastapi>=0.115.12",
@@ -97,6 +98,7 @@ include-package-data = false
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
+"aiconfigurator.sdk.config_adapter" = ["schemas/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
