@@ -49,11 +49,20 @@ def _load_defaults(systems_root: Optional[str]) -> dict:
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a comparable integer tuple."""
-    try:
-        return tuple(int(x) for x in v.split("."))
-    except ValueError:
-        return (0,)
+    """Parse a dotted version string into a comparable integer tuple.
+
+    Leading numeric segments are parsed; the first non-numeric segment and
+    everything after it is ignored so that PEP 440 suffixes such as
+    ``"0.5.14.post1"`` or ``"0.5.14.dev3"`` produce ``(0, 5, 14)`` rather
+    than falling back to ``(0,)``.
+    """
+    parts: list[int] = []
+    for segment in v.split("."):
+        try:
+            parts.append(int(segment))
+        except ValueError:
+            break  # trailing non-numeric segment — stop here
+    return tuple(parts) if parts else (0,)
 
 
 def resolve_attention_lane_order(
@@ -109,6 +118,13 @@ def resolve_attention_lane_order(
                 )
             elif map_lane not in listed:
                 listed.append(map_lane)
+        else:
+            logger.warning(
+                "resolve_attention_lane_order: version %r is below all entries for backend %r"
+                " — no framework default available",
+                version,
+                backend,
+            )
 
     # Step 3: remaining known lanes in sorted order.
     for lane in sorted(_KNOWN_LANES):
