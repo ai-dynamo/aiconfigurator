@@ -370,7 +370,7 @@ def _gpu_label(system: str, system_spec: dict) -> str:
     return f"{system} (SM{sm_version})"
 
 
-def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> bool:
+def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str, backend: str = "", version: str = "") -> bool:
     gpu_spec = system_spec.get("gpu") or {}
     sm_version = gpu_spec.get("sm_version")
     if datatype == "FP8":
@@ -382,10 +382,14 @@ def _gpu_supports_datatype(system: str, system_spec: dict, datatype: str) -> boo
     if datatype == "FP4":
         return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
     if datatype == "FP4_SWDEQUANT":
-        # nvfp4 software dequant (Marlin FP4 / casting) on SM >= 80
-        if sm_version is not None and sm_version >= 80:
+        # Native FP4 (Blackwell) always supported; for non-Blackwell delegate
+        # to the centralized sw-dequant capability predicate.
+        from aiconfigurator_core.sdk.models.helpers import check_nvfp4_swdequant
+        from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+        if is_blackwell_system(system):
             return True
-        return "fp4_tc_flops" in gpu_spec or (sm_version is not None and sm_version >= 100)
+        return check_nvfp4_swdequant(system, backend_name=backend, version=version)
     return True
 
 
@@ -431,6 +435,7 @@ def get_hardware_incompatibility(
     system: str,
     backend: str,
     system_spec: dict,
+    version: str = "",
 ) -> HardwareIncompatibility | None:
     """Return a deterministic hardware/model datatype incompatibility, if any."""
     model_info = dict(_get_model_info(model))
@@ -451,7 +456,11 @@ def get_hardware_incompatibility(
         )
 
     required_datatypes = _required_datatypes_for_model(model, backend)
-    missing = tuple(dt for dt in required_datatypes if not _gpu_supports_datatype(system, system_spec, dt))
+    missing = tuple(
+        dt
+        for dt in required_datatypes
+        if not _gpu_supports_datatype(system, system_spec, dt, backend=backend, version=version)
+    )
     if not missing:
         return None
 
@@ -905,6 +914,7 @@ class SupportMatrix:
                     system=system,
                     backend=backend,
                     system_spec=system_spec,
+                    version=version,
                 )
             except Exception:
                 logger.exception("Hardware compatibility preflight failed for %s on %s/%s", model, system, backend)

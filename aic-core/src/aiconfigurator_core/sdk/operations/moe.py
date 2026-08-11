@@ -1665,6 +1665,11 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        # Normalize for table lookup: nvfp4_wo runs the BF16 compute kernel so
+        # the bfloat16 perf rows are used (SOL still uses original quant_mode
+        # for FP4-accurate weight memory in the roofline).
+        table_quant_mode = TrtLLMWideEPMoEDispatch._normalize_quant_mode_for_table(quant_mode)
+
         # Strict eager resolution (parity with the Rust engine, which resolves
         # flops with `?` at query entry): reject a missing *_tc_flops entry up
         # front — a SILICON exact hit never invokes the get_sol closure.
@@ -1738,7 +1743,7 @@ class TrtLLMWideEPMoE(Operation):
                 wrapper = database._wideep_moe_compute_data
                 wrapper.raise_if_not_loaded()
                 kd = util_empirical.require_data_slice(wrapper, kernel_source)
-                quant_data = util_empirical.require_data_slice(kd, quant_mode)
+                quant_data = util_empirical.require_data_slice(kd, table_quant_mode)
                 dists = list(quant_data.keys())
                 dist = workload_distribution if workload_distribution in dists else (dists[0] if dists else None)
                 if dist is None:
@@ -1762,7 +1767,7 @@ class TrtLLMWideEPMoE(Operation):
                     database.backend,
                     database.version,
                     kernel_source,
-                    quant_mode.name,
+                    table_quant_mode.name,
                     topk,
                     num_experts,
                     hidden_size,
@@ -1843,7 +1848,7 @@ class TrtLLMWideEPMoE(Operation):
             database._wideep_moe_compute_data.raise_if_not_loaded()
             # Find the best matching distribution
             kernel_data = util_empirical.require_data_slice(database._wideep_moe_compute_data, kernel_source)
-            quant_data = util_empirical.require_data_slice(kernel_data, quant_mode)
+            quant_data = util_empirical.require_data_slice(kernel_data, table_quant_mode)
             available_distributions = list(quant_data.keys())
             if workload_distribution in available_distributions:
                 used_distribution = workload_distribution

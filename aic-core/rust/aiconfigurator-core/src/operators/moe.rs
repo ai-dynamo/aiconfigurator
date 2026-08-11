@@ -44,7 +44,7 @@ use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::gemm::quant_tc_flops;
-use crate::perf_database::moe::{MoeKernel, MoeSiblingSlice};
+use crate::perf_database::moe::{MoeKernel, MoeSiblingSlice, normalize_moe_quant};
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -602,10 +602,11 @@ impl MoeOp {
         db: &PerfDatabase,
         table: MoeTableSel,
     ) -> Result<Vec<(u32, f64)>, AicError> {
+        let lookup_quant = normalize_moe_quant(self.quant_mode);
         match table {
             MoeTableSel::Standard | MoeTableSel::LowLatency => db.moe.slice_points(
                 moe_kernel(table),
-                self.quant_mode.name(),
+                lookup_quant.name(),
                 &self.workload_distribution,
                 self.topk,
                 self.num_experts,
@@ -616,7 +617,7 @@ impl MoeOp {
             ),
             MoeTableSel::Wideep { is_context } => db.wideep.moe_slice_points(
                 is_context,
-                self.quant_mode.name(),
+                lookup_quant.name(),
                 &self.workload_distribution,
                 self.topk,
                 self.num_experts,
@@ -657,17 +658,18 @@ impl MoeOp {
         provenance: &'static str,
         out: &mut Vec<MoeReferenceCandidate>,
     ) -> Result<(), AicError> {
+        let lookup_source = normalize_moe_quant(source_quant);
         let slices = match table {
             MoeTableSel::Standard | MoeTableSel::LowLatency => db.moe.sibling_slices(
                 moe_kernel(table),
-                source_quant.name(),
+                lookup_source.name(),
                 &self.workload_distribution,
                 self.moe_tp_size,
                 self.moe_ep_size,
             ),
             MoeTableSel::Wideep { is_context } => db.wideep.moe_sibling_slices(
                 is_context,
-                source_quant.name(),
+                lookup_source.name(),
                 &self.workload_distribution,
                 self.moe_tp_size,
                 self.moe_ep_size,
@@ -1091,6 +1093,49 @@ mod tests {
     ///     quant_mode=common.MoEQuantMode.nvfp4, workload_distribution="balanced",
     ///     database_mode=common.DatabaseMode.EMPIRICAL))
     /// ```
+    /// nvfp4_wo normalization parity: `nvfp4_wo` must resolve through bfloat16
+    /// rows on h200/vllm/0.19.0 (no nvfp4_wo rows exist; bfloat16 data does).
+    /// Python oracle (shared_layer=False, HYBRID):
+    ///
+    /// ```python
+    /// db = perf_database.get_database_view("h200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
+    ///     transfer_policy=None, shared_layer=False)
+    /// float(MoE._query_moe_table(db, num_tokens=96, hidden_size=7168,
+    ///     inter_size=2048, topk=8, num_experts=256, moe_tp_size=1, moe_ep_size=1,
+    ///     quant_mode=MoEQuantMode.nvfp4_wo, workload_distribution="power_law_1.2",
+    ///     database_mode=DatabaseMode.HYBRID))
+    /// # → 4.144185638427734  (identical to bfloat16 at same shape)
+    /// ```
+    #[test]
+    fn moe_nvfp4_wo_normalizes_to_bfloat16_matches_python_oracle() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let db = PerfDatabase::load(&root, "h200_sxm", "vllm", "0.19.0")
+            .expect("h200/vllm/0.19.0 db loads")
+            .with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+
+        let op = MoeOp {
+            name: "moe-nvfp4wo".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 1,
+            quant_mode: MoeQuantMode::Nvfp4Wo,
+            workload_distribution: "power_law_1.2".into(),
+            attention_dp_size: 1,
+            is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
+        };
+        let r = op.query(&db, 96).expect("nvfp4_wo resolves via bfloat16 alias");
+        assert_oracle(&r, 4.144185638427734, Source::Silicon, "nvfp4_wo_t96");
+    }
+
     #[test]
     fn moe_empirical_low_latency_table_selection_matches_python_oracles() {
         let db = b200_trtllm_db().with_mode(

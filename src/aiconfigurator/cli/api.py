@@ -1506,7 +1506,7 @@ def _run_agg_estimate(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name, version=resolved_version)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1653,7 +1653,7 @@ def _run_static_estimate(
         is_context_role=static_mode != "static_gen",
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_nvfp4_for_system(model_config, system_name, model_path, backend_name=backend_name, version=resolved_version)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1820,14 +1820,22 @@ def _run_disagg_estimate(
         prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(
+        prefill_model_config, system_name, model_path, backend_name=backend_name, version=resolved_version
+    )
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
     )
-    resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
+    resolve_nvfp4_for_system(
+        decode_model_config,
+        decode_system_name or system_name,
+        model_path,
+        backend_name=backend_name,
+        version=resolved_version,
+    )
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -2132,9 +2140,13 @@ def _run_afd_estimate(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
     resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(a_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(
+        a_model_config, system_name, model_path, backend_name=backend_name, version=resolved_version
+    )
     resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
-    resolve_nvfp4_for_system(f_model_config, system_name, model_path)
+    resolve_nvfp4_for_system(
+        f_model_config, system_name, model_path, backend_name=backend_name, version=resolved_version
+    )
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

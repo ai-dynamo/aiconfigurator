@@ -72,26 +72,82 @@ def test_fp4_model_is_hardware_incompatible_below_sm80():
     assert "does not support" in incompatibility.reason
 
 
-def test_fp4_model_is_allowed_on_ampere_via_software_fallback():
+def test_fp4_model_is_allowed_on_ampere_vllm_021():
+    """vLLM >= 0.21.0 supports NVFP4 software dequant on SM80+ (Ampere)."""
     incompatibility = get_hardware_incompatibility(
         model="nvidia/Qwen3-235B-A22B-NVFP4",
         system="a100_sxm",
-        backend="trtllm",
+        backend="vllm",
         system_spec=_system_spec(sm_version=80, fp8=True),
+        version="0.21.0",
     )
 
     assert incompatibility is None
 
 
-def test_fp4_model_is_allowed_on_hopper_via_software_fallback():
+def test_fp4_model_is_incompatible_on_ampere_vllm_old_version():
+    """vLLM < 0.21.0 does not support NVFP4 on Ampere."""
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="a100_sxm",
+        backend="vllm",
+        system_spec=_system_spec(sm_version=80, fp8=True),
+        version="0.19.0",
+    )
+
+    assert incompatibility is not None
+
+
+def test_fp4_model_is_incompatible_on_hopper_trtllm():
+    """TRT-LLM has no Hopper NVFP4 support (native FP4 requires SM100+)."""
     incompatibility = get_hardware_incompatibility(
         model="nvidia/Qwen3-235B-A22B-NVFP4",
         system="h100_sxm",
         backend="trtllm",
         system_spec=_system_spec(sm_version=90, fp8=True),
+        version="1.3.0rc20",
+    )
+
+    assert incompatibility is not None
+
+
+def test_fp4_model_is_allowed_on_hopper_vllm_021():
+    """vLLM >= 0.21.0 supports NVFP4 software dequant on SM90 (Hopper)."""
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="h100_sxm",
+        backend="vllm",
+        system_spec=_system_spec(sm_version=90, fp8=True),
+        version="0.21.0",
     )
 
     assert incompatibility is None
+
+
+def test_fp4_model_is_allowed_on_hopper_sglang_053():
+    """SGLang >= 0.5.3 supports NVFP4 software dequant on SM90 (Hopper)."""
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="h100_sxm",
+        backend="sglang",
+        system_spec=_system_spec(sm_version=90, fp8=True),
+        version="0.5.3",
+    )
+
+    assert incompatibility is None
+
+
+def test_fp4_model_is_incompatible_on_hopper_sglang_old_version():
+    """SGLang < 0.5.3 does not support NVFP4 on Hopper."""
+    incompatibility = get_hardware_incompatibility(
+        model="nvidia/Qwen3-235B-A22B-NVFP4",
+        system="h100_sxm",
+        backend="sglang",
+        system_spec=_system_spec(sm_version=90, fp8=True),
+        version="0.5.2",
+    )
+
+    assert incompatibility is not None
 
 
 def test_sglang_dsa_model_is_hardware_incompatible_below_sm90():

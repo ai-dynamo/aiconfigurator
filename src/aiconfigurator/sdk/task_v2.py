@@ -41,6 +41,7 @@ from aiconfigurator.sdk.models import (
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
     check_is_moe,
+    check_nvfp4_swdequant,
     get_model_family,
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
@@ -1008,12 +1009,14 @@ class Task:
                 if not kv_explicit.get(role, False):
                     self._set_role_attr(role, "kvcache_quant_mode", common.KVCacheQuantMode.fp8)
 
-        # NVFP4 software fallback: on non-Blackwell systems, remap nvfp4 to
-        # nvfp4_wo (FP4 weight memory, BF16 compute speed) so the perf model
-        # queries BF16 data instead of native FP4 data.
+        # NVFP4 software fallback: remap nvfp4 to nvfp4_wo (FP4 weight memory,
+        # BF16 compute speed) only for backends that actually support sw-dequant
+        # at the resolved version. TRT-LLM has no Hopper NVFP4 support.
         for role in roles:
             system = self._role_attr(role, "system_name")
-            if not is_blackwell_system(system):
+            backend = self._role_attr(role, "backend_name")
+            version = self._role_attr(role, "backend_version")
+            if check_nvfp4_swdequant(system, backend, version) and not is_blackwell_system(system):
                 if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.nvfp4:
                     self._set_role_attr(role, "gemm_quant_mode", common.GEMMQuantMode.nvfp4_wo)
                 if self._role_attr(role, "moe_quant_mode") == common.MoEQuantMode.nvfp4:
@@ -1838,7 +1841,14 @@ class Task:
             # are NOT aliased to a collected table — they are admitted (or not)
             # through the transfer reachability checks below, mirroring the
             # query-time ladder.
+            # Op-specific aliases: MoE ops normalize nvfp4_wo -> bfloat16 at
+            # query time (same kernel, BF16 compute speed), so validation must
+            # accept it when bfloat16 data exists. GEMM does NOT alias here —
+            # it uses the transfer ladder (XPROFILE) which rejects in SILICON.
+            _moe_ops = {"moe", "wideep_context_moe", "wideep_generation_moe"}
             validation_aliases = {"w4a16_mxfp4_cutlass": "w4a16_mxfp4"}
+            if op in _moe_ops:
+                validation_aliases["nvfp4_wo"] = "bfloat16"
             alias = validation_aliases.get(name)
             if alias and alias in modes:
                 return

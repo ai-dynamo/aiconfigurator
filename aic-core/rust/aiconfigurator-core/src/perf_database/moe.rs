@@ -390,7 +390,7 @@ impl MoeTable {
 
 /// Normalize MoE quant mode for perf table lookup: nvfp4_wo runs the BF16
 /// compute kernel, so bfloat16 perf data is exact.
-fn normalize_moe_quant(quant: MoeQuantMode) -> MoeQuantMode {
+pub(crate) fn normalize_moe_quant(quant: MoeQuantMode) -> MoeQuantMode {
     if quant == MoeQuantMode::Nvfp4Wo {
         MoeQuantMode::Bfloat16
     } else {

@@ -16,14 +16,37 @@ def _model_config(**overrides) -> ModelConfig:
     return ModelConfig(**defaults)
 
 
-def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper_vllm():
+    """vLLM >= 0.21.0 supports sw-dequant on Hopper → remap fires."""
     mc = _model_config(
         gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
     )
-    resolve_nvfp4_for_system(mc, "h100_sxm")
+    resolve_nvfp4_for_system(mc, "h100_sxm", backend_name="vllm", version="0.21.0")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
     assert mc.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_not_remapped_on_hopper_trtllm():
+    """TRT-LLM has no Hopper NVFP4 support → remap must NOT fire."""
+    mc = _model_config(
+        gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+        moe_quant_mode=common.MoEQuantMode.nvfp4,
+    )
+    resolve_nvfp4_for_system(mc, "h100_sxm", backend_name="trtllm", version="1.3.0rc20")
+    assert mc.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert mc.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_nvfp4_not_remapped_on_hopper_old_vllm():
+    """vLLM < 0.21.0 does not support sw-dequant on Hopper → remap must NOT fire."""
+    mc = _model_config(
+        gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+        moe_quant_mode=common.MoEQuantMode.nvfp4,
+    )
+    resolve_nvfp4_for_system(mc, "h100_sxm", backend_name="vllm", version="0.19.0")
+    assert mc.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert mc.moe_quant_mode == common.MoEQuantMode.nvfp4
 
 
 def test_nvfp4_unchanged_on_blackwell():
@@ -31,7 +54,7 @@ def test_nvfp4_unchanged_on_blackwell():
         gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
     )
-    resolve_nvfp4_for_system(mc, "b200_sxm")
+    resolve_nvfp4_for_system(mc, "b200_sxm", backend_name="trtllm", version="1.3.0rc20")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.nvfp4
     assert mc.moe_quant_mode == common.MoEQuantMode.nvfp4
 
@@ -41,7 +64,7 @@ def test_bfloat16_unchanged_on_hopper():
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         moe_quant_mode=common.MoEQuantMode.bfloat16,
     )
-    resolve_nvfp4_for_system(mc, "h100_sxm")
+    resolve_nvfp4_for_system(mc, "h100_sxm", backend_name="vllm", version="0.21.0")
     assert mc.gemm_quant_mode == common.GEMMQuantMode.bfloat16
     assert mc.moe_quant_mode == common.MoEQuantMode.bfloat16
 

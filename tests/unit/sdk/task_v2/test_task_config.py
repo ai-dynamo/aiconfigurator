@@ -980,17 +980,30 @@ def test_sglang_agg_default_moe_ep_search():
     assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
-def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
-    """NVFP4 models on non-Blackwell systems should have quant modes remapped to nvfp4_wo
-    (FP4 weight memory, BF16 compute speed) for correct perf predictions."""
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper_vllm():
+    """vLLM >= 0.21.0 on Hopper: nvfp4 → nvfp4_wo (FP4 memory, BF16 compute)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="vllm",
+        backend_version="0.24.0",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_not_remapped_on_hopper_trtllm():
+    """TRT-LLM has no Hopper NVFP4 support → nvfp4 must NOT be remapped."""
     t = Task(
         serving_mode="agg",
         model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
         system_name="h100_sxm",
         backend_name="trtllm",
+        backend_version="1.3.0rc20",
     )
-    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
-    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
 
 
 def test_nvfp4_preserved_on_blackwell():
@@ -1011,7 +1024,8 @@ def test_nvfp4_hopper_explicit_gemm_preserves_supplied_mode():
         serving_mode="agg",
         model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
         system_name="h100_sxm",
-        backend_name="trtllm",
+        backend_name="vllm",
+        backend_version="0.24.0",
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
     )
     assert t.gemm_quant_mode == common.GEMMQuantMode.bfloat16
@@ -1024,7 +1038,8 @@ def test_nvfp4_hopper_explicit_moe_preserves_supplied_mode():
         serving_mode="agg",
         model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
         system_name="h100_sxm",
-        backend_name="trtllm",
+        backend_name="vllm",
+        backend_version="0.24.0",
         moe_quant_mode=common.MoEQuantMode.bfloat16,
     )
     assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
@@ -1923,6 +1938,34 @@ def test_validate_gemm_quant_transfer_reachable_in_hybrid():
     for mode, policy in (("SILICON", None), ("HYBRID", None), ("HYBRID", "xprofile")):
         with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
             make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
+
+
+def test_validate_nvfp4_wo_moe_alias_admitted_in_hybrid():
+    """nvfp4_wo MoE normalizes to bfloat16 at query time, so _check_role_against_db
+    must admit it via the op-scoped alias when bfloat16 MoE data exists in the DB.
+    GEMM nvfp4_wo must go through the transfer ladder (not the alias) so SILICON
+    still rejects it. Uses vLLM 0.24.0 on H100 where the remap fires."""
+
+    def make(mode, policy=None):
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.24.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    # vLLM 0.24.0 on H100: nvfp4 → nvfp4_wo. HYBRID admits:
+    # MoE nvfp4_wo via bfloat16 alias (bfloat16 MoE data exists in h100/vllm).
+    # GEMM nvfp4_wo via XPROFILE transfer ladder to bfloat16.
+    make("HYBRID").validate()
+
+    # SILICON rejects GEMM nvfp4_wo (no silicon data, no alias for GEMM, no
+    # transfer in SILICON). MoE alias fires but GEMM raises first.
+    with pytest.raises(ValueError, match="nvfp4_wo"):
+        make("SILICON").validate()
 
 
 def test_validate_fp8_static_not_transfer_admitted_in_hybrid():

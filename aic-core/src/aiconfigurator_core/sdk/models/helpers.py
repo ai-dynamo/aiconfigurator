@@ -534,25 +534,62 @@ def resolve_dsv4_moe_arch(
         model_config.moe_quant_mode = mode
 
 
-def resolve_nvfp4_for_system(
-    model_config: config.ModelConfig,
+# Backend version thresholds for NVFP4 software dequant on SM80-99 (non-Blackwell).
+# vLLM 0.21.0 added Hopper QDQ/dequant emulation; SGLang 0.5.3 added the same.
+# TRT-LLM has no Hopper NVFP4 support (native FP4 requires SM100+/Blackwell).
+_NVFP4_SWDEQUANT_BACKEND_MIN_VERSIONS: dict[str, str] = {
+    "vllm": "0.21.0",
+    "sglang": "0.5.3",
+}
+
+
+def check_nvfp4_swdequant(
     system_name: str | None,
-    model_path: str | None = None,
-) -> None:
-    """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
+    backend_name: str | None = None,
+    version: str | None = None,
+) -> bool:
+    """Return True when a non-Blackwell system+backend+version supports NVFP4 software dequant.
 
-    On Blackwell, nvfp4 runs with native FP4 tensor cores (compute=4x).
-    On Hopper and earlier, the framework dequantizes FP4 weights to BF16
-    before compute, so latency should be modeled at BF16 speed (compute=1x)
-    while weight memory stays FP4-sized.
+    Blackwell (SM100+) runs nvfp4 natively — no software dequantization and no
+    remap needed, so this returns False for Blackwell. Non-Blackwell systems
+    require a backend that implements sw-dequant AND a version that includes it
+    (vLLM 0.21.0+, SGLang 0.5.3+). TRT-LLM has no Hopper NVFP4 support.
 
-    When quant modes are still None (CLI estimate path before get_model
-    infers them), infers from the HF config via ``model_path`` so the
-    remap can fire before model construction.
+    Used as a single predicate across Task resolution, resolve_nvfp4_for_system(),
+    and the support-matrix hardware-preflight gate (for the FP4_SWDEQUANT datatype).
     """
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system
 
     if is_blackwell_system(system_name):
+        return False  # native FP4 TC — sw-dequant not needed, nvfp4 stays as-is
+    min_ver_str = _NVFP4_SWDEQUANT_BACKEND_MIN_VERSIONS.get(backend_name or "")
+    if min_ver_str is None:
+        return False  # backend not known to support sw-dequant on non-Blackwell
+    if version is None:
+        return False  # unknown version: conservative rejection
+    parsed = common.parse_support_matrix_version(version)
+    min_parsed = common.parse_support_matrix_version(min_ver_str)
+    return parsed is not None and min_parsed is not None and parsed >= min_parsed
+
+
+def resolve_nvfp4_for_system(
+    model_config: config.ModelConfig,
+    system_name: str | None,
+    model_path: str | None = None,
+    backend_name: str | None = None,
+    version: str | None = None,
+) -> None:
+    """Remap native nvfp4 to weight-only nvfp4_wo on systems that support sw-dequant.
+
+    On Blackwell, nvfp4 runs with native FP4 tensor cores (compute=4x).
+    On Hopper/Ampere (SM80-99) with a supporting backend+version, the framework
+    dequantizes FP4 weights to BF16 before compute — latency is modeled at BF16
+    speed (compute=1x) while weight memory stays FP4-sized (nvfp4_wo).
+
+    When quant modes are still None (CLI estimate path before get_model infers
+    them), infers from the HF config via ``model_path``.
+    """
+    if not check_nvfp4_swdequant(system_name, backend_name, version):
         return
 
     gemm_q = model_config.gemm_quant_mode
