@@ -20,16 +20,61 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order
 from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=256)
+def _lane_order_cached(backend, version, sm_version, override, systems_root) -> tuple[str, ...]:
+    """Memoized :func:`resolve_attention_lane_order`.
+
+    The resolution reads a YAML map and builds a list; the engine-spec build
+    needs it per attention op, so memoize on the full input tuple. One entry
+    per (database identity x override) — a sweep resolves each order exactly
+    once.
+    """
+    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root)
+
+
+def resolve_lane_order(database, override: str | None = None) -> tuple[str, ...]:
+    """Attention lane precedence for *database* under an optional *override*.
+
+    The override is the user-facing ``attention_backend`` knob carried by the
+    op; everything else comes off the database handle (backend, version,
+    ``sm_version``, systems root). ``"default"`` is always the last element.
+    """
+    sm_version = database.system_spec["gpu"].get("sm_version") or -1
+    return _lane_order_cached(database.backend, database.version, sm_version, override, database.systems_root)
+
+
+def lane_walk_order(table, lane_order: tuple[str, ...]) -> tuple[str, ...]:
+    """*lane_order* followed by the table's remaining lanes, in table order.
+
+    The resolver only knows the user-facing lane vocabulary; collected
+    ``kernel_source`` labels are richer (trtllm ships ``torch_flow`` /
+    ``torch_flow_flashinfer``, vllm ships ``vllm_*``, sglang also ships
+    ``flash_attention``) and some backends have no ``"default"`` lane at all.
+    Appending the leftovers keeps every collected row reachable and reproduces
+    the pre-lane behaviour (first lane loaded wins) for backends the map does
+    not cover yet. Table order is the loader's row order, so this is stable for
+    a given data set — and the ENGINE SPEC carries this extended order, so the
+    Rust twin replays it verbatim instead of re-deriving it.
+    """
+    if not table:
+        return tuple(lane_order)
+    extra = tuple(lane for lane in table if isinstance(lane, str) and lane not in lane_order)
+    return tuple(lane_order) + extra
+
 
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
