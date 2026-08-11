@@ -5,7 +5,7 @@
 model rewrite, and the explicit mixed-step branch.
 
 Synthetic parquet/metadata pairs are written directly from the documented
-``aic_fpm_forward_perf`` schema (v5) — deliberately NOT via collector code, so
+``aic_fpm_forward_perf`` schema (v6) — deliberately NOT via collector code, so
 this suite doubles as the producer/consumer contract test on the modeling
 side of the module boundary.
 """
@@ -277,6 +277,24 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
 
+    @pytest.mark.parametrize(
+        "identity,config_overrides",
+        [
+            ({"moe_backend": "flashinfer_cutlass"}, {"moe_backend": "flashinfer_cutlass"}),
+            ({"attention_backend": "fa3"}, {"attention_backend": "fa3"}),
+            ({"enable_eplb": True}, {"enable_eplb": True}),
+        ],
+    )
+    def test_unemittable_vllm_identity_is_rejected_before_cell_selection(self, fake_db, identity, config_overrides):
+        # Exercise the producer-to-consumer boundary with a row that exactly
+        # matches a direct SDK request. The standard Task-to-generator path
+        # cannot emit these vLLM settings yet, so selection must fail closed
+        # instead of pricing a deployment AIC would not reproduce.
+        rows = [_row("decode", 2, 0, 2048, 8.0, identity=identity)]
+        op = _make_op("decode", model_config=_model_config(**config_overrides))
+        with pytest.raises(PerfDataNotAvailableError, match="Task-to-generator"):
+            op.query(fake_db(rows), batch_size=2, s=1024)
+
     def test_backend_knob_data_answers_matching_config(self, fake_db):
         # v6 backend knobs are ordinary identity columns: wideep-collected
         # rows answer a wideep config — and only that config.
@@ -292,9 +310,6 @@ class TestFPMForwardOpQuery:
         "overrides",
         [
             {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
-            {"enable_eplb": True},
-            {"moe_backend": "megamoe"},
-            {"attention_backend": "fa3"},
         ],
     )
     def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
