@@ -59,10 +59,19 @@ _RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_digest")
 _TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
 
 
+def _registry_lists(registry_module) -> tuple[list, ...]:
+    registries = [registry_module.REGISTRY]
+    registry_xpu = getattr(registry_module, "REGISTRY_XPU", None)
+    if registry_xpu is not None:
+        registries.append(registry_xpu)
+    return tuple(registries)
+
+
 def enumerate_registry_modules() -> set[str]:
     """Return every collector module referenced by an OpEntry in any of the five
     registries enumerated by ``framework_manifest._REGISTRY_MODULES`` (sglang,
-    trtllm, vllm, wideep_sglang, wideep_trtllm).
+    trtllm, vllm, wideep_sglang, wideep_trtllm), plus active sibling registries
+    such as vLLM's ``REGISTRY_XPU``.
     """
     import importlib
 
@@ -70,12 +79,13 @@ def enumerate_registry_modules() -> set[str]:
 
     modules: set[str] = set()
     for registry_module_path in _REGISTRY_MODULES.values():
-        registry = importlib.import_module(registry_module_path).REGISTRY
-        for entry in registry:
-            if entry.module:
-                modules.add(entry.module)
-            for route in entry.versions:
-                modules.add(route.module)
+        registry_module = importlib.import_module(registry_module_path)
+        for registry in _registry_lists(registry_module):
+            for entry in registry:
+                if entry.module:
+                    modules.add(entry.module)
+                for route in entry.versions:
+                    modules.add(route.module)
     return modules
 
 

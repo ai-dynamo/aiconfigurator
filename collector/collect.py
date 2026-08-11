@@ -1180,18 +1180,12 @@ def collect_vllm(
         logger.exception("vLLM is not installed. Please install it from https://github.com/vllm-project/vllm")
         return None, None
 
-    from collector.framework_manifest import CollectorRuntime, require_collector_runtime
+    from collector.framework_manifest import require_collector_runtime
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("vllm")}
     if is_xpu_backend:
-        runtime = CollectorRuntime(
-            framework="vllm",
-            version=version,
-            images={"default": f"installed-vllm-xpu:{version}"},
-            source_repo="https://github.com/vllm-project/vllm.git",
-        )
-        logger.warning("vLLM XPU collector is using installed runtime v%s; skipping stock CUDA manifest pin", version)
+        runtime = require_collector_runtime("vllm_xpu", version, requested_ops=requested_ops, wideep_ops=set())
     else:
         runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 

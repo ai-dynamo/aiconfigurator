@@ -8,7 +8,7 @@ RowParallelLinear layers, prepares supported FP8 paths, expands YAML-backed
 matrix shapes, and logs perf rows using XPU-aware device helpers.
 """
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm==0.26.0"
 
 import os
 

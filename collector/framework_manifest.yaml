@@ -31,6 +31,17 @@ frameworks:
       images:
         default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
         cu129: "vllm/vllm-openai:v0.24.0-cu129@sha256:6b005c78cd17a1f0215f31e95d183833f4dfd6167c4473241b80d1c8843b91e8"
+  vllm_xpu:
+    base_framework: vllm
+    data_backend: vllm
+    notes: >
+      Intel XPU collector runtime. This is intentionally separate from stock
+      CUDA vLLM because the XPU collectors depend on vLLM 0.26.0 plus the
+      matching vllm-xpu-kernels runtime contract.
+    default:
+      version: "0.26.0"
+      images:
+        default: "vllm/vllm-openai-xpu:v0.26.0@sha256:e2ab50957fc309d3fb110e6331ab8bfb7dd4f0074df41cbbf0bc3c64c8bc0e52"
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"

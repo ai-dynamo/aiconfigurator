@@ -125,6 +125,11 @@ collector.vllm.collect_attn:
   - collector/cases/base_ops/attention_context.yaml
   - collector/cases/base_ops/attention_generation.yaml
   - __model_cases__
+collector.vllm.collect_attn_xpu:
+  - collector/cases/base_ops/attention_context.yaml
+  - collector/cases/base_ops/attention_generation.yaml
+  - collector/vllm/utils_xpu.py
+  - __model_cases__
 collector.vllm.collect_attn_encoder:
   - collector/cases/base_ops/attention_encoder.yaml
   - __model_cases__
@@ -140,6 +145,10 @@ collector.vllm.collect_gdn:
 collector.vllm.collect_gemm:
   - collector/cases/base_ops/gemm.yaml
   - __model_cases__
+collector.vllm.collect_gemm_xpu:
+  - collector/cases/base_ops/gemm.yaml
+  - collector/vllm/utils_xpu.py
+  - __model_cases__
 collector.vllm.collect_mhc_module:
   - collector/cases/base_ops/mhc.yaml
   - __model_cases__
@@ -147,6 +156,9 @@ collector.vllm.collect_mla_module:
   - collector/cases/base_ops/mla_module.yaml
   - __model_cases__
 collector.vllm.collect_moe:
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+collector.vllm.collect_moe_xpu:
   - collector/cases/base_ops/moe.yaml
   - __model_cases__
 

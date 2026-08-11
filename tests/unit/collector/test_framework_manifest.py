@@ -11,6 +11,7 @@ from collector.framework_manifest import get_collector_runtime, require_collecto
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
+from collector.vllm.registry import REGISTRY_XPU as VLLM_XPU_REGISTRY
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
 
@@ -37,6 +38,15 @@ def test_manifest_exposes_current_framework_versions_and_images():
     assert vllm.image("cu130") == vllm.image()
 
 
+def test_manifest_exposes_pinned_vllm_xpu_runtime_identity():
+    runtime = get_collector_runtime("vllm_xpu")
+
+    assert runtime.framework == "vllm_xpu"
+    assert runtime.data_backend == "vllm"
+    assert runtime.version == "0.26.0"
+    assert runtime.image().startswith("vllm/vllm-openai-xpu:v0.26.0@sha256:")
+
+
 def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
     expected = f'__compat__ = "vllm=={get_collector_runtime("vllm").version}"'
     assert all(not entry.versions for entry in VLLM_REGISTRY)
@@ -45,6 +55,15 @@ def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
         source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
         declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
         assert declarations == [expected], module
+
+    def test_active_vllm_xpu_collectors_are_exactly_pinned_to_manifest_version():
+        expected = f'__compat__ = "vllm=={get_collector_runtime("vllm_xpu").version}"'
+        assert all(not entry.versions for entry in VLLM_XPU_REGISTRY)
+
+        for module in sorted({entry.module for entry in VLLM_XPU_REGISTRY}):
+            source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
+            declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
+            assert declarations == [expected], module
 
 
 def test_wideep_runtime_stays_independent_from_default_framework_runtime():
@@ -155,6 +174,19 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
     assert (runtime.workload, runtime.version) == (workload, version)
 
 
+def test_vllm_xpu_runtime_selection_uses_xpu_registry_and_accepts_local_version_metadata():
+    runtime = require_collector_runtime("vllm_xpu", "0.26.0+xpu", requested_ops={"gemm"}, wideep_ops=set())
+
+    assert runtime.framework == "vllm_xpu"
+    assert runtime.version == "0.26.0"
+    assert runtime.image().startswith("vllm/vllm-openai-xpu:v0.26.0@sha256:")
+
+
+def test_vllm_xpu_runtime_selection_rejects_version_mismatch():
+    with pytest.raises(RuntimeError, match=r"vllm_xpu stock collector requires exactly 0\.26\.0"):
+        require_collector_runtime("vllm_xpu", "0.24.0", requested_ops={"gemm"}, wideep_ops=set())
+
+
 @pytest.mark.parametrize(
     ("installed_version", "requested_ops", "match"),
     [
@@ -173,6 +205,11 @@ def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, r
 def test_unknown_requested_op_fails_with_key_error():
     with pytest.raises(KeyError, match=r"has no op\(s\): \['not_a_real_op'\]"):
         require_collector_runtime("sglang", "0.5.14", requested_ops={"not_a_real_op"}, wideep_ops=set())
+
+
+def test_vllm_xpu_unknown_requested_op_fails_with_key_error():
+    with pytest.raises(KeyError, match=r"vllm_xpu registry has no op\(s\): \['not_a_real_op'\]"):
+        require_collector_runtime("vllm_xpu", "0.26.0+xpu", requested_ops={"not_a_real_op"}, wideep_ops=set())
 
 
 def test_typo_mixed_with_real_op_fails_closed():

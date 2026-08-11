@@ -8,7 +8,7 @@ benchmark synthetic MoE cases. The module adapts common MoE case specs to XPU
 kernel constraints, builds routing logits, and writes vLLM MoE perf rows.
 """
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm==0.26.0"
 
 import os
 
