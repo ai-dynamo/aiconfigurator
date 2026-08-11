@@ -488,7 +488,6 @@ def _fold_per_op_entries(entries) -> dict[str, tuple[float, float, str]]:
 _ACCEPTED_SOURCE_TAG_DIVERGENCES = {
     ("context_p2p", "empirical", "silicon"),
     ("generation_p2p", "empirical", "silicon"),
-    ("context_attention", "mixed", "silicon"),
 }
 
 

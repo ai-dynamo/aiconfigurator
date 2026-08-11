@@ -239,27 +239,35 @@ impl ContextAttentionOp {
         };
 
         // Fused-op extras (qk_norm optional, rope + kv_write mandatory).
-        // Python evaluates them through the mode-aware `query_mem_op`, so
-        // SOL mode uses the pure `bytes / mem_bw` bound here too.
+        // Python evaluates them through the mode-aware `query_mem_op` and
+        // composes full PerformanceResults, so the extras keep their
+        // provenance (empirical formula under SILICON/HYBRID/EMPIRICAL, sol
+        // under SOL) and the final add below merges it into the table
+        // result's source — silicon table + empirical extras -> "mixed".
         let q_num = (self.n * self.head_size) as f64;
         let k_num = (self.n_kv * self.head_size) as f64;
         let v_num = (self.n_kv * self.head_size) as f64;
-        let mem_op = |bytes: f64| query_mem_op(db, bytes).latency_ms;
+        let mem_op = |bytes: f64| query_mem_op(db, bytes);
 
-        let mut extra = 0.0;
+        // Python `extra_latency = 0`: a zero PerformanceResult is an add
+        // identity (`plus` passes the first accumulated term through
+        // verbatim, source included).
+        let mut extra = PerformanceResult::new(0.0, Source::Empirical);
         if self.use_qk_norm {
-            let qk_norm = 2.0 * mem_op(q_num * 2.0) + 2.0 * mem_op(k_num * 2.0);
-            extra += qk_norm * 2.0; // elementwise before norm
+            let qk_norm = mem_op(q_num * 2.0)
+                .scaled(2.0)
+                .plus(mem_op(k_num * 2.0).scaled(2.0));
+            extra = extra.plus(qk_norm.scaled(2.0)); // elementwise before norm
         }
-        let apply_rope = 2.0 * mem_op(q_num * 2.0 + k_num * 2.0);
+        let apply_rope = mem_op(q_num * 2.0 + k_num * 2.0).scaled(2.0);
         let kv_write = mem_op(k_num * self.fmha_quant_mode.mapping().memory)
-            + mem_op(v_num * self.fmha_quant_mode.mapping().memory);
-        extra += apply_rope + kv_write;
+            .plus(mem_op(v_num * self.fmha_quant_mode.mapping().memory));
+        extra = extra.plus(apply_rope.plus(kv_write));
 
-        // Python's correction factor for the fused extras. The mem-op extras
-        // are a scalar add (`result += extra * 1.1`): latency only, energy
-        // unchanged (Python's `__add__` with a plain float).
-        result.latency_ms += extra * 1.1;
+        // Python's correction factor for the fused extras
+        // (`result += extra_latency * 1.1`): latency and energy both sum
+        // (the mem-op extras carry zero energy) and the sources merge.
+        result = result.plus(extra.scaled(1.1));
 
         if seq_imbalance_correction_scale != 1.0 {
             // Python `result * scale` scales latency AND energy.
@@ -383,15 +391,16 @@ impl EncoderAttentionOp {
         // operations/attention.py): Q + K bytes (bf16) over all tokens,
         // rotated fractionally, with the 1.1 correction factor. Added on top
         // of the mode-dispatched table value (Python applies it after the
-        // table query in every mode, through the mode-aware `query_mem_op`).
-        // Scalar add: latency only, energy unchanged (Python `__add__` with
-        // a plain float).
+        // table query in every mode, through the mode-aware `query_mem_op`)
+        // as a full PerformanceResult, so the rope extra keeps its mem-op
+        // provenance and the add merges sources (silicon table + empirical
+        // rope -> "mixed").
         if self.partial_rotary_factor > 0.0 {
             let qk_num = (self.n as u64) * (self.head_size as u64); // MHA: q == k
             let qk_bytes = 2 * (qk_num * 2) * (batch_size as u64) * (s as u64);
             let apply_rope =
-                self.partial_rotary_factor * 2.0 * query_mem_op(db, qk_bytes as f64).latency_ms;
-            result.latency_ms += apply_rope * 1.1;
+                query_mem_op(db, qk_bytes as f64).scaled(self.partial_rotary_factor * 2.0);
+            result = result.plus(apply_rope.scaled(1.1));
         }
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
@@ -1029,7 +1038,9 @@ mod tests {
             .expect("context attention query must succeed");
         // Table value at exact hit is 19.82; mem_op extras add ~0-1ms on top.
         assert!(result.latency_ms > 19.0 && result.latency_ms < 30.0);
-        assert_eq!(result.source, Source::Silicon);
+        // Measured table leaf + empirical rope/kv_write extras -> "mixed"
+        // (Python `ContextAttention.query` PerformanceResult composition).
+        assert_eq!(result.source, Source::Mixed);
     }
 
     #[test]
@@ -1527,5 +1538,49 @@ mod tests {
         let expected = encoder_attention_sol_ms(&spec, 72, 16.0, 64.0, 2.0, enc_flops);
         assert_eq!(result.latency_ms, expected);
         assert_eq!(result.source, Source::Sol);
+    }
+
+    /// SILICON mode: the fused rope/kv_write extras are empirical formulas,
+    /// so the op-level context result must MERGE provenance — measured table
+    /// leaf + empirical extras -> `Source::Mixed`, with the table's energy
+    /// unchanged (the mem-op extras carry none). Guards the
+    /// PerformanceResult composition against regressing to a latency-only
+    /// scalar add (which mislabeled the result `silicon`).
+    #[test]
+    fn context_attention_silicon_merges_extras_provenance_into_mixed() {
+        let db = b200_vllm_db();
+        let op = ContextAttentionOp::new(
+            "ctx",
+            64,
+            8,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        );
+        let result = op.query(&db, 4, 2048, 256, 1.0).expect("ctx silicon");
+
+        let table = query_context_attention_table(
+            &db,
+            4,
+            2048,
+            256,
+            64,
+            8,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        )
+        .expect("table silicon");
+        let q_num = (64 * 128) as f64;
+        let k_num = (8 * 128) as f64;
+        let fmha_mem = FmhaQuantMode::Bfloat16.mapping().memory;
+        let mem_op = |bytes: f64| query_mem_op(&db, bytes).latency_ms;
+        // Same association as the op body: rope + (kv_q + kv_v).
+        let extras = 2.0 * mem_op(q_num * 2.0 + k_num * 2.0)
+            + (mem_op(k_num * fmha_mem) + mem_op(k_num * fmha_mem));
+        assert_eq!(result.latency_ms, table.latency_ms + extras * 1.1);
+        assert_eq!(result.energy_wms, table.energy_wms);
+        assert_eq!(result.source, Source::Mixed);
     }
 }
