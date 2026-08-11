@@ -48,28 +48,47 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_WIDEEP_MLA_ATTENTION_BACKENDS = ("flashinfer", "fa3")
 
-def _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend: str) -> str:
+
+def _attention_backend_or_default(attention_backend: str | None) -> str:
+    """Default only an omitted backend; an explicit empty value stays invalid."""
+    return "flashinfer" if attention_backend is None else attention_backend
+
+
+def _check_wideep_mla_attention_backend(attention_backend: str | None) -> str:
+    """Validate the user-facing WideEP MLA attention backend."""
+    requested = _attention_backend_or_default(attention_backend)
+    if requested not in _WIDEEP_MLA_ATTENTION_BACKENDS:
+        raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {requested!r}.")
+    return requested
+
+
+def _resolve_wideep_mla_kernel_source(data_wrapper, attention_backend: str | None) -> str:
     """Resolve the kernel_source key for the WideEP MLA tables.
 
     These tables are keyed at the top level by the *measured* kernel_source.
     Hopper collections use ``fa3`` / ``flashinfer`` -- identical to the
     user-facing ``attention_backend`` names -- but Blackwell (SM100) collections
     use ``trtllm_mla``, which is NOT a user-facing attention_backend. Prefer the
-    requested backend when the table actually carries it; otherwise fall back to
-    the kernel source that was collected (e.g. ``trtllm_mla`` on Blackwell) so the
-    lookup does not miss purely on a name mismatch. If neither is present, return
-    the requested backend and let ``require_data_slice`` raise the standard
-    coverage error.
+    requested value when the table actually carries it, including explicit
+    low-level kernel sources such as ``trtllm_mla``. Only the supported
+    user-facing aliases may fall back to a collected ``trtllm_mla`` slice; an
+    unknown or empty value must never borrow that slice.
     """
+    requested = _attention_backend_or_default(attention_backend)
     try:
-        if attn_backend in data_wrapper:
-            return attn_backend
-        if "trtllm_mla" in data_wrapper:
-            return "trtllm_mla"
+        if requested in data_wrapper:
+            return requested
+        if requested in _WIDEEP_MLA_ATTENTION_BACKENDS:
+            return "trtllm_mla" if "trtllm_mla" in data_wrapper else requested
     except TypeError:
-        pass
-    return attn_backend
+        # The caller will raise the structured table-not-loaded error. With no
+        # table there is no exact kernel_source set against which to validate.
+        return requested
+    raise ValueError(
+        f"attention_backend must be 'flashinfer', 'fa3', or match an available kernel_source; got {requested!r}."
+    )
 
 
 def _cache_key(database: PerfDatabase) -> tuple:
@@ -1318,12 +1337,9 @@ class WideEPGenerationMLA(Operation):
         ) -> float:
             # SOL / util from own (num_heads, b, s) grid; num_heads = 128 // tp_size
             # (mirrors get_silicon).
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend not in {"flashinfer", "fa3"}:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
             sol_time = get_sol(b, s, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             cls.load_data(database)
-            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_generation_mla_data, attn_backend)
+            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_generation_mla_data, attention_backend)
 
             def _slice():
                 cls.load_data(database)
@@ -1374,9 +1390,7 @@ class WideEPGenerationMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend not in {"flashinfer", "fa3"}:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_backend = _check_wideep_mla_attention_backend(attention_backend)
             kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend)
             attn_data = util_empirical.require_data_slice(data_wrapper, kernel_source)
             # Convert tp_size to num_heads (assuming 128 total heads for DeepSeek)
@@ -1594,12 +1608,9 @@ class WideEPContextMLA(Operation):
         ) -> float:
             # SOL / util from own (num_heads, full_s, b) grid; num_heads = 128 // tp_size.
             # Samples are prefix=0; SOL(query) carries prefix natively.
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend not in {"flashinfer", "fa3"}:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
             sol_time = get_sol(b, s, prefix, tp_size, kvcache_quant_mode, fmha_quant_mode)[0]
             cls.load_data(database)
-            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_context_mla_data, attn_backend)
+            kernel_source = _resolve_wideep_mla_kernel_source(database._wideep_context_mla_data, attention_backend)
 
             def _slice():
                 cls.load_data(database)
@@ -1655,9 +1666,7 @@ class WideEPContextMLA(Operation):
 
         def get_silicon():
             data_wrapper.raise_if_not_loaded()
-            attn_backend = attention_backend or "flashinfer"
-            if attn_backend not in {"flashinfer", "fa3"}:
-                raise ValueError(f"Unsupported attention backend: {attn_backend}")
+            attn_backend = _check_wideep_mla_attention_backend(attention_backend)
             kernel_source = _resolve_wideep_mla_kernel_source(data_wrapper, attn_backend)
             attn_data = util_empirical.require_data_slice(data_wrapper, kernel_source)
 
