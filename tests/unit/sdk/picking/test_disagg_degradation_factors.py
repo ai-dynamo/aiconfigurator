@@ -98,9 +98,7 @@ def _run(**kwargs):
     prefill_df = pd.DataFrame([_prefill_dict()])
     decode_df = pd.DataFrame([_decode_dict()])
     # Loose SLAs so both single candidates always survive filtering.
-    return pick_autoscale(
-        prefill_df, decode_df, target_ttft=1e9, target_tpot=1e9, **kwargs
-    )
+    return pick_autoscale(prefill_df, decode_df, target_ttft=1e9, target_tpot=1e9, **kwargs)
 
 
 def test_default_factors_match_constants() -> None:
