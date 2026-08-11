@@ -8,8 +8,7 @@ import pytest
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
-from aiconfigurator.sdk.models import check_is_moe, get_model, get_model_family
-from aiconfigurator.sdk.models.laguna import LagunaModel
+from aiconfigurator.sdk.models import LagunaModel, check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit

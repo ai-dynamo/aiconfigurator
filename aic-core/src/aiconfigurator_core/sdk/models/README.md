@@ -25,6 +25,7 @@ models/
   nemotron_nas.py    # NemotronNas (PUZZLE NAS models)
   nemotron_h.py      # NemotronHModel (Mamba + MoE + Transformer hybrid)
   hybrid_moe.py      # HybridMoEModel (MiMo-V2-Flash, Llama 4)
+  laguna.py          # LagunaModel (per-layer full/SWA attention + dense/MoE FFN)
   qwen35.py          # Qwen35Model (Qwen3.5 hybrid GDN + full-attention)
 ```
 
@@ -75,6 +76,7 @@ Each model class has a `create(cls, model_info, model_config, backend_name)` cla
 | DeepSeekV4Model | Single class, MoE prefix args |
 | NemotronHModel | Passes MoE args + calls `set_hybrid_config()` after construction |
 | HybridMoEModel | Passes MoE args + calls `set_hybrid_config()` after construction |
+| LagunaModel | Passes MoE args + calls `set_laguna_config()` after construction |
 | NemotronNas | Applies block configs from `extra_params` after construction |
 | Qwen35Model | Standard args, simple wrapper |
 

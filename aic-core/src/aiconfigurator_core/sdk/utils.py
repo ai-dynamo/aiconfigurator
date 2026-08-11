@@ -937,7 +937,6 @@ def _parse_hf_config_json(config: dict) -> dict:
             shared_expert_inter_size=int(config.get("shared_expert_intermediate_size", 0)),
             gating=bool(config.get("gating", False)),
             use_qk_norm=True,
-            moe_routed_scaling_factor=float(config.get("moe_routed_scaling_factor", 1.0)),
         )
         logger.info(
             "Laguna config: global_layers=%d, swa_layers=%d, dense_layers=%d, moe_layers=%d, sw=%d, shared_expert=%d",

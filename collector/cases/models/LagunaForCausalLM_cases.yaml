@@ -21,6 +21,9 @@ model_case_values:
       inter_size: 1024
       topk: 10
       num_experts: 256
+      # Block-FP8 requires the per-rank intermediate width to remain divisible
+      # by the checkpoint's 128-element quantization block.
+      max_tp_exclusive: 16
       framework_quantization:
         vllm:
           allowed_modes:

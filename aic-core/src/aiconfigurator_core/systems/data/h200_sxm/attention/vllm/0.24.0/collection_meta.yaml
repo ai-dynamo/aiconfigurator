@@ -1,13 +1,34 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 schema_version: 1
-provenance: legacy
+provenance: collected
 runtime:
   framework: vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0
+  image_digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+model:
+  path: poolside/Laguna-S-2.1-FP8
+  revision: fc72eb9025540b2225a681bb81950cc1225ff286
+  config_sha256: 6337348c4988936be54276c637e7a2c1c6b25ec44114a199240944a3e0f7212e
+collection:
+  scope: append_missing_laguna_keys
+  run_root: artifacts/laguna_s2_repro/collection_vllm_0_24_minimal_broad_moe_20260810
+  collected_at: '2026-08-10'
 tables:
   context_attention_perf:
+    collector_hash: sha256:fa0ee72fb4fdce4686b2325299579efa42bf09129e78a6990d845df434fb011a
+    case_plan_hash: sha256:a6077f915fcc19391d5ab47a446e6c3a8c2235f133095c011a876bf786c20cdd
+    rows: 51544
+    fresh_rows: 714
+    preserved_rows: 50830
+    replaced_rows: 0
+    sha256: d9f706261919dc1e8d926886b48580d30a5504859c3b0f1515244ae14f8c3f2f
     status: complete
   generation_attention_perf:
+    collector_hash: sha256:fa0ee72fb4fdce4686b2325299579efa42bf09129e78a6990d845df434fb011a
+    case_plan_hash: sha256:d2f299f5581527d0c6ddbd62e089a9d0685ff40a374f6f86531c08663381f40e
+    rows: 63006
+    fresh_rows: 840
+    preserved_rows: 62166
+    replaced_rows: 0
+    sha256: ac8090f56bda8f895f9a5ba8836a91e1725d26d4d5840aaa5b1acb6be047b260
     status: complete

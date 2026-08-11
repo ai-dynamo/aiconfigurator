@@ -234,7 +234,6 @@ class LagunaConfig:
     sliding_window_size: KV-cache token window applied to all sliding_attention layers
     shared_expert_inter_size: intermediate size of the always-active shared expert (0 if absent)
     gating: whether layers include a per-head attention-gate projection before the output projection
-    moe_routed_scaling_factor: routed-expert output scaling before combining with the shared expert
     """
 
     layer_types: tuple[str, ...]
@@ -244,7 +243,6 @@ class LagunaConfig:
     shared_expert_inter_size: int
     gating: bool = False
     use_qk_norm: bool = True
-    moe_routed_scaling_factor: float = 1.0
 
 
 @dataclass(frozen=True)

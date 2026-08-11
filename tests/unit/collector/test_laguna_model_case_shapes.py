@@ -23,8 +23,9 @@ def test_laguna_moe_quantization_matches_official_artifact():
     assert not case_generator.moe_model_allows_quantization("vllm", LAGUNA_MODEL_PATH, "fp8")
     assert not case_generator.moe_model_allows_quantization("vllm", LAGUNA_MODEL_PATH, "bfloat16")
     cases = case_generator.get_common_moe_test_cases(backend="vllm")
-    assert len(cases) == 42
-    assert sum(len(case.num_tokens_list) for case in cases) == 1134
+    assert len(cases) == 36
+    assert sum(len(case.num_tokens_list) for case in cases) == 972
+    assert all(case.tp < 16 for case in cases)
     assert {
         (1, 1),
         (1, 2),

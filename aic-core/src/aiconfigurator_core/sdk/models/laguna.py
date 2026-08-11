@@ -271,9 +271,7 @@ class LagunaModel(BaseModel):
         if cfg.gating:
             gate_ops = [
                 ops.GEMM(f"{prefix}_attention_gate_gemm", count, dims["n_q_per_gpu"], self._hidden_size, gemm_q),
-                ops.ElementWise(
-                    f"{prefix}_attention_gate_act", count, dims["n_q_per_gpu"], dims["n_q_per_gpu"], 0.8
-                ),
+                ops.ElementWise(f"{prefix}_attention_gate_act", count, dims["n_q_per_gpu"], dims["n_q_per_gpu"], 0.8),
             ]
         return [
             ops.ElementWise(f"{prefix}_attn_norm", count, 2 * self._hidden_size, 2 * self._hidden_size, 0.8),

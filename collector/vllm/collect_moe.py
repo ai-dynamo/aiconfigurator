@@ -115,17 +115,19 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     use_routing_bias = (
         model_config.get("topk_method") == "noaux_tc"
         or bool(declared_routing_bias)
-        or model_type in {"mimo_v2_flash", "glm_moe_dsa", "nemotron_h"}
+        or model_type in {"mimo_v2_flash", "glm_moe_dsa", "laguna", "nemotron_h"}
     )
     # Resolve on declaration, not truthiness: a canonical routed_scaling_factor
     # of 0.0 is a real value (it zeroes the routed contribution) and must not
     # fall through to the vendor key or the 1.0 default.
     declared_routed_scale = model_config.get("routed_scaling_factor")
     if declared_routed_scale is None:
+        declared_routed_scale = model_config.get("moe_routed_scaling_factor")
+    if declared_routed_scale is None:
         declared_routed_scale = model_config.get("moe_router_scaling_factor")
 
     scoring_func = str(model_config.get("scoring_func") or "softmax")
-    if model_type == "nemotron_h":
+    if model_type in {"laguna", "nemotron_h"}:
         scoring_func = "sigmoid"
 
     custom_routing = None
@@ -187,7 +189,7 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "use_grouped_topk": use_grouped_topk,
         "num_expert_group": num_expert_group,
         "topk_group": topk_group,
-        "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "nemotron_h"},
+        "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "laguna", "nemotron_h"},
         "use_routing_bias": use_routing_bias,
         "router_logits_float32": use_routing_bias or scoring_func in {"sigmoid", "sqrtsoftplus"},
         "custom_routing": custom_routing,
@@ -753,24 +755,14 @@ def run_moe_torch(
                 router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)]
             else:
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
-            routed_inputs = [
-                moe_module.router.select_experts(hidden_states, router_logits) for router_logits in router_logits_list
-            ]
             num_warmups = 1 if distributed == "power_law" else 3
             num_runs = 1 if distributed == "power_law" else 6
 
             def run_single_iteration():
-                for topk_weights, topk_ids in routed_inputs:
+                for router_logits in router_logits_list:
                     forward_context = get_forward_context()
                     forward_context.moe_layer_index = 0
-                    quant_method.apply(
-                        routed_experts,
-                        hidden_states,
-                        topk_weights,
-                        topk_ids,
-                        shared_experts=None,
-                        shared_experts_input=None,
-                    )
+                    moe_module(hidden_states, router_logits)
 
             with (
                 set_forward_context({}, vllm_config),

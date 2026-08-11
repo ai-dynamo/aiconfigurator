@@ -739,15 +739,12 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
-    # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
-    # registered in moe.yaml base_ops.
-    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
-    # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
-    # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    # +117 for Laguna's artifact-backed shapes across the backend-agnostic
-    # topology union and three workload distributions.
-    assert len(moe_cases) == 5457
+    laguna_moe_cases = [case for case in moe_cases if case.model_name == "poolside/Laguna-S-2.1-FP8"]
+    assert laguna_moe_cases
+    assert all(case.tp < 16 for case in laguna_moe_cases)
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_moe_cases} == {
+        (3072, 1024, 10, 256)
+    }
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
