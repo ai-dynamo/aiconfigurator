@@ -1045,7 +1045,7 @@ class TestGetModelMOESGLangDispatch:
         return [op._name for op in getattr(model, f"{prefix}_ops") if "moe" in op._name or "router" in op._name]
 
     def test_sglang_moe_large_ep_emits_the_ep_block(self):
-        """DeepEP comm backend (inter-node) -> MoEAllToAll/EPMoE block."""
+        """DeepEP comm backend (inter-node) -> MoEAllToAll/MoEExpertCompute block."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1067,7 +1067,7 @@ class TestGetModelMOESGLangDispatch:
             "context_moe_combine",
         ]
         assert isinstance(model.context_ops[7], ops.MoEAllToAll)
-        assert isinstance(model.context_ops[8], ops.EPMoE)
+        assert isinstance(model.context_ops[8], ops.MoEExpertCompute)
 
     def test_sglang_moe_large_ep_intranode_emits_the_ep_block(self):
         """Intra-node large EP (ep=4) uses the same block; only the span differs."""

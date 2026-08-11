@@ -263,7 +263,7 @@ class TestSglangLargeEPStructure:
             assert a2a._sms == 20  # cfg.sms rides only the HT backend
             assert a2a._attention_tp_size == 1  # cfg.tp_size
             assert a2a._scale_factor == NUM_LAYERS
-        assert isinstance(moe, ops.EPMoE)
+        assert isinstance(moe, ops.MoEExpertCompute)
         assert moe._workload_distribution == "power_law_1.01"
         assert moe._enable_eplb is False
         assert moe._num_slots == 256  # sglang has no EPLB slot axis
@@ -476,7 +476,7 @@ class TestTrtllmLargeEPStructure:
         # use_low_precision_combine (deepseek.py:798-812).
         assert prepare._comm_dtype == dispatch._comm_dtype == "nvfp4"
         assert combine._comm_dtype == "nvfp4"
-        assert isinstance(moe, ops.EPMoE)
+        assert isinstance(moe, ops.MoEExpertCompute)
         assert moe._enable_eplb is False  # trtllm EPLB rides the _eplb distribution, never the 0.8
 
     def test_generation_block_structure_overlap_and_low_precision_combine(self):
@@ -653,7 +653,7 @@ def _write_parquet(path, rows):
 @pytest.fixture
 def vllm_toy_db(tmp_path):
     """A real PerfDatabase over a synthetic systems tree: one vllm version
-    carrying only the unified ``moe_a2a_perf`` / ``moe_ep_perf`` tables for a
+    carrying only the unified ``moe_a2a_perf`` / ``moe_expert_compute_perf`` tables for a
     non-DeepSeek MoE shape (hidden 4096, topk 4, experts 64, ep 8)."""
     systems_root = tmp_path / "systems"
     systems_root.mkdir()
@@ -699,7 +699,7 @@ def vllm_toy_db(tmp_path):
         for phase in ("context", "generation")
         for tokens in (128, 4096)
     ]
-    _write_parquet(version_dir / "moe_ep_perf.parquet", ep_rows)
+    _write_parquet(version_dir / "moe_expert_compute_perf.parquet", ep_rows)
 
     db = get_database("toy_sys", "vllm", "1.0", systems_paths=str(systems_root), allow_missing_data=True)
     assert db is not None
@@ -744,7 +744,7 @@ class TestVllmG2Seed:
             assert dispatch._comm_backend == combine._comm_backend == expected_backend
             # Exact arithmetic against the hand-built rows at x=64 (an exact
             # collected point): a2a leaves are base_us*factor us -> ms, x10
-            # scale; EPMoE globalizes tokens by dp (64*8=512), and the toy
+            # scale; MoEExpertCompute globalizes tokens by dp (64*8=512), and the toy
             # token curve is linear so the lerp between 128 and 4096 is exact:
             # 0.5 ms * 512/128 = 2.0 ms, x10 scale.
             base_us = 100.0 if phase == "context" else 50.0

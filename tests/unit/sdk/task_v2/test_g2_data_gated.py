@@ -6,7 +6,7 @@
 
 A MoE shape NO shipped checkpoint has (hidden 5120, topk 4, 64 experts;
 verified against the bundled model_configs) becomes large-EP-explorable the
-moment its ``moe_a2a_perf`` + ``moe_ep_perf`` parquets exist for a system --
+moment its ``moe_a2a_perf`` + ``moe_expert_compute_perf`` parquets exist for a system --
 with ZERO source changes: no new model class, no new family registration, no
 builder variant, no flag. On sglang AND vllm:
 
@@ -40,7 +40,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.models import get_model, get_model_family
-from aiconfigurator.sdk.operations.moe_comm import EPMoE, MoEAllToAll
+from aiconfigurator.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
 from aiconfigurator.sdk.perf_database import databases_cache, get_database, set_systems_paths
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -115,7 +115,7 @@ def _a2a_rows() -> list[dict]:
 
 def _ep_rows() -> list[dict]:
     """moe_ep expert-compute rows: ``kernel_source="deepep_moe"`` (what
-    ``EPMoE._resolve_kernel_source`` picks on sglang/vllm) and the
+    ``MoEExpertCompute._resolve_kernel_source`` picks on sglang/vllm) and the
     ``power_law_1.2`` distribution MOEModel passes for this family."""
     rows = []
     for phase in ("context", "generation"):
@@ -190,7 +190,7 @@ def synth_systems(tmp_path):
         )
     for backend in BACKENDS:
         _write_version_dir(root, "comm", backend, "moe_a2a_perf.parquet", _a2a_rows())
-        _write_version_dir(root, "moe", backend, "moe_ep_perf.parquet", _ep_rows())
+        _write_version_dir(root, "moe", backend, "moe_expert_compute_perf.parquet", _ep_rows())
     databases_cache.clear()
     set_systems_paths(["default", root])
     try:
@@ -226,7 +226,7 @@ def test_coverage_probes_report_the_synthetic_shape(synth_systems, backend):
     a2a = database.moe_a2a_coverage(SYNTH_HIDDEN, SYNTH_TOPK, SYNTH_EXPERTS)
     assert a2a == {"deepep_ht": set(_PAIRS), "deepep_ll": set(_PAIRS)}
     for phase in ("context", "generation"):
-        compute = database.moe_ep_compute_coverage(
+        compute = database.moe_expert_compute_coverage(
             SYNTH_HIDDEN, SYNTH_INTER, SYNTH_TOPK, SYNTH_EXPERTS, common.MoEQuantMode.bfloat16, phase
         )
         assert compute == {ep for ep, _node in _PAIRS}
@@ -278,12 +278,12 @@ def test_build_model_config_carries_backend_and_node_width(synth_systems, synth_
 
 
 def _large_ep_ops(op_list) -> list:
-    """All MoEAllToAll/EPMoE instances, recursing into OverlapOp groups."""
+    """All MoEAllToAll/MoEExpertCompute instances, recursing into OverlapOp groups."""
     found = []
     stack = list(op_list)
     while stack:
         op = stack.pop()
-        if isinstance(op, (MoEAllToAll, EPMoE)):
+        if isinstance(op, (MoEAllToAll, MoEExpertCompute)):
             found.append(op)
         for group in ("_group_a", "_group_b"):
             stack.extend(getattr(op, group, None) or [])
@@ -314,7 +314,7 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
         "generation_moe_combine",
         "generation_moe_dispatch",
     ]
-    assert sorted(type(op).__name__ for op in large_ops) == ["EPMoE", "EPMoE"] + ["MoEAllToAll"] * 4
+    assert sorted(type(op).__name__ for op in large_ops) == ["MoEAllToAll"] * 4 + ["MoEExpertCompute"] * 2
 
     # Every emitted large-EP op queries the synthetic tables successfully:
     # x=128 per-rank tokens -> 128 on the comm curve (in range) and

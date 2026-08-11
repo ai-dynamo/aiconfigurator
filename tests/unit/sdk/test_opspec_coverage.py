@@ -50,7 +50,7 @@ EXEMPT: dict[str, str] = {
     # to the Python step — the documented behavior pinned by
     # test_rust_engine_step.py::test_large_ep_op_graph_takes_the_documented_python_fallback.
     "MoEAllToAll": "large-EP consumer wired in PR 2; Rust port deferred to AIC-1601 (Python-step fallback until then)",
-    "MoEExpertCompute": "large-EP consumer wired in PR 2; Rust port deferred to AIC-1601 (Python-step fallback until then)",
+    "MoEExpertCompute": "large-EP consumer wired in PR 2; Rust port deferred to AIC-1601 (Python fallback until then)",
 }
 
 

@@ -171,7 +171,7 @@ def enumerate_parallel_config(
             have different moe parallel support.
         enable_wideep: DEPRECATED and ignored. Large-EP participation is decided per
             parallel config from perf-data coverage (``PerfDatabase.moe_a2a_coverage`` /
-            ``moe_ep_compute_coverage``), not by a flag, so this no longer narrows the
+            ``moe_expert_compute_coverage``), not by a flag, so this no longer narrows the
             enumeration. Still accepted so existing callers keep working; restrict the
             search with ``moe_ep_list`` instead.
         real_silicon_sweep: when True, exclude PP (force pp_list=[1]) and filter by

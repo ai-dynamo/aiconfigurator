@@ -454,7 +454,7 @@ class TestLargeEPSeam:
             "context_moe_combine",
         ]
         assert isinstance(result[1], ops.MoEAllToAll)
-        assert isinstance(result[2], ops.EPMoE)
+        assert isinstance(result[2], ops.MoEExpertCompute)
         assert isinstance(result[3], ops.MoEAllToAll)
 
     def test_comm_backend_other_phase_falls_back_to_fused(self):

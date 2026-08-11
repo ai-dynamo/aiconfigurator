@@ -1228,7 +1228,7 @@ class Task:
         # (a lightweight double injected by a caller) carries no coverage
         # information, which is the same answer as an absent table.
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_ep_compute_coverage", None)
+        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
         if gpus_per_node and a2a_probe is not None and compute_probe is not None:
             a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)

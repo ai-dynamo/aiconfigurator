@@ -1705,7 +1705,6 @@ def build_default_tasks(
             exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
             tasks[exp_name] = _make_agg(backend_name, backend_moe)
 
-
         if "afd" in modes_to_sweep and afd_feasible:
             try:
                 afd_task = Task(
@@ -1738,7 +1737,6 @@ def build_default_tasks(
 
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         tasks[exp_name] = _make_disagg(backend_name, backend_moe)
-
 
     if not tasks:
         logger.error("No task configs could be built for serving_mode=%s.", serving_mode)

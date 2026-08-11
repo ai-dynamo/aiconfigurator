@@ -1981,7 +1981,6 @@ def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
     assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)
 
 
-
 def test_trtllm_dp1_tep_tuples_stay_fused():
     """A dp=1 TEP tuple cannot build a TRT-LLM large-EP model
     (validate_trtllm_large_ep requires attention_dp_size > 1), so the

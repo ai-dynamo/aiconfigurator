@@ -984,7 +984,7 @@ def _h200_sglang_wideep_paths() -> list[str]:
     reason="shipped h200_sxm sglang wideEP parquets not present",
 )
 def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
-    """Spec section 4.8: the large-EP ops (MoEAllToAll / EPMoE) have no
+    """Spec section 4.8: the large-EP ops (MoEAllToAll / MoEExpertCompute) have no
     ``_to_opspec`` branch yet -- the Rust mirror is deliberately deferred to
     AIC-1601 (PR 2.5). Until it lands, a large-EP model routed at the Rust
     engine must fail compilation with ``OpConversionError`` (surfaced as
@@ -1021,7 +1021,7 @@ def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
 
     # (1) The op graph is not expressible as a compiled EngineSpec: the walk
     # dies on the first large-EP op with the op-conversion error.
-    with pytest.raises(OpConversionError, match=r"MoEAllToAll|EPMoE"):
+    with pytest.raises(OpConversionError, match=r"MoEAllToAll|MoEExpertCompute"):
         build_engine_spec_json(
             model,
             model_path="deepseek-ai/DeepSeek-R1",
@@ -1037,7 +1037,7 @@ def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
     rust_engine_step._engine_handle_cache_clear()
     try:
         # (2) The engine-step wrapper surfaces it as the typed unsupported error.
-        with pytest.raises(RustEngineUnsupportedError, match=r"MoEAllToAll|EPMoE"):
+        with pytest.raises(RustEngineUnsupportedError, match=r"MoEAllToAll|MoEExpertCompute"):
             rust_engine_step._cached_engine_handle(model, database)
 
         # (3) End to end through the backend gate: a rust-routed run_static

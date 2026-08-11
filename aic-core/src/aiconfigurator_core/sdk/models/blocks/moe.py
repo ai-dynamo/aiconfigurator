@@ -266,7 +266,7 @@ def _default_moe_block_ops(
     dispatch_cp_kwargs = {"attn_cp_size": attn_cp_size} if is_context else {}
 
     # Large-EP branch: a per-phase comm backend on cfg selects the
-    # MoEAllToAll + EPMoE emission (with its own shared-expert flavor).
+    # MoEAllToAll + MoEExpertCompute emission (with its own shared-expert flavor).
     # ``moe_comm_backend`` (dict[str, str] | None) does not exist on
     # ModelConfig yet — hence getattr; absent/uncovered phase means the fused
     # path below.
@@ -388,7 +388,7 @@ def _default_moe_block_ops(
 
 
 # ---------------------------------------------------------------------------
-# Large-EP emission (cfg.moe_comm_backend selects a MoEAllToAll/EPMoE graph)
+# Large-EP emission (cfg.moe_comm_backend selects a MoEAllToAll/MoEExpertCompute graph)
 # ---------------------------------------------------------------------------
 
 
@@ -502,7 +502,7 @@ def _large_ep_block_ops(
     gpus_per_node: int,
     shared_gemm_quant_mode=None,
 ) -> list:
-    """Large-EP branch: router + shared experts + A2A dispatch/EPMoE/combine.
+    """Large-EP branch: router + shared experts + A2A dispatch/MoEExpertCompute/combine.
 
     Fidelity notes (each transcribed from the legacy wideEP graphs):
 
@@ -517,7 +517,7 @@ def _large_ep_block_ops(
       queried undivided tokens -> nvlink passes 1 in both phases.
     - ``sms`` rides only ``deepep_ht`` (the legacy normal-mode table keys an
       SM budget; LL and nvlink rows carry none).
-    - ``enable_eplb`` reaches EPMoE only for deepep backends: the sglang MoE
+    - ``enable_eplb`` reaches MoEExpertCompute only for deepep backends: the sglang MoE
       query corrects prefill tokens by 0.8 under EPLB, while trtllm EPLB
       rides the ``_eplb`` workload-distribution suffix instead.
     - trtllm structure: when the shape has shared experts, a trailing
@@ -567,7 +567,7 @@ def _large_ep_block_ops(
             )
         )
     routed_ops.append(
-        ops.EPMoE(
+        ops.MoEExpertCompute(
             f"{prefix}_moe",
             scale_factor,
             hidden_size=shape.hidden_size,

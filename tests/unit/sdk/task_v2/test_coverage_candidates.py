@@ -154,7 +154,7 @@ def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
             f,
         )
     _write_version_dir(root, "comm", "moe_a2a_perf.parquet", a2a_rows)
-    _write_version_dir(root, "moe", "moe_ep_perf.parquet", ep_rows)
+    _write_version_dir(root, "moe", "moe_expert_compute_perf.parquet", ep_rows)
     return root
 
 
