@@ -50,40 +50,10 @@ if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 FPM_FORWARD_SCHEMA_NAME = "aic_fpm_forward_perf"
-FPM_FORWARD_SCHEMA_VERSION = 5
+FPM_FORWARD_SCHEMA_VERSION = 6
 FPM_FORWARD_COORDINATE_SYSTEM = "iteration_totals_balanced_v1"
 FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
 _PHASES = ("prefill", "decode")
-_SUPPORTED_BACKEND_AXIS = "baseline"
-
-
-def _requested_backend_policy(model_config) -> tuple[tuple[str, str] | None, dict]:
-    """Map the config's backend-policy fields to the collector's
-    ``(backend_axis, backend_policy)`` cell identity.
-
-    This mirrors the collector's admission table (fpm_forward/planner.py):
-    each admitted policy declares the AIC config fields it is valid for
-    (``aic_fields``). Today exactly one policy exists — ``baseline_auto``,
-    the AIC automatic baseline (no wideep/eplb, automatic MoE/attention
-    backends). A field combination with no admitted policy returns ``None``
-    plus the fields, and the query fails as a data miss: the request has an
-    identity the collected data cannot represent. Growing a real policy axis
-    on the collector side extends this table in the same change.
-    """
-    fields = {
-        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
-        "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
-        "moe_backend": getattr(model_config, "moe_backend", None) or None,
-        "attention_backend": getattr(model_config, "attention_backend", None) or None,
-    }
-    if (
-        not fields["enable_wideep"]
-        and not fields["enable_eplb"]
-        and fields["moe_backend"] is None
-        and fields["attention_backend"] in (None, "flashinfer")
-    ):
-        return (_SUPPORTED_BACKEND_AXIS, "baseline_auto"), fields
-    return None, fields
 
 
 # Identity columns that select a cell, in row-column order. ``model_path`` is
@@ -102,6 +72,15 @@ _CELL_MATCH_COLUMNS = (
     "moe_tp",
     "moe_ep",
     "cp",
+    # Explicit backend identity (schema v6): "auto" = the engine decided;
+    # pinned values were plumbed to the engine and verified by the collector.
+    # The two enable_* columns are real parquet booleans; _norm_identity's
+    # str() lowers them to "True"/"False", matching the request side's
+    # Python bools.
+    "moe_backend",
+    "attention_backend",
+    "enable_wideep",
+    "enable_eplb",
 )
 # Full physical row key (collector contract) used for duplicate detection.
 _ROW_KEY_COLUMNS = (
@@ -122,14 +101,29 @@ _ROW_KEY_COLUMNS = (
     "moe_tp",
     "moe_ep",
     "cp",
-    "backend_axis",
-    "backend_policy",
+    "moe_backend",
+    "attention_backend",
+    "enable_wideep",
+    "enable_eplb",
     "workload_kind",
     "batch_size",
     "total_prefill_tokens",
     "total_kv_read_tokens",
     "partition_policy",
 )
+
+
+def _norm_backend_request(value, *, engine_default: str | None = None) -> str:
+    """Request-side normalization for the string backend identity columns.
+
+    The collector records "auto" when the knob was left to the engine.
+    ``engine_default`` folds AIC's spelled-out default (ModelConfig ships
+    attention_backend="flashinfer" rather than None) back to "auto" so the
+    default config reaches the auto-collected cells.
+    """
+    if value is None or value == "" or value == engine_default:
+        return "auto"
+    return str(value)
 
 
 def _norm_identity(value) -> str:
@@ -215,6 +209,20 @@ def _validate_row(row: dict, index: int, expected_version: str, expected_system:
         raise ValueError(
             f"FPM row {index} backend={row.get('backend')!r} does not match the database backend {expected_backend!r}"
         )
+    # Schema v6 backend identity: the strings must be present ("auto" or a
+    # pinned name) and the enables must be REAL booleans — a string "true"
+    # would str()-normalize to "true" while the request side produces "True",
+    # a silent never-matches identity. Fail loudly instead.
+    for column in ("moe_backend", "attention_backend"):
+        value = row.get(column)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f'FPM row {index} {column}={value!r} must be a non-empty string ("auto" or a pinned name)')
+    for column in ("enable_wideep", "enable_eplb"):
+        value = row.get(column)
+        if not isinstance(value, bool):
+            # Retype-exempt: load_fpm_forward_data documents a uniform
+            # ValueError for every structural violation of the pair.
+            raise ValueError(f"FPM row {index} {column}={value!r} must be a boolean")  # noqa: TRY004
     latency = row.get("latency_ms")
     if not isinstance(latency, (int, float)) or not math.isfinite(float(latency)) or float(latency) <= 0:
         raise ValueError(f"FPM row {index} has non-finite/non-positive latency_ms={latency!r}")
@@ -281,16 +289,12 @@ def load_fpm_forward_data(primary_path: str, expected_version: str, expected_sys
 
         cell_key = (
             _norm_identity(row.get("model_path")),
-            _norm_identity(row.get("backend_axis")),
-            _norm_identity(row.get("backend_policy")),
             *(_norm_identity(row.get(column)) for column in _CELL_MATCH_COLUMNS),
         )
         cell = cells.setdefault(
             cell_key,
             {
                 "model_path": str(row.get("model_path")),
-                "backend_axis": _norm_identity(row.get("backend_axis")),
-                "backend_policy": _norm_identity(row.get("backend_policy")),
                 "match_identity": tuple(_norm_identity(row.get(column)) for column in _CELL_MATCH_COLUMNS),
                 "cell_ids": [],
                 "tables": {"prefill": {}, "decode": {}},
@@ -487,8 +491,13 @@ class FPMForwardOp(Operation):
             _norm_identity(model_config.moe_tp_size if model_config.moe_tp_size is not None else 1),
             _norm_identity(model_config.moe_ep_size if model_config.moe_ep_size is not None else 1),
             _norm_identity(model_config.cp_size),
+            _norm_backend_request(getattr(model_config, "moe_backend", None)),
+            # ModelConfig spells the engine default out ("flashinfer"); the
+            # collector records engine-decided knobs as "auto".
+            _norm_backend_request(getattr(model_config, "attention_backend", None), engine_default="flashinfer"),
+            _norm_identity(bool(getattr(model_config, "enable_wideep", False))),
+            _norm_identity(bool(getattr(model_config, "enable_eplb", False))),
         )
-        self._requested_policy, self._policy_fields = _requested_backend_policy(model_config)
         self._sol_ops = list(sol_ops) if sol_ops is not None else None
         self._interp_configs: dict[tuple, OpInterpConfig] = {}
         if sol_fn is not None:
@@ -551,32 +560,18 @@ class FPMForwardOp(Operation):
     # ------------------------------------------------------------------
 
     def _select_cell(self, cells: dict) -> dict:
-        if self._requested_policy is None:
-            collected = sorted({(cell["backend_axis"], cell["backend_policy"]) for cell in cells.values()})
-            raise PerfDataNotAvailableError(
-                f"No collected FPM backend policy matches this config's backend fields: "
-                f"{self._policy_fields}. The collector admits no policy for this combination "
-                f"(collected policies: {collected}); FPM answers only from collected identities."
-            )
-        axis, policy = self._requested_policy
         matches = [
             cell
             for cell in cells.values()
-            if cell["match_identity"] == self._match_identity
-            and cell["backend_axis"] == axis
-            and cell["backend_policy"] == policy
-            and cell["model_path"] == self._model_path
+            if cell["match_identity"] == self._match_identity and cell["model_path"] == self._model_path
         ]
         if not matches:
-            available = sorted(
-                {(cell["model_path"], cell["backend_policy"], *cell["match_identity"]) for cell in cells.values()}
-            )
+            available = sorted({(cell["model_path"], *cell["match_identity"]) for cell in cells.values()})
             raise PerfDataNotAvailableError(
                 f"No FPM cell matches model_path={self._model_path!r} with identity "
-                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))} under the "
-                f"{axis}/{policy} backend policy. FPM never "
+                f"{dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))}. FPM never "
                 "substitutes another model's curves; collect data under this exact model path or "
-                f"query with the collected path. Collected cells (model_path, backend_policy, identity): "
+                f"query with the collected path. Collected cells (model_path, identity): "
                 f"{available[:8]}"
             )
         if len(matches) > 1:

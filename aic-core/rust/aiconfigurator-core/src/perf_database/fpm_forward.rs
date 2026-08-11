@@ -14,7 +14,7 @@
 //!
 //! is validated (sidecar schema/sha256/row_count, per-row workload checks,
 //! duplicate physical row keys) and grouped into cells keyed by
-//! `(model_path, backend_axis, backend_policy, 11 identity columns)`. Each
+//! `(model_path, 15 identity columns)`. Each
 //! cell holds one nested table per phase — prefill
 //! `[batch][total_prefill][total_kv]`, decode `[batch][total_kv]` — plus the
 //! per-phase axis-aligned domain bounding box and a prebuilt
@@ -46,20 +46,16 @@ use crate::common::error::AicError;
 
 pub const FPM_FORWARD_BASENAME: &str = "fpm_forward_perf.parquet";
 pub const FPM_FORWARD_SCHEMA_NAME: &str = "aic_fpm_forward_perf";
-pub const FPM_FORWARD_SCHEMA_VERSION: u64 = 5;
+pub const FPM_FORWARD_SCHEMA_VERSION: u64 = 6;
 pub const FPM_FORWARD_COORDINATE_SYSTEM: &str = "iteration_totals_balanced_v1";
 pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
-pub const FPM_FORWARD_SUPPORTED_BACKEND_AXIS: &str = "baseline";
-/// The only policy the collector admits today. The Python spec builder
-/// refuses to compile FPM ops whose derived policy identity differs
-/// (OpConversionError -> Python-step fallback), so every request reaching
-/// this table is a baseline_auto request by construction; the pin below
-/// keeps foreign-policy cells from answering it.
-pub const FPM_FORWARD_SUPPORTED_BACKEND_POLICY: &str = "baseline_auto";
 
 /// Identity columns that select a cell, in row-column order (`model_path` is
 /// handled separately; `weight_quantization` is deliberately excluded).
-pub const FPM_CELL_MATCH_COLUMNS: [&str; 11] = [
+/// The last four are the schema-v6 explicit backend identity: "auto" = the
+/// engine decided; the `enable_*` columns are real parquet booleans,
+/// normalized to "True"/"False" (Python `str(bool)`) for comparison.
+pub const FPM_CELL_MATCH_COLUMNS: [&str; 15] = [
     "gemm_quant_mode",
     "moe_quant_mode",
     "fmha_quant_mode",
@@ -71,6 +67,10 @@ pub const FPM_CELL_MATCH_COLUMNS: [&str; 11] = [
     "moe_tp",
     "moe_ep",
     "cp",
+    "moe_backend",
+    "attention_backend",
+    "enable_wideep",
+    "enable_eplb",
 ];
 
 pub const FPM_PREFILL_AXES: [&str; 3] =
@@ -78,12 +78,11 @@ pub const FPM_PREFILL_AXES: [&str; 3] =
 pub const FPM_DECODE_AXES: [&str; 2] = ["batch_size", "total_kv_read_tokens"];
 
 /// One collected cell: the tables and domains for a single
-/// `(model_path, backend_axis, backend_policy, identity)` tuple.
+/// `(model_path, identity)` tuple (the 15-column identity carries the
+/// backend knobs since schema v6).
 #[derive(Debug)]
 pub struct FpmForwardCell {
     pub model_path: String,
-    pub backend_axis: String,
-    pub backend_policy: String,
     pub match_identity: Vec<String>,
     pub cell_ids: Vec<String>,
     pub prefill: Node,
@@ -152,8 +151,8 @@ impl FpmForwardTable {
     }
 
     /// Cell selection, mirroring Python `FPMForwardOp._select_cell` exactly:
-    /// strict equality on identity, backend axis/policy, and `model_path`
-    /// (no fallback), then a hard ambiguity guard.
+    /// strict equality on the 15-column identity and `model_path` (no
+    /// fallback), then a hard ambiguity guard.
     pub fn select_cell(
         &self,
         match_identity: &[String],
@@ -165,22 +164,12 @@ impl FpmForwardTable {
         // collected model_path could silently answer for a different model).
         let matches: Vec<&FpmForwardCell> = cells
             .iter()
-            .filter(|cell| {
-                cell.match_identity == match_identity
-                    && cell.backend_axis == FPM_FORWARD_SUPPORTED_BACKEND_AXIS
-                    && cell.backend_policy == FPM_FORWARD_SUPPORTED_BACKEND_POLICY
-                    && cell.model_path == model_path
-            })
+            .filter(|cell| cell.match_identity == match_identity && cell.model_path == model_path)
             .collect();
         if matches.is_empty() {
             let mut available: Vec<String> = cells
                 .iter()
-                .map(|cell| {
-                    format!(
-                        "({:?}, {:?}, {:?})",
-                        cell.model_path, cell.backend_policy, cell.match_identity
-                    )
-                })
+                .map(|cell| format!("({:?}, {:?})", cell.model_path, cell.match_identity))
                 .collect();
             available.sort();
             available.dedup();
@@ -191,11 +180,10 @@ impl FpmForwardTable {
                 .map(|(c, v)| format!("{c}={v:?}"))
                 .collect();
             return Err(structural(format!(
-                "No FPM cell matches model_path={model_path:?} with identity {{{}}} under the \
-                 {FPM_FORWARD_SUPPORTED_BACKEND_AXIS}/{FPM_FORWARD_SUPPORTED_BACKEND_POLICY} \
-                 backend policy. FPM never substitutes another model's curves; collect data \
+                "No FPM cell matches model_path={model_path:?} with identity {{{}}}. \
+                 FPM never substitutes another model's curves; collect data \
                  under this exact model path or query with the collected path. Collected cells \
-                 (model_path, backend_policy, identity): [{}]",
+                 (model_path, identity): [{}]",
                 identity.join(", "),
                 available.join(", ")
             )));
@@ -308,8 +296,6 @@ fn json_uint(value: Option<&serde_json::Value>) -> Option<u64> {
 struct FpmRow {
     cell_id: String,
     model_path: String,
-    backend_axis: String,
-    backend_policy: String,
     match_identity: Vec<String>,
     row_key: Vec<String>,
     workload_kind: String,
@@ -325,10 +311,8 @@ impl FpmRow {
     /// key, or a colliding row could slip past the check and silently
     /// last-win in the grouped cell — hence one shared constructor.
     fn cell_key(&self) -> Vec<String> {
-        let mut key = Vec::with_capacity(3 + self.match_identity.len());
+        let mut key = Vec::with_capacity(1 + self.match_identity.len());
         key.push(self.model_path.clone());
-        key.push(self.backend_axis.clone());
-        key.push(self.backend_policy.clone());
         key.extend(self.match_identity.iter().cloned());
         key
     }
@@ -360,8 +344,8 @@ fn load_pair(
         "fmha_quant_mode",
         "comm_quant_mode",
         "kv_cache_dtype",
-        "backend_axis",
-        "backend_policy",
+        "moe_backend",
+        "attention_backend",
         "workload_kind",
         "partition_policy",
     ];
@@ -380,6 +364,11 @@ fn load_pair(
         "total_prefill_tokens",
         "total_kv_read_tokens",
     ];
+    let bool_cols = ["enable_wideep", "enable_eplb"];
+    let mut bool_idx = BTreeMap::new();
+    for name in bool_cols {
+        bool_idx.insert(name, reader.col(name)?);
+    }
     let mut int_idx = BTreeMap::new();
     for name in int_cols {
         int_idx.insert(name, reader.col(name)?);
@@ -425,6 +414,16 @@ fn load_pair(
             Ok(row
                 .u32_optional(Some(int_idx[name]))?
                 .map_or_else(String::new, |v| v.to_string()))
+        };
+        // Schema-v6 enable_* flags: REAL booleans only (no string/int
+        // coercion — Python rejects those, and a coerced "true" would
+        // compare as "true" vs the request side's "True"). Normalized to
+        // Python str(bool) capitalization.
+        let get_bool_identity = |name: &str| -> Result<String, AicError> {
+            let value = row.bool_strict(bool_idx[name]).map_err(|_| {
+                structural(format!("FPM row {index} {name} must be a boolean"))
+            })?;
+            Ok(if value { "True".to_string() } else { "False".to_string() })
         };
 
         let workload_kind = get_str("workload_kind")?;
@@ -498,11 +497,21 @@ fn load_pair(
             .map(|name| {
                 if str_idx.contains_key(name) {
                     get_str(name)
+                } else if bool_idx.contains_key(name) {
+                    get_bool_identity(name)
                 } else {
                     get_int_identity(name)
                 }
             })
             .collect::<Result<_, _>>()?;
+        // The string backend knobs must be present: "auto" or a pinned name.
+        for (offset, name) in [(11usize, "moe_backend"), (12usize, "attention_backend")] {
+            if match_identity[offset].is_empty() {
+                return Err(structural(format!(
+                    "FPM row {index} {name} must be a non-empty string (\"auto\" or a pinned name)"
+                )));
+            }
+        }
         // Full physical row key (collector contract) for duplicate detection,
         // in Python's _ROW_KEY_COLUMNS order.
         let row_key: Vec<String> = vec![
@@ -523,8 +532,10 @@ fn load_pair(
             match_identity[8].clone(),
             match_identity[9].clone(),
             match_identity[10].clone(),
-            get_str("backend_axis")?,
-            get_str("backend_policy")?,
+            match_identity[11].clone(),
+            match_identity[12].clone(),
+            match_identity[13].clone(),
+            match_identity[14].clone(),
             workload_kind.clone(),
             batch_size.to_string(),
             total_prefill_tokens.to_string(),
@@ -535,8 +546,6 @@ fn load_pair(
         rows.push(FpmRow {
             cell_id: get_str("cell_id")?,
             model_path: get_str("model_path")?,
-            backend_axis: get_str("backend_axis")?,
-            backend_policy: get_str("backend_policy")?,
             match_identity,
             row_key,
             workload_kind,
@@ -591,8 +600,6 @@ fn load_pair(
         let building = cells.entry(row.cell_key()).or_insert_with(|| Building {
             cell: FpmForwardCell {
                 model_path: row.model_path.clone(),
-                backend_axis: row.backend_axis.clone(),
-                backend_policy: row.backend_policy.clone(),
                 match_identity: row.match_identity.clone(),
                 cell_ids: Vec::new(),
                 prefill: Node::branch(),
@@ -709,8 +716,10 @@ pub(crate) mod tests {
         pub total_kv_read_tokens: u32,
         pub latency_ms: f64,
         pub model_path: &'static str,
-        pub backend_axis: &'static str,
-        pub backend_policy: &'static str,
+        pub moe_backend: &'static str,
+        pub attention_backend: &'static str,
+        pub enable_wideep: bool,
+        pub enable_eplb: bool,
         pub backend_version: &'static str,
         pub partition_policy: &'static str,
         pub tp: u32,
@@ -729,8 +738,10 @@ pub(crate) mod tests {
                 total_kv_read_tokens: 4096,
                 latency_ms: 7.0,
                 model_path: "org/model-a",
-                backend_axis: "baseline",
-                backend_policy: "baseline_auto",
+                moe_backend: "auto",
+                attention_backend: "auto",
+                enable_wideep: false,
+                enable_eplb: false,
                 backend_version: "0.25.1",
                 partition_policy: FPM_FORWARD_PARTITION_POLICY,
                 tp: 4,
@@ -770,6 +781,10 @@ pub(crate) mod tests {
             tp.to_string(),               // moe_tp
             "1".to_string(),              // moe_ep
             "1".to_string(),              // cp
+            "auto".to_string(),           // moe_backend
+            "auto".to_string(),           // attention_backend
+            "False".to_string(),          // enable_wideep (str(bool))
+            "False".to_string(),          // enable_eplb
         ]
     }
 
@@ -784,7 +799,7 @@ pub(crate) mod tests {
         rows: &[RowSpec],
         mutate_sidecar: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
     ) -> PathBuf {
-        use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
+        use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int64Type};
         use parquet::file::properties::WriterProperties;
         use parquet::file::writer::SerializedFileWriter;
         use parquet::schema::parser::parse_message_type;
@@ -808,8 +823,10 @@ pub(crate) mod tests {
             REQUIRED INT64 moe_tp;
             REQUIRED INT64 moe_ep;
             REQUIRED INT64 cp;
-            REQUIRED BINARY backend_axis (UTF8);
-            REQUIRED BINARY backend_policy (UTF8);
+            REQUIRED BINARY moe_backend (UTF8);
+            REQUIRED BINARY attention_backend (UTF8);
+            REQUIRED BOOLEAN enable_wideep;
+            REQUIRED BOOLEAN enable_eplb;
             REQUIRED BINARY workload_kind (UTF8);
             REQUIRED INT64 batch_size;
             REQUIRED INT64 total_prefill_tokens;
@@ -866,10 +883,23 @@ pub(crate) mod tests {
             col.close().expect("close");
         }
         for values in [
-            str_col(&|r| r.backend_axis.to_string()),
-            str_col(&|r| r.backend_policy.to_string()),
-            str_col(&|r| r.workload_kind.to_string()),
+            str_col(&|r| r.moe_backend.to_string()),
+            str_col(&|r| r.attention_backend.to_string()),
         ] {
+            let mut col = rg.next_column().expect("next col").expect("str col");
+            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
+            col.close().expect("close");
+        }
+        for values in [
+            rows.iter().map(|r| r.enable_wideep).collect::<Vec<bool>>(),
+            rows.iter().map(|r| r.enable_eplb).collect::<Vec<bool>>(),
+        ] {
+            let mut col = rg.next_column().expect("next col").expect("bool col");
+            col.typed::<BoolType>().write_batch(&values, None, None).expect("write");
+            col.close().expect("close");
+        }
+        {
+            let values = str_col(&|r| r.workload_kind.to_string());
             let mut col = rg.next_column().expect("next col").expect("str col");
             col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
             col.close().expect("close");
@@ -1071,7 +1101,7 @@ pub(crate) mod tests {
     fn sidecar_integral_floats_are_accepted() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         write_pair_with(tmp.path(), &default_rows(), |m| {
-            m.insert("schema_version".into(), serde_json::Value::from(5.0));
+            m.insert("schema_version".into(), serde_json::Value::from(6.0));
             m.insert("row_count".into(), serde_json::Value::from(9.0));
         });
         assert!(loaded_table(tmp.path()).cells().is_ok());
@@ -1173,14 +1203,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn non_baseline_backend_policy_never_matches() {
-        // Foreign-policy cells (same path + identity) must not answer a
-        // baseline_auto request.
+    fn pinned_backend_knob_cell_never_answers_auto_request() {
+        // Cells collected with a pinned MoE backend must not answer an
+        // "auto" request with the same path + quant/parallel identity.
         let tmp = tempfile::tempdir().expect("tmpdir");
         let rows: Vec<RowSpec> = default_rows()
             .into_iter()
             .map(|r| RowSpec {
-                backend_policy: "wideep_v1",
+                moe_backend: "deepep_moe",
                 ..r
             })
             .collect();
@@ -1192,19 +1222,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn non_baseline_backend_axis_never_matches() {
+    fn wideep_cells_answer_wideep_requests() {
+        // Schema v6 backend knobs are ordinary identity columns: data
+        // collected under enable_wideep=true answers a request whose
+        // identity says "True" — and only that request.
         let tmp = tempfile::tempdir().expect("tmpdir");
         let rows: Vec<RowSpec> = default_rows()
             .into_iter()
             .map(|r| RowSpec {
-                backend_axis: "wideep",
+                enable_wideep: true,
                 ..r
             })
             .collect();
         write_pair(tmp.path(), &rows);
-        let err = loaded_table(tmp.path())
-            .select_cell(&default_identity(4), "org/model-a")
-            .unwrap_err();
+        let table = loaded_table(tmp.path());
+        let mut wideep_identity = default_identity(4);
+        wideep_identity[13] = "True".to_string();
+        let cell = table.select_cell(&wideep_identity, "org/model-a").expect("select");
+        assert_eq!(cell.match_identity[13], "True");
+        let err = table.select_cell(&default_identity(4), "org/model-a").unwrap_err();
         assert!(err.to_string().contains("No FPM cell matches"), "{err}");
     }
+
 }

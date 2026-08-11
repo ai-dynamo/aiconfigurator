@@ -64,9 +64,18 @@ def _row(
         "moe_tp": "1",
         "moe_ep": "1",
         "cp": "1",
+        "moe_backend": "auto",
+        "attention_backend": "auto",
+        "enable_wideep": False,
+        "enable_eplb": False,
     }
     if identity:
         base_identity.update(identity)
+    # Identity dicts built from an op's _match_identity carry str(bool)
+    # ("True"/"False"); the parquet columns are REAL booleans.
+    for knob in ("enable_wideep", "enable_eplb"):
+        if isinstance(base_identity[knob], str):
+            base_identity[knob] = base_identity[knob] == "True"
     return {
         "cell_id": f"fpm-test-{workload_kind}",
         "model_path": model_path,
@@ -85,8 +94,10 @@ def _row(
         "moe_tp": int(base_identity["moe_tp"]),
         "moe_ep": int(base_identity["moe_ep"]),
         "cp": int(base_identity["cp"]),
-        "backend_axis": "baseline",
-        "backend_policy": "baseline_auto",
+        "moe_backend": base_identity["moe_backend"],
+        "attention_backend": base_identity["attention_backend"],
+        "enable_wideep": base_identity["enable_wideep"],
+        "enable_eplb": base_identity["enable_eplb"],
         "workload_kind": workload_kind,
         "batch_size": batch_size,
         "total_prefill_tokens": total_prefill_tokens,
@@ -121,7 +132,7 @@ def _write_pair(data_dir: str, rows: list[dict], *, sidecar_overrides: dict | No
         parquet_sha = hashlib.sha256(handle.read()).hexdigest()
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
-        "schema_version": 5,
+        "schema_version": 6,
         "coordinate_system": "iteration_totals_balanced_v1",
         "measurement_policy": "dynamo_native_single_sample_v1",
         "row_count": len(rows),
@@ -257,14 +268,25 @@ class TestFPMForwardOpQuery:
         result = _make_op("decode", model_path="other-org/other-model").query(db, batch_size=2, s=1024)
         assert float(result) == pytest.approx(9.0)
 
-    def test_foreign_backend_policy_cell_not_matched(self, fake_db):
-        # A cell collected under a non-baseline policy must not answer a
-        # baseline request even when path and identity match.
+    def test_pinned_backend_knob_cell_not_matched(self, fake_db):
+        # A cell collected under a pinned MoE backend must not answer an
+        # "auto" request even when path and quant/parallel identity match.
         rows = _default_rows()
         for row in rows:
-            row["backend_policy"] = "wideep_v1"
+            row["moe_backend"] = "deepep_moe"
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
+
+    def test_backend_knob_data_answers_matching_config(self, fake_db):
+        # v6 backend knobs are ordinary identity columns: wideep-collected
+        # rows answer a wideep config — and only that config.
+        rows = [_row("decode", 2, 0, 2048, 8.0, identity={"enable_wideep": True})]
+        db = fake_db(rows)
+        cfg = _model_config(enable_wideep=True, moe_tp_size=1, moe_ep_size=1)
+        result = _make_op("decode", model_config=cfg).query(db, batch_size=2, s=1024)
+        assert float(result) == pytest.approx(8.0)
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
+            _make_op("decode").query(db, batch_size=2, s=1024)
 
     @pytest.mark.parametrize(
         "overrides",
@@ -276,25 +298,12 @@ class TestFPMForwardOpQuery:
         ],
     )
     def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
-        # The collector admits no policy for these field combinations, so the
-        # request's identity cannot exist in collected data: the query must
-        # fail as a data miss (sweeps skip the point) — never silently ride
-        # on baseline_auto curves.
+        # Backend knobs are identity columns: a config whose knob identity
+        # was never collected fails as a data miss (sweeps skip the point) —
+        # never silently rides on auto-collected curves.
         op = _make_op("decode", model_config=_model_config(**overrides))
-        with pytest.raises(PerfDataNotAvailableError, match="backend fields"):
+        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
-
-    def test_off_baseline_op_never_compiles_to_engine_spec(self):
-        # The EngineSpec wire carries no policy identity and the compiled
-        # engine pins baseline_auto, so an off-baseline op must refuse
-        # conversion (RustEngineUnsupportedError fallback lands on the Python
-        # step, whose query reports the data miss).
-        from aiconfigurator_core.sdk.engine import OpConversionError, _to_opspec
-
-        cfg = _model_config(enable_wideep=True, moe_tp_size=1, moe_ep_size=1)
-        op = FPMForwardOp("decode", cfg, MODEL_PATH, sol_ops=[], weight_bytes=1.0)
-        with pytest.raises(OpConversionError, match="backend-policy identity"):
-            _to_opspec(op, backend="vllm", architecture="test", database=None)
 
     def test_dp_identity_uses_local_batch(self, fake_db):
         rows = [

@@ -1587,8 +1587,10 @@ def _fpm_write_pair(data_dir) -> None:
                 "backend_version": _FPM_VERSION,
                 "weight_quantization": "fp8_block",
                 **identity,
-                "backend_axis": "baseline",
-                "backend_policy": "baseline_auto",
+                "moe_backend": "auto",
+                "attention_backend": "auto",
+                "enable_wideep": False,
+                "enable_eplb": False,
                 "workload_kind": kind,
                 "batch_size": batch,
                 "total_prefill_tokens": prefill,
@@ -1604,7 +1606,7 @@ def _fpm_write_pair(data_dir) -> None:
         _json.dumps(
             {
                 "schema_name": "aic_fpm_forward_perf",
-                "schema_version": 5,
+                "schema_version": 6,
                 "coordinate_system": "iteration_totals_balanced_v1",
                 "parquet_sha256": digest,
                 "row_count": len(rows),
@@ -1708,7 +1710,7 @@ class TestRustEngineStepFpmParity:
         ctx_op = spec["context_ops"][0]["FpmForward"]
         assert ctx_op["phase"] == "prefill"
         assert spec["generation_ops"][0]["FpmForward"]["phase"] == "decode"
-        assert len(ctx_op["match_identity"]) == 11
+        assert len(ctx_op["match_identity"]) == 15
         assert ctx_op["sol_ops"], "sol_ops must carry the original granular list"
 
     @pytest.mark.parametrize(
