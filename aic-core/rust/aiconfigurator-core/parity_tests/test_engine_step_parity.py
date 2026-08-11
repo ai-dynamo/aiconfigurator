@@ -1608,6 +1608,10 @@ def _fpm_write_pair(data_dir) -> None:
                 "schema_name": "aic_fpm_forward_perf",
                 "schema_version": 6,
                 "coordinate_system": "iteration_totals_balanced_v1",
+                "measurement_policy": "dynamo_native_single_sample_v1",
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
                 "parquet_sha256": digest,
                 "row_count": len(rows),
             }

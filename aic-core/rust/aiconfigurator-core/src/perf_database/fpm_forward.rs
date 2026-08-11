@@ -49,6 +49,9 @@ pub const FPM_FORWARD_SCHEMA_NAME: &str = "aic_fpm_forward_perf";
 pub const FPM_FORWARD_SCHEMA_VERSION: u64 = 6;
 pub const FPM_FORWARD_COORDINATE_SYSTEM: &str = "iteration_totals_balanced_v1";
 pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
+/// The only measurement policy the collector publishes; pinned in the
+/// sidecar gate (a pair measured under a different regime is structural).
+pub const FPM_FORWARD_MEASUREMENT_POLICY: &str = "dynamo_native_single_sample_v1";
 
 /// Identity columns that select a cell, in row-column order (`model_path` is
 /// handled separately; `weight_quantization` is deliberately excluded).
@@ -220,7 +223,13 @@ fn sha256_file(path: &Path) -> Result<String, AicError> {
 
 /// Sidecar validation, mirroring `_validate_sidecar` check-for-check. Returns
 /// the sidecar's `row_count` for the post-read cross-check.
-fn validate_sidecar(metadata_path: &Path, parquet_path: &Path) -> Result<Option<u64>, AicError> {
+fn validate_sidecar(
+    metadata_path: &Path,
+    parquet_path: &Path,
+    system: &str,
+    backend: &str,
+    version: &str,
+) -> Result<Option<u64>, AicError> {
     if !metadata_path.exists() {
         return Err(structural(format!(
             "FPM database is missing its metadata sidecar: {}. \
@@ -266,6 +275,31 @@ fn validate_sidecar(metadata_path: &Path, parquet_path: &Path) -> Result<Option<
             metadata.get("coordinate_system"),
             metadata_path.display()
         )));
+    }
+    if metadata.get("measurement_policy").and_then(|v| v.as_str())
+        != Some(FPM_FORWARD_MEASUREMENT_POLICY)
+    {
+        return Err(structural(format!(
+            "unsupported FPM measurement_policy={:?} (expected {FPM_FORWARD_MEASUREMENT_POLICY:?}): {}",
+            metadata.get("measurement_policy"),
+            metadata_path.display()
+        )));
+    }
+    // The commit record names the database identity it was published for;
+    // contradictory metadata (a pair copied into the wrong tree with its
+    // sidecar) is rejected here, before any row is read.
+    for (key, expected) in [
+        ("system", system),
+        ("backend", backend),
+        ("backend_version", version),
+    ] {
+        if metadata.get(key).and_then(|v| v.as_str()) != Some(expected) {
+            return Err(structural(format!(
+                "FPM sidecar {key}={:?} does not match the database {key} {expected:?}: {}",
+                metadata.get(key),
+                metadata_path.display()
+            )));
+        }
     }
     let actual_sha = sha256_file(parquet_path)?;
     if metadata.get("parquet_sha256").and_then(|v| v.as_str()) != Some(actual_sha.as_str()) {
@@ -328,7 +362,7 @@ fn load_pair(
         return Ok(None);
     }
     let metadata_path = parquet_path.with_extension("metadata.json");
-    let sidecar_row_count = validate_sidecar(&metadata_path, parquet_path)?;
+    let sidecar_row_count = validate_sidecar(&metadata_path, parquet_path, system, backend, version)?;
 
     let reader = PerfReader::open(parquet_path)?;
     // Physical row-key columns (collector contract), in order.
@@ -943,6 +977,13 @@ pub(crate) mod tests {
             sha256_file(&parquet_path).expect("sha256").into(),
         );
         sidecar.insert("row_count".into(), serde_json::Value::from(rows.len() as u64));
+        sidecar.insert(
+            "measurement_policy".into(),
+            FPM_FORWARD_MEASUREMENT_POLICY.into(),
+        );
+        sidecar.insert("system".into(), "b200_sxm".into());
+        sidecar.insert("backend".into(), "vllm".into());
+        sidecar.insert("backend_version".into(), "0.25.1".into());
         mutate_sidecar(&mut sidecar);
         std::fs::write(
             parquet_path.with_extension("metadata.json"),
@@ -1029,6 +1070,26 @@ pub(crate) mod tests {
             write_pair_with(tmp.path(), &default_rows(), mutate);
             let err = loaded_table(tmp.path()).cells().unwrap_err();
             assert!(err.to_string().contains(needle), "wanted {needle:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn contradictory_sidecar_identity_fails_loudly() {
+        // The commit record names the identity it was published for; a pair
+        // whose rows match the tree but whose sidecar names foreign values
+        // is inconsistent and must be rejected before any row is read.
+        for (key, value) in [
+            ("system", "gb200_nvl72"),
+            ("backend", "sglang"),
+            ("backend_version", "9.9.9"),
+            ("measurement_policy", "multi_sample_v2"),
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            write_pair_with(tmp.path(), &default_rows(), |m| {
+                m.insert(key.into(), value.into());
+            });
+            let err = loaded_table(tmp.path()).cells().unwrap_err();
+            assert!(err.to_string().contains(key), "{key}: {err}");
         }
     }
 

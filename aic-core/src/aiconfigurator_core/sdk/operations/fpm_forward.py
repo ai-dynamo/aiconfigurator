@@ -53,6 +53,9 @@ FPM_FORWARD_SCHEMA_NAME = "aic_fpm_forward_perf"
 FPM_FORWARD_SCHEMA_VERSION = 6
 FPM_FORWARD_COORDINATE_SYSTEM = "iteration_totals_balanced_v1"
 FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
+# The only measurement policy the collector publishes; pinned in the sidecar
+# gate so a pair measured under a different regime is a loud structural error.
+FPM_FORWARD_MEASUREMENT_POLICY = "dynamo_native_single_sample_v1"
 _PHASES = ("prefill", "decode")
 
 
@@ -143,9 +146,18 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _validate_sidecar(metadata_path: str, parquet_path: str) -> dict:
+def _validate_sidecar(
+    metadata_path: str,
+    parquet_path: str,
+    expected_system: str,
+    expected_backend: str,
+    expected_version: str,
+) -> dict:
     """The sidecar is the writer's commit record: an unmatched pair (e.g. after
-    an interrupted writer) must be rejected, not silently served."""
+    an interrupted writer) must be rejected, not silently served. The commit
+    record also names the database identity it was published for — metadata
+    that contradicts the resolved database (a pair copied into the wrong tree
+    with its sidecar) is rejected here, before any row is read."""
     if not os.path.exists(metadata_path):
         raise ValueError(
             f"FPM database is missing its metadata sidecar: {metadata_path}. "
@@ -174,6 +186,21 @@ def _validate_sidecar(metadata_path: str, parquet_path: str) -> dict:
             f"unsupported FPM coordinate_system={metadata.get('coordinate_system')!r} "
             f"(expected {FPM_FORWARD_COORDINATE_SYSTEM!r}): {metadata_path}"
         )
+    if metadata.get("measurement_policy") != FPM_FORWARD_MEASUREMENT_POLICY:
+        raise ValueError(
+            f"unsupported FPM measurement_policy={metadata.get('measurement_policy')!r} "
+            f"(expected {FPM_FORWARD_MEASUREMENT_POLICY!r}): {metadata_path}"
+        )
+    for key, expected in (
+        ("system", expected_system),
+        ("backend", expected_backend),
+        ("backend_version", expected_version),
+    ):
+        if metadata.get(key) != expected:
+            raise ValueError(
+                f"FPM sidecar {key}={metadata.get(key)!r} does not match the database {key} "
+                f"{expected!r}: {metadata_path}"
+            )
     actual_sha = _sha256_file(parquet_path)
     if metadata.get("parquet_sha256") != actual_sha:
         raise ValueError(
@@ -260,7 +287,7 @@ def load_fpm_forward_data(primary_path: str, expected_version: str, expected_sys
         ) from exc
 
     metadata_path = os.path.splitext(primary_path)[0] + ".metadata.json"
-    metadata = _validate_sidecar(metadata_path, primary_path)
+    metadata = _validate_sidecar(metadata_path, primary_path, expected_system, expected_backend, expected_version)
     try:
         rows = pq.read_table(primary_path).to_pylist()
     except ValueError:

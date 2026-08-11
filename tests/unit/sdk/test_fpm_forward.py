@@ -133,6 +133,10 @@ def _write_pair(data_dir: str, rows: list[dict], *, sidecar_overrides: dict | No
     metadata = {
         "schema_name": "aic_fpm_forward_perf",
         "schema_version": 6,
+        "measurement_policy": "dynamo_native_single_sample_v1",
+        "system": SYSTEM,
+        "backend": BACKEND,
+        "backend_version": VERSION,
         "coordinate_system": "iteration_totals_balanced_v1",
         "measurement_policy": "dynamo_native_single_sample_v1",
         "row_count": len(rows),
@@ -389,6 +393,23 @@ class TestFPMForwardLoaderValidation:
         rows[0]["backend_version"] = "some-other-version"
         with pytest.raises(ValueError, match="backend_version"):
             self._query(fake_db(rows))
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("system", "gb200_nvl72"),
+            ("backend", "sglang"),
+            ("backend_version", "some-other-version"),
+            ("measurement_policy", "multi_sample_v2"),
+        ],
+    )
+    def test_contradictory_sidecar_identity_fails_loudly(self, fake_db, key, value):
+        # The sidecar commit record names the identity it was published for;
+        # a pair whose rows match the tree but whose sidecar names foreign
+        # values is inconsistent and must be rejected before any row is read.
+        db = fake_db(sidecar_overrides={key: value})
+        with pytest.raises(ValueError, match=key):
+            self._query(db)
 
     def test_misplaced_system_or_backend_fails_loudly(self, fake_db):
         # system/backend are in the physical row key but NOT the cell key: a
