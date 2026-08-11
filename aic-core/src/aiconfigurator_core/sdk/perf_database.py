@@ -223,6 +223,12 @@ def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[s
         if not data:
             continue
         saw_table = True
+        # Lane-aware shape (AIC-1715): outermost keys are strings (kernel_source).
+        # Peel to first lane for backward-compat fmha-key extraction.
+        # TODO(AIC-1715 Task 3): replaced by lane-union across all lanes.
+        first_key = next(iter(data))
+        if isinstance(first_key, str):
+            data = next(iter(data.values()))
         for fmha_key in data:
             if kv_cache_mode in data[fmha_key]:
                 modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
@@ -1802,7 +1808,20 @@ def _enum_key_names(data) -> list[str]:
     """Safely extract Enum key names from a mapping.
 
     Many perf tables are optional and loaders return ``None`` when data
-    files are missing. Treat missing/empty tables as supporting no modes."""
+    files are missing. Treat missing/empty tables as supporting no modes.
+
+    Tables with the lane-aware shape introduced by AIC-1715 (outermost keys
+    are strings — kernel_source values) are transparently peeled to their first
+    lane so that callers see the enum-keyed level as before.
+
+    # TODO(AIC-1715 Task 3): replaced by lane-union across all lanes.
+    """
+    if not data:
+        return []
+    first_key = next(iter(data))
+    if isinstance(first_key, str):
+        # Lane-aware shape: peel the kernel_source level to expose enum keys.
+        data = next(iter(data.values()))
     if not data:
         return []
     names: list[str] = []
