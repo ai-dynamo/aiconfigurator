@@ -1155,6 +1155,7 @@ class BaseBackend:
                 osl=1,
                 prefix=prefix * np.floor(step.context_tokens / isl),
                 seq_imbalance_correction_scale=ctx_scale,
+                engine_step_backend=runtime_config.engine_step_backend,
             ),
             mode="static_ctx",
         )
@@ -1184,6 +1185,7 @@ class BaseBackend:
                 osl=1,
                 prefix=prefix,
                 seq_imbalance_correction_scale=ctx_scale,
+                engine_step_backend=runtime_config.engine_step_backend,
             ),
             mode="static_ctx",
         )
@@ -1208,6 +1210,7 @@ class BaseBackend:
                     isl=isl + osl // 2,
                     osl=2,
                     gen_seq_imbalance_correction_scale=gen_scale,
+                    engine_step_backend=runtime_config.engine_step_backend,
                 ),
                 mode="static_gen",
             )
@@ -1298,6 +1301,7 @@ class BaseBackend:
                 isl=isl + osl // 2,
                 osl=2,
                 gen_seq_imbalance_correction_scale=gen_scale,
+                engine_step_backend=runtime_config.engine_step_backend,
             ),
             mode="static_gen",
         )

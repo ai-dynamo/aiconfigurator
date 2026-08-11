@@ -55,6 +55,20 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.MOE,
     ),
     OpEntry(
+        op="mla_bmm_gen_pre",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_pre_test_cases",
+        run_func="run_mla_gen_pre",
+        perf_filename=PerfFile.MLA_BMM,
+    ),
+    OpEntry(
+        op="mla_bmm_gen_post",
+        module="collector.vllm.collect_mla_bmm",
+        get_func="get_mla_gen_post_test_cases",
+        run_func="run_mla_gen_post",
+        perf_filename=PerfFile.MLA_BMM,
+    ),
+    OpEntry(
         op="mla_context_module",
         module="collector.vllm.collect_mla_module",
         get_func="get_mla_context_module_test_cases",
@@ -137,6 +151,20 @@ REGISTRY: list[OpEntry] = [
         get_func="get_gdn_test_cases",
         run_func="run_gdn_torch",
         perf_filename=PerfFile.GDN,
+    ),
+    OpEntry(
+        op="kda",
+        module="collector.vllm.collect_kda",
+        get_func="get_kda_test_cases",
+        run_func="run_kda_torch",
+        perf_filename=PerfFile.KDA,
+        # Kimi-K3 KDA kernels exist only on the vLLM kimi-k3 branch preview
+        # image; verified on Hopper (SM90), Ada (SM89 — full grid, 1145
+        # rows, chunk/Triton fallback lanes, no FlashKDA/fused-decode
+        # below SM90), B200 (SM100), B300/GB200/GB300 (SM100/103) and RTX
+        # PRO 6000 (SM120 — full grid, 1203 rows, all six kernel paths).
+        # Only SM80 (no probe hardware) remains unverified.
+        unverified_sms=(80,),
     ),
 ]
 

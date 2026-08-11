@@ -75,6 +75,21 @@ def test_dsv4_native_checkpoints_remap_by_system_family():
     )
 
 
+def test_kimi_k3_moe_remaps_to_w4a8_on_blackwell_only():
+    from aiconfigurator.sdk.models.helpers import resolve_kimi_k3_moe_arch_mode
+
+    # Blackwell serving quantizes activations to mxfp8 (kimi-k3 branch
+    # Mxfp4MoEMethod default precision); Hopper keeps the checkpoint's plain
+    # W4A16 marlin lane, so the resolver stays silent there.
+    for system in ("b200_sxm", "b300_sxm", "gb200", "gb300"):
+        mode = resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang")
+        assert mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8
+    for system in ("h200_sxm", "h100_sxm"):
+        assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang") is None
+    assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "b300_sxm", "vllm") is None
+    assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K2.5", "b300_sxm", "sglang") is None
+
+
 def test_dsv4_arch_remap_never_overrides_explicit_mode():
     from aiconfigurator.sdk.models.helpers import resolve_dsv4_moe_arch
 
@@ -163,25 +178,30 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
 def test_topk_calib_builder_splits_v1_and_v2_variants():
     from aiconfigurator.sdk.operations.dsv4 import _build_topk_calib_from_rows
 
-    by_mode = {
-        0: {
-            4096: {
-                8: {
-                    "v1_flat": {"latency": 1.5},
-                    "v1_top_last": {"latency": 1.0},
-                    "v2_flat": {"latency": 0.9},
-                    "v2_top_last": {"latency": 0.7},
+    # Outermost level: the calibration row's native num_heads (#1460 review —
+    # the DELTA is selector-geometry-specific, Flash 512 vs Pro 1024).
+    by_native = {
+        64: {
+            0: {
+                4096: {
+                    8: {
+                        "v1_flat": {"latency": 1.5},
+                        "v1_top_last": {"latency": 1.0},
+                        "v2_flat": {"latency": 0.9},
+                        "v2_top_last": {"latency": 0.7},
+                    }
                 }
             }
         }
     }
-    calib = _build_topk_calib_from_rows(by_mode)
-    assert calib["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.5)
-    assert calib["v2"]["exact"][(0, 4096, 8)] == pytest.approx(0.2)
+    calib = _build_topk_calib_from_rows(by_native)
+    assert set(calib.keys()) == {64}
+    assert calib[64]["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.5)
+    assert calib[64]["v2"]["exact"][(0, 4096, 8)] == pytest.approx(0.2)
 
     # A file carrying only one variant leaves the other None rather than
     # silently borrowing across phases.
-    only_v1 = {0: {4096: {8: {"v1_flat": {"latency": 1.5}, "v1_top_last": {"latency": 1.0}}}}}
+    only_v1 = {64: {0: {4096: {8: {"v1_flat": {"latency": 1.5}, "v1_top_last": {"latency": 1.0}}}}}}
     calib = _build_topk_calib_from_rows(only_v1)
-    assert calib["v1"] is not None
-    assert calib["v2"] is None
+    assert calib[64]["v1"] is not None
+    assert calib[64]["v2"] is None

@@ -41,6 +41,30 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 sys.path.insert(0, str(_REPO_ROOT))
 
+# Per-worker library thread caps, applied by default (runbook §4.0). The scan
+# parallelizes at the PROCESS level, so per-worker BLAS/rayon pools are pure
+# oversubscription: they thrash the cores (measured ~18x slowdown at 6
+# workers) and their per-thread malloc arenas inflate worker RSS until the
+# host OOMs (measured ~0.7 GB/entry/worker uncapped; a 6-worker bare run
+# reached ~152 GB in 40 minutes and froze the host). ``setdefault`` so an
+# explicit export still wins.
+#
+# Applied at MODULE level, before the support_matrix import below pulls in
+# pandas/numpy: native runtimes read these variables when they initialize, and
+# fork-mode workers inherit the parent's already-initialized pools — setting
+# the caps after import would be too late on both counts. Spawn-mode workers
+# re-import this module, so they inherit the caps the same way.
+_WORKER_THREAD_CAPS = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+_DEFAULTED_THREAD_CAPS = [name for name in _WORKER_THREAD_CAPS if name not in os.environ]
+for _name in _DEFAULTED_THREAD_CAPS:
+    os.environ[_name] = _WORKER_THREAD_CAPS[_name]
+
 from tools.support_matrix.support_matrix import (
     DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     SupportMatrix,
@@ -714,6 +738,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not baseline_dir.exists():
         print(f"baseline-dir does not exist: {baseline_dir}", file=sys.stderr)
         return 2
+
+    if _DEFAULTED_THREAD_CAPS:
+        print(f"Thread caps defaulted to 1 (runbook §4.0): {', '.join(_DEFAULTED_THREAD_CAPS)}")
 
     print(f"Scan mode: {args.scan_mode}")
     print(f"SQLite:   {db_path}")

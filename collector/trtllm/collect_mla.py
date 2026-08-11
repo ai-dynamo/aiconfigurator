@@ -8,7 +8,7 @@ context/generation MLA kernels. The module adapts shared MLA cases to current
 metadata objects, request/cache helpers, and backend-specific timing paths.
 """
 
-__compat__ = "trtllm>=1.1.0"
+__compat__ = "trtllm>=1.3.0rc20"
 
 import math
 from dataclasses import dataclass
@@ -23,25 +23,32 @@ from tensorrt_llm._torch.attention_backend.interface import (
 )
 from tensorrt_llm._torch.attention_backend.utils import get_attention_backend
 from tensorrt_llm._torch.metadata import KVCacheParams
-from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequest, SamplingConfig
 from tensorrt_llm._torch.pyexecutor.resource_manager import KVCacheManager
 from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.functional import PositionEmbeddingType
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
-from tensorrt_llm.sampling_params import SamplingParams
 
 from collector.case_generator import get_context_mla_case_specs, get_generation_mla_case_specs
-from collector.helper import benchmark_with_power, log_perf
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
 
 def _mla_tokens_per_block() -> int:
+    # SM90 serving runs DeepSeek-dim MLA (headDimQk=576) through FlashMLA and
+    # forces tokens_per_block=64: model_config.enable_flash_mla requires
+    # head_dim==576 on SM90 (tensorrt_llm/_torch/model_config.py@v1.3.0rc20),
+    # py_executor_creator.py then overrides tokens_per_block to 64, and the
+    # attention op enables FlashMLA only for SM90 && tokens_per_block==64
+    # (cpp/tensorrt_llm/thop/attentionOp.cpp:1235@v1.3.0rc20). With 32 the op
+    # falls back to the generation FMHA runner, which 1.3.0rc20 no longer
+    # supports for FP8 KV cache on SM90 ("Deepseek should be supported by fmha
+    # in generation part", cpp/tensorrt_llm/common/attentionOp.cpp:3091).
+    #
     # TRT-LLM PR #10261 (>=1.3.0rc0) dropped numTokensPerPage=64 trtllm-gen MLA
-    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512). Only P32 remains.
-    if tensorrt_llm.__version__ >= "1.3.0rc0":
-        return 32
-    return 64
+    # cubins for DeepSeek-V3 dims (headDimQk=576, headDimV=512) on Blackwell;
+    # only P32 remains there.
+    return 64 if get_sm_version() == 90 else 32
 
 
 def get_context_mla_test_cases():
@@ -182,6 +189,34 @@ def run_mla(
     perf_filename,
     device="cuda:0",
 ):
+    # FIXME(kernel-limit): TRT-LLM 1.3.0rc20 has no MLA FMHA kernel below
+    # Hopper — AttentionOp::initialize() hard-asserts "Deepseek should be
+    # supported by fmha in context part" (attentionOp.cpp:3097) / "... in
+    # generation part" (:3091) when the FMHA dispatcher reports the Deepseek
+    # head layout unsupported. Hardware-observed on L40 (SM89) 2026-07-26:
+    # smoke 0/8 across both phases, every case a C++ SIGABRT Python cannot
+    # catch (worker reset per case). Serving hits the identical assert on its
+    # default path (attn_backend='TRTLLM', llm_args.py:4544; no SM-conditional
+    # switch in modeling_deepseekv3.py). This is a REGRESSION, not a permanent
+    # architectural wall: trtllm 1.0.0 collected full SM89 MLA data
+    # (l40s/mla/trtllm/1.0.0: 2436 ctx + 5068 gen rows, bf16 AND fp8 KV), and
+    # since 1.3.0rc15 the tree only carries an approved reuse of that 1.0.0
+    # data. Root cause (source diff v1.0.0 vs v1.3.0rc20): MLA context moved
+    # from the PACKED_QKV/Q_PAGED_KV layouts (whose hd192 kernels SM89 had)
+    # to SEPARATE_Q_K_V, and the new layout's kernel-generation whitelist is
+    # `kspec.sm in [90, 100, 120]` — SM89 absent
+    # (cpp/kernels/fmha_v2/setup.py:6926-6931@v1.3.0rc20); the hand-added
+    # sm89 576x512 generation cubin entry from 1.0.0 was dropped in the same
+    # window. Layout-level, so it kills every dtype at once. Fail closed with
+    # a cited, classified raise (Gemma4/DSA precedent). Re-verify on the next
+    # framework version bump.
+    if get_sm_version() < 90:
+        phase = "context" if is_context_phase else "generation"
+        raise ValueError(
+            f"TRT-LLM MLA has no pre-Hopper FMHA kernel; DeepSeek MLA {phase} "
+            f"is unsupported on SM{get_sm_version()} (attentionOp.cpp:"
+            f"{'3097' if is_context_phase else '3091'} assert @1.3.0rc20)"
+        )
     scenario = Scenario()
     q_lora_rank = scenario.q_lora_rank
     kv_lora_rank = scenario.kv_lora_rank
@@ -355,30 +390,15 @@ def _run_attn_for_backend(
         dtype=kv_cache_dtype,
     )
 
-    beam_width = 1
-    batch_request_infos = []
-    batch_llm_requests = []
-    for req_id, ctx_len in enumerate(context_sequence_lengths):
-        req = LlmRequest(
-            request_id=req_id,
-            max_new_tokens=num_generation_steps + 1,
-            input_tokens=[1] * ctx_len,
-            sampling_config=SamplingConfig(SamplingParams()._get_sampling_config()),
-            is_streaming=False,
-        )
-        req.paged_kv_block_ids = []
-        batch_request_infos.append((req_id, ctx_len, beam_width))
-        batch_llm_requests.append(req)
-    # TRT-LLM >=1.3.0rc replaced KVCacheManager.impl.add_sequence (per-sequence) with
-    # add_sequence_batch(request_infos, requests) (batched). Confirmed absent on <1.3.0rc
-    # and present on 1.3.0rc15; the hasattr probe is the live boundary check. When the
-    # minimum supported TRT-LLM version always carries add_sequence_batch, remove the
-    # else branch (source: tensorrt_llm/_torch/pyexecutor/resource_manager.py, KVCacheManager).
-    if hasattr(kv_cache_manager.impl, "add_sequence_batch"):
-        kv_cache_manager.impl.add_sequence_batch(batch_request_infos, batch_llm_requests)
-    else:
-        for (req_id, ctx_len, req_beam_width), req in zip(batch_request_infos, batch_llm_requests, strict=True):
-            kv_cache_manager.impl.add_sequence(req_id, ctx_len, req_beam_width, req)
+    # TRT-LLM 1.3.0rc20 removed the per-request ``impl.add_sequence`` binding
+    # (serving batches registrations through ``add_sequence_batch`` in
+    # tensorrt_llm/_torch/pyexecutor/resource_manager.py::prepare_resources).
+    # Register context sequences through the framework's own
+    # ``add_dummy_requests`` warmup path, like the sibling attention collectors.
+    kv_cache_manager.add_dummy_requests(
+        list(range(len(context_sequence_lengths))),
+        token_nums=list(context_sequence_lengths),
+    )
 
     attn_metadata = attention_cls.Metadata(
         seq_lens=torch.tensor(context_sequence_lengths, dtype=torch.int),
@@ -418,27 +438,30 @@ def _run_attn_for_backend(
         attn_metadata.prepare()
 
     if is_context_phase:
+        # Packed context token count; case grids use uniform context lengths,
+        # so this matches the previous last-length * num-contexts sizing.
+        total_ctx_tokens = sum(context_sequence_lengths)
         ctx_compressed_kv = torch.randn(
-            [ctx_len * len(context_sequence_lengths), kv_lora_rank],
+            [total_ctx_tokens, kv_lora_rank],
             dtype=dtype,
             device=device,
         )
 
         ctx_k_pe = torch.randn(
-            [ctx_len * len(context_sequence_lengths), qk_rope_head_dim],
+            [total_ctx_tokens, qk_rope_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_q = torch.randn(
-            [ctx_len * len(context_sequence_lengths), num_heads * qk_head_dim],
+            [total_ctx_tokens, num_heads * qk_head_dim],
             dtype=dtype,
             device=device,
         )
 
         ctx_kv = torch.randn(
             [
-                ctx_len * len(context_sequence_lengths),
+                total_ctx_tokens,
                 num_kv_heads * (qk_nope_head_dim + v_head_dim),
             ],
             dtype=dtype,
@@ -499,25 +522,81 @@ def _run_attn_for_backend(
 
         latent_cache = torch.cat([compressed_kv, k_pe], dim=-1)
 
-        if tensorrt_llm.__version__ > "1.2.0rc2":
-            num_seqs = len(context_sequence_lengths)
-            cu_q_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
-            cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
-            fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
+        num_seqs = len(context_sequence_lengths)
+        cu_q_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+        cu_kv_seqlens = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+        fmha_scheduler_counter = torch.empty(1, dtype=torch.uint32, device=device)
 
-            has_fp8_kv_cache = attn_mla.has_fp8_kv_cache if hasattr(attn_mla, "has_fp8_kv_cache") else False
-            if has_fp8_kv_cache:
-                mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
-                mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)
-                quant_q_buffer = torch.empty(
-                    num_tokens, num_heads * (kv_lora_rank + qk_rope_head_dim), dtype=torch.uint8, device=device
-                )
-            else:
-                mla_bmm1_scale = None
-                mla_bmm2_scale = None
-                quant_q_buffer = None
+        # Validate the backend quant state instead of defaulting to BF16 on a
+        # missing attribute: rc20 exposes TrtllmAttention.has_fp8_kv_cache
+        # (derived from QuantMode.has_fp8_kv_cache()). A silent False default
+        # would set up the BF16 scale/buffer path under an fp8-KV label —
+        # mislabeled rows, worse than a crash. Probe-and-raise per
+        # layer_permissions.md.
+        if not hasattr(attn_mla, "has_fp8_kv_cache"):
+            raise RuntimeError(
+                "TrtllmAttention.has_fp8_kv_cache missing (rc20 API drift); "
+                "refusing to default the MLA generation quant path to BF16"
+            )
+        has_fp8_kv_cache = attn_mla.has_fp8_kv_cache
+        expected_fp8_kv = kv_cache_dtype == tensorrt_llm.bindings.DataType.FP8
+        if bool(has_fp8_kv_cache) != expected_fp8_kv:
+            raise RuntimeError(
+                f"MLA generation quant-state mismatch: backend has_fp8_kv_cache="
+                f"{has_fp8_kv_cache}, requested kv_cache_dtype={kv_cache_dtype}"
+            )
+        if has_fp8_kv_cache:
+            mla_bmm1_scale = torch.empty(2, dtype=torch.float32, device=device)
+            mla_bmm2_scale = torch.empty(1, dtype=torch.float32, device=device)
+            quant_q_buffer = torch.empty(
+                num_tokens, num_heads * (kv_lora_rank + qk_rope_head_dim), dtype=torch.uint8, device=device
+            )
+        else:
+            mla_bmm1_scale = None
+            mla_bmm2_scale = None
+            quant_q_buffer = None
 
-            # Call mla_rope_generation before forward
+        # Call mla_rope_generation before forward
+        attn_mla.mla_rope_generation(
+            fused_q,
+            q_pe,
+            latent_cache,
+            attn_metadata,
+            cu_q_seqlens,
+            cu_kv_seqlens,
+            fmha_scheduler_counter,
+            mla_bmm1_scale,
+            mla_bmm2_scale,
+            quant_q_buffer,
+        )
+        attn_mla.forward(
+            fused_q,
+            None,
+            None,
+            attn_metadata,
+            attention_input_type=AttentionInputType.generation_only,
+            latent_cache=latent_cache,
+            q_pe=q_pe,
+            cu_q_seqlens=cu_q_seqlens,
+            cu_kv_seqlens=cu_kv_seqlens,
+            fmha_scheduler_counter=fmha_scheduler_counter,
+            mla_bmm1_scale=mla_bmm1_scale,
+            mla_bmm2_scale=mla_bmm2_scale,
+            quant_q_buffer=quant_q_buffer,
+        )
+
+    # Use benchmark_with_power context manager
+    def kernel_func():
+        if is_context_phase:
+            attn_mla.forward(
+                q,
+                k,
+                v,
+                attn_metadata,
+                attention_input_type=AttentionInputType.context_only,
+                latent_cache=latent_cache,
+            )
+        else:
             attn_mla.mla_rope_generation(
                 fused_q,
                 q_pe,
@@ -545,67 +624,6 @@ def _run_attn_for_backend(
                 mla_bmm2_scale=mla_bmm2_scale,
                 quant_q_buffer=quant_q_buffer,
             )
-        else:
-            attn_mla.forward(
-                fused_q,
-                None,
-                None,
-                attn_metadata,
-                attention_input_type=AttentionInputType.generation_only,
-                latent_cache=latent_cache,
-                q_pe=q_pe,
-            )
-
-    # Use benchmark_with_power context manager
-    def kernel_func():
-        if is_context_phase:
-            attn_mla.forward(
-                q,
-                k,
-                v,
-                attn_metadata,
-                attention_input_type=AttentionInputType.context_only,
-                latent_cache=latent_cache,
-            )
-        else:
-            if tensorrt_llm.__version__ > "1.2.0rc2":
-                attn_mla.mla_rope_generation(
-                    fused_q,
-                    q_pe,
-                    latent_cache,
-                    attn_metadata,
-                    cu_q_seqlens,
-                    cu_kv_seqlens,
-                    fmha_scheduler_counter,
-                    mla_bmm1_scale,
-                    mla_bmm2_scale,
-                    quant_q_buffer,
-                )
-                attn_mla.forward(
-                    fused_q,
-                    None,
-                    None,
-                    attn_metadata,
-                    attention_input_type=AttentionInputType.generation_only,
-                    latent_cache=latent_cache,
-                    q_pe=q_pe,
-                    cu_q_seqlens=cu_q_seqlens,
-                    cu_kv_seqlens=cu_kv_seqlens,
-                    fmha_scheduler_counter=fmha_scheduler_counter,
-                    mla_bmm1_scale=mla_bmm1_scale,
-                    mla_bmm2_scale=mla_bmm2_scale,
-                    quant_q_buffer=quant_q_buffer,
-                )
-            else:
-                attn_mla.forward(
-                    fused_q,
-                    None,
-                    None,
-                    attn_metadata,
-                    attention_input_type=AttentionInputType.generation_only,
-                    latent_cache=latent_cache,
-                    q_pe=q_pe,
-                )
 
     with benchmark_with_power(
         device=device,

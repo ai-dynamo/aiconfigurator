@@ -100,13 +100,29 @@ shards. Each shard runs a fresh process that exits after `N` entries, returning
 — which is more thorough than in-pool recycling and cannot deadlock. The DB is
 checkpointed, so the next shard resumes from where the last stopped.
 
-Also cap library threads — 16 workers already saturate the cores, so per-worker
-BLAS/rayon threads are pure oversubscription and the main arena-bloat driver:
+Also cap library threads — the scan parallelizes at the process level, so
+per-worker BLAS/rayon threads are pure oversubscription and the main
+arena-bloat driver. **The runner now sets these caps itself** (all five
+default to `1` at module import, before pandas/numpy load and before any
+worker starts; an explicit export still wins):
 
 ```bash
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
        RAYON_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 ```
+
+Measured on the 2026-08-01 full-matrix campaign (Apple M3 Pro, 6 workers,
+Darwin — the arena behavior is not glibc-specific):
+
+- **Uncapped is catastrophic on both axes.** RSS grew ~0.7 GB/entry/worker; a
+  bare (uncapped, unsharded) run reached six workers × 22–27 GB ≈ **152 GB in
+  40 minutes**, jetsammed system services, and froze the host via a
+  WindowServer watchdog timeout. The same uncapped thrashing also made each
+  entry **~18× slower** (47 s → 2.5 s/entry once capped) — the historical
+  "hours-scale" estimate for this scan was mostly thread contention.
+- **Capped + sharded is tame:** ~9 GB peak per 100-entry shard tree, and the
+  full 6 460-entry pareto matrix completes in ≈ 4.5 h at 6 workers (well under
+  an hour on a 12-worker Linux box).
 
 Tune workers + shard size to RAM (always with `--max-tasks-per-child 0`):
 

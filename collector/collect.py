@@ -102,6 +102,39 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 SYSTEMIC_GROUP_THRESHOLD = 5
 
 
+@contextlib.contextmanager
+def _collector_model_path(model_path: str | None):
+    previous = os.environ.get("COLLECTOR_MODEL_PATH")
+    if model_path:
+        os.environ["COLLECTOR_MODEL_PATH"] = model_path
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        else:
+            os.environ["COLLECTOR_MODEL_PATH"] = previous
+
+
+def _get_test_cases_for_model(get_func, model_path: str | None):
+    if not model_path:
+        return get_func()
+    with _collector_model_path(model_path):
+        sig = signature(get_func)
+        params = sig.parameters
+        if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
+            return get_func(model_path=model_path)
+        return get_func()
+
+
+def _requested_ops(ops: list[str] | None, case_plan=None) -> set[str]:
+    if ops is not None:
+        return set(ops)
+    if case_plan is not None:
+        return set(case_plan.ops)
+    return set()
+
+
 def _require_torch():
     if torch is None:
         raise RuntimeError("PyTorch is required to run collectors. Use --plan-only to inspect collector v2 YAML plans.")
@@ -132,7 +165,7 @@ def _registry_with_requested_wideep(registry: list, backend: str, ops: list[str]
     if not wideep_registry:
         return registry
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     requested_wideep_ops = requested_ops & {entry.op for entry in wideep_registry}
     if not requested_wideep_ops:
         return registry
@@ -729,15 +762,29 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             "timestamp": datetime.now().isoformat(),
         }
 
+    # Parent-side exactly-once ledger of finished task IDs. The monitoring
+    # loop's exit condition MUST NOT depend on worker-side progress_value
+    # ticks: a worker records done_tasks/failed_tasks and bumps
+    # progress_value as separate manager RPCs, so a hard kill between them
+    # (hardware-observed on H20 2026-07-19: TRT-LLM C++ teardown SIGABRT
+    # right after the task completed) loses the tick forever — the run then
+    # sat at 99/100 with a complete checkpoint and every GPU idle. Every
+    # task that reaches done_tasks or failed_tasks lands here exactly once
+    # via sync_done_to_checkpoint, so `len(accounted)` is the authoritative
+    # completion count; progress_value remains for worker-side GC cadence.
+    accounted = set()
+
     def sync_done_to_checkpoint():
         for task_id in list(done_tasks.keys()):
             resume_tracker.mark_passed(task_id)
+            accounted.add(task_id)
             try:
                 del done_tasks[task_id]
             except KeyError:
                 pass
         for task_id in list(failed_tasks.keys()):
             resume_tracker.mark_failed(task_id)
+            accounted.add(task_id)
             try:
                 del failed_tasks[task_id]
             except KeyError:
@@ -777,8 +824,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 try:
                     func(*task_params, device=device)
                     resume_tracker.mark_passed(task_id)
+                    accounted.add(task_id)
                 except Exception as e:
                     resume_tracker.mark_failed(task_id)
+                    accounted.add(task_id)
                     error_info = {
                         "module": module_name,
                         "device_id": 0,
@@ -801,7 +850,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 resume_tracker.flush()
             resume_tracker.flush(force=True)
 
-        while progress_value.value < len(task_infos):
+        while len(accounted) < len(task_infos):
             # Drain errors
             while not error_queue.empty():
                 error = error_queue.get()
@@ -814,14 +863,14 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 pbar.set_postfix({"errors": len(errors)})
                 last_error_count = len(errors)
 
-            if progress_value.value == last_progress:
+            if len(accounted) == last_progress:
                 stall_count += 1
                 if stall_count > STALL_THRESHOLD:
-                    logger.warning(f"Progress stalled at {progress_value.value}/{len(task_infos)}")
+                    logger.warning(f"Progress stalled at {len(accounted)}/{len(task_infos)}")
                     stall_count = 0
             else:
                 stall_count = 0
-                last_progress = progress_value.value
+                last_progress = len(accounted)
 
             # Check process health — only restart if there is still work
             # remaining.  Workers that consumed a None sentinel or finished
@@ -848,8 +897,17 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                             f"errors: {len(process_stats[i]['errors'])})"
                         )
 
-                    # Mark active task as failed if the process died while running it
-                    if active_task_id is not None and active_task_id not in done_tasks:
+                    # Mark active task as failed if the process died while
+                    # running it. The `accounted` guard covers the window
+                    # where the worker recorded done but died before its
+                    # progress tick and the sync already drained done_tasks:
+                    # without it the parent would re-mark a passed task as
+                    # failed (mislabel) on top of double-counting it.
+                    if (
+                        active_task_id is not None
+                        and active_task_id not in done_tasks
+                        and active_task_id not in accounted
+                    ):
                         try:
                             failed_tasks[active_task_id] = True
                         except Exception:
@@ -874,13 +932,52 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                         processes[i] = None
                         continue
 
-                    remaining = len(task_infos) - progress_value.value
+                    remaining = len(task_infos) - len(accounted)
                     if remaining > 0:
                         processes[i] = start_process(i)
                     else:
                         processes[i] = None
 
-            current = progress_value.value
+            # Escape hatch: every worker slot is permanently gone (restart
+            # limit, consumed sentinel, or no remaining work to justify a
+            # restart) while tasks are still unaccounted — e.g. a worker was
+            # SIGKILLed after queue.get() but before it recorded anything in
+            # done_tasks/current_task_ids. Without this the monitor loop
+            # would spin at 0.5s forever with nothing able to make progress.
+            # Record the orphaned ids as failures so the summary and resume
+            # checkpoint stay complete, then stop the loop.
+            if all(p is None for p in processes) and len(accounted) < len(task_infos):
+                while not error_queue.empty():
+                    error = error_queue.get()
+                    errors.append(error)
+                    process_stats[error["device_id"]]["errors"].append(error["task_id"])
+                sync_done_to_checkpoint()
+                orphaned = [info["id"] for info in task_infos if info["id"] not in accounted]
+                if orphaned:
+                    logger.error(
+                        f"All workers exited with {len(orphaned)} task(s) unaccounted; "
+                        f"recording them as failed (orphaned by worker death) and stopping the monitor loop."
+                    )
+                    for task_id in orphaned:
+                        errors.append(
+                            {
+                                "module": module_name,
+                                "device_id": None,
+                                "task_id": task_id,
+                                "task_params": None,
+                                "error_type": "WorkerOrphanedTask",
+                                "error_message": "all workers exited before this task was accounted",
+                                "classification": "unexpected",
+                                "group": None,
+                                "traceback": "",
+                                "timestamp": datetime.now().isoformat(),
+                            }
+                        )
+                        failed_tasks[task_id] = True
+                    sync_done_to_checkpoint()
+                break
+
+            current = len(accounted)
             if current > pbar.n:
                 pbar.update(current - pbar.n)
 
@@ -959,29 +1056,6 @@ def collect_ops(
     if runtime_version:
         from collector.version_resolver import _check_compat as check_compat
 
-    @contextlib.contextmanager
-    def _collector_model_path(model_path: str | None):
-        previous = os.environ.get("COLLECTOR_MODEL_PATH")
-        if model_path:
-            os.environ["COLLECTOR_MODEL_PATH"] = model_path
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop("COLLECTOR_MODEL_PATH", None)
-            else:
-                os.environ["COLLECTOR_MODEL_PATH"] = previous
-
-    def _get_test_cases(get_func, model_path: str | None):
-        if not model_path:
-            return get_func()
-        with _collector_model_path(model_path):
-            sig = signature(get_func)
-            params = sig.parameters
-            if "model_path" in params or any(param.kind == Parameter.VAR_KEYWORD for param in params.values()):
-                return get_func(model_path=model_path)
-            return get_func()
-
     all_errors = []
 
     for collection in collections:
@@ -1038,7 +1112,7 @@ def collect_ops(
             def get_func_with_limit(get_func=get_func, op=collection["type"]):
                 from collector.capabilities import filter_cases
 
-                cases = _get_test_cases(get_func, model_path)
+                cases = _get_test_cases_for_model(get_func, model_path)
                 cases, _dropped = filter_cases(cases, op=op, sm_version=sm_version)
                 if case_filters:
                     before_count = len(cases)
@@ -1115,28 +1189,56 @@ def collect_sglang(
 
     from collector.framework_manifest import require_collector_runtime
 
-    requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
+    requested_ops = _requested_ops(ops, case_plan)
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
     runtime = require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
+    from collector.fullnode import SGLANG_FULLNODE_OPS, collect_sglang_fullnode_op
     from collector.sglang.registry import REGISTRY
     from collector.version_resolver import build_collections
 
+    all_errors = []
     registry = _registry_with_requested_wideep(REGISTRY, "sglang", ops, case_plan)
-    collections = build_collections(registry, "sglang", version, ops, logger=logger)
-    all_errors = collect_ops(
-        num_processes,
-        collections,
-        version,
-        limit=limit,
-        shuffle=shuffle,
-        backend="sglang",
-        resume_options=resume_options,
-        model_path=model_path,
-        case_plan=case_plan,
-        sm_version=sm_version,
-        case_filters=case_filters,
-    )
+    ops_filter = ops if ops is not None else (case_plan.ops if case_plan is not None else None)
+    collections = build_collections(registry, "sglang", version, ops_filter, logger=logger)
+    requested_fullnode_ops = requested_ops & set(SGLANG_FULLNODE_OPS)
+    fullnode_collections = [collection for collection in collections if collection["type"] in requested_fullnode_ops]
+    pool_collections = [collection for collection in collections if collection["type"] not in SGLANG_FULLNODE_OPS]
+
+    if pool_collections:
+        all_errors = collect_ops(
+            num_processes,
+            pool_collections,
+            version,
+            limit=limit,
+            shuffle=shuffle,
+            backend="sglang",
+            resume_options=resume_options,
+            model_path=model_path,
+            case_plan=case_plan,
+            sm_version=sm_version,
+            case_filters=case_filters,
+        )
+
+    for collection in fullnode_collections:
+        all_errors.extend(
+            collect_sglang_fullnode_op(
+                collection,
+                runtime_version=version,
+                limit=limit,
+                shuffle=shuffle,
+                shuffle_seed=42,
+                backend="sglang",
+                resume_options=resume_options,
+                model_path=model_path,
+                case_plan=case_plan,
+                sm_version=sm_version,
+                case_filters=case_filters,
+                get_test_cases_for_model=_get_test_cases_for_model,
+                resume_checkpoint_cls=ResumeCheckpoint,
+                logger=logger,
+            )
+        )
 
     generate_collection_summary(all_errors, "sglang", version)
     provenance_ctx = {

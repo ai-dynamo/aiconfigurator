@@ -12,7 +12,7 @@ Builds a single TRT-LLM torch-flow attention layer running in encoder mode:
 Quant: bf16 only. TRT-LLM upstream does not support fp8 on the encoder path.
 """
 
-__compat__ = "trtllm>=1.3.0rc5"
+__compat__ = "trtllm>=1.3.0rc20"
 
 import os
 

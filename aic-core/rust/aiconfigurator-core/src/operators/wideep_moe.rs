@@ -30,13 +30,14 @@
 //! (architecture-preferred kernel, falling back to whatever the table
 //! actually collected).
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WideEpMoeOp {
@@ -137,7 +138,8 @@ impl WideEpMoeOp {
         // Engine coordinates are always integral (table keys / the u32
         // query); rounding to u32 keeps integer floor-division parity with
         // Python's `get_sol` (same convention as operators/moe.rs).
-        let sol = |t: f64| self.sol_latency_ms(spec, t.round() as u32);
+        let tc_flops = quant_tc_flops(spec, self.quant_mode.mapping())?;
+        let sol = |t: f64| self.sol_latency_ms(spec, t.round() as u32, tc_flops);
         db.wideep_moe.query_compute(
             num_tokens,
             self.hidden_size,
@@ -184,8 +186,9 @@ impl WideEpMoeOp {
     fn empirical_latency(&self, db: &PerfDatabase, num_tokens: u32) -> Result<f64, AicError> {
         let kernel = self.select_kernel(db)?;
         let spec = &db.system_spec;
-        let sol = |c: &[f64]| self.sol_latency_ms(spec, c[0].round() as u32);
-        let sol_time = self.sol_latency_ms(spec, num_tokens);
+        let tc_flops = quant_tc_flops(spec, self.quant_mode.mapping())?;
+        let sol = |c: &[f64]| self.sol_latency_ms(spec, c[0].round() as u32, tc_flops);
+        let sol_time = self.sol_latency_ms(spec, num_tokens, tc_flops);
 
         // Python keys on ("wideep_moe", system, backend, version, kernel,
         // quant, topk, num_experts, hidden, inter, num_slots, moe_tp,
@@ -240,7 +243,7 @@ impl WideEpMoeOp {
     /// (`operators/moe.rs`) except the weight-read term uses `num_slots`
     /// instead of `num_experts` (WideEP EPLB redundant mode may replicate
     /// experts across slots). `num_experts` never enters the math.
-    fn sol_latency_ms(&self, spec: &SystemSpec, num_tokens: u32) -> f64 {
+    fn sol_latency_ms(&self, spec: &SystemSpec, num_tokens: u32, tc_flops: f64) -> f64 {
         let total_tokens = num_tokens as u64 * self.topk as u64;
         let moe_ep = (self.moe_ep_size as u64).max(1);
         let moe_tp = (self.moe_tp_size as u64).max(1);
@@ -255,11 +258,9 @@ impl WideEpMoeOp {
                 * std::cmp::min(slots / moe_ep, total_tokens / moe_ep); // weights (num_slots)
         let mem_bytes = (mem_bytes_int as f64) * self.quant_mode.mapping().memory;
 
-        // Python indexes `bfloat16_tc_flops` directly (KeyError if absent);
-        // every shipped system populates it — same fallback convention as
-        // operators/moe.rs.
-        let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
-        let sol_math = (ops as f64) / (tc_flops * self.quant_mode.mapping().compute) * 1000.0;
+        // `tc_flops` is pre-resolved by the caller via `quant_tc_flops`
+        // (strict per-dtype lookup; a missing `*_tc_flops` entry errors there).
+        let sol_math = (ops as f64) / tc_flops * 1000.0;
         let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
         sol_math.max(sol_mem)
     }

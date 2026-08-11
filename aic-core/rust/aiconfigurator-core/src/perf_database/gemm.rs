@@ -18,14 +18,70 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use quick_cache::sync::{Cache, DefaultLifecycle};
+use quick_cache::{DefaultHashBuilder, OptionsBuilder, UnitWeighter};
+
+use super::interpolation::Grid3;
+use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::interpolation::Grid3;
-use super::perf_interp::{self, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform};
 use crate::perf_database::parquet_loader::PerfReader;
+
+const GEMM_QUERY_CACHE_CAPACITY: usize = 32_768;
+// Keep construction and per-table memory independent of large host CPU counts.
+const GEMM_QUERY_CACHE_SHARDS: usize = 16;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct GemmQueryKey {
+    quant: GemmQuantMode,
+    m: u32,
+    n: u32,
+    k: u32,
+}
+
+// Quick Cache is the intended pattern for hot, high-cardinality scalar-query
+// memoization in the perf database. DSA's `sparse` map is deliberately
+// different: it holds a small, unbounded set of lazily loaded table objects,
+// rather than memoizing high-volume scalar results.
+fn gemm_query_cache() -> Cache<GemmQueryKey, f64> {
+    let options = OptionsBuilder::new()
+        .estimated_items_capacity(GEMM_QUERY_CACHE_CAPACITY)
+        .weight_capacity(GEMM_QUERY_CACHE_CAPACITY as u64)
+        .shards(GEMM_QUERY_CACHE_SHARDS)
+        .build()
+        .expect("valid static GEMM query cache options");
+    Cache::with_options(
+        options,
+        UnitWeighter,
+        DefaultHashBuilder::default(),
+        DefaultLifecycle::default(),
+    )
+}
+
+#[inline(always)]
+fn resolve_gemm_query_cached<F>(
+    cache: &Cache<GemmQueryKey, f64>,
+    key: GemmQueryKey,
+    resolve: F,
+) -> Result<f64, AicError>
+where
+    F: FnOnce() -> Result<f64, AicError>,
+{
+    if let Some(value) = cache.get(&key) {
+        return Ok(value);
+    }
+
+    let value = resolve()?;
+    // Preserve resolver behavior by returning non-finite results, but do
+    // not make them sticky cache hits for later queries.
+    if value.is_finite() {
+        cache.insert(key, value);
+    }
+    Ok(value)
+}
 
 /// GEMM-family perf-data owner for one logical
 /// `<system>/<backend>/<version>` selection.
@@ -51,17 +107,25 @@ pub struct GemmTable {
     gemm: OnceLock<Result<GemmEngineGrids, AicError>>,
     compute_scale: OnceLock<Result<TwoDGrids, AicError>>,
     scale_matrix: OnceLock<Result<TwoDGrids, AicError>>,
+    /// Successful finite scalar GEMM queries, keyed by normalized quant and
+    /// shape and bounded independently for each shard.
+    query_cache: OnceLock<Cache<GemmQueryKey, f64>>,
 }
 
 /// 3-D GEMM tables keyed by quant name -> m -> n -> k -> latency_ms.
+/// `quant_order` records first-seen (file row) order: the `BTreeMap` iterates
+/// alphabetically, but the quant-transfer ladder's tie-breaks are pinned to
+/// Python's dict-insertion (= file row) order.
 struct GemmGrids {
     by_quant: BTreeMap<String, Grid3<f64>>,
+    quant_order: Vec<String>,
 }
 
 /// Engine-ready GEMM tables: per quant, the nested table plus the scattered
 /// (n, k)-site index, both built once at load (tables are immutable).
 struct GemmEngineGrids {
     by_quant: BTreeMap<String, (Node, SiteIndex)>,
+    quant_order: Vec<String>,
 }
 
 /// 2-D scale tables keyed by quant name -> m -> k -> latency_ms.
@@ -99,6 +163,7 @@ impl GemmTable {
             gemm: OnceLock::new(),
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
+            query_cache: OnceLock::new(),
         }
     }
 
@@ -110,24 +175,42 @@ impl GemmTable {
     /// k_tail=3 util-hold beyond the sweep); unknown shape -> log2-IDW util
     /// transfer from <=4 covering neighbour sites within 2.0 octaves.
     pub fn query(&self, quant: GemmQuantMode, m: u32, n: u32, k: u32) -> Result<f64, AicError> {
-        let grids = self.load_gemm()?;
         // `fp8_static` is a behavioral mode that reuses `fp8` perf tables,
         // mirroring Python `GEMM._normalize_for_lookup`. The
         // compute_scale / scale_matrix tables apply the same
         // normalization in their respective query methods.
         let lookup_quant = normalize_fp8_static_quant(quant);
-        let quant_name = lookup_quant.name();
-        let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
-                self.data_root.display(),
-                grids.by_quant.keys().collect::<Vec<_>>(),
-            ))
-        })?;
+        // Resolve flops BEFORE any perf-data lookup: Python resolves at
+        // `_query_gemm_table` entry in every mode, so a missing dtype entry
+        // must classify as MissingSystemFlops on both engines — not as a
+        // data miss when the quant's table also happens to be uncollected.
         let spec = &self.system_spec;
-        let sol = move |c: &[f64]| gemm_sol_latency_ms(spec, lookup_quant, c[0], c[1], c[2]);
-        let cfg = gemm_engine_config(&sol);
-        index.resolve(&cfg, &[m as f64, n as f64, k as f64])
+        let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        // Keep the cache probe below FLOPS resolution, even on hits. Hoisting
+        // it would change MissingSystemFlops-over-PerfDatabase error precedence.
+        let key = GemmQueryKey {
+            quant: lookup_quant,
+            m,
+            n,
+            k,
+        };
+        let cache = self.query_cache.get_or_init(gemm_query_cache);
+        resolve_gemm_query_cached(cache, key, || {
+            let grids = self.load_gemm()?;
+            let quant_name = lookup_quant.name();
+            let (_, index) = grids.by_quant.get(quant_name).ok_or_else(|| {
+                AicError::PerfDatabase(format!(
+                    "GEMM perf data missing for quant '{quant_name}' at {}; available: {:?}",
+                    self.data_root.display(),
+                    grids.by_quant.keys().collect::<Vec<_>>(),
+                ))
+            })?;
+            let sol = move |c: &[f64]| {
+                gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
+            };
+            let cfg = gemm_engine_config(&sol);
+            index.resolve(&cfg, &[m as f64, n as f64, k as f64])
+        })
     }
 
     /// Query compute-scale latency (ms) — used by `fp8_static` GEMM only.
@@ -233,6 +316,15 @@ impl GemmTable {
         Ok(points)
     }
 
+    /// Distinct quant names of the loaded GEMM table, in first-seen (file
+    /// row) order — the exact analogue of `MoeTable::available_quants` and of
+    /// Python's dict-insertion iteration over the gemm data. The
+    /// quant-transfer ladder's tie-breaks depend on this order; the
+    /// alphabetical `BTreeMap` iteration must NOT be used for it.
+    pub fn available_quants(&self) -> Result<&[String], AicError> {
+        Ok(&self.load_gemm()?.quant_order)
+    }
+
     fn load_gemm(&self) -> Result<&GemmEngineGrids, AicError> {
         let cell = self.gemm.get_or_init(|| {
             let mut grids = load_gemm_parquet(&self.gemm_sources)?;
@@ -249,6 +341,7 @@ impl GemmTable {
             // sees the same monotone-bounded inputs as Python.
             clamp_gemm_grids_to_sol(&self.system_spec, &mut grids);
             // Build the engine table + (n, k)-site index once per quant.
+            let quant_order = grids.quant_order;
             let by_quant = grids
                 .by_quant
                 .into_iter()
@@ -258,7 +351,7 @@ impl GemmTable {
                     (quant_name, (node, index))
                 })
                 .collect();
-            Ok(GemmEngineGrids { by_quant })
+            Ok(GemmEngineGrids { by_quant, quant_order })
         });
         cell.as_ref().map_err(|err| clone_err(err))
     }
@@ -278,63 +371,51 @@ impl GemmTable {
     }
 }
 
-/// Speed-of-light GEMM latency in ms.
+/// Speed-of-light GEMM latency in ms, from a pre-resolved `tc_flops`.
 ///
 /// Mirrors Python's `GEMM._query_gemm_table::get_sol`:
-/// - `sol_math = 2 * m * n * k / tc_flops(quant) * 1000`
+/// - `sol_math = 2 * m * n * k / tc_flops * 1000`
 /// - `sol_mem  = quant.memory * (m*n + m*k + n*k) / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
-///
-/// `tc_flops(quant)` follows Python `_get_quant_tc_flops`: compute factor
-/// 1 maps to `bfloat16_tc_flops`, 2 to `fp8_tc_flops`, 4 to `fp4_tc_flops`,
-/// with a `bfloat16_tc_flops * compute_factor` fallback when the spec
-/// entry is missing.
-pub(crate) fn gemm_sol_latency_ms(
+pub(crate) fn gemm_sol_latency_ms_with_flops(
     spec: &SystemSpec,
     quant: GemmQuantMode,
+    tc_flops: f64,
     m: f64,
     n: f64,
     k: f64,
 ) -> f64 {
     let mapping = quant.mapping();
-    let (m_f, n_f, k_f) = (m, n, k);
-    let tc_flops = tc_flops_for_compute(spec, mapping.compute);
-    let sol_math = 2.0 * m_f * n_f * k_f / tc_flops * 1000.0;
-    let sol_mem = mapping.memory * (m_f * n_f + m_f * k_f + n_f * k_f)
-        / spec.gpu.mem_bw
-        * 1000.0;
+    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
+    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem)
 }
 
-pub(crate) fn tc_flops_for_compute(spec: &SystemSpec, compute_factor: f64) -> f64 {
-    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    let direct = match compute_factor as u32 {
-        1 => spec.gpu.bfloat16_tc_flops,
-        2 => spec.gpu.fp8_tc_flops,
-        4 => spec.gpu.fp4_tc_flops,
-        _ => None,
-    };
-    direct.unwrap_or(bf16 * compute_factor)
-}
+// Strict resolver lives in common/system_spec.rs (it depends only on
+// common-layer types); re-exported here because every SOL caller in the
+// perf_database/operators layers already imports it from this module.
+pub(crate) use crate::common::system_spec::quant_tc_flops;
 
 /// In-place SOL clamp for every entry in the GEMM grid set.
 ///
-/// `bfloat16_tc_flops` is required for the bf16 SOL path; if the system
-/// YAML omits it (no real system in the repo does, but the schema marks
-/// it optional), we leave the grids untouched so the caller sees raw data
-/// rather than a corrupted clamp using `tc_flops == 0`.
+/// Silicon data can exist for a dtype whose `*_tc_flops` entry is missing
+/// from the system YAML (e.g. b60 fp8). Mirror Python `GEMM._correct_sol`:
+/// leave that quant's slice unclamped rather than failing the whole
+/// database load; query-time SOL/HYBRID paths still reject the quant mode.
 fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
-    if spec.gpu.bfloat16_tc_flops.is_none() {
-        return;
-    }
     for (quant_name, grid) in grids.by_quant.iter_mut() {
         let Some(quant) = gemm_quant_by_name(quant_name) else {
+            continue;
+        };
+        let Ok(tc_flops) = quant_tc_flops(spec, quant.mapping()) else {
             continue;
         };
         for (&m, by_n) in grid.iter_mut() {
             for (&n, by_k) in by_n.iter_mut() {
                 for (&k, latency) in by_k.iter_mut() {
-                    let sol = gemm_sol_latency_ms(spec, quant, m as f64, n as f64, k as f64);
+                    let sol = gemm_sol_latency_ms_with_flops(
+                        spec, quant, tc_flops, m as f64, n as f64, k as f64,
+                    );
                     if sol > *latency {
                         *latency = sol;
                     }
@@ -344,7 +425,7 @@ fn clamp_gemm_grids_to_sol(spec: &SystemSpec, grids: &mut GemmGrids) {
     }
 }
 
-fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
+pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
     use GemmQuantMode::*;
     Some(match name {
         "bfloat16" => Bfloat16,
@@ -473,6 +554,7 @@ fn query_scale_table(
 /// source yields rows.
 fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
     let mut by_quant: BTreeMap<String, Grid3<f64>> = BTreeMap::new();
+    let mut quant_order: Vec<String> = Vec::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -499,6 +581,9 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
                 continue;
             }
             let dtype = dtype.to_string();
+            if !by_quant.contains_key(&dtype) {
+                quant_order.push(dtype.clone());
+            }
             // First-wins parity with Python's `load_gemm_data` try/except
             // KeyError, extended across shared-layer sources (earlier source wins).
             by_quant
@@ -519,7 +604,7 @@ fn load_gemm_parquet(sources: &[PerfSource]) -> Result<GemmGrids, AicError> {
             sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
         )));
     }
-    Ok(GemmGrids { by_quant })
+    Ok(GemmGrids { by_quant, quant_order })
 }
 
 /// Load a 2-D (compute_scale / scale_matrix) table from an ordered source list.
@@ -587,6 +672,10 @@ fn clone_err(err: &AicError) -> AicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_cache_len(table: &GemmTable) -> usize {
+        table.query_cache.get().map_or(0, Cache::len)
+    }
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -713,6 +802,148 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    #[test]
+    fn gemm_query_cache_is_bit_identical_for_all_resolution_classes() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        let cases = [
+            (256, 32, 32),
+            (259, 32, 32),
+            (10_000_000, 32, 32),
+            (256, 128, 96),
+        ];
+
+        for (m, n, k) in cases {
+            let uncached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
+            let cached = table.query(GemmQuantMode::Bfloat16, m, n, k).unwrap();
+            assert_eq!(
+                cached.to_bits(),
+                uncached.to_bits(),
+                "cache changed ({m},{n},{k})"
+            );
+        }
+
+        assert_eq!(query_cache_len(&table), cases.len());
+    }
+
+    #[test]
+    fn gemm_query_cache_normalizes_quant_and_separates_shape_fields() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+
+        let fp8 = table.query(GemmQuantMode::Fp8, 256, 32, 32).unwrap();
+        let fp8_static = table.query(GemmQuantMode::Fp8Static, 256, 32, 32).unwrap();
+        assert_eq!(fp8.to_bits(), fp8_static.to_bits());
+        assert_eq!(query_cache_len(&table), 1);
+
+        for (quant, m, n, k) in [
+            (GemmQuantMode::Bfloat16, 256, 32, 32),
+            (GemmQuantMode::Bfloat16, 257, 32, 32),
+            (GemmQuantMode::Bfloat16, 256, 64, 32),
+            (GemmQuantMode::Bfloat16, 256, 32, 64),
+        ] {
+            table.query(quant, m, n, k).unwrap();
+        }
+        assert_eq!(query_cache_len(&table), 5);
+    }
+
+    #[test]
+    fn gemm_query_errors_never_enter_the_cache() {
+        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+        for _ in 0..2 {
+            assert!(table
+                .query(GemmQuantMode::Int4Wo, 1024, 4096, 4096)
+                .is_err());
+        }
+        assert_eq!(query_cache_len(&table), 0);
+
+        let missing = GemmTable::new(PathBuf::from("/nonexistent/aic/data/root"), b200_sxm_spec());
+        for _ in 0..2 {
+            assert!(missing.query(GemmQuantMode::Bfloat16, 1, 1, 1).is_err());
+        }
+        assert_eq!(query_cache_len(&missing), 0);
+    }
+
+    #[test]
+    fn gemm_query_cache_enforces_production_per_shard_bound() {
+        let cache = gemm_query_cache();
+        let key = |m| GemmQueryKey {
+            quant: GemmQuantMode::Bfloat16,
+            m,
+            n: 32,
+            k: 32,
+        };
+        let per_shard_capacity = GEMM_QUERY_CACHE_CAPACITY / GEMM_QUERY_CACHE_SHARDS;
+
+        assert_eq!(per_shard_capacity, 2_048);
+        assert_eq!(cache.num_shards(), GEMM_QUERY_CACHE_SHARDS);
+        assert_eq!(cache.shard_capacity(), per_shard_capacity as u64);
+        assert_eq!(cache.capacity(), GEMM_QUERY_CACHE_CAPACITY as u64);
+
+        let target_shard = cache.shard_index(&key(0));
+        let keys: Vec<_> = (0..)
+            .map(key)
+            .filter(|key| cache.shard_index(key) == target_shard)
+            .take(per_shard_capacity + 1)
+            .collect();
+        assert_eq!(keys.len(), 2_049);
+
+        for (value, key) in keys.into_iter().enumerate() {
+            cache.insert(key, value as f64);
+        }
+
+        assert_eq!(cache.len(), per_shard_capacity);
+        assert!(cache.len() < GEMM_QUERY_CACHE_CAPACITY);
+    }
+
+    #[test]
+    fn gemm_query_cache_allows_concurrent_duplicate_misses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 4;
+        const EXPECTED: f64 = 1.25;
+
+        let cache = Arc::new(gemm_query_cache());
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let key = GemmQueryKey {
+            quant: GemmQuantMode::Bfloat16,
+            m: 259,
+            n: 32,
+            k: 32,
+        };
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let barrier = Arc::clone(&barrier);
+                let resolutions = Arc::clone(&resolutions);
+                std::thread::spawn(move || {
+                    resolve_gemm_query_cached(&cache, key, || {
+                        resolutions.fetch_add(1, Ordering::Relaxed);
+                        barrier.wait();
+                        Ok(EXPECTED)
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        let values: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(values
+            .windows(2)
+            .all(|pair| pair[0].to_bits() == pair[1].to_bits()));
+        assert_eq!(resolutions.load(Ordering::Relaxed), THREADS);
+        assert_eq!(cache.len(), 1);
+
+        let cached = resolve_gemm_query_cached(&cache, key, || -> Result<f64, AicError> {
+            panic!("cache hit unexpectedly invoked the resolver")
+        })
+        .unwrap();
+        assert_eq!(cached.to_bits(), EXPECTED.to_bits());
+    }
+
     /// Values generated from the Python v2 engine on the same table
     /// (`db.query_gemm(..., SILICON)` on b200_sxm/vllm/0.19.0, bfloat16):
     /// exact hit, m-interp on a collected (n,k) site, m util-hold beyond the
@@ -773,5 +1004,74 @@ mod tests {
             AicError::Io { .. } | AicError::PerfDatabase(_) => {}
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// Mirror of Python `test_gemm_op.py::TestStaticHelpers`: dtype-keyed
+    /// resolution (sq -> int8, weight-only -> bf16), strict missing-key
+    /// error, and the b300 fp4 entry beating the old 4x-bf16 extrapolation.
+    #[test]
+    fn quant_tc_flops_resolves_by_compute_dtype() {
+        use crate::common::system_spec::{GpuSpec, MiscSpec, NodeSpec, SystemSpec};
+        let mut spec = SystemSpec {
+            data_dir: std::path::PathBuf::from("data/synthetic"),
+            gpu: GpuSpec {
+                mem_bw: 1.0,
+                mem_bw_empirical_scaling_factor: 1.0,
+                mem_empirical_constant_latency: 0.0,
+                mem_capacity: None,
+                bfloat16_tc_flops: Some(1000.0),
+                int8_tc_flops: Some(30.0),
+                fp8_tc_flops: Some(2000.0),
+                fp4_tc_flops: None,
+                power: None,
+                sm_version: None,
+            },
+            node: NodeSpec {
+                num_gpus_per_node: 8,
+                intra_node_bw: 900.0,
+                inter_node_bw: 100.0,
+                pcie_bw: None,
+                p2p_latency: 0.0,
+                num_gpus_per_rack: None,
+                inter_rack_bw: None,
+            },
+            misc: MiscSpec::default(),
+        };
+
+        use crate::common::enums::GemmQuantMode as Q;
+        assert_eq!(
+            quant_tc_flops(&spec, Q::Bfloat16.mapping()).unwrap(),
+            1000.0
+        );
+        assert_eq!(quant_tc_flops(&spec, Q::Fp8.mapping()).unwrap(), 2000.0);
+        // sq runs on the int8 pipeline, NOT fp8's (b300: int8 != fp8).
+        assert_eq!(quant_tc_flops(&spec, Q::Sq.mapping()).unwrap(), 30.0);
+        // weight-only modes dequantize to bf16 before the MMA.
+        assert_eq!(quant_tc_flops(&spec, Q::Int8Wo.mapping()).unwrap(), 1000.0);
+
+        // Missing fp4 entry: strict error, never bf16 * 4.
+        match quant_tc_flops(&spec, Q::Nvfp4.mapping()) {
+            Err(AicError::MissingSystemFlops(msg)) => assert!(msg.contains("fp4_tc_flops")),
+            other => panic!("expected MissingSystemFlops, got {other:?}"),
+        }
+
+        // Memory-only modes have no compute pipeline.
+        use crate::common::enums::KvCacheQuantMode;
+        match quant_tc_flops(&spec, KvCacheQuantMode::Fp8.mapping()) {
+            Err(AicError::MissingSystemFlops(msg)) => assert!(msg.contains("memory-only")),
+            other => panic!("expected MissingSystemFlops, got {other:?}"),
+        }
+
+        // Non-finite entries (e.g. YAML `.inf`) are placeholders/typos: +inf
+        // would zero sol_math and silently collapse SOL onto the memory roof.
+        spec.gpu.fp4_tc_flops = Some(f64::INFINITY);
+        assert!(matches!(
+            quant_tc_flops(&spec, Q::Nvfp4.mapping()),
+            Err(AicError::MissingSystemFlops(_))
+        ));
+
+        // b300 breaks the fixed 4x ratio: the YAML entry must win.
+        spec.gpu.fp4_tc_flops = Some(1.4e16);
+        assert_eq!(quant_tc_flops(&spec, Q::Nvfp4.mapping()).unwrap(), 1.4e16);
     }
 }

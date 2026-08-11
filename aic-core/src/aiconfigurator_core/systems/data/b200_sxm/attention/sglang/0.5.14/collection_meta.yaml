@@ -7,6 +7,13 @@ runtime:
   framework: sglang
   version: 0.5.14
 tables:
+  # 2026-08-02: appended the Kimi-K3 attention profiles — the DSPARK draft
+  # shape and the MLA-as-attention 96-family shards (context +952,
+  # generation +1566 rows, keys disjoint). 884 context cells failed
+  # CLASSIFIED on the known trtllm_mha fp8-KV constraint (the collector's
+  # own probe-raise: 0.5.14 trtllm_mha quantizes Q to FP8 when the KV
+  # cache is FP8, so a bf16-compute row would be mislabeled) — the same
+  # failure family as other models' b200 attention runs.
   context_attention_perf:
     status: complete
   generation_attention_perf:

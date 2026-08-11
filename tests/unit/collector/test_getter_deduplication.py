@@ -54,7 +54,7 @@ def _install_trtllm_stubs(monkeypatch):
         cuda=types.SimpleNamespace(empty_cache=_noop, Stream=_noop),
         device=lambda value: value,
     )
-    _stub_module(monkeypatch, "tensorrt_llm", __version__="1.3.0rc10")
+    _stub_module(monkeypatch, "tensorrt_llm", __version__="1.3.0rc20")
     for package in (
         "tensorrt_llm._torch",
         "tensorrt_llm._torch.models",
@@ -77,6 +77,11 @@ def _install_trtllm_stubs(monkeypatch):
         create_moe=_noop,
     )
     _stub_module(monkeypatch, "tensorrt_llm.mapping", Mapping=_Dummy)
+    _stub_module(
+        monkeypatch,
+        "tensorrt_llm._utils",
+        is_sm_100f=lambda sm_version=None: sm_version in (100, 103),
+    )
     _stub_module(monkeypatch, "tensorrt_llm.models.modeling_utils", QuantAlgo=_Dummy(), QuantConfig=_Dummy)
     _stub_module(
         monkeypatch,
@@ -379,8 +384,10 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    assert len(cases) == 1887
-    assert sum(len(case[1]) for case in cases) == 50949
+    # 1926 = 1887 pre-Kimi-K3 + 39 K3 w4a16_mxfp4 cases (grouped-topk mapping
+    # for model_type kimi_linear).
+    assert len(cases) == 1926
+    assert sum(len(case[1]) for case in cases) == 52002
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —

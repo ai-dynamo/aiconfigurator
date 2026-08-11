@@ -14,6 +14,8 @@ from collector.case_generator import (
     get_attention_head_configs,
 )
 
+pytestmark = pytest.mark.unit
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -173,8 +175,11 @@ def test_sglang_sm90_full_structural_population_is_stable(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     for phase, sweep_getter, expected in (
-        ("context", get_attention_context_shape_sweeps, 147),
-        ("generation", get_attention_generation_shape_sweeps, 132),
+        # 151/137 since the Kimi-K3 declarations added 8 SM90 head configs
+        # (DSPARK draft GQA shards 64/32/16/8 q-heads @hd64 + MLA 96-family
+        # 96/48/24/12 @hd128, all fa3-routed; net +4 context / +5 generation).
+        ("context", get_attention_context_shape_sweeps, 151),
+        ("generation", get_attention_generation_shape_sweeps, 137),
     ):
         configs = [
             config
@@ -401,7 +406,10 @@ def test_bf16_prefill_on_fp8_kv_fails_closed_on_internally_quantizing_backends()
 @pytest.mark.parametrize(
     "relative_path",
     [
-        "collector/trtllm/collect_attn.py",
+        # collector/trtllm/collect_attn.py adopted the per-model backend axis
+        # (trtllm_attn_backend) and now passes backend="trtllm"; its
+        # population contract is covered by
+        # test_trtllm_attention_backend.py.
         "collector/vllm/collect_attn.py",
         "collector/vllm/collect_attn_xpu.py",
     ],

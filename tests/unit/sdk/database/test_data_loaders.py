@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from collections import defaultdict
 from itertools import product
 
@@ -733,6 +734,32 @@ def test_load_context_attention_data_basic(tmp_path):
     assert data[qm][kcd][0][16][0][4][2][1]["latency"] == pytest.approx(0.321)
 
 
+def test_load_context_attention_data_warns_only_for_same_version_backend_collision(tmp_path, caplog):
+    csv_file = tmp_path / "ctx_attn_conflicts.csv"
+    headers = (
+        "framework,version,device,op_name,kernel_source,batch_size,isl,num_heads,num_key_value_heads,head_dim,"
+        "beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
+    )
+    shared_fields = "trt,{version},hwX,context_attention,{kernel_source},1,2,4,4,16,8,bfloat16,bfloat16,1,{latency}"
+    rows = [
+        shared_fields.format(version="2.0", kernel_source="winner_backend", latency="0.321"),
+        shared_fields.format(version="1.0", kernel_source="reuse_backend", latency="0.654"),
+        shared_fields.format(version="2.0", kernel_source="dropped_backend", latency="0.987"),
+    ]
+    csv_file.write_text(headers + "\n".join(rows) + "\n")
+
+    with caplog.at_level(logging.DEBUG):
+        data = load_context_attention_data(str(csv_file))
+
+    conflicts = [record for record in caplog.records if "value conflict in context attention data" in record.message]
+    assert [record.levelno for record in conflicts] == [logging.DEBUG, logging.WARNING]
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[0].message
+    assert "kernel_source=reuse_backend, version=1.0" in conflicts[0].message
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[1].message
+    assert "kernel_source=dropped_backend, version=2.0" in conflicts[1].message
+    assert data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][0][16][0][4][2][1]["latency"] == pytest.approx(0.321)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6) load_generation_attention_data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -795,6 +822,32 @@ def test_load_generation_attention_data_basic(tmp_path):
     assert data[kcd][0][16][0][4][1][3]["latency"] == pytest.approx(0.987)
 
 
+def test_load_generation_attention_data_warns_only_for_same_version_backend_collision(tmp_path, caplog):
+    csv_file = tmp_path / "gen_attn_conflicts.csv"
+    headers = (
+        "framework,version,device,op_name,kernel_source,batch_size,isl,num_heads,num_key_value_heads,head_dim,"
+        "beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
+    )
+    shared_fields = "trt,{version},hwX,generation_attention,{kernel_source},1,2,4,4,16,8,dummy,bfloat16,1,{latency}"
+    rows = [
+        shared_fields.format(version="2.0", kernel_source="winner_backend", latency="0.321"),
+        shared_fields.format(version="1.0", kernel_source="reuse_backend", latency="0.654"),
+        shared_fields.format(version="2.0", kernel_source="dropped_backend", latency="0.987"),
+    ]
+    csv_file.write_text(headers + "\n".join(rows) + "\n")
+
+    with caplog.at_level(logging.DEBUG):
+        data = load_generation_attention_data(str(csv_file))
+
+    conflicts = [record for record in caplog.records if "value conflict in generation attention data" in record.message]
+    assert [record.levelno for record in conflicts] == [logging.DEBUG, logging.WARNING]
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[0].message
+    assert "kernel_source=reuse_backend, version=1.0" in conflicts[0].message
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[1].message
+    assert "kernel_source=dropped_backend, version=2.0" in conflicts[1].message
+    assert data[KVCacheQuantMode.bfloat16][0][16][0][4][1][3]["latency"] == pytest.approx(0.321)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7) load_context_mla_data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -811,18 +864,15 @@ def test_load_context_mla_data_nonexistent(tmp_path):
 
 def test_load_context_mla_data_basic(tmp_path):
     """
-    Create a CSV line of (backend_name,version,hardware,op_name,quant_mode,kv_cache_dtype,
-    b,s,tp_size,step,latency). We pick:
-      quant_mode="bfloat16", kv_cache_dtype="bfloat16",
-      b=1, s=2, tp_size=4, step=1, latency=1.111.
-    The loader does:
-      quant_mode_enum = common.FMHAQuantMode[quant_mode_str]
-      kv_cache_dtype_enum = common.KVCacheQuantMode[kv_cache_dtype_str]
-      Then:
-        context_mla_data[quant_mode_enum][kv_cache_dtype_enum][tp_size][s][b] = latency
+    Rows carry the rank-local num_heads column directly (#1458: the retired
+    ``128 // tp_size`` backfill is a hard error, covered in
+    test_mla_head_axis_keying.py). Structure:
+        context_mla_data[fmha][kv_cache_dtype][num_heads][s][b]
     """
     csv_file = tmp_path / "ctx_mla.csv"
-    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
+    headers = (
+        "framework,version,device,op_name,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
     fields = [
         "trt",  # backend_name (ignored)
         "1.0",  # version (ignored)
@@ -830,9 +880,10 @@ def test_load_context_mla_data_basic(tmp_path):
         "opZ",  # op_name (ignored as key)
         "bfloat16",  # quant_mode → common.FMHAQuantMode.bfloat16
         "bfloat16",  # kv_cache_dtype → common.KVCacheQuantMode.bfloat16
+        "32",  # num_heads (rank-local)
         "1",  # b
         "2",  # s
-        "4",  # tp_size
+        "4",  # tp_size (provenance)
         "1",  # step (ignored downstream)
         "1.111",  # latency
     ]
@@ -843,7 +894,7 @@ def test_load_context_mla_data_basic(tmp_path):
     qm = FMHAQuantMode.bfloat16
     kcd = KVCacheQuantMode.bfloat16
 
-    num_heads = 128 // 4  # tp_size == 4 -> num_heads == 128 // 4 == 32
+    num_heads = 32
 
     assert qm in data
     assert kcd in data[qm]
@@ -869,17 +920,14 @@ def test_load_generation_mla_data_nonexistent(tmp_path):
 
 def test_load_generation_mla_data_basic(tmp_path):
     """
-    Create a CSV with (backend_name,version,hardware,op_name,quant_mode,kv_cache_dtype,
-    b,s,tp_size,step,latency). We pick:
-      b=1, s=2, tp_size=4, step=1 → stored s=2+1=3, quant_mode unused, kv_cache_dtype="bfloat16",
-      latency=2.222.
-    The loader does:
-      s = s + step
-      kv_cache_dtype_enum = common.KVCacheQuantMode[kv_cache_dtype_str]
-      generation_mla_data[kv_cache_dtype_enum][tp_size][b][new_s] = latency
+    Rows carry the rank-local num_heads column directly (#1458). The loader
+    stores s = isl + step:
+        generation_mla_data[kv_cache_dtype][num_heads][b][s]
     """
     csv_file = tmp_path / "gen_mla.csv"
-    headers = "framework,version,device,op_name,mla_dtype,kv_cache_dtype,batch_size,isl,tp_size,step,latency\n"
+    headers = (
+        "framework,version,device,op_name,mla_dtype,kv_cache_dtype,num_heads,batch_size,isl,tp_size,step,latency\n"
+    )
     fields = [
         "trt",  # backend_name (ignored)
         "1.0",  # version (ignored)
@@ -887,9 +935,10 @@ def test_load_generation_mla_data_basic(tmp_path):
         "opW",  # op_name (ignored)
         "ignored",  # quant_mode (not used downstream)
         "bfloat16",  # kv_cache_dtype → common.KVCacheQuantMode.bfloat16
+        "32",  # num_heads (rank-local)
         "1",  # b
         "2",  # s=2
-        "4",  # tp_size
+        "4",  # tp_size (provenance)
         "1",  # step → new_s=3
         "2.222",  # latency
     ]
@@ -898,7 +947,7 @@ def test_load_generation_mla_data_basic(tmp_path):
     data = load_generation_mla_data(str(csv_file))
 
     kcd = KVCacheQuantMode.bfloat16
-    num_heads = 128 // 4  # tp_size == 4 -> num_heads == 128 // 4 == 32
+    num_heads = 32
 
     assert kcd in data
     assert num_heads in data[kcd]
@@ -1025,7 +1074,8 @@ def test_load_context_mla_module_data_nonexistent(tmp_path):
 def test_load_context_mla_module_data_basic(tmp_path):
     """
     Test loading context MLA module data.
-    Structure: data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][num_heads][s][b]
+    Structure (#1458): data[fmha][kv][gemm][native][num_heads][s][b] — native
+    resolves from the model column via _MLA_MODULE_NATIVE_HEADS.
     """
     csv_file = tmp_path / "mla_context_module_perf.txt"
     headers = (
@@ -1047,10 +1097,11 @@ def test_load_context_mla_module_data_basic(tmp_path):
     assert fmha in data
     assert kv in data[fmha]
     assert gemm in data[fmha][kv]
-    assert 16 in data[fmha][kv][gemm]  # num_heads
-    assert 4000 in data[fmha][kv][gemm][16]  # s = isl (step=0)
-    assert 2 in data[fmha][kv][gemm][16][4000]  # b
-    assert data[fmha][kv][gemm][16][4000][2]["latency"] == pytest.approx(1.5)
+    assert 128 in data[fmha][kv][gemm]  # native (DeepSeek-V3 pin)
+    assert 16 in data[fmha][kv][gemm][128]  # num_heads (rank-local sweep axis)
+    assert 4000 in data[fmha][kv][gemm][128][16]  # s = isl (step=0)
+    assert 2 in data[fmha][kv][gemm][128][16][4000]  # b
+    assert data[fmha][kv][gemm][128][16][4000][2]["latency"] == pytest.approx(1.5)
 
 
 def test_load_context_mla_module_data_with_power(tmp_path):
@@ -1067,7 +1118,7 @@ def test_load_context_mla_module_data_with_power(tmp_path):
     csv_file.write_text(headers + row)
 
     data = load_context_mla_module_data(str(csv_file))
-    entry = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1024][1]
+    entry = data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][128][1024][1]
     assert entry["latency"] == pytest.approx(0.5)
     assert entry["power"] == pytest.approx(800.0)
     assert entry["energy"] == pytest.approx(400.0)  # 800 * 0.5
@@ -1087,8 +1138,7 @@ def test_load_generation_mla_module_data_nonexistent(tmp_path):
 def test_load_generation_mla_module_data_basic(tmp_path):
     """
     Test loading generation MLA module data.
-    Structure: data[kv_cache_quant_mode][gemm_quant_mode][num_heads][b][s]
-    s = isl + step
+    Structure (#1458): data[kv][gemm][native][num_heads][b][s], s = isl + step.
     """
     csv_file = tmp_path / "mla_generation_module_perf.txt"
     headers = (
@@ -1110,10 +1160,11 @@ def test_load_generation_mla_module_data_basic(tmp_path):
     # kv_cache_dtype at the top level (decode compute follows kv dtype).
     assert kv in data
     assert gemm in data[kv]
-    assert 16 in data[kv][gemm]  # num_heads
-    assert 4 in data[kv][gemm][16]  # b
-    assert 256 in data[kv][gemm][16][4]  # s = isl(1) + step(255)
-    assert data[kv][gemm][16][4][256]["latency"] == pytest.approx(0.135)
+    assert 128 in data[kv][gemm]  # native (DeepSeek-V3 pin)
+    assert 16 in data[kv][gemm][128]  # num_heads (rank-local sweep axis)
+    assert 4 in data[kv][gemm][128][16]  # b
+    assert 256 in data[kv][gemm][128][16][4]  # s = isl(1) + step(255)
+    assert data[kv][gemm][128][16][4][256]["latency"] == pytest.approx(0.135)
 
 
 def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
@@ -1124,19 +1175,19 @@ def test_load_generation_mla_module_data_multiple_quant_modes(tmp_path):
         "mla_dtype,kv_cache_dtype,gemm_type,num_heads,batch_size,isl,tp_size,step,latency\n"
     )
     rows = (
-        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
+        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,deepseek-ai/DeepSeek-V3,A,"
         "bfloat16,bfloat16,bfloat16,128,1,1,1,256,0.13\n"
-        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,m,A,"
+        "VLLM,0.17.0,NVIDIA B200,mla_generation_module,default,deepseek-ai/DeepSeek-V3,A,"
         "bfloat16,fp8,fp8_block,128,1,1,1,256,0.10\n"
     )
     csv_file.write_text(headers + rows)
 
     data = load_generation_mla_module_data(str(csv_file))
 
-    # bfloat16/bfloat16 combo
-    entry1 = data[KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][1][257]
+    # bfloat16/bfloat16 combo (native 128 bucket)
+    entry1 = data[KVCacheQuantMode.bfloat16][GEMMQuantMode.bfloat16][128][128][1][257]
     assert entry1["latency"] == pytest.approx(0.13)
 
     # fp8/fp8_block combo
-    entry2 = data[KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][1][257]
+    entry2 = data[KVCacheQuantMode.fp8][GEMMQuantMode.fp8_block][128][128][1][257]
     assert entry2["latency"] == pytest.approx(0.10)
