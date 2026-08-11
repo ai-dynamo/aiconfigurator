@@ -225,6 +225,29 @@ class Gemma4MixConfig:
 
 
 @dataclass(frozen=True)
+class LagunaConfig:
+    """Config for Laguna hybrid global/SWA attention + dense/MoE FFN layers.
+
+    layer_types: per-layer tuple of "full_attention" (global) or "sliding_attention" (SWA)
+    mlp_layer_types: per-layer tuple of "dense" or "sparse" (MoE)
+    num_attention_heads_per_layer: Q head count per layer; may differ between global and SWA layers
+    sliding_window_size: KV-cache token window applied to all sliding_attention layers
+    shared_expert_inter_size: intermediate size of the always-active shared expert (0 if absent)
+    gating: whether layers include a per-head attention-gate projection before the output projection
+    moe_routed_scaling_factor: routed-expert output scaling before combining with the shared expert
+    """
+
+    layer_types: tuple[str, ...]
+    mlp_layer_types: tuple[str, ...]
+    num_attention_heads_per_layer: tuple[int, ...]
+    sliding_window_size: int
+    shared_expert_inter_size: int
+    gating: bool = False
+    use_qk_norm: bool = True
+    moe_routed_scaling_factor: float = 1.0
+
+
+@dataclass(frozen=True)
 class Qwen35Config:
     """Config for Qwen3.5 hybrid GDN + full-attention model (dense and MoE).
 
@@ -576,6 +599,8 @@ DefaultHFModels = {
     "Qwen/Qwen3-VL-32B-Instruct",
     "Qwen/Qwen3-VL-32B-Thinking",
     "Qwen/Qwen3-VL-235B-A22B-Instruct",
+    # Poolside Laguna
+    "poolside/Laguna-S-2.1-FP8",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/MiniMax-M2.5-NVFP4",
@@ -674,6 +699,7 @@ ModelFamily = {
     "GEMMA4MIX",
     "MINIMAXM3",
     "STEP3P7",
+    "LAGUNA",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -712,6 +738,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
     "Gemma4ForConditionalGeneration": "GEMMA4MIX",
+    "LagunaForCausalLM": "LAGUNA",
 }
 
 # Multimodal architectures whose LLM config lives under a nested key (e.g. "text_config").

@@ -22,6 +22,7 @@ from aiconfigurator_core.sdk.common import (
     DefaultHFModels,
     HybridMoEConfig,
     KimiK3Config,
+    LagunaConfig,
     Qwen35Config,
     VisionEncoderConfig,
 )
@@ -882,6 +883,70 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"swa_num_heads={extra_params.swa_num_heads or 'default'}, "
             f"head_wise_attn_gate={extra_params.use_head_wise_attn_gate}, "
             f"share_expert_dim={config.get('share_expert_dim', 0)}"
+    elif architecture == "LagunaForCausalLM":
+        layer_types = tuple(config.get("layer_types", ()))
+        mlp_layer_types = tuple(config.get("mlp_layer_types", ()))
+        heads_per_layer = tuple(config.get("num_attention_heads_per_layer", ()))
+
+        if len(layer_types) != layers:
+            raise ValueError(f"Laguna layer_types length {len(layer_types)} != num_hidden_layers {layers}")
+        if len(mlp_layer_types) != layers:
+            raise ValueError(f"Laguna mlp_layer_types length {len(mlp_layer_types)} != num_hidden_layers {layers}")
+        if len(heads_per_layer) != layers:
+            raise ValueError(
+                f"Laguna num_attention_heads_per_layer length {len(heads_per_layer)} != num_hidden_layers {layers}"
+            )
+        if any(layer_type not in {"full_attention", "sliding_attention"} for layer_type in layer_types):
+            raise ValueError("Laguna layer_types must contain only 'full_attention' or 'sliding_attention'")
+        if any(layer_type not in {"dense", "sparse"} for layer_type in mlp_layer_types):
+            raise ValueError("Laguna mlp_layer_types must contain only 'dense' or 'sparse'")
+        if any(not isinstance(heads, int) or heads <= 0 for heads in heads_per_layer):
+            raise ValueError("Laguna num_attention_heads_per_layer must contain only positive integers")
+
+        full_heads = {
+            heads
+            for layer_type, heads in zip(layer_types, heads_per_layer, strict=True)
+            if layer_type == "full_attention"
+        }
+        sliding_heads = {
+            heads
+            for layer_type, heads in zip(layer_types, heads_per_layer, strict=True)
+            if layer_type == "sliding_attention"
+        }
+        if full_heads != {n}:
+            raise ValueError(f"Laguna full_attention layers must use num_attention_heads={n}, got {sorted(full_heads)}")
+        if len(sliding_heads) > 1:
+            raise ValueError(f"Laguna sliding_attention layers must use one head count, got {sorted(sliding_heads)}")
+
+        dense_layers = {index for index, layer_type in enumerate(mlp_layer_types) if layer_type == "dense"}
+        mlp_only_layers = config.get("mlp_only_layers")
+        if mlp_only_layers is not None and dense_layers != set(mlp_only_layers):
+            raise ValueError(
+                f"Laguna mlp_only_layers {sorted(mlp_only_layers)} do not match dense mlp layers {sorted(dense_layers)}"
+            )
+
+        sliding_window = int(config.get("sliding_window", 0))
+        if "sliding_attention" in layer_types and sliding_window <= 0:
+            raise ValueError("Laguna sliding_attention layers require a positive sliding_window")
+
+        extra_params = LagunaConfig(
+            layer_types=layer_types,
+            mlp_layer_types=mlp_layer_types,
+            num_attention_heads_per_layer=heads_per_layer,
+            sliding_window_size=sliding_window,
+            shared_expert_inter_size=int(config.get("shared_expert_intermediate_size", 0)),
+            gating=bool(config.get("gating", False)),
+            use_qk_norm=True,
+            moe_routed_scaling_factor=float(config.get("moe_routed_scaling_factor", 1.0)),
+        )
+        logger.info(
+            "Laguna config: global_layers=%d, swa_layers=%d, dense_layers=%d, moe_layers=%d, sw=%d, shared_expert=%d",
+            extra_params.layer_types.count("full_attention"),
+            extra_params.layer_types.count("sliding_attention"),
+            extra_params.mlp_layer_types.count("dense"),
+            extra_params.mlp_layer_types.count("sparse"),
+            extra_params.sliding_window_size,
+            extra_params.shared_expert_inter_size,
         )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.

@@ -414,14 +414,19 @@ def run_moe_torch(
             exclude_modules=[],
         )
     elif moe_type == "fp8_block":
-        # Block-FP8 serving (DeepSeek-style checkpoints) is per-128-block
-        # weights with dynamic per-group activations; Fp8Config rejects
-        # static for block quant (fp8.py:130-134).
-        quant_config = Fp8Config(
-            is_checkpoint_fp8_serialized=True,
-            activation_scheme="dynamic",
-            weight_block_size=[128, 128],
-        )
+        model_quantization = _load_model_moe_config(model_name).get("quantization_config")
+        if isinstance(model_quantization, dict) and model_quantization.get("quant_method") == "compressed-tensors":
+            # Construct the same artifact-owned quantization method serving
+            # selects instead of approximating it with generic Fp8Config.
+            quant_config = CompressedTensorsConfig.from_config(model_quantization)
+        else:
+            # Native block-FP8 checkpoints use per-128-block weights with
+            # dynamic per-group activations.
+            quant_config = Fp8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[128, 128],
+            )
     elif moe_type == "w4a16_mxfp4":
         checkpoint_qc = _load_model_moe_config(model_name).get("quantization_config") or {}
         is_ct_mxfp4 = checkpoint_qc.get("quant_method") == "compressed-tensors" and "mxfp4" in str(
@@ -748,14 +753,24 @@ def run_moe_torch(
                 router_logits_list = [balanced_logits(num_tokens, num_experts, topk).to(logits_dtype).to(device)]
             else:
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
+            routed_inputs = [
+                moe_module.router.select_experts(hidden_states, router_logits) for router_logits in router_logits_list
+            ]
             num_warmups = 1 if distributed == "power_law" else 3
             num_runs = 1 if distributed == "power_law" else 6
 
             def run_single_iteration():
-                for router_logits in router_logits_list:
+                for topk_weights, topk_ids in routed_inputs:
                     forward_context = get_forward_context()
                     forward_context.moe_layer_index = 0
-                    moe_module(hidden_states, router_logits)
+                    quant_method.apply(
+                        routed_experts,
+                        hidden_states,
+                        topk_weights,
+                        topk_ids,
+                        shared_experts=None,
+                        shared_experts_input=None,
+                    )
 
             with (
                 set_forward_context({}, vllm_config),

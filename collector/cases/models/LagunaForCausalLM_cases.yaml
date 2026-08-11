@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: LagunaForCausalLM
+model_path: poolside/Laguna-S-2.1-FP8
+model_paths:
+  - poolside/Laguna-S-2.1-FP8
+include_base: true
+description: >
+  Official Laguna-S 2.1 FP8 hybrid full/SWA attention plus routed-MoE
+  collection plan. Covers the routed expert shape, full-attention head-count
+  gap, and SWA windowed attention shapes exposed by the Laguna-S structural
+  AIC model.
+
+model_case_values:
+  moe:
+    - model_paths:
+        - poolside/Laguna-S-2.1-FP8
+      hidden_size: 3072
+      inter_size: 1024
+      topk: 10
+      num_experts: 256
+      framework_quantization:
+        vllm:
+          allowed_modes:
+            - fp8_block
+  attention:
+    - id: laguna_s2_full_attention
+      model_path: poolside/Laguna-S-2.1-FP8
+      num_attention_heads: 48
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4]
+    - id: laguna_s2_sliding_attention
+      model_path: poolside/Laguna-S-2.1-FP8
+      num_attention_heads: 72
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 512
+      tensor_parallel_sizes: [1, 2, 4]
+
+framework_specific_op_cases:
+  vllm:
+    moe:
+      cases: all
