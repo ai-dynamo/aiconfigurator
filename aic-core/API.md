@@ -112,6 +112,9 @@ split-package releases. Core-only consumers may install `aiconfigurator-core`
 directly. See the
 [crate README](rust/aiconfigurator-core/README.md) for setup and usage examples.
 
+`build_aic_engine` was removed in 0.11.0. Existing Rust consumers must migrate
+to `AicEngineBuilder`.
+
 The supported root-level Rust surface is grouped as follows:
 
 - compiled engine: `AicEngineBuilder`, `AicEngine`, `AicError`;
