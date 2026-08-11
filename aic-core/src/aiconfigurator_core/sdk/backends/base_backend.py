@@ -1291,8 +1291,9 @@ class BaseBackend:
         osl: int,
         prefix: int,
     ) -> tuple[float, float, dict, dict]:
-        """Mixed step for FPM models: pure-prefill query plus the decode
-        work's MARGINAL cost. No mixed database row exists or is synthesized.
+        """Mixed step for FPM models: the step's SCHEDULED TOTALS priced on
+        the prefill curve, plus the decode work's MARGINAL cost. No mixed
+        database row exists or is synthesized.
 
         A mixed step is one shared forward pass: weight reads, kernel
         launches, and per-step fixed overheads are paid once, by the prefill
@@ -1304,11 +1305,24 @@ class BaseBackend:
         generation-only step (``ctx_tokens == 0``) has no pass to ride on and
         keeps the full decode latency.
 
-        The workload mapping mirrors the op-level passes: the prefill
-        component runs ``ceil(ctx_tokens/isl)`` requests of ``isl`` tokens and
-        is divided by the chunk count when ``ctx_tokens < isl`` (average
-        per-chunk cost); the decode component runs ``gen_tokens`` requests at
-        the average sequence length ``isl + osl//2``.
+        The prefill component is addressed at the iteration's REAL scheduled
+        totals via ``query_totals``: the engine picks its execution regime
+        (CUDA-graph vs eager) and its GEMM width from the step's total token
+        count — prefill chunk PLUS decode tokens — so the query coordinate
+        must carry both, and the collected rows (which encode the regime
+        cliffs) answer on the correct side. When ``ctx_tokens`` is a chunk of
+        a longer request, each chunk is priced at its own
+        ``(chunk + gen_tokens, past_kv)`` coordinates and the per-iteration
+        AVERAGE is returned (callers treat the mixed step as the steady-state
+        iteration); the decode tokens' GEMM/weights are then counted exactly
+        once, because the baseline subtraction removed them from the decode
+        term.
+
+        CONTRACT PREREQUISITE: this pricing is only as correct as the match
+        between the deployed engine configuration and the collected data —
+        in particular the CUDA-graph capture surface. The cliff positions are
+        not modeled; they are encoded in the data. A deployment whose capture
+        config differs from the collection cannot be rescued by this formula.
         """
         per_ops_step_data: dict[str, float] = {}
         per_ops_step_source: dict[str, str] = {}
@@ -1316,33 +1330,46 @@ class BaseBackend:
         total_energy_wms = 0.0
 
         if ctx_tokens > 0:
-            summary = self.run_static(
-                model,
-                database,
-                RuntimeConfig(
-                    batch_size=np.ceil(ctx_tokens / isl),
-                    beam_width=1,
-                    isl=isl,
-                    osl=1,
-                    prefix=prefix,
-                    # Inherit the caller's resolved route: a fresh config
-                    # defaults to None and would re-resolve from the env var,
-                    # letting an explicitly-forced "python" FPM step run its
-                    # component statics on the Rust engine.
-                    engine_step_backend=runtime_config.engine_step_backend,
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                ),
-                mode="static_ctx",
-            )
-            chunk_scale = np.ceil(isl / ctx_tokens)
-            energy_dict = summary.get_context_energy_wms_dict()
-            source_dict = summary.get_context_source_dict()
-            for op_name, latency in summary.get_context_latency_dict().items():
-                latency = latency / chunk_scale
-                per_ops_step_data[op_name] = latency
-                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
-                total_latency_ms += latency
-                total_energy_wms += energy_dict.get(op_name, 0.0) / chunk_scale
+            prefill_op = model.context_ops[0]
+            new_tokens = isl - prefix
+            if new_tokens <= 0:
+                raise ValueError(f"isl must be greater than prefix, got isl={isl} prefix={prefix}")
+            if ctx_tokens >= new_tokens:
+                # One or more whole prefills scheduled in this iteration (no
+                # chunking): the step's scheduled total (ctx + decode tokens)
+                # picks the regime row.
+                batch = int(np.ceil(ctx_tokens / new_tokens))
+                results = [
+                    prefill_op.query_totals(
+                        database,
+                        batch_size=batch,
+                        total_prefill_tokens=ctx_tokens + gen_tokens,
+                        total_kv_read_tokens=batch * prefix,
+                    )
+                ]
+            else:
+                # Chunked prefill: one request spread over ceil(new/ctx)
+                # iterations. Price each chunk at ITS scheduled totals —
+                # chunk + decode tokens over the chunk's already-computed
+                # context — and report the per-iteration average.
+                results = []
+                done = 0
+                while done < new_tokens:
+                    chunk = min(ctx_tokens, new_tokens - done)
+                    results.append(
+                        prefill_op.query_totals(
+                            database,
+                            batch_size=1,
+                            total_prefill_tokens=chunk + gen_tokens,
+                            total_kv_read_tokens=prefix + done,
+                        )
+                    )
+                    done += chunk
+            pre_ms = sum(float(r) for r in results) / len(results)
+            sources = {getattr(r, "source", "silicon") for r in results}
+            per_ops_step_data[prefill_op._name] = pre_ms
+            per_ops_step_source[prefill_op._name] = sources.pop() if len(sources) == 1 else "mixed"
+            total_latency_ms += pre_ms
 
         if gen_tokens > 0:
             summary = self.run_static(

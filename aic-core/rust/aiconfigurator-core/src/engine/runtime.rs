@@ -470,8 +470,9 @@ impl Engine {
         // breakdown reports [total, prefill_component, 0, marginal_decode].
         // The component consumers (speculative agg scheduling) only read the
         // split under MTP, which FPM rejects at build time.
-        if let Some((_, decode_op)) = self.fpm_ops() {
+        if let Some((prefill_op, decode_op)) = self.fpm_ops() {
             let (prefill_ms, marginal_decode_ms) = self.fpm_mixed_step_components(
+                prefill_op,
                 decode_op,
                 ctx_tokens,
                 gen_tokens,
@@ -628,8 +629,18 @@ impl Engine {
     /// fixed overheads are paid once, by the prefill component; sampling the
     /// decode curve at its KV-axis floor isolates that shared part, so the
     /// subtraction keeps only the KV-read/attention marginal cost.
+    /// Mixed-step composition, mirroring Python
+    /// `_get_fpm_mix_step_latency` exactly: the prefill component prices the
+    /// iteration's REAL scheduled totals (chunk + decode tokens — the count
+    /// the engine picks its CUDA-graph/eager regime and GEMM width from) via
+    /// `query_totals`; chunked requests are priced per chunk at their own
+    /// `(chunk + gen, past_kv)` coordinates and averaged. The decode
+    /// component stays the pass-baseline marginal. Correct only when the
+    /// deployed engine configuration (especially the CUDA-graph capture
+    /// surface) matches the collection — the cliffs live in the data.
     fn fpm_mixed_step_components(
         &self,
+        prefill_op: &FpmForwardOp,
         decode_op: &FpmForwardOp,
         ctx_tokens: u32,
         gen_tokens: u32,
@@ -639,16 +650,44 @@ impl Engine {
     ) -> Result<(f64, f64), AicError> {
         let mut prefill_component = 0.0_f64;
         if ctx_tokens > 0 {
-            let rt = RuntimeConfig {
-                batch_size: ctx_tokens.div_ceil(isl),
-                isl,
-                osl: 1,
-                prefix,
-                ..Default::default()
-            };
-            let ctx_ms = self.run_context_phase(&rt)?;
-            let chunk_scale = (isl as f64 / ctx_tokens as f64).ceil();
-            prefill_component = ctx_ms / chunk_scale;
+            let new_tokens = isl.saturating_sub(prefix);
+            if new_tokens == 0 {
+                return Err(AicError::PerfDatabase(format!(
+                    "isl must be greater than prefix, got isl={isl} prefix={prefix}"
+                )));
+            }
+            if ctx_tokens >= new_tokens {
+                // Whole prefills this iteration: the scheduled total picks
+                // the regime row.
+                let batch = ctx_tokens.div_ceil(new_tokens);
+                prefill_component = prefill_op
+                    .query_totals(
+                        &self.db,
+                        &[
+                            batch as f64,
+                            (ctx_tokens + gen_tokens) as f64,
+                            (batch * prefix) as f64,
+                        ],
+                    )?
+                    .latency_ms;
+            } else {
+                // Chunked prefill: per-chunk totals, per-iteration average.
+                let mut total = 0.0_f64;
+                let mut chunks = 0u32;
+                let mut done = 0u32;
+                while done < new_tokens {
+                    let chunk = ctx_tokens.min(new_tokens - done);
+                    total += prefill_op
+                        .query_totals(
+                            &self.db,
+                            &[1.0, (chunk + gen_tokens) as f64, (prefix + done) as f64],
+                        )?
+                        .latency_ms;
+                    done += chunk;
+                    chunks += 1;
+                }
+                prefill_component = total / chunks as f64;
+            }
         }
         let mut marginal_decode = 0.0_f64;
         if gen_tokens > 0 {
@@ -1124,22 +1163,104 @@ mod tests {
     }
 
     /// The marginal-decode mixed composition, exact arithmetic over the
-    /// fixture rows: prefill (1, 2048, 0) -> 20.0 (chunk_scale 1), decode
-    /// in-curve lerp minus the (8, 8) -> 6.0 baseline floor.
+    /// fixture rows: the prefill component prices the step's SCHEDULED TOTAL
+    /// (ctx + gen tokens) on the prefill curve; decode is the in-curve lerp
+    /// minus the (8, 8) -> 6.0 baseline floor.
     #[test]
     fn fpm_mixed_step_is_prefill_plus_marginal_decode() {
         let tmp = tempfile::tempdir().unwrap();
         let engine = build_fpm_engine(tmp.path(), None).unwrap();
-        // ctx: 2048 tokens / isl 2048 -> batch 1, coords (1, 2048, 0) -> exact
-        // 20.0; chunk_scale = ceil(2048/2048) = 1.
+        // ctx: 2048 tokens / isl 2048 -> batch 1, totals (1, 2048+8, 0):
+        // in-curve lerp between (1,2048)->20.0 and (1,4096)->40.0.
         // gen: batch 8; osl=0 clamps to 1 -> isl' = 2048, one step at
         // s = 2049 -> kv = 8*2049 = 16392: lerp between (8,4096)->7.0 and
         // (8,65536)->9.0, minus baseline (8, kv_floor=8) -> 6.0.
         let ms = engine.mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let pre = 20.0 + (40.0 - 20.0) * (2056.0 - 2048.0) / (4096.0 - 2048.0);
         let w = (16392.0 - 4096.0) / (65536.0 - 4096.0);
         let decode = 7.0 + (9.0 - 7.0) * w;
-        let expected = 20.0 + (decode - 6.0);
+        let expected = pre + (decode - 6.0);
         assert!((ms - expected).abs() < 1e-9, "got {ms}, want {expected}");
+    }
+
+    /// FPM engine over CUSTOM rows (cliff pair + chunk coordinates); same
+    /// wiring as [`build_fpm_engine`].
+    fn build_fpm_engine_with_rows(
+        tmp: &std::path::Path,
+        rows: &[crate::perf_database::fpm_forward::tests::RowSpec],
+    ) -> Result<Engine, AicError> {
+        use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
+        write_pair(tmp, rows);
+        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        let fpm_op = |phase: FpmPhase| {
+            Op::FpmForward(FpmForwardOp {
+                name: format!("fpm_forward_{}", phase.as_str()),
+                phase,
+                model_path: "org/model-a".to_string(),
+                match_identity: default_identity(4),
+                weight_bytes: 0.0,
+                sol_ops: vec![],
+            })
+        };
+        let spec = EngineSpec::new(
+            fixture_engine_config(None),
+            vec![fpm_op(FpmPhase::Prefill)],
+            vec![fpm_op(FpmPhase::Decode)],
+        );
+        Engine::build(spec, Arc::new(db))
+    }
+
+    fn cliff_rows() -> Vec<crate::perf_database::fpm_forward::tests::RowSpec> {
+        use crate::perf_database::fpm_forward::tests::RowSpec;
+        let mk = |kind: &'static str, batch: u32, prefill: u32, kv: u32, lat: f64| RowSpec {
+            workload_kind: kind,
+            batch_size: batch,
+            total_prefill_tokens: prefill,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        vec![
+            // CUDA-graph cliff pair at capture=2048, plus the eager plateau.
+            mk("prefill", 1, 2048, 0, 47.0),
+            mk("prefill", 1, 2049, 0, 99.0),
+            mk("prefill", 1, 4096, 0, 99.0),
+            // Chunk coordinates for the multi-chunk average test.
+            mk("prefill", 1, 1032, 0, 10.0),
+            mk("prefill", 1, 1032, 1024, 14.0),
+            mk("decode", 8, 0, 8, 6.0),
+            mk("decode", 8, 0, 4096, 7.0),
+            mk("decode", 8, 0, 65536, 9.0),
+        ]
+    }
+
+    /// Spec test 1+2: the step's total (ctx + gen) picks the regime side.
+    /// ctx=2048 alone sits ON the capture boundary (graph side, 47 ms); the
+    /// same chunk with ANY decode riders crosses it and must price eager.
+    #[test]
+    fn fpm_mixed_step_total_crosses_the_graph_cliff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
+        // In-graph: pure prefill step, totals (1, 2048, 0) -> exact 47.0.
+        let graph = engine.mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((graph[1] - 47.0).abs() < 1e-9, "graph-side prefill {}", graph[1]);
+        // Crossing: 8 decode riders push the total to 2056 -> eager plateau.
+        let eager = engine.mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((eager[1] - 99.0).abs() < 1e-9, "eager-side prefill {}", eager[1]);
+        assert!(eager[1] > graph[1] * 2.0 - 1e-9);
+    }
+
+    /// Spec test 4: chunked requests price each chunk at its own
+    /// (chunk + gen, past_kv) coordinates; the component is their average.
+    #[test]
+    fn fpm_mixed_step_chunks_average_exact_coordinates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
+        // ctx=1024 of isl=2048: chunk 1 -> (1, 1032, 0) = 10.0,
+        // chunk 2 -> (1, 1032, 1024) = 14.0; average 12.0.
+        let parts = engine.mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((parts[1] - 12.0).abs() < 1e-9, "chunk average {}", parts[1]);
     }
 
     /// A generation-only step keeps the FULL decode latency (no pass to ride

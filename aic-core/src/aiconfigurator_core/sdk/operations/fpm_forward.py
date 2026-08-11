@@ -668,6 +668,43 @@ class FPMForwardOp(Operation):
             coords = (batch_size, batch_size * s)
         return self._resolve(cell, coords, database)
 
+    def query_totals(
+        self,
+        database: PerfDatabase,
+        *,
+        batch_size: int,
+        total_prefill_tokens: int = 0,
+        total_kv_read_tokens: int,
+    ) -> PerformanceResult:
+        """Query by raw iteration-total coordinates.
+
+        The mixed-step composition prices a scheduled iteration whose totals
+        (prefill chunk + decode tokens) are generally not expressible as the
+        per-request ``(batch, s, prefix)`` shape :meth:`query` converts from;
+        this entry addresses the collected ``(batch_size,
+        total_prefill_tokens, total_kv_read_tokens)`` coordinates directly
+        (decode phase: ``(batch_size, total_kv_read_tokens)``). Same domain
+        gate, interpolation, and no-extrapolation contract as :meth:`query`;
+        mirrors the Rust op's ``query_totals``.
+        """
+        batch_size = int(batch_size)
+        total_prefill_tokens = int(total_prefill_tokens)
+        total_kv_read_tokens = int(total_kv_read_tokens)
+        if batch_size < 1 or total_kv_read_tokens < 0:
+            raise ValueError(
+                f"invalid FPM totals query: batch_size={batch_size}, total_kv_read_tokens={total_kv_read_tokens}"
+            )
+        cell = self._load_cell(database)
+        if self._phase == "prefill":
+            if total_prefill_tokens < 1:
+                raise ValueError(f"prefill query_totals needs total_prefill_tokens >= 1, got {total_prefill_tokens}")
+            coords = (batch_size, total_prefill_tokens, total_kv_read_tokens)
+        else:
+            if total_prefill_tokens:
+                raise ValueError(f"decode query_totals takes no prefill tokens, got {total_prefill_tokens}")
+            coords = (batch_size, total_kv_read_tokens)
+        return self._resolve(cell, coords, database)
+
     def query_pass_baseline(self, database: PerfDatabase, *, batch_size: int) -> PerformanceResult:
         """Decode-pass baseline at the smallest collectable KV for this batch.
 
