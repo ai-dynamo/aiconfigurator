@@ -42,9 +42,16 @@ all_frameworks_op_cases:
       - 20480
       head_counts:
       - 128
+      # Kimi-K3 96-head family: per-rank MLA shards at TP 1/2/4/8. The grid
+      # previously covered only the 128-head (DeepSeek) family; K3 queries
+      # at 96/48/24/12 interpolated between neighbours (2026-08-02).
+      - 96
       - 64
+      - 48
       - 32
+      - 24
       - 16
+      - 12
       - 8
       - 4
       - 2

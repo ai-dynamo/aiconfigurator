@@ -15,11 +15,7 @@ use std::collections::HashMap;
 use super::options::ForwardPassPerfOptions;
 
 pub(crate) trait WithOptions {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        relaxable: &[usize],
-    ) -> Self;
+    fn with_options(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self;
 }
 
 pub(crate) trait StoreStats {
@@ -133,8 +129,8 @@ impl<T: Clone> BucketedSamples<T> {
             return None;
         }
 
-        // Estimation must not clamp outside configured correction bounds into
-        // edge regions.
+        // Estimation must not clamp outside configured correction-grid
+        // workload ranges into edge regions.
         let mut key = Vec::with_capacity(x.len());
         for (i, value) in x.iter().enumerate() {
             let lo = self.axis_min[i];
@@ -198,7 +194,8 @@ impl<T: Clone> BucketedSamples<T> {
 
     fn retire_from_fattest_bucket(&mut self) {
         // Eviction removes samples only. Dynamic regression bounds remain
-        // monotonic; fixed correction bounds are configured at model creation.
+        // monotonic; fixed correction-grid workload ranges are configured at
+        // model creation.
         let Some(key) = self
             .buckets
             .iter()

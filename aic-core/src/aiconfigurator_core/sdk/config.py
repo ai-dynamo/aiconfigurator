@@ -44,6 +44,11 @@ class ModelConfig:
     enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
+    # Forward-pass modeling switch. "op_level" (default) keeps the granular op
+    # lists; "fpm" replaces each phase list with a single whole-model
+    # fpm_forward op backed by collected forward-pass data (see
+    # operations/fpm_forward.py). Validated in models.get_model.
+    forward_model: str = "op_level"
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.
@@ -217,7 +222,7 @@ class AFDConfig:
     # for compute and transfer latency queries.
     a_batch_size: int = 128
     num_microbatches: int = 3
-    pipeline_model: str = "optimistic"  # "optimistic" (K=3) or "conservative" (K=2)
+    pipeline_model: str = "optimistic"  # "optimistic" (K=3), "conservative" (K=2), or "serial"
     comm_overhead_factor: float = 1.0
     # Which phase(s) AFD should be applied to.
     # "decode" (default) mirrors existing behavior; "prefill" applies to

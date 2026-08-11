@@ -10,7 +10,7 @@
 use super::options::ForwardPassPerfOptions;
 use super::samples::{AxisRange, BucketedSamples, StoreStats, WithOptions};
 
-const RELAXABLE_NEG_TOLERANCE: f64 = 1e-6;
+const HINGE_NEG_TOLERANCE: f64 = 1e-6;
 const PREFILL_HINGE_MIN_OBSERVATIONS: usize = 6;
 const RELATIVE_WEIGHT_FLOOR_MS: f64 = 25.0;
 const HINGE_LOGSPACE_CANDIDATES: usize = 8;
@@ -20,22 +20,16 @@ pub(crate) struct BucketedRegression {
     samples: BucketedSamples<f64>,
     ndim: usize,
     min_observations: usize,
-    relaxable: Vec<usize>,
     fit: Option<RegressionFit>,
 }
 
 impl WithOptions for BucketedRegression {
-    fn with_options(
-        options: &ForwardPassPerfOptions,
-        axis_ranges: &[AxisRange],
-        relaxable: &[usize],
-    ) -> Self {
+    fn with_options(options: &ForwardPassPerfOptions, axis_ranges: &[AxisRange]) -> Self {
         let ndim = axis_ranges.len();
         Self {
             samples: BucketedSamples::new_dynamic(options, ndim),
             ndim,
             min_observations: options.min_observations,
-            relaxable: relaxable.to_vec(),
             fit: None,
         }
     }
@@ -55,12 +49,7 @@ impl BucketedRegression {
     pub(crate) fn add_observation(&mut self, x: Vec<f64>, y: f64) {
         if self.samples.add(x, y) {
             let observations = self.samples.observations();
-            self.fit = fit_regression(
-                &observations,
-                self.ndim,
-                self.min_observations,
-                &self.relaxable,
-            );
+            self.fit = fit_regression(&observations, self.ndim, self.min_observations);
         }
     }
 
@@ -118,10 +107,20 @@ impl WeightedHingeFit {
             + self.right_slope_delta * (value - self.knot).max(0.0)
     }
 
-    fn is_monotonic_nonnegative(&self) -> bool {
-        self.intercept >= -RELAXABLE_NEG_TOLERANCE
-            && self.left_slope >= -RELAXABLE_NEG_TOLERANCE
-            && self.left_slope + self.right_slope_delta >= -RELAXABLE_NEG_TOLERANCE
+    fn normalize_monotonic_nonnegative(mut self) -> Option<Self> {
+        let right_slope = self.left_slope + self.right_slope_delta;
+        if self.left_slope < -HINGE_NEG_TOLERANCE
+            || right_slope < -HINGE_NEG_TOLERANCE
+            || ![self.intercept, self.left_slope, right_slope]
+                .iter()
+                .all(|value| value.is_finite())
+        {
+            return None;
+        }
+
+        self.left_slope = self.left_slope.max(0.0);
+        self.right_slope_delta = right_slope.max(0.0) - self.left_slope;
+        Some(self)
     }
 }
 
@@ -129,40 +128,87 @@ fn fit_regression(
     observations: &[(Vec<f64>, f64)],
     ndim: usize,
     min_observations: usize,
-    relaxable: &[usize],
 ) -> Option<RegressionFit> {
     // Prefill is the only one-dimensional workload kind today. Its latency is
     // overhead-heavy at low token counts and slope-heavy at high token counts,
     // so a weighted hinge avoids the negative intercepts a global line can fit.
-    if ndim == 1
-        && relaxable.is_empty()
-        && observations.len() >= min_observations.max(PREFILL_HINGE_MIN_OBSERVATIONS)
-    {
+    if ndim == 1 && observations.len() >= min_observations.max(PREFILL_HINGE_MIN_OBSERVATIONS) {
         if let Some(fit) = fit_weighted_hinge(observations) {
             return Some(RegressionFit::WeightedHinge(fit));
         }
     }
 
-    fit_linear(observations, ndim, min_observations, relaxable).map(RegressionFit::Linear)
+    fit_linear(observations, ndim, min_observations).map(RegressionFit::Linear)
 }
 
 fn fit_linear(
     observations: &[(Vec<f64>, f64)],
     ndim: usize,
     min_observations: usize,
-    relaxable: &[usize],
 ) -> Option<LinearFit> {
     if observations.len() < min_observations {
         return None;
     }
-    let size = ndim + 1;
+
+    // The forward-pass regressions have at most two workload dimensions. Find
+    // the non-negative least-squares solution by enumerating every active set:
+    // each bit selects a slope that is free, while unselected slopes are fixed
+    // at zero. The intercept remains unconstrained. Comparing the residuals of
+    // all feasible faces gives the constrained optimum without relying on an
+    // absolute coefficient tolerance across differently-scaled features.
+    let active_set_count = 1usize.checked_shl(ndim.try_into().ok()?)?;
+    let mut best: Option<(f64, LinearFit)> = None;
+    for active_mask in 0..active_set_count {
+        let active = (0..ndim)
+            .filter(|idx| active_mask & (1usize << idx) != 0)
+            .collect::<Vec<_>>();
+        let Some(fit) = fit_linear_active_set(observations, ndim, &active) else {
+            continue;
+        };
+        let squared_error = observations
+            .iter()
+            .map(|(x, y)| {
+                let residual = fit.predict(x) - *y;
+                residual * residual
+            })
+            .sum::<f64>();
+        if !squared_error.is_finite() {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(best_error, _)| squared_error < *best_error)
+        {
+            best = Some((squared_error, fit));
+        }
+    }
+
+    let fit = best.map(|(_, fit)| fit)?;
+    let is_underdetermined = observations.len() <= ndim;
+    let has_load_signal = fit.coefficients.iter().any(|coef| *coef > 0.0);
+
+    // Preserve explicitly configured low-observation behavior while the
+    // system is underdetermined. Once there are enough observations to
+    // identify the slopes, an intercept-only boundary has no usable load
+    // signal and must not make the model ready.
+    (is_underdetermined || has_load_signal).then_some(fit)
+}
+
+fn fit_linear_active_set(
+    observations: &[(Vec<f64>, f64)],
+    ndim: usize,
+    active: &[usize],
+) -> Option<LinearFit> {
+    let size = active.len() + 1;
     let mut lhs = vec![vec![0.0_f64; size]; size];
     let mut rhs = vec![0.0_f64; size];
 
     for (x, y) in observations {
         let mut row = Vec::with_capacity(size);
         row.push(1.0);
-        row.extend(x.iter().copied().take(ndim));
+        for idx in active {
+            row.push(*x.get(*idx)?);
+        }
         for i in 0..size {
             rhs[i] += row[i] * *y;
             for j in 0..size {
@@ -173,21 +219,14 @@ fn fit_linear(
 
     let solution = solve_linear_system(lhs.clone(), rhs.clone())
         .or_else(|| solve_regularized_linear_system(lhs, rhs))?;
-    let mut coefficients = solution[1..].to_vec();
-    let mut has_non_relaxable_negative = false;
-    for (idx, coef) in coefficients.iter_mut().enumerate() {
-        if *coef < 0.0 {
-            if relaxable.contains(&idx) {
-                if *coef < -RELAXABLE_NEG_TOLERANCE {
-                    *coef = 0.0;
-                }
-            } else {
-                has_non_relaxable_negative = true;
-            }
-        }
-    }
-    if has_non_relaxable_negative {
+    if !solution.iter().all(|value| value.is_finite())
+        || solution[1..].iter().any(|coef| *coef < 0.0)
+    {
         return None;
+    }
+    let mut coefficients = vec![0.0; ndim];
+    for (solution_idx, feature_idx) in active.iter().enumerate() {
+        coefficients[*feature_idx] = solution[solution_idx + 1];
     }
     Some(LinearFit {
         intercept: solution[0],
@@ -237,7 +276,7 @@ fn fit_weighted_hinge_at(observations: &[(Vec<f64>, f64)], knot: f64) -> Option<
         right_slope_delta: solution[2],
         knot,
     };
-    fit.is_monotonic_nonnegative().then_some(fit)
+    fit.normalize_monotonic_nonnegative()
 }
 
 fn weighted_hinge_rmse(observations: &[(Vec<f64>, f64)], fit: &WeightedHingeFit) -> f64 {
@@ -343,4 +382,31 @@ fn solve_linear_system(mut lhs: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<
         }
     }
     Some(rhs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WeightedHingeFit, HINGE_NEG_TOLERANCE};
+
+    #[test]
+    fn weighted_hinge_normalizes_tolerated_negative_slopes() {
+        let fit = WeightedHingeFit {
+            intercept: -10.0,
+            left_slope: -HINGE_NEG_TOLERANCE / 2.0,
+            right_slope_delta: HINGE_NEG_TOLERANCE / 4.0,
+            knot: 2.0,
+        }
+        .normalize_monotonic_nonnegative()
+        .unwrap();
+
+        assert_eq!(fit.left_slope, 0.0);
+        assert_eq!(fit.left_slope + fit.right_slope_delta, 0.0);
+        assert_eq!(fit.intercept, -10.0);
+
+        let invalid = WeightedHingeFit {
+            left_slope: -2.0 * HINGE_NEG_TOLERANCE,
+            ..fit
+        };
+        assert!(invalid.normalize_monotonic_nonnegative().is_none());
+    }
 }

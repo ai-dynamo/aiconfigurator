@@ -3,12 +3,14 @@
 
 """Unit tests for generator naive module — nvbug 5941223."""
 
+import json
 import re
 from unittest.mock import patch
 
 import pytest
 
 from aiconfigurator.generator.naive import (
+    _ENGINE_LIMIT_KEYS,
     _calculate_min_tp,
     _estimate_model_weight_bytes,
     _sanitize_rfc1123,
@@ -16,6 +18,20 @@ from aiconfigurator.generator.naive import (
 )
 
 _RFC1123_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9\-.]*[a-z0-9])?$")
+_UNSUPPORTED_GPT_NEOX_CONFIG = {
+    "architectures": ["GPTNeoXForCausalLM"],
+    "hidden_size": 512,
+    "intermediate_size": 2048,
+    "num_attention_heads": 8,
+    "num_hidden_layers": 6,
+    "torch_dtype": "float16",
+    "vocab_size": 50304,
+}
+_UNSUPPORTED_MOE_CONFIG = {
+    **_UNSUPPORTED_GPT_NEOX_CONFIG,
+    "architectures": ["UnsupportedMoeForCausalLM"],
+    "num_local_experts": 8,
+}
 
 
 @pytest.mark.unit
@@ -212,8 +228,57 @@ class TestBuildNaiveGeneratorParams:
 
 
 @pytest.mark.unit
-class TestEstimateModelWeightBytesFailsOnMissingModel:
-    @patch("aiconfigurator.sdk.utils.get_model_config_from_model_path")
+class TestEstimateModelWeightBytes:
+    def test_estimates_unsupported_architecture_from_raw_config(self, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps(_UNSUPPORTED_GPT_NEOX_CONFIG))
+
+        assert _estimate_model_weight_bytes(str(tmp_path)) == 153354240
+
+    @patch(
+        "aiconfigurator.generator.naive._load_model_config_from_model_path",
+        return_value=_UNSUPPORTED_GPT_NEOX_CONFIG,
+    )
+    def test_remote_unsupported_architecture_loads_config_once(self, mock_load_config):
+        assert _estimate_model_weight_bytes("EleutherAI/pythia-70m") == 153354240
+        mock_load_config.assert_called_once_with("EleutherAI/pythia-70m")
+
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 80 * 1024**3},
+    )
+    def test_builds_params_for_unsupported_architecture(self, _mock_system, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps(_UNSUPPORTED_GPT_NEOX_CONFIG))
+
+        result = build_naive_generator_params(
+            model_name=str(tmp_path),
+            total_gpus=8,
+            system_name="h100_sxm",
+            backend_name="vllm",
+        )
+
+        assert result["params"]["agg"]["tensor_parallel_size"] == 1
+        assert result["ModelConfig"]["fits_in_memory"] is True
+
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 512 * 1024**2},
+    )
+    def test_builds_tep_params_for_unsupported_moe_architecture(self, _mock_system, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps(_UNSUPPORTED_MOE_CONFIG))
+
+        result = build_naive_generator_params(
+            model_name=str(tmp_path),
+            total_gpus=8,
+            system_name="h100_sxm",
+            backend_name="vllm",
+        )
+
+        assert result["ModelConfig"]["is_moe"] is True
+        assert result["params"]["agg"]["tensor_parallel_size"] == 1
+        assert result["params"]["agg"]["moe_tensor_parallel_size"] == 2
+        assert result["params"]["agg"]["moe_expert_parallel_size"] == 1
+
+    @patch("aiconfigurator.generator.naive._load_model_config_from_model_path")
     def test_raises_when_config_download_fails(self, mock_get_config):
         mock_get_config.side_effect = Exception(
             "Failed to download nonexistent-org/fake-model-12345's config.json from HuggingFace: "
@@ -299,6 +364,67 @@ class TestCalculateMinTp:
 
 
 @pytest.mark.unit
+class TestPreserveEngineLimits:
+    """The FPM collector's declared entry point: preserve_engine_limits=True."""
+
+    @patch(
+        "aiconfigurator.generator.naive._estimate_model_weight_bytes",
+        return_value=30 * 1024**3,
+    )
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3},
+    )
+    def test_strips_engine_limit_keys_and_sets_guard(self, _mock_sys, _mock_est):
+        overrides = {
+            "params": {
+                "agg": {
+                    "max_num_tokens": 4096,
+                    "max_seq_len": 8192,
+                    "tokens_per_block": 64,
+                    "gpu_memory_utilization": 0.9,
+                    "compilation_config": "{}",
+                    "cuda_graph_batch_sizes": [1, 2, 4],
+                    "trust_remote_code": True,
+                }
+            }
+        }
+        result = build_naive_generator_params(
+            model_name="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system_name="h200_sxm",
+            backend_name="vllm",
+            generator_overrides=overrides,
+            preserve_engine_limits=True,
+        )
+
+        assert result["preserve_engine_limits"] is True
+        assert result["params"]
+        for role_params in result["params"].values():
+            assert not set(role_params) & set(_ENGINE_LIMIT_KEYS)
+        assert result["params"]["agg"]["trust_remote_code"] is True
+
+    @patch(
+        "aiconfigurator.generator.naive._estimate_model_weight_bytes",
+        return_value=30 * 1024**3,
+    )
+    @patch(
+        "aiconfigurator.generator.naive._get_system_config",
+        return_value={"gpus_per_node": 8, "vram_per_gpu": 141 * 1024**3},
+    )
+    def test_default_keeps_naive_engine_limits(self, _mock_sys, _mock_est):
+        result = build_naive_generator_params(
+            model_name="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system_name="h200_sxm",
+            backend_name="vllm",
+        )
+
+        assert "preserve_engine_limits" not in result
+        assert result["params"]["agg"]["max_batch_size"] == 128
+
+
+@pytest.mark.unit
 class TestRenderingNameFallback:
     """Verify prepare_template_context uses 'dynamo' fallback for missing name_prefix."""
 
@@ -356,3 +482,58 @@ class TestRenderingNameFallback:
         }
         ctx = prepare_template_context(params, "vllm")
         assert ctx["BenchConfig"]["prefix"] == 0
+
+
+@pytest.mark.unit
+def test_frozen_model_config_renders_without_model_resolution(monkeypatch):
+    # E3: with a frozen config the builder must not touch the filesystem or
+    # network for model metadata, even for unreachable checkpoints.
+    import aiconfigurator.generator.naive as naive_module
+
+    def _boom(*_a, **_k):
+        raise AssertionError("model resolution must not run when model_config is provided")
+
+    monkeypatch.setattr("aiconfigurator.sdk.utils.get_model_config_from_model_path", _boom)
+    frozen = {
+        "layers": 4,
+        "hidden_size": 128,
+        "inter_size": 256,
+        "vocab": 2048,
+        "num_experts": 8,
+        "moe_inter_size": 64,
+        "architecture": "GlmMoeDsaForCausalLM",
+    }
+    params = naive_module.build_naive_generator_params(
+        "/cluster-only/private-model",
+        4,
+        "b200_sxm",
+        "vllm",
+        model_config=frozen,
+    )
+    assert params["ModelConfig"]["is_moe"] is True
+
+
+@pytest.mark.unit
+def test_preserve_engine_limits_strips_disagg_roles():
+    params = build_naive_generator_params(
+        "/cluster-only/private-model",
+        4,
+        "b200_sxm",
+        "vllm",
+        mode="disagg",
+        preserve_engine_limits=True,
+        model_config={
+            "layers": 2,
+            "hidden_size": 64,
+            "inter_size": 128,
+            "vocab": 1000,
+            "num_experts": 0,
+            "moe_inter_size": 0,
+            "architecture": "Qwen2ForCausalLM",
+        },
+    )
+    for role in ("prefill", "decode"):
+        role_params = params["params"][role]
+        assert "max_batch_size" not in role_params
+        assert "gpu_memory_utilization" not in role_params
+    assert params["preserve_engine_limits"] is True

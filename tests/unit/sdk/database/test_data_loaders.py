@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from collections import defaultdict
 from itertools import product
 
@@ -733,6 +734,32 @@ def test_load_context_attention_data_basic(tmp_path):
     assert data[qm][kcd][0][16][0][4][2][1]["latency"] == pytest.approx(0.321)
 
 
+def test_load_context_attention_data_warns_only_for_same_version_backend_collision(tmp_path, caplog):
+    csv_file = tmp_path / "ctx_attn_conflicts.csv"
+    headers = (
+        "framework,version,device,op_name,kernel_source,batch_size,isl,num_heads,num_key_value_heads,head_dim,"
+        "beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
+    )
+    shared_fields = "trt,{version},hwX,context_attention,{kernel_source},1,2,4,4,16,8,bfloat16,bfloat16,1,{latency}"
+    rows = [
+        shared_fields.format(version="2.0", kernel_source="winner_backend", latency="0.321"),
+        shared_fields.format(version="1.0", kernel_source="reuse_backend", latency="0.654"),
+        shared_fields.format(version="2.0", kernel_source="dropped_backend", latency="0.987"),
+    ]
+    csv_file.write_text(headers + "\n".join(rows) + "\n")
+
+    with caplog.at_level(logging.DEBUG):
+        data = load_context_attention_data(str(csv_file))
+
+    conflicts = [record for record in caplog.records if "value conflict in context attention data" in record.message]
+    assert [record.levelno for record in conflicts] == [logging.DEBUG, logging.WARNING]
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[0].message
+    assert "kernel_source=reuse_backend, version=1.0" in conflicts[0].message
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[1].message
+    assert "kernel_source=dropped_backend, version=2.0" in conflicts[1].message
+    assert data[FMHAQuantMode.bfloat16][KVCacheQuantMode.bfloat16][0][16][0][4][2][1]["latency"] == pytest.approx(0.321)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6) load_generation_attention_data
 # ─────────────────────────────────────────────────────────────────────────────
@@ -793,6 +820,32 @@ def test_load_generation_attention_data_basic(tmp_path):
     assert 1 in data[kcd][0][16][0][4]  # b == 1
     assert 3 in data[kcd][0][16][0][4][1]  # s = original 2 + step 1 = 3
     assert data[kcd][0][16][0][4][1][3]["latency"] == pytest.approx(0.987)
+
+
+def test_load_generation_attention_data_warns_only_for_same_version_backend_collision(tmp_path, caplog):
+    csv_file = tmp_path / "gen_attn_conflicts.csv"
+    headers = (
+        "framework,version,device,op_name,kernel_source,batch_size,isl,num_heads,num_key_value_heads,head_dim,"
+        "beam_width,attn_dtype,kv_cache_dtype,step,latency\n"
+    )
+    shared_fields = "trt,{version},hwX,generation_attention,{kernel_source},1,2,4,4,16,8,dummy,bfloat16,1,{latency}"
+    rows = [
+        shared_fields.format(version="2.0", kernel_source="winner_backend", latency="0.321"),
+        shared_fields.format(version="1.0", kernel_source="reuse_backend", latency="0.654"),
+        shared_fields.format(version="2.0", kernel_source="dropped_backend", latency="0.987"),
+    ]
+    csv_file.write_text(headers + "\n".join(rows) + "\n")
+
+    with caplog.at_level(logging.DEBUG):
+        data = load_generation_attention_data(str(csv_file))
+
+    conflicts = [record for record in caplog.records if "value conflict in generation attention data" in record.message]
+    assert [record.levelno for record in conflicts] == [logging.DEBUG, logging.WARNING]
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[0].message
+    assert "kernel_source=reuse_backend, version=1.0" in conflicts[0].message
+    assert "kernel_source=winner_backend, version=2.0" in conflicts[1].message
+    assert "kernel_source=dropped_backend, version=2.0" in conflicts[1].message
+    assert data[KVCacheQuantMode.bfloat16][0][16][0][4][1][3]["latency"] == pytest.approx(0.321)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

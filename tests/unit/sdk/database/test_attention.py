@@ -125,7 +125,7 @@ class TestContextAttention:
             comprehensive_perf_db.set_transfer_policy(None)
 
     def test_query_context_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         b, full_s, prefix, n, n_kv = 1, 32, 0, 8, 4
         s = full_s - prefix
         kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
@@ -228,7 +228,7 @@ class TestGenerationAttention:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_generation_attention_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         b, s, n, n_kv = 2, 64, 16, 4
         kv_cache_quant_mode = common.KVCacheQuantMode.fp8
 
@@ -441,7 +441,7 @@ class TestGenerationMLA:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_generation_mla_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_generation_mla(
             1, 32, 32, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL_FULL
         )
@@ -482,3 +482,39 @@ def test_default_database_mode(mutable_comprehensive_perf_db):
     assert cache_info.currsize == 1
     assert isinstance(sol_result, float)
     assert sol_result != non_sol_result
+
+
+def test_sol_full_is_per_call_diagnostic_never_default_mode(mutable_comprehensive_perf_db):
+    """DatabaseMode.SOL_FULL is a per-call diagnostic (the sanity notebook
+    unpacks its raw 3-tuple) but can never become the active mode: every
+    mode-entry choke point raises."""
+    from aiconfigurator_core.sdk.perf_database import _normalize_database_mode
+
+    db = mutable_comprehensive_perf_db
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
+        db.set_default_database_mode(common.DatabaseMode.SOL_FULL)
+    # The refused mode must not stick.
+    assert db.get_default_database_mode() == common.DatabaseMode.SILICON
+
+    # The get_database / get_database_view string+enum normalizer refuses too.
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
+        _normalize_database_mode("SOL_FULL")
+    with pytest.raises(ValueError, match="cannot be a database's default mode"):
+        _normalize_database_mode(common.DatabaseMode.SOL_FULL)
+
+    # The per-call diagnostic contract stays: a raw (sol, sol_math, sol_mem)
+    # tuple, unpackable exactly as tools/sanity_check/validate_database.ipynb
+    # consumes it.
+    sol_time, sol_math, sol_mem = db.query_mem_op(1 << 20, database_mode=common.DatabaseMode.SOL_FULL)
+    assert sol_time == pytest.approx(max(sol_math, sol_mem))
+    result = db.query_context_attention(
+        b=1,
+        s=128,
+        n=16,
+        n_kv=16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        database_mode=common.DatabaseMode.SOL_FULL,
+        prefix=0,
+    )
+    assert isinstance(result, tuple) and len(result) == 3

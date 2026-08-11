@@ -233,6 +233,42 @@ class Qwen35Config:
 
 
 @dataclass(frozen=True)
+class KimiK3Config:
+    """Config for Kimi-K3 hybrid KDA + MLA LatentMoE model.
+
+    layer_types: per-layer tuple of "linear_attention" (KDA) or "full_attention" (MLA),
+                 derived from config.json linear_attn_config.kda_layers (1-based).
+    kda_*: KDA layer geometry (Kimi-K3: 96 heads, head_dim 128, conv kernel 4;
+           q/k/v/gate projections are all num_heads*head_dim wide — full-rank gate).
+    MLA fields mirror the DeepSeek latent-attention geometry; mla_use_nope means the
+    rope slice is projected/cached but positionless (kernel shape unchanged), and
+    mla_use_output_gate adds one extra hidden->num_heads*v_head_dim gate GEMM.
+    LatentMoE: routed experts run in a routed_expert_hidden_size-wide latent space
+    (7168 -> 3584 down proj, experts at 3584/3072, 3584 -> 7168 up proj); the
+    num_shared_experts shared experts run in the full hidden space.
+    attn_res_block_size: AttnRes cross-layer residual block size (elementwise only).
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "linear_attention" (KDA) or "full_attention" (MLA)
+    kda_num_heads: int
+    kda_head_dim: int
+    kda_conv_kernel: int
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    topk: int = 0
+    num_experts: int = 0
+    moe_inter_size: int = 0
+    routed_expert_hidden_size: int = 0  # LatentMoE latent width (0 = experts in full hidden space)
+    num_shared_experts: int = 0
+    first_k_dense_replace: int = 0
+    dense_inter_size: int = 0
+    attn_res_block_size: int = 0
+
+
+@dataclass(frozen=True)
 class DeepSeekV4Config:
     """Config fields unique to DeepSeek-V4 compressed attention + mHC models."""
 
@@ -488,6 +524,8 @@ DefaultHFModels = {
     "nvidia/DeepSeek-V3.1-NVFP4",
     # Kimi K2.5 Models
     "moonshotai/Kimi-K2.5",
+    # Kimi K3
+    "moonshotai/Kimi-K3",
     "nvidia/Kimi-K2.5-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
@@ -554,6 +592,28 @@ DefaultHFModels = {
     "google/gemma-4-26B-A4B",
 }
 
+# Bundled model configs and the default support-matrix roster intentionally have
+# different lifecycles. A model can leave the generated matrix when a newer
+# release supersedes it while its cached config remains available for explicit
+# SDK/CLI use and for loading historical support-matrix rows.
+RetiredSupportMatrixHFModels = frozenset(
+    {
+        "zai-org/GLM-5",
+        "zai-org/GLM-5-FP8",
+        "nvidia/GLM-5-NVFP4",
+        "zai-org/GLM-5.1",
+        "zai-org/GLM-5.1-FP8",
+        "nvidia/GLM-5.1-NVFP4",
+        "MiniMaxAI/MiniMax-M2.5",
+        "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+        "nvidia/Nemotron-H-56B-Base-8K",
+    }
+)
+
+assert RetiredSupportMatrixHFModels <= DefaultHFModels
+SupportMatrixHFModels = DefaultHFModels - RetiredSupportMatrixHFModels
+
 """
 Supported systems (GPU types)
 """
@@ -585,6 +645,7 @@ ModelFamily = {
     "DEEPSEEKV32",
     "DEEPSEEKV4",
     "KIMIK25",
+    "KIMIK3",
     "NEMOTRONNAS",
     "NEMOTRONH",
     "HYBRIDMOE",
@@ -607,6 +668,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
     "DeepseekV4ForCausalLM": "DEEPSEEKV4",
     "KimiK25ForConditionalGeneration": "KIMIK25",
+    "KimiK3ForConditionalGeneration": "KIMIK3",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
@@ -628,6 +690,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "KimiK3ForConditionalGeneration": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
@@ -636,6 +699,14 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Qwen3VLMoeForConditionalGeneration": "text_config",
     "MiniMaxM3SparseForConditionalGeneration": "text_config",
 }
+
+# Architectures whose speculative decoding is DSPARK-style: ``nextn`` is the
+# speculative BLOCK SIZE served by a standalone trained draft model (block
+# proposal, verified at width nextn+1), NOT a chained target-shaped MTP
+# module. Their checkpoints carry no num_nextn_predict_layers, so
+# nextn="auto" cannot enable speculation and the MTP mismatch warning does
+# not apply (see Task._resolve_model_identity).
+DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
 
 """
 All reduce strategy for trtllm custom allreduce
@@ -879,11 +950,29 @@ ColumnsAFD = [
     "tokens/s/gpu",
     "tokens/s/user",
     "seq/s",
+    "request_rate",
     "concurrency",
+    "parallel",
     "pipeline_model",
     "num_microbatches",
+    "nextn",
     "combined_with_pd",
     "boundary_on_attn",
+    # Static prefill pool paired with the AFD pool in combined-with-PD
+    # default-mode sweeps; NaN for single-phase AFD-only estimates.
+    "(p)workers",
+    "(p)tp",
+    "(p)pp",
+    "(p)dp",
+    "(p)moe_tp",
+    "(p)ep",
+    "(p)bs",
+    "(p)num_gpus",
+    "(p)system",
+    "(p)backend",
+    "(p)version",
+    "(p)impl",
+    "(d)impl",
     "num_total_gpus",
     "memory",
     "backend",
@@ -902,7 +991,11 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    SOL_FULL = 4  # Provide SOL time and details
+    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
+    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
+    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
+    # database's DEFAULT mode — mode entry raises (perf_database).
+    SOL_FULL = 4
 
 
 class TransferKind(Enum):
@@ -1007,6 +1100,7 @@ class PerfDataFilename(Enum):
     scale_matrix = "scale_matrix_perf.parquet"
     mamba2 = "mamba2_perf.parquet"
     gdn = "gdn_perf.parquet"
+    kda = "kda_perf.parquet"
     # Module-level attention profiling (complete self_attn forward)
     mla_context_module = "mla_context_module_perf.parquet"
     mla_generation_module = "mla_generation_module_perf.parquet"
@@ -1037,6 +1131,10 @@ class PerfDataFilename(Enum):
     dsv4_csa_attn_module = "dsv4_csa_attn_module_perf.parquet"
     dsv4_csa_topk_calib = "dsv4_csa_topk_calib_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
+    # Whole-model forward-pass data (forward_model="fpm"). Paired with a
+    # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
+    # ``operations.fpm_forward``, never through the shared layer.
+    fpm_forward = "fpm_forward_perf.parquet"
 
 
 # compute_dtype names the tensor-core pipeline the mode's MMA actually executes
@@ -1101,6 +1199,7 @@ class FMHAQuantMode(Enum):
     """
 
     bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")
+    float16 = QuantMapping(2, 1, "float16", "bfloat16")  # sglang decode attention uses float16 compute
     fp8 = QuantMapping(1, 2, "fp8", "fp8")
     fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # FIXME: specific for sglang wideep
 

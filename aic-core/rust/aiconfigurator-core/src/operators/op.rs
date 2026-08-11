@@ -18,13 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-    Dsv4ModuleOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-    GenerationMlaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    MsaModuleOp, TrtllmWideEpMoEDispatchOp,
-    NcclOp, P2POp, PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp,
-    WideEpGenerationMlaOp, WideEpMoeOp,
+    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
+    MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source, TrtllmWideEpMoEDispatchOp,
+    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -155,6 +153,13 @@ pub enum Op {
     /// `ENGINE_SPEC_SCHEMA_VERSION` stays unchanged. Do NOT insert new
     /// variants mid-enum.
     Dsv4MegaMoe(Dsv4MegaMoeOp),
+    /// Kimi Delta Attention (KDA) kernel for Kimi-K3 linear_attention
+    /// layers — Python `KDAKernel` (a `GDNKernel` subclass with a distinct
+    /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
+    /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
+    /// `Dsv4MegaMoe`); the new serialized variant bumped
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5.
+    Kda(KdaOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -235,6 +240,7 @@ impl Op {
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
+            Op::Kda(o) => &o.name,
         }
     }
 
@@ -318,23 +324,29 @@ impl Op {
             Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
-                // independently, then `max(group_a_total, group_b_total)` is
-                // returned. Source tag follows the additive combine rule.
+                // independently, then latency = max(group_a_total,
+                // group_b_total) while ENERGY = group_a + group_b (both
+                // groups consume power even though they overlap in time).
+                // Source tag follows the additive combine rule.
                 let mut total_a = 0.0_f64;
+                let mut energy_a = 0.0_f64;
                 let mut source_a: Option<Source> = None;
                 for inner in &op.group_a {
                     let r = inner.query(db, ctx)?;
                     total_a += r.latency_ms;
+                    energy_a += r.energy_wms;
                     source_a = Some(match source_a {
                         None => r.source,
                         Some(prev) => prev.combine(r.source),
                     });
                 }
                 let mut total_b = 0.0_f64;
+                let mut energy_b = 0.0_f64;
                 let mut source_b: Option<Source> = None;
                 for inner in &op.group_b {
                     let r = inner.query(db, ctx)?;
                     total_b += r.latency_ms;
+                    energy_b += r.energy_wms;
                     source_b = Some(match source_b {
                         None => r.source,
                         Some(prev) => prev.combine(r.source),
@@ -345,7 +357,12 @@ impl Op {
                     (Some(s), None) | (None, Some(s)) => s,
                     (None, None) => Source::Silicon,
                 };
-                Ok(PerformanceResult::new(total_a.max(total_b), source).clamp_non_negative())
+                Ok(PerformanceResult::with_energy(
+                    total_a.max(total_b),
+                    energy_a + energy_b,
+                    source,
+                )
+                .clamp_non_negative())
             }
             Op::Fallback(op) => {
                 // Mirrors Python `FallbackOp.query`: try the primary; on
@@ -370,20 +387,31 @@ impl Op {
                         db
                     };
                 match op.primary.query(primary_db, ctx) {
+                    // Primary result passes through verbatim — its energy
+                    // rides along (Python returns `self._primary.query(...)`).
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
+                        // Fallback chain: Python sums PerformanceResults
+                        // (`total += op.query(...)`), so latency AND energy
+                        // both accumulate.
                         let mut total = 0.0_f64;
+                        let mut energy = 0.0_f64;
                         let mut source: Option<Source> = None;
                         for inner in &op.fallback {
                             let r = inner.query(db, ctx)?;
                             total += r.latency_ms;
+                            energy += r.energy_wms;
                             source = Some(match source {
                                 None => r.source,
                                 Some(prev) => prev.combine(r.source),
                             });
                         }
-                        Ok(PerformanceResult::new(total, source.unwrap_or(Source::Silicon))
-                            .clamp_non_negative())
+                        Ok(PerformanceResult::with_energy(
+                            total,
+                            energy,
+                            source.unwrap_or(Source::Silicon),
+                        )
+                        .clamp_non_negative())
                     }
                     Err(other) => Err(other),
                 }
@@ -392,7 +420,9 @@ impl Op {
             // same `x`); the megamoe table is indexed by local-rank tokens
             // and the op must NOT re-multiply by attention_dp_size.
             Op::Dsv4MegaMoe(op) => op.query(db, ctx.num_tokens),
+            // Like Gdn: the op derives its phase coordinates internally
+            // (verify divides the (nextn+1)-scaled batch by draft_tokens).
+            Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
         }
     }
 }
-

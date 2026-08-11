@@ -2087,6 +2087,118 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
     return test_cases
 
 
+# =============================================================================
+# KDA (Kimi Delta Attention) Test Cases  — Kimi-K3 linear_attention layers
+# =============================================================================
+
+
+@dataclasses.dataclass
+class KdaCommonTestCase:
+    """Test case configuration for KDA (Kimi Delta Attention) kernel benchmarking."""
+
+    phase: str  # "context", "generation" or "verify"
+    d_model: int  # hidden_size
+    d_conv: int  # Conv1d kernel size (short_conv_kernel_size)
+    num_k_heads: int  # Number of KDA key heads (per attention-TP shard)
+    head_k_dim: int  # Key head dimension
+    num_v_heads: int  # Number of KDA value heads (== num_k_heads for KDA)
+    head_v_dim: int  # Value head dimension
+    batch_size_list: Optional[list[int]]
+    seq_len_list: Optional[list[int]]  # context: prefill seq lens; verify: draft token nums; generation: None
+    model_name: str
+
+
+def get_common_kda_test_cases() -> list[KdaCommonTestCase]:
+    """
+    Generate common test cases for KDA (Kimi Delta Attention) kernel benchmarking.
+
+    Structural shapes come exclusively from per-model ``model_case_values.kda``
+    rows (one row per attention-TP shard of the model's head count). Phases:
+    context (chunked prefill kernels), generation (fused recurrent decode) and
+    verify (speculative-decode target-verify at several draft-token widths).
+    """
+    test_cases: list[KdaCommonTestCase] = []
+    kda_sweep = _required_base_common_case_values("kda")
+    context_seq_lens = _as_int_list(
+        kda_sweep.get("context_sequence_lengths"),
+        field_name="kda.context_sequence_lengths",
+    )
+    context_batch_sizes = _as_int_list(
+        kda_sweep.get("context_batch_sizes"),
+        field_name="kda.context_batch_sizes",
+    )
+    generation_batch_sizes = _as_int_list(
+        kda_sweep.get("generation_batch_sizes"),
+        field_name="kda.generation_batch_sizes",
+    )
+    verify_batch_sizes = _as_int_list(
+        kda_sweep.get("verify_batch_sizes"),
+        field_name="kda.verify_batch_sizes",
+    )
+    verify_draft_token_nums = _as_int_list(
+        kda_sweep.get("verify_draft_token_nums"),
+        field_name="kda.verify_draft_token_nums",
+    )
+
+    model_config_list = _model_case_values("kda")
+
+    for model_config in model_config_list:
+        d_model = int(model_config["d_model"])
+        d_conv = int(model_config["d_conv"])
+        num_k_heads = int(model_config["num_k_heads"])
+        head_k_dim = int(model_config["head_k_dim"])
+        num_v_heads = int(model_config["num_v_heads"])
+        head_v_dim = int(model_config["head_v_dim"])
+        model_name = str(model_config["model_path"])
+
+        test_cases.append(
+            KdaCommonTestCase(
+                phase="context",
+                d_model=d_model,
+                d_conv=d_conv,
+                num_k_heads=num_k_heads,
+                head_k_dim=head_k_dim,
+                num_v_heads=num_v_heads,
+                head_v_dim=head_v_dim,
+                batch_size_list=context_batch_sizes,
+                seq_len_list=context_seq_lens,
+                model_name=model_name,
+            )
+        )
+
+        test_cases.append(
+            KdaCommonTestCase(
+                phase="generation",
+                d_model=d_model,
+                d_conv=d_conv,
+                num_k_heads=num_k_heads,
+                head_k_dim=head_k_dim,
+                num_v_heads=num_v_heads,
+                head_v_dim=head_v_dim,
+                batch_size_list=generation_batch_sizes,
+                seq_len_list=None,
+                model_name=model_name,
+            )
+        )
+
+        test_cases.append(
+            KdaCommonTestCase(
+                phase="verify",
+                d_model=d_model,
+                d_conv=d_conv,
+                num_k_heads=num_k_heads,
+                head_k_dim=head_k_dim,
+                num_v_heads=num_v_heads,
+                head_v_dim=head_v_dim,
+                batch_size_list=verify_batch_sizes,
+                seq_len_list=verify_draft_token_nums,
+                model_name=model_name,
+            )
+        )
+
+    return test_cases
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # DeepSeek-V4 attention test cases
 # ═══════════════════════════════════════════════════════════════════════

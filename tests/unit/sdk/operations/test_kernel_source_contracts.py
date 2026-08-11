@@ -75,6 +75,21 @@ def test_dsv4_native_checkpoints_remap_by_system_family():
     )
 
 
+def test_kimi_k3_moe_remaps_to_w4a8_on_blackwell_only():
+    from aiconfigurator.sdk.models.helpers import resolve_kimi_k3_moe_arch_mode
+
+    # Blackwell serving quantizes activations to mxfp8 (kimi-k3 branch
+    # Mxfp4MoEMethod default precision); Hopper keeps the checkpoint's plain
+    # W4A16 marlin lane, so the resolver stays silent there.
+    for system in ("b200_sxm", "b300_sxm", "gb200", "gb300"):
+        mode = resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang")
+        assert mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8
+    for system in ("h200_sxm", "h100_sxm"):
+        assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang") is None
+    assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "b300_sxm", "vllm") is None
+    assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K2.5", "b300_sxm", "sglang") is None
+
+
 def test_dsv4_arch_remap_never_overrides_explicit_mode():
     from aiconfigurator.sdk.models.helpers import resolve_dsv4_moe_arch
 
