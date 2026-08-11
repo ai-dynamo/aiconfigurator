@@ -481,10 +481,14 @@ def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
        ``query_trtllm_alltoall`` applies via ``_normalize_quant_mode_for_table``.
        Exact-first ordering keeps real fp8_block rows winning if a future
        collection ships them.
-    3. The sole collected dtype (debug log): the legacy tables have no dtype
-       axis (DeepEP rows live under "default"), so a caller asking for a
-       payload dtype must still reach them. With two or more collected dtypes
-       there is no unambiguous stand-in: typed miss.
+    3. The ``"default"`` slice when it is the sole collected key (debug log):
+       the legacy DeepEP tables have no dtype axis (their adapted rows live
+       under ``"default"``), so a caller asking for a payload dtype must
+       still reach them — untyped data is a stand-in for any request. A sole
+       TYPED key is NOT: shipped GB200 ``nvlink_one_sided`` carries only
+       nvfp4, and matched two-sided rows show bf16/nvfp4 dispatch ratios of
+       0.56x-3.48x, so substituting across payload dtypes is a material
+       silent error where the legacy query raised. Typed slices miss.
     """
     if comm_dtype in phase_slice:
         return phase_slice[comm_dtype]
@@ -495,15 +499,13 @@ def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
             query_context,
         )
         return phase_slice["fp8"]
-    if len(phase_slice) == 1:
-        sole = next(iter(phase_slice))
+    if len(phase_slice) == 1 and "default" in phase_slice:
         logger.debug(
-            "moe_a2a: comm_dtype %r not collected; falling back to sole available %r (%s)",
+            "moe_a2a: comm_dtype %r not collected; falling back to the untyped 'default' slice (%s)",
             comm_dtype,
-            sole,
             query_context,
         )
-        return phase_slice[sole]
+        return phase_slice["default"]
     raise PerfDataNotAvailableError(
         f"Missing silicon data for the requested lookup; comm_dtype '{comm_dtype}' is not available for "
         f"{query_context}; collected dtypes: {sorted(phase_slice)}."
@@ -1067,6 +1069,7 @@ class EPMoE(Operation):
         num_slots: int | None = None,
         kernel_source: str | None = None,
         is_gated: bool = True,
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__(name, scale_factor)
         _validate_ep_phase(inference_phase)
@@ -1082,6 +1085,7 @@ class EPMoE(Operation):
         self._inference_phase = inference_phase
         self._kernel_source = kernel_source
         self._is_gated = is_gated
+        self._enable_eplb = enable_eplb
         # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down).
         # EP-only family: no moe_tp division (moe_tp == 1 by construction).
         # Parity-pinned: sized by num_experts, NOT num_slots, matching the
@@ -1210,6 +1214,8 @@ class EPMoE(Operation):
         moe_tp_size: int,
         moe_ep_size: int,
         num_tokens: int,
+        is_gated: bool = True,
+        enable_eplb: bool = False,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """Silicon lookup against the unified moe_ep table.
@@ -1231,6 +1237,12 @@ class EPMoE(Operation):
         """
         cls.load_data(database)
         _validate_ep_phase(inference_phase)
+        if enable_eplb and inference_phase == "context" and kernel_source == "deepep_moe":
+            # Legacy sglang EPLB prefill correction (moe.py:649): EPLB
+            # rebalancing flattens hot-expert load, modeled as int(tokens*0.8)
+            # before the table walk. Context + deepep tables only — the trtllm
+            # EPLB effect rides the `_eplb` distribution suffix instead.
+            num_tokens = int(num_tokens * 0.8)
 
         if database_mode is None:
             database_mode = database._default_database_mode
@@ -1253,10 +1265,11 @@ class EPMoE(Operation):
         # slices pin num_slots == num_experts, where this reduces exactly to
         # the sglang oracle's SOL (MoE._query_moe_table's get_sol). num_gemms
         # is pinned to 3 (gated): the forward has no is_gated axis and both
-        # legacy queries default is_gated=True (neither legacy wideep op
-        # forwards it from query()). The SOL only shapes the beyond-range
-        # boundary util-hold; in-range lookups are raw lerp on measured points.
-        num_gemms = 3
+        # Gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 — the legacy sglang
+        # oracle derives this in _query_moe_table (moe.py:309) from the op's
+        # is_gated. The SOL only shapes the beyond-range boundary util-hold;
+        # in-range lookups are raw lerp on measured points.
+        num_gemms = 3 if is_gated else 2
 
         def get_sol_latency(tokens: int) -> float:
             total_tokens = tokens * topk
@@ -1327,12 +1340,16 @@ class EPMoE(Operation):
         # rank's tokens to the experts (same scaling as legacy MoE /
         # TrtLLMWideEPMoE query()).
         num_tokens = kwargs.get("x") * self._attention_dp_size
+        # Per-call quant override — the legacy expert-compute ops both honor
+        # kwargs.get("quant_mode"); it drives kernel resolution too (a
+        # Blackwell fp8_block override selects deepgemm, not moe_torch_flow).
+        quant_mode = kwargs.get("quant_mode") or self._quant_mode
         kernel_source = self._kernel_source
         if kernel_source is None:
-            kernel_source = self._resolve_kernel_source(database, self._quant_mode)
+            kernel_source = self._resolve_kernel_source(database, quant_mode)
         result = database.query_moe_ep(
             kernel_source,
-            self._quant_mode,
+            quant_mode,
             self._workload_distribution,
             self._inference_phase,
             self._topk,
@@ -1343,6 +1360,8 @@ class EPMoE(Operation):
             1,  # moe_tp_size — the large-EP family is EP-only
             self._moe_ep_size,
             num_tokens,
+            is_gated=self._is_gated,
+            enable_eplb=self._enable_eplb,
         )
         return PerformanceResult(
             float(result) * self._scale_factor,

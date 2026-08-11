@@ -3244,6 +3244,8 @@ class PerfDatabase:
         moe_tp_size: int,
         moe_ep_size: int,
         num_tokens: int,
+        is_gated: bool = True,
+        enable_eplb: bool = False,
         database_mode: common.DatabaseMode | None = None,
     ) -> PerformanceResult:
         """Query the unified large-EP MoE expert-compute table. Delegates to
@@ -3264,6 +3266,8 @@ class PerfDatabase:
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
             num_tokens=num_tokens,
+            is_gated=is_gated,
+            enable_eplb=enable_eplb,
             database_mode=database_mode,
         )
 

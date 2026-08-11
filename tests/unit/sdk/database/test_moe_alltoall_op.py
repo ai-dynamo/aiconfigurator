@@ -68,16 +68,20 @@ def _build_injected_store():
                 ("deepep_ht", "combine", "default", *_SLICE, 20),
                 {32: _leaf(0.30, power=100.0), 64: _leaf(0.50, power=100.0)},
             ),
-            # deepep_ll collected under a single non-default dtype (fallback target).
-            (("deepep_ll", "dispatch", "bfloat16", *_SLICE, 0), {8: _leaf(0.40)}),
+            # deepep_ll collected under the sole untyped "default" slice (the
+            # legacy-DeepEP shape; the one sanctioned sole-key fallback target).
+            (("deepep_ll", "dispatch", "default", *_SLICE, 0), {8: _leaf(0.40)}),
             # nvlink_two_sided prepare phase (trtllm-only phase) + a multi-dtype
             # dispatch slice for the no-fallback test.
             (("nvlink_two_sided", "prepare", "fp8", *_SLICE, 0), {16: _leaf(0.05)}),
             (("nvlink_two_sided", "dispatch", "fp8", *_SLICE, 0), {16: _leaf(0.06)}),
             (("nvlink_two_sided", "dispatch", "bfloat16", *_SLICE, 0), {16: _leaf(0.07)}),
             # nvlink_one_sided dispatch collected under fp8 only (fp8_block
-            # normalization target when it is the sole dtype).
+            # normalization target — the alias, not the sole-key fallback).
             (("nvlink_one_sided", "dispatch", "fp8", *_SLICE, 0), {16: _leaf(0.08)}),
+            # nvlink_one_sided combine collected under nvfp4 only: a sole TYPED
+            # key (the shipped GB200 shape) must MISS for other dtypes.
+            (("nvlink_one_sided", "combine", "nvfp4", *_SLICE, 0), {16: _leaf(0.12)}),
             # combine with BOTH a real fp8_block key and an fp8 key: exact-first
             # ordering must keep the collected fp8_block row winning.
             (("nvlink_two_sided", "combine", "fp8_block", *_SLICE, 0), {16: _leaf(0.09)}),
@@ -134,11 +138,25 @@ def test_exact_token_hit_returns_leaf_value(a2a_db):
     assert result.energy == pytest.approx(100.0 * 0.50, rel=1e-12)
 
 
-def test_dtype_fallback_to_sole_available(a2a_db):
-    # Requested "default" is absent; "bfloat16" is the only collected dtype.
-    op = _make_op(comm_backend="deepep_ll", sms=0)
+def test_dtype_fallback_to_sole_untyped_default(a2a_db):
+    # Requested dtype is absent; the sole collected slice is the untyped
+    # "default" (adapted legacy DeepEP) — the one sanctioned stand-in.
+    op = _make_op(comm_backend="deepep_ll", sms=0, comm_dtype="fp8")
     result = op.query(a2a_db, x=8)
     assert float(result) == pytest.approx(0.40, rel=1e-12)
+
+
+def test_sole_typed_dtype_raises_named_miss(a2a_db):
+    # Shipped-GB200 shape: nvlink_one_sided combine carries ONLY nvfp4. A
+    # bf16/fp8/fp8_block request must raise the named miss (matched two-sided
+    # rows show 0.56x-3.48x bf16/nvfp4 ratios — substitution is material),
+    # exactly like the legacy query_trtllm_alltoall raise.
+    for req in ("bfloat16", "fp8", "fp8_block"):
+        with pytest.raises(PerfDataNotAvailableError, match="comm_dtype"):
+            a2a_db.query_moe_a2a("nvlink_one_sided", "combine", req, 16, 2, 7168, 8, 256, 16, sms=0)
+    # the collected dtype itself still hits.
+    ok = a2a_db.query_moe_a2a("nvlink_one_sided", "combine", "nvfp4", 16, 2, 7168, 8, 256, 16, sms=0)
+    assert float(ok) == pytest.approx(0.12, rel=1e-12)
 
 
 def test_multi_dtype_missing_requested_raises(a2a_db):

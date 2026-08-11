@@ -216,3 +216,135 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# (c) Review follow-ups: eplb / is_gated / per-call quant override parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not os.path.exists(SGLANG_CONTEXT_PATH),
+    reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
+)
+def test_l1_sglang_context_eplb_token_correction_equivalence():
+    # Legacy applies int(tokens * 0.8) for context EPLB before the table walk
+    # (moe.py:649); the unified query must reproduce it on every context
+    # slice — including the reviewer's probe point (power_law_0.6, topk=8,
+    # experts=256, hidden=7168, inter=2048, tp=1, ep=2, 32 tokens: 1.0025957
+    # legacy vs 1.2833225 uncorrected).
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    legacy_table = load_wideep_context_moe_data(SGLANG_CONTEXT_PATH)
+    comparisons = 0
+    for (quant, dist, topk, experts, hidden, inter, tp, ep), tokens in itertools.islice(
+        _iter_slices(legacy_table, 8), 6
+    ):
+        for tok in _token_probes(tokens)[:3]:
+            unified = db.query_moe_ep(
+                "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, tok,
+                enable_eplb=True,
+            )
+            legacy = db.query_moe(
+                num_tokens=tok,
+                hidden_size=hidden,
+                inter_size=inter,
+                topk=topk,
+                num_experts=experts,
+                moe_tp_size=tp,
+                moe_ep_size=ep,
+                quant_mode=quant,
+                workload_distribution=dist,
+                is_context=True,
+                moe_backend="deepep_moe",
+                enable_eplb=True,
+            )
+            _assert_equivalent(unified, legacy, f"eplb ctx {quant.name} {dist} {topk=} {experts=} {ep=} {tok=}")
+            comparisons += 1
+    assert comparisons >= 12, f"eplb sweep too small: {comparisons}"
+    # Generation is NOT corrected — one probe pinning the asymmetry.
+    (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
+    with_eplb = db.query_moe_ep(
+        "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens),
+        enable_eplb=True,
+    )
+    without = db.query_moe_ep(
+        "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
+    )
+    assert float(with_eplb) == float(without)
+
+
+@pytest.mark.skipif(
+    not os.path.exists(SGLANG_GENERATION_PATH),
+    reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
+)
+def test_l1_sglang_non_gated_overflow_equivalence():
+    # is_gated shapes the beyond-range SOL (num_gemms 3 vs 2, moe.py:309).
+    # Probe every slice at 2x the collected max where the util-hold rides the
+    # roofline — includes the reviewer's EP32 point (0.2264363 legacy
+    # non-gated vs 0.2308887 with the gemm count pinned to 3).
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    legacy_table = load_wideep_generation_moe_data(SGLANG_GENERATION_PATH)
+    comparisons = 0
+    for (quant, dist, topk, experts, hidden, inter, tp, ep), tokens in itertools.islice(
+        _iter_slices(legacy_table, 8), 6
+    ):
+        tok = 2 * max(tokens)
+        unified = db.query_moe_ep(
+            "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, tok,
+            is_gated=False,
+        )
+        legacy = db.query_moe(
+            num_tokens=tok,
+            hidden_size=hidden,
+            inter_size=inter,
+            topk=topk,
+            num_experts=experts,
+            moe_tp_size=tp,
+            moe_ep_size=ep,
+            quant_mode=quant,
+            workload_distribution=dist,
+            is_context=False,
+            moe_backend="deepep_moe",
+            is_gated=False,
+        )
+        _assert_equivalent(unified, legacy, f"non-gated overflow {quant.name} {dist} {topk=} {experts=} {ep=} {tok=}")
+        comparisons += 1
+    assert comparisons >= 4
+
+
+@pytest.mark.skipif(
+    not os.path.exists(SGLANG_CONTEXT_PATH),
+    reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
+)
+def test_epmoe_per_call_quant_mode_override_reaches_the_walk():
+    # Legacy expert-compute ops honor kwargs.get("quant_mode"); the op-level
+    # override must reach both kernel resolution and the table walk. Construct
+    # with an uncollected ctor mode and query with the collected one: only the
+    # override can make the walk succeed.
+    from aiconfigurator_core.sdk import common
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+    from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    legacy_table = load_wideep_context_moe_data(SGLANG_CONTEXT_PATH)
+    (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
+    op = EPMoE(
+        "review_probe",
+        1.0,
+        hidden_size=hidden,
+        inter_size=inter,
+        topk=topk,
+        num_experts=experts,
+        moe_ep_size=ep,
+        quant_mode=common.MoEQuantMode.nvfp4,  # uncollected on this table
+        workload_distribution=dist,
+        attention_dp_size=1,
+        inference_phase="context",
+    )
+    with pytest.raises(PerfDataNotAvailableError):
+        op.query(db, x=min(tokens))  # ctor mode alone must miss
+    overridden = op.query(db, x=min(tokens), quant_mode=quant)  # override hits
+    direct = db.query_moe_ep(
+        "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
+    )
+    assert float(overridden) == pytest.approx(float(direct), rel=1e-12)
