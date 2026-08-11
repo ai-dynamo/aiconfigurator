@@ -27,7 +27,7 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::query_token_curve;
+use super::axis_curve::AxisCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct TrtllmAlltoallTable {
@@ -145,7 +145,7 @@ impl TrtllmAlltoallTable {
                 self.data_root.display()
             ))
         })?;
-        query_token_curve(by_tokens, num_tokens as f64, &|t| t)
+        token_axis_curve(by_tokens).query(num_tokens as f64, &|t| t)
     }
 
     /// Collected `(num_tokens, latency)` points of one resolved alltoall
@@ -245,6 +245,13 @@ pub(crate) fn select_alltoall_kernel(
     } else {
         "NotEnabled"
     }
+}
+
+/// Bridge a sorted token->latency map onto the shared [`AxisCurve`] engine
+/// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
+/// iteration is ascending, so the strict-order constructor holds.
+fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
+    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
 }
 
 /// Load the TRT-LLM alltoall table from an ordered source list. Mirrors

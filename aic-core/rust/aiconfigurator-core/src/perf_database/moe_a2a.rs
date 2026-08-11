@@ -53,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::moe::query_token_curve;
+use super::axis_curve::AxisCurve;
 use super::perf_interp::{self, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
@@ -208,7 +208,7 @@ impl MoeA2aTable {
         // An EXACT sms key collapses that level to a 1-D token curve;
         // anything else resolves the 2-D (sms, num_tokens) Grid.
         if let Some(curve) = by_sms.get(&sms) {
-            return query_token_curve(curve, num_tokens as f64, &|t| t);
+            return token_axis_curve(curve).query(num_tokens as f64, &|t| t);
         }
         let mut node = Node::branch();
         for (&sm, curve) in &by_sms {
@@ -280,6 +280,13 @@ fn load_moe_a2a_grids(
         by_keys,
         dtypes_by_phase,
     })
+}
+
+/// Bridge a sorted token->latency map onto the shared [`AxisCurve`] engine
+/// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
+/// iteration is ascending, so the strict-order constructor holds.
+fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
+    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
 }
 
 /// Python `_store_a2a_leaf(..., overwrite=False)`: the first stored leaf at a

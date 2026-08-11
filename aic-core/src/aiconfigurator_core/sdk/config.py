@@ -41,6 +41,12 @@ class ModelConfig:
     sms: int = 20
     moe_backend: str = None  # SGLang MoE backend: deepep_moe, megamoe, or None
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
+    # DEPRECATED and ignored (large-EP is selected per tuple via
+    # moe_comm_backend); kept for a compatibility window because ModelConfig
+    # is exported through the supported core SDK facade and removal breaks
+    # ModelConfig(enable_wideep=...) callers AND silently shifts positional
+    # arguments after this slot.
+    enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
     # Forward-pass modeling switch. "op_level" (default) keeps the granular op

@@ -1240,13 +1240,14 @@ class Task:
         if gpus_per_node and a2a_probe is not None and compute_probe is not None:
             a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
             quant_mode = self._role_attr(role, "moe_quant_mode")
-            if isinstance(quant_mode, str):
-                # The compute probe keys the moe_ep table on MoEQuantMode
-                # members; a str would miss every key and silently report
-                # "no coverage" instead of the caller's type bug.
+            if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
+                # The compute table is keyed by MoEQuantMode members; any
+                # other type (str, int, a sibling enum like
+                # GEMMQuantMode.bfloat16) would miss every key and silently
+                # report empty coverage, disabling large-EP exploration.
                 raise TypeError(
-                    f"moe_quant_mode must be a common.MoEQuantMode member, got str {quant_mode!r} "
-                    f"(e.g. common.MoEQuantMode[{quant_mode!r}])"
+                    f"moe_quant_mode must be a common.MoEQuantMode member, got "
+                    f"{type(quant_mode).__name__} {quant_mode!r} "
                 )
             for phase in ("context", "generation"):
                 compute = compute_probe(

@@ -174,9 +174,15 @@ def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
     Raises:
         ValueError: If ``num_gpus_per_node`` is unset.
     """
-    if model_config.num_gpus_per_node is None:
+    value = model_config.num_gpus_per_node
+    if value is None:
         raise ValueError("moe_comm_backend is set but num_gpus_per_node is not — the enumerator must set both")
-    return model_config.num_gpus_per_node
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        # The coordinate selects the all-to-all performance slice: zero would
+        # ZeroDivisionError in nodes_for, a negative or fractional value
+        # silently mis-prices a custom/direct builder call.
+        raise ValueError(f"num_gpus_per_node must be a positive integer (hardware fact), got {value!r}")
+    return value
 
 
 def build_large_ep_moe_ops(

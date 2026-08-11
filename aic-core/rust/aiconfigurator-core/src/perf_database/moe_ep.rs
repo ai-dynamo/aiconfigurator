@@ -53,7 +53,7 @@
 //! moe_comm.py:1256-1261); otherwise the token curve rides the shared
 //! `perf_interp` engine (1-axis Grid: RAW lerp in range, boundary util-hold
 //! beyond it) anchored on the WideEP MoE roofline SOL `get_sol_latency`
-//! (moe_comm.py:1221-1237, `num_gemms` pinned to 3) — the same
+//! (moe_comm.py:1221-1237, `num_gemms` from `is_gated`: 3/2) — the same
 //! `num_slots`-aware roofline the retired
 //! `operators/wideep_moe.rs::sol_latency_ms` implemented.
 //!
@@ -84,13 +84,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::moe::{query_token_curve, singleton_underflow};
+use super::axis_curve::AxisCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
+
+/// Bridge a sorted token->latency map onto the shared [`AxisCurve`] engine
+/// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
+/// iteration is ascending, so the strict-order constructor holds.
+fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
+    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
+}
 
 /// `(kernel_source, quant, distribution, inference_phase, topk, num_experts,
 /// num_slots, hidden_size, inter_size, moe_tp_size, moe_ep_size)` — every
@@ -253,6 +260,7 @@ impl MoeEpTable {
         moe_tp_size: u32,
         moe_ep_size: u32,
         num_tokens: u32,
+        is_gated: bool,
     ) -> Result<f64, AicError> {
         let grids = self.load()?;
         let quant_name = quant.name();
@@ -345,7 +353,7 @@ impl MoeEpTable {
             })?;
         // moe_comm.py:1256-1261: a single measured token point cannot define
         // the low-token launch floor — querying below it is a typed miss.
-        if let Some(only) = singleton_underflow(curve, num_tokens) {
+        if let Some(only) = token_axis_curve(curve).singleton_underflow(num_tokens) {
             return Err(AicError::PerfDatabase(format!(
                 "MoE EP silicon token underflow has only one measured point; cannot infer \
                  low-token latency from a singleton. measured_token={only}, requested \
@@ -370,9 +378,10 @@ impl MoeEpTable {
                 moe_tp_size,
                 moe_ep_size,
                 tokens.round() as u32,
+                is_gated,
             )
         };
-        query_token_curve(curve, f64::from(num_tokens), &sol)
+        token_axis_curve(curve).query(f64::from(num_tokens), &sol)
     }
 
     /// Distinct `kernel_source` keys present in the loaded table, in sorted
@@ -427,10 +436,9 @@ const SGLANG_ADAPTED_KERNEL_SOURCE: &str = "deepep_moe";
 /// [`adapt_legacy_trtllm_wideep_moe`].
 const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
 
-/// `num_gemms` in the roofline SOL: pinned to 3 (gated) — the query path has
-/// no `is_gated` axis and both legacy wideep queries ran with their
-/// `is_gated=True` default (moe_comm.py:1215-1221).
-const EP_NUM_GEMMS: u64 = 3;
+/// `num_gemms` in the roofline SOL follows `is_gated` (3 gated / 2
+/// non-gated), mirroring the Python SOL and the legacy oracle
+/// (moe.py:309).
 
 /// WideEP MoE roofline SOL (ms) — verbatim `get_sol_latency`
 /// (moe_comm.py:1223-1237), the same math the retired
@@ -450,6 +458,7 @@ fn ep_sol_latency_ms(
     moe_tp_size: u32,
     moe_ep_size: u32,
     tokens: u32,
+    is_gated: bool,
 ) -> f64 {
     // moe_comm.py:1224: `total_tokens = tokens * topk`.
     let total_tokens = tokens as u64 * topk as u64;
@@ -460,12 +469,15 @@ fn ep_sol_latency_ms(
     let slots = num_slots as u64;
     // moe_comm.py:1225: `total_tokens * hidden_size * inter_size * num_gemms
     // * 2 // moe_ep_size // moe_tp_size`.
-    let ops = total_tokens * h * inter * EP_NUM_GEMMS * 2 / moe_ep / moe_tp;
+    // Gated (SwiGLU) = 3 GEMMs, non-gated (Relu2) = 2 — mirrors the Python
+    // SOL's `3 if is_gated else 2` (legacy oracle moe.py:309).
+    let num_gemms: u64 = if is_gated { 3 } else { 2 };
+    let ops = total_tokens * h * inter * num_gemms * 2 / moe_ep / moe_tp;
     // moe_comm.py:1226-1234: the three integer byte terms, then one float
     // multiply by `quant_mode.value.memory`.
     let mem_bytes_int = total_tokens / moe_ep * h * 2 // input+output (:1227)
-        + total_tokens / moe_ep * inter * EP_NUM_GEMMS / moe_tp // intermediate activations (:1228)
-        + h * inter * EP_NUM_GEMMS / moe_tp
+        + total_tokens / moe_ep * inter * num_gemms / moe_tp // intermediate activations (:1228)
+        + h * inter * num_gemms / moe_tp
             * std::cmp::min(slots / moe_ep, total_tokens / moe_ep); // weights, num_slots-aware (:1229-1233)
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
     // moe_comm.py:1235: Python indexes `bfloat16_tc_flops` directly (KeyError
@@ -580,7 +592,8 @@ fn adapt_legacy_sglang_wideep_moe(
 /// `_read_perf_rows` and is stored under that empty key — there is no
 /// backend mapping to drop it, unlike moe_a2a's legacy alltoall adapter),
 /// `num_slots` and the `_eplb` distributions pass through, latency already
-/// ms, unconditional assignment. The legacy table has no phase split, so
+/// ms, first-row-wins assignment (#1423 shared-layer contract). The legacy
+/// table has no phase split, so
 /// each row registers under BOTH `inference_phase` values.
 fn adapt_legacy_trtllm_wideep_moe(
     sources: &[PerfSource],
@@ -1074,6 +1087,7 @@ mod tests {
             1,
             moe_ep_size,
             num_tokens,
+            true,
         )
     }
 
@@ -1333,6 +1347,7 @@ mod tests {
                     1, // moe_tp_size default
                     2,
                     32,
+                    true,
                 )
                 .unwrap(),
             0.25,
@@ -2068,6 +2083,7 @@ mod tests {
                     u32_of("moe_tp_size"),
                     u32_of("moe_ep_size"),
                     u32_of("num_tokens"),
+                    true, // oracle rows were generated at the gated default
                 )
                 .unwrap_or_else(|err| panic!("oracle sample {sample} must resolve: {err}"));
             let want = sample["latency_ms"].as_f64().expect("latency_ms");

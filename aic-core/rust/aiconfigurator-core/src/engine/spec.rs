@@ -742,8 +742,9 @@ mod tests {
     #[test]
     fn op_variant_indices_are_pinned() {
         const GEMM_INDEX: u32 = 0;
-        const MOE_ALL_TO_ALL_INDEX: u32 = 31;
-        const EP_MOE_INDEX: u32 = 32;
+        // Re-derived after main's Kda append (Kimi-K3) shifted the tail.
+        const MOE_ALL_TO_ALL_INDEX: u32 = 32;
+        const EP_MOE_INDEX: u32 = 33;
 
         let index_of = |op: &OpSpec| -> u32 {
             let bytes = bincode::serialize(op).expect("serialize op");

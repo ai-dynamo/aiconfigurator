@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
-    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    EpMoeOp, MoeAllToAllOp, MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
+    Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp,
+    GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp,
+    MoEDispatchOp, MoeAllToAllOp, MoeOp, MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source,
     VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
 };
 use crate::perf_database::PerfDatabase;

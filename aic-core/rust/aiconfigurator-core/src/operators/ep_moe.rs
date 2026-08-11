@@ -97,11 +97,10 @@ pub struct EpMoeOp {
     /// always leave this `None`.
     #[serde(default)]
     pub kernel_source: Option<String>,
-    /// Gated FFN (3 GEMMs) vs non-gated (2). Weights-only in Python
-    /// (`get_weights`, moe_comm.py:1058-1059); the latency path has no
-    /// `is_gated` axis (the roofline SOL pins `num_gemms = 3`). Carried on
-    /// the wire because it is part of the op's config identity. Python
-    /// default `True` (:1038).
+    /// Gated FFN (3 GEMMs) vs non-gated (2): sizes resident weights
+    /// (`get_weights`, moe_comm.py:1058-1059) AND the beyond-range roofline
+    /// SOL's gemm count (`3 if is_gated else 2`, mirroring the legacy oracle
+    /// moe.py:309). Python default `True` (:1038).
     #[serde(default = "default_is_gated")]
     pub is_gated: bool,
     /// Python default `False` (:1039).
@@ -207,6 +206,7 @@ impl EpMoeOp {
             1, // moe_tp_size — the large-EP family is EP-only (:1312)
             self.moe_ep_size,
             tokens,
+            self.is_gated,
         )
     }
 

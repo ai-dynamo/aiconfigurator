@@ -305,8 +305,18 @@ def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
 
     The sglang `moe_backend == "deepep_moe"` mapping to the DeepEP flavors
     retired with AIC-1601 (large-EP comm is modeled by `MoEAllToAll`); those
-    Rust variants no longer exist.
+    Rust variants no longer exist — but Python still routes a direct/custom
+    `MoEDispatch(moe_backend="deepep_moe")` through the DeepEP tables, so
+    serializing that op as `CustomAllReduce` would silently change the
+    communication algorithm in the native engine. Raise `OpConversionError`
+    instead: the established contract for graphs the native engine cannot
+    represent, which delegates the step back to Python.
     """
+    if backend == "deepep_moe":
+        raise OpConversionError(
+            "MoEDispatch(moe_backend='deepep_moe') has no native variant (retired with "
+            "AIC-1601; large-EP comm is modeled by MoEAllToAll) — delegating to the Python step"
+        )
     if backend == "trtllm":
         return "TrtllmAlltoall"
     return "CustomAllReduce"
