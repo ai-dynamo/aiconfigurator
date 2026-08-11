@@ -27,6 +27,18 @@ precision, keys are sorted, and the header carries no wall-clock timestamps
 (only the git HEAD of the capture). Run it twice and diff to prove a capture
 is clean. Regenerate deliberately (review the diff!) when a case list or a
 compared metric changes, never as a way to silence a parity failure.
+
+Integrity guards (these fixtures are Gate 2's frozen deletion anchor):
+
+- The starting tree must be clean apart from ``parity_tests/goldens/``
+  itself (the script's own output, overwritten wholesale — a leftover
+  partial capture cannot influence a new one). Any other tracked-file
+  modification aborts before a single case is evaluated, so a header can
+  never record an unidentifiable source state.
+- All three payloads are captured in full BEFORE any file is written. A
+  mid-capture failure (e.g. ``pytest.skip`` from a missing WideEP data set)
+  therefore leaves the committed goldens byte-untouched instead of a
+  partially rewritten mix.
 """
 
 from __future__ import annotations
@@ -78,11 +90,53 @@ def _git(*args: str) -> str:
         return "unknown"
 
 
-# Captured ONCE before any golden file is written: the first write dirties
-# the tree, so per-file `git describe --dirty` calls would stamp the later
-# files "-dirty" on a capture that started clean.
+# Repo-root-relative prefix of this script's own output directory —
+# porcelain paths are always root-relative regardless of cwd.
+_GOLDEN_REL_PREFIX = "aic-core/rust/aiconfigurator-core/parity_tests/goldens/"
+
+
+def _dirty_paths(porcelain: str) -> list[str]:
+    """Tracked-file modifications that would make the capture state
+    unidentifiable: every ``git status --porcelain`` entry except untracked
+    files (which do not affect ``git describe --dirty`` or the capture) and
+    the goldens directory itself (this script's output — about to be
+    rewritten wholesale, so its pre-state is not a capture input)."""
+    dirty: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip() or line.startswith("??"):
+            continue
+        # Rename entries carry both sides: "R  old -> new".
+        paths = line[3:].split(" -> ")
+        if all(path.strip().strip('"').startswith(_GOLDEN_REL_PREFIX) for path in paths):
+            continue
+        dirty.append(line[3:].strip())
+    return dirty
+
+
+def _require_clean_tree() -> None:
+    """Abort a capture that starts from a dirty tree (goldens excluded, see
+    `_dirty_paths`) BEFORE any evaluation or write."""
+    try:
+        porcelain = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=_PARITY_DIR, text=True, stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        return  # not a git checkout — capture identity is "unknown" anyway
+    dirty = _dirty_paths(porcelain)
+    if dirty:
+        raise RuntimeError(
+            "golden capture requires a clean tree (only parity_tests/goldens/ "
+            "may differ): commit or stash these paths first: " + ", ".join(sorted(dirty))
+        )
+
+
+# Captured ONCE at import, before any write. NO `--dirty` suffix: the
+# clean-tree guard rejects every tracked modification except goldens-dir
+# output from a previous run, so a dirty flag could only ever echo this
+# script's own artifacts — omitting it keeps the documented run-twice-and-
+# diff workflow byte-idempotent (the second run re-stamps identical headers).
 _GIT_STATE = {
-    "git_describe": _git("describe", "--always", "--dirty"),
+    "git_describe": _git("describe", "--always"),
     "git_head": _git("rev-parse", "HEAD"),
 }
 
@@ -201,19 +255,26 @@ except Exception:  # pragma: no cover — pytest is a hard dependency here
 
 
 def main() -> int:
+    _require_clean_tree()
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    # Capture ALL payloads before writing ANY tracked fixture: a late
+    # failure must leave the committed goldens byte-untouched.
     try:
-        _write("engine_step.json", capture_engine_step())
-        _write("compile_engine.json", capture_compile_engine())
-        _write("per_op.json", capture_per_op())
+        payloads = {
+            "engine_step.json": capture_engine_step(),
+            "compile_engine.json": capture_compile_engine(),
+            "per_op.json": capture_per_op(),
+        }
     except _PytestSkipped as exc:
         raise RuntimeError(
-            "golden capture aborted — a capture helper skipped "
-            f"({exc}). Regeneration requires the FULL systems data set "
-            "(e.g. the WideEP databases); do not commit partially captured "
-            "goldens."
+            "golden capture aborted BEFORE any write — a capture helper "
+            f"skipped ({exc}). Regeneration requires the FULL systems data "
+            "set (e.g. the WideEP databases); the committed goldens are "
+            "untouched."
         ) from exc
+    for filename, payload in payloads.items():
+        _write(filename, payload)
     _log(f"golden capture complete in {time.monotonic() - started:.0f}s")
     return 0
 
