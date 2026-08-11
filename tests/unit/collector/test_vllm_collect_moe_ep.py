@@ -363,6 +363,32 @@ def test_hash_closures_has_no_entry_for_the_unregistered_module():
     assert "collector.wideep.vllm.collect_moe_ep" not in closures
 
 
+def test_registry_modules_have_no_wideep_vllm_entry():
+    # Enrollment surface #2 (README step 2): without this map entry,
+    # framework_manifest registry/runtime resolution raises for the key even
+    # after registry.py exists — the activation checklist flips this pin.
+    from collector.framework_manifest import _REGISTRY_MODULES
+
+    assert "wideep_vllm" not in _REGISTRY_MODULES
+
+
+def test_kernel_source_backends_have_no_vllm_deepep_moe_mapping():
+    # Enrollment surface #3 (README step 4): the module writes
+    # kernel_source="deepep_moe", which the curated fact table maps only for
+    # framework: sglang today. Activation adds the vllm mapping WITH a
+    # verified citation — until then its absence is pinned so activated rows
+    # cannot silently resolve to `unverified` facts.
+    import yaml
+
+    table = yaml.safe_load((REPO_ROOT / "collector" / "kernel_source_backends.yaml").read_text())
+    vllm_deepep = [
+        entry
+        for entry in table["mappings"]
+        if entry.get("framework") == "vllm" and entry.get("kernel_source") == "deepep_moe"
+    ]
+    assert vllm_deepep == []
+
+
 def test_source_documents_the_activation_procedure():
     assert "DORMANT" in SOURCE_TEXT
     assert "wideep_vllm" in SOURCE_TEXT  # names the manifest key enrollment adds

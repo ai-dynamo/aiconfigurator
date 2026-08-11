@@ -225,6 +225,21 @@ def _get_moe_model_path() -> str:
     return _resolve_moe_model_path(_selected_moe_model_id())
 
 
+def _case_model_path(model_name: str) -> str:
+    """The model artifact for one declared case.
+
+    ``collect.py`` sets ``COLLECTOR_MODEL_PATH`` only for single-model plans
+    (``--model-path``), where it points at the operator's artifact for the one
+    model the plan expanded — it wins. A full plan carries cases from every
+    declared wideep model, so each case resolves its OWN declared
+    ``model_name``: the loaded checkpoint's config is the consistency oracle
+    for the declaration asserts in :func:`run_moe`, and loading a default
+    model for another model's case would fail them (or worse, benchmark the
+    wrong geometry).
+    """
+    return _resolve_moe_model_path(os.environ.get("COLLECTOR_MODEL_PATH") or model_name)
+
+
 def _sorted_phase_cases(test_cases):
     """Sort phase cases on the non-token key axis first (D5: sorted emission).
 
@@ -242,23 +257,35 @@ def _sorted_phase_cases(test_cases):
     )
 
 
-def get_moe_prefill_test_cases(rank):
+def get_moe_prefill_test_cases(rank, *, topk, num_experts):
     """Get test cases for MoE prefill phase including distribution and alpha.
 
     Returns a list of dicts with keys: 'num_tokens', 'distributed', 'power_law_alpha'.
     For uniform distribution, 'power_law_alpha' is None.
+
+    The uniform variant only exists where its synthetic workload is non-empty:
+    ``num_token * topk * ep // num_experts`` tokens per local expert must be
+    positive, or the rank under measurement receives nothing (pure declared
+    arithmetic, so it is resolved HERE, at generation time — the benchmark
+    loop runs this list exactly and treats an empty workload as an invariant
+    breach). Power-law variants sample their own per-expert counts and keep
+    every token point.
     """
     test_cases = []
     num_tokens = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
     power_law_alphas = [0.6, 0.8, 1.01, 1.02, 1.2]
 
+    dropped_empty_uniform = []
     for num_token in sorted(num_tokens):
         if num_token * 8 < 128:
             continue
         if num_token * rank > 256 * 2048:
             continue
         # Uniform
-        test_cases.append({"num_tokens": num_token, "distributed": "uniform", "power_law_alpha": None})
+        if int(num_token * topk * rank // num_experts) <= 0:
+            dropped_empty_uniform.append(num_token)
+        else:
+            test_cases.append({"num_tokens": num_token, "distributed": "uniform", "power_law_alpha": None})
         # Power-law variants
         for alpha in power_law_alphas:
             test_cases.append(
@@ -269,6 +296,12 @@ def get_moe_prefill_test_cases(rank):
                 }
             )
 
+    if dropped_empty_uniform:
+        print(
+            f"moe_ep context: dropped {len(dropped_empty_uniform)} uniform token points "
+            f"{dropped_empty_uniform} at generation (num_token * topk={topk} * ep={rank} // "
+            f"num_experts={num_experts} yields 0 tokens per local expert); power-law variants kept"
+        )
     return _sorted_phase_cases(test_cases)
 
 
@@ -424,14 +457,17 @@ def benchmark_moe_layer_prefill(
                 tokens_per_local_expert = int(num_token * topk * simulated_ep_size // model_total_experts)
                 rank_print(f"tokens_per_local_expert: {tokens_per_local_expert}")
                 if tokens_per_local_expert <= 0:
-                    # Physically empty token point: fewer routed tokens than
-                    # local experts, so this rank receives none. Logged, not
-                    # silent — it drops one token point, not the queued case.
-                    rank_print(
-                        f"  moe_ep context: dropping num_tokens={num_token} "
-                        f"(uniform routing yields 0 tokens per local expert at ep={simulated_ep_size})"
+                    # get_moe_prefill_test_cases resolves this pure declared
+                    # arithmetic at generation time, so an empty uniform
+                    # workload here means the manifest and the runtime have
+                    # drifted apart. Raise rather than skip: a queued point
+                    # either runs or fails classified.
+                    raise MoeEpBenchmarkError(
+                        f"moe_ep context: uniform num_tokens={num_token} reached the benchmark with "
+                        f"0 tokens per local expert (topk={topk}, ep={simulated_ep_size}, "
+                        f"num_experts={model_total_experts}); the generation-time manifest should "
+                        "have excluded it"
                     )
-                    continue
                 num_recv = [tokens_per_local_expert] * num_local_experts
 
                 total_valid_positions = sum(num_recv)
@@ -554,7 +590,10 @@ def benchmark_moe_layer_prefill(
                 rank_print("DeepEP MoE GEMM Results (Prefill):")
                 rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                log_perf(
+                # log_perf reports write failures by returning False — fail
+                # closed, or the executor checkpoints this case as passed
+                # with rows missing.
+                if not log_perf(
                     item_list=[
                         _build_moe_ep_row(
                             moe_dtype=moe_dtype,
@@ -578,7 +617,11 @@ def benchmark_moe_layer_prefill(
                     kernel_source=MOE_EP_KERNEL_SOURCE,
                     perf_filename=_moe_ep_perf_path(output_path, perf_filename),
                     power_stats=_power_columns(power_stats),
-                )
+                ):
+                    raise MoeEpBenchmarkError(
+                        f"helper.log_perf failed to persist the measured context row "
+                        f"(num_tokens={num_token * simulated_ep_size}, ep={simulated_ep_size})"
+                    )
             del (
                 hidden_states_per_token_iter,
                 hidden_states_fp8_tensor_iter,
@@ -720,14 +763,16 @@ def benchmark_moe_layer_decode(
                 raise ValueError(f"Unsupported distributed mode: {distributed}")
             max_masked_m = int(torch.stack([mm.max() for mm in masked_m_list]).max().item())
             if max_masked_m > hidden_states.shape[1]:
-                # Same FIXME(kernel-limit) bound as above, expressed per expert:
-                # this skew routes more tokens to one expert than the buffer
-                # holds. One token point is dropped (logged), not the case.
-                rank_print(
-                    f"  moe_ep generation: dropping num_tokens={num_token} "
-                    f"(max masked_m {max_masked_m} exceeds the dispatch buffer {hidden_states.shape[1]})"
+                # Same FIXME(kernel-limit) bound as above, expressed per
+                # expert: this sampled skew routes more tokens to one expert
+                # than the synthetic buffer holds. Raise rather than skip —
+                # a declared token point that cannot run fails classified
+                # (a rerun re-samples), it does not silently thin the curve.
+                raise MoeEpBenchmarkError(
+                    f"moe_ep generation: num_tokens={num_token} drew a routing sample with "
+                    f"max masked_m {max_masked_m} exceeding the dispatch buffer "
+                    f"{hidden_states.shape[1]} (num_max_dispatch_tokens_per_rank * ep)"
                 )
-                continue
             scale_tensor = torch.ones(
                 num_local_experts,
                 num_max_dispatch_tokens_per_rank * simulated_ep_size,
@@ -838,7 +883,9 @@ def benchmark_moe_layer_decode(
                 rank_print("DeepEP MoE GEMM Results (Decode) - CUDA Graph Enabled:")
                 rank_print(f"  Average latency: {avg_latency_ms:.3f}ms")
                 distribution_str = f"power_law_{power_law_alpha}" if distributed == "power_law" else distributed
-                log_perf(
+                # Fail closed on a reported write failure, mirroring the
+                # context loop above.
+                if not log_perf(
                     item_list=[
                         _build_moe_ep_row(
                             moe_dtype=moe_dtype,
@@ -862,7 +909,11 @@ def benchmark_moe_layer_decode(
                     kernel_source=MOE_EP_KERNEL_SOURCE,
                     perf_filename=_moe_ep_perf_path(output_path, perf_filename),
                     power_stats=_power_columns(power_stats),
-                )
+                ):
+                    raise MoeEpBenchmarkError(
+                        f"helper.log_perf failed to persist the measured generation row "
+                        f"(num_tokens={num_token * simulated_ep_size}, ep={simulated_ep_size})"
+                    )
             del hidden_states, hidden_states_fp8_tensor, scale_tensor, dispatch_output_list
             torch.cuda.empty_cache()
 
@@ -1047,7 +1098,7 @@ def run_moe(
         f"(num_local_experts={num_local_experts}, total_experts={model_total_experts})"
     )
 
-    prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size)
+    prefill_test_cases = get_moe_prefill_test_cases(simulated_ep_size, topk=model_topk, num_experts=model_total_experts)
     rank_print(f"Testing {len(prefill_test_cases)} prefill configurations...")
 
     # Use deepep_mode="normal" for prefill
@@ -1140,8 +1191,11 @@ def get_moe_ep_test_cases():
 
     Returns:
         list[list]: ``[num_local_experts, moe_ep_size, hidden_size, inter_size,
-        topk, num_experts, num_slots, moe_dtype]`` per case — the positional
-        argument list ``collect.py`` hands to :func:`run_moe_ep`.
+        topk, num_experts, num_slots, moe_dtype, model_name]`` per case — the
+        positional argument list ``collect.py`` hands to :func:`run_moe_ep`.
+        ``model_name`` keeps the case's model identity: the subprocess loads
+        THAT checkpoint (:func:`_case_model_path`), and two models that happen
+        to share every shape argument stay distinct tasks.
     """
     try:
         # collect.py puts COLLECTOR_ROOT on sys.path (see the module header).
@@ -1187,6 +1241,7 @@ def get_moe_ep_test_cases():
                 num_experts,
                 num_experts,  # num_slots: no EPLB redundancy axis on sglang
                 MOE_EP_QUANT_MODE,
+                recipe.model_name,
             ],
         )
 
@@ -1209,6 +1264,7 @@ def run_moe_benchmark(
     num_experts,
     num_slots,
     moe_dtype,
+    model_name,
     gpu_id,
     output_path,
     perf_filename,
@@ -1216,14 +1272,15 @@ def run_moe_benchmark(
     """Run one moe_ep case — called in a subprocess with CUDA_VISIBLE_DEVICES set.
 
     All initialization that must happen after CUDA_VISIBLE_DEVICES is set lives
-    here. Every shape argument is the DECLARED value from the case plan.
+    here. Every shape argument is the DECLARED value from the case plan, and
+    ``model_name`` is the declared model whose checkpoint this case loads.
     """
     # In subprocess, always use cuda:0 since CUDA_VISIBLE_DEVICES isolates the GPU
     torch.cuda.set_device("cuda:0")
 
     server_port = 30000 + gpu_id * 100
     server_args = ServerArgs(
-        model_path=_get_moe_model_path(),
+        model_path=_case_model_path(model_name),
         dtype="auto",
         device="cuda",
         load_format="dummy",
@@ -1249,7 +1306,7 @@ def run_moe_benchmark(
 
     print(f"\n{'=' * 60}")
     print(
-        f"moe_ep: local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, "
+        f"moe_ep: model={model_name}, local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, "
         f"num_experts={num_experts}, moe_dtype={moe_dtype}, GPU={gpu_id}"
     )
     print(f"{'=' * 60}")
@@ -1323,6 +1380,7 @@ def run_moe_ep(
     num_experts,
     num_slots,
     moe_dtype,
+    model_name,
     *,
     perf_filename,
     device="cuda:0",
@@ -1337,13 +1395,23 @@ def run_moe_ep(
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
 
     print("\n" + "=" * 60)
-    print(f"moe_ep: local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, GPU={gpu_id}")
+    print(f"moe_ep: model={model_name}, local_experts={num_local_experts}, moe_ep_size={moe_ep_size}, GPU={gpu_id}")
     print("=" * 60)
 
     # Resolve output_path from cwd so perf files land in the collector
     # framework's result directory (consistent with collect_moe.py behavior).
     _run_moe_subprocess(
-        [num_local_experts, moe_ep_size, hidden_size, inter_size, topk, num_experts, num_slots, moe_dtype],
+        [
+            num_local_experts,
+            moe_ep_size,
+            hidden_size,
+            inter_size,
+            topk,
+            num_experts,
+            num_slots,
+            moe_dtype,
+            model_name,
+        ],
         gpu_id,
         os.getcwd(),
         perf_filename,

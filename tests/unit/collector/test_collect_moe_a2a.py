@@ -57,10 +57,11 @@ def test_base_op_yaml_declares_the_three_workload_axes():
 def test_declared_shapes_come_from_the_wideep_model_rows(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     shapes = a2a.get_moe_a2a_shapes()
-    # The persisted comm key has no model column, so the 20 declared wideep
-    # model rows collapse onto 6 physical (hidden, topk, experts) tuples.
+    # The persisted comm key has no model column, so the declared wideep
+    # model rows collapse onto 7 physical (hidden, topk, experts) tuples.
     assert shapes == [
         a2a.MoeA2AShape(3072, 8, 256),
+        a2a.MoeA2AShape(3584, 16, 896),
         a2a.MoeA2AShape(4096, 6, 256),
         a2a.MoeA2AShape(6144, 8, 256),
         a2a.MoeA2AShape(7168, 6, 384),
@@ -68,6 +69,77 @@ def test_declared_shapes_come_from_the_wideep_model_rows(monkeypatch):
         a2a.MoeA2AShape(7168, 8, 384),
     ]
     assert shapes == sorted(shapes)
+
+
+def test_shapes_carry_the_declared_routing(monkeypatch):
+    # F16: the workload's routing is a declared fact riding on the shape —
+    # DeepSeek-V3-style rows declare group-limited routing (8 groups, top-4),
+    # Kimi/GLM rows declare global routing (1/1). The routing fields stay out
+    # of the shape's identity (compare=False), so the persisted key is
+    # unchanged.
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    routing = {
+        (shape.hidden_size, shape.topk, shape.num_experts): (shape.num_expert_group, shape.topk_group)
+        for shape in a2a.get_moe_a2a_shapes()
+    }
+    assert routing[(7168, 8, 256)] == (8, 4)  # DeepSeek-V3/R1
+    assert routing[(7168, 8, 384)] == (1, 1)  # Kimi-K2.5
+    assert routing[(3584, 16, 896)] == (1, 1)  # Kimi-K3
+
+
+def _fake_moe_recipe(model_name, hidden_size, topk, num_experts, *, num_expert_group=1, topk_group=1):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        model_name=model_name,
+        hidden_size=hidden_size,
+        topk=topk,
+        num_experts=num_experts,
+        sglang_moe_num_expert_group=num_expert_group,
+        sglang_moe_topk_group=topk_group,
+    )
+
+
+def test_conflicting_routing_declarations_raise(monkeypatch):
+    # Two models sharing a (hidden, topk, experts) key but disagreeing on
+    # routing would write indistinguishable rows measured under different
+    # traffic patterns — an unresolvable declaration, so it fails loudly.
+    import collector.case_generator as case_generator
+
+    monkeypatch.setattr(
+        case_generator,
+        "get_common_moe_test_cases",
+        lambda backend: [
+            _fake_moe_recipe("model-a", 7168, 8, 256, num_expert_group=8, topk_group=4),
+            _fake_moe_recipe("model-b", 7168, 8, 256, num_expert_group=1, topk_group=1),
+        ],
+    )
+    monkeypatch.setattr(case_generator, "is_wideep_moe_model", lambda name: True)
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="conflicting routing"):
+        a2a.get_moe_a2a_shapes()
+
+
+def test_ht_topk_group_budget_derives_from_the_declaration():
+    grouped = a2a.MoeA2AShape(7168, 8, 256, num_expert_group=8, topk_group=4)
+    global_routing = a2a.MoeA2AShape(7168, 8, 384, num_expert_group=1, topk_group=1)
+    # DeepSeek-style: the deepep test's min(nodes, 4), with 4 now sourced
+    # from the declared topk_group instead of a hardcoded constant.
+    assert a2a.ht_num_topk_groups(grouped, num_nodes=2) == 2
+    assert a2a.ht_num_topk_groups(grouped, num_nodes=8) == 4
+    assert a2a.ht_num_topk_groups(grouped, num_nodes=18) == 4
+    # Global routing: every node group stays selectable, masking degenerates
+    # to plain top-k at any world.
+    assert a2a.ht_num_topk_groups(global_routing, num_nodes=8) == 8
+    assert a2a.ht_num_topk_groups(global_routing, num_nodes=18) == 18
+
+
+def test_case_plan_ids_carry_the_routing_identity():
+    shape = a2a.MoeA2AShape(7168, 8, 256, num_expert_group=8, topk_group=4)
+    case = a2a.MoeA2ACase("deepep_ht", shape, num_tokens=1024, sms=20)
+    [case_id] = a2a.case_plan_ids([case], ep_size=16, node_num=4)
+    payload = json.loads(case_id.split(":run_case:", 1)[1])
+    assert payload["num_expert_group"] == 8
+    assert payload["topk_group"] == 4
 
 
 def test_shapes_stay_correlated_never_crossed(monkeypatch):
@@ -90,9 +162,9 @@ def test_case_plan_is_the_grid_times_the_shapes(monkeypatch):
 
     ht = [case for case in cases if case.comm_backend == "deepep_ht"]
     ll = [case for case in cases if case.comm_backend == "deepep_ll"]
-    assert len(ht) == 6 * 3 * 13 == 234
-    assert len(ll) == 6 * 14 == 84
-    assert len(cases) == 318
+    assert len(ht) == 7 * 3 * 13 == 273
+    assert len(ll) == 7 * 14 == 98
+    assert len(cases) == 371
     # LL rows carry no SM budget — the value the SDK's legacy adapter assigns.
     assert {case.sms for case in ll} == {0}
 
@@ -524,17 +596,78 @@ def test_module_is_registered_as_a_standalone_provenance_producer():
 
 def test_runtime_meta_rejects_a_version_that_is_not_the_manifest_pin():
     with pytest.raises(a2a.MoeA2ADeclarationError, match="manifest wideep_sglang pin"):
-        a2a.resolve_runtime_meta("0.5.14")
+        a2a.resolve_runtime_meta("0.5.14", None)
 
 
-def test_runtime_meta_records_the_pinned_wideep_runtime():
+def test_runtime_meta_records_the_launched_image_variant():
+    # F17: the sidecar attests the image the launcher actually passed to
+    # srun (the GB200 launcher runs the grace_blackwell variant, not
+    # `default`), including which manifest variant it is.
     from collector.framework_manifest import get_collector_runtime
 
     pinned = get_collector_runtime("sglang", workload="wideep")
-    meta = a2a.resolve_runtime_meta(pinned.version)
+    meta = a2a.resolve_runtime_meta(pinned.version, pinned.image("grace_blackwell"))
     assert meta["framework"] == "wideep_sglang"
     assert meta["version"] == pinned.version
-    assert meta["image"] == pinned.image()
+    assert meta["image"] == pinned.image("grace_blackwell")
+    assert meta["image_variant"] == "grace_blackwell"
+
+    default_meta = a2a.resolve_runtime_meta(pinned.version, pinned.image())
+    assert default_meta["image_variant"] == "default"
+
+
+def test_runtime_meta_requires_the_launched_image():
+    from collector.framework_manifest import get_collector_runtime
+
+    pinned = get_collector_runtime("sglang", workload="wideep")
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="--image-ref"):
+        a2a.resolve_runtime_meta(pinned.version, None)
+
+
+def test_runtime_meta_rejects_an_image_the_manifest_does_not_pin():
+    from collector.framework_manifest import get_collector_runtime
+
+    pinned = get_collector_runtime("sglang", workload="wideep")
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="not a manifest wideep_sglang image variant"):
+        a2a.resolve_runtime_meta(pinned.version, "someone/rebuilt-image:latest")
+
+
+def test_launcher_passes_the_image_it_launches():
+    # The launcher-to-sidecar identity: whatever ${CONTAINER_IMAGE} srun
+    # receives is exactly what the collector is told to attest.
+    launcher = REPO_ROOT / "collector" / "network" / "slurm" / "submit_moe_a2a.sh"
+    text = launcher.read_text(encoding="utf-8")
+    assert '--image-ref \\"${CONTAINER_IMAGE}\\"' in text
+
+
+def test_stale_output_artifacts_fail_closed(tmp_path):
+    # F19: log_perf appends, so a rerun into a directory holding a previous
+    # attempt's staging CSV would finalize stale rows under this run's
+    # attestation. The collector refuses such a directory outright.
+    from collector.helper import stale_output_artifacts
+    from collector.registry_types import PerfFile
+
+    assert stale_output_artifacts(tmp_path, PerfFile.MOE_A2A.value) == []
+    (tmp_path / PerfFile.MOE_A2A.value).write_text("header\nrow\n")
+    (tmp_path / "errors_moe_a2a.rank0.json").write_text("[]")
+    stale = stale_output_artifacts(tmp_path, PerfFile.MOE_A2A.value)
+    assert PerfFile.MOE_A2A.value in stale
+    assert "errors_moe_a2a.rank0.json" in stale
+    # main() consults it before any benchmark or write.
+    assert "stale_output_artifacts(output_dir" in SOURCE_TEXT
+    assert "refuses to run into" in SOURCE_TEXT
+
+
+def test_alternate_ll_transports_refuse_to_finalize():
+    # F21: --allow-mnnvl / --disable-nvlink change the LL Buffer construction
+    # but no persisted identity records them, so such runs are diagnostic:
+    # staged rows only, no parquet, no sidecar.
+    assert a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=False)
+    assert not a2a.transport_is_default(allow_mnnvl=True, disable_nvlink=False)
+    assert not a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=True)
+    finalize_at = SOURCE_TEXT.index("finalize_perf_files([perf_path])")
+    guard_at = SOURCE_TEXT.index("if diagnostic_transport:")
+    assert guard_at < finalize_at, "the diagnostic-transport refusal must gate finalization"
 
 
 # ---------------------------------------------------------------------------

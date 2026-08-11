@@ -112,8 +112,49 @@ def test_submit_moe_a2a_invokes_the_collector_with_the_world_layout():
 def test_submit_launchers_use_per_job_output_dirs():
     # Each job finalizes its own parquet and attests a world-specific
     # collection_meta.yaml, so jobs get per-world output dirs; within a job
-    # all cases append one CSV through log_perf's lockfile.
+    # all cases append one CSV through log_perf's lockfile. The job-id
+    # subdirectory (resolved inside the job) additionally keeps a
+    # resubmission from appending after a preempted attempt's stale rows —
+    # the collectors refuse a directory that already holds owned artifacts.
     for script in (SUBMIT_MOE_A2A, SUBMIT_TRTLLM_ALLTOALL):
         text = script.read_text(encoding="utf-8")
         assert 'OUTPUT_DIR="${SCRIPT_DIR}/results/moe_a2a_' in text, script.name
         assert "${NUM_GPUS}gpu" in text, script.name
+        assert "${OUTPUT_DIR}/job_\\${SLURM_JOB_ID}" in text, script.name
+
+
+def test_submit_launchers_pass_the_launched_image_to_the_collector():
+    # Launcher-to-sidecar identity: the collector attests --image-ref, so it
+    # must receive exactly the ref srun --container-image runs (including an
+    # operator's CONTAINER_IMAGE override).
+    for script in (SUBMIT_MOE_A2A, SUBMIT_TRTLLM_ALLTOALL):
+        text = script.read_text(encoding="utf-8")
+        assert '--image-ref \\"${CONTAINER_IMAGE}\\"' in text, script.name
+
+
+def _default_gpu_list(script: Path) -> list[int]:
+    for line in script.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith('GPU_LIST="'):
+            return [int(item) for item in stripped.split('"')[1].split(",")]
+    raise AssertionError(f"no GPU_LIST default found in {script.name}")
+
+
+def test_advertised_default_worlds_expand_to_at_least_one_case(monkeypatch):
+    # A default world that expands to zero cases reserves nodes (up to a full
+    # rack) only to fail: every advertised default must survive the plan's
+    # structural drops. 72 (sglang: no declared expert count divides 72) and
+    # 48/72 (trtllm: the sole 256-expert shape) are deliberately absent.
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    from collector.network.slurm import collect_trtllm_alltoall as ata
+    from collector.wideep.sglang import collect_moe_a2a as a2a
+
+    gpus_per_node = 4  # both launchers' default
+    shapes = a2a.get_moe_a2a_shapes()
+    grid = a2a.get_moe_a2a_workload_grid()
+    for world in _default_gpu_list(SUBMIT_MOE_A2A):
+        cases = a2a.build_case_plan(shapes=shapes, grid=grid, ep_size=world, node_num=world // gpus_per_node)
+        assert cases, f"moe_a2a default world {world} expanded to zero cases"
+
+    for world in _default_gpu_list(SUBMIT_TRTLLM_ALLTOALL):
+        assert ata.get_default_test_cases(world), f"trtllm alltoall default world {world} expanded to zero cases"

@@ -521,7 +521,9 @@ def run_moe_ep(
             num_slots=num_slots,
         )
         for row, power_stats in rows:
-            log_perf(
+            # log_perf reports write failures by returning False — fail
+            # closed, mirroring the sglang/trtllm moe_ep writers.
+            if not log_perf(
                 item_list=[row],
                 framework="VLLM",
                 version=get_version("vllm"),
@@ -530,4 +532,8 @@ def run_moe_ep(
                 kernel_source=MOE_EP_KERNEL_SOURCE,
                 perf_filename=_moe_ep_perf_path(output_path, perf_filename),
                 power_stats=_power_columns(power_stats),
-            )
+            ):
+                raise MoeEpBenchmarkError(
+                    f"helper.log_perf failed to persist the measured {inference_phase} row "
+                    f"(ep={moe_ep_size}, num_experts={num_experts})"
+                )

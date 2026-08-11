@@ -93,7 +93,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from collector.framework_manifest import get_collector_runtime
-from collector.helper import benchmark_with_power, finalize_perf_files, log_perf
+from collector.helper import benchmark_with_power, finalize_perf_files, log_perf, stale_output_artifacts
 from collector.registry_types import PerfFile
 from collector.wideep.sglang.collect_moe_a2a import (
     MoeA2AShape,
@@ -1108,12 +1108,15 @@ def case_plan_ids(cases: list[AlltoallTestCase], *, kernel_source: str, node_num
 # ============================================================================
 
 
-def resolve_runtime_meta(installed_version: str) -> dict:
+def resolve_runtime_meta(installed_version: str, image_ref: str | None) -> dict:
     """The sidecar ``runtime`` block, from the manifest ``trtllm`` pin.
 
     The INSTALLED version is what actually produced the data, so it is what
     is recorded — but it must equal the pin, or the collected rows would be
-    attributed to a runtime that never ran them.
+    attributed to a runtime that never ran them. ``image_ref`` is the
+    reference the launcher actually passed to ``srun --container-image``
+    (``CONTAINER_IMAGE`` is operator-overridable): it must be one of the
+    manifest's pinned image variants and is what the sidecar attests.
     """
     from packaging.version import InvalidVersion, Version
 
@@ -1127,8 +1130,20 @@ def resolve_runtime_meta(installed_version: str) -> dict:
             f"trtllm alltoall collection requires tensorrt_llm {runtime.version} (manifest trtllm pin), "
             f"found {installed_version}; use {runtime.image()}"
         )
-    image, sep, digest = runtime.image().partition("@")
-    meta = {"framework": runtime.framework, "version": installed_version, "image": image}
+    if not image_ref:
+        raise TrtllmAlltoallDeclarationError(
+            "trtllm alltoall collection requires --image-ref with the container image the job was "
+            'launched with (the launcher passes --image-ref "${CONTAINER_IMAGE}"); runtime provenance '
+            "must attest the image that actually ran, not the manifest default"
+        )
+    variant = next((name for name, ref in sorted(runtime.images.items()) if ref == image_ref), None)
+    if variant is None:
+        raise TrtllmAlltoallDeclarationError(
+            f"trtllm alltoall was launched with image {image_ref!r}, which is not a manifest trtllm "
+            f"image variant ({runtime.images}); rows from an unpinned image are not publishable"
+        )
+    image, sep, digest = image_ref.partition("@")
+    meta = {"framework": runtime.framework, "version": installed_version, "image": image, "image_variant": variant}
     if sep:
         meta["image_digest"] = digest
     return meta
@@ -1184,6 +1199,7 @@ def run_benchmark(
     kernel_source: str,
     gpus_per_node: int,
     output_dir: Path,
+    image_ref: str | None,
     num_warmup: int = 3,
     num_iterations: int = 10,
 ) -> None:
@@ -1207,10 +1223,19 @@ def run_benchmark(
     case_ids = case_plan_ids(test_cases, kernel_source=kernel_source, node_num=node_num)
 
     version = tensorrt_llm.__version__
-    runtime_meta = resolve_runtime_meta(version)
+    runtime_meta = resolve_runtime_meta(version, image_ref)
     device_name = torch.cuda.get_device_name(device)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
+    if stale:
+        raise TrtllmAlltoallDeclarationError(
+            f"trtllm alltoall refuses to run into {output_dir}: it holds artifacts from a previous "
+            f"attempt ({', '.join(stale)}). log_perf appends to the staging CSV, so rerunning here "
+            "would finalize stale rows under this run's attestation. Use a fresh --output-path (the "
+            "launcher derives one per Slurm job); no validated resume protocol exists for this "
+            "standalone collector."
+        )
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
 
     if rank == 0:
@@ -1290,18 +1315,46 @@ def run_benchmark(
             failure_count += 1
             result.combine_low_precision_latency_ms = 0.0
 
+        # Rank 0 persists; the write result is agreed on below BEFORE any rank
+        # enters the next case's barrier, so a failed write degrades to a
+        # classified case failure instead of a rank-0-only exception that
+        # would desync the peers. helper.log_perf reports failures by
+        # returning False, never by raising.
+        persist_failed = 0
         if rank == 0:
-            _print_case_summary(test_case, result)
-            for row in build_unified_rows(test_case, result, kernel_source=kernel_source, node_num=node_num):
-                log_perf(
-                    item_list=[row],
-                    framework=FRAMEWORK,
-                    version=version,
-                    device_name=device_name,
-                    op_name=OP_NAME,
+            try:
+                _print_case_summary(test_case, result)
+                for row in build_unified_rows(test_case, result, kernel_source=kernel_source, node_num=node_num):
+                    if not log_perf(
+                        item_list=[row],
+                        framework=FRAMEWORK,
+                        version=version,
+                        device_name=device_name,
+                        op_name=OP_NAME,
+                        kernel_source=kernel_source,
+                        perf_filename=perf_path,
+                    ):
+                        raise TrtllmAlltoallBenchmarkError(
+                            f"helper.log_perf failed to persist a measured row for {test_case.description}; "
+                            "a measured-but-unpersisted case must fail classified, not finalize"
+                        )
+            except Exception as error:
+                persist_failed = 1
+                record_failure(
+                    output_dir,
+                    test_case,
+                    error,
+                    rank=rank,
                     kernel_source=kernel_source,
-                    perf_filename=perf_path,
+                    node_num=node_num,
+                    op_name="alltoall_persistence",
                 )
+        if world_size > 1:
+            persist_agreement = torch.tensor([persist_failed], dtype=torch.int32, device=device)
+            dist.all_reduce(persist_agreement, op=dist.ReduceOp.MAX)
+            persist_failed = int(persist_agreement.item())
+        if persist_failed:
+            failure_count += 1
 
     if rank == 0:
         converted = finalize_perf_files([perf_path])
@@ -1385,6 +1438,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Output DIRECTORY for moe_a2a_perf parquet + collection_meta.yaml (default: cwd)",
     )
     parser.add_argument(
+        "--image-ref",
+        type=str,
+        default=None,
+        help="container image the job was launched with (the launcher's ${CONTAINER_IMAGE}); must be a "
+        "manifest trtllm image variant — recorded in the sidecar runtime block",
+    )
+    parser.add_argument(
         "--warmup",
         type=int,
         default=3,
@@ -1425,6 +1485,7 @@ def main():
             kernel_source=args.kernel_source,
             gpus_per_node=gpus_per_node,
             output_dir=Path(args.output_path),
+            image_ref=args.image_ref,
             num_warmup=args.warmup,
             num_iterations=args.iterations,
         )

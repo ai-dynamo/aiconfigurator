@@ -10,7 +10,7 @@
 # helper.log_perf's lockfile.
 #
 # Usage:
-#   bash submit_moe_a2a.sh                                  # default: 8,16,32,48,64,72 GPUs, 4 GPUs/node
+#   bash submit_moe_a2a.sh                                  # default: 8,16,32,48,64 GPUs, 4 GPUs/node
 #   bash submit_moe_a2a.sh --gpu-list 8,16                  # only 8 and 16 GPUs
 #   bash submit_moe_a2a.sh --gpus-per-node 8 --gpu-list 16  # 8-GPU nodes
 
@@ -20,7 +20,7 @@ Usage: bash $(basename "$0") [OPTIONS]
 
 Options:
   --gpu-list <list>        Comma-separated GPU counts to benchmark; each must be
-                           a multiple of --gpus-per-node (default: 8,16,32,48,64,72)
+                           a multiple of --gpus-per-node (default: 8,16,32,48,64)
   --gpus-per-node <n>      GPUs per node for node/task calculation
                            (default: \${GPUS_PER_NODE:-4})
   --modes <list>           DeepEP kernel families to collect
@@ -54,8 +54,12 @@ CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${REPO_DIR}:${REPO_DIR}}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
 
-# Defaults
-GPU_LIST="8,16,32,48,64,72"
+# Defaults. 72 is deliberately absent: no declared wideep shape has an expert
+# count divisible by 72, so that world expands to zero cases and the collector
+# raises after the full-rack allocation is already held. Kept in sync with the
+# declarations by tests/unit/collector/test_network_layout.py::
+# test_advertised_default_worlds_expand_to_at_least_one_case.
+GPU_LIST="8,16,32,48,64"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 MODES="deepep_ht,deepep_ll"
 
@@ -85,7 +89,7 @@ echo "=========================================="
 echo "MoE all-to-all (DeepEP) benchmark [${MODES}]"
 echo "Submitting parallel jobs for: ${GPU_LIST} GPUs"
 echo "Container image: ${CONTAINER_IMAGE}"
-echo "Results: ${SCRIPT_DIR}/results/moe_a2a_<N>gpu/"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_<N>gpu/job_<jobid>/"
 echo "=========================================="
 
 for NUM_GPUS in "${GPU_COUNTS[@]}"; do
@@ -99,8 +103,11 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     TASKS_PER_NODE=${GPUS_PER_NODE}
 
     JOB_NAME="${ACCOUNT}-moe_a2a.${NUM_GPUS}gpu"
+    # Per-attempt staging: log_perf appends to its CSV and the collector
+    # refuses a directory holding a previous attempt's artifacts, so every
+    # submission gets a job-scoped subdirectory (resolved inside the job,
+    # where SLURM_JOB_ID exists; the collector mkdirs it).
     OUTPUT_DIR="${SCRIPT_DIR}/results/moe_a2a_${NUM_GPUS}gpu"
-    mkdir -p "${OUTPUT_DIR}"
 
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
 
@@ -132,12 +139,13 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
                     -- python -m collector.wideep.sglang.collect_moe_a2a \
                         --gpus-per-node \"${TASKS_PER_NODE}\" \
                         --modes \"${MODES}\" \
-                        --output-path \"${OUTPUT_DIR}\""
+                        --image-ref \"${CONTAINER_IMAGE}\" \
+                        --output-path \"${OUTPUT_DIR}/job_\${SLURM_JOB_ID}\""
 done
 
 echo ""
 echo "=========================================="
 echo "All jobs submitted!"
 echo "Check status: squeue -u \$USER"
-echo "Results: ${SCRIPT_DIR}/results/moe_a2a_<N>gpu/moe_a2a_perf.parquet (+ collection_meta.yaml)"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_<N>gpu/job_<jobid>/moe_a2a_perf.parquet (+ collection_meta.yaml)"
 echo "=========================================="

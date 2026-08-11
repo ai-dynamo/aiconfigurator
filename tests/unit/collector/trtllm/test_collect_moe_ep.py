@@ -189,14 +189,15 @@ def test_sm90_42_case_reconciliation_is_log_pinned(monkeypatch, capsys):
     # The SM90 twin of the SM80/SM120 capsys pins: the 42-case population must
     # reconcile arithmetically in the getter's logged drop accounting, not
     # just in the returned count (117 recipes -> 16 kept x 1 mode x 3 EPLB
-    # configs = 48, minus 6 slot-alignment drops, zero kernel-limit drops).
+    # configs = 48, minus 6 slot-alignment drops, zero kernel-limit drops;
+    # a single-model plan has no cross-model duplicates to deduplicate).
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     cases = _getter(90)()
     out = capsys.readouterr().out
     assert len(cases) == 42
     assert "moe_ep: 42 cases from 117 moe recipes" in out
     assert "-> 16 recipes kept) x 1 quant mode(s) x 2-3 EPLB configs" in out
-    assert "= 48 expanded - 6 num_slots%ep!=0" in out
+    assert "= 48 expanded - 6 num_slots%ep!=0 - 0 deduplicated onto the runtime identity" in out
 
 
 def test_sm120_collects_both_quants_with_no_kernel_limit_drops(monkeypatch, capsys):
@@ -214,21 +215,23 @@ def test_sm120_collects_both_quants_with_no_kernel_limit_drops(monkeypatch, caps
     assert {case[13] for case in cases} == {False, True}
 
 
-def test_full_population_covers_every_declared_wideep_model(monkeypatch):
+def test_full_population_covers_every_declared_wideep_model(monkeypatch, capsys):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     cases = _getter(90)()
-    # 770 at the dc4caca merge-base: rc20 (#1356) restricts the (True, 288)
-    # EPLB layout to models with <= 288 experts (replication identity), so
-    # the five 384-expert entries (Kimi-K2/K2.5 trio, DeepSeek-V4-Pro pair)
-    # collect 28 instead of 38 cases each.
-    assert len(cases) == 770
-    models = {case[10] for case in cases}
-    assert "deepseek-ai/DeepSeek-V3" in models
-    assert "moonshotai/Kimi-K2-Instruct" in models  # the 384-expert family
-    # Invocation identities are unique — no dedup path is needed (skill: do
-    # not ship dedup unless repository-owned YAML produces a duplicate).
-    identities = [(case[0], case[10], case[8], case[12], case[13], case[14]) for case in cases]
-    assert len(identities) == len(set(identities))
+    out = capsys.readouterr().out
+    # F20: model_name is provenance-only for this synthetic runner (run_moe_ep
+    # builds the simulator from the shape arguments; the persisted key has no
+    # model column), so the plan is deduplicated onto the runtime identity —
+    # the same-shape entries the model families share collapse to one task,
+    # and every contributing family stays auditable in the population log.
+    runtime_identities = [
+        tuple(tuple(value) if isinstance(value, list) else value for i, value in enumerate(case) if i != 10)
+        for case in cases
+    ]
+    assert len(runtime_identities) == len(set(runtime_identities))
+    assert "deduplicated onto the runtime identity" in out
+    assert "deepseek-ai/DeepSeek-V3" in out
+    assert "moonshotai/Kimi-K2-Instruct" in out  # the 384-expert family
     for case in cases:
         moe_type, num_experts, tp, ep, dist, slots = (case[0], case[6], case[7], case[8], case[11], case[14])
         assert moe_type == "fp8_block"
@@ -462,12 +465,15 @@ def test_retired_extras_are_not_persisted_columns():
 def test_no_silent_case_skipping_and_the_dry_run_raises():
     # failure_handling.md: a queued case is executed or raises a classified
     # error. The dry-run loop previously constructed a RuntimeError without
-    # raising it, silently completing the case with zero rows.
+    # raising it, silently completing the case with zero rows; its successor
+    # then shrank the declared token list to the dry-run ceiling (F15) —
+    # both made a partial curve indistinguishable from complete coverage.
+    # The declared list either runs in full or the case fails classified.
     assert "skipping..." not in SOURCE_TEXT
     assert "raise MoeEpBenchmarkError" in SOURCE_TEXT
     assert 'RuntimeError(f"dry run failed' not in SOURCE_TEXT
-    # Token points above the dry-run ceiling are dropped with a logged reason.
-    assert "dropping num_tokens=" in SOURCE_TEXT
+    assert "dropping num_tokens=" not in SOURCE_TEXT
+    assert "largest declared token count" in SOURCE_TEXT
 
 
 def test_sm120_drops_are_parked_as_a_kernel_limit():

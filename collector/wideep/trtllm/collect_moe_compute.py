@@ -816,16 +816,38 @@ def get_moe_ep_test_cases():
     # of the recipe product order.
     test_cases.sort(key=lambda case: (case[10], case[0], case[8], case[12], case[13], case[14]))
 
+    # Dedup on the runtime identity (the architecture's `dedup(expand(...))`
+    # step): `model_name` (index 10) is provenance-only for this synthetic
+    # runner — run_moe_ep builds the simulator from the shape arguments and
+    # the persisted row key carries no model column — so tasks differing only
+    # in model would rerun identical kernels and stack duplicate rows whose
+    # loaded value depends on row order. The sort above makes the kept
+    # representative deterministic (alphabetically first model); every
+    # contributing model is retained in the log line below.
+    deduped: list[list] = []
+    contributors: dict[tuple, list[str]] = {}
+    for case in test_cases:
+        runtime_key = tuple(
+            tuple(value) if isinstance(value, list) else value for i, value in enumerate(case) if i != 10
+        )
+        contributors.setdefault(runtime_key, []).append(case[10])
+        if len(contributors[runtime_key]) == 1:
+            deduped.append(case)
+    duplicate_count = len(test_cases) - len(deduped)
+    contributing_models = sorted({model for models in contributors.values() for model in models})
+
     kept_recipes = len(recipes) - dropped_not_declared - dropped_not_power_law - dropped_not_ep
     print(
-        f"moe_ep: {len(test_cases)} cases from {len(recipes)} moe recipes "
+        f"moe_ep: {len(deduped)} cases from {len(recipes)} moe recipes "
         f"(dropped: {dropped_not_declared} not declared wideep, "
         f"{dropped_not_power_law} not power_law, {dropped_not_ep} not tp=1/ep>1 "
         f"-> {kept_recipes} recipes kept) x {len(moe_list)} quant mode(s) x 2-3 EPLB configs "
         f"(the 288-slot layout only exists when num_experts <= 288) "
-        f"= {expanded} expanded - {dropped_slot_alignment} num_slots%ep!=0"
+        f"= {expanded} expanded - {dropped_slot_alignment} num_slots%ep!=0 "
+        f"- {duplicate_count} deduplicated onto the runtime identity "
+        f"(contributing models: {', '.join(contributing_models)})"
     )
-    return test_cases
+    return deduped
 
 
 # =============================================================================
@@ -982,28 +1004,24 @@ def run_moe_ep(
     # =========================================================================
     torch.cuda.synchronize()
     max_tokens = num_tokens_lists[-1]
-    for i in range(len(num_tokens_lists)):
-        max_tokens = num_tokens_lists[-i - 1]
-        try:
-            hidden_states_max_tokens = torch.randn([max_tokens, hidden_size], device="cpu").bfloat16().to(device)
-            # Use num_slots for routing (EPLB routes to slots, not experts)
-            logits_max_tokens = balanced_logits(max_tokens, num_slots, topk).to(router_logits_dtype).to(device)
-            moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
-            torch.cuda.synchronize()
-            print(f"[dry run] Successfully dry run for {max_tokens} tokens")
-            break
-        except Exception as e:
-            print(f"[dry run] Failed for {max_tokens} tokens: {e}, trying smaller size...")
-            if i == len(num_tokens_lists) - 1:
-                # Execute-or-raise: not even the smallest declared token count
-                # ran, so the whole case fails classified instead of silently
-                # completing with zero rows (the retired code constructed this
-                # RuntimeError without raising it).
-                raise MoeEpBenchmarkError(
-                    f"moe_ep dry run failed for every declared token count "
-                    f"(moe_type={moe_type}, ep={moe_ep_size}, num_slots={num_slots}): {e}"
-                ) from e
-            continue
+    try:
+        hidden_states_max_tokens = torch.randn([max_tokens, hidden_size], device="cpu").bfloat16().to(device)
+        # Use num_slots for routing (EPLB routes to slots, not experts)
+        logits_max_tokens = balanced_logits(max_tokens, num_slots, topk).to(router_logits_dtype).to(device)
+        moe.forward(hidden_states_max_tokens, logits_max_tokens, do_finalize=not min_latency_mode)
+        torch.cuda.synchronize()
+        print(f"[dry run] Successfully dry run for {max_tokens} tokens")
+    except Exception as e:
+        # Execute-or-raise: the queued case declares num_tokens_lists in its
+        # identity, so a run that cannot execute the largest declared token
+        # point fails classified. The retired walk-down silently shrank the
+        # benchmarked list instead — the executor checkpoint and case-plan
+        # hash still represented the full list, making a partial curve
+        # indistinguishable from complete coverage.
+        raise MoeEpBenchmarkError(
+            f"moe_ep dry run failed for the largest declared token count {max_tokens} "
+            f"(moe_type={moe_type}, ep={moe_ep_size}, num_slots={num_slots}): {e}"
+        ) from e
 
     # =========================================================================
     # AutoTuner
@@ -1039,23 +1057,22 @@ def run_moe_ep(
 
     if not cache_loaded:
         torch.cuda.synchronize()
-        for i in range(len(num_tokens_lists)):
-            max_tokens_for_tuning = num_tokens_lists[-i - 1]
-            if max_tokens_for_tuning > max_tokens:
+        # Tuning-quality fallback only: every declared token point is still
+        # benchmarked below; a tuner that only succeeds at a smaller ceiling
+        # degrades tactic selection, not coverage.
+        for max_tokens_for_tuning in reversed(num_tokens_lists):
+            try:
+                with torch.inference_mode(), autotune(cache_path=cache_path):
+                    moe.forward(
+                        hidden_states_max_tokens[:max_tokens_for_tuning],
+                        logits_max_tokens[:max_tokens_for_tuning],
+                        do_finalize=not min_latency_mode,
+                    )
+                torch.cuda.synchronize()
+                break  # Tuning succeeded, exit loop
+            except Exception as e:
+                print(f"tune failed for {max_tokens_for_tuning} tokens: {e}, fallback to smaller tokens")
                 continue
-            else:
-                try:
-                    with torch.inference_mode(), autotune(cache_path=cache_path):
-                        moe.forward(
-                            hidden_states_max_tokens[:max_tokens_for_tuning],
-                            logits_max_tokens[:max_tokens_for_tuning],
-                            do_finalize=not min_latency_mode,
-                        )
-                    torch.cuda.synchronize()
-                    break  # Tuning succeeded, exit loop
-                except Exception as e:
-                    print(f"tune failed for {max_tokens_for_tuning} tokens: {e}, fallback to smaller tokens")
-                    continue
 
     del hidden_states_max_tokens, logits_max_tokens
 
@@ -1063,14 +1080,6 @@ def run_moe_ep(
     # Benchmark each token count
     # =========================================================================
     for num_tokens in num_tokens_lists:
-        if num_tokens > max_tokens:
-            # Runtime token-point drop, logged with its reason: the dry run
-            # above established that this token count cannot be allocated/run
-            # on this device. Drops one token point inside the queued case,
-            # never the case.
-            print(f"moe_ep: dropping num_tokens={num_tokens} because the dry run failed above {max_tokens} tokens")
-            continue
-
         num_iter = 5 if distributed == "power_law" else 1
 
         # In WideEP, DP size = EP size, each DP rank has num_tokens/ep_size tokens
@@ -1252,8 +1261,10 @@ def run_moe_ep(
 
         # Log performance: one measurement -> one row per inference phase
         # (see _build_moe_ep_phase_rows). kernel_source stays the
-        # framework-dispatch ground truth recorded in `source`.
-        log_perf(
+        # framework-dispatch ground truth recorded in `source`. log_perf
+        # reports write failures by returning False — fail closed, or the
+        # executor would checkpoint this case as passed with rows missing.
+        if not log_perf(
             item_list=_build_moe_ep_phase_rows(
                 moe_dtype=moe_type,
                 distribution=dist_str,
@@ -1274,7 +1285,12 @@ def run_moe_ep(
             kernel_source=source,
             perf_filename=perf_filename,
             power_stats=_power_columns(power_stats),
-        )
+        ):
+            raise MoeEpBenchmarkError(
+                f"helper.log_perf failed to persist the measured moe_ep rows (num_tokens={num_tokens}, "
+                f"moe_type={moe_type}, ep={moe_ep_size}); a measured-but-unpersisted point must fail "
+                "classified, not checkpoint as passed"
+            )
 
         # Cleanup iteration
         if accurate_wideep_simulation:

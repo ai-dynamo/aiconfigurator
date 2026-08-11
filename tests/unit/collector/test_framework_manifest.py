@@ -66,10 +66,11 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
 
 
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
-    # The `comm` family override retargets exactly the two DeepEP ops; wideep_moe
-    # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset was
-    # collected with, where DSv4 module support is verified.
-    moe = resolve_op_runtime("wideep_sglang", "wideep_moe")
+    # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
+    # (the retired wideep_moe's successor) is family `moe` and stays on the
+    # DeepSeek-V4 runtime its 0.5.10 dataset was collected with, where DSv4
+    # module support is verified.
+    moe = resolve_op_runtime("wideep_sglang", "moe_ep")
     assert (moe.family, moe.version) == ("moe", "0.5.10")
     assert "deepseek-v4" in moe.image()
 
@@ -88,10 +89,10 @@ def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
 
 def test_deepep_and_wideep_moe_cannot_share_one_container():
     with pytest.raises(RuntimeError) as excinfo:
-        require_collector_runtime("sglang", "0.5.12", requested_ops={"wideep_moe", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
+        require_collector_runtime("sglang", "0.5.12", requested_ops={"moe_ep", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
     message = str(excinfo.value)
     assert "deepep_ll→0.5.12" in message
-    assert "wideep_moe→0.5.10" in message
+    assert "moe_ep→0.5.10" in message
     assert "run each version group in its own container" in message
 
 

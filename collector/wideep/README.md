@@ -59,17 +59,27 @@ Enrollment is one coordinated change:
 2. Create `collector/wideep/vllm/registry.py` with
    `OpEntry(op="moe_ep", module="collector.wideep.vllm.collect_moe_ep",
    get_func="get_moe_ep_test_cases", run_func="run_moe_ep",
-   perf_filename=PerfFile.MOE_EP)`.
+   perf_filename=PerfFile.MOE_EP)`, and enroll the framework key in
+   `collector/framework_manifest.py` `_REGISTRY_MODULES`
+   (`"wideep_vllm": "collector.wideep.vllm.registry"`) — registry/runtime
+   resolution raises for a manifest entry with no registered module.
 3. In the SAME commit (Task-1 sequencing rule: closures may not precede
    registration), add the `collector.wideep.vllm.collect_moe_ep` entry to
    `collector/hash_closures.yaml` (base-op yaml extras + `__model_cases__`,
    like its sglang/trtllm siblings).
 4. Set `__compat__` in `collector/wideep/vllm/collect_moe_ep.py` to the
-   pinned vllm version.
+   pinned vllm version, and add the kernel-source fact to
+   `collector/kernel_source_backends.yaml`: the module writes
+   `kernel_source: deepep_moe`, which that table currently maps only for
+   `framework: sglang` — the new `{framework: vllm, kernel_source:
+   deepep_moe, backend: ...}` entry needs a citation into the verified vLLM
+   dispatch (the same verification as item 6).
 5. Flip the dormancy pins in
    `tests/unit/collector/test_vllm_collect_moe_ep.py`
    (`test_no_vllm_wideep_registry_exists`,
    `test_manifest_has_no_wideep_vllm_pin`,
+   `test_registry_modules_have_no_wideep_vllm_entry`,
+   `test_kernel_source_backends_have_no_vllm_deepep_moe_mapping`,
    `test_hash_closures_has_no_entry_for_the_unregistered_module`) into their
    positive counterparts.
 6. On the pinned image, resolve the module's marked VERIFICATION ITEMs

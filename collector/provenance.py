@@ -57,7 +57,7 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
 STATUS_COMPLETE = "complete"
 STATUS_PARTIAL = "partial"
 
-_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_digest")
+_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_variant", "image_digest")
 _TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
 
 

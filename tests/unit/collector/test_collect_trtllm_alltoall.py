@@ -340,14 +340,44 @@ def test_sidecar_is_written_with_the_trtllm_module_identity(tmp_path):
 
 def test_runtime_meta_gates_the_installed_version_against_the_manifest_pin():
     manifest = yaml.safe_load((REPO_ROOT / "collector" / "framework_manifest.yaml").read_text())
-    pinned = manifest["frameworks"]["trtllm"]["default"]["version"]
-    meta = ata.resolve_runtime_meta(pinned)
+    spec = manifest["frameworks"]["trtllm"]["default"]
+    pinned = spec["version"]
+    meta = ata.resolve_runtime_meta(pinned, spec["images"]["default"])
     assert meta["framework"] == "trtllm"
     assert meta["version"] == pinned
     assert "@" not in meta["image"]
+    assert meta["image_variant"] == "default"
     assert meta["image_digest"].startswith("sha256:")
     with pytest.raises(ata.TrtllmAlltoallDeclarationError, match="manifest trtllm pin"):
-        ata.resolve_runtime_meta("1.2.0rc5")
+        ata.resolve_runtime_meta("1.2.0rc5", spec["images"]["default"])
+
+
+def test_runtime_meta_attests_the_launched_image_only(tmp_path):
+    # F17: CONTAINER_IMAGE is operator-overridable in the launcher, so the
+    # sidecar must attest the ref that actually ran — a ref outside the
+    # manifest pins is refused, and a missing ref cannot silently fall back
+    # to the manifest default.
+    manifest = yaml.safe_load((REPO_ROOT / "collector" / "framework_manifest.yaml").read_text())
+    spec = manifest["frameworks"]["trtllm"]["default"]
+    with pytest.raises(ata.TrtllmAlltoallDeclarationError, match="--image-ref"):
+        ata.resolve_runtime_meta(spec["version"], None)
+    with pytest.raises(ata.TrtllmAlltoallDeclarationError, match="not a manifest trtllm image variant"):
+        ata.resolve_runtime_meta(spec["version"], "someone/rebuilt-trtllm:latest")
+
+
+def test_stale_staging_artifacts_are_refused_before_any_write():
+    # F19: log_perf appends; a resubmission into a directory with a previous
+    # attempt's CSV would finalize duplicates under this run's attestation.
+    assert "stale_output_artifacts(output_dir" in SOURCE_TEXT
+    assert "refuses to run into" in SOURCE_TEXT
+
+
+def test_rank0_persistence_result_is_agreed_before_the_next_collective():
+    # F18: a rank-0-only write failure must become a classified case failure
+    # every rank agrees on, not an exception peers never see (they would hang
+    # in the next case's barrier).
+    assert "persist_failed" in SOURCE_TEXT
+    assert 'op_name="alltoall_persistence"' in SOURCE_TEXT
 
 
 def test_classified_failure_records_are_rank_scoped(tmp_path):

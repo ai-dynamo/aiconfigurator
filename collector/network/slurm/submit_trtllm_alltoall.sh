@@ -7,7 +7,7 @@
 # sidecar) per job; within a job, cases append one CSV via log_perf's lockfile
 #
 # Usage:
-#   bash submit_trtllm_alltoall.sh                                                # default: NVLinkTwoSided, 2,4,8,16,32,48,64,72 GPUs, 4 GPUs/node
+#   bash submit_trtllm_alltoall.sh                                                # default: NVLinkTwoSided, 2,4,8,16,32,64 GPUs, 4 GPUs/node
 #   bash submit_trtllm_alltoall.sh --kernel-source NVLinkOneSided --gpu-list 2,4  # NVLinkOneSided, 2 and 4 GPUs
 #   bash submit_trtllm_alltoall.sh --gpu-list 4,8,16                              # NVLinkTwoSided, 4,8,16 GPUs
 
@@ -19,7 +19,7 @@ Options:
   --kernel-source <name>   Communication strategy: NVLinkTwoSided or NVLinkOneSided
                            (default: NVLinkTwoSided)
   --gpu-list <list>        Comma-separated GPU counts to benchmark
-                           (default: 2,4,8,16,32,48,64,72)
+                           (default: 2,4,8,16,32,64)
   --gpus-per-node <n>      GPUs per node for node/task calculation
                            (default: \${GPUS_PER_NODE:-4})
   -h, --help               Show this help message
@@ -54,9 +54,13 @@ PARTITION="${PARTITION:-gb200}"
 
 COLLECTOR_SCRIPT="${SCRIPT_DIR}/collect_trtllm_alltoall.py"
 
-# Defaults
+# Defaults. 48 and 72 are deliberately absent: the collector's sole declared
+# shape has 256 experts, which shards evenly into neither world, so those jobs
+# would expand to zero cases and fail after reserving up to a full rack. Kept
+# in sync by tests/unit/collector/test_network_layout.py::
+# test_advertised_default_worlds_expand_to_at_least_one_case.
 KERNEL_SOURCE="NVLinkTwoSided"
-GPU_LIST="2,4,8,16,32,48,64,72"
+GPU_LIST="2,4,8,16,32,64"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 
 # Parse arguments
@@ -84,7 +88,7 @@ IFS=',' read -ra GPU_COUNTS <<< "${GPU_LIST}"
 echo "=========================================="
 echo "TensorRT-LLM MoE AlltoAll Benchmark [${KERNEL_SOURCE}]"
 echo "Submitting parallel jobs for: ${GPU_LIST} GPUs"
-echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/job_<jobid>/"
 echo "=========================================="
 
 for NUM_GPUS in "${GPU_COUNTS[@]}"; do
@@ -101,9 +105,11 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     # One output directory per job: the collector finalizes a parquet and a
     # collection_meta.yaml sidecar per run (per world), so jobs cannot share
     # one file. Within a job, cases append one moe_a2a_perf.txt via
-    # helper.log_perf's lockfile.
+    # helper.log_perf's lockfile. The job-scoped subdirectory (resolved inside
+    # the job, where SLURM_JOB_ID exists) keeps a resubmission from appending
+    # after a previous attempt's stale rows — the collector refuses a
+    # directory that already holds owned artifacts.
     OUTPUT_DIR="${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.${NUM_GPUS}gpu"
-    mkdir -p "${OUTPUT_DIR}"
 
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
     
@@ -130,12 +136,12 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
                     --container-image=\"${CONTAINER_IMAGE}\" \
                     --container-mounts=\"${CONTAINER_MOUNTS}\" \
                     --mpi=pmix \
-                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --gpus-per-node \"${TASKS_PER_NODE}\" --output-path \"${OUTPUT_DIR}\""
+                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --gpus-per-node \"${TASKS_PER_NODE}\" --image-ref \"${CONTAINER_IMAGE}\" --output-path \"${OUTPUT_DIR}/job_\${SLURM_JOB_ID}\""
 done
 
 echo ""
 echo "=========================================="
 echo "All jobs submitted!"
 echo "Check status: squeue -u \$USER"
-echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/moe_a2a_perf.parquet (+ collection_meta.yaml)"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/job_<jobid>/moe_a2a_perf.parquet (+ collection_meta.yaml)"
 echo "=========================================="

@@ -106,16 +106,18 @@ def test_deepseek_v3_population_counts_per_stage(monkeypatch, moe_ep_symbols):
     cases = moe_ep_symbols["get_moe_ep_test_cases"]()
     assert len(cases) == 8
     # Sorted emission on the non-token key axis (moe_ep_size), and every case
-    # carries the DECLARED DeepSeek-V3 geometry, not a live HF read.
+    # carries the DECLARED DeepSeek-V3 geometry, not a live HF read — plus the
+    # model identity the subprocess loads (F14: never a defaulted checkpoint).
+    model = "deepseek-ai/DeepSeek-V3"
     assert cases == [
-        [128, 2, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [64, 4, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [32, 8, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [16, 16, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [8, 32, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [4, 64, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [2, 128, 7168, 2048, 8, 256, 256, "fp8_block"],
-        [1, 256, 7168, 2048, 8, 256, 256, "fp8_block"],
+        [128, 2, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [64, 4, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [32, 8, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [16, 16, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [8, 32, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [4, 64, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [2, 128, 7168, 2048, 8, 256, 256, "fp8_block", model],
+        [1, 256, 7168, 2048, 8, 256, 256, "fp8_block", model],
     ]
 
 
@@ -126,6 +128,49 @@ def test_local_expert_counts_match_the_retired_hardcoded_sweep(monkeypatch, moe_
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", "deepseek-ai/DeepSeek-V3")
     local_experts = [case[0] for case in moe_ep_symbols["get_moe_ep_test_cases"]()]
     assert local_experts == [128, 64, 32, 16, 8, 4, 2, 1]
+
+
+def test_cases_resolve_their_own_declared_model(moe_ep_symbols):
+    # F14: the executor sets COLLECTOR_MODEL_PATH only for single-model plans;
+    # a full plan runs cases from several model families, so each subprocess
+    # loads the case's OWN declared model — never a defaulted checkpoint that
+    # would fail (or silently pass with the wrong geometry through) the
+    # declaration asserts.
+    loaded = _load_symbols("_case_model_path")
+    loaded["os"] = os
+    loaded["_resolve_moe_model_path"] = lambda model_id: f"resolved:{model_id}"
+
+    os_environ_backup = os.environ.get("COLLECTOR_MODEL_PATH")
+    try:
+        os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        assert loaded["_case_model_path"]("moonshotai/Kimi-K2.5") == "resolved:moonshotai/Kimi-K2.5"
+        os.environ["COLLECTOR_MODEL_PATH"] = "/scratch/artifacts/DeepSeek-V3"
+        assert loaded["_case_model_path"]("deepseek-ai/DeepSeek-V3") == "resolved:/scratch/artifacts/DeepSeek-V3"
+    finally:
+        if os_environ_backup is None:
+            os.environ.pop("COLLECTOR_MODEL_PATH", None)
+        else:
+            os.environ["COLLECTOR_MODEL_PATH"] = os_environ_backup
+
+
+def test_prefill_manifest_excludes_empty_uniform_workloads_at_generation():
+    # F15 twin: `num_token * topk * ep // num_experts == 0` is pure declared
+    # arithmetic, so the empty uniform points are resolved in the token-list
+    # builder — the benchmark loop runs the manifest exactly (reaching the
+    # runtime zero-workload branch raises as an invariant breach). Power-law
+    # variants sample their own counts and keep every token point.
+    loaded = _load_symbols("get_moe_prefill_test_cases", "_sorted_phase_cases")
+
+    # DeepSeek-V3 at any declared EP: 16 * 8 * 2 // 256 == 1 — nothing drops.
+    dsv3 = loaded["get_moe_prefill_test_cases"](2, topk=8, num_experts=256)
+    assert {"num_tokens": 16, "distributed": "uniform", "power_law_alpha": None} in dsv3
+
+    # Kimi-K2.5-like (384 experts) at EP 2: 16 * 8 * 2 // 384 == 0 — the
+    # uniform point drops at generation, its power-law variants stay.
+    kimi = loaded["get_moe_prefill_test_cases"](2, topk=8, num_experts=384)
+    assert {"num_tokens": 16, "distributed": "uniform", "power_law_alpha": None} not in kimi
+    assert {"num_tokens": 16, "distributed": "power_law", "power_law_alpha": 0.8} in kimi
+    assert {"num_tokens": 32, "distributed": "uniform", "power_law_alpha": None} in kimi
 
 
 def test_models_without_a_declared_wideep_row_expand_to_zero(monkeypatch, moe_ep_symbols):
@@ -150,12 +195,38 @@ def test_full_population_covers_every_declared_wideep_model(monkeypatch, moe_ep_
     assert counts["unique_invocations"] == len(cases) == 62
     # Dedup is not a no-op: the raw stage carries 186 recipes for 62 invocations.
     assert counts["quant_allowed"] == 186
-    # Every case is a valid EP shard of its declared expert count.
-    for local_experts, ep_size, _hidden, _inter, _topk, num_experts, num_slots, quant in cases:
+    # Every case is a valid EP shard of its declared expert count, tied to the
+    # model whose checkpoint the subprocess loads.
+    for local_experts, ep_size, _hidden, _inter, _topk, num_experts, num_slots, quant, model in cases:
         assert local_experts * ep_size == num_experts
         assert num_slots == num_experts
         assert ep_size > 1
         assert quant == "fp8_block"
+        assert isinstance(model, str) and model
+    # F14 registry surface: every declared wideep model family reaches the
+    # plan under its own identity — including families whose shape arguments
+    # collide — so no case can load another model's checkpoint.
+    from collector.case_generator import (
+        get_common_moe_test_cases,
+        is_wideep_moe_model,
+        moe_model_allows_quantization,
+    )
+
+    declared_models = {
+        recipe.model_name
+        for recipe in get_common_moe_test_cases(backend="sglang")
+        if is_wideep_moe_model(recipe.model_name)
+        and recipe.tp == 1
+        and recipe.ep > 1
+        and moe_model_allows_quantization("sglang", recipe.model_name, "fp8_block")
+    }
+    case_models = {case[8] for case in cases}
+    assert case_models == declared_models
+    assert len(case_models) >= 2, "the full path must span at least two model families"
+    # Cross-model shape collisions exist — without the model argument those
+    # cases would share task identity (and a default checkpoint).
+    assert len({tuple(case[:8]) for case in cases}) < len(cases)
+    assert len({tuple(case) for case in cases}) == len(cases)
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +363,13 @@ def test_hash_closures_declare_the_case_yaml_the_module_now_reads():
 def test_no_silent_case_skipping_in_the_benchmark_loops():
     # failure_handling.md: a queued case is executed or raises a classified
     # error. The retired `except Exception: ... skipping` handlers must not
-    # come back.
+    # come back, and neither may the runtime token-point drops (F15): the
+    # deterministic empty-uniform predicate lives in the token-list builder,
+    # and the stochastic LL buffer exceedance raises classified.
     assert "skipping..." not in SOURCE_TEXT
+    assert "dropping num_tokens=" not in SOURCE_TEXT
+    assert "the generation-time manifest should" in SOURCE_TEXT
+    assert "drew a routing sample" in SOURCE_TEXT
     assert "MoeEpBenchmarkError" in SOURCE_TEXT
     assert "MoeEpDeclarationMismatchError" in SOURCE_TEXT
 
