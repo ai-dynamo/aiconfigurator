@@ -102,6 +102,13 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `strict_provenance` policy flags; the engine re-derives every table's
 #   source list from the perf-data tree
 #   (`perf_database/source_resolution.rs`).
+# - 14 (AIC-1715/1716): Context/Generation attention ops gained `lane_order`
+#   (always serialized — bincode decodes positionally). Concurrently claimed
+#   v8, v9, v10, and v12 on its own branch (v8 alongside #1503's v7/v8, v9
+#   alongside #1461's `Op::FpmForward` v9, v10 alongside issue #1498's Mhc
+#   `seq_split` v10, v12 alongside PR-6's `DsaModuleOp`
+#   `attn_projection_quant_modes` v12); each landed first, so this renumbers
+#   to 14 at merge (same v3/v4, v5/v6 precedent).
 # Single owner: the Rust crate constant. Python re-exports it for
 # diagnostics/tests instead of declaring a twin to keep in sync.
 ENGINE_SPEC_SCHEMA_VERSION = aiconfigurator_core.engine_spec_schema_version()
