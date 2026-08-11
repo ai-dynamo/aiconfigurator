@@ -77,7 +77,9 @@ class TRTLLMBackend(BaseBackend):
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
         return KV_CACHE_MEMORY_RESERVED_FRACTION, KV_CACHE_MEMORY_TOLERANCE
 
-    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
+    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int, backend_version: str | None = None) -> dict:
+        # backend_version is unused: TRT-LLM's fraction default is not
+        # version-dependent.
         # Use ``if x is None`` (rather than kwargs.get default) so that an
         # explicit None from the Python API still falls back to the constant.
         max_seq_len = kwargs.get("max_seq_len")
