@@ -345,6 +345,7 @@ class Qwen35Model(BaseModel):
                         fmha_q,
                         head_size=self._head_size,
                         use_qk_norm=True,
+                        attention_backend=getattr(self.config, "attention_backend", None),
                     ),
                     ops.GEMM(
                         "context_proj_gemm",
@@ -716,6 +717,7 @@ class Qwen35Model(BaseModel):
                         kvcache_q,
                         head_size=self._head_size,
                         use_qk_norm=True,
+                        attention_backend=getattr(self.config, "attention_backend", None),
                     ),
                     ops.GEMM(
                         "generation_proj_gemm",
