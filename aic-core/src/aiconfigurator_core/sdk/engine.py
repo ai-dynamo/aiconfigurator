@@ -63,6 +63,7 @@ from aiconfigurator_core.sdk.operations import (
     GenerationDSAModule,
     GenerationMLA,
     GenerationMSAModule,
+    KDAKernel,
     Mamba2Kernel,
     MLABmm,
     MLAModule,
@@ -102,7 +103,11 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   enum indices after `DsaGeneration` shifted). The MSA insertion and #1405
 #   each claimed version 3 on their own branch, so their merge needed a
 #   fresh number.
-ENGINE_SPEC_SCHEMA_VERSION = 4
+# - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
+#   `native_num_heads` (always serialized — bincode decodes positionally).
+# - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
+#   Claimed version 5 concurrently with #1460; renumbered at the merge.
+ENGINE_SPEC_SCHEMA_VERSION = 6
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -236,7 +241,7 @@ def _generation_mla(op: GenerationMLA) -> dict:
 
 
 def _mla_module(op: MLAModule) -> dict:
-    return {
+    spec = {
         "name": op._name,
         "scale_factor": op._scale_factor,
         "num_heads": op._num_heads,
@@ -244,6 +249,11 @@ def _mla_module(op: MLAModule) -> dict:
         "fmha_quant_mode": _quant_name(op._fmha_quant_mode),
         "gemm_quant_mode": _quant_name(op._gemm_quant_mode),
     }
+    # Emitted only when set: keeps specs from legacy builders byte-identical
+    # (the Rust field is #[serde(default)]; Rust bincode always serializes it, #1458).
+    if op._native_num_heads is not None:
+        spec["native_num_heads"] = op._native_num_heads
+    return spec
 
 
 def _mla_bmm(op: MLABmm) -> dict:
@@ -540,6 +550,10 @@ def _gdn(op: GDNKernel) -> dict:
     }
 
 
+def _kda(op: KDAKernel) -> dict:
+    return {**_gdn(op), "draft_tokens": op._draft_tokens}
+
+
 def _wideep_context_mla(op: WideEPContextMLA) -> dict:
     return {
         "name": op._name,
@@ -711,6 +725,11 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"Mhc": _mhc_module(op, architecture=architecture)}
     if isinstance(op, Mamba2Kernel):
         return {"Mamba2": _mamba2(op)}
+    if isinstance(op, KDAKernel):
+        # Must precede the GDNKernel check: KDAKernel subclasses GDNKernel and
+        # would otherwise be silently serialized as Gdn (wrong table + a bf16
+        # SOL byte model for an fp32-state kernel).
+        return {"Kda": _kda(op)}
     if isinstance(op, GDNKernel):
         return {"Gdn": _gdn(op)}
 
@@ -943,6 +962,24 @@ def compile_engine(
     return bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json))
 
 
+def build_ops_json(
+    ops: Any,
+    *,
+    model: Any,
+    backend: str,
+    database: Any = None,
+) -> str:
+    """Serialize an op list to the OpSpec JSON array the ad-hoc op-list
+    evaluation FFI (``AicEngine.evaluate_ops_json``) consumes.
+
+    Serves op lists deliberately NOT emitted into the compiled ``EngineSpec``
+    (the VL encoder phase). Raises ``OpConversionError`` for ops the spec
+    cannot express, exactly like the spec builder.
+    """
+    architecture = getattr(model, "architecture", "") or ""
+    return json.dumps([_to_opspec(op, backend=backend, architecture=architecture, database=database) for op in ops])
+
+
 def build_engine_spec_json(
     model: Any,
     *,
@@ -1084,6 +1121,27 @@ class EngineHandle:
             float(gen_seq_imbalance_correction_scale),
         )
 
+    def mixed_step_breakdown(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[float, float, float, float]:
+        """Return total/shared-non-attn/context-attn/decode-attn latency."""
+        return self._engine.mixed_step_breakdown(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
+
     def decode_step_latency(
         self,
         gen_tokens: int,
@@ -1093,6 +1151,147 @@ class EngineHandle:
     ) -> float:
         return self._engine.decode_step_latency(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def run_static_per_op(
+        self,
+        *,
+        batch_size: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        beam_width: int = 1,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
+        """``run_static`` with the per-op values kept: ``(context, generation)``
+        lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
+        name appears once, accumulated with Python's phase-dict semantics;
+        generation values are per-step-folded, then weighted by
+        ``repeat_count``)."""
+        return self._engine.run_static_per_op(
+            int(batch_size),
+            int(beam_width),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+            mode,
+            int(stride),
+        )
+
+    def mixed_step_breakdown_per_op(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[tuple[str, float, float, str]],
+        list[tuple[str, float, float, str]],
+        list[tuple[str, float, float, str]],
+    ]:
+        """``mixed_step_breakdown`` with the per-op values kept:
+        ``(shared_non_attention, context_attention, decode_attention)`` lists;
+        context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
+        return self._engine.mixed_step_breakdown_per_op(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
+
+    def decode_step_per_op(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[tuple[str, float, float, str]]:
+        """``decode_step_latency`` with the per-op values kept."""
+        return self._engine.decode_step_per_op(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def evaluate_context_ops(
+        self,
+        indices: list[int],
+        *,
+        batch_size: int,
+        s: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        x: int | None = None,
+    ) -> list[tuple[str, float, float, str]]:
+        """Thin op-list evaluation over the compiled CONTEXT op list: evaluate
+        the ops at ``indices`` (positions in the spec's ``context_ops``, which
+        mirror ``model.context_ops`` order) at the context-phase shape.
+        ``x`` overrides the per-op token count verbatim (callers with their
+        own x policy, e.g. AFD's uniform ``batch * s``); ``None`` keeps the
+        base-phase rule (``batch * s``, logits-GEMM exception)."""
+        return self._engine.evaluate_context_ops(
+            [int(i) for i in indices],
+            int(batch_size),
+            int(s),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            int(x) if x is not None else None,
+        )
+
+    def evaluate_generation_ops(
+        self,
+        indices: list[int],
+        *,
+        batch_size: int,
+        s: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+        prefix: int = 0,
+        x: int | None = None,
+    ) -> list[tuple[str, float, float, str]]:
+        """Thin op-list evaluation over the compiled GENERATION op list at the
+        decode-step shape (see :meth:`evaluate_context_ops`). The base decode
+        walk carries no prefix; ``prefix`` exists for orchestrations that
+        thread it (AFD)."""
+        return self._engine.evaluate_generation_ops(
+            [int(i) for i in indices],
+            int(batch_size),
+            int(s),
+            float(gen_seq_imbalance_correction_scale),
+            int(prefix),
+            int(x) if x is not None else None,
+        )
+
+    def evaluate_ops_json(
+        self,
+        ops_json: str,
+        *,
+        is_context: bool,
+        batch_size: int,
+        s: int,
+        prefix: int = 0,
+        imbalance_correction_scale: float = 1.0,
+        x: int | None = None,
+    ) -> list[tuple[str, float, float, str]]:
+        """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against
+        this engine's database — serves op lists deliberately NOT in the
+        compiled spec (the VL encoder phase); the caller keeps the shape math."""
+        return self._engine.evaluate_ops_json(
+            ops_json,
+            bool(is_context),
+            int(batch_size),
+            int(s),
+            int(prefix),
+            float(imbalance_correction_scale),
+            int(x) if x is not None else None,
         )
 
     def last_provenance(self) -> str | None:

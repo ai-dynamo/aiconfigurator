@@ -81,6 +81,52 @@ def test_expected_progress_projects_service_metrics_not_core_breakdown():
     assert original.get_result_dict()["tpot"] == 10.0
 
 
+def test_aggregate_projection_does_not_double_apply_scheduler_progress():
+    original = _summary()
+    original.set_step_estimates(
+        {
+            "scheduling": {
+                "decode_tokens_per_iteration": 2.0,
+                "decode_iterations": 5.0,
+            }
+        }
+    )
+
+    projected = SpeculativeDecodingProfile(1.0).project_summary(original, role="agg")
+
+    assert projected is not original
+    assert projected.get_result_dict()["tpot"] == 10.0
+    assert projected.get_result_dict()["tokens/s"] == 45.0
+
+
+def test_aggregate_projection_applies_when_scheduler_saw_no_explicit_progress():
+    """Legacy flow: run_agg was called without decode_tokens_per_iteration, so
+    its scheduling metadata carries no progress marker and the post-hoc scalar
+    projection must still apply (regression: treating the scheduler's implicit
+    1.0 default as 'already projected' silently froze TPOT at baseline)."""
+    original = _summary()
+    original.set_step_estimates({"scheduling": {"decode_iterations": 9.0}})
+
+    projected = SpeculativeDecodingProfile(1.0).project_summary(original, role="agg")
+
+    assert projected.get_result_dict()["tpot"] == 5.0
+    assert projected.get_result_dict()["tokens/s"] == 90.0
+
+
+def test_aggregate_projection_never_stacks_on_mismatched_scheduler_progress(caplog):
+    """If run_agg already applied a different progress, the scheduler value is
+    authoritative: re-scaling on top would compound two different speedups."""
+    original = _summary()
+    original.set_step_estimates({"scheduling": {"decode_tokens_per_iteration": 1.5}})
+
+    with caplog.at_level("WARNING", logger="aiconfigurator.sdk.speculative"):
+        projected = SpeculativeDecodingProfile(1.0).project_summary(original, role="agg")
+
+    assert projected.get_result_dict()["tpot"] == 10.0
+    assert projected.get_result_dict()["tokens/s"] == 45.0
+    assert any("decode_tokens_per_iteration" in record.message for record in caplog.records)
+
+
 def test_aggregate_projection_reapplies_vllm_little_law_cap():
     original = _summary()
     frame = original.get_summary_df().copy()

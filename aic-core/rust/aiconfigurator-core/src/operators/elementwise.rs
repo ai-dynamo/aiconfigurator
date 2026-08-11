@@ -9,14 +9,16 @@
 //! uses the same `query_mem_op` empirical formula for all of them, scaled
 //! by per-op token counts and dtype factors.
 //!
-//! The formula matches Python's `PerfDatabase.query_mem_op`:
-//! `(mem_bytes / (mem_bw * empirical_scaling) + constant_latency) * 1000`.
+//! The formula matches Python's mode-aware `PerfDatabase.query_mem_op`:
+//! `(mem_bytes / (mem_bw * empirical_scaling) + constant_latency) * 1000`
+//! tagged "empirical", or the pure `mem_bytes / mem_bw * 1000` bound tagged
+//! "sol" under SOL mode.
 
-use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
-use crate::operators::attention::mem_op_latency_ms;
+use crate::operators::attention::query_mem_op;
+use crate::operators::base::PerformanceResult;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ElementwiseOp {
@@ -57,7 +59,6 @@ impl ElementwiseOp {
         let num_tokens = num_tokens / self.scale_num_tokens.max(1);
         let num_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
         let bytes = self.bytes_per_token * (num_tokens as f64);
-        let latency = mem_op_latency_ms(&db.system_spec, bytes);
-        Ok(PerformanceResult::new(latency, Source::Empirical).scaled(self.scale_factor))
+        Ok(query_mem_op(db, bytes).scaled(self.scale_factor))
     }
 }

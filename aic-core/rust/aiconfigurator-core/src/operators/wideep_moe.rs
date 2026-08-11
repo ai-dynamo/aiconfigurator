@@ -30,13 +30,14 @@
 //! (architecture-preferred kernel, falling back to whatever the table
 //! actually collected).
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WideEpMoeOp {
@@ -98,18 +99,25 @@ impl WideEpMoeOp {
         }
     }
 
-    pub fn query(
-        &self,
-        db: &PerfDatabase,
-        num_tokens: u32,
-    ) -> Result<PerformanceResult, AicError> {
+    pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         // Python: `x = num_tokens * self._attention_dp_size`.
         let scaled = num_tokens.saturating_mul(self.attention_dp_size.max(1));
 
         // Database-mode dispatch, mirroring the Python `_query_compute_table`
-        // tail (`database._query_silicon_or_hybrid`). The SOL diagnostic
-        // modes never reach the compiled engine.
+        // tail (`database._query_silicon_or_hybrid`); SOL (and the retired
+        // SOL_FULL alias) is the pure roofline with `Source::Sol`.
         let (latency, source) = match db.database_mode {
+            // Python `_query_compute_table`: `get_sol(num_tokens, hidden_size,
+            // inter_size, topk, num_experts, num_slots, moe_tp_size,
+            // moe_ep_size, quant_mode, workload_distribution)[0]` — weights
+            // use num_slots; num_experts and the distribution never enter.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+                (
+                    self.sol_latency_ms(&db.system_spec, scaled, tc_flops),
+                    Source::Sol,
+                )
+            }
             DatabaseMode::Empirical => (self.empirical_latency(db, scaled)?, Source::Empirical),
             DatabaseMode::Hybrid => match self.silicon_latency(db, scaled) {
                 Ok(latency) => (latency, Source::Silicon),
@@ -137,7 +145,8 @@ impl WideEpMoeOp {
         // Engine coordinates are always integral (table keys / the u32
         // query); rounding to u32 keeps integer floor-division parity with
         // Python's `get_sol` (same convention as operators/moe.rs).
-        let sol = |t: f64| self.sol_latency_ms(spec, t.round() as u32);
+        let tc_flops = quant_tc_flops(spec, self.quant_mode.mapping())?;
+        let sol = |t: f64| self.sol_latency_ms(spec, t.round() as u32, tc_flops);
         db.wideep_moe.query_compute(
             num_tokens,
             self.hidden_size,
@@ -184,8 +193,9 @@ impl WideEpMoeOp {
     fn empirical_latency(&self, db: &PerfDatabase, num_tokens: u32) -> Result<f64, AicError> {
         let kernel = self.select_kernel(db)?;
         let spec = &db.system_spec;
-        let sol = |c: &[f64]| self.sol_latency_ms(spec, c[0].round() as u32);
-        let sol_time = self.sol_latency_ms(spec, num_tokens);
+        let tc_flops = quant_tc_flops(spec, self.quant_mode.mapping())?;
+        let sol = |c: &[f64]| self.sol_latency_ms(spec, c[0].round() as u32, tc_flops);
+        let sol_time = self.sol_latency_ms(spec, num_tokens, tc_flops);
 
         // Python keys on ("wideep_moe", system, backend, version, kernel,
         // quant, topk, num_experts, hidden, inter, num_slots, moe_tp,
@@ -240,7 +250,7 @@ impl WideEpMoeOp {
     /// (`operators/moe.rs`) except the weight-read term uses `num_slots`
     /// instead of `num_experts` (WideEP EPLB redundant mode may replicate
     /// experts across slots). `num_experts` never enters the math.
-    fn sol_latency_ms(&self, spec: &SystemSpec, num_tokens: u32) -> f64 {
+    fn sol_latency_ms(&self, spec: &SystemSpec, num_tokens: u32, tc_flops: f64) -> f64 {
         let total_tokens = num_tokens as u64 * self.topk as u64;
         let moe_ep = (self.moe_ep_size as u64).max(1);
         let moe_tp = (self.moe_tp_size as u64).max(1);
@@ -255,11 +265,9 @@ impl WideEpMoeOp {
                 * std::cmp::min(slots / moe_ep, total_tokens / moe_ep); // weights (num_slots)
         let mem_bytes = (mem_bytes_int as f64) * self.quant_mode.mapping().memory;
 
-        // Python indexes `bfloat16_tc_flops` directly (KeyError if absent);
-        // every shipped system populates it — same fallback convention as
-        // operators/moe.rs.
-        let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
-        let sol_math = (ops as f64) / (tc_flops * self.quant_mode.mapping().compute) * 1000.0;
+        // `tc_flops` is pre-resolved by the caller via `quant_tc_flops`
+        // (strict per-dtype lookup; a missing `*_tc_flops` entry errors there).
+        let sol_math = (ops as f64) / tc_flops * 1000.0;
         let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
         sol_math.max(sol_mem)
     }
@@ -374,7 +382,12 @@ mod tests {
         let emp = fallback_op
             .query(&b200_trtllm_db(DatabaseMode::Empirical), 64)
             .expect("empirical dist fallback");
-        assert_oracle(&emp, 0.4135615825653076, Source::Empirical, "emp_dist_fb_t64");
+        assert_oracle(
+            &emp,
+            0.4135615825653076,
+            Source::Empirical,
+            "emp_dist_fb_t64",
+        );
         let hyb = fallback_op
             .query(&b200_trtllm_db(DatabaseMode::Hybrid), 64)
             .expect("hybrid dist fallback");
@@ -396,7 +409,6 @@ mod tests {
             matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
             "expected the typed empirical miss, got {result:?}"
         );
-
     }
 
     /// Distribution fallback is FILE-ROW order, not sorted order: gb200's
@@ -436,15 +448,44 @@ mod tests {
         let hit = fallback_op
             .query(&gb200(DatabaseMode::Hybrid), 64)
             .expect("silicon dist fallback");
-        assert_oracle(&hit, 0.34764800071716306, Source::Silicon, "gb200_dist_fb_t64");
+        assert_oracle(
+            &hit,
+            0.34764800071716306,
+            Source::Silicon,
+            "gb200_dist_fb_t64",
+        );
         let interp = fallback_op
             .query(&gb200(DatabaseMode::Hybrid), 333)
             .expect("silicon dist fallback interp");
-        assert_oracle(&interp, 0.42581739127635954, Source::Silicon, "gb200_dist_fb_t333");
+        assert_oracle(
+            &interp,
+            0.42581739127635954,
+            Source::Silicon,
+            "gb200_dist_fb_t333",
+        );
         let emp = fallback_op
             .query(&gb200(DatabaseMode::Empirical), 333)
             .expect("empirical dist fallback");
-        assert_oracle(&emp, 0.4259303480537969, Source::Empirical, "gb200_emp_dist_fb_t333");
+        assert_oracle(
+            &emp,
+            0.4259303480537969,
+            Source::Empirical,
+            "gb200_emp_dist_fb_t333",
+        );
     }
 
+    /// SOL mode returns the pure WideEP MoE roofline (weights keyed by
+    /// num_slots) tagged `Source::Sol` (Python `_query_compute_table` SOL
+    /// branch).
+    #[test]
+    fn wideep_moe_sol_mode_returns_roofline_with_sol_source() {
+        let db = b200_trtllm_db(DatabaseMode::Sol);
+        let op = op();
+        let result = op.query(&db, 64).expect("wideep moe sol");
+        let tc_flops = quant_tc_flops(&db.system_spec, op.quant_mode.mapping()).unwrap();
+        let expected = op.sol_latency_ms(&db.system_spec, 64, tc_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+    }
 }

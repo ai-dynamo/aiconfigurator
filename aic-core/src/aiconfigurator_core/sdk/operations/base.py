@@ -80,7 +80,7 @@ def _resolve_perf_data_path(perf_file: str) -> str:
 #   tools/perf_database/migrate_family_layout.py  (KNOWN_BACKEND_DIRS)
 #   tools/sanity_check/create_charts.py           (_KNOWN_BACKEND_DIRS)
 #   aic-core/rust/aiconfigurator-core/src/perf_database/mod.rs (KNOWN_BACKEND_DIRS)
-# (tools/perf_database/audit_kernel_source.py's _LEGACY_BACKEND_DIRS is a
+# (tools/perf_database/check_kernel_source.py's _LEGACY_BACKEND_DIRS is a
 # deliberate 3-entry variant — consumer backends only, no comm pseudo-backends.)
 _KNOWN_BACKEND_DIRS = frozenset({"trtllm", "sglang", "vllm", "nccl", "oneccl"})
 
@@ -195,7 +195,7 @@ class Operation:
 
     Note: query() returns PerformanceResult (float-like) instead of plain float.
     The class behaves as a float for backward compatibility while carrying
-    energy data and a ``source`` tag ("silicon" / "empirical" / "mixed").
+    energy data and a provenance ``source`` tag; see ``PerformanceResult``.
     """
 
     # Subclasses that own CSV data override this. Keyed by (system_path, db_mode).
@@ -300,8 +300,10 @@ def clear_all_op_caches() -> None:
       fixture clears only the counter, not data caches — clearing the
       caches would force a fresh-disk reload mid-suite)
 
-    Also clears empirical utilization grids and the shared instrumentation
-    counter. Util grids are derived from per-op data, so retaining them after
+    Also clears empirical utilization grids, the shared instrumentation
+    counter, and the compiled-engine handle LRU (each ``EngineHandle`` pins a
+    Rust-side perf-DB load, so it belongs to the same eviction contract).
+    Util grids are derived from per-op data, so retaining them after
     their source caches are evicted can mix an old custom ``systems_root`` or
     shared-layer view into newly loaded data.
 
@@ -318,6 +320,11 @@ def clear_all_op_caches() -> None:
 
     util_empirical.clear_grid_cache()
     Operation._load_data_call_count.clear()
+    # Lazy for the same cycle reason (rust_engine_step is imported by engine.py,
+    # which imports operation modules).
+    from aiconfigurator_core.sdk import rust_engine_step
+
+    rust_engine_step._engine_handle_cache_clear()
 
 
 def warm_all_op_data(database: PerfDatabase) -> None:

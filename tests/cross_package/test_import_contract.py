@@ -36,6 +36,7 @@ CORE_SDK_LEAF_MODULES = [
     "models.gpt",
     "models.helpers",
     "models.hybrid_moe",
+    "models.kimi_k3",
     "models.llama",
     "models.minimax_m3",
     "models.moe",
@@ -52,6 +53,7 @@ CORE_SDK_LEAF_MODULES = [
     "operations.dsv4",
     "operations.elementwise",
     "operations.embedding",
+    "operations.fpm_forward",
     "operations.gemm",
     "operations.mamba",
     "operations.mla",
@@ -64,6 +66,7 @@ CORE_SDK_LEAF_MODULES = [
     "perf_interp.engine",
     "performance_result",
     "rust_engine_step",
+    "step_estimate",
     "system_spec",
     "utils",
 ]

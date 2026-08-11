@@ -43,18 +43,40 @@ def test_query_gemm_empirical_data_calibrated(stub_perf_db):
     assert math.isclose(float(empirical_value), float(silicon_value), rel_tol=1e-6)
 
 
-def test_query_gemm_empirical_raises_without_data(stub_perf_db):
-    """When the op has no data for the requested slice (fp8 absent in the stub),
-    EMPIRICAL raises EmpiricalNotImplementedError instead of fabricating a
-    SOL / constant -- the legacy placeholder fallback was removed.
+def test_query_gemm_empirical_borrows_cross_profile_under_default_policy(stub_perf_db):
+    """When the op has no data for the requested quant (fp8 absent in the stub)
+    the GEMM quant-transfer ladder borrows the collected bfloat16 grid across
+    profiles under the default (aggressive) policy — a data-calibrated
+    estimate tagged "xprofile", not a fabricated SOL / constant.
+    """
+    from aiconfigurator.sdk.operations import util_empirical
+
+    quant_mode = common.GEMMQuantMode.fp8  # no fp8 GEMM data in the stub; bf16 present
+    m, n, k = 64, 128, 256
+
+    with util_empirical.capture_provenance() as tags:
+        borrowed = stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
+    assert float(borrowed) > 0
+    assert "xprofile" in tags
+
+
+def test_query_gemm_empirical_raises_without_data_when_policy_forbids_transfer(stub_perf_db):
+    """Without a same-profile sibling, a policy that stops at XQUANT
+    ("balanced") must keep raising EmpiricalNotImplementedError instead of
+    fabricating a SOL / constant -- the legacy placeholder fallback stays
+    removed; cross-profile borrowing is policy-gated, never implicit.
     """
     from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
     quant_mode = common.GEMMQuantMode.fp8  # no fp8 GEMM data in the stub
     m, n, k = 64, 128, 256
 
-    with pytest.raises(EmpiricalNotImplementedError):
-        stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
+    stub_perf_db.set_transfer_policy("balanced")
+    try:
+        with pytest.raises(EmpiricalNotImplementedError):
+            stub_perf_db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.EMPIRICAL)
+    finally:
+        stub_perf_db.set_transfer_policy(None)
 
 
 def test_query_gemm_exact_match_skips_3d_interpolation(comprehensive_perf_db, monkeypatch):

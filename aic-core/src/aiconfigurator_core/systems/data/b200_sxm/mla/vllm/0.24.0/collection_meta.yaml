@@ -9,5 +9,18 @@ runtime:
 tables:
   mla_context_module_perf:
     status: complete
+    # Re-collected 2026-07-27 on B200 with the fused-op collector fix
+    # (ai-dynamo/aiconfigurator#1423). Measurement-method deviation, approved
+    # by the data owner: RMSNorm dispatch pinned to the eager `vllm_c` kernels
+    # (provider-asserted in collector/vllm/utils.py::enable_engine_fused_ops)
+    # as a validated surrogate for the serving engine's compiled/fused
+    # execution, which cannot be reproduced in a standalone collector (the
+    # IR-op torch wrapping is opaque to inductor outside a worker). Anchored
+    # -9% vs an in-engine per-layer trace at heads64/bs16/kv8192/fp8; the
+    # previous rows ran the never-in-serving native chain (+34%). Re-collect
+    # through the worker's VLLM_COMPILE dispatch when that harness lands.
+    norm_dispatch: vllm_c_eager_surrogate
   mla_generation_module_perf:
     status: complete
+    # Same deviation as mla_context_module_perf above.
+    norm_dispatch: vllm_c_eager_surrogate

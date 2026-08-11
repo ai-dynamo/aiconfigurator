@@ -20,6 +20,7 @@ from aiconfigurator.sdk.picking import (
     _build_disagg_summary_dict,
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
+from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class InferenceSession:
     Methods:
         run_static (static, static_ctx, static_gen): to support static batching and disagg,
             returns details of a static run
+        run_mixed: estimate one mixed prefill/decode engine iteration
         run_agg (static, static_ctx, static_gen): run agg inference, returns summary of the
             perf result with given agg config and runtime config (concurrency)
         find_best_agg_result_under_constraints (static, static_ctx, static_gen):
@@ -59,6 +61,7 @@ class InferenceSession:
         mode: str,
         stride: int = 32,
         latency_correction_scale: float = 1.0,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run static inference
@@ -68,10 +71,16 @@ class InferenceSession:
             mode (str): the mode to run inference, static, static_ctx, static_gen
             stride (int): the stride is used to accelerate the estimation, for a give osl,
                 will only computes the i, i+stride, i+2*stride, ... step, default is 32.
+            free_gpu_memory_fraction: Explicit KV-cache memory fraction for the
+                budget check (backend-defined semantics). When omitted the
+                backend applies its version-derived default.
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
+        # Forward the fraction only when set so stubbed/injected backends
+        # predating the kwarg keep working (same compat rule as predict.py).
+        extra = {} if free_gpu_memory_fraction is None else {"free_gpu_memory_fraction": free_gpu_memory_fraction}
         return self._backend.run_static(
             self._model,
             self._database,
@@ -79,6 +88,7 @@ class InferenceSession:
             mode,
             stride,
             latency_correction_scale,
+            **extra,
         )
 
     def run_static_latency_only(
@@ -103,6 +113,14 @@ class InferenceSession:
         return self._backend.run_static_latency_only(
             self._model, self._database, runtime_config, mode, stride, latency_correction_scale
         )
+
+    def run_mixed(
+        self,
+        runtime_config: config.RuntimeConfig,
+        step: MixedStepInput,
+    ) -> StepEstimate:
+        """Estimate one mixed prefill/decode engine iteration."""
+        return self._backend.run_mixed(self._model, self._database, runtime_config, step)
 
     def run_agg(self, runtime_config: config.RuntimeConfig, **kwargs) -> InferenceSummary:
         """
@@ -276,6 +294,7 @@ class DisaggInferenceSession:
         decode_batch_size: int,
         decode_num_worker: int,
         speculative_profile: SpeculativeDecodingProfile | None = None,
+        free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -291,6 +310,10 @@ class DisaggInferenceSession:
             decode_num_worker (int): the number of decode workers
             speculative_profile: Optional accepted-token progress assumption.
                 Projects decode metrics before prefill/decode rate matching.
+            free_gpu_memory_fraction: Explicit KV-cache memory fraction applied
+                to BOTH worker evaluations (semantics are backend-defined, see
+                run_static). When omitted, each run_static falls back to the
+                backend's version-derived default.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -308,6 +331,7 @@ class DisaggInferenceSession:
             mode="static_ctx",
             runtime_config=prefill_runtime_config,
             latency_correction_scale=self._prefill_latency_correction_scale,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
@@ -316,6 +340,7 @@ class DisaggInferenceSession:
             mode="static_gen",
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
@@ -331,6 +356,15 @@ class DisaggInferenceSession:
         prefill_oom = prefill_summary.check_oom()
         decode_oom = decode_summary.check_oom()
         if prefill_oom or decode_oom:
+            disagg_summary.set_oom(True)
+        # KV-cache budget infeasibility (per-worker fraction-based check from
+        # run_static) disqualifies the combination just like a capacity OOM:
+        # the deployed engine could not admit the assumed decode batch, so the
+        # projected throughput would be unreachable (#1396).
+        prefill_kv_oom = prefill_summary.check_kv_cache_oom()
+        decode_kv_oom = decode_summary.check_kv_cache_oom()
+        if prefill_kv_oom or decode_kv_oom:
+            disagg_summary.set_kv_cache_oom(True)
             disagg_summary.set_oom(True)
 
         disagg_summary.set_summary_df(disagg_summary_df)
@@ -355,12 +389,18 @@ class DisaggInferenceSession:
         prefill_ctx_latency = prefill_summary.get_context_latency_dict()
         if prefill_ctx_latency:
             per_ops_data["prefill"] = dict(prefill_ctx_latency)
+            disagg_summary.set_context_latency_dict(dict(prefill_ctx_latency))
+            disagg_summary.set_context_energy_wms_dict(dict(prefill_summary.get_context_energy_wms_dict()))
+            disagg_summary.set_context_power_avg(prefill_summary.get_context_power_avg())
         prefill_ctx_source = prefill_summary.get_context_source_dict()
         if prefill_ctx_source:
             per_ops_source["prefill"] = dict(prefill_ctx_source)
         decode_gen_latency = decode_summary.get_generation_latency_dict()
         if decode_gen_latency:
             per_ops_data["decode"] = dict(decode_gen_latency)
+            disagg_summary.set_generation_latency_dict(dict(decode_gen_latency))
+            disagg_summary.set_generation_energy_wms_dict(dict(decode_summary.get_generation_energy_wms_dict()))
+            disagg_summary.set_generation_power_avg(decode_summary.get_generation_power_avg())
         decode_gen_source = decode_summary.get_generation_source_dict()
         if decode_gen_source:
             per_ops_source["decode"] = dict(decode_gen_source)
@@ -455,14 +495,21 @@ class DisaggInferenceSession:
                         runtime_config=overwritten_runtime_config,
                         latency_correction_scale=latency_correction_scale,
                     )
-                    if not summary.check_oom():
+                    if not summary.check_oom() and not summary.check_kv_cache_oom():
                         all_configs_oom = False
                         summary_df = pd.concat(
                             [summary_df, summary.get_summary_df()],
                             axis=0,
                             ignore_index=True,
                         )
-                    else:  # larger b will always OOM
+                    else:
+                        # Larger b will always OOM. check_kv_cache_oom covers
+                        # the fraction-based budget (e.g. vLLM only exposes
+                        # gpu_memory_utilization of total memory): a worker
+                        # whose KV for batch b cannot actually be allocated
+                        # must not enter the candidate pool, or the search
+                        # selects deployments whose projected concurrency is
+                        # physically unreachable (#1396).
                         break
             except Exception as e:
                 logger.warning(
@@ -925,6 +972,11 @@ class AFDInferenceSession:
         self._model_path = model_path
         self._a_model_config = a_model_config
         self._f_model_config = f_model_config
+        a_nextn = int(getattr(a_model_config, "nextn", 0) or 0)
+        f_nextn = int(getattr(f_model_config, "nextn", 0) or 0)
+        if a_nextn != f_nextn:
+            raise ValueError(f"AFD A/F model configs must use the same nextn; got A={a_nextn}, F={f_nextn}.")
+        self._nextn = a_nextn
         self._database = database
         self._backend = backend
         self._afd_config = afd_config
@@ -956,8 +1008,28 @@ class AFDInferenceSession:
         for decode we pass ``gen_seq_imbalance_correction_scale``.  Tokens
         processed per call = ``batch_size`` for decode, ``batch_size*seq_len``
         for prefill (one token per sequence vs. full sequence).
+
+        The per-op values come from the compiled engine when the routing gate
+        allows (the op-list evaluation FFI); the AFD orchestration — the A/F
+        partitioning, the stride integration, the comm ops — stays Python-side
+        permanently. The Python ``op.query()`` loop remains the fallback for
+        the explicit escape hatch and for op lists the compiled spec cannot
+        express.
         """
+        ops = list(ops_iter)
         x = batch_size * seq_len if is_context else batch_size
+
+        rust = self._sum_latency_with_rust(
+            ops,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            x=x,
+            model=model,
+            runtime_config=runtime_config,
+            is_context=is_context,
+        )
+        if rust is not None:
+            return rust
 
         kwargs_common = {
             "x": x,
@@ -973,9 +1045,97 @@ class AFDInferenceSession:
             kwargs_common["gen_seq_imbalance_correction_scale"] = runtime_config.gen_seq_imbalance_correction_scale
 
         per_op = defaultdict(float)
-        for op in ops_iter:
+        for op in ops:
             result = op.query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
+        return sum(per_op.values()), per_op
+
+    def _sum_latency_with_rust(
+        self,
+        ops: list,
+        *,
+        batch_size: int,
+        seq_len: int,
+        x: int,
+        model,
+        runtime_config: config.RuntimeConfig,
+        is_context: bool,
+    ):
+        """Compiled-engine path of :meth:`_sum_latency`, or ``None`` to fall
+        back to the Python ``op.query()`` loop.
+
+        Maps the partitioned op objects to their positions in
+        ``model.context_ops`` / ``model.generation_ops`` (the compiled spec
+        preserves that order 1:1) and evaluates them through the thin op-list
+        FFI with ``_sum_latency``'s exact query shape: uniform ``x`` (no
+        logits-GEMM exception) and the runtime ``prefix`` threaded into BOTH
+        phases. Falls back (returns ``None``) for ops outside the model lists
+        and for op graphs the spec cannot express.
+        """
+        from aiconfigurator.sdk.rust_engine_step import (
+            RustEngineUnsupportedError,
+            evaluate_context_ops_with_rust,
+            evaluate_generation_ops_with_rust,
+            note_python_step_fallback,
+            should_use_rust_engine_step,
+        )
+
+        if not ops or not should_use_rust_engine_step(runtime_config, self._database):
+            return None
+
+        phase_ops = model.context_ops if is_context else model.generation_ops
+        memo_attr = "_afd_rust_context_index" if is_context else "_afd_rust_generation_index"
+        # Memo keyed by the LIST OBJECT's identity, not its length: a rebuilt
+        # equal-length op list could otherwise serve stale id()->index
+        # mappings silently (CPython id reuse).
+        memo = getattr(model, memo_attr, None)
+        if memo is not None and memo[0] is phase_ops:
+            index_by_id = memo[1]
+        else:
+            index_by_id = {id(op): i for i, op in enumerate(phase_ops)}
+            try:
+                setattr(model, memo_attr, (phase_ops, index_by_id))
+            except (AttributeError, TypeError):
+                pass  # slotted/frozen model objects: recompute per call
+        try:
+            indices = [index_by_id[id(op)] for op in ops]
+        except KeyError:
+            # An op outside the compiled phase list (the synthetic comm ops
+            # never come through here, so this is unexpected) — let the
+            # Python loop own it.
+            return None
+
+        prefix = int(runtime_config.prefix or 0)
+        try:
+            if is_context:
+                entries = evaluate_context_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                    x=x,
+                )
+            else:
+                entries = evaluate_generation_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                    prefix=prefix,
+                    x=x,
+                )
+        except RustEngineUnsupportedError as exc:
+            note_python_step_fallback("unsupported_op_graph:afd", str(exc))
+            return None
+
+        per_op = defaultdict(float)
+        for name, latency_ms, _energy_wms, _source in entries:
+            per_op[name] += float(latency_ms)
         return sum(per_op.values()), per_op
 
     def _afd_batch_shape(self) -> tuple[int, int, int, int, int]:
@@ -1093,7 +1253,7 @@ class AFDInferenceSession:
     def _pipeline_tcycle(self, t_a: float, t_f: float, t_a2f: float, t_f2a: float) -> tuple[float, bool]:
         """Compute per-layer cycle time and whether comm is hidden.
 
-        Two pipeline regimes are supported:
+        Three pipeline regimes are supported:
 
         * **K=3 (optimistic, 3-batch overlap)** — the network round trip
           ``t_c = t_a2f + t_f2a`` is its own pipeline stage, so::
@@ -1108,6 +1268,11 @@ class AFDInferenceSession:
 
               TPOT_layer = max(t_a + t_a2f, t_f + t_f2a) (N_min = 2)
 
+        * **Serial (no overlap)** — all compute and communication stages
+          execute sequentially::
+
+              TPOT_layer = t_a + t_a2f + t_f + t_f2a
+
         The optimistic model falls back to conservative when there are
         not enough in-flight micro-batches to fill the K=3 pipeline.
 
@@ -1119,6 +1284,8 @@ class AFDInferenceSession:
         cfg = self._afd_config
         num_microbatches = max(int(cfg.num_microbatches or 1), 1)
         t_c = t_a2f + t_f2a
+        if cfg.pipeline_model == "serial":
+            return t_a + t_a2f + t_f + t_f2a, False
         if cfg.pipeline_model == "optimistic":
             # Need ≥ 2 + t_c / max(t_a, t_f) in-flight microbatches to
             # hide the network stage behind compute.  Equivalent to the
@@ -1136,8 +1303,33 @@ class AFDInferenceSession:
             t_cycle = max(t_a, t_f, t_c)
             comm_hidden = t_c <= max(t_a, t_f)
             return t_cycle, comm_hidden
-        # conservative K=2
-        return max(t_a + t_a2f, t_f + t_f2a), False
+        if cfg.pipeline_model == "conservative":
+            return max(t_a + t_a2f, t_f + t_f2a), False
+        raise ValueError(f"Unsupported AFD pipeline_model: {cfg.pipeline_model!r}.")
+
+    def _pipeline_global_step_latency(
+        self,
+        t_a: float,
+        t_f: float,
+        t_a2f: float,
+        t_f2a: float,
+        *,
+        num_layers: int,
+    ) -> tuple[float, float, bool]:
+        """Return the Eq.5-style global decode-step latency.
+
+        ``_pipeline_tcycle`` returns the overlapped per-layer cadence. A
+        global decode step spans all in-flight microbatches across all
+        layers; that global step is TPOT because every request receives
+        its next token only after the whole in-flight batch advances.
+        """
+        cfg = self._afd_config
+        num_layers = max(int(num_layers or 1), 1)
+        num_microbatches = max(int(cfg.num_microbatches or 1), 1)
+        t_cycle, comm_hidden = self._pipeline_tcycle(t_a, t_f, t_a2f, t_f2a)
+        pipeline_fill = t_a + t_f + t_a2f + t_f2a
+        t_global_step = pipeline_fill + t_cycle * max(num_microbatches * num_layers - 1, 0)
+        return t_global_step, t_cycle, comm_hidden
 
     def _estimate_a_memory_dict(
         self,
@@ -1225,6 +1417,7 @@ class AFDInferenceSession:
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             kv_cache_reserved_fraction=reserved_fraction,
             kv_cache_tolerance=tolerance,
+            fraction_of_free=self._backend.memory_fraction_of_free(),
         )
         return summary
 
@@ -1250,7 +1443,7 @@ class AFDInferenceSession:
         brk_t_f_per_layer: float,
         t_a2f_layer: float,
         t_f2a_layer: float,
-    ) -> tuple[float, float, float, dict, dict]:
+    ) -> tuple[float, float, float, float, dict, dict, bool]:
         """Integrate compute latency along the decode KV-cache length.
 
         Attention is the only op whose latency reads ``s``; sampling at
@@ -1258,10 +1451,12 @@ class AFDInferenceSession:
         used by ``_run_generation_phase`` and recovers the average
         per-step latency over the full decode trace.
 
-        Returns ``(t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op,
-        f_per_op)``, where the scalars are per-step averages and the
-        per-op dicts are *per-step* totals (averaged across the trace)
-        in the same units as ``_sum_latency`` output.
+        Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
+        t_step_avg, a_per_op, f_per_op, comm_hidden)``. ``t_step`` is the
+        global-batch decode step used as TPOT. The per-op dicts are
+        *per-step* totals (averaged across the trace) in the same units as
+        ``_sum_latency`` output. ``comm_hidden`` is the flag from the last
+        sampled stride.
 
         ``brk_t_a_per_layer`` / ``brk_t_f_per_layer`` are the per-layer
         intra-pool comm contributions (A-side combine, F-side AG+RS) —
@@ -1272,13 +1467,16 @@ class AFDInferenceSession:
         time.
         """
         stride = self._AFD_DECODE_STRIDE
+        verify_width = self._nextn + 1
 
         t_a_layer_sum = 0.0
         t_f_layer_sum = 0.0
+        t_cycle_sum = 0.0
         t_step_sum = 0.0
         a_per_op_sum: dict[str, float] = defaultdict(float)
         f_per_op_sum: dict[str, float] = defaultdict(float)
         total_repeat = 0
+        comm_hidden = False
 
         decode_steps = max(osl - 1, 1)
         for i in range(0, decode_steps, stride):
@@ -1292,7 +1490,7 @@ class AFDInferenceSession:
 
             t_a_step_i, a_per_op_i = self._sum_latency(
                 a_partition.attn_ops,
-                batch_size=a_batch_size,
+                batch_size=a_batch_size * verify_width,
                 seq_len=s_i,
                 model=a_model,
                 runtime_config=runtime_config,
@@ -1300,7 +1498,7 @@ class AFDInferenceSession:
             )
             t_f_step_i, f_per_op_i = self._sum_latency(
                 f_partition.ffn_ops,
-                batch_size=b_batch_size,
+                batch_size=b_batch_size * verify_width,
                 seq_len=s_i,
                 model=f_model,
                 runtime_config=runtime_config,
@@ -1313,11 +1511,18 @@ class AFDInferenceSession:
             # accumulation. ``sum_i max(...)`` ≠ ``max(sum_i ...)``;
             # the latter under-estimates the bottleneck whenever the
             # winning pool changes across the decode trace.
-            t_cycle_i, _ = self._pipeline_tcycle(t_a_layer_i, t_f_layer_i, t_a2f_layer, t_f2a_layer)
-            t_step_i = num_layers * t_cycle_i
+            t_step_i, t_cycle_i, comm_hidden_i = self._pipeline_global_step_latency(
+                t_a_layer_i,
+                t_f_layer_i,
+                t_a2f_layer,
+                t_f2a_layer,
+                num_layers=num_layers,
+            )
+            comm_hidden = comm_hidden_i
 
             t_a_layer_sum += t_a_layer_i * repeat
             t_f_layer_sum += t_f_layer_i * repeat
+            t_cycle_sum += t_cycle_i * repeat
             t_step_sum += t_step_i * repeat
             for k, v in a_per_op_i.items():
                 a_per_op_sum[k] += v * repeat
@@ -1328,10 +1533,19 @@ class AFDInferenceSession:
         denom = max(total_repeat, 1)
         t_a_layer_avg = t_a_layer_sum / denom
         t_f_layer_avg = t_f_layer_sum / denom
+        t_cycle_avg = t_cycle_sum / denom
         t_step_avg = t_step_sum / denom
         a_per_op = {k: v / denom for k, v in a_per_op_sum.items()}
         f_per_op = {k: v / denom for k, v in f_per_op_sum.items()}
-        return t_a_layer_avg, t_f_layer_avg, t_step_avg, a_per_op, f_per_op
+        return (
+            t_a_layer_avg,
+            t_f_layer_avg,
+            t_cycle_avg,
+            t_step_avg,
+            a_per_op,
+            f_per_op,
+            comm_hidden,
+        )
 
     def _simulate_phase(
         self,
@@ -1371,6 +1585,12 @@ class AFDInferenceSession:
 
         cfg = self._afd_config
         ops_phase = "context" if phase == "prefill" else "generation"
+        if phase == "decode" and self._nextn > 0:
+            logger.warning(
+                "AFD MTP nextn=%d uses batch widening by nextn+1 for parity with the base backend. "
+                "This is an approximation: verify positions share sequence KV history.",
+                self._nextn,
+            )
         # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
         # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
         # them to the F-Worker for sensitivity studies.
@@ -1398,7 +1618,7 @@ class AFDInferenceSession:
         # step.  Each comm op's ``query(x=...)`` takes the number of tokens
         # held by a single A-rank; the op internally fans this out to the
         # global token count via ``n_a_workers``.
-        tokens_per_req = effective_prefill_len if phase == "prefill" else 1
+        tokens_per_req = effective_prefill_len if phase == "prefill" else self._nextn + 1
         afd_a_batch_tokens = a_micro_batch_size * tokens_per_req
 
         # Five comm-side ops model the per-layer AFD traffic:
@@ -1449,7 +1669,15 @@ class AFDInferenceSession:
         # ``num_layers`` per-layer compute and AFD does not currently
         # model them as separate stages.
         if phase == "decode":
-            t_a_layer, t_f_layer, t_step, a_per_op, f_per_op = self._integrate_decode_phase(
+            (
+                t_a_layer,
+                t_f_layer,
+                t_cycle,
+                t_step,
+                a_per_op,
+                f_per_op,
+                comm_hidden,
+            ) = self._integrate_decode_phase(
                 a_partition=a_partition,
                 f_partition=f_partition,
                 a_model=a_model,
@@ -1465,12 +1693,10 @@ class AFDInferenceSession:
                 t_a2f_layer=t_a2f_layer,
                 t_f2a_layer=t_f2a_layer,
             )
-            t_cycle = t_step / num_layers
-            # The ``comm_hidden`` flag is informational only; report it
-            # at the *average* operating point so it stays a single
-            # stable scalar even though the per-step pipeline above
-            # already accounts for s-dependent bottleneck shifts.
-            _, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
+            # ``comm_hidden`` was captured during the decode integration
+            # loop above — reuse it instead of re-evaluating
+            # ``_pipeline_tcycle`` (which would both waste compute and
+            # re-trigger the optimistic-degradation warning).
         else:
             # Prefill: single shot over the uncached input suffix; no
             # need to integrate, ``s == isl - prefix`` everywhere.
@@ -1592,7 +1818,7 @@ class AFDInferenceSession:
         if phase not in ("prefill", "decode", "both"):
             raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
         if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction()
+            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction(self._database.version)
 
         a_model, f_model = self._build_models()
 
@@ -1757,7 +1983,10 @@ class AFDInferenceSession:
 
         if decode_metrics is not None:
             tpot = decode_metrics["t_step"]
-            tokens_per_s = b_total / (num_microbatches * (tpot / 1000.0)) if tpot > 0 else 0.0
+            # tpot (= t_step) is the global decode-step latency after
+            # pipeline overlap; the system produces b_total tokens per
+            # global step, so throughput = b_total / tpot.
+            tokens_per_s = b_total / (tpot / 1000.0) if tpot > 0 else 0.0
         else:
             tpot = 0.0
             tokens_per_s = 0.0
@@ -1805,7 +2034,7 @@ class AFDInferenceSession:
         is_oom = a_is_oom or f_is_oom
 
         tokens_per_s_per_user = (1000.0 / tpot) if tpot > 0 else 0.0
-        seq_per_s = tokens_per_s / max(osl - 1, 1) if tokens_per_s > 0 else 0.0
+        seq_per_s = tokens_per_s / max(osl, 1) if tokens_per_s > 0 else 0.0
 
         result_dict = {
             "model": self._model_path,
@@ -1864,12 +2093,15 @@ class AFDInferenceSession:
             "tokens/s/gpu": round(tokens_per_s_per_gpu, 2),
             "tokens/s/user": round(tokens_per_s_per_user, 2),
             "seq/s": round(seq_per_s, 3),
+            "request_rate": round(seq_per_s, 3),
             # ``a_batch_size`` is the total in-flight batch per A-Worker;
             # latency is evaluated on the derived microbatch, while the
             # user-visible concurrency remains the total in-flight batch.
             "concurrency": b_total,
+            "parallel": (f"a{cfg.n_a_nodes}n-tp{cfg.tp_a}+f{cfg.n_f_nodes}n-ep{cfg.f_moe_ep_size}"),
             "pipeline_model": cfg.pipeline_model,
             "num_microbatches": num_microbatches,
+            "nextn": self._nextn,
             "combined_with_pd": bool(cfg.combined_with_pd),
             "boundary_on_attn": bool(cfg.boundary_on_attn),
             "num_total_gpus": total_gpus,
@@ -1877,7 +2109,10 @@ class AFDInferenceSession:
             "backend": self._backend.name.value,
             "version": str(self._database.version),
             "system": str(self._database.system),
-            "power_w": 0.0,
+            # AFD power is not modeled yet. NaN prevents these rows from
+            # being mistaken for zero-power deployments or ranked against
+            # configurations with measured power.
+            "power_w": float("nan"),
         }
 
         summary_df = pd.DataFrame([result_dict], columns=common.ColumnsAFD)

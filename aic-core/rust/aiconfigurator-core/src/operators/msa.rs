@@ -26,8 +26,11 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::dsa::DsaModuleOp;
-use crate::perf_database::dsa::{dsa_context_sol_ms, dsa_dims, dsa_generation_sol_ms};
-use crate::perf_database::gemm::tc_flops_for_compute;
+use crate::perf_database::dsa::{
+    dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_flops,
+    dsa_generation_sol_ms,
+};
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
 
 /// One MSA module block (context or generation — the phase is chosen by the
@@ -64,7 +67,7 @@ impl MsaModuleOp {
         s: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let sol = self.sol_ms(db, batch_size, s, prefix, true);
+        let sol = self.sol_ms(db, batch_size, s, prefix, true)?;
         match db.database_mode {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
@@ -110,7 +113,7 @@ impl MsaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let sol = self.sol_ms(db, batch_size, s, 0, false);
+        let sol = self.sol_ms(db, batch_size, s, 0, false)?;
         match db.database_mode {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
@@ -148,7 +151,14 @@ impl MsaModuleOp {
         }
     }
 
-    fn sol_ms(&self, db: &PerfDatabase, b: u32, s: u32, prefix: u32, is_context: bool) -> f64 {
+    fn sol_ms(
+        &self,
+        db: &PerfDatabase,
+        b: u32,
+        s: u32,
+        prefix: u32,
+        is_context: bool,
+    ) -> Result<f64, AicError> {
         msa_attention_sol_ms(
             &db.system_spec,
             is_context,
@@ -177,6 +187,9 @@ impl MsaModuleOp {
     /// no transfer source.
     fn dsa_context_util(&self, db: &PerfDatabase, b: u32, s: u32, prefix: u32) -> Option<f64> {
         let dims = dsa_dims(&self.dsa_architecture);
+        let flops =
+            dsa_context_sol_flops(&db.system_spec, self.gemm_quant_mode, self.fmha_quant_mode)
+                .ok()?;
         let sol = dsa_context_sol_ms(
             &db.system_spec,
             dims,
@@ -191,6 +204,7 @@ impl MsaModuleOp {
             // MSA borrows the FULL DSA layer (Python's probe never sets
             // skip_indexer).
             false,
+            flops,
         );
         let probe = self.dsa_probe(dims.index_topk);
         let silicon = probe
@@ -208,6 +222,7 @@ impl MsaModuleOp {
     /// Mirrors Python `_dsa_generation_util`.
     fn dsa_generation_util(&self, db: &PerfDatabase, b: u32, s: u32) -> Option<f64> {
         let dims = dsa_dims(&self.dsa_architecture);
+        let flops = dsa_generation_sol_flops(&db.system_spec, self.gemm_quant_mode).ok()?;
         let sol = dsa_generation_sol_ms(
             &db.system_spec,
             dims,
@@ -216,6 +231,7 @@ impl MsaModuleOp {
             b as i64,
             s as i64,
             self.num_heads as i64,
+            flops,
         );
         let probe = self.dsa_probe(dims.index_topk);
         let silicon = probe
@@ -264,7 +280,7 @@ fn msa_attention_sol_ms(
     kv_quant: KvCacheQuantMode,
     fmha_quant: FmhaQuantMode,
     gemm_quant: GemmQuantMode,
-) -> f64 {
+) -> Result<f64, AicError> {
     let qk_head_dim = head_dim;
     let tokens = if is_context { b * s } else { b };
     // context: full prefill of `s` new tokens on top of `prefix` cached.
@@ -321,17 +337,17 @@ fn msa_attention_sol_ms(
     let q_io_bytes = (tokens * num_heads * qk_head_dim) as f64 * fmha_quant.mapping().memory * 2.0;
     let total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes;
 
-    let gemm_flops = tc_flops_for_compute(spec, gemm_quant.mapping().compute);
-    // Python passes `common.FMHAQuantMode.fp8` (compute factor 2).
-    let fp8_flops = tc_flops_for_compute(spec, 2.0);
-    let attn_flops = tc_flops_for_compute(spec, fmha_quant.mapping().compute);
+    let gemm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
+    // Python passes `common.FMHAQuantMode.fp8`.
+    let fp8_flops = quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?;
+    let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
 
     let sol_math = (gemm_ops as f64 / gemm_flops
         + indexer_ops as f64 / fp8_flops
         + attention_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    Ok(sol_math.max(sol_mem))
 }
 
 #[cfg(test)]
@@ -346,7 +362,8 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        let mut db = PerfDatabase::load(&systems_root, "b200_sxm", backend, version).expect("db must load");
+        let mut db =
+            PerfDatabase::load(&systems_root, "b200_sxm", backend, version).expect("db must load");
         db.database_mode = DatabaseMode::Hybrid;
         db
     }
@@ -375,7 +392,10 @@ mod tests {
     }
 
     fn approx(a: f64, b: f64) {
-        assert!((a - b).abs() < 1e-9 * b.abs().max(1.0), "expected {b}, got {a}");
+        assert!(
+            (a - b).abs() < 1e-9 * b.abs().max(1.0),
+            "expected {b}, got {a}"
+        );
     }
 
     /// Oracle values from the Python reference (`ContextMSAModule` /

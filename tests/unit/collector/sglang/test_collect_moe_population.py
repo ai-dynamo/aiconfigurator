@@ -379,7 +379,7 @@ def test_case_generator_preserves_representative_sglang_moe_runtime_contracts():
 
 
 def test_sm120_population_gates_w4a8_and_keeps_w4a16_marlin():
-    # w4a8_mxfp4_mxfp8 is SM100/103-only (max_sm_exclusive: 120): SGLang
+    # w4a8_mxfp4_mxfp8 is SM100-family-only (max_sm_exclusive: 110): SGLang
     # 0.5.14 has no SM120 mxfp8-activation MXFP4 path (mxfp4.py:344-360), and
     # SM120 serving routes MXFP4 checkpoints to weight-only Marlin instead
     # (server_args.py:3876-3887). The w4a16_mxfp4 slice therefore populates

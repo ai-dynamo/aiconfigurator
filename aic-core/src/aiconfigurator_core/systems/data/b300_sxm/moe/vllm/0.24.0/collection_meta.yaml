@@ -8,4 +8,10 @@ runtime:
   version: 0.24.0
 tables:
   moe_perf:
+    # 2026-08-02: appended 972 Kimi-K3 w4a16_mxfp4 rows (Marlin weight-only
+    # + SiTU, kernel_source vllm_compressedtensorsw4a4mxfp4moe_marlin_
+    # marlinexperts) collected on 8x B300 in the vllm kimi-k3 preview
+    # runtime (0.1.dev19262, moe family pin); keys disjoint; same 3
+    # classified moe_tp=32 marlin tile-limit failures as b200 (identical
+    # failure spectrum across SM100/103).
     status: complete

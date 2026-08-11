@@ -61,8 +61,8 @@ def process_experiment_result(
     target_tpot = task.tpot
     target_request_latency = task.request_latency
     use_request_latency = target_request_latency is not None and target_request_latency > 0
-    total_gpus = getattr(task, "total_gpus", None) or 0
     serving_mode = task.serving_mode
+    total_gpus = task.effective_total_gpus if serving_mode == "afd" else (task.total_gpus or 0)
 
     x_axis_col = "request_latency" if use_request_latency else "tokens/s/user"
 
@@ -116,12 +116,14 @@ def _merge_into_top_n(
         df = best_configs[exp_name].copy()
         if not df.empty:
             df["backend"] = backend_name
+            df["_task_key"] = exp_name
             best_configs_dfs.append(df)
 
         pf = pareto_fronts.get(exp_name)
         if pf is not None and not pf.empty:
             pf_copy = pf.copy()
             pf_copy["backend"] = backend_name
+            pf_copy["_task_key"] = exp_name
             pareto_dfs.append(pf_copy)
 
     # Merge all best configs and take top N
@@ -181,22 +183,22 @@ def merge_experiment_results_by_mode(
     """
     agg_exps = [name for name, task in tasks.items() if task.serving_mode == "agg"]
     disagg_exps = [name for name, task in tasks.items() if task.serving_mode == "disagg"]
+    afd_exps = [name for name, task in tasks.items() if task.serving_mode == "afd"]
 
     merged_best_configs = {}
     merged_best_throughputs = {}
     merged_pareto_fronts = {}
     merged_pareto_x_axis = {}
 
-    agg_merged = _merge_into_top_n(agg_exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n)
-    disagg_merged = _merge_into_top_n(disagg_exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n)
-
-    merged_best_configs["agg"] = agg_merged[0]
-    merged_best_throughputs["agg"] = agg_merged[1]
-    merged_pareto_fronts["agg"] = agg_merged[2]
-    merged_pareto_x_axis["agg"] = agg_merged[3]
-    merged_best_configs["disagg"] = disagg_merged[0]
-    merged_best_throughputs["disagg"] = disagg_merged[1]
-    merged_pareto_fronts["disagg"] = disagg_merged[2]
-    merged_pareto_x_axis["disagg"] = disagg_merged[3]
+    # AFD results use their own ColumnsAFD schema; merge each serving mode
+    # within its own bucket instead of concatenating across schemas.
+    for mode_name, mode_exps in (("agg", agg_exps), ("disagg", disagg_exps), ("afd", afd_exps)):
+        if not mode_exps:
+            continue
+        mode_merged = _merge_into_top_n(mode_exps, tasks, best_configs, pareto_fronts, pareto_x_axis, top_n)
+        merged_best_configs[mode_name] = mode_merged[0]
+        merged_best_throughputs[mode_name] = mode_merged[1]
+        merged_pareto_fronts[mode_name] = mode_merged[2]
+        merged_pareto_x_axis[mode_name] = mode_merged[3]
 
     return merged_best_configs, merged_best_throughputs, merged_pareto_fronts, merged_pareto_x_axis

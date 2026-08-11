@@ -37,12 +37,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::gemm::quant_tc_flops;
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
@@ -110,8 +111,9 @@ struct NodeCache {
     by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
 }
 
-/// num_heads → step → isl → batch → latency.
-pub type DsaHeadGrid = BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>>;
+/// num_heads → step → isl → batch → measured leaf
+/// (`{latency, power, energy}`, mirroring Python `load_*_dsa_module_data`).
+pub type DsaHeadGrid = BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, LeafValue>>>>;
 
 /// (arch, fmha, kv, gemm) → dsa_backend → num_heads → step → isl → batch →
 /// latency. The `dsa_backend` level mirrors Python's
@@ -203,8 +205,11 @@ impl DsaTable {
     /// `perf_db_sources` (Python-supplied). Each DSA file falls back to its
     /// primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let context_sources =
-            resolve_op_sources(perf_db_sources, "dsa_context_module_perf.parquet", &data_root);
+        let context_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsa_context_module_perf.parquet",
+            &data_root,
+        );
         let generation_sources = resolve_op_sources(
             perf_db_sources,
             "dsa_generation_module_perf.parquet",
@@ -241,7 +246,12 @@ impl DsaTable {
     ) -> Result<Arc<DsaSparseTables>, AicError> {
         let file_prefix = dsa_sparse_file_prefix(architecture);
         let key = (file_prefix.to_string(), num_heads);
-        if let Some(tables) = self.sparse.lock().expect("dsa sparse cache poisoned").get(&key) {
+        if let Some(tables) = self
+            .sparse
+            .lock()
+            .expect("dsa sparse cache poisoned")
+            .get(&key)
+        {
             return Ok(Arc::clone(tables));
         }
         let mut tables = DsaSparseTables::default();
@@ -323,10 +333,14 @@ impl DsaTable {
         index_topk: u32,
         dsa_backend: &str,
         skip_indexer: bool,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // `skip_indexer=true` reads the GLM-5.2 reuse-layer table (rows tagged
         // `*_skip_indexer` in the same parquet) and zeroes the indexer terms
         // in the SOL — mirroring Python `_query_context_dsa_module_table`.
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsa_context_sol_flops(spec, gemm_quant, fmha_quant)?;
         let nodes = if skip_indexer {
             self.load_context_skip_nodes()?
         } else {
@@ -363,10 +377,11 @@ impl DsaTable {
                 c[1] as i64, // prefix
                 c[0] as i64, // num_heads
                 skip_indexer,
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "prefix", "seq_len", "batch"], &sol);
-        perf_interp::query(
+        perf_interp::query_value(
             &cfg,
             node,
             &[num_heads as f64, prefix as f64, isl as f64, b as f64],
@@ -396,10 +411,14 @@ impl DsaTable {
         architecture: &str,
         dsa_backend: &str,
         skip_indexer: bool,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // `skip_indexer=true` reads the GLM-5.2 reuse-layer generation table.
         // The generation SOL is skip-independent (Python's generation get_sol
         // has no skip branch) — only the table slice differs.
+        // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
+        // must classify as MissingSystemFlops on both engines, in every mode
+        // (mirrors Python's query-entry resolution and GemmTable::query).
+        let flops = dsa_generation_sol_flops(spec, gemm_quant)?;
         let nodes = if skip_indexer {
             self.load_generation_skip_nodes()?
         } else {
@@ -433,10 +452,11 @@ impl DsaTable {
                 c[1] as i64, // b
                 c[2] as i64, // s
                 c[0] as i64, // num_heads
+                flops,
             )
         };
         let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &sol);
-        perf_interp::query(
+        perf_interp::query_value(
             &cfg,
             node,
             &[num_heads as f64, b as f64, sequence_tokens as f64],
@@ -580,14 +600,12 @@ fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
         for (backend, by_heads) in by_backend {
-            let node = backends
-                .entry(backend.clone())
-                .or_insert_with(Node::branch);
+            let node = backends.entry(backend.clone()).or_insert_with(Node::branch);
             for (&n, by_step) in by_heads {
                 for (&step, by_isl) in by_step {
                     for (&isl, by_batch) in by_isl {
-                        for (&bb, &lat) in by_batch {
-                            node.insert(&[n, step, isl, bb], lat);
+                        for (&bb, &leaf) in by_batch {
+                            node.insert_value(&[n, step, isl, bb], leaf);
                         }
                     }
                 }
@@ -609,15 +627,13 @@ fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
         for (backend, by_heads) in by_backend {
-            let node = backends
-                .entry(backend.clone())
-                .or_insert_with(Node::branch);
+            let node = backends.entry(backend.clone()).or_insert_with(Node::branch);
             for (&n, by_step) in by_heads {
                 for (&step, by_isl) in by_step {
                     for (&isl, by_batch) in by_isl {
                         let seq = isl + step;
-                        for (&bb, &lat) in by_batch {
-                            node.insert(&[n, bb, seq], lat);
+                        for (&bb, &leaf) in by_batch {
+                            node.insert_value(&[n, bb, seq], leaf);
                         }
                     }
                 }
@@ -631,18 +647,41 @@ fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
 // Analytic SOLs — verbatim ports of Python `operations/dsa.py` get_sol
 // ---------------------------------------------------------------------------
 
-/// Python `GEMM._get_quant_tc_flops`: compute factor 1 -> bf16 TC flops,
-/// 2 -> fp8, 4 -> fp4; fall back to `bf16 * factor` when the spec entry is
-/// missing.
-fn tc_flops(spec: &SystemSpec, compute_factor: f64) -> f64 {
-    let bf16 = spec.gpu.bfloat16_tc_flops.unwrap_or(0.0);
-    let direct = match compute_factor as u32 {
-        1 => spec.gpu.bfloat16_tc_flops,
-        2 => spec.gpu.fp8_tc_flops,
-        4 => spec.gpu.fp4_tc_flops,
-        _ => None,
-    };
-    direct.unwrap_or(bf16 * compute_factor)
+/// Pre-resolved TC-FLOPS for the three DSA op groups. Resolved once per
+/// query via `quant_tc_flops` (strict: a missing `*_tc_flops` entry errors)
+/// so the hot sol closures stay `-> f64`.
+#[derive(Clone, Copy)]
+pub(crate) struct DsaSolFlops {
+    pub gemm: f64,
+    pub indexer_fp8: f64,
+    pub attn: f64,
+}
+
+/// Context flops set: GEMM group by `gemm_quant`, indexer always FP8,
+/// attention by `fmha_quant`.
+pub(crate) fn dsa_context_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+    fmha_quant: FmhaQuantMode,
+) -> Result<DsaSolFlops, AicError> {
+    Ok(DsaSolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        indexer_fp8: quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, fmha_quant.mapping())?,
+    })
+}
+
+/// Generation flops set: the attention group is hardcoded bfloat16 in
+/// Python (`fmha_mode = FMHAQuantMode.bfloat16`).
+pub(crate) fn dsa_generation_sol_flops(
+    spec: &SystemSpec,
+    gemm_quant: GemmQuantMode,
+) -> Result<DsaSolFlops, AicError> {
+    Ok(DsaSolFlops {
+        gemm: quant_tc_flops(spec, gemm_quant.mapping())?,
+        indexer_fp8: quant_tc_flops(spec, FmhaQuantMode::Fp8.mapping())?,
+        attn: quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?,
+    })
 }
 
 /// Python `common.indexer_cache_entry_bytes`: FP8 indexer KV entry with one
@@ -661,7 +700,6 @@ fn indexer_cache_entry_bytes(index_head_dim: i64) -> i64 {
 /// attention group (fmha_quant) whose exact KV pair count is
 /// `sum_{i=0..s-1} min(prefix+i+1, index_topk)`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn dsa_context_sol_ms(
     spec: &SystemSpec,
     dims: &DsaDims,
@@ -674,6 +712,7 @@ pub(crate) fn dsa_context_sol_ms(
     prefix: i64,
     num_heads: i64,
     skip_indexer: bool,
+    flops: DsaSolFlops,
 ) -> f64 {
     let (hidden, q_lora, kv_lora) = (dims.hidden_size, dims.q_lora_rank, dims.kv_lora_rank);
     let (inh, ihd) = (dims.index_n_heads, dims.index_head_dim);
@@ -684,7 +723,8 @@ pub(crate) fn dsa_context_sol_ms(
     let (b, s, prefix, num_heads) = (b as i128, s as i128, prefix as i128, num_heads as i128);
     let (hidden, q_lora, kv_lora) = (hidden as i128, q_lora as i128, kv_lora as i128);
     let (inh, ihd, topk) = (inh as i128, ihd as i128, index_topk as i128);
-    let (qk_head_dim, attn_head_dim, v_dim) = (qk_head_dim as i128, attn_head_dim as i128, v_dim as i128);
+    let (qk_head_dim, attn_head_dim, v_dim) =
+        (qk_head_dim as i128, attn_head_dim as i128, v_dim as i128);
     let (qk_nope, qk_rope) = (dims.qk_nope_head_dim as i128, dims.qk_rope_head_dim as i128);
 
     let full_s = s + prefix;
@@ -745,9 +785,11 @@ pub(crate) fn dsa_context_sol_ms(
     let total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes;
 
     // ── SOL ─────────────────────────────────────────────────────
-    let gemm_flops = tc_flops(spec, gemm_quant.mapping().compute);
-    let indexer_fp8_flops = tc_flops(spec, FmhaQuantMode::Fp8.mapping().compute);
-    let attn_flops = tc_flops(spec, fmha_quant.mapping().compute);
+    let DsaSolFlops {
+        gemm: gemm_flops,
+        indexer_fp8: indexer_fp8_flops,
+        attn: attn_flops,
+    } = flops;
 
     let sol_math = (gemm_group_ops as f64 / gemm_flops
         + indexer_logits_ops as f64 / indexer_fp8_flops
@@ -769,6 +811,7 @@ pub(crate) fn dsa_generation_sol_ms(
     b: i64,
     s: i64,
     num_heads: i64,
+    flops: DsaSolFlops,
 ) -> f64 {
     let (b, s, num_heads) = (b as i128, s as i128, num_heads as i128);
     let (hidden, q_lora, kv_lora) = (
@@ -815,9 +858,11 @@ pub(crate) fn dsa_generation_sol_ms(
     let kv_cache_bytes = (b * effective_kv * attn_head_dim) as f64 * kv_quant.mapping().memory;
     let total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes;
 
-    let gemm_flops = tc_flops(spec, gemm_quant.mapping().compute);
-    let indexer_fp8_flops = tc_flops(spec, FmhaQuantMode::Fp8.mapping().compute);
-    let attn_flops = tc_flops(spec, FmhaQuantMode::Bfloat16.mapping().compute);
+    let DsaSolFlops {
+        gemm: gemm_flops,
+        indexer_fp8: indexer_fp8_flops,
+        attn: attn_flops,
+    } = flops;
 
     let sol_math = (gemm_group_ops as f64 / gemm_flops
         + indexer_logits_ops as f64 / indexer_fp8_flops
@@ -888,10 +933,11 @@ fn load_dsa_parquet(
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
         // Optional columns: legacy files may lack them (Python `row.get`).
+        let power_col = reader.col_optional("power");
         let op_name_col = reader.col_optional("op_name");
         let ks_col = reader.col_optional("kernel_source");
         // Phase 1: collapse this source with last-row-wins (plain insert).
-        let mut source_values: BTreeMap<(DsaKey, String, u32, u32, u32, u32), f64> =
+        let mut source_values: BTreeMap<(DsaKey, String, u32, u32, u32, u32), LeafValue> =
             BTreeMap::new();
         for row in reader.rows()? {
             let row = row?;
@@ -948,15 +994,23 @@ fn load_dsa_parquet(
             let num_heads = row.u32(num_heads_col)?;
             let batch_size = row.u32(batch_size_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             for dsa_backend in buckets {
                 source_values.insert(
-                    (key.clone(), dsa_backend.to_string(), num_heads, step, isl, batch_size),
-                    latency,
+                    (
+                        key.clone(),
+                        dsa_backend.to_string(),
+                        num_heads,
+                        step,
+                        isl,
+                        batch_size,
+                    ),
+                    LeafValue::with_power(latency, power),
                 );
             }
         }
         // Phase 2: merge with first-source-wins (earlier source outranks).
-        for ((key, dsa_backend, num_heads, step, isl, batch_size), latency) in source_values {
+        for ((key, dsa_backend, num_heads, step, isl, batch_size), leaf) in source_values {
             by_keys
                 .entry(key)
                 .or_default()
@@ -969,14 +1023,17 @@ fn load_dsa_parquet(
                 .entry(isl)
                 .or_default()
                 .entry(batch_size)
-                .or_insert(latency);
+                .or_insert(leaf);
         }
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no DSA module rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(DsaGrids { by_keys })
@@ -1125,8 +1182,17 @@ pub fn lookup_2d(
     let Some((&first, &last)) = steps.first().zip(steps.last()) else {
         return Ok(None);
     };
-    let lo = steps.iter().rev().find(|&&st| st <= step).copied().unwrap_or(first);
-    let hi = steps.iter().find(|&&st| st >= step).copied().unwrap_or(last);
+    let lo = steps
+        .iter()
+        .rev()
+        .find(|&&st| st <= step)
+        .copied()
+        .unwrap_or(first);
+    let hi = steps
+        .iter()
+        .find(|&&st| st >= step)
+        .copied()
+        .unwrap_or(last);
     if lo == hi {
         return Ok(Some(table[&(use_isl, lo)]));
     }
@@ -1200,7 +1266,8 @@ mod tests {
                 "trtllm",
                 false,
             )
-            .expect("DSA context query must succeed");
+            .expect("DSA context query must succeed")
+            .latency;
         assert!(
             (latency - 1.0972).abs() < 1e-6,
             "expected recorded latency, got {latency}"
@@ -1256,7 +1323,8 @@ mod tests {
                 "trtllm",
                 false,
             )
-            .expect("DSA context query must succeed");
+            .expect("DSA context query must succeed")
+            .latency;
         approx_rel(latency, 7.756);
     }
 
@@ -1312,6 +1380,7 @@ mod tests {
                     false,
                 )
                 .unwrap()
+                .latency
         };
         let dsv32 = "DeepseekV32ForCausalLM";
         let glm = "GlmMoeDsaForCausalLM";
@@ -1345,7 +1414,11 @@ mod tests {
     /// `tests/unit/sdk/test_cp_dsa_modeling.py::test_lookup_2d_exact_and_step_interp`.
     #[test]
     fn cp_lookup_2d_exact_step_interp_clamp_and_empty() {
-        let t = grid(&[(1, 4096, 0, 100.0), (1, 4096, 1024, 200.0), (1, 8192, 0, 400.0)]);
+        let t = grid(&[
+            (1, 4096, 0, 100.0),
+            (1, 4096, 1024, 200.0),
+            (1, 8192, 0, 400.0),
+        ]);
         let t = &t[&1];
         assert_eq!(lookup_2d(t, 4096, 0).unwrap(), Some(100.0)); // exact grid point
         assert_eq!(lookup_2d(t, 4096, 512).unwrap(), Some(150.0)); // step interp
@@ -1392,7 +1465,11 @@ mod tests {
 
     /// Write one synthetic CP sparse parquet with the collector's column set
     /// (`num_heads, batch_size, isl, step, latency[, score_mode]`).
-    fn write_sparse_parquet(path: &Path, with_score_mode: bool, rows: &[(i64, i64, i64, i64, f64, &str)]) {
+    fn write_sparse_parquet(
+        path: &Path,
+        with_score_mode: bool,
+        rows: &[(i64, i64, i64, i64, f64, &str)],
+    ) {
         use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
         use parquet::file::properties::WriterProperties;
         use parquet::file::writer::SerializedFileWriter;
@@ -1430,17 +1507,23 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let latencies: Vec<f64> = rows.iter().map(|r| r.4).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
-        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.typed::<DoubleType>()
+            .write_batch(&latencies, None, None)
+            .expect("write latency");
         col.close().expect("close col");
         if with_score_mode {
             let modes: Vec<ByteArray> = rows.iter().map(|r| ByteArray::from(r.5)).collect();
             let mut col = rg.next_column().expect("next col").expect("score col");
-            col.typed::<ByteArrayType>().write_batch(&modes, None, None).expect("write score");
+            col.typed::<ByteArrayType>()
+                .write_batch(&modes, None, None)
+                .expect("write score");
             col.close().expect("close col");
         }
         rg.close().expect("close row group");
@@ -1508,9 +1591,16 @@ mod tests {
             .expect("sparse tables must load");
         assert_eq!(
             sparse.mqa,
-            grid(&[(1, 2048, 0, 25.0), (1, 16384, 0, 1601.5), (2, 2048, 128, 30.0)])
+            grid(&[
+                (1, 2048, 0, 25.0),
+                (1, 16384, 0, 1601.5),
+                (2, 2048, 128, 30.0)
+            ])
         );
-        assert_eq!(sparse.topk_last, grid(&[(1, 16384, 0, 800.0), (1, 2048, 0, 190.0)]));
+        assert_eq!(
+            sparse.topk_last,
+            grid(&[(1, 16384, 0, 800.0), (1, 2048, 0, 190.0)])
+        );
         assert_eq!(sparse.topk_flat, grid(&[(1, 2048, 0, 100.0)]));
         assert!(sparse.dsa_attn.is_empty());
     }
@@ -1538,6 +1628,7 @@ mod tests {
                     false,
                 )
                 .unwrap()
+                .latency
         };
         // exact hit
         approx_rel(q(16, 4097), 0.2698);
@@ -1555,8 +1646,10 @@ mod tests {
     /// `(op_name, kernel_source, latency)`; the shape coordinate is fixed at
     /// (DeepseekV32ForCausalLM, bf16/bf16/bf16, n=128, b=1, isl=1024, step=0).
     fn write_dsa_module_parquet(path: &Path, rows: &[(&str, &str, f64)]) {
-        let rows_kv: Vec<(&str, &str, &str, i64, f64)> =
-            rows.iter().map(|r| (r.0, r.1, "bfloat16", 1024, r.2)).collect();
+        let rows_kv: Vec<(&str, &str, &str, i64, f64)> = rows
+            .iter()
+            .map(|r| (r.0, r.1, "bfloat16", 1024, r.2))
+            .collect();
         write_dsa_module_parquet_rows(path, &rows_kv)
     }
 
@@ -1589,14 +1682,18 @@ mod tests {
         let str_cols: [Vec<ByteArray>; 6] = [
             rows.iter().map(|r| ByteArray::from(r.0)).collect(),
             rows.iter().map(|r| ByteArray::from(r.1)).collect(),
-            rows.iter().map(|_| ByteArray::from("DeepseekV32ForCausalLM")).collect(),
+            rows.iter()
+                .map(|_| ByteArray::from("DeepseekV32ForCausalLM"))
+                .collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
             rows.iter().map(|r| ByteArray::from(r.2)).collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
         ];
         for values in &str_cols {
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(values, None, None).expect("write str");
+            col.typed::<ByteArrayType>()
+                .write_batch(values, None, None)
+                .expect("write str");
             col.close().expect("close col");
         }
         let int_cols: [Vec<i64>; 4] = [
@@ -1607,12 +1704,16 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let latencies: Vec<f64> = rows.iter().map(|r| r.4).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
-        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.typed::<DoubleType>()
+            .write_batch(&latencies, None, None)
+            .expect("write latency");
         col.close().expect("close col");
         rg.close().expect("close row group");
         writer.close().expect("close writer");
@@ -1677,6 +1778,7 @@ mod tests {
                     false,
                 )
                 .expect("query must succeed")
+                .latency
         };
         // BF16-KV rows back BOTH buckets (mirrors Python
         // `_dsa_kernel_source_buckets`): both full rows land in each bucket
@@ -1696,9 +1798,27 @@ mod tests {
         write_dsa_module_parquet_rows(
             &tmp.path().join("dsa_context_module_perf.parquet"),
             &[
-                ("dsa_context_module", "sglang_dsa_indexer_trtllm", "fp8", 4096, 1.0),
-                ("dsa_context_module", "sglang_dsa_indexer_flashmla_sparse", "fp8", 4096, 5.0),
-                ("dsa_context_module", "sglang_dsa_dense_mha_trtllm_ragged", "fp8", 1024, 7.0),
+                (
+                    "dsa_context_module",
+                    "sglang_dsa_indexer_trtllm",
+                    "fp8",
+                    4096,
+                    1.0,
+                ),
+                (
+                    "dsa_context_module",
+                    "sglang_dsa_indexer_flashmla_sparse",
+                    "fp8",
+                    4096,
+                    5.0,
+                ),
+                (
+                    "dsa_context_module",
+                    "sglang_dsa_dense_mha_trtllm_ragged",
+                    "fp8",
+                    1024,
+                    7.0,
+                ),
             ],
         );
         let table = DsaTable::new(tmp.path().to_path_buf());
@@ -1720,6 +1840,7 @@ mod tests {
                     false,
                 )
                 .expect("query must succeed")
+                .latency
         };
         assert_eq!(q("trtllm", 4096), 1.0);
         assert_eq!(q("flashmla_kv", 4096), 5.0);
@@ -1758,16 +1879,22 @@ mod tests {
                 .expect("writer");
         let mut rg = writer.next_row_group().expect("row group");
         let str_cols: [Vec<ByteArray>; 6] = [
-            rows.iter().map(|_| ByteArray::from("dsa_generation_module")).collect(),
+            rows.iter()
+                .map(|_| ByteArray::from("dsa_generation_module"))
+                .collect(),
             rows.iter().map(|_| ByteArray::from("default")).collect(),
-            rows.iter().map(|_| ByteArray::from("DeepseekV32ForCausalLM")).collect(),
+            rows.iter()
+                .map(|_| ByteArray::from("DeepseekV32ForCausalLM"))
+                .collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
             rows.iter().map(|_| ByteArray::from("bfloat16")).collect(),
         ];
         for values in &str_cols {
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(values, None, None).expect("write str");
+            col.typed::<ByteArrayType>()
+                .write_batch(values, None, None)
+                .expect("write str");
             col.close().expect("close col");
         }
         let int_cols: [Vec<i64>; 4] = [
@@ -1778,12 +1905,16 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let latencies: Vec<f64> = rows.iter().map(|r| r.2).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
-        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.typed::<DoubleType>()
+            .write_batch(&latencies, None, None)
+            .expect("write latency");
         col.close().expect("close col");
         rg.close().expect("close row group");
         writer.close().expect("close writer");
@@ -1838,7 +1969,8 @@ mod tests {
                 "flashmla_kv",
                 false,
             )
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert_eq!(got, 222.0);
     }
 
@@ -1869,7 +2001,65 @@ mod tests {
                 "flashmla_kv", // absent: falls back to the trtllm slice
                 false,
             )
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert_eq!(got, 3.5);
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_context_dsa_module(b=1, s=1536, num_heads=128,
+    ///     kvcache_quant_mode=bfloat16, fmha_quant_mode=bfloat16,
+    ///     gemm_quant_mode=bfloat16, database_mode=SILICON, prefix=0,
+    ///     architecture="DeepseekV32ForCausalLM")
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    #[test]
+    fn dsa_context_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("dsa_context_module_perf.parquet"),
+            &[
+                Col::Str("architecture", vec!["DeepseekV32ForCausalLM"; 2]),
+                Col::Str("mla_dtype", vec!["bfloat16"; 2]),
+                Col::Str("kv_cache_dtype", vec!["bfloat16"; 2]),
+                Col::Str("gemm_type", vec!["bfloat16"; 2]),
+                Col::I64("num_heads", vec![128, 128]),
+                Col::I64("batch_size", vec![1, 1]),
+                Col::I64("isl", vec![1024, 2048]),
+                Col::I64("step", vec![0, 0]),
+                Col::Str("op_name", vec!["dsa_context_module"; 2]),
+                Col::Str("kernel_source", vec!["sglang_dsa_indexer_trtllm"; 2]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = DsaTable::new(tmp.path().to_path_buf());
+        let spec = energy_test_spec();
+        let v = table
+            .query_context(
+                &spec,
+                1,
+                1536,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+                "DeepseekV32ForCausalLM",
+                0,
+                INDEX_TOPK,
+                "trtllm",
+                false,
+            )
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
     }
 }

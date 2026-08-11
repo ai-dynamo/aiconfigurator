@@ -8,9 +8,17 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions, mtp_scale_factor
 
 logger = logging.getLogger(__name__)
+
+# Historical DeepSeek-compatible 128-head kernel-table convention: sglang/
+# trtllm kernel queries key at ``128 // tp_size`` even for Kimi K2.5
+# (64-native). Collection side pinned in the Kimi case YAML; rationale and the
+# true-geometry follow-up in docs/perf_database/head-axis-keying.md. Scoped to
+# THIS class — Kimi-K3 (#1435) already queries true local geometry, and the
+# WideEP classes below use 128 as DSV3's actual native, not this convention.
+_MLA_KERNEL_TABLE_NATIVE_HEADS = 128
 
 
 @register_model("DEEPSEEK", "KIMIK25")
@@ -47,12 +55,23 @@ class DeepSeekModel(BaseModel):
         )
         extra_params = model_info["extra_params"]
         family = model_info["model_family"]
+        # Per-checkpoint, per-projection fact: Kimi-K2.5/R1 NVFP4 exclude the
+        # whole self_attn block from quantization; DeepSeek-V3.1-NVFP4 excludes
+        # only q/kv projections and keeps o_proj NVFP4; native FP8 checkpoints
+        # exclude nothing. Drives per-GEMM dtypes and the MLA-module perf key.
+        attn_exclusions = attention_projection_exclusions(model_info.get("raw_config") or {})
 
         if family == "KIMIK25":
             # Kimi K2.5 reuses the DeepSeek architecture, but skips the WideEP
             # dispatch below since the WideEP variants are DEEPSEEK-V3-specific
             # (different hidden_size, layer count, etc.).
-            return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
+            return cls(
+                *moe_args,
+                *base_args,
+                extra_params,
+                backend_name=backend_name,
+                attention_quant_exclusions=attn_exclusions,
+            )
 
         # DEEPSEEK family — three-way dispatch on WideEP.
         if backend_name == "sglang" and model_config.moe_backend == "deepep_moe":
@@ -61,10 +80,12 @@ class DeepSeekModel(BaseModel):
                 model_info["model_path"],
                 backend_name,
             )
-            return WideEPDeepSeekModel(*moe_args, *base_args)
+            return WideEPDeepSeekModel(*moe_args, *base_args, attention_quant_exclusions=attn_exclusions)
         if backend_name == "trtllm" and model_config.enable_wideep:
             logger.debug("TensorRT-LLM WideEP is enabled for model %s", model_info["model_path"])
-            return TrtllmWideEPDeepSeekModel(*moe_args, *base_args, extra_params)
+            return TrtllmWideEPDeepSeekModel(
+                *moe_args, *base_args, extra_params, attention_quant_exclusions=attn_exclusions
+            )
         logger.debug(
             "WideEP is not enabled for model %s with backend %s",
             model_info["model_path"],
@@ -73,9 +94,23 @@ class DeepSeekModel(BaseModel):
         # Thread backend_name through so backend-specific modeling (e.g. vLLM
         # TP allreduce, vLLM-specific attention head size) fires for the
         # DEEPSEEK family too, not just KIMIK25.
-        return cls(*moe_args, *base_args, extra_params, backend_name=backend_name)
+        return cls(
+            *moe_args,
+            *base_args,
+            extra_params,
+            backend_name=backend_name,
+            attention_quant_exclusions=attn_exclusions,
+        )
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        backend_name: str = "",
+        attention_quant_exclusions: frozenset = frozenset(),
+    ) -> None:
         super().__init__(*args)
         # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
         # in extra_params; generic hidden_size // n_heads would give the wrong value (e.g., 112).
@@ -118,11 +153,50 @@ class DeepSeekModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
+        # Attention projections follow the checkpoint's PER-PROJECTION dtype,
+        # not the global gemm mode: serving loads excluded projections in BF16
+        # (vLLM ReplicatedLinear/ColumnParallelLinear pick up the unquantized
+        # tensors) while non-excluded ones stay quantized — V3.1-NVFP4 keeps
+        # o_proj NVFP4 with BF16 q/kv. Drives per-GEMM perf rows and
+        # get_weights() byte widths.
+        excl = attention_quant_exclusions
+
+        def _attn_mode(group: str) -> common.GEMMQuantMode:
+            return common.GEMMQuantMode.bfloat16 if group in excl else gemm_quant_mode
+
+        attn_q_gemm_quant_mode = _attn_mode("q")
+        attn_kv_gemm_quant_mode = _attn_mode("kv")
+        attn_o_gemm_quant_mode = _attn_mode("o")
+        # downscale GEMM fuses q_a + kv_a: BF16 only when both groups are excluded.
+        attn_downscale_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if {"q", "kv"} <= excl else gemm_quant_mode
+        # Module perf rows are keyed by ONE gemm_type; when the checkpoint
+        # mixes dtypes across projections no row matches exactly, so key on
+        # o_proj's dtype — the largest projection by bytes and FLOPs (heads x
+        # v_head_dim x hidden ~ 58% of block weights at 64 heads).
+        attn_modes = {attn_q_gemm_quant_mode, attn_kv_gemm_quant_mode, attn_o_gemm_quant_mode}
+        # A module perf row is keyed by ONE gemm_type, so an exact module
+        # identity exists only when every projection shares a dtype. Mixed
+        # checkpoints (V3.1/V3.2-NVFP4: BF16 q/kv + NVFP4 o_proj) must use the
+        # granular per-projection path — an all-NVFP4 module profile measures
+        # kernels the checkpoint never runs.
+        attn_module_identity_exact = len(attn_modes) == 1
+        attn_gemm_quant_mode = next(iter(attn_modes)) if attn_module_identity_exact else attn_o_gemm_quant_mode
+        # Absorbed kv_b BMMs inherit the kv projection dtype.
         mla_bmm_quant_mode = (
-            common.GEMMQuantMode.fp8
+            common.GEMMQuantMode.bfloat16
+            if attn_kv_gemm_quant_mode == common.GEMMQuantMode.bfloat16
+            else common.GEMMQuantMode.fp8
             if gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
+
+        # Perf-row key for the profiled MLA attention module. When the
+        # checkpoint keeps attention projections unquantized (every NVFP4
+        # DeepSeek/Kimi release), serving executes BF16 projection GEMMs, so
+        # querying the module table at the global gemm_quant_mode (nvfp4)
+        # selects rows for kernels that never run. Weights accounting is NOT
+        # switched here: attention byte-width, MoE layer count and encoder
+        # residency are coupled and land together in a follow-up (#1396).
 
         h = self._hidden_size  # 7168
         tp_size = self.config.tp_size
@@ -147,67 +221,94 @@ class DeepSeekModel(BaseModel):
         cp_style = self.config.cp_style
         attn_count_div = cp if cp_style in ("allgather", "ring") else 1
 
-        self.context_ops.extend(
-            [
-                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
-                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
+        # Mixed checkpoints bypass the module row entirely (no exact
+        # identity exists in a single-gemm_type table); uniform checkpoints
+        # keep the profiled-module primary with the granular fallback.
+        context_mla_granular = [
+            ops.GEMM(
+                "context_downscale_gemm",
+                self._num_layers,
+                2112,
+                h,
+                attn_downscale_gemm_quant_mode,
+                seq_split=cp,
+            ),
+            ops.GEMM(
+                "context_q_b_proj_gemm",
+                self._num_layers,
+                # heads x (qk_nope 128 + qk_rope 64); DSV3's 128 heads gave the old 24576 literal
+                self._num_heads * 192 // tp_size,
+                1536,
+                attn_q_gemm_quant_mode,
+                seq_split=cp,
+            ),
+            ops.GEMM(
+                "context_kv_b_proj_gemm",
+                self._num_layers,
+                # heads x (qk_nope 128 + v_head_dim 128)
+                self._num_heads * 256 // tp_size,
+                512,
+                attn_kv_gemm_quant_mode,
+                seq_split=cp,
+            ),
+            ops.ContextAttention(
+                "context_attention",
+                self._num_layers / attn_count_div,
+                self._num_heads // tp_size,
+                self._num_kv_heads // tp_size,
+                kvcache_quant_mode,
+                fmha_quant_mode,
+                head_size=self._vllm_head_size,
+            )
+            if self._backend_name == "vllm"
+            else ops.ContextMLA(
+                "context_attention",
+                self._num_layers,
+                _MLA_KERNEL_TABLE_NATIVE_HEADS // tp_size,
+                kvcache_quant_mode,
+                fmha_quant_mode,
+                cp_size=cp,
+            ),
+            ops.GEMM(
+                "context_proj_gemm",
+                self._num_layers,
+                h,
+                # o_proj input: heads x v_head_dim 128
+                self._num_heads * 128 // tp_size,
+                attn_o_gemm_quant_mode,
+                seq_split=cp,
+            ),
+        ]
+        if attn_module_identity_exact:
+            context_mla_block_ops = [
                 ops.FallbackOp(
                     "context_mla_block",
                     primary=ops.MLAModule(
                         "context_mla_module",
                         self._num_layers / attn_count_div,
                         True,
-                        128 // tp_size,
+                        # Model head count, not the DSV3 literal: Kimi K2.5 has 64
+                        # heads, so tp1 must hit the heads=64 rows (present in the
+                        # module tables as the DSV3 tp2 shard).
+                        self._num_heads // tp_size,
                         kvcache_quant_mode,
                         fmha_quant_mode,
-                        gemm_quant_mode,
+                        attn_gemm_quant_mode,
+                        # [native][local] module-table identity (#1458);
+                        # resolves nearest (-> DSV3 128) until per-model data lands.
+                        native_num_heads=self._num_heads,
                     ),
-                    fallback=[
-                        ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode, seq_split=cp),
-                        ops.GEMM(
-                            "context_q_b_proj_gemm",
-                            self._num_layers,
-                            24576 // tp_size,
-                            1536,
-                            gemm_quant_mode,
-                            seq_split=cp,
-                        ),
-                        ops.GEMM(
-                            "context_kv_b_proj_gemm",
-                            self._num_layers,
-                            32768 // tp_size,
-                            512,
-                            gemm_quant_mode,
-                            seq_split=cp,
-                        ),
-                        ops.ContextAttention(
-                            "context_attention",
-                            self._num_layers / attn_count_div,
-                            self._num_heads // tp_size,
-                            self._num_kv_heads // tp_size,
-                            kvcache_quant_mode,
-                            fmha_quant_mode,
-                            head_size=self._vllm_head_size,
-                        )
-                        if self._backend_name == "vllm"
-                        else ops.ContextMLA(
-                            "context_attention",
-                            self._num_layers,
-                            128 // tp_size,
-                            kvcache_quant_mode,
-                            fmha_quant_mode,
-                            cp_size=cp,
-                        ),
-                        ops.GEMM(
-                            "context_proj_gemm",
-                            self._num_layers,
-                            h,
-                            128 * 128 // tp_size,
-                            gemm_quant_mode,
-                            seq_split=cp,
-                        ),
-                    ],
-                ),
+                    fallback=context_mla_granular,
+                )
+            ]
+        else:
+            context_mla_block_ops = context_mla_granular
+
+        self.context_ops.extend(
+            [
+                ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
+                ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
+                *context_mla_block_ops,
                 *self._cp_attn_comm_ops(),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
             ]
@@ -343,6 +444,91 @@ class DeepSeekModel(BaseModel):
                 )
             )
         #####generation part, only generation part is scaled by mtp_scale_factor
+        # Same mixed-identity gate as the context block above.
+        generation_mla_granular = [
+            ops.GEMM(
+                "generation_downscale_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                2112,
+                h,
+                attn_downscale_gemm_quant_mode,
+            ),
+            ops.GEMM(
+                "generation_q_b_proj_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                self._num_heads * 192 // tp_size,
+                1536,
+                attn_q_gemm_quant_mode,
+            ),
+            *(
+                # KIMI K2.5 on vLLM: same reasoning as ContextAttention above —
+                # vLLM absorbs the KV projection and runs standard GenerationAttention
+                # with v_head_dim=128. TRT-LLM and SGLang use the full MLA path
+                # (MLABmm + GenerationMLA + MLABmm).
+                [
+                    ops.GenerationAttention(
+                        "generation_attention",
+                        self._num_layers * self._mtp_scale_factor,
+                        self._num_heads // tp_size,
+                        self._num_kv_heads // tp_size,
+                        kvcache_quant_mode,
+                        head_size=self._vllm_head_size,
+                    )
+                ]
+                if self._backend_name == "vllm"
+                else [
+                    ops.MLABmm(
+                        "generation_bmm_pre",
+                        self._num_layers * self._mtp_scale_factor,
+                        self._num_heads // tp_size,
+                        mla_bmm_quant_mode,
+                        if_pre=True,
+                    ),
+                    ops.GenerationMLA(
+                        "generation_attention",
+                        self._num_layers * self._mtp_scale_factor,
+                        _MLA_KERNEL_TABLE_NATIVE_HEADS // tp_size,
+                        kvcache_quant_mode,
+                    ),
+                    ops.MLABmm(
+                        "generation_bmm_post",
+                        self._num_layers * self._mtp_scale_factor,
+                        self._num_heads // tp_size,
+                        mla_bmm_quant_mode,
+                        if_pre=False,
+                    ),
+                ]
+            ),
+            ops.GEMM(
+                "generation_proj_gemm",
+                self._num_layers * self._mtp_scale_factor,
+                h,
+                # o_proj input is heads x v_head_dim 128 (the old h//tp
+                # literal was wrong even for DSV3: 7168 vs 16384)
+                self._num_heads * 128 // tp_size,
+                attn_o_gemm_quant_mode,
+            ),
+        ]
+        if attn_module_identity_exact:
+            generation_mla_block_ops = [
+                ops.FallbackOp(
+                    "generation_mla_block",
+                    primary=ops.MLAModule(
+                        "generation_mla_module",
+                        self._num_layers * self._mtp_scale_factor,
+                        False,
+                        self._num_heads // tp_size,
+                        kvcache_quant_mode,
+                        fmha_quant_mode,
+                        attn_gemm_quant_mode,
+                        native_num_heads=self._num_heads,
+                    ),
+                    fallback=generation_mla_granular,
+                )
+            ]
+        else:
+            generation_mla_block_ops = generation_mla_granular
+
         self.generation_ops.extend(
             [
                 ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
@@ -353,80 +539,7 @@ class DeepSeekModel(BaseModel):
                     2 * h,
                     0.8,
                 ),
-                ops.FallbackOp(
-                    "generation_mla_block",
-                    primary=ops.MLAModule(
-                        "generation_mla_module",
-                        self._num_layers * self._mtp_scale_factor,
-                        False,
-                        128 // tp_size,
-                        kvcache_quant_mode,
-                        fmha_quant_mode,
-                        gemm_quant_mode,
-                    ),
-                    fallback=[
-                        ops.GEMM(
-                            "generation_downscale_gemm",
-                            self._num_layers * self._mtp_scale_factor,
-                            2112,
-                            h,
-                            gemm_quant_mode,
-                        ),
-                        ops.GEMM(
-                            "generation_q_b_proj_gemm",
-                            self._num_layers * self._mtp_scale_factor,
-                            24576 // tp_size,
-                            1536,
-                            gemm_quant_mode,
-                        ),
-                        *(
-                            # KIMI K2.5 on vLLM: same reasoning as ContextAttention above —
-                            # vLLM absorbs the KV projection and runs standard GenerationAttention
-                            # with v_head_dim=128. TRT-LLM and SGLang use the full MLA path
-                            # (MLABmm + GenerationMLA + MLABmm).
-                            [
-                                ops.GenerationAttention(
-                                    "generation_attention",
-                                    self._num_layers * self._mtp_scale_factor,
-                                    self._num_heads // tp_size,
-                                    self._num_kv_heads // tp_size,
-                                    kvcache_quant_mode,
-                                    head_size=self._vllm_head_size,
-                                )
-                            ]
-                            if self._backend_name == "vllm"
-                            else [
-                                ops.MLABmm(
-                                    "generation_bmm_pre",
-                                    self._num_layers * self._mtp_scale_factor,
-                                    self._num_heads // tp_size,
-                                    mla_bmm_quant_mode,
-                                    if_pre=True,
-                                ),
-                                ops.GenerationMLA(
-                                    "generation_attention",
-                                    self._num_layers * self._mtp_scale_factor,
-                                    128 // tp_size,
-                                    kvcache_quant_mode,
-                                ),
-                                ops.MLABmm(
-                                    "generation_bmm_post",
-                                    self._num_layers * self._mtp_scale_factor,
-                                    self._num_heads // tp_size,
-                                    mla_bmm_quant_mode,
-                                    if_pre=False,
-                                ),
-                            ]
-                        ),
-                        ops.GEMM(
-                            "generation_proj_gemm",
-                            self._num_layers * self._mtp_scale_factor,
-                            h,
-                            h // tp_size,
-                            gemm_quant_mode,
-                        ),
-                    ],
-                ),
+                *generation_mla_block_ops,
                 ops.ElementWise(
                     "generation_add_norm_2",
                     self._num_layers * self._mtp_scale_factor,
@@ -581,7 +694,14 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         # already rejects trtllm CP; this is the explicit belt-and-suspenders.
         return False
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        attention_quant_exclusions: frozenset = frozenset(),
+    ) -> None:
         super().__init__(*args)
 
         # make sure the parallel width is same
@@ -607,8 +727,23 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
+        # Attention projections follow the checkpoint's PER-PROJECTION dtype
+        # (see DeepSeekModel.__init__): excluded projections load in BF16.
+        excl = attention_quant_exclusions
+
+        def _attn_mode(group: str) -> common.GEMMQuantMode:
+            return common.GEMMQuantMode.bfloat16 if group in excl else gemm_quant_mode
+
+        attn_q_gemm_quant_mode = _attn_mode("q")
+        attn_kv_gemm_quant_mode = _attn_mode("kv")
+        attn_o_gemm_quant_mode = _attn_mode("o")
+        attn_downscale_gemm_quant_mode = common.GEMMQuantMode.bfloat16 if {"q", "kv"} <= excl else gemm_quant_mode
+
+        # Absorbed kv_b BMMs inherit the kv projection dtype.
         mla_bmm_quant_mode = (
-            common.GEMMQuantMode.fp8
+            common.GEMMQuantMode.bfloat16
+            if attn_kv_gemm_quant_mode == common.GEMMQuantMode.bfloat16
+            else common.GEMMQuantMode.fp8
             if gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
@@ -685,7 +820,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                 # kv_a_proj_with_mqa: projects hidden_size -> compressed_dim (1536+512+64=2112)
-                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
+                ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, attn_downscale_gemm_quant_mode),
                 # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
                 ops.ElementWise("context_q_a_layernorm", self._num_layers, 1536, 1536, 0.8),
                 ops.GEMM(
@@ -693,14 +828,14 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     24576 // tp_size,
                     1536,
-                    gemm_quant_mode,
+                    attn_q_gemm_quant_mode,
                 ),
                 ops.GEMM(
                     "context_kv_b_proj_gemm",
                     self._num_layers,
                     32768 // tp_size,
                     512,
-                    gemm_quant_mode,
+                    attn_kv_gemm_quant_mode,
                 ),
                 ops.ContextMLA(
                     "context_attention",
@@ -709,7 +844,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     kvcache_quant_mode,
                     fmha_quant_mode,
                 ),
-                ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, attn_o_gemm_quant_mode),
                 ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
             ]
         )
@@ -853,7 +988,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     2112,
                     h,
-                    gemm_quant_mode,
+                    attn_downscale_gemm_quant_mode,
                 ),
                 # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
                 # In TRT-LLM, kv_a_layernorm (dim=512) runs in parallel but is much smaller,
@@ -870,7 +1005,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     24576 // tp_size,
                     1536,
-                    gemm_quant_mode,
+                    attn_q_gemm_quant_mode,
                 ),
                 # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
                 # Main stream: q_nope * W_absorption -> absorbed_q
@@ -916,7 +1051,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                     h,
                     h // tp_size,
-                    gemm_quant_mode,
+                    attn_o_gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "generation_add_norm_2",
@@ -1059,7 +1194,14 @@ class WideEPDeepSeekModel(BaseModel):
         # DeepSeek-V3 SGLang WideEP (deepep) — dense MLA prefill CP (1145 uniform).
         return backend_name == "sglang"
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        attention_quant_exclusions: frozenset = frozenset(),
+    ) -> None:
         super().__init__(*args)
 
         assert num_experts >= self.config.moe_ep_size, f"ep size cannot be larger than num_experts {num_experts}"
@@ -1085,6 +1227,15 @@ class WideEPDeepSeekModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
+
+        # Attention downscale (fused q_a+kv_a) follows the checkpoint's
+        # per-projection dtype (see DeepSeekModel.__init__); the q_b/kv_b/o
+        # projections live inside the WideEP MLA module rows, whose query
+        # carries no gemm axis, so only the granular downscale GEMMs are
+        # switched here.
+        attn_downscale_gemm_quant_mode = (
+            common.GEMMQuantMode.bfloat16 if {"q", "kv"} <= attention_quant_exclusions else gemm_quant_mode
+        )
 
         self._power_law_alpha_prefill = 0.6 if self.config.enable_eplb else 1.01
         self._power_law_alpha_decode = 1.01
@@ -1113,7 +1264,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
                     h,
-                    gemm_quant_mode,
+                    attn_downscale_gemm_quant_mode,
                     scale_num_tokens=tp_size,
                     seq_split=cp,
                 ),
@@ -1140,7 +1291,7 @@ class WideEPDeepSeekModel(BaseModel):
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3, seq_split=cp),
                 ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8, seq_split=cp),
                 ops.GEMM(
-                    "context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode, seq_split=cp
+                    "context_downscale_gemm", self._num_layers, 2112, h, attn_downscale_gemm_quant_mode, seq_split=cp
                 ),  # on every gpu, fused_a
                 ops.WideEPContextMLA(
                     "context_attention",
@@ -1256,7 +1407,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     1536 + 512 + 64,  # q_lora_rank + kv_lora_rank + qk_rope_head_dim = 2112
                     h,
-                    gemm_quant_mode,
+                    attn_downscale_gemm_quant_mode,
                 ),
             ]
         )
@@ -1277,7 +1428,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     2112,
                     h,
-                    gemm_quant_mode,
+                    attn_downscale_gemm_quant_mode,
                 ),
                 ops.WideEPGenerationMLA(
                     "generation_attention",

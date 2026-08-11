@@ -366,9 +366,15 @@ fn estimate_from_dict(
         None
     } else {
         Some(KvCacheEstimateAdjusted {
-            tolerance_fraction: adjusted_item.get_item("tolerance_fraction")?.extract::<f64>()?,
-            total_kv_size_bytes: adjusted_item.get_item("total_kv_size_bytes")?.extract::<u64>()?,
-            total_kv_size_tokens: adjusted_item.get_item("total_kv_size_tokens")?.extract::<u64>()?,
+            tolerance_fraction: adjusted_item
+                .get_item("tolerance_fraction")?
+                .extract::<f64>()?,
+            total_kv_size_bytes: adjusted_item
+                .get_item("total_kv_size_bytes")?
+                .extract::<u64>()?,
+            total_kv_size_tokens: adjusted_item
+                .get_item("total_kv_size_tokens")?
+                .extract::<u64>()?,
         })
     };
 

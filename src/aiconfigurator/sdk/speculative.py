@@ -12,12 +12,15 @@ the same ``aic-core`` engine can be reused across acceptance-rate sweeps.
 from __future__ import annotations
 
 import copy
+import logging
 import math
 from dataclasses import dataclass
 from typing import Literal
 
 from aiconfigurator.sdk.config_builders import normalize_nextn
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+
+logger = logging.getLogger(__name__)
 
 ProjectionRole = Literal["agg", "prefill", "decode", "static"]
 
@@ -93,8 +96,24 @@ class SpeculativeDecodingProfile:
         if frame is None or frame.empty:
             return projected
 
-        frame = frame.copy(deep=True)
         progress = self.tokens_per_iteration
+        if role == "agg":
+            step_estimates = projected.get_step_estimates()
+            scheduling = step_estimates.get("scheduling", {}) if step_estimates else {}
+            applied_progress = scheduling.get("decode_tokens_per_iteration")
+            if applied_progress is not None:
+                # The agg scheduler already modeled speculative progress; its
+                # metrics are authoritative and must never be re-scaled here.
+                if not math.isclose(float(applied_progress), progress):
+                    logger.warning(
+                        "run_agg applied decode_tokens_per_iteration=%s but the projection "
+                        "profile expects %s; keeping the scheduler-applied value.",
+                        applied_progress,
+                        progress,
+                    )
+                return projected
+
+        frame = frame.copy(deep=True)
         original_request_latency = frame.get("request_latency")
 
         if "tpot" in frame:

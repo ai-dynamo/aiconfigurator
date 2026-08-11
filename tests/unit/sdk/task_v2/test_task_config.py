@@ -981,8 +981,9 @@ def test_sglang_agg_default_moe_ep_search():
 
 
 def test_run_validates_by_default():
-    """run() validates first (v1 fail-fast); validate=False skips it. SGLang WideEP DeepSeek
-    has no wideep_context_mla data for fp8/bf16 -> validate raises."""
+    """run() validates first (v1 fail-fast); validate=False skips it. An EXPLICIT fmha
+    quant the WideEP MLA table lacks (it only carries the fp8_block label) makes validate
+    raise -- the explicit value is preserved (not auto-resolved) so it fails fast."""
     from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
 
     t = Task(
@@ -992,9 +993,111 @@ def test_run_validates_by_default():
         backend_name="sglang",
         enable_wideep=True,
         total_gpus=64,
+        fmha_quant_mode=common.FMHAQuantMode.fp8,
     )
     with pytest.raises(UnsupportedWideepConfigError):
         t.run()  # default validate=True
+
+
+def test_wideep_deepseek_resolves_fp8_block_mla_labels():
+    """WideEP DeepSeek queries the wideep_*_mla tables, which the collector labels
+    fp8_block (fmha) / fp8 (kv) even though physically a bf16 run (collect_mla_module.py).
+    The task must resolve those labels so DB validation matches -- NOT the narrow-EP bf16
+    downgrade that applies without WideEP."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    assert t.moe_backend == "deepep_moe"
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+
+    # Without WideEP the same model keeps the narrow-EP bf16 downgrade.
+    t_narrow = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        total_gpus=8,
+    )
+    assert t_narrow.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+
+def test_wideep_kimi_skips_deepseek_mla_label_remap():
+    """Kimi K2.5 reuses the DeepSeek architecture but is deliberately OUT of the WideEP
+    path (models/deepseek.py routes KIMIK25 away from WideEPDeepSeekModel), so the
+    fp8_block/fp8 MLA label remap above must not fire for it -- otherwise the task
+    labels a WideEP config that model construction never builds. Kimi WideEP support
+    is deferred to its own PR; this pins the deferral."""
+    t = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K2.5",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        enable_wideep=True,
+        total_gpus=64,
+    )
+    assert t.moe_backend == "deepep_moe"
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+
+
+def test_deepep_moe_without_enable_wideep_keys_wideep_mla_tables():
+    """The intra-node DeepEP sweep (cli ``agg_deepep`` / ``disagg_deepep``) sets
+    moe_backend=deepep_moe with enable_wideep UNSET, and models/deepseek.py dispatches
+    to WideEPDeepSeekModel -- which builds WideEPContextMLA / WideEPGenerationMLA -- on
+    moe_backend alone. So the op keys validate against must be the wideep_*_mla tables,
+    matching the fp8_block/fp8 labels _resolve_quant_modes assigns on that same
+    predicate. Keying the tables on enable_wideep instead resolved fmha=fp8_block but
+    checked narrow-EP context_mla (bfloat16 only), rejecting a config the model layer
+    builds happily."""
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+        total_gpus=8,
+    )
+    assert t.enable_wideep is False
+    # The quant remap and the table selection must agree, or validate rejects the pair.
+    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    assert t._attention_op_keys("agg") == ("wideep_context_mla", "wideep_generation_mla")
+
+    # Plain narrow EP (no deepep_moe) keeps the narrow-EP tables and the bf16 downgrade.
+    t_narrow = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        total_gpus=8,
+    )
+    assert t_narrow._attention_op_keys("agg") == ("context_mla", "generation_mla")
+
+
+def test_deepep_moe_kimi_keeps_narrow_ep_mla_tables():
+    """Guard for the guard above: Kimi K2.5 is routed away from WideEPDeepSeekModel
+    (models/deepseek.py dispatches on the DeepSeek architecture), so deepep_moe must NOT
+    pull it into the wideep_*_mla tables -- that would validate against tables whose ops
+    are never built, the mirror of the bug the DeepSeek case pins. Widening the
+    DeepseekV3ForCausalLM guard in _attention_op_keys fails here, and would also break
+    test_wideep_kimi_skips_deepseek_mla_label_remap."""
+    t = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K2.5",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        moe_backend="deepep_moe",
+        total_gpus=8,
+    )
+    assert t._architecture != "DeepseekV3ForCausalLM"
+    assert t._attention_op_keys("agg") == ("context_mla", "generation_mla")
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
 
 def test_enable_wideep_normalizes_moe_backend():
@@ -1724,6 +1827,98 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
             make("HYBRID", disabled).validate()
 
 
+def test_validate_gemm_quant_transfer_reachable_in_hybrid():
+    """GEMM has the same transfer ladder as MoE (shared quant-transfer
+    primitive): int4_wo GEMM (profile (0.5, 1), bf16 compute pipeline) has no
+    Hopper data and no same-profile sibling, but is XPROFILE-reachable in
+    HYBRID from the collected bf16/fp8 tables. SILICON and non-XPROFILE
+    policies keep rejecting — the gate admits exactly what the resolved
+    policy + DB contents make reachable at query time."""
+
+    def make(mode, policy=None, quant=common.GEMMQuantMode.int4_wo):
+        t = Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="vllm",
+            backend_version="0.19.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+        # int4_wo is collected by NO h200/vllm version, so cross-version
+        # shared-layer inheritance cannot data-admit it (unlike trtllm, where
+        # 1.2.0rc5 carries int4_wo and feeds newer versions as a sibling).
+        t.gemm_quant_mode = quant
+        return t
+
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()  # default policy (all on) -> XPROFILE reachable -> no raise
+    make("HYBRID", "xprofile").validate()  # XPROFILE explicitly enabled -> no raise
+
+    # No same-profile GEMM sibling for (0.5, 1): XQUANT alone must not admit it,
+    # and neither may weaker policies — the query ladder would reject at run time.
+    for disabled in ("off", "conservative", "balanced", "xquant"):
+        with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+            make("HYBRID", disabled).validate()
+
+    # nvfp4 (fp4 MMA) can never run on Hopper: strict per-dtype resolution
+    # (#1398) rejects it at validate() in EVERY mode and policy — BEFORE the
+    # transfer ladder is consulted — mirroring the query-entry behavior, so
+    # impossible sweep configurations fail early instead of on the first
+    # HYBRID query.
+    from aiconfigurator.sdk.errors import MissingSystemFlopsError
+
+    for mode, policy in (("SILICON", None), ("HYBRID", None), ("HYBRID", "xprofile")):
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
+
+
+def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
+    """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
+    the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
+    profile transfer on combos without quantize data — validate keeps failing
+    fast instead of the sweep dying late in query_compute_scale."""
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="b200_sxm",
+        backend_name="vllm",
+        backend_version="0.19.0",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.fp8_static
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
+        t.validate()
+
+
+def test_validate_gemm_xprofile_requires_listed_level_profile(monkeypatch):
+    """The gate deliberately refuses XPROFILE admission for a profile missing
+    from the GEMM util-LEVEL table (the runtime ladder would fall back to a
+    default level, but the gate enforces the enum-line + level-line
+    add-a-quant recipe — the one intentional way it is stricter)."""
+    from aiconfigurator.sdk.operations import gemm as gemm_ops
+
+    # int4_wo: resolvable dtype (bf16 pipeline) so the strict-FLOPS check at
+    # the top of the gate passes and the level-table refusal is what fires
+    # (nvfp4 on Hopper would raise MissingSystemFlopsError before reaching
+    # the ladder — see test_validate_gemm_quant_transfer_reachable_in_hybrid).
+    trimmed = {p: lv for p, lv in gemm_ops._GEMM_QUANT_UTIL_LEVEL.items() if p != (0.5, 1)}
+    monkeypatch.setattr(gemm_ops, "_GEMM_QUANT_UTIL_LEVEL", trimmed)
+
+    t = Task(
+        serving_mode="agg",
+        model_path="Qwen/Qwen3-32B",
+        system_name="h200_sxm",
+        backend_name="vllm",
+        backend_version="0.19.0",
+        database_mode="HYBRID",
+    )
+    t.gemm_quant_mode = common.GEMMQuantMode.int4_wo
+    with pytest.raises(ValueError, match="Unsupported gemm quant mode 'int4_wo'"):
+        t.validate()
+
+
 def test_validate_skips_db_check_when_database_unavailable():
     """If DB can't be loaded, DB validation silently skips (caller sees other errors)."""
     t = Task(
@@ -1819,3 +2014,27 @@ def test_to_yaml_round_trips_through_from_yaml():
     assert t2.model_path == t1.model_path
     assert t2.gemm_quant_mode == t1.gemm_quant_mode
     assert t2.agg_tp_candidates == t1.agg_tp_candidates
+
+
+def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
+    """V3.1-NVFP4 (BF16 q/kv + NVFP4 o_proj) bypasses the profiled MLA-module
+    row, so fmha availability must be judged on the GRANULAR context-mla table:
+    b200/trtllm has an fp8 fmha slice only in the module table, and keeping the
+    checkpoint-inferred fp8 would make every context query miss (reviewer
+    regression: the b200/trtllm support-matrix entry failed end-to-end)."""
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        t = Task(
+            serving_mode="agg",
+            model_path="nvidia/DeepSeek-V3.1-NVFP4",
+            system_name="b200_sxm",
+            backend_name="trtllm",
+            backend_version="1.3.0rc10",
+            isl=128,
+            osl=64,
+        )
+    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)

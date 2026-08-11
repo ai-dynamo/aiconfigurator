@@ -104,17 +104,19 @@ def _moe_quant_util_level(quant_mode) -> float:
 
 def _xprofile_moe_quants(query_quant, table) -> list:
     """Collected quants with a DIFFERENT (memory, compute) profile than the query,
-    nearest-profile first. Same-profile quants are handled by the same-profile tier;
-    these are the cross-profile transfer references, rescaled by the util-level ratio."""
-    qp = (query_quant.value.memory, query_quant.value.compute)
+    nearest-profile first. Kept as a named MoE entry point for existing callers;
+    the ordering itself lives in the shared quant-transfer primitive."""
+    return util_empirical.xprofile_quant_order(query_quant, table)
 
-    def dist(q):
-        return abs(q.value.memory - qp[0]) + abs(q.value.compute - qp[1])
 
-    return sorted(
-        (q for q in table if q is not query_quant and (q.value.memory, q.value.compute) != qp),
-        key=dist,
-    )
+def xprofile_util_level_known(quant_mode) -> bool:
+    """Whether the MoE util-LEVEL table lists this quant's profile.
+
+    The runtime ladder falls back to ``_MOE_QUANT_UTIL_DEFAULT`` for unlisted
+    profiles; the validate gate deliberately does NOT (admitting a quant
+    nobody calibrated would hide the missing level line the add-a-quant
+    recipe requires), so it asks this instead of reaching into the table."""
+    return util_empirical.quant_profile(quant_mode) in _MOE_QUANT_UTIL_LEVEL
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -296,6 +298,10 @@ class MoE(Operation):
         enable_eplb: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_moe`` body."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         cls.load_data(database)
@@ -327,7 +333,7 @@ class MoE(Operation):
                 // moe_tp_size
                 * min(num_experts // moe_ep_size, total_tokens // moe_ep_size)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -493,32 +499,15 @@ class MoE(Operation):
                                     )
                     return out
 
+                # Relation ladder (xshape -> xquant -> xprofile) via the shared
+                # quant-transfer primitive; MoE contributes candidate
+                # enumeration (_collect), its SOL, and its util-LEVEL table.
+                # Same-profile transfer measured ~13% MAPE (fp8_block <- fp8);
+                # cross-profile raw ~58% -> ~24% MAPE LOO with the level ratio.
                 policy = database.transfer_policy
-
-                def _moe_candidates():
-                    # Tier 1 (XSHAPE): cross-shape within the query quant (closest measurement).
-                    cands = (
-                        _collect(quant_mode, quant_mode, "xshape")
-                        if (common.TransferKind.XSHAPE in policy and quant_mode in moe_table)
-                        else []
-                    )
-                    if cands:
-                        return cands
-                    # Tier 2 (XQUANT): cross-quant within the same (memory, compute) profile.
-                    # Same profile => same SOL coefficients and binding regime, so util
-                    # transfers (measured ~13% MAPE for fp8_block <- fp8; the query quant's
-                    # SOL is used unchanged). Only when the query quant has no data of any shape.
-                    if common.TransferKind.XQUANT in policy:
-                        qp = (quant_mode.value.memory, quant_mode.value.compute)
-                        for q in moe_table:
-                            if q is quant_mode or (q.value.memory, q.value.compute) != qp:
-                                continue
-                            cands.extend(_collect(q, quant_mode, "xquant"))
-                    return cands
-
-                grid = util_empirical.grid_from_reference(
+                grid, util_scale, ref_prov = util_empirical.quant_transfer_grid(
+                    "moe",
                     (
-                        "moe_xshape",
                         database.system,
                         database.backend,
                         database.version,
@@ -534,48 +523,16 @@ class MoE(Operation):
                         num_gemms,
                     ),
                     (topk, num_experts, hidden_size, inter_size),
-                    _moe_candidates,
+                    policy,
+                    quant_mode,
+                    moe_table,
+                    _collect,
+                    _moe_quant_util_level,
                     depth=1,
                     selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
                 )
-                if grid is not None and grid.samples and grid.reference_provenance:
-                    prov = grid.reference_provenance
-
-                # Tier 3: cross-PROFILE. No own- or same-profile data at all -> borrow the
-                # nearest collected quant's util curve, built with the REFERENCE quant's own
-                # SOL, and rescale by the per-quant util-LEVEL ratio e(query)/e(ref). The
-                # cross-profile error is ~pure systematic kernel-efficiency bias, which this
-                # ratio removes (raw ~58% -> ~24% MAPE LOO). Last resort, lowest confidence.
-                if (grid is None or not grid.samples) and common.TransferKind.XPROFILE in policy:
-                    for ref_q in _xprofile_moe_quants(quant_mode, moe_table):
-                        g = util_empirical.grid_from_reference(
-                            (
-                                "moe_xprofile",
-                                database.system,
-                                database.backend,
-                                database.version,
-                                quant_mode.name,
-                                ref_q.name,
-                                kernel_tag,
-                                topk,
-                                num_experts,
-                                hidden_size,
-                                inter_size,
-                                moe_tp_size,
-                                moe_ep_size,
-                                workload_distribution,
-                                num_gemms,
-                            ),
-                            (topk, num_experts, hidden_size, inter_size),
-                            (lambda _rq=ref_q: _collect(_rq, _rq, "xprofile")),
-                            depth=1,
-                            selection_key=(id(moe_table), policy, workload_distribution, num_gemms),
-                        )
-                        if g is not None and g.samples:
-                            grid = g
-                            util_scale = _moe_quant_util_level(quant_mode) / _moe_quant_util_level(ref_q)
-                            prov = "xprofile"
-                            break
+                if ref_prov:
+                    prov = ref_prov
             latency, _ = util_empirical.estimate(sol_time, (num_tokens,), grid, util_scale=util_scale, provenance=prov)
             return latency
 
@@ -984,6 +941,69 @@ class MoEDispatch(Operation):
     # ------------------------------------------------------------------
 
     @classmethod
+    def _resolve_wideep_deepep_comm_node_data(
+        cls,
+        data_by_node,
+        *,
+        table: str,
+        node_num: int,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+    ) -> tuple[int, dict, bool]:
+        """Resolve DeepEP dispatch/combine rows for ``(node_num, hidden, topk, experts)``.
+
+        Prefer measurements at the requested node scale. When those rows are
+        absent, reuse node_num=1 rows for the same
+        ``(hidden_size, topk, num_experts)``. This is the intentional WideEP
+        communication approximation and is returned as ``source="estimated"``.
+        Exact-scale rows remain ``source="silicon"``.
+
+        If neither exact-scale nor matching node_num=1 data exists, fail with
+        ``PerfDataNotAvailableError`` instead of inventing a value. Sub-node
+        scales use the same node-1 approximation because they have no separate
+        table representation.
+
+        Read via .get() chains so a miss does not auto-vivify nested entries.
+        Returns ``(lookup_node, node_data, used_node1_fallback)``. Raises
+        ``PerfDataNotAvailableError`` when neither the requested scale nor the
+        node_num=1 rows have this shape.
+        """
+        node_data = data_by_node.get(node_num, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if node_data:
+            return node_num, node_data, False
+
+        node1_data = cls._wideep_comm_node1_fallback(
+            data_by_node,
+            table=table,
+            requested_node_num=node_num,
+            hidden_size=hidden_size,
+            topk=topk,
+            num_experts=num_experts,
+        )
+        return 1, node1_data, node_num != 1
+
+    @staticmethod
+    def _wideep_comm_node1_fallback(
+        data_by_node,
+        *,
+        table: str,
+        requested_node_num: float,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+    ) -> dict:
+        """Return matching node-1 WideEP communication data or fail clearly."""
+        node1_data = data_by_node.get(1, {}).get(hidden_size, {}).get(topk, {}).get(num_experts, {})
+        if node1_data:
+            return node1_data
+        raise PerfDataNotAvailableError(
+            f"wideep_deepep_{table} communication data unavailable for requested node_num={requested_node_num}: "
+            f"no exact rows and no matching node_num=1 fallback rows for "
+            f"hidden={hidden_size} topk={topk} experts={num_experts}"
+        )
+
+    @classmethod
     def _query_wideep_deepep_ll_table(
         cls,
         database: PerfDatabase,
@@ -1014,7 +1034,14 @@ class MoEDispatch(Operation):
         elif database_mode == common.DatabaseMode.EMPIRICAL:
             return PerformanceResult(get_empirical(num_tokens, topk, num_experts), energy=0.0, source="empirical")
         else:
-            data = database._wideep_deepep_ll_data[node_num][hidden_size][topk][num_experts]
+            _lookup_node, data, used_node1_fallback = cls._resolve_wideep_deepep_comm_node_data(
+                database._wideep_deepep_ll_data,
+                table="ll",
+                node_num=node_num,
+                hidden_size=hidden_size,
+                topk=topk,
+                num_experts=num_experts,
+            )
             # 1-D tokens curve. Dispatch has no implemented roofline, but util-hold
             # only needs the SOL *ratio*: dispatch bytes scale ~linearly with
             # tokens (hidden/topk fixed per slice), so a linear proxy is
@@ -1025,7 +1052,18 @@ class MoEDispatch(Operation):
             result = perf_interp.query(config, data, num_tokens)
             lat = perf_interp.get_value(result, "latency")
             energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_comm_result(
+                database, lat / 1000.0, energy / 1000.0, used_node1_fallback=used_node1_fallback
+            )
+
+    @staticmethod
+    def _wideep_comm_result(
+        database: PerfDatabase, latency: float, energy: float, *, used_node1_fallback: bool
+    ) -> PerformanceResult:
+        """Return exact table data as silicon and node-1 reuse as estimated."""
+        if not used_node1_fallback:
+            return database._interp_pr(latency, energy=energy)
+        return PerformanceResult(latency, energy=energy, source="estimated")
 
     @classmethod
     def _query_wideep_deepep_normal_table(
@@ -1061,8 +1099,21 @@ class MoEDispatch(Operation):
                 get_empirical(num_tokens, num_experts, topk, hidden_size), energy=0.0, source="empirical"
             )
         else:
-            if node_num == 1 and sms == 20:  # only collect sm=20 for now
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts][sms]
+            lookup_node, node_data, used_node1_fallback = cls._resolve_wideep_deepep_comm_node_data(
+                database._wideep_deepep_normal_data,
+                table="normal",
+                node_num=node_num,
+                hidden_size=hidden_size,
+                topk=topk,
+                num_experts=num_experts,
+            )
+            if lookup_node == 1 and sms == 20:  # only collect sm=20 for now
+                # .get(), not [] -- node_data is a nested defaultdict from the
+                # loader, so indexing a missing sms would auto-vivify an empty
+                # branch INTO the shared cached table (see load_data caches) and
+                # skew later 2-axis (sms, tokens) queries on the same slice.
+                # An empty dict here still fails cleanly in perf_interp.query.
+                data = node_data.get(sms, {})
                 # 1-D tokens curve; linear token proxy SOL (see deepep_ll note).
                 config = perf_interp.OpInterpConfig(
                     axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
@@ -1071,7 +1122,7 @@ class MoEDispatch(Operation):
                 lat = perf_interp.get_value(result, "latency")
                 energy = perf_interp.get_value(result, "energy")
             else:
-                data = database._wideep_deepep_normal_data[node_num][hidden_size][topk][num_experts]
+                data = node_data
                 # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
                 # off-grid sms snaps to the nearest collected value (the legacy
                 # 2-D scattered interp simply failed on a single-sms cloud);
@@ -1085,7 +1136,9 @@ class MoEDispatch(Operation):
                 result = perf_interp.query(config, data, sms, num_tokens)
                 lat = perf_interp.get_value(result, "latency")
                 energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat / 1000.0, energy=energy / 1000.0)
+            return cls._wideep_comm_result(
+                database, lat / 1000.0, energy / 1000.0, used_node1_fallback=used_node1_fallback
+            )
 
     # ------------------------------------------------------------------
     # Op contract — legacy body lifted verbatim. Heavy branching across
@@ -1592,6 +1645,10 @@ class TrtLLMWideEPMoE(Operation):
         is_gated: bool = True,
     ) -> PerformanceResult | tuple[float, float, float]:
         """Verbatim port of legacy ``PerfDatabase.query_wideep_moe_compute``."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
         cls.load_data(database)
 
         num_gemms = 3 if is_gated else 2
@@ -1624,7 +1681,7 @@ class TrtLLMWideEPMoE(Operation):
                 // moe_tp_size
                 * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
             )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
+            sol_math = ops / common.get_quant_tc_flops(database.system_spec, quant_mode) * 1000
             sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
             sol_time = max(sol_math, sol_mem)
             return sol_time, sol_math, sol_mem
@@ -2566,6 +2623,18 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
+                moe_ep_size
+            ][num_tokens]
+            logger.debug(
+                f"value conflict in wideep context moe data: {quant_mode} {distribution} {topk} "
+                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values
         wideep_context_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
             moe_ep_size
@@ -2634,6 +2703,18 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
+                moe_tp_size
+            ][moe_ep_size][num_tokens]
+            logger.debug(
+                f"value conflict in wideep generation moe data: {quant_mode} {distribution} {topk} "
+                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values
         wideep_generation_moe_data[quant_mode][distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
             moe_ep_size
@@ -2832,6 +2913,18 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][
+                inter_size
+            ][num_slots][moe_tp_size][moe_ep_size][num_tokens]
+            logger.debug(
+                f"value conflict in wideep moe compute data: {kernel_source} {quant_mode} {distribution} "
+                f"{topk} {num_experts} {hidden_size} {inter_size} {num_slots} {moe_tp_size} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values with kernel_source dimension
         wideep_moe_compute_data[kernel_source][quant_mode][distribution][topk][num_experts][hidden_size][inter_size][
             num_slots
@@ -2934,6 +3027,18 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
         power = float(row.get("power", 0.0))
         energy = power * latency  # watt-milliseconds
 
+        try:
+            # Check for conflict: first source wins (shared-layer contract).
+            trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
+                moe_ep_size
+            ][num_tokens]
+            logger.debug(
+                f"value conflict in trtllm alltoall data: {kernel_source} {op_name} {quant_mode} "
+                f"{num_nodes} {hidden_size} {topk} {num_experts} {moe_ep_size} {num_tokens}"
+            )
+            continue
+        except KeyError:
+            pass
         # Store all three values with kernel_source and num_nodes dimensions
         trtllm_alltoall_data[kernel_source][op_name][quant_mode][num_nodes][hidden_size][topk][num_experts][
             moe_ep_size

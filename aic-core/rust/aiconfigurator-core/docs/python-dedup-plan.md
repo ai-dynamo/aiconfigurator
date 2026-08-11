@@ -5,25 +5,66 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
-**Status (2026-07-13): NOT STARTED — plan of record, not yet implemented.**
-The switch is still opt-in: `engine_step_backend` defaults to Python
-(`config.py`), `should_use_rust_engine_step` returns Python unless it is set to
-`"rust"`, and the `operations/*.py` `query()` methods plus the
-`perf_database.py` latency-query methods are all still present. None of the
-gates below has run.
+**Status (2026-08-06): PR-1 (#1454) MERGED 2026-08-05; PR-2 in flight.**
+PR-2 closes every gap listed below and lands the Gate-2 golden anchor. State
+of the former gaps:
 
-**New blocker since drafting:** the Rust engine-step is **SILICON-only** (no
-`util_empirical` layer), so `should_use_rust_engine_step` delegates
-HYBRID/EMPIRICAL databases back to Python for answer-parity. A *global* default
-flip (Gate 1) therefore cannot ship until the empirical-layer port lands
-(issue #1333); until then any flip is silicon-only or staged per-family.
+- **Energy/power crosses the FFI (PR-2).** Rust perf leaves carry the
+  measured `{latency, power, energy}` triple (`perf_interp.rs::LeafValue`);
+  power blends with the Python engine's exact semantics (linear lerp /
+  median util-hold / IDW site mean — NOT energy-lerp), and per-op
+  `energy_wms` rides the op-list FFI. The PR-1 power routing carve-out and
+  the static-path "run the Python phase runners for energy only" double
+  evaluation are both DELETED; the Python `query()` layer is no longer a
+  live dependency of rust-routed runs. Known dormant gap: the WideEP/deepep
+  table families remain latency-only on the Rust side — no shipped wideep
+  parquet carries power columns today, so both engines report 0.0 there;
+  thread it when wideep power data first ships (#1439 territory).
+- **AFD** sources its per-op values from the compiled engine via the thin
+  op-list evaluation FFI (`evaluate_context_ops` / `evaluate_generation_ops`,
+  index-addressed into the compiled spec); the A/F partitioning, stride
+  integration, and the five synthetic comm ops stay Python-side permanently.
+  (Correction to the earlier text: AFD never routed through
+  `RustEngineUnsupportedError` fallback — its decode pipeline called
+  `Operation.query()` directly in `AFDInferenceSession._sum_latency`; that
+  call site is now the FFI insertion point, with the Python loop as
+  fallback.) The VL encoder phase likewise: shape math stays Python, per-op
+  values come from `evaluate_ops_json` (encoder ops are deliberately NOT in
+  the compiled spec).
+- **SOL is ported; SOL_FULL is a Python-side per-call diagnostic (PR-2).**
+  The compiled engine dispatches `DatabaseMode::Sol` per family in front of
+  the already-ported SOL formulas; `_RUST_SUPPORTED_DATABASE_MODES` includes
+  SOL, emptying the gate's mode-based delegation. SOL_FULL is declared a
+  permanently Python-side PER-CALL diagnostic (#1357's alternative
+  disposition): `query_*(..., database_mode=SOL_FULL)` keeps returning the
+  raw `(sol_time, sol_math, sol_mem)` tuple the sanity-check notebook
+  plots, while mode entry rejects it as a DEFAULT mode (it has never worked
+  there — the phase runners cannot consume a bare tuple). The per-call
+  branches are engine-step-dead and delete together with `query()` in PR-3,
+  which must also decide the sanity notebook's replacement oracle.
 
-**Done since drafting:** the full parity scan is complete
-(`parity-scan-report.md`: gate CLOSED, 0 REGRESSION), and the
-engine-step parity, compile-engine parity, and engine-step perf gates all run
-in CI (`.github/workflows/build-test.yml`).
+## Revised PR sequence (2026-08-01) — supersedes the P0–P4 table below
 
-**Branch base:** `main` tip (post #1200 / #1201).
+| # | PR | Scope | Maps to |
+| --- | --- | --- | --- |
+| **PR-1** | Rust default | Flip default resolution to the compiled engine; power-carrying and non-`PerfDatabase` databases delegate to the Python step; explicit `"rust"`/`"python"` keep force semantics (`"python"` is the escape hatch, retained one release). Propagate `engine_step_backend` into the internal `RuntimeConfig` constructions (`run_mixed` passes 1–3, `_get_genonly_step_latency`) so the escape hatch binds the whole composition. Forced-rust full-matrix scan as merge evidence. No deletion. Bake one release cycle. | P0+P1 |
+| **PR-2** | Golden anchor + gap closure — **DELIVERED by this PR** | Goldens captured from the live Python path (engine-step 346 case/surface records incl. error classes, compile-engine references, per-op dicts for the compile-engine subset; byte-idempotent `regenerate_goldens.py`); parity suites rewired to Rust-vs-golden with anti-vacuous guards. Energy crosses the FFI (power carve-out and the static energy double-run deleted). The op-list evaluation FFI restores the user-facing per-op breakdown (real op names + per-op energy + real provenance tags replace the `rust_engine_step_*` synthetic keys) and feeds AFD `_sum_latency` / the VL encoder phase. SOL ported; SOL_FULL kept as a Python-side per-call diagnostic (default-mode entry rejects it). Issue #1456 (site-transfer tie-break order) fixed and anchored by smoke cases. | P2 + gaps |
+| **PR-3** | Delete + retire switch | Delete per the keep/delete inventory below; `"python"` value becomes a warning no-op (deprecation shim = folded P4); propose the `.claude/rules` dual-implementation → golden-diff rewrite (human-owned, proposal only). | P3+P4 |
+
+Strictly sequential. PR-2 may start once PR-1 merges; PR-3 waits for PR-1 to
+bake one release cycle. Rationale for 3 (not 2, not 5): goldens must merge
+green from the live Python path *before* any deletion (a golden captured in
+the deletion PR risks self-referential regeneration and reverts with it), and
+the flip must bake separately from deletion so a post-flip drift still has a
+one-env-var rollback; conversely P0's heavy lifting shipped in #1355 and P4 is
+a one-line shim, so neither deserves a standalone PR anymore.
+
+**Done since the original draft:** the 2026-07 opt-in-rust parity scan
+completed (`parity-scan-report.md`: gate CLOSED, 0 REGRESSION — historical
+evidence for the opt-in path, distinct from PR-1's own forced-rust scan,
+which reruns against the flipped default as its merge evidence); engine-step
+parity, compile-engine parity, and perf gates in CI; #1355 (SILICON audit +
+HYBRID/EMPIRICAL port) merged.
 
 ## Motivation
 
@@ -37,10 +78,11 @@ the `perf_database.py` latency-query methods, and the Python op-walk in
 `backends/base_backend.py` — now mirrors the Rust `operators/` +
 `perf_database/` + `engine/` code. Two engines compute the same step latency.
 
-The Rust path exists but is **opt-in**: `should_use_rust_engine_step`
-(`sdk/rust_engine_step.py:222`) returns `"python"` unless
-`runtime_config.engine_step_backend == "rust"` or the env var is set. Every
-default CLI / SDK run still walks ops in Python.
+The Rust path became the DEFAULT in PR-1 (#1454), and PR-2 closed the
+remaining delegations: `should_use_rust_engine_step`
+(`sdk/rust_engine_step.py`) now keeps only the explicit `"python"` escape
+hatch and the non-`PerfDatabase` duck-type delegation. The paragraphs below
+describe the pre-Phase-2 starting point this plan set out to remove.
 
 Phase 2 makes Rust the default execution path and removes the duplicated
 Python latency code.
@@ -116,32 +158,44 @@ Flip `engine_step_backend` default to `"rust"`. Before merge:
   with the >5% throughput delta documented) as a precondition. Decide and
   record: is the flip global, or staged per-family (the `rust_engine_step.py:382`
   comment hints some families already default to Rust)?
-- The 164-surface smoke harness (`parity_tests/test_engine_step_parity.py`,
-  `test_compile_engine_parity.py`) passes bit-identical-or-within-tolerance.
+- The smoke harness (`parity_tests/test_engine_step_parity.py`,
+  `test_compile_engine_parity.py` — 346 golden-backed case/surface pairs as
+  of PR-2) passes bit-identical-or-within-tolerance.
 
 **No deletion in this PR.** Both engines stay; only the default changes.
 
-### Gate 2 — Golden capture (replace the live differential oracle)
+### Gate 2 — Golden capture (replace the live differential oracle) — SATISFIED (PR-2)
 
-The parity tests compare **Python vs Rust live**. Deleting the Python path
-destroys the regression detector future Rust changes rely on. Before any
-deletion:
-- Capture current Python `run_static` / `run_agg` / step-latency outputs as
-  golden fixtures across the smoke matrix.
-- Rewrite `test_engine_step_parity.py` / `test_compile_engine_parity.py` to
-  assert **Rust vs golden** instead of **Rust vs live-Python**.
-- Land the goldens + rewired tests as their own PR, green, before Gate 3.
+The parity tests compared **Python vs Rust live**; deleting the Python path
+would have destroyed the regression detector future Rust changes rely on.
+PR-2 delivered:
+- Python `run_static` / step-latency outputs captured as golden fixtures
+  across the full smoke matrix (`parity_tests/goldens/`, including error
+  classes — error symmetry is a first-class golden value — plus per-op
+  latency/energy/source dicts for the compile-engine subset).
+- `test_engine_step_parity.py` / `test_compile_engine_parity.py` assert
+  **Rust vs golden**; `regenerate_goldens.py` (Python side pinned, thread
+  caps pinned, byte-idempotent) is the sanctioned regeneration path.
+  Anti-vacuous guard tests prove the comparison detects drift.
+- The rewiring exposed and fixed a vacuous comparison: the mixed-step
+  helper's bare `RuntimeConfig` had rust-routed the "python" side since the
+  PR-1 flip (silent self-comparison); it is now pinned to the Python step.
 
 ### Gate 3 — Delete the duplicated Python latency code
 
 Only after Gates 1–2 hold and have soaked one release cycle:
+- **Per-op breakdown precondition — SATISFIED (PR-2)**: the op-list
+  evaluation FFI exposes per-op `(name, latency_ms, energy_wms, source)`
+  and the bridge populates the `InferenceSummary` per-op dicts with real op
+  names, energies, and provenance tags; the compile-engine parity subset
+  anchors the per-op dicts against goldens.
 - Delete per the keep/delete table.
 - Remove the `"python"` value of `engine_step_backend` (and the
   `should_use_rust_engine_step` gate); the CLI/SDK arg becomes deprecated
   no-op for one cycle, then dropped.
 - Re-run goldens (Gate 2) + smoke harness; numbers unchanged.
 
-## PR sequence
+## PR sequence (SUPERSEDED — see "Revised PR sequence (2026-08-01)" above)
 
 | # | PR | Lands | Gated? |
 | --- | --- | --- | --- |
@@ -171,6 +225,9 @@ P0 → P1 → P2 → P3 → P4, strictly sequential. P2 may start once P1 is in.
 | `query()` deletion nicks a kept consumer (memory / OpSpec walk). | AST pass to confirm `query()` has no caller outside the deleted branch; `get_weights()` / attrs / loaders explicitly retained. |
 | `interpolation.py` assumed dead but perf-DB still uses it. | Marked "keep, re-audit"; not in P3's delete set without a fresh consumer grep. |
 | `rust_engine_step` handle cache or rayon introduces non-determinism once it is the only path. | Smoke harness runs `RAYON_NUM_THREADS=1` and `=8`, asserts identical output (carried over from Phase 1.5 E5). |
+| PR-3 deletes the Python step while the Rust path still collapses the per-op breakdown to a synthetic key — SDK users permanently lose op-level latency analysis. | RESOLVED (PR-2): per-op values cross the op-list evaluation FFI and populate `InferenceSummary` with real names/energies/sources; golden-anchored. |
+| WideEP/deepep tables are latency-only on the Rust side; the MoE-dispatch wrapper sums only `.latency_ms` of its inner comm results (discarding energy the comm loaders already carry); DSA's `has_power` gate is per-source in Rust vs first-source in Python. Energy silently diverges if power data ships for those tables before the ports. | All dormant today (no shipped comm/wideep/DSA parquet carries power; both engines report 0.0 on every affected path — verified). Thread them together with the first relevant power drop (#1439 territory). |
+| Residual exact-tie enumeration-order gaps of the #1456 class (grid_hold `nearest_key` toward-smaller-key; attention `_ref_head_size` / DSA `bs_slice` sorted-vs-insertion order) — all self-documented in code, all fire only on bitwise-equal distance ties. | Pre-existing (not introduced by Phase 2). Fix with the same load-order-record pattern as the GEMM site fix if a real tie ever surfaces in the scan. |
 
 ## Acceptance criteria
 

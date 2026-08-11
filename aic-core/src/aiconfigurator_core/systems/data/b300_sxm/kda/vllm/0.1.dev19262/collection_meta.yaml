@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.1.dev19262
+tables:
+  # First SM103 vllm kda data (unverified_sms 103 lifted on this run):
+  # 1203 rows on 8x B300, image vllm/vllm-openai@sha256:e90e2603 (the
+  # manifest pin). All six serving kernel paths present (flashkda_fwd
+  # prefill, fused_kda_decode, fused_recurrent_kda chain verify, Triton
+  # conv/packed pairs). 4 classified cell failures (3 context,
+  # 1 generation).
+  kda_perf:
+    status: complete

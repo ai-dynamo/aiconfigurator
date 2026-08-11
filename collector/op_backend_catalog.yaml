@@ -178,6 +178,11 @@ families:
   - family: linear_attention
     op_files: [gdn_perf, mamba2_perf]
 
+  # KDA gets its own family (not linear_attention) so its runtime can pin to
+  # the sglang kimi-k3 branch image while gdn/mamba2 stay on the stock pin.
+  - family: kda
+    op_files: [kda_perf]
+
   - family: mhc
     op_files: [mhc_module_perf]
 

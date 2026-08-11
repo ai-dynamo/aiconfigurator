@@ -1,6 +1,6 @@
 # CLI User Guide
 ## Basic Command
-As mentioned in root Readme, CLI supports five modes: `default`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
+As mentioned in root Readme, CLI supports six modes: `default`, `recommend`, `exp`, `generate`, `estimate`, and `support`. We'll go through these modes one by one.
 
 Quantization defaults are inferred from the Hugging Face model config (`config.json` plus optional `hf_quant_config.json`).  
 For low-precision models, use a quantized HF ID (for example, `Qwen/Qwen3-32B-FP8`) or a local model directory containing those files.
@@ -16,7 +16,8 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
-- `--engine-step-backend`: Experimental static-latency backend — `python` (default) or `rust` (routes static step estimates through the Rust FPM estimator). (`default`, `exp`, `generate`, `estimate`)
+- `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). When `--forward-model fpm` is selected, AIC evaluates step latency using the Python implementation; `--engine-step-backend rust` does not take effect because the compiled engine does not yet have an FPM operation (Rust support is tracked separately in PR #1461). V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -240,7 +241,7 @@ aiconfigurator cli estimate \
 | `memory` | Per-component memory (weights, kvcache, activations, nccl, others) as a share of GPU capacity, the KV footprint per sequence, and a KV-bound max-batch upper bound. |
 | `time` | Per-op latency bars in context → generation order, each op's share of the phase, and (in static modes) a Speed-of-Light (SOL) comparison plus the per-op data source. |
 | `energy` | Per-op energy breakdown, when energy data is available for the system. |
-| `source` | Per-op data-source attribution — `silicon` (measured), `empirical` (interpolated / formula), or `mixed` — so you can tell which numbers are measured vs estimated. |
+| `source` | Per-op data-source attribution — including `silicon` (measured), `empirical` (interpolated / formula), `estimated` (modeled), and `mixed` — so you can distinguish measured and modeled values. |
 | `all` | Every section above. |
 
 `--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).
@@ -344,6 +345,58 @@ agg_supported, disagg_supported = cli_support(
 print(f"Agg: {agg_supported}, Disagg: {disagg_supported}")
 ```
 
+### Recommend mode (deployment sizing)
+This mode finds the minimum number of GPUs needed to meet a performance target. It is designed as a procurement sizing tool — the output is unconstrained, suitable for driving purchasing decisions.
+
+Instead of specifying a GPU count (like `default` mode), you specify exactly one load target (request rate or concurrency) along with SLA constraints, and the system calculates the minimum GPUs required.
+
+The recommender searches both tensor-parallel and pipeline-parallel configurations to find the most efficient layout. For models too large to fit on a single node, it automatically escalates to multi-node configurations.
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend trtllm \
+    --target-request-rate 50 --ttft 2000 --tpot 30 --isl 4000 --osl 1000
+```
+
+or with a concurrency target:
+
+```bash
+aiconfigurator cli recommend --model-path Qwen/Qwen3-32B --system h200_sxm --backend sglang \
+    --target-concurrency 200 --ttft 2000 --tpot 30
+```
+
+**Required arguments:**
+- `--model-path` (alias `--model`): HuggingFace model path or local path containing `config.json`
+- `--system`: System name (GPU type)
+- Exactly one of the following (mutually exclusive):
+  - `--target-request-rate`: Target system request rate in req/s
+  - `--target-concurrency`: Target number of concurrent users
+
+**Optional arguments:**
+- `--backend`: Backend name (`trtllm`, `vllm`, `sglang`, `auto`). Default: `trtllm`
+- `--ttft`, `--tpot`: SLA targets in ms (default: 2000ms, 30ms)
+- `--request-latency`: End-to-end request latency target in ms
+- `--isl`, `--osl`: Input/output sequence lengths (default: 4000, 1000)
+- `--nextn`: MTP draft length, or `auto` to use the checkpoint's `num_nextn_predict_layers`
+- `--nextn-accepted`: Required when the resolved draft depth is greater than 0; it must be a measured average in the range `0 <= nextn_accepted <= nextn`
+- All other arguments match `default` mode (quantization, prefix caching, etc.)
+
+The output includes `total_gpus_needed` and `replicas_needed` columns, showing both agg and disagg configurations ranked by fewest GPUs first.
+
+**Python API equivalent:**
+```python
+from aiconfigurator.cli import cli_recommend
+
+result = cli_recommend(
+    model_path="Qwen/Qwen3-32B",
+    system="h200_sxm",
+    target_request_rate=50.0,
+    ttft=2000,
+    tpot=30,
+)
+for mode, df in result.best_configs.items():
+    print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
+```
+
 ### Default mode
 This mode is triggered by
 ```bash
@@ -398,7 +451,7 @@ The command will create two experiments for the given problem, one is `agg` and 
 #### Spica migration
 
 The experimental Spica smart sweeper has moved to Dynamo's standalone
-[AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+[AI Simulate distribution](https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview).
 The AIC `--thorough-sweep` and `--thorough-config` flags have been removed. Install
 it from a matching Dynamo checkout with `python -m pip install ./aisimulate`, then run Spica
 through `python -m aisimulate.spica`. Runnable configurations and tools live under
@@ -567,13 +620,13 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 By default, we output the top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. The generated files depend on your `--deployment-target`:
 - **Dynamo** (default): `k8s_deploy.yaml` for Kubernetes deployment, plus engine configs (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) and run scripts (`node_0_run.sh`)
 - **llm-d**: `llm-d-values.yaml` for Helm deployment with the llm-d-modelservice chart
-- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod or LeaderWorkerSet) and `run.sh` (the complete rank-aware vLLM launch)
+- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod, LeaderWorkerSet, or Grove PodCliqueSet), `fpm_env.sh` (rank discovery plus the per-cell collection facts), and `run.sh` (the launch-only vLLM command)
 
 For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for Dynamo deployments or the [README llm-d section](../README.md#deploying-to-llm-d-platform) for llm-d deployments.
 
 `--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
-**Deployment Target Selection**
+#### Deployment Target Selection
 
 Use `--deployment-target` to choose which orchestration platform to deploy to:
 - `dynamo-j2` (default): Generates typed Dynamo Kubernetes manifests
@@ -597,15 +650,21 @@ Workers:
       - --scheduler-cls
       - InstrumentedScheduler
       - --benchmark-mode
-      - agg
+      - prefill
       - --dump-config-to
       - "/results/resolved-config-node{node_rank}.json"
 K8sConfig:
+  # Optional; the multinode default is lws.
+  fpm_orchestrator: grove
   fpm_shared_memory_size: 200Gi
   fpm_resource_labels:
     fpm.nvidia.com/run-id: glm52-example
     fpm.nvidia.com/stage: probe
+    # Optional; set only when the target cluster uses KAI Scheduler.
+    kai.scheduler/queue: dynamo
   worker_extra_pod_spec:
+    # Optional; Grove does not select a scheduler by default.
+    schedulerName: kai-scheduler
     mainContainer:
       resources:
         requests:
@@ -620,19 +679,20 @@ K8sConfig:
 
 `Workers.agg.extra_cli_args` must be a `list[str]`, and the final command must include `--benchmark-mode` with one of `agg`, `prefill`, or `decode`. This runtime option selects the FPM collection phase; it does not change the required single aggregated-worker deployment topology. `K8sConfig.extra_env` accepts concrete `{name, value}` entries only; `valueFrom`, `envFrom`, and Secret-derived values are not supported. The normal rule, mapping, and versioned-template pipeline still builds the base command before the extra arguments are appended. If both `--benchmark-output-path` and `DYN_FPM_BENCHMARK_OUTPUT_PATH` are supplied, they must be identical. If neither is supplied, the generator adds `/results/benchmark.json` to both the command and environment.
 
-`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
+`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Grove does not inject a scheduler or queue: clusters that use KAI Scheduler can set `worker_extra_pod_spec.schedulerName` and the `kai.scheduler/queue` resource label explicitly, while other clusters can supply their own scheduler settings through the same generic fields. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
 
 The generated artifact directory contains only:
 
 ```text
 artifacts/
 ├── k8s_deploy.yaml
+├── fpm_env.sh
 └── run.sh
 ```
 
-For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it is a keepalive `LeaderWorkerSet` whose size and per-node GPU limit come from the resolved topology. Both forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment exports and the complete resolved `python3 -m dynamo.vllm ...` command.
+For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it contains a keepalive `LeaderWorkerSet` by default or a `PodCliqueSet` when `K8sConfig.fpm_orchestrator` is `grove`. Its size and per-node GPU limit come from the resolved topology. GB200/MNNVL output also includes its `ComputeDomain` in the same YAML file. All forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `fpm_env.sh` owns rank/leader discovery and exports the per-cell `FPM_*` collection facts; `run.sh` sources it, adds the engine environment exports, and execs the complete resolved `python3 -m dynamo.vllm ...` command.
 
-`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits an LWS and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. The target cluster must have the LeaderWorkerSet API and controller installed before applying a multinode artifact.
+`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove.
 
 For one node, apply the Pod, wait for it to become ready, and stream the script into it:
 
@@ -642,9 +702,9 @@ kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
 kubectl exec -i <pod> -- bash -s < artifacts/run.sh
 ```
 
-For multiple nodes, the collector stages inputs first and then starts the same `run.sh` concurrently on every LWS Pod. The script requires the controller-injected `LWS_WORKER_INDEX` and `LWS_LEADER_ADDRESS` values to add the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
+For multiple nodes, the collector stages inputs first and then starts its collection runtime concurrently on every workload Pod; the runtime sources `fpm_env.sh` — which derives rank and leader address from the controller-injected LWS or Grove values — before invoking `run.sh`, which adds the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
 
-With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v1 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. The script also accepts the legacy schema-v2 `status: passed` plus `config.dp_rank` result used by earlier Phase 1 collectors. A terminal invalid result stops the script. The collector still owns staging the complete runtime bundle (scheduler code, cases, capacity, run-spec, runtime contracts, and validators) on every Pod, strict schema/metric validation, result download/aggregation/evidence, exit coordination, and cleanup.
+With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v2 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. A terminal invalid result stops the script. A collection driver still owns staging its collection runtime on every Pod, strict result validation, result download/aggregation/evidence, exit coordination, and cleanup.
 
 Every execution starts a new engine and reloads the model. `run.sh` refuses to overwrite any expected benchmark output, so each run must use new paths. With the default `/results` `emptyDir`, results remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
 

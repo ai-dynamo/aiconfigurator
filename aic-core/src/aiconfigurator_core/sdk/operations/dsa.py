@@ -124,6 +124,40 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
+
+def dsa_block_weights_bytes(
+    architecture: str,
+    local_heads: int,
+    projection_quant_modes: dict,
+) -> float:
+    """Per-layer DSA attention block weight bytes for one rank.
+
+    ``projection_quant_modes`` maps the projection groups ``q``/``kv``/``o``/
+    ``indexer`` to their GEMMQuantMode — per-checkpoint fact (e.g.
+    DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but quantizes o_proj).
+    q_a / kv_a(+mqa, incl. the indexer K projection) and the indexer
+    projections are replicated across TP (single latent / single index);
+    q_b, the absorbed kv_b (W_UK/W_UV) and o_proj shard by heads
+    (``local_heads`` is already per-rank).
+    """
+    dims = DSA_MODEL_DIMS.get(architecture) or DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE]
+    h = dims["hidden_size"]
+    q_lora = dims["q_lora_rank"]
+    kv_lora = dims["kv_lora_rank"]
+    qk = dims["qk_nope_head_dim"] + dims["qk_rope_head_dim"]
+    v = dims["v_head_dim"]
+    idx = dims["index_head_dim"] * dims["index_n_heads"]
+
+    def _b(group: str) -> float:
+        return projection_quant_modes[group].value.memory
+
+    q_params = h * q_lora + q_lora * local_heads * qk
+    kv_params = h * (kv_lora + dims["qk_rope_head_dim"]) + kv_lora * local_heads * (dims["qk_nope_head_dim"] + v)
+    o_params = local_heads * v * h
+    indexer_params = q_lora * idx + h * dims["index_n_heads"]
+    return q_params * _b("q") + kv_params * _b("kv") + o_params * _b("o") + indexer_params * _b("indexer")
+
+
 # DSA sparse sub-kernel (mqa / topk / dsa_attn) data-file prefix per architecture.
 # GLM-5 and DeepSeek-V3.2 share the same DSA kernels (only shapes/heads differ),
 # so the CP delta strategy in ContextDSAModule._query_cp is identical -- only the
@@ -236,6 +270,7 @@ class ContextDSAModule(Operation):
         cp_size: int = 1,
         index_topk_freq: int = 1,
         dsa_full_layer_fraction: float | None = None,
+        attn_projection_quant_modes: dict | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -255,7 +290,8 @@ class ContextDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        self._weights = 0.0
+        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -349,6 +385,12 @@ class ContextDSAModule(Operation):
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table
         (``_context_dsa_module_skip_data``) instead of the full table; all other
         lookup logic is identical."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -444,11 +486,10 @@ class ContextDSAModule(Operation):
             total_mem = gemm_weight_bytes + kv_cache_bytes + indexer_cache_bytes + q_io_bytes
 
             # ── SOL ─────────────────────────────────────────────────────
-            from aiconfigurator_core.sdk.operations.gemm import GEMM
 
-            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
-            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
-            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_quant_mode)
+            gemm_flops = common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = common.get_quant_tc_flops(database.system_spec, fmha_quant_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops
@@ -1047,6 +1088,7 @@ class GenerationDSAModule(Operation):
         architecture: str = "DeepseekV32ForCausalLM",
         index_topk_freq: int = 1,
         dsa_full_layer_fraction: float | None = None,
+        attn_projection_quant_modes: dict | None = None,
     ) -> None:
         super().__init__(name, scale_factor)
         self._num_heads = num_heads
@@ -1059,7 +1101,8 @@ class GenerationDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        self._weights = 0.0
+        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1145,6 +1188,12 @@ class GenerationDSAModule(Operation):
     ):
         """Query generation DSA module table.
         ``skip_indexer=True`` reads the GLM-5.2 reuse-layer table."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+        common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.bfloat16)
         from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError
 
         # ``DEFAULT_DSA_ARCHITECTURE`` and ``DSA_MODEL_DIMS`` live at module
@@ -1209,11 +1258,9 @@ class GenerationDSAModule(Operation):
             kv_cache_bytes = b * effective_kv * attn_head_dim * kv_cache_dtype.value.memory
             total_mem = gemm_weight_bytes + indexer_cache_bytes + kv_cache_bytes
 
-            from aiconfigurator_core.sdk.operations.gemm import GEMM
-
-            gemm_flops = GEMM._get_quant_tc_flops(database.system_spec, gemm_quant_mode)
-            indexer_fp8_flops = GEMM._get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
-            attn_flops = GEMM._get_quant_tc_flops(database.system_spec, fmha_mode)
+            gemm_flops = common.get_quant_tc_flops(database.system_spec, gemm_quant_mode)
+            indexer_fp8_flops = common.get_quant_tc_flops(database.system_spec, common.FMHAQuantMode.fp8)
+            attn_flops = common.get_quant_tc_flops(database.system_spec, fmha_mode)
 
             sol_math = (
                 gemm_group_ops / gemm_flops + indexer_logits_ops / indexer_fp8_flops + sparse_attn_ops / attn_flops

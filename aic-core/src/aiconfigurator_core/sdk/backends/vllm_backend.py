@@ -12,17 +12,42 @@ from aiconfigurator_core.sdk.models import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# vLLM's ``gpu_memory_utilization`` default: the engine only manages this
+# fraction of TOTAL device memory (weights + activations + CUDA graphs + KV
+# all fit inside it). Without this cap the sweep packs memory to 100% of the
+# device and selects decode batch sizes whose KV cache cannot be allocated in
+# a real deployment (see ai-dynamo/aiconfigurator#1396: predicted decode
+# bs=96/rank vs 29/rank actually admitted on B200 for Kimi-K2.5-NVFP4).
+# Values mirror the framework default (CacheConfig.gpu_memory_utilization,
+# vllm/config/cache.py: 0.9 @v0.14.0/v0.19.0; 0.92 @v0.22.0, unchanged
+# @v0.24.0/v0.25.x). Keyed by minor-version prefix; unknown versions fall
+# through to the newest known default.
+VLLM_GPU_MEMORY_UTILIZATION_BY_VERSION: dict[str, float] = {
+    "0.14": 0.9,
+    "0.19": 0.9,
+    "0.22": 0.92,
+    "0.24": 0.92,
+}
+VLLM_DEFAULT_GPU_MEMORY_UTILIZATION: float = 0.92
+# Small safety margin for KV block/page granularity and memory-profiler
+# variance between vLLM releases.
+KV_CACHE_MEMORY_TOLERANCE: float = 0.02
+
 
 class VLLMBackend(BaseBackend):
     """vLLM backend.
 
     Currently mirrors TRT-LLM's activation-memory model (the pre-refactor
     implementation literally delegated ``_get_memory_usage`` to TRTLLMBackend),
-    with no KV-cache-aware OOM accounting yet. We reuse both TRT-LLM's
-    per-family coefficient table and its ``_moe_workspace_width`` hook so
-    estimates stay byte-identical with the old delegation; the agg-pipeline
-    hooks (``_resolve_agg_kwargs``, ``_oom_check_kwargs``, ...) remain at
-    BaseBackend defaults — vLLM does not yet do KV-cache OOM probing.
+    reusing both TRT-LLM's per-family coefficient table and its
+    ``_moe_workspace_width`` hook so estimates stay byte-identical with the
+    old delegation.
+
+    KV-cache OOM accounting: vLLM caps its whole footprint at
+    ``gpu_memory_utilization`` of TOTAL device memory (``of_total``
+    semantics, unlike TRT-LLM's ``free_gpu_memory_fraction`` which applies to
+    the free pool after weights). The overrides below wire that budget into
+    both the static (disagg component) and agg OOM checks.
     """
 
     # Reuse TRT-LLM's per-family activation coefficients until a vLLM-specific
@@ -39,6 +64,31 @@ class VLLMBackend(BaseBackend):
         super().__init__()
         self.name = common.BackendName.vllm
 
+    def get_default_free_gpu_memory_fraction(self, backend_version: str | None = None) -> float | None:
+        if backend_version:
+            for prefix, value in VLLM_GPU_MEMORY_UTILIZATION_BY_VERSION.items():
+                if str(backend_version).startswith(prefix):
+                    return value
+        return VLLM_DEFAULT_GPU_MEMORY_UTILIZATION
+
+    def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
+        return 0.0, KV_CACHE_MEMORY_TOLERANCE
+
+    def memory_fraction_of_free(self) -> bool:
+        # gpu_memory_utilization caps TOTAL device memory, not the free pool.
+        return False
+
+    def _oom_check_kwargs(self, agg_extra: dict) -> dict:
+        fraction = agg_extra.get("free_gpu_memory_fraction")
+        if fraction is None:
+            fraction = VLLM_DEFAULT_GPU_MEMORY_UTILIZATION
+        return {
+            "free_gpu_memory_fraction": fraction,
+            "kv_cache_reserved_fraction": 0.0,
+            "kv_cache_tolerance": KV_CACHE_MEMORY_TOLERANCE,
+            "fraction_of_free": False,
+        }
+
     def _mix_step_efficiency(self, ctx_tokens: int, gen_tokens: int) -> float:
         # vLLM v1 serialises prefill (max_num_partial_prefills=1): each mix step
         # processes one request's full ISL alongside a handful of decode tokens
@@ -50,7 +100,7 @@ class VLLMBackend(BaseBackend):
         # Return 1.0: no correction applied for this backend.
         return 1.0
 
-    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, osl: int) -> int:
+    def _mix_step_gen_tokens(self, b: int, ctx_tokens: int, isl: int, decode_iterations: float) -> int:
         # vLLM v1 scheduler sets max_num_partial_prefills=1 by default, meaning
         # exactly one request is in partial-prefill state per forward pass.
         # The remaining b - ceil(ctx_tokens/isl) requests are in decode phase.

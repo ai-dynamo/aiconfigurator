@@ -63,6 +63,11 @@ models and missing or unreadable model, system, or performance data. Check
 `aic_with_correction`, or `fallback_regression`, and to inspect any fallback
 warning.
 
+Native online corrections default to an absolute factor range of `[0.5, 2.0]`.
+Pass `None` explicitly as `min_faster_correction_factor` or
+`max_slower_correction_factor` in the options dictionary to remove the bound
+in that direction. Regression fallback ignores both options.
+
 Use `from_native(...)` instead when native AIC support is required and an
 unsupported configuration or native data failure should surface rather than
 fall back.
@@ -122,8 +127,11 @@ The supported root-level Rust surface is grouped as follows:
   `ENGINE_SPEC_SCHEMA_VERSION`, and `FPM_VERSION`.
 
 Advanced consumers may use `engine::{Engine, RuntimeConfig, StaticMode,
-StaticResult}` and `engine::spec::{EngineSpec, OpSpec}` to load and execute a
-previously compiled specification directly.
+StaticResult, PerOpValue}` and `engine::spec::{EngineSpec, OpSpec}` to load and
+execute a previously compiled specification directly. `PerOpValue` is the
+per-op result tuple `(name, latency_ms, energy_wms, source)` returned by the
+`*_per_op` / `evaluate_*` methods (the thin op-list evaluation FFI); per-op
+energy is 0.0 wherever the perf tables carry no power columns.
 
 ## Compatibility rules
 

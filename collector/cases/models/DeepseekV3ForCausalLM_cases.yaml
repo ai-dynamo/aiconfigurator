@@ -45,6 +45,8 @@ model_case_values:
         vllm:
           allowed_modes: [fp8_block]
     - model_path: nvidia/DeepSeek-V3.1-NVFP4
+      model_aliases:
+        - nvidia/DeepSeek-V3.2-NVFP4
       hidden_size: 7168
       inter_size: 2048
       topk: 8

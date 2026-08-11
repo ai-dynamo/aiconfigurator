@@ -29,12 +29,19 @@ Let's get started.
 
 ### Install from PyPI
 
-> **Published-wheel support: Linux x86-64 only.** The required
-> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is built
-> as a `manylinux_2_28_x86_64` wheel (Linux x86-64, glibc >= 2.28). Linux
-> aarch64 has no published core wheel and must build `./aic-core` and the root
-> project from source; that path is not covered by published-wheel support.
-> macOS and Windows have no supported installation path.
+> **Public PyPI support: Linux x86-64 only.** The required
+> `aiconfigurator-core` wheel bundles a native Rust/PyO3 extension and is
+> published to PyPI as a `manylinux_2_28_x86_64` wheel (Linux x86-64,
+> glibc >= 2.28).
+>
+> **Release wheel coverage:** The
+> [platform-wheel workflow](.github/workflows/build-platform-wheels.yml) also
+> builds, installs, and verifies `manylinux_2_28_aarch64` and
+> `macosx_11_0_arm64` core wheels. Release-branch runs stage the complete wheel
+> set to Artifactory when platform-wheel staging is enabled. These Artifactory
+> artifacts are separate from public PyPI: Linux aarch64 and macOS arm64 users
+> with access to the release artifacts can install the matching wheel set.
+> Windows has no supported installation path.
 
 ```bash
 pip3 install aiconfigurator
@@ -64,13 +71,13 @@ owner first when crossing this package boundary:
 
 ```bash
 python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
-python3 -m pip install 'aiconfigurator==0.10.0'
+python3 -m pip install 'aiconfigurator==0.11.0'
 ```
 
 If a normal upgrade was already attempted, repair the core payload with:
 
 ```bash
-python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.10.0'
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.11.0'
 ```
 
 ### Build and Install from Source
@@ -107,23 +114,25 @@ docker create --name aic aiconfigurator:latest && docker cp aic:/workspace/dist 
 
 ```bash
 aiconfigurator cli default --model Qwen/Qwen3-32B-FP8 --total-gpus 32 --system h200_sxm
+aiconfigurator cli recommend --model Qwen/Qwen3-32B-FP8 --system h200_sxm --target-request-rate 50 --ttft 2000 --tpot 30
 aiconfigurator cli exp --yaml-path exp.yaml
 aiconfigurator cli generate --model-path Qwen/Qwen3-32B-FP8 --total-gpus 8 --system h200_sxm
 aiconfigurator cli support --model-path Qwen/Qwen3-32B-FP8 --system h200_sxm
 ```
-- We have four modes: `default`, `exp`, `generate`, and `support`.
+- We have six modes: `default`, `estimate`, `recommend`, `exp`, `generate`, and `support`.
 - Use `default` to find the estimated best deployment by searching the configuration space.
 - The experimental Spica smart sweeper now lives in Dynamo's standalone
-  [AI Simulate distribution](https://github.com/ai-dynamo/dynamo/blob/95587b1a3fe28a3916362ba5f54aa65c8bfb9d3b/docs/components/aisimulate/spica/README.md).
+  [AI Simulate distribution](https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview).
   From a matching Dynamo checkout, install it with `python -m pip install ./aisimulate`, then use
   `python -m aisimulate.spica` for Spica searches. Runnable configurations and tools live under
   `examples/aisimulate/spica`.
 - Use `exp` to run customized experiments defined in a YAML file.
 - Use `generate` to quickly create a naive configuration without a parameter sweep.
+- Use `recommend` to find the minimum GPU count and optimal deployment configuration needed to meet a performance target. This mode is designed as a procurement sizing tool -- specify exactly one load target (`--target-request-rate` or `--target-concurrency` — mutually exclusive) along with SLA constraints, and the system calculates the minimum GPUs required. You can also omit `--total-gpus` in default mode with a load target for the same behavior.
 - Use `support` to verify if AIC supports a model/hardware combination for agg and disagg modes.
 - `--model` is an alias for `--model-path` in the CLI.
 - Use `--backend` to specify the inference backend: `trtllm` (default), `vllm`, or `sglang`.
-- Use `--deployment-target` to specify the artifact platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. FPM V1 supports one aggregated vLLM worker group and emits exactly two artifacts: a reusable keepalive Pod or LeaderWorkerSet, and `run.sh`; see the [Generator overview](docs/generator_overview.md#fpm-v1-target).
+- Use `--deployment-target` to specify the artifact platform: `dynamo-j2` (default, typed Dynamo manifests), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. FPM V1 supports one aggregated vLLM worker group and emits exactly three artifacts: a reusable keepalive Pod, LeaderWorkerSet, or Grove PodCliqueSet in `k8s_deploy.yaml`, `fpm_env.sh` (the collection-facts contract file), and a launch-only `run.sh`; see the [Generator overview](docs/generator_overview.md#fpm-v1-target).
 - Use `exp`, pass in exp.yaml by `--yaml-path` to customize your experiments and even a heterogenous one.
 - Use `--save-dir DIR` to generate deployment artifacts for the selected target (Dynamo manifests, llm-d values/overlays, or an FPM resource workload + script).
 - Use `--database-mode` to control performance estimation mode: `SILICON` (default, uses collected silicon data), `HYBRID` (uses silicon data when available, otherwise SOL+empirical), `EMPIRICAL` (SOL+empirical for all), or `SOL` (speed-of-light only). Please be careful, only `SILICON` mode's result is reproducible. Other modes are for research purpose
@@ -148,7 +157,7 @@ Refer to [CLI User Guide](docs/cli_user_guide.md)
 You can also use `aiconfigurator` programmatically in Python:
 
 ```python
-from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_support
+from aiconfigurator.cli import cli_default, cli_exp, cli_generate, cli_recommend, cli_support
 
 # 1. Run default agg vs disagg comparison
 result = cli_default(model_path="Qwen/Qwen3-32B-FP8", total_gpus=32, system="h200_sxm")
@@ -168,11 +177,16 @@ result = cli_exp(config={
     }
 })
 
-# 3. Generate a naive configuration
+# 3. Find minimum GPUs for a performance target (procurement sizing)
+result = cli_recommend(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm", target_request_rate=50.0, ttft=2000, tpot=30)
+for mode, df in result.best_configs.items():
+    print(f"{mode}: {df[['total_gpus_needed', 'replicas_needed', 'tp', 'tpot']].head()}")
+
+# 4. Generate a naive configuration
 result = cli_generate(model_path="Qwen/Qwen3-32B-FP8", total_gpus=8, system="h200_sxm")
 print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 
-# 4. Check support for a model/system combination
+# 5. Check support for a model/system combination
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```

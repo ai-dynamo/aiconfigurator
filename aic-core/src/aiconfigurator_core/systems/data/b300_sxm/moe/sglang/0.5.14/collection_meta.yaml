@@ -8,4 +8,8 @@ runtime:
   version: 0.5.14
 tables:
   moe_perf:
+    # 2026-07-29: appended 3078 Kimi-K3 w4a8_mxfp4_mxfp8 rows (3584/3072,
+    # 896x16, sglang_flashinfer_trtllm_moe with mxfp8 activations — the
+    # Blackwell serving-truth precision; the earlier w4a16 label kept bf16
+    # activations), collected on 8x B300; zero failures, keys disjoint.
     status: complete
