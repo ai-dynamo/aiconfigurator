@@ -386,9 +386,10 @@ def _config_dir_without_layer_types(model_path: str) -> str:
     and ``ModelConfig.from_pretrained`` then runs unmodified on the local dir,
     so the framework's own config/quant handling stays authoritative.
     """
-    import hashlib
     import json
     import shutil
+
+    from helper import config_norm_cache_key
 
     if os.path.isdir(model_path):
         # create_attention_layer resolves ids through _resolve_local_model_path
@@ -399,9 +400,16 @@ def _config_dir_without_layer_types(model_path: str) -> str:
         from huggingface_hub import snapshot_download
 
         src = snapshot_download(model_path, allow_patterns=["*.json"])
+    # Key the cache on the config CONTENT, not just the source path: bundled
+    # model configs can change under an unchanged path (repo update), and a
+    # path-only key would keep serving the stale normalized copy. The key
+    # hashes every JSON in src (config.json + side-cars) — the copytree below
+    # materializes them all and ModelConfig.from_pretrained reads side-cars
+    # too. Content freshness of src itself is the resolver's job:
+    # _materialize_aic_cached_config refreshes the bundled copy on change.
     dst = os.path.join(
         os.path.expanduser("~/.cache/aic_collector/glm_dsa_config_norm"),
-        hashlib.sha1(src.encode()).hexdigest()[:16],
+        config_norm_cache_key(src),
     )
     config_path = os.path.join(dst, "config.json")
     if not os.path.exists(config_path):

@@ -22,6 +22,7 @@ use crate::perf_database::dsa::{
     bs_slice, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_flops,
     dsa_generation_sol_ms, dsa_sparse_file_prefix, lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
 };
+use crate::perf_database::perf_interp::LeafValue;
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
 
@@ -120,17 +121,20 @@ impl DsaModuleOp {
         let q = |skip_indexer: bool| {
             query_context_table(db, self, batch_size, isl, prefix, "trtllm", skip_indexer)
         };
-        let (full, full_source) = q(false)?;
-        let (latency, source) = if w >= 1.0 {
-            (full, full_source)
+        let full = q(false)?;
+        let result = if w >= 1.0 {
+            full
         } else {
-            // GLM-5.2 shared-index amortization (Python ContextDSAModule.query).
-            let (skip, skip_source) = q(true)?;
-            (w * full + (1.0 - w) * skip, full_source.combine(skip_source))
+            // GLM-5.2 shared-index amortization (Python ContextDSAModule.query):
+            // latency AND energy are each `w*full + (1-w)*skip`.
+            let skip = q(true)?;
+            PerformanceResult::with_energy(
+                w * full.latency_ms + (1.0 - w) * skip.latency_ms,
+                w * full.energy_wms + (1.0 - w) * skip.energy_wms,
+                full.source.combine(skip.source),
+            )
         };
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 
     /// Context-Parallel (CP) prefill — GLM-5/DSA sparse composition.
@@ -158,8 +162,16 @@ impl DsaModuleOp {
             // `query_context_dsa_module` dispatch (no explicit database_mode
             // => the database default), on the flashmla_kv slice (the kernel
             // used under CP); `float(...)` drops the source.
-            query_context_table(db, self, batch_size, per_card, prefix, "flashmla_kv", skip_indexer)
-                .map(|(latency, _)| latency)
+            query_context_table(
+                db,
+                self,
+                batch_size,
+                per_card,
+                prefix,
+                "flashmla_kv",
+                skip_indexer,
+            )
+            .map(|r| r.latency_ms)
         };
         let mut ag = |elems: u64| {
             NcclOp::new(
@@ -172,7 +184,15 @@ impl DsaModuleOp {
             .query(db, 1)
             .map(|r| r.latency_ms)
         };
-        self.query_cp_with(&sparse, batch_size, isl, prefix, skip_indexer, &mut base, &mut ag)
+        self.query_cp_with(
+            &sparse,
+            batch_size,
+            isl,
+            prefix,
+            skip_indexer,
+            &mut base,
+            &mut ag,
+        )
     }
 
     /// CP (round-robin split) per-layer DSA composition. Verbatim mirror of
@@ -295,17 +315,20 @@ impl DsaModuleOp {
         let q = |skip_indexer: bool| {
             query_generation_table(db, self, batch_size, s, "trtllm", skip_indexer)
         };
-        let (full, full_source) = q(false)?;
-        let (latency, source) = if w >= 1.0 {
-            (full, full_source)
+        let full = q(false)?;
+        let result = if w >= 1.0 {
+            full
         } else {
-            // GLM-5.2 shared-index amortization (decode side).
-            let (skip, skip_source) = q(true)?;
-            (w * full + (1.0 - w) * skip, full_source.combine(skip_source))
+            // GLM-5.2 shared-index amortization (decode side): latency AND
+            // energy are each `w*full + (1-w)*skip`.
+            let skip = q(true)?;
+            PerformanceResult::with_energy(
+                w * full.latency_ms + (1.0 - w) * skip.latency_ms,
+                w * full.energy_wms + (1.0 - w) * skip.energy_wms,
+                full.source.combine(skip.source),
+            )
         };
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 
@@ -317,8 +340,9 @@ impl DsaModuleOp {
 // InterpolationDataNotAvailableError)` and only falls to `get_empirical` when
 // `database_mode == HYBRID` — in Rust that catch set is exactly
 // `err.is_missing_perf_data()` (which deliberately excludes
-// `EmpiricalNotImplemented`). EMPIRICAL always estimates; the SOL diagnostic
-// modes never reach the compiled engine.
+// `EmpiricalNotImplemented`). EMPIRICAL always estimates; SOL (and the
+// retired SOL_FULL alias) returns the pure speed-of-light roofline with
+// `Source::Sol` and zero energy.
 // ---------------------------------------------------------------------------
 
 /// Context DSA module latency for the op's slice under the database's mode.
@@ -330,37 +354,64 @@ fn query_context_table(
     prefix: u32,
     dsa_backend: &str,
     skip_indexer: bool,
-) -> Result<(f64, Source), AicError> {
+) -> Result<PerformanceResult, AicError> {
     let silicon = || {
-        db.dsa.query_context(
-            &db.system_spec,
-            b,
-            isl,
-            op.num_heads,
-            op.kv_cache_dtype,
-            op.fmha_quant_mode,
-            op.gemm_quant_mode,
-            &op.architecture,
-            prefix,
-            op.index_topk,
-            dsa_backend,
-            skip_indexer,
-        )
+        db.dsa
+            .query_context(
+                &db.system_spec,
+                b,
+                isl,
+                op.num_heads,
+                op.kv_cache_dtype,
+                op.fmha_quant_mode,
+                op.gemm_quant_mode,
+                &op.architecture,
+                prefix,
+                op.index_topk,
+                dsa_backend,
+                skip_indexer,
+            )
+            .map(|v| PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon))
     };
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((
+        // Python `_query_context_dsa_module_table`: `get_sol(b, s, prefix,
+        // num_heads, kvcache_quant_mode, fmha_quant_mode)[0]`, closing over
+        // skip_indexer / gemm quant / the op's index_topk.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let spec = &db.system_spec;
+            let dims = dsa_dims(&op.architecture);
+            let flops = dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode)?;
+            Ok(PerformanceResult::new(
+                dsa_context_sol_ms(
+                    spec,
+                    dims,
+                    op.index_topk as i64,
+                    op.kv_cache_dtype,
+                    op.fmha_quant_mode,
+                    op.gemm_quant_mode,
+                    b as i64,
+                    isl as i64,
+                    prefix as i64,
+                    op.num_heads as i64,
+                    skip_indexer,
+                    flops,
+                ),
+                Source::Sol,
+            ))
+        }
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
-            Ok(latency) => Ok((latency, Source::Silicon)),
-            Err(err) if err.is_missing_perf_data() => Ok((
+            Ok(result) => Ok(result),
+            Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                 context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((silicon()?, Source::Silicon)),
+        _ => silicon(),
     }
 }
 
@@ -372,35 +423,58 @@ fn query_generation_table(
     s: u32,
     dsa_backend: &str,
     skip_indexer: bool,
-) -> Result<(f64, Source), AicError> {
+) -> Result<PerformanceResult, AicError> {
     let silicon = || {
-        db.dsa.query_generation(
-            &db.system_spec,
-            b,
-            s,
-            op.num_heads,
-            op.kv_cache_dtype,
-            op.fmha_quant_mode,
-            op.gemm_quant_mode,
-            &op.architecture,
-            dsa_backend,
-            skip_indexer,
-        )
+        db.dsa
+            .query_generation(
+                &db.system_spec,
+                b,
+                s,
+                op.num_heads,
+                op.kv_cache_dtype,
+                op.fmha_quant_mode,
+                op.gemm_quant_mode,
+                &op.architecture,
+                dsa_backend,
+                skip_indexer,
+            )
+            .map(|v| PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon))
     };
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((
+        // Python `_query_generation_dsa_module_table`: `get_sol(b, s,
+        // num_heads, kv_cache_dtype)[0]` — the attention group is hardcoded
+        // bfloat16 inside; skip_indexer never enters the decode SOL.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let spec = &db.system_spec;
+            let dims = dsa_dims(&op.architecture);
+            let flops = dsa_generation_sol_flops(spec, op.gemm_quant_mode)?;
+            Ok(PerformanceResult::new(
+                dsa_generation_sol_ms(
+                    spec,
+                    dims,
+                    op.kv_cache_dtype,
+                    op.gemm_quant_mode,
+                    b as i64,
+                    s as i64,
+                    op.num_heads as i64,
+                    flops,
+                ),
+                Source::Sol,
+            ))
+        }
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
-            Ok(latency) => Ok((latency, Source::Silicon)),
-            Err(err) if err.is_missing_perf_data() => Ok((
+            Ok(result) => Ok(result),
+            Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                 generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((silicon()?, Source::Silicon)),
+        _ => silicon(),
     }
 }
 
@@ -430,11 +504,11 @@ enum CtxSolShape {
 /// Calibration data feeding the selected context variant's util grid.
 enum CtxCalibration<'a> {
     /// `[prefix][s][b]` — one head's full prefix-carrying sub-grid.
-    HeadPrefix(&'a BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>),
+    HeadPrefix(&'a BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, LeafValue>>>),
     /// `[num_heads][prefix][s][b]` — the whole backend-selected slice.
     AllHeads(&'a DsaHeadGrid),
     /// `[s][b]` — one head's prefix=0 anchor sub-grid.
-    HeadP0(&'a BTreeMap<u32, BTreeMap<u32, f64>>),
+    HeadP0(&'a BTreeMap<u32, BTreeMap<u32, LeafValue>>),
     /// `[num_heads] -> [s][b]` at prefix=0, heads without a 0 anchor dropped
     /// (the Python dict comprehension).
     AllHeadsP0(&'a DsaHeadGrid),
@@ -536,12 +610,7 @@ fn context_empirical(
         && prefix_keys[0] <= prefix
         && prefix <= *prefix_keys.last().expect("non-empty prefix keys");
 
-    let (heads_f, prefix_f, s_f, b_f) = (
-        op.num_heads as f64,
-        prefix as f64,
-        s as f64,
-        b as f64,
-    );
+    let (heads_f, prefix_f, s_f, b_f) = (op.num_heads as f64, prefix as f64, s as f64, b as f64);
     let (tag, depth, query, shape, calibration, head_scoped): (
         &'static str,
         usize,
@@ -685,8 +754,7 @@ fn context_empirical(
             CtxCalibration::Missing => return Ok(None),
         };
         Ok(Some(UtilGrid::new(util_empirical::build_samples(
-            points,
-            sample_sol,
+            points, sample_sol,
         ))))
     })?;
     let (latency, _) = util_empirical::estimate(sol_time, &query, grid.as_deref(), 1.0)?;
@@ -798,12 +866,8 @@ fn generation_empirical(
         db.note_provenance(util_empirical::ProvenanceTier::Empirical);
         Ok(latency)
     } else {
-        let (latency, _) = util_empirical::estimate(
-            sol_time,
-            &[heads_f, b as f64, s as f64],
-            None,
-            1.0,
-        )?;
+        let (latency, _) =
+            util_empirical::estimate(sol_time, &[heads_f, b as f64, s as f64], None, 1.0)?;
         Ok(latency)
     }
 }
@@ -816,11 +880,11 @@ fn generation_empirical(
 // ---------------------------------------------------------------------------
 
 /// `(s, b)` points of one `[s][b]` sub-grid.
-fn points_2d(grid: &BTreeMap<u32, BTreeMap<u32, f64>>) -> Vec<(Vec<f64>, f64)> {
+fn points_2d(grid: &BTreeMap<u32, BTreeMap<u32, LeafValue>>) -> Vec<(Vec<f64>, f64)> {
     let mut points = Vec::new();
     for (&s, by_b) in grid {
-        for (&b, &latency) in by_b {
-            points.push((vec![s as f64, b as f64], latency));
+        for (&b, leaf) in by_b {
+            points.push((vec![s as f64, b as f64], leaf.latency));
         }
     }
     points
@@ -828,13 +892,13 @@ fn points_2d(grid: &BTreeMap<u32, BTreeMap<u32, f64>>) -> Vec<(Vec<f64>, f64)> {
 
 /// `(prefix, s, b)` points of one head's `[prefix][s][b]` sub-grid.
 fn context_points_head(
-    head_grid: &BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>,
+    head_grid: &BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, LeafValue>>>,
 ) -> Vec<(Vec<f64>, f64)> {
     let mut points = Vec::new();
     for (&prefix, by_s) in head_grid {
         for (&s, by_b) in by_s {
-            for (&b, &latency) in by_b {
-                points.push((vec![prefix as f64, s as f64, b as f64], latency));
+            for (&b, leaf) in by_b {
+                points.push((vec![prefix as f64, s as f64, b as f64], leaf.latency));
             }
         }
     }
@@ -847,10 +911,10 @@ fn context_points_all(slice: &DsaHeadGrid) -> Vec<(Vec<f64>, f64)> {
     for (&heads, head_grid) in slice {
         for (&prefix, by_s) in head_grid {
             for (&s, by_b) in by_s {
-                for (&b, &latency) in by_b {
+                for (&b, leaf) in by_b {
                     points.push((
                         vec![heads as f64, prefix as f64, s as f64, b as f64],
-                        latency,
+                        leaf.latency,
                     ));
                 }
             }
@@ -866,8 +930,8 @@ fn context_points_all_p0(slice: &DsaHeadGrid) -> Vec<(Vec<f64>, f64)> {
     for (&heads, head_grid) in slice {
         if let Some(by_s) = head_grid.get(&0) {
             for (&s, by_b) in by_s {
-                for (&b, &latency) in by_b {
-                    points.push((vec![heads as f64, s as f64, b as f64], latency));
+                for (&b, leaf) in by_b {
+                    points.push((vec![heads as f64, s as f64, b as f64], leaf.latency));
                 }
             }
         }
@@ -879,13 +943,13 @@ fn context_points_all_p0(slice: &DsaHeadGrid) -> Vec<(Vec<f64>, f64)> {
 /// (isl, step) -> seq collapse stores `[0][seq][batch]`; Python's raw view is
 /// `[b][s]`, so the coordinate order flips to (batch, seq).
 fn generation_points_head(
-    head_grid: &BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>>,
+    head_grid: &BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, LeafValue>>>,
 ) -> Vec<(Vec<f64>, f64)> {
     let mut points = Vec::new();
     for by_seq in head_grid.values() {
         for (&seq, by_b) in by_seq {
-            for (&b, &latency) in by_b {
-                points.push((vec![b as f64, seq as f64], latency));
+            for (&b, leaf) in by_b {
+                points.push((vec![b as f64, seq as f64], leaf.latency));
             }
         }
     }
@@ -898,8 +962,8 @@ fn generation_points_all(slice: &DsaHeadGrid) -> Vec<(Vec<f64>, f64)> {
     for (&heads, head_grid) in slice {
         for by_seq in head_grid.values() {
             for (&seq, by_b) in by_seq {
-                for (&b, &latency) in by_b {
-                    points.push((vec![heads as f64, b as f64, seq as f64], latency));
+                for (&b, leaf) in by_b {
+                    points.push((vec![heads as f64, b as f64, seq as f64], leaf.latency));
                 }
             }
         }
@@ -1131,7 +1195,9 @@ mod tests {
         ];
         for (arch, heads, b, s, prefix, expected) in cases {
             let op = dsa_op(arch, heads, KvCacheQuantMode::Bfloat16);
-            let result = op.query_context(&db, b, s, prefix).expect("empirical query");
+            let result = op
+                .query_context(&db, b, s, prefix)
+                .expect("empirical query");
             approx_rel_1e9(result.latency_ms, expected);
             assert_eq!(result.source, Source::Empirical, "({arch}, h={heads})");
         }
@@ -1147,12 +1213,16 @@ mod tests {
     fn context_empirical_sglang_glm_matches_python_oracles() {
         let db = b200_db("sglang", "0.5.14", DatabaseMode::Empirical);
         let cross = dsa_op(GLM, 128, KvCacheQuantMode::Bfloat16);
-        let result = cross.query_context(&db, 2, 4096, 512).expect("cross-head query");
+        let result = cross
+            .query_context(&db, 2, 4096, 512)
+            .expect("cross-head query");
         approx_rel_1e9(result.latency_ms, 13.731357702671428);
         assert_eq!(result.source, Source::Empirical);
 
         let exact = dsa_op(GLM, 64, KvCacheQuantMode::Bfloat16);
-        let result = exact.query_context(&db, 2, 4096, 10000).expect("exact-hit query");
+        let result = exact
+            .query_context(&db, 2, 4096, 10000)
+            .expect("exact-hit query");
         approx_rel_1e9(result.latency_ms, 8.2065);
         assert_eq!(result.source, Source::Empirical);
     }
@@ -1164,7 +1234,9 @@ mod tests {
     fn context_hybrid_prefers_silicon() {
         let db = b200_db("vllm", "0.19.0", DatabaseMode::Hybrid);
         let op = dsa_op(DSV32, 128, KvCacheQuantMode::Bfloat16);
-        let exact = op.query_context(&db, 4, 2048, 0).expect("silicon exact hit");
+        let exact = op
+            .query_context(&db, 4, 2048, 0)
+            .expect("silicon exact hit");
         approx_rel_1e9(exact.latency_ms, 7.6471);
         assert_eq!(exact.source, Source::Silicon);
         let interior = op.query_context(&db, 4, 3000, 0).expect("silicon interp");
@@ -1207,7 +1279,11 @@ mod tests {
             let op = dsa_op(DSV32, heads, KvCacheQuantMode::Bfloat16);
             let result = op.query_generation(&db, b, s).expect("empirical query");
             approx_rel_1e9(result.latency_ms, expected);
-            assert_eq!(result.source, Source::Empirical, "(h={heads}, b={b}, s={s})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "(h={heads}, b={b}, s={s})"
+            );
         }
     }
 
@@ -1217,7 +1293,9 @@ mod tests {
     fn generation_empirical_sglang_glm_matches_python_oracle() {
         let db = b200_db("sglang", "0.5.14", DatabaseMode::Empirical);
         let op = dsa_op(GLM, 64, KvCacheQuantMode::Bfloat16);
-        let result = op.query_generation(&db, 48, 10000).expect("empirical query");
+        let result = op
+            .query_generation(&db, 48, 10000)
+            .expect("empirical query");
         approx_rel_1e9(result.latency_ms, 0.1927939670669063);
         assert_eq!(result.source, Source::Empirical);
     }
@@ -1234,5 +1312,55 @@ mod tests {
             matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
             "got {result:?}"
         );
+    }
+
+    /// SOL mode returns the pure DSA roofline tagged `Source::Sol` (Python
+    /// `_query_{context,generation}_dsa_module_table` SOL branches).
+    #[test]
+    fn dsa_sol_mode_returns_roofline_with_sol_source() {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db =
+            PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load");
+        db.database_mode = DatabaseMode::Sol;
+        let spec = db.system_spec.clone();
+        let op = glm_cp_op(1);
+        let dims = dsa_dims(&op.architecture);
+
+        let result = op.query_context(&db, 2, 4096, 512).expect("ctx sol");
+        let flops = dsa_context_sol_flops(&spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
+        let expected = dsa_context_sol_ms(
+            &spec,
+            dims,
+            op.index_topk as i64,
+            op.kv_cache_dtype,
+            op.fmha_quant_mode,
+            op.gemm_quant_mode,
+            2,
+            4096,
+            512,
+            op.num_heads as i64,
+            false,
+            flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+
+        let result = op.query_generation(&db, 8, 4096).expect("gen sol");
+        let flops = dsa_generation_sol_flops(&spec, op.gemm_quant_mode).unwrap();
+        let expected = dsa_generation_sol_ms(
+            &spec,
+            dims,
+            op.kv_cache_dtype,
+            op.gemm_quant_mode,
+            8,
+            4096,
+            op.num_heads as i64,
+            flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
     }
 }

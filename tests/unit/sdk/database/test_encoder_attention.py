@@ -36,16 +36,25 @@ class TestQueryEncoderAttention:
         fmha = common.FMHAQuantMode.bfloat16
         kv = common.KVCacheQuantMode.bfloat16
 
-        encoder_sol_math = comprehensive_perf_db.query_encoder_attention(
-            b, s, n, h, fmha, database_mode=common.DatabaseMode.SOL_FULL
-        )[1]
+        # At this shape sol_math dwarfs sol_mem by ~1000x on the fixture spec
+        # (and both phases share the same byte count), so the SOL scalar IS
+        # the FLOPs term the per-call SOL_FULL diagnostic tuple exposes directly.
+        encoder_sol = float(
+            comprehensive_perf_db.query_encoder_attention(b, s, n, h, fmha, database_mode=common.DatabaseMode.SOL)
+        )
         # context_attention (causal) at same config: prefix=0
-        causal_sol_math = comprehensive_perf_db.query_context_attention(
-            b, s, 0, n, n, kv, fmha, database_mode=common.DatabaseMode.SOL_FULL
-        )[1]
+        causal_sol = float(
+            comprehensive_perf_db.query_context_attention(
+                b, s, 0, n, n, kv, fmha, database_mode=common.DatabaseMode.SOL
+            )
+        )
+        # Regime guard: the scalar must sit far above the shared memory bound.
+        mem_bytes = 2 * b * (3 * n * s * h + n * s * h)
+        sol_mem = mem_bytes / comprehensive_perf_db.system_spec["gpu"]["mem_bw"] * 1000
+        assert encoder_sol > 10 * sol_mem
 
         # encoder is non-causal -> exactly 2x compute of causal
-        assert math.isclose(encoder_sol_math, 2 * causal_sol_math, rel_tol=1e-6)
+        assert math.isclose(encoder_sol, 2 * causal_sol, rel_tol=1e-6)
 
     def test_silicon_mode_lookup(self, comprehensive_perf_db):
         """SILICON mode looks up [fmha][head_size][n][s][b]."""
