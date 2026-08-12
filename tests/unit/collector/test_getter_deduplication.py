@@ -584,3 +584,30 @@ def test_step3p7_preserves_vendor_routing_contract(monkeypatch, model_name):
     assert runtime_config["use_routing_bias"] is True
     assert runtime_config["routed_scaling_factor"] == 3.0
     assert runtime_config["router_logits_float32"] is True
+
+
+def test_canonical_routed_scaling_factor_of_zero_is_preserved(monkeypatch):
+    """A declared ``routed_scaling_factor`` of 0.0 is a value, not an absence.
+
+    Resolving with ``a or b or 1.0`` treats 0.0 as unset and silently falls
+    through to the vendor key (or the default), scaling the routed contribution
+    by 1.0 when the model asks for it to be zeroed.
+    """
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(
+        module,
+        "_load_model_moe_config",
+        lambda _model_name: {"routed_scaling_factor": 0.0, "moe_router_scaling_factor": 2.0},
+    )
+
+    runtime_config = module._resolve_moe_runtime_config("test/zero-scale", {})
+    assert runtime_config["routed_scaling_factor"] == 0.0
+
+    # Vendor key still used when the canonical one is genuinely absent.
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: {"moe_router_scaling_factor": 2.0})
+    assert module._resolve_moe_runtime_config("test/vendor-only", {})["routed_scaling_factor"] == 2.0
+
+    # Neither declared -> 1.0.
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: {})
+    assert module._resolve_moe_runtime_config("test/neither", {})["routed_scaling_factor"] == 1.0

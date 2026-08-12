@@ -117,6 +117,13 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         or bool(declared_routing_bias)
         or model_type in {"mimo_v2_flash", "glm_moe_dsa", "nemotron_h"}
     )
+    # Resolve on declaration, not truthiness: a canonical routed_scaling_factor
+    # of 0.0 is a real value (it zeroes the routed contribution) and must not
+    # fall through to the vendor key or the 1.0 default.
+    declared_routed_scale = model_config.get("routed_scaling_factor")
+    if declared_routed_scale is None:
+        declared_routed_scale = model_config.get("moe_router_scaling_factor")
+
     scoring_func = str(model_config.get("scoring_func") or "softmax")
     if model_type == "nemotron_h":
         scoring_func = "sigmoid"
@@ -175,9 +182,7 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "activation_situ_linear_beta": (
             model_config.get("activation_situ_linear_beta") if activation == "situ" else None
         ),
-        "routed_scaling_factor": float(
-            model_config.get("routed_scaling_factor") or model_config.get("moe_router_scaling_factor") or 1.0
-        ),
+        "routed_scaling_factor": float(declared_routed_scale if declared_routed_scale is not None else 1.0),
         "swiglu_limit": model_config.get("swiglu_limit") if model_type in ("deepseek_v4", "deepseek_ref") else None,
         "use_grouped_topk": use_grouped_topk,
         "num_expert_group": num_expert_group,
