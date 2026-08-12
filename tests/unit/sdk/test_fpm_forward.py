@@ -272,6 +272,24 @@ class TestFPMForwardOpQuery:
         with pytest.raises(ValueError, match="invalid FPM totals query"):
             _make_op("decode").query_totals(db, batch_size=0, total_kv_read_tokens=2048)
 
+    @pytest.mark.parametrize(
+        "identity,config_overrides",
+        [
+            ({"moe_backend": "flashinfer_cutlass"}, {"moe_backend": "flashinfer_cutlass"}),
+            ({"attention_backend": "fa3"}, {"attention_backend": "fa3"}),
+            ({"enable_eplb": True}, {"enable_eplb": True}),
+        ],
+    )
+    def test_unemittable_vllm_identity_is_rejected_before_cell_selection(self, fake_db, identity, config_overrides):
+        # Exercise the producer-to-consumer boundary with a row that exactly
+        # matches a direct SDK request. The standard Task-to-generator path
+        # cannot emit these vLLM settings yet, so selection must fail closed
+        # instead of pricing a deployment AIC would not reproduce.
+        rows = [_row("decode", 2, 0, 2048, 8.0, identity=identity)]
+        op = _make_op("decode", model_config=_model_config(**config_overrides))
+        with pytest.raises(PerfDataNotAvailableError, match="Task-to-generator"):
+            op.query(fake_db(rows), batch_size=2, s=1024)
+
     def test_model_path_mismatch_never_falls_back(self, fake_db):
         # The identity match is unique, but the identity carries no model
         # fingerprint: borrowing the sole collected path would silently
@@ -308,20 +326,25 @@ class TestFPMForwardOpQuery:
             _make_op("decode").query(db, batch_size=2, s=1024)
 
     @pytest.mark.parametrize(
-        "overrides",
+        "overrides,message",
         [
-            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
-            {"enable_eplb": True},
-            {"moe_backend": "megamoe"},
-            {"attention_backend": "fa3"},
+            # wideep is generator-emittable, so it reaches cell selection and
+            # fails as an ordinary identity miss...
+            ({"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1}, "No FPM cell matches"),
+            # ...while pinned backends / EPLB are rejected earlier by the
+            # deployment-identity gate (the standard Task-to-generator path
+            # cannot emit them yet).
+            ({"enable_eplb": True}, "Task-to-generator"),
+            ({"moe_backend": "megamoe"}, "Task-to-generator"),
+            ({"attention_backend": "fa3"}, "Task-to-generator"),
         ],
     )
-    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
+    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides, message):
         # Backend knobs are identity columns: a config whose knob identity
         # was never collected fails as a data miss (sweeps skip the point) —
         # never silently rides on auto-collected curves.
         op = _make_op("decode", model_config=_model_config(**overrides))
-        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
+        with pytest.raises(PerfDataNotAvailableError, match=message):
             op.query(fake_db(), batch_size=2, s=1024)
 
     def test_dp_identity_uses_local_batch(self, fake_db):

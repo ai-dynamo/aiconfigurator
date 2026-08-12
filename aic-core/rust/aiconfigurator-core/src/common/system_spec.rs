@@ -62,7 +62,6 @@ pub struct GpuSpec {
     pub sm_version: Option<u32>,
 }
 
-
 /// Strict tensor-core FLOPS resolver. Mirrors Python
 /// `common.get_quant_tc_flops`: the quant mode's `compute_dtype` selects the
 /// `<dtype>_tc_flops` spec entry; a missing OR non-positive entry is an error

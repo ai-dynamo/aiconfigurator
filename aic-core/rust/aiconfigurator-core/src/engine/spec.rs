@@ -73,7 +73,11 @@ struct BincodeWire {
 
 impl EngineSpec {
     /// Build a spec, stamping the current [`ENGINE_SPEC_SCHEMA_VERSION`].
-    pub fn new(engine: EngineConfig, context_ops: Vec<OpSpec>, generation_ops: Vec<OpSpec>) -> Self {
+    pub fn new(
+        engine: EngineConfig,
+        context_ops: Vec<OpSpec>,
+        generation_ops: Vec<OpSpec>,
+    ) -> Self {
         Self {
             schema_version: ENGINE_SPEC_SCHEMA_VERSION,
             engine,
@@ -156,16 +160,15 @@ mod tests {
     use crate::common::enums::{
         BackendKind, CommQuantMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode,
     };
+    use crate::operators::moe_dispatch::DispatchFlavor;
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-        Dsv4ModuleOp,
-        ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-        GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-        NcclOp, P2POp, TrtllmWideEpMoEDispatchOp, VisionEncoderOp, WideEpContextMlaOp,
-        WideEpGenerationMlaOp, WideEpMoeOp,
+        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp,
+        GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
+        MlaModuleOp, MoEDispatchOp, MoeOp, NcclOp, P2POp, TrtllmWideEpMoEDispatchOp,
+        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
     };
-    use crate::operators::moe_dispatch::DispatchFlavor;
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
         DataType, ParallelMapping, QuantizationConfig, SpeculativeConfig,
@@ -183,7 +186,7 @@ mod tests {
             quant_mode: GemmQuantMode::Fp8,
             scale_num_tokens: 0,
             low_precision_input: true,
-                seq_split: 1,
+            seq_split: 1,
         }
     }
 
@@ -737,9 +740,7 @@ mod tests {
                 activation_dtype: Some(DataType::Fp8),
                 kv_cache_dtype: Some(DataType::Fp8),
             },
-            speculative: Some(SpeculativeConfig {
-                nextn: Some(1),
-            }),
+            speculative: Some(SpeculativeConfig { nextn: Some(1) }),
             perf_db_sources: Default::default(),
             database_mode: Default::default(),
             transfer_policy: None,
@@ -782,7 +783,10 @@ mod tests {
         let spec = EngineSpec::new(
             sample_engine_config(),
             vec![OpSpec::MlaModuleContext(none_native), OpSpec::Gemm(gemm())],
-            vec![OpSpec::MlaModuleGeneration(mla_module()), OpSpec::Moe(moe())],
+            vec![
+                OpSpec::MlaModuleGeneration(mla_module()),
+                OpSpec::Moe(moe()),
+            ],
         );
         let bytes = spec.to_bincode().expect("to_bincode");
         let decoded = EngineSpec::from_bincode(&bytes).expect("from_bincode");
@@ -825,7 +829,10 @@ mod tests {
     fn version_skew_reports_unsupported_before_payload_decode() {
         let spec = EngineSpec::new(
             sample_engine_config(),
-            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![
+                OpSpec::Gemm(gemm()),
+                OpSpec::ContextAttention(context_attention()),
+            ],
             vec![OpSpec::GenerationAttention(generation_attention())],
         );
         let mut bytes = spec.to_bincode().expect("to_bincode");
@@ -839,14 +846,18 @@ mod tests {
         bytes.truncate(bytes.len() - 8);
 
         match EngineSpec::from_bincode(&bytes) {
-            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+            Err(AicError::UnsupportedSchemaVersion {
+                kind,
+                got,
+                expected,
+            }) => {
                 assert_eq!(kind, "EngineSpec");
                 assert_eq!(got, foreign);
                 assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
             }
-            other => panic!(
-                "expected UnsupportedSchemaVersion before payload decode, got {other:?}"
-            ),
+            other => {
+                panic!("expected UnsupportedSchemaVersion before payload decode, got {other:?}")
+            }
         }
     }
 
@@ -854,7 +865,10 @@ mod tests {
     fn handshake_spec() -> EngineSpec {
         EngineSpec::new(
             sample_engine_config(),
-            vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+            vec![
+                OpSpec::Gemm(gemm()),
+                OpSpec::ContextAttention(context_attention()),
+            ],
             vec![OpSpec::GenerationAttention(generation_attention())],
         )
     }
@@ -863,8 +877,8 @@ mod tests {
     #[test]
     fn from_bincode_round_trips_and_preserves_version() {
         let spec = handshake_spec();
-        let decoded =
-            EngineSpec::from_bincode(&spec.to_bincode().expect("to_bincode")).expect("from_bincode");
+        let decoded = EngineSpec::from_bincode(&spec.to_bincode().expect("to_bincode"))
+            .expect("from_bincode");
         assert_eq!(decoded, spec);
         assert_eq!(decoded.schema_version, ENGINE_SPEC_SCHEMA_VERSION);
     }
@@ -893,7 +907,11 @@ mod tests {
         bytes[..4].copy_from_slice(&foreign.to_le_bytes()); // only the prefix changes
 
         match EngineSpec::from_bincode(&bytes) {
-            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+            Err(AicError::UnsupportedSchemaVersion {
+                kind,
+                got,
+                expected,
+            }) => {
                 assert_eq!(kind, "EngineSpec");
                 assert_eq!(got, foreign);
                 assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);

@@ -34,6 +34,20 @@ logger = logging.getLogger(__name__)
 
 _RFC1123_MAX_LEN = 63
 
+# Engine-limit keys stripped by ``build_naive_generator_params`` when the
+# caller asks to preserve the target image's own resolved limits
+# (``preserve_engine_limits=True``). Keep in sync with the rule plugins'
+# ``preserve_engine_limits`` guard.
+_ENGINE_LIMIT_KEYS = (
+    "max_batch_size",
+    "max_num_tokens",
+    "max_seq_len",
+    "tokens_per_block",
+    "gpu_memory_utilization",
+    "compilation_config",
+    "cuda_graph_batch_sizes",
+)
+
 # Default fallbacks
 _DEFAULT_GPUS_PER_NODE = 8
 _DEFAULT_VRAM_BYTES = 141 * 1024 * 1024 * 1024  # 141 GiB (H200)
@@ -201,49 +215,10 @@ def _estimate_model_weight_bytes(model_path: str, *, model_metadata: dict[str, A
 
     try:
         config = _parse_hf_config_json(raw_config)
-        num_layers = config["layers"]
-        hidden_size = config["hidden_size"]
-        inter_size = config["inter_size"]
-        vocab_size = config["vocab"]
-        num_experts = config["num_experts"]
-        moe_inter_size = config["moe_inter_size"]
-
-        # Embedding parameters
-        embedding_params = vocab_size * hidden_size
-
-        # Per-layer parameters
-        # Attention: Q, K, V, O projections = 4 * hidden^2
-        attention_params = 4 * hidden_size * hidden_size
-
-        # FFN parameters
-        if num_experts and num_experts > 1:
-            # MoE: gate + up + down for each expert, plus router
-            ffn_inter = moe_inter_size if moe_inter_size else inter_size
-            ffn_params = 3 * hidden_size * ffn_inter * num_experts
-            # Router/gate
-            ffn_params += hidden_size * num_experts
-        else:
-            # Dense: gate + up + down (for SwiGLU-style FFN)
-            ffn_params = 3 * hidden_size * inter_size
-
-        # Layer norms (2 per layer) + small bias terms
-        norm_params = 4 * hidden_size
-
-        # Total per layer
-        per_layer_params = attention_params + ffn_params + norm_params
-
-        # Total parameters
-        total_params = embedding_params + (num_layers * per_layer_params)
-
-        # Convert to bytes (BF16)
-        weight_bytes = total_params * _BYTES_PER_PARAM
-
-        logger.info(
-            f"Estimated model weight size for {model_path}: "
-            f"{weight_bytes / (1024**3):.2f} GiB ({total_params / 1e9:.2f}B params)"
-        )
+        weight_bytes = _estimate_weight_bytes_from_config(config, model_path)
 
         if model_metadata is not None:
+            num_experts = config["num_experts"]
             model_metadata.update(
                 architecture=config.get("architecture", ""),
                 is_moe=bool(num_experts and num_experts > 1),
@@ -297,6 +272,59 @@ def _estimate_model_weight_bytes(model_path: str, *, model_metadata: dict[str, A
             raise RuntimeError(
                 f"Could not estimate model size for {model_path!r}: {fallback_error}"
             ) from fallback_error
+
+    except Exception as e:
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
+
+
+def _estimate_weight_bytes_from_config(config: dict, model_path: str) -> int:
+    """Run the DPP weight-size formula over an already-resolved model config."""
+
+    try:
+        num_layers = config["layers"]
+        hidden_size = config["hidden_size"]
+        inter_size = config["inter_size"]
+        vocab_size = config["vocab"]
+        num_experts = config["num_experts"]
+        moe_inter_size = config["moe_inter_size"]
+
+        # Embedding parameters
+        embedding_params = vocab_size * hidden_size
+
+        # Per-layer parameters
+        # Attention: Q, K, V, O projections = 4 * hidden^2
+        attention_params = 4 * hidden_size * hidden_size
+
+        # FFN parameters
+        if num_experts and num_experts > 1:
+            # MoE: gate + up + down for each expert, plus router
+            ffn_inter = moe_inter_size if moe_inter_size else inter_size
+            ffn_params = 3 * hidden_size * ffn_inter * num_experts
+            # Router/gate
+            ffn_params += hidden_size * num_experts
+        else:
+            # Dense: gate + up + down (for SwiGLU-style FFN)
+            ffn_params = 3 * hidden_size * inter_size
+
+        # Layer norms (2 per layer) + small bias terms
+        norm_params = 4 * hidden_size
+
+        # Total per layer
+        per_layer_params = attention_params + ffn_params + norm_params
+
+        # Total parameters
+        total_params = embedding_params + (num_layers * per_layer_params)
+
+        # Convert to bytes (BF16)
+        weight_bytes = total_params * _BYTES_PER_PARAM
+
+        logger.info(
+            f"Estimated model weight size for {model_path}: "
+            f"{weight_bytes / (1024**3):.2f} GiB ({total_params / 1e9:.2f}B params)"
+        )
+
+        return weight_bytes
 
     except Exception as e:
         logger.exception("Could not estimate model size for %s.", model_path)
@@ -370,6 +398,8 @@ def build_naive_generator_params(
     optimization_type: str | None = None,
     generator_dynamo_version: str | None = None,
     generator_overrides: dict[str, Any] | None = None,
+    preserve_engine_limits: bool = False,
+    model_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
@@ -377,6 +407,10 @@ def build_naive_generator_params(
     Calculates the smallest parallelization that fits the model in memory
     and selects the appropriate strategy (TP, TEP, or DEP) based on the
     model architecture and optimization objective.
+
+    This function is the FPM collector's declared render entry point:
+    ``collector/fpm_forward`` imports it from ``aiconfigurator.generator.naive``
+    and renders every cell with ``preserve_engine_limits=True``.
 
     Args:
         model_name: Name or HuggingFace ID of the model.
@@ -391,6 +425,18 @@ def build_naive_generator_params(
             defaults such as backend runtime images.
         generator_overrides: Optional raw generator override mapping loaded
             from ``--generator-config`` and ``--generator-set``.
+        preserve_engine_limits: When True, strip the naive engine-limit
+            defaults in ``_ENGINE_LIMIT_KEYS`` from every worker role's params
+            and set ``params["preserve_engine_limits"] = True`` so the rule
+            plugins do not reintroduce them. Native self-benchmarking must
+            observe the limits resolved by the target engine image instead of
+            the SLA-derived serving defaults.
+        model_config: Optional pre-parsed model configuration in the shape
+            returned by ``get_model_config_from_model_path``. When provided
+            (the FPM collector's frozen-plan render), model metadata is taken
+            from this payload verbatim and no filesystem or network model
+            resolution happens -- render stays a pure function of the frozen
+            plan even for checkpoints only reachable inside the cluster.
 
     Returns:
         Dictionary containing generator parameters.  When ``mode="agg"``,
@@ -405,8 +451,12 @@ def build_naive_generator_params(
 
     # Estimate model weight size and retain architecture metadata from the same
     # raw config so unsupported models do not require another parse/download.
+    # FPM renders size straight from the frozen config when one is provided.
     model_metadata: dict[str, Any] = {}
-    model_weight_bytes = _estimate_model_weight_bytes(model_name, model_metadata=model_metadata)
+    if model_config is not None:
+        model_weight_bytes = _estimate_weight_bytes_from_config(model_config, model_name)
+    else:
+        model_weight_bytes = _estimate_model_weight_bytes(model_name, model_metadata=model_metadata)
 
     # Calculate minimum GPU count that fits the model
     min_gpus, fits, required_tp = _calculate_min_tp(
@@ -420,12 +470,13 @@ def build_naive_generator_params(
     architecture = str(model_metadata.get("architecture", ""))
     is_moe = bool(model_metadata.get("is_moe", False))
     if not model_metadata:
-        # Preserve the test/mocking seam and compatibility for callers that
-        # replace the weight estimator with a plain integer-returning stub.
+        # The frozen config wins when provided; otherwise preserve the
+        # test/mocking seam for callers that replace the weight estimator
+        # with a plain integer-returning stub.
         try:
-            model_config = get_model_config_from_model_path(model_name)
-            architecture = model_config.get("architecture", "")
-            num_experts = model_config.get("num_experts", 0)
+            detected = model_config if model_config is not None else get_model_config_from_model_path(model_name)
+            architecture = detected.get("architecture", "")
+            num_experts = detected.get("num_experts", 0)
             is_moe = bool(num_experts and num_experts > 1)
         except Exception:
             logger.warning(
@@ -592,5 +643,11 @@ def build_naive_generator_params(
     if effective_dynamo_version:
         params["generator_dynamo_version"] = effective_dynamo_version
     _drop_empty_worker_roles(params)
+
+    if preserve_engine_limits:
+        for role_params in params.get("params", {}).values():
+            for key in _ENGINE_LIMIT_KEYS:
+                role_params.pop(key, None)
+        params["preserve_engine_limits"] = True
 
     return params

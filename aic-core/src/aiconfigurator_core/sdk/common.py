@@ -592,6 +592,28 @@ DefaultHFModels = {
     "google/gemma-4-26B-A4B",
 }
 
+# Bundled model configs and the default support-matrix roster intentionally have
+# different lifecycles. A model can leave the generated matrix when a newer
+# release supersedes it while its cached config remains available for explicit
+# SDK/CLI use and for loading historical support-matrix rows.
+RetiredSupportMatrixHFModels = frozenset(
+    {
+        "zai-org/GLM-5",
+        "zai-org/GLM-5-FP8",
+        "nvidia/GLM-5-NVFP4",
+        "zai-org/GLM-5.1",
+        "zai-org/GLM-5.1-FP8",
+        "nvidia/GLM-5.1-NVFP4",
+        "MiniMaxAI/MiniMax-M2.5",
+        "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+        "nvidia/Nemotron-H-56B-Base-8K",
+    }
+)
+
+assert RetiredSupportMatrixHFModels <= DefaultHFModels
+SupportMatrixHFModels = DefaultHFModels - RetiredSupportMatrixHFModels
+
 """
 Supported systems (GPU types)
 """
@@ -969,7 +991,11 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    SOL_FULL = 4  # Provide SOL time and details
+    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
+    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
+    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
+    # database's DEFAULT mode — mode entry raises (perf_database).
+    SOL_FULL = 4
 
 
 class TransferKind(Enum):

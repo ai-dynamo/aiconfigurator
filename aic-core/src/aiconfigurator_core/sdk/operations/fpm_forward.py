@@ -610,11 +610,43 @@ class FPMForwardOp(Operation):
             )
         return matches[0]
 
+    def _validate_deployment_identity(self, database: PerfDatabase) -> None:
+        """Reject FPM identities the standard deployment bridge cannot emit.
+
+        The schema-v6 collector can label vLLM measurements taken with pinned
+        backend knobs, but the common Task -> generator path does not yet carry
+        those knobs into the generated vLLM command. Allowing a direct SDK/YAML
+        request to select such a cell would therefore model a different runtime
+        than AIC deploys. Keep the rows producer-valid, but fail the consumer
+        closed until structured generator fields land.
+        """
+        if database.backend != "vllm":
+            return
+
+        identity = dict(zip(_CELL_MATCH_COLUMNS, self._match_identity, strict=True))
+        unsupported = []
+        if identity["moe_backend"] != "auto":
+            unsupported.append(f"moe_backend={identity['moe_backend']!r}")
+        if identity["attention_backend"] != "auto":
+            unsupported.append(f"attention_backend={identity['attention_backend']!r}")
+        if identity["enable_eplb"] != "False":
+            unsupported.append(f"enable_eplb={identity['enable_eplb']}")
+
+        if unsupported:
+            raise PerfDataNotAvailableError(
+                "FPM cannot select this vLLM deployment identity because AIC's standard "
+                "Task-to-generator path cannot emit the corresponding pinned backend/EPLB "
+                f"settings yet: {', '.join(unsupported)}. Use automatic backend selection "
+                "with EPLB disabled, or use forward_model='op_level', until those settings "
+                "have structured end-to-end generator support."
+            )
+
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
 
     def _load_cell(self, database: PerfDatabase) -> dict:
+        self._validate_deployment_identity(database)
         self.load_data(database)
         wrapper = database._fpm_forward_data
         wrapper.raise_if_not_loaded()

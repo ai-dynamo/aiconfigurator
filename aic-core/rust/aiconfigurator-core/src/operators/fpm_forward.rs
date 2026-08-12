@@ -238,12 +238,15 @@ impl FpmForwardOp {
             }
         };
         let cfg = interp_config(self.phase, &sol);
-        let latency = index.resolve(&cfg, coords).map_err(|err| {
-            match sol_failure.borrow_mut().take() {
-                Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
-                None => err,
-            }
-        })?;
+        let latency = index
+            .resolve_value(&cfg, coords)
+            .map(|value| value.latency)
+            .map_err(|err| {
+                match sol_failure.borrow_mut().take() {
+                    Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
+                    None => err,
+                }
+            })?;
         if !latency.is_finite() || latency <= 0.0 {
             return Err(data_err(format!(
                 "FPM {} interpolation produced an invalid latency ({latency}) at {coords:?}.",

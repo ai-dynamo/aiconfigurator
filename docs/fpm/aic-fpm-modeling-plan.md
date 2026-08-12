@@ -21,7 +21,7 @@ consumes the **as-built** contract, not the planned one:
 | Point grid | collector-owned Halton/maximin, frozen holdout IDs | Dynamo PR11509 native self-benchmark owns the grid; runtime-admitted, no holdout set |
 | Repeats | 5 repeats, median, CV/quarantine | single sample per point (`dynamo_native_single_sample_v1`); DP max is baked into `latency_ms` |
 | Publication | candidate dir + human promotion | collector writes the formal pair directly (locked, atomic, conflict-fail merge) |
-| Sidecar | predictor ID, block size, per-axis min/max | schema v5: hashes, run identities, counts — **no predictor/domain fields** |
+| Sidecar | predictor ID, block size, per-axis min/max | schema v6: hashes, run identities, counts — **no predictor/domain fields** |
 | Backends | vllm/sglang/trtllm probes | vLLM only; `PP=1`, `CP=1` fixed; one backend policy `baseline_auto` |
 
 Consequences adopted in this plan:
@@ -60,6 +60,13 @@ total_prefill_tokens, total_kv_read_tokens, partition_policy`. Value column: `la
 Schema v6 replaced the former `backend_axis`/`backend_policy` label pair with the four
 explicit backend identity columns (`"auto"` = the engine decided; the `enable_*` columns
 are real booleans).
+
+The V1 consumer fails closed for vLLM requests that pin `moe_backend` or
+`attention_backend`, or enable EPLB. The collector can record those identities, but AIC's
+standard Task-to-generator path cannot yet reproduce the corresponding engine arguments;
+modeling them would price a different runtime than the generated deployment. Automatic
+backend selection with EPLB disabled remains supported. Structured end-to-end generator
+fields are required before the pinned identities can be enabled in modeling.
 
 This V1 location is exact-version-only and is NOT presented as an immutable contract: FPM
 data deliberately bypasses `_build_op_sources()` (which merges shapes from several

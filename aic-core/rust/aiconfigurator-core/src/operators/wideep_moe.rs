@@ -99,18 +99,25 @@ impl WideEpMoeOp {
         }
     }
 
-    pub fn query(
-        &self,
-        db: &PerfDatabase,
-        num_tokens: u32,
-    ) -> Result<PerformanceResult, AicError> {
+    pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         // Python: `x = num_tokens * self._attention_dp_size`.
         let scaled = num_tokens.saturating_mul(self.attention_dp_size.max(1));
 
         // Database-mode dispatch, mirroring the Python `_query_compute_table`
-        // tail (`database._query_silicon_or_hybrid`). The SOL diagnostic
-        // modes never reach the compiled engine.
+        // tail (`database._query_silicon_or_hybrid`); SOL (and the retired
+        // SOL_FULL alias) is the pure roofline with `Source::Sol`.
         let (latency, source) = match db.database_mode {
+            // Python `_query_compute_table`: `get_sol(num_tokens, hidden_size,
+            // inter_size, topk, num_experts, num_slots, moe_tp_size,
+            // moe_ep_size, quant_mode, workload_distribution)[0]` — weights
+            // use num_slots; num_experts and the distribution never enter.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+                (
+                    self.sol_latency_ms(&db.system_spec, scaled, tc_flops),
+                    Source::Sol,
+                )
+            }
             DatabaseMode::Empirical => (self.empirical_latency(db, scaled)?, Source::Empirical),
             DatabaseMode::Hybrid => match self.silicon_latency(db, scaled) {
                 Ok(latency) => (latency, Source::Silicon),
@@ -375,7 +382,12 @@ mod tests {
         let emp = fallback_op
             .query(&b200_trtllm_db(DatabaseMode::Empirical), 64)
             .expect("empirical dist fallback");
-        assert_oracle(&emp, 0.4135615825653076, Source::Empirical, "emp_dist_fb_t64");
+        assert_oracle(
+            &emp,
+            0.4135615825653076,
+            Source::Empirical,
+            "emp_dist_fb_t64",
+        );
         let hyb = fallback_op
             .query(&b200_trtllm_db(DatabaseMode::Hybrid), 64)
             .expect("hybrid dist fallback");
@@ -397,7 +409,6 @@ mod tests {
             matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
             "expected the typed empirical miss, got {result:?}"
         );
-
     }
 
     /// Distribution fallback is FILE-ROW order, not sorted order: gb200's
@@ -437,15 +448,44 @@ mod tests {
         let hit = fallback_op
             .query(&gb200(DatabaseMode::Hybrid), 64)
             .expect("silicon dist fallback");
-        assert_oracle(&hit, 0.34764800071716306, Source::Silicon, "gb200_dist_fb_t64");
+        assert_oracle(
+            &hit,
+            0.34764800071716306,
+            Source::Silicon,
+            "gb200_dist_fb_t64",
+        );
         let interp = fallback_op
             .query(&gb200(DatabaseMode::Hybrid), 333)
             .expect("silicon dist fallback interp");
-        assert_oracle(&interp, 0.42581739127635954, Source::Silicon, "gb200_dist_fb_t333");
+        assert_oracle(
+            &interp,
+            0.42581739127635954,
+            Source::Silicon,
+            "gb200_dist_fb_t333",
+        );
         let emp = fallback_op
             .query(&gb200(DatabaseMode::Empirical), 333)
             .expect("empirical dist fallback");
-        assert_oracle(&emp, 0.4259303480537969, Source::Empirical, "gb200_emp_dist_fb_t333");
+        assert_oracle(
+            &emp,
+            0.4259303480537969,
+            Source::Empirical,
+            "gb200_emp_dist_fb_t333",
+        );
     }
 
+    /// SOL mode returns the pure WideEP MoE roofline (weights keyed by
+    /// num_slots) tagged `Source::Sol` (Python `_query_compute_table` SOL
+    /// branch).
+    #[test]
+    fn wideep_moe_sol_mode_returns_roofline_with_sol_source() {
+        let db = b200_trtllm_db(DatabaseMode::Sol);
+        let op = op();
+        let result = op.query(&db, 64).expect("wideep moe sol");
+        let tc_flops = quant_tc_flops(&db.system_spec, op.quant_mode.mapping()).unwrap();
+        let expected = op.sol_latency_ms(&db.system_spec, 64, tc_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+    }
 }

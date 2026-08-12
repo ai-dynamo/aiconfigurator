@@ -152,8 +152,8 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         choices=["python", "rust"],
         default=None,
         help="Engine-step latency backend. By default the compiled Rust engine answers "
-        "(databases with measured power data delegate to the Python step until energy "
-        "crosses the FFI); use 'python' as the escape hatch or 'rust' to force the "
+        "(energy crosses the FFI, so power-carrying databases run on the compiled "
+        "engine too); use 'python' as the escape hatch or 'rust' to force the "
         "compiled engine.",
     )
     common_parser.add_argument(
@@ -1533,9 +1533,9 @@ def build_default_tasks(
         enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
         engine_step_backend: Engine-step latency backend ("python" or "rust");
-            unset defaults to the compiled Rust engine (power-carrying databases
-            delegate to the Python step, as do SDK callers passing synthetic
-            database objects the compiled engine cannot re-load from disk).
+            unset defaults to the compiled Rust engine (SDK callers passing
+            synthetic database objects the compiled engine cannot re-load
+            from disk still delegate to the Python step).
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
