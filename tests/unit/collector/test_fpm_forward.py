@@ -1097,7 +1097,7 @@ def test_native_validation_rejects_sub_batch_token_totals(tmp_path):
 def test_formal_database_uses_schema_v6_and_rejects_conflicts(tmp_path):
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
     rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
-    parquet, metadata = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+    parquet, metadata, skipped = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
     write_formal_database(plan, rows, systems_root=tmp_path / "systems")
 
     assert parquet.exists()
@@ -1115,22 +1115,31 @@ def test_formal_database_uses_schema_v6_and_rejects_conflicts(tmp_path):
         write_formal_database(plan, conflicting, systems_root=tmp_path / "systems")
 
 
-def test_formal_database_rejects_disjoint_rows_from_a_different_attempt(tmp_path):
+def test_formal_database_first_publisher_wins_on_rerun_overlap(tmp_path):
+    """A cell republished under a different run identity is skipped whole
+    (first publisher wins, sealed rows never mixed or overwritten) while the
+    database file stays byte-stable and the skip is reported to the caller."""
+
     plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
     rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
     systems_root = tmp_path / "systems"
-    write_formal_database(plan, rows, systems_root=systems_root)
+    parquet, _metadata, first_skipped = write_formal_database(plan, rows, systems_root=systems_root)
+    assert first_skipped == ()
+    sealed = parquet.read_bytes()
 
-    disjoint_stale_row = [
+    rerun_rows = [
         {
             **rows[0],
             "total_prefill_tokens": rows[0]["total_prefill_tokens"] + 1,
+            "latency_ms": 999.0,
             "collector_attempt_id": "different-attempt",
             "runtime_run_id": "different-run",
         }
     ]
-    with pytest.raises(ValueError, match="refusing to mix FPM run identities"):
-        write_formal_database(plan, disjoint_stale_row, systems_root=systems_root)
+    parquet2, _metadata2, skipped = write_formal_database(plan, rerun_rows, systems_root=systems_root)
+
+    assert skipped == (rows[0]["cell_id"],)
+    assert parquet2.read_bytes() == sealed
 
 
 def test_formal_database_merge_gate_names_missing_row_key_columns(tmp_path):
@@ -1335,12 +1344,12 @@ def test_formal_database_requires_family_measured_version_in_curated_tree(tmp_pa
     # A completed collection admits the version; publication creates the
     # two-level consumer path next to the family layout.
     (family_dir / "collection_meta.yaml").write_text("tables:\n  attention:\n    status: complete\n")
-    parquet, _metadata = write_formal_database(plan, rows, systems_root=None)
+    parquet, _metadata, _skipped = write_formal_database(plan, rows, systems_root=None)
     assert parquet.is_file()
     assert parquet == curated / plan.system / plan.backend / "0.24.0" / "fpm_forward_perf.parquet"
 
     explicit = tmp_path / "explicit"
-    parquet2, _metadata2 = write_formal_database(plan, rows, systems_root=explicit)
+    parquet2, _metadata2, _skipped2 = write_formal_database(plan, rows, systems_root=explicit)
     assert parquet2.is_file()
 
 

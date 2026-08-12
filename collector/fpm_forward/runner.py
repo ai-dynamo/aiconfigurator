@@ -1654,15 +1654,18 @@ def _run_collection_impl(
                     )
                 )
             systems_root = Path(database_root).expanduser().resolve() if database_root else None
-            parquet_path, metadata_path = write_formal_database(plan, formal_rows, systems_root=systems_root)
+            parquet_path, metadata_path, first_wins_skipped = write_formal_database(
+                plan, formal_rows, systems_root=systems_root
+            )
             checkpoint["database"] = {
                 "status": "passed",
                 "parquet": str(parquet_path),
                 "metadata": str(metadata_path),
                 "row_count": len(formal_rows),
-                "published_cells": len(publishable_cells),
+                "published_cells": len(publishable_cells) - len(first_wins_skipped),
                 "plan_cells": len(plan.cells),
                 "missing_cells": missing_cells,
+                "skipped_first_publisher_wins": list(first_wins_skipped),
             }
             if partial:
                 logger.warning(

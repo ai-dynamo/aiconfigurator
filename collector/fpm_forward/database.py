@@ -323,8 +323,16 @@ def write_formal_database(
     rows: list[dict[str, Any]],
     *,
     systems_root: Path | None = None,
-) -> tuple[Path, Path]:
-    """Atomically merge conflict-free native-grid rows into the AIC data tree."""
+) -> tuple[Path, Path, tuple[str, ...]]:
+    """Atomically merge conflict-free native-grid rows into the AIC data tree.
+
+    Returns ``(parquet_path, metadata_path, skipped_cells)``.
+    ``skipped_cells`` implements first-publisher-wins: cells whose cell_id is
+    already published under a different run identity are dropped from this
+    publication (loudly) instead of failing the whole merge - published rows
+    are sha-sealed evidence and are never overwritten or mixed, while the
+    incoming plan's non-overlapping cells still land.
+    """
 
     if not rows:
         raise ValueError("refusing to write an empty FPM database")
@@ -402,13 +410,27 @@ def write_formal_database(
                 f"expected={version!r}"
             )
         existing_identities = _run_identities_by_cell(merged, source="existing")
-        for cell_id, incoming_identity in incoming_identities.items():
+        skipped_cells: list[str] = []
+        for cell_id, incoming_identity in sorted(incoming_identities.items()):
             existing_identity = existing_identities.get(cell_id)
             if existing_identity is not None and existing_identity != incoming_identity:
-                raise ValueError(
-                    f"refusing to mix FPM run identities for cell_id={cell_id!r}: "
-                    f"existing={existing_identity!r}, incoming={incoming_identity!r}"
+                skipped_cells.append(cell_id)
+                logger.warning(
+                    "fpm_forward: cell_id=%s is already published under a different run identity "
+                    "(existing=%s, incoming=%s); first publisher wins - skipping this cell's rows",
+                    cell_id,
+                    existing_identity,
+                    incoming_identity,
                 )
+        if skipped_cells:
+            skipped_set = set(skipped_cells)
+            rows = [row for row in rows if row.get("cell_id") not in skipped_set]
+            if not rows:
+                logger.warning(
+                    "fpm_forward: every incoming cell is already published under a different run "
+                    "identity; database left unchanged"
+                )
+                return parquet_path, metadata_path, tuple(skipped_cells)
         index = {tuple(row[key] for key in _ROW_KEY): row for row in merged}
         if len(index) != len(merged):
             raise ValueError(f"existing FPM database contains duplicate physical keys: {parquet_path}")
@@ -454,4 +476,4 @@ def write_formal_database(
         finally:
             temporary.unlink(missing_ok=True)
             temporary_metadata.unlink(missing_ok=True)
-    return parquet_path, metadata_path
+    return parquet_path, metadata_path, tuple(skipped_cells)

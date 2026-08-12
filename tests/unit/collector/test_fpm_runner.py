@@ -2178,7 +2178,7 @@ def test_publish_partial_ships_passed_cells_and_records_the_missing(tmp_path, mo
         parquet.write_bytes(b"parquet")
         metadata = parquet.with_suffix(".metadata.json")
         metadata.write_text("{}")
-        return parquet, metadata
+        return parquet, metadata, ()
 
     monkeypatch.setattr("collector.fpm_forward.database.write_formal_database", fake_writer)
 
