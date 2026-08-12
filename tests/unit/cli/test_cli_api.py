@@ -164,15 +164,48 @@ class TestCLIEstimateUnit:
         assert hybrid_default.mode is common.DatabaseMode.HYBRID
         assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
-    def test_attention_backend_parameter_accepted_in_estimate(self, monkeypatch):
-        """Test that cli_estimate accepts attention_backend parameter (forwarded from CLI)."""
+    def test_estimate_accepts_attention_backend_parameter(self, monkeypatch):
+        """Test that cli_estimate accepts attention_backend parameter without error."""
         import aiconfigurator.cli.api as api
-        import inspect
 
-        # Verify that cli_estimate has attention_backend parameter
-        sig = inspect.signature(api.cli_estimate)
-        assert "attention_backend" in sig.parameters
-        assert sig.parameters["attention_backend"].default is None
+        captured_kwargs = {}
+
+        def fake_run_agg_estimate(**kwargs):
+            captured_kwargs.update(kwargs)
+            # Return minimal EstimateResult to avoid schema errors
+            from aiconfigurator.cli.api import EstimateResult
+
+            return EstimateResult(
+                ttft=100.0,
+                tpot=10.0,
+                power_w=500.0,
+                isl=1024,
+                osl=512,
+                batch_size=32,
+                ctx_tokens=1024,
+                tp_size=1,
+                pp_size=1,
+                model_path="Qwen/Qwen3-32B",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                backend_version="latest",
+                raw={},
+            )
+
+        monkeypatch.setattr(api, "_run_agg_estimate", fake_run_agg_estimate)
+
+        # Call cli_estimate with attention_backend; should not raise
+        result = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            backend_name="trtllm",
+            attention_backend="trtllm_mha",
+        )
+
+        # Verify result is valid
+        assert result is not None
+        assert result.ttft == 100.0
 
 
 class TestCLIDefaultNextn:
@@ -263,15 +296,30 @@ class TestCLIExpUnit:
         assert "exp_agg_simplified" in result.tasks
         assert "exp_agg_simplified" in result.best_throughputs
 
-    def test_build_experiment_tasks_accepts_attention_backend_parameter(self):
-        """Test that build_experiment_tasks accepts attention_backend parameter."""
+    def test_exp_attention_backend_reaches_task_model_config(self):
+        """Test that attention_backend from exp mode reaches Task's ModelConfig."""
         from aiconfigurator.cli.main import build_experiment_tasks
-        import inspect
 
-        # Verify build_experiment_tasks has attention_backend parameter
-        sig = inspect.signature(build_experiment_tasks)
-        assert "attention_backend" in sig.parameters
-        assert sig.parameters["attention_backend"].default is None
+        # Minimal experiment YAML fixture
+        config = {
+            "exp_test": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            }
+        }
+
+        # Build experiment tasks with attention_backend override
+        tasks = build_experiment_tasks(config=config, attention_backend="fa3")
+
+        # Verify attention_backend reached the Task
+        assert tasks is not None and len(tasks) > 0
+        for task in tasks.values():
+            assert task.attention_backend == "fa3"
+            # Verify it reaches the ModelConfig
+            model_config = task.build_model_config(role="agg")
+            assert model_config.attention_backend == "fa3"
 
 
 class TestCLIGenerateEquivalence:
