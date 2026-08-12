@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate the Python oracle for the Rust ``moe_ep`` perf table.
+"""Generate the Python oracle for the Rust ``moe_expert_compute`` perf table.
 
-Dumps stratified ``(key, num_tokens) -> PerfDatabase.query_moe_ep(...)``
+Dumps stratified ``(key, num_tokens) -> PerfDatabase.query_moe_expert_compute(...)``
 samples from the shipped h200_sxm/sglang and gb200/trtllm data to
-``src/perf_database/testdata/moe_ep_oracle.json``; the Rust
+``src/perf_database/testdata/moe_expert_compute_oracle.json``; the Rust
 ``#[cfg(test)] moe_ep_matches_python_oracle`` test loads the same parquet
-files through ``MoeEpTable`` and asserts a relative error <= 1e-9.
+files through ``MoeExpertComputeTable`` and asserts a relative error <= 1e-9.
 
 Regenerate (from the repo root, after `git lfs pull`):
 
-    .venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_ep_oracle.py
+    .venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_expert_compute_oracle.py
 
 Sampling is fully deterministic (sorted coordinates + fixed per-category
 strides), so a regeneration with unchanged data produces an identical file.
@@ -35,10 +35,12 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
-from aiconfigurator_core.sdk.operations.moe_comm import EPMoE
+from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 from aiconfigurator_core.sdk.perf_database import get_database
 
-OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "src", "perf_database", "testdata", "moe_ep_oracle.json")
+OUT_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "src", "perf_database", "testdata", "moe_expert_compute_oracle.json"
+)
 
 # (system, backend, version) tuples whose shipped data feeds the oracle: the
 # legacy sglang wideep context/generation pair (kernel "deepep_moe", six
@@ -123,7 +125,7 @@ def first_available_distributions(store):
 
 def candidates_for(db):
     """Build the per-category candidate lists for one database tuple."""
-    EPMoE.load_data(db)
+    MoEExpertCompute.load_data(db)
     store = db._moe_ep_data
     slices = sorted(walk_store(store), key=lambda item: item[0])
     first_by_phase = first_available_distributions(store)
@@ -205,7 +207,7 @@ def build_samples(db, system, data_root):
             ) = coord
             if kind in ("dist_uniform_fallback", "dist_first_available"):
                 distribution = item[3]
-            result = db.query_moe_ep(
+            result = db.query_moe_expert_compute(
                 kernel_source,
                 MoEQuantMode[quant_name],
                 distribution,
@@ -252,8 +254,10 @@ def main() -> None:
         samples.extend(build_samples(db, system, data_root))
 
     header = {
-        "_regenerate": (".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_ep_oracle.py"),
-        "_source": "PerfDatabase.query_moe_ep (shared_layer=False), SILICON mode",
+        "_regenerate": (
+            ".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_expert_compute_oracle.py"
+        ),
+        "_source": "PerfDatabase.query_moe_expert_compute (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)

@@ -30,7 +30,7 @@
 //! The SGLang `moe_backend == "deepep_moe"` branch of Python's `_moe_table`
 //! (wideep context/generation MoE tables) retired with AIC-1601: both the
 //! silicon and the empirical selector now raise a typed missing-data error.
-//! Large-EP expert compute is modeled by `operators::ep_moe::EpMoeOp`.
+//! Large-EP expert compute is modeled by `operators::moe_expert_compute::MoeExpertComputeOp`.
 //!
 //! Weights accounting (per-expert FFN weights + router) is in the model
 //! layer; the operator returns latency + energy (energy rides the standard
@@ -315,7 +315,7 @@ impl MoeOp {
         // (moe.py:637-647, 803-813), so the correction must not leak there.
         //
         // Unreachable from model-emitted specs since PR 2 (enable_eplb flows
-        // to EpMoe); retained for wire-compat with the Python MoE op. PR 3's
+        // to MoeExpertCompute); retained for wire-compat with the Python MoE op. PR 3's
         // data migration decides its fate. If you make this reachable again,
         // restore a fixture-backed test (the deleted
         // `moe_eplb_correction_scoped_to_silicon_only` pattern).
@@ -334,12 +334,12 @@ impl MoeOp {
         let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
         let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32, tc_flops);
 
-        // sglang deepep_moe compute retired — large-EP uses EpMoe (AIC-1601)
+        // sglang deepep_moe compute retired — large-EP uses MoeExpertCompute (AIC-1601)
         if is_sglang && self.moe_backend.as_deref() == Some("deepep_moe") {
             return Err(AicError::PerfDatabase(format!(
                 "sglang deepep_moe MoE compute is retired (AIC-1601): op {} requested the \
                  removed wideep context/generation MoE tables; large-EP expert compute is \
-                 modeled by the EpMoe op",
+                 modeled by the MoeExpertCompute op",
                 self.name
             )));
         }
@@ -423,12 +423,12 @@ impl MoeOp {
         // wrong table would over-estimate by the ~3x kernel gap. The tag
         // folds the choice into every grid cache key so one table's grid
         // can't be served to another's query at the same shape.
-        // sglang deepep_moe compute retired — large-EP uses EpMoe (AIC-1601)
+        // sglang deepep_moe compute retired — large-EP uses MoeExpertCompute (AIC-1601)
         if db.backend == "sglang" && self.moe_backend.as_deref() == Some("deepep_moe") {
             return Err(AicError::PerfDatabase(format!(
                 "sglang deepep_moe MoE compute is retired (AIC-1601): op {} requested the \
                  removed wideep context/generation MoE tables; large-EP expert compute is \
-                 modeled by the EpMoe op",
+                 modeled by the MoeExpertCompute op",
                 self.name
             )));
         }
@@ -599,7 +599,7 @@ impl MoeOp {
     }
 
     /// Enumerate `source_quant`'s collected sibling slices (same table,
-    /// same wl-after-fallback / moe_tp / moe_ep) as ladder candidates.
+    /// same wl-after-fallback / moe_tp / moe_expert_compute) as ladder candidates.
     /// Mirrors `_collect` (`operations/moe.py:454-486`); a typed data miss
     /// (table failed to load) yields no candidates, exactly like Python's
     /// `grid_from_reference` catching the raise from `_collect`.
@@ -772,17 +772,17 @@ fn moe_sol_latency_ms(
     tc_flops: f64,
 ) -> f64 {
     let total_tokens = num_tokens as u64 * topk as u64;
-    let moe_ep = (moe_ep_size as u64).max(1);
+    let moe_expert_compute = (moe_ep_size as u64).max(1);
     let moe_tp = (moe_tp_size as u64).max(1);
     let h = hidden_size as u64;
     let inter = inter_size as u64;
     let ne = num_experts as u64;
 
-    let ops = total_tokens * h * inter * num_gemms * 2 / moe_ep / moe_tp;
-    let mem_bytes_int = total_tokens / moe_ep * h * 2 // input + output
-        + total_tokens / moe_ep * inter * num_gemms / moe_tp // intermediate
+    let ops = total_tokens * h * inter * num_gemms * 2 / moe_expert_compute / moe_tp;
+    let mem_bytes_int = total_tokens / moe_expert_compute * h * 2 // input + output
+        + total_tokens / moe_expert_compute * inter * num_gemms / moe_tp // intermediate
         + h * inter * num_gemms / moe_tp
-            * std::cmp::min(ne / moe_ep, total_tokens / moe_ep);
+            * std::cmp::min(ne / moe_expert_compute, total_tokens / moe_expert_compute);
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
 
     // `tc_flops` is pre-resolved by the caller via `quant_tc_flops`

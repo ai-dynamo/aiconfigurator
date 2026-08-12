@@ -134,7 +134,7 @@ impl MoEDispatchOp {
                 //      if attn_tp > 1: comm += custom_allreduce(num_gpus, volume)
                 //      if attn_dp > 1: comm += nccl(num_gpus, "all_gather" if pre
                 //                                  else "reduce_scatter", volume * dp)
-                //      (both terms can add; Python asserts moe_tp==1 or moe_ep==1)
+                //      (both terms can add; Python asserts moe_tp==1 or moe_expert_compute==1)
                 //  * sglang non-deepep pre_dispatch (:1043-1071):
                 //      if combined_tp_dp: nccl(attn_tp, "reduce_scatter", volume)
                 //                       + nccl(num_gpus, "all_gather", volume*dp)
@@ -144,7 +144,7 @@ impl MoEDispatchOp {
                 //  * sglang non-deepep combine (:1072-1098): mirrors pre but swaps
                 //    reduce_scatter <-> all_gather and inverts the combined order.
                 //
-                // `num_gpus = moe_tp * moe_ep`; `attn_tp = num_gpus / attn_dp`;
+                // `num_gpus = moe_tp * moe_expert_compute`; `attn_tp = num_gpus / attn_dp`;
                 // `volume = num_tokens * hidden_size` (element count, half-precision).
                 // Rust mirrors element-count semantics by passing
                 // `num_tokens * attn_dp` to the NCCL sub-op so its internal
@@ -714,7 +714,7 @@ mod tests {
             8,
             256,
             1, // moe_tp
-            8, // moe_ep
+            8, // moe_expert_compute
             1, // attention_dp
             pre_dispatch,
             BackendKind::Sglang,

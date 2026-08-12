@@ -37,7 +37,7 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 //   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
 //   bincode enum index; large-EP is now modeled natively by the
-//   `MoeAllToAll` / `EpMoe` variants appended after `Kda`, and `EpMoeOp`
+//   `MoeAllToAll` / `MoeExpertCompute` variants appended after `Kda`, and `MoeExpertComputeOp`
 //   carries the `enable_eplb` legacy-fidelity field.
 pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
 

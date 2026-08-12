@@ -3,8 +3,8 @@
 
 //! Unified large-EP MoE expert-compute operator.
 //!
-//! Rust port of Python `sdk/operations/moe_comm.py::EPMoE` — the OP layer
-//! over the `perf_database/moe_ep.rs` table (`_query_ep_table`'s silicon body
+//! Rust port of Python `sdk/operations/moe_comm.py::MoEExpertCompute` — the OP layer
+//! over the `perf_database/moe_expert_compute.rs` table (`_query_ep_table`'s silicon body
 //! lives there; everything the op adds is here):
 //!
 //! - `attention_dp_size` GLOBALIZES the token count before the lookup
@@ -23,7 +23,7 @@
 //!   `ValueError`, so this is a hard config error, NOT a data miss.
 //! - the mode gate: SOL/SOL_FULL/EMPIRICAL have no estimation tier for this
 //!   family (:1206-1210) and HYBRID's empirical leg is the same raise
-//!   (:1270-1274). See [`EpMoeOp::query`].
+//!   (:1270-1274). See [`MoeExpertComputeOp::query`].
 
 use serde::{Deserialize, Serialize};
 
@@ -64,14 +64,14 @@ fn default_is_gated() -> bool {
 }
 
 /// One inference phase of the unified large-EP expert compute (Python
-/// `EPMoE`; one op instance per phase).
+/// `MoEExpertCompute`; one op instance per phase).
 ///
 /// Field order is the wire format (bincode serializes struct fields
 /// positionally) and matches the Python `_to_opspec` contract.
 /// `#[serde(default)]` is applied exactly where the Python ctor has a default
 /// (moe_comm.py:1036-1039).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EpMoeOp {
+pub struct MoeExpertComputeOp {
     pub name: String,
     pub scale_factor: f64,
     pub hidden_size: u32,
@@ -108,7 +108,7 @@ pub struct EpMoeOp {
     pub enable_eplb: bool,
 }
 
-impl EpMoeOp {
+impl MoeExpertComputeOp {
     /// Query the expert compute at the PER-ATTENTION-DP-RANK token count
     /// `num_tokens` (Python `query`'s `x`).
     ///
@@ -121,7 +121,7 @@ impl EpMoeOp {
     ///    globalization. `x=101, adp=2` gives `int(202 * 0.8) = 161`; the
     ///    reversed order would give `int(101 * 0.8) * 2 = 160` — an adjacent
     ///    collected point in the shipped tables.
-    /// 4. `_validate_ep_phase` (:1195, reached through `query_moe_ep`).
+    /// 4. `_validate_ep_phase` (:1195, reached through `query_moe_expert_compute`).
     /// 5. the mode gate (:1206-1210) — see below.
     /// 6. the table lookup with `moe_tp_size = 1` (:1302-1315) and
     ///    `PerformanceResult(float(result) * scale_factor, source=...)`
@@ -158,7 +158,7 @@ impl EpMoeOp {
             DatabaseMode::Silicon | DatabaseMode::Hybrid => {}
             mode => {
                 return Err(AicError::EmpiricalNotImplemented(format!(
-                    "{mode:?} mode is not available for moe_ep {kernel_source}/{}: silicon data \
+                    "{mode:?} mode is not available for moe_expert_compute {kernel_source}/{}: silicon data \
                      required (estimation tier is a planned follow-up).",
                     self.inference_phase
                 )))
@@ -171,7 +171,7 @@ impl EpMoeOp {
                     // moe_comm.py:1270-1274 — HYBRID's empirical fallback for
                     // this family is itself the typed not-implemented raise.
                     AicError::EmpiricalNotImplemented(format!(
-                        "HYBRID empirical fallback is not available for moe_ep \
+                        "HYBRID empirical fallback is not available for moe_expert_compute \
                          {kernel_source}/{}: silicon data required (estimation tier is a planned \
                          follow-up). Silicon miss: {err}",
                         self.inference_phase
@@ -191,7 +191,7 @@ impl EpMoeOp {
         kernel_source: &str,
         tokens: u32,
     ) -> Result<f64, AicError> {
-        db.moe_ep.query(
+        db.moe_expert_compute.query(
             kernel_source,
             self.quant_mode,
             &self.workload_distribution,
@@ -210,7 +210,7 @@ impl EpMoeOp {
         )
     }
 
-    /// Mirror of Python `EPMoE._resolve_kernel_source` (moe_comm.py:1120-1153)
+    /// Mirror of Python `MoEExpertCompute._resolve_kernel_source` (moe_comm.py:1120-1153)
     /// at QUERY time:
     /// 1. sglang / vllm -> `"deepep_moe"`, WITHOUT consulting the table;
     /// 2. otherwise (trtllm) SM >= 100 (Blackwell) with an `fp8_block`
@@ -235,7 +235,7 @@ impl EpMoeOp {
         } else {
             "moe_torch_flow"
         };
-        let available = db.moe_ep.available_kernels()?;
+        let available = db.moe_expert_compute.available_kernels()?;
         if available.iter().any(|kernel| kernel == preferred) {
             return Ok(preferred.to_string());
         }
@@ -251,7 +251,7 @@ mod tests {
     use super::*;
     use crate::common::enums::TransferPolicy;
     use crate::common::system_spec::SystemSpec;
-    use crate::perf_database::MoeEpTable;
+    use crate::perf_database::MoeExpertComputeTable;
     use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
     use parquet::file::properties::WriterProperties;
     use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
@@ -274,7 +274,7 @@ mod tests {
         col.close().unwrap();
     }
 
-    /// One synthetic new-schema `moe_ep_perf.parquet` row. Shape is pinned at
+    /// One synthetic new-schema `moe_expert_compute_perf.parquet` row. Shape is pinned at
     /// (topk=8, experts=128, hidden=7168, inter=2048, moe_tp=1, ep=16); the
     /// axes under test are kernel/phase/slots/tokens.
     struct EpRow {
@@ -282,7 +282,7 @@ mod tests {
         inference_phase: &'static str,
         num_slots: i64,
         num_tokens: i64,
-        /// Already MILLIseconds — the moe_ep schema's unit.
+        /// Already MILLIseconds — the moe_expert_compute schema's unit.
         latency_ms: f64,
     }
 
@@ -391,22 +391,26 @@ mod tests {
     }
 
     /// A real database (for the system spec / data-root plumbing) with the
-    /// moe_ep table swapped for a synthetic one — the `moe_dispatch.rs`
+    /// moe_expert_compute table swapped for a synthetic one — the `moe_dispatch.rs`
     /// pattern.
     fn synthetic_db(mode: DatabaseMode) -> (tempfile::TempDir, PerfDatabase) {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        write_moe_ep_parquet(&tmp.path().join("moe_ep_perf.parquet"), &synthetic_rows());
+        write_moe_ep_parquet(
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
+            &synthetic_rows(),
+        );
         let systems = systems_root();
         let spec = SystemSpec::load(&systems.join("h200_sxm.yaml")).expect("system yaml must load");
         let mut db = PerfDatabase::load(&systems, "h200_sxm", "sglang", "0.5.6.post2")
             .expect("h200_sxm/sglang/0.5.6.post2 must load")
             .with_mode(mode, TransferPolicy::ALL);
-        db.tables_mut().moe_ep = MoeEpTable::new(tmp.path().to_path_buf(), spec);
+        db.tables_mut().moe_expert_compute =
+            MoeExpertComputeTable::new(tmp.path().to_path_buf(), spec);
         (tmp, db)
     }
 
-    fn op() -> EpMoeOp {
-        EpMoeOp {
+    fn op() -> MoeExpertComputeOp {
+        MoeExpertComputeOp {
             name: "moe".into(),
             scale_factor: 1.0,
             hidden_size: 7168,
@@ -601,7 +605,7 @@ mod tests {
     fn kernel_source_auto_resolution_falls_back_to_a_collected_kernel() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         write_moe_ep_parquet(
-            &tmp.path().join("moe_ep_perf.parquet"),
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
             &[ep_row("wideep_compute_cutlass", "context", 128, 100, 0.42)],
         );
         let systems = systems_root();
@@ -612,7 +616,7 @@ mod tests {
             let tables = db.tables_mut();
             tables.backend = "trtllm".to_string();
             tables.system_spec.gpu.sm_version = Some(100);
-            tables.moe_ep = MoeEpTable::new(tmp.path().to_path_buf(), spec);
+            tables.moe_expert_compute = MoeExpertComputeTable::new(tmp.path().to_path_buf(), spec);
         }
         let mut auto = op();
         auto.kernel_source = None;
@@ -732,7 +736,7 @@ mod tests {
             "attention_dp_size": 1,
             "inference_phase": "context"
         }"#;
-        let op: EpMoeOp = serde_json::from_str(json).expect("defaults must fill in");
+        let op: MoeExpertComputeOp = serde_json::from_str(json).expect("defaults must fill in");
         assert_eq!(op.num_slots, None);
         assert_eq!(op.kernel_source, None);
         assert!(op.is_gated);
@@ -772,7 +776,7 @@ mod tests {
         any_file
     }
 
-    /// The `"moe_ep"` slice of the shared op-level oracle fixture (the same
+    /// The `"moe_expert_compute"` slice of the shared op-level oracle fixture (the same
     /// file `moe_a2a.rs` reads for its `"moe_a2a"` slice — one generator run
     /// produces both).
     fn oracle_samples(op_kind: &str) -> Vec<serde_json::Value> {
@@ -788,7 +792,7 @@ mod tests {
             .collect()
     }
 
-    /// OP-level parity against Python `EPMoE(...).query(db, x=...)` — not the
+    /// OP-level parity against Python `MoEExpertCompute(...).query(db, x=...)` — not the
     /// raw table query: what is under test is the op layer's
     /// `x * attention_dp_size` globalization, the `int(tokens * 0.8)` EPLB
     /// correction, the `num_slots` default, the `kernel_source=None`
@@ -802,7 +806,7 @@ mod tests {
     #[test]
     fn moe_ep_op_matches_python_oracle() {
         let systems = systems_root();
-        let samples = oracle_samples("moe_ep");
+        let samples = oracle_samples("moe_expert_compute");
         let mut dbs: BTreeMap<String, PerfDatabase> = BTreeMap::new();
         let mut max_rel = 0.0_f64;
         let mut checked = 0_usize;
@@ -815,7 +819,7 @@ mod tests {
             if !shipped_data_ready(
                 &data_root,
                 &[
-                    "moe_ep_perf.parquet",
+                    "moe_expert_compute_perf.parquet",
                     "wideep_context_moe_perf.parquet",
                     "wideep_generation_moe_perf.parquet",
                     "wideep_moe_perf.parquet",
@@ -837,7 +841,7 @@ mod tests {
             };
             let quant: MoeQuantMode = serde_json::from_value(sample["quant_mode"].clone())
                 .expect("quant must map to a MoeQuantMode");
-            let op = EpMoeOp {
+            let op = MoeExpertComputeOp {
                 name: "oracle".into(),
                 scale_factor: sample["scale_factor"].as_f64().expect("scale_factor"),
                 hidden_size: u32_of("hidden_size"),
@@ -883,6 +887,8 @@ mod tests {
             checked >= 55,
             "oracle unexpectedly small: {checked} samples"
         );
-        eprintln!("moe_ep op oracle: {checked} samples, max relative error {max_rel:e}");
+        eprintln!(
+            "moe_expert_compute op oracle: {checked} samples, max relative error {max_rel:e}"
+        );
     }
 }

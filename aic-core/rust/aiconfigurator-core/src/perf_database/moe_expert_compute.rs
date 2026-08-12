@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Unified large-EP MoE expert-compute table (`moe_ep_perf.parquet`).
+//! Unified large-EP MoE expert-compute table (`moe_expert_compute_perf.parquet`).
 //!
-//! Rust port of Python `sdk/operations/moe_comm.py`: `load_moe_ep_data`
+//! Rust port of Python `sdk/operations/moe_comm.py`: `load_moe_expert_compute_data`
 //! (new schema) + `_load_legacy_ep` (the three legacy wideep adapters) + the
-//! silicon body of `EPMoE._query_ep_table`.
+//! silicon body of `MoEExpertCompute._query_ep_table`.
 //!
 //! One coordinate serves every inference backend:
 //! `[kernel_source][quant][distribution][inference_phase][topk][num_experts]`
@@ -14,9 +14,9 @@
 //!
 //! Four source files feed it:
 //!
-//! - `moe_ep_perf.parquet` — the unified schema. UNITS: unlike the
+//! - `moe_expert_compute_perf.parquet` — the unified schema. UNITS: unlike the
 //!   us-collected a2a table, its `latency` column is ALREADY in milliseconds
-//!   (`load_moe_ep_data`'s docstring / moe_comm.py:916) — stored raw, no
+//!   (`load_moe_expert_compute_data`'s docstring / moe_comm.py:916) — stored raw, no
 //!   /1000 anywhere. The optional `power` column feeds only the Python
 //!   leaves' power/energy ride-alongs, which never influence the latency
 //!   resolution; it is not read here.
@@ -32,7 +32,7 @@
 //!   has no context/generation split, so each row registers under BOTH
 //!   `inference_phase` values (`_adapt_legacy_trtllm_wideep_moe`).
 //!
-//! Merge (Python `load_moe_ep_data` / `_store_ep_leaf`): the legacy adapters
+//! Merge (Python `load_moe_expert_compute_data` / `_store_ep_leaf`): the legacy adapters
 //! keep the FIRST row on a collision (`overwrite=False` — their oracle
 //! loaders adopted the skip-on-key-conflict shared-layer contract in #1423,
 //! same as moe_a2a's keep-first legacy convention). The FIRST new-schema
@@ -96,7 +96,12 @@ use crate::perf_database::parquet_loader::PerfReader;
 /// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
 /// iteration is ascending, so the strict-order constructor holds.
 fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
-    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
+    AxisCurve::from_sorted_iter(
+        "num_tokens",
+        points
+            .iter()
+            .map(|(&coordinate, &value)| (coordinate, value)),
+    )
 }
 
 /// `(kernel_source, quant, distribution, inference_phase, topk, num_experts,
@@ -105,7 +110,7 @@ fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve 
 /// `BTreeMap` range scan over a `(kernel, quant, distribution, phase)`
 /// prefix answers the distribution chain's carries-phase test.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MoeEpKey {
+pub struct MoeExpertComputeKey {
     pub kernel_source: String,
     pub quant: String,
     pub distribution: String,
@@ -119,7 +124,7 @@ pub struct MoeEpKey {
     pub moe_ep_size: u32,
 }
 
-/// `num_tokens -> latency_ms` curves keyed by [`MoeEpKey`], plus the
+/// `num_tokens -> latency_ms` curves keyed by [`MoeExpertComputeKey`], plus the
 /// insertion-ordered distribution list per `(kernel_source, quant)` the
 /// fallback chain needs. Mirrors the retired `wideep_moe.rs`'s
 /// `first_distribution` (Python dict-insertion order is file row order),
@@ -127,7 +132,7 @@ pub struct MoeEpKey {
 /// ordered list because `_resolve_ep_distribution` filters candidates by
 /// inference-phase coverage before taking the first one.
 struct MoeEpGrids {
-    by_keys: BTreeMap<MoeEpKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MoeExpertComputeKey, BTreeMap<u32, f64>>,
     dist_order: BTreeMap<(String, String), Vec<String>>,
 }
 
@@ -144,7 +149,7 @@ impl MoeEpGrids {
     /// defaultdict vivifies the distribution bucket on the store WALK, so
     /// even a keep-first collision cannot reorder (the bucket already
     /// exists whenever a store is skipped).
-    fn note_distribution(&mut self, key: &MoeEpKey) {
+    fn note_distribution(&mut self, key: &MoeExpertComputeKey) {
         let order = self
             .dist_order
             .entry((key.kernel_source.clone(), key.quant.clone()))
@@ -157,7 +162,7 @@ impl MoeEpGrids {
     /// Python `_store_ep_leaf(..., overwrite=True)`: unconditional
     /// assignment — replaces whatever is there. Used only by the first
     /// new-schema occurrence of a key (precedence over legacy-adapted rows).
-    fn store_overwrite(&mut self, key: MoeEpKey, num_tokens: u32, latency_ms: f64) {
+    fn store_overwrite(&mut self, key: MoeExpertComputeKey, num_tokens: u32, latency_ms: f64) {
         self.note_distribution(&key);
         self.by_keys
             .entry(key)
@@ -169,7 +174,7 @@ impl MoeEpGrids {
     /// at a coordinate wins. Used by the legacy adapters — their oracle
     /// loaders guard with the skip-on-key-conflict shared-layer contract
     /// (#1423), so an earlier source (or earlier row) takes priority.
-    fn store_keep_first(&mut self, key: MoeEpKey, num_tokens: u32, latency_ms: f64) {
+    fn store_keep_first(&mut self, key: MoeExpertComputeKey, num_tokens: u32, latency_ms: f64) {
         self.note_distribution(&key);
         self.by_keys
             .entry(key)
@@ -179,7 +184,7 @@ impl MoeEpGrids {
     }
 }
 
-pub struct MoeEpTable {
+pub struct MoeExpertComputeTable {
     data_root: PathBuf,
     /// Owns the system spec because the query-time roofline SOL
     /// (`get_sol_latency`) reads `gpu.bfloat16_tc_flops` / `gpu.mem_bw` —
@@ -189,7 +194,7 @@ pub struct MoeEpTable {
     spec: SystemSpec,
     /// Ordered, priority-sorted sources per distinct perf-file basename
     /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
-    /// default (`MoeEpTable::new`).
+    /// default (`MoeExpertComputeTable::new`).
     moe_ep_sources: Vec<PerfSource>,
     legacy_context_sources: Vec<PerfSource>,
     legacy_generation_sources: Vec<PerfSource>,
@@ -197,7 +202,7 @@ pub struct MoeEpTable {
     grids: OnceLock<Result<MoeEpGrids, AicError>>,
 }
 
-impl MoeEpTable {
+impl MoeExpertComputeTable {
     /// Construct an empty table for the given data directory. No I/O. Each
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
@@ -213,7 +218,11 @@ impl MoeEpTable {
         spec: SystemSpec,
         perf_db_sources: &PerfDbSources,
     ) -> Self {
-        let moe_ep_sources = resolve_op_sources(perf_db_sources, "moe_ep_perf.parquet", &data_root);
+        let moe_ep_sources = resolve_op_sources(
+            perf_db_sources,
+            "moe_expert_compute_perf.parquet",
+            &data_root,
+        );
         let legacy_context_sources = resolve_op_sources(
             perf_db_sources,
             "wideep_context_moe_perf.parquet",
@@ -239,12 +248,12 @@ impl MoeEpTable {
 
     /// Unified EP MoE expert-compute latency (ms).
     ///
-    /// Mirrors the SILICON body of Python `EPMoE._query_ep_table`: exact
+    /// Mirrors the SILICON body of Python `MoEExpertCompute._query_ep_table`: exact
     /// kernel/quant walk, distribution chain (requested -> "uniform" ->
     /// first phase-carrying collected distribution in insertion order),
     /// exact shape walk, the singleton-underflow guard, then a 1-D token
     /// curve on the perf_interp engine anchored on the WideEP roofline SOL.
-    /// Argument order matches `PerfDatabase.query_moe_ep`.
+    /// Argument order matches `PerfDatabase.query_moe_expert_compute`.
     #[allow(clippy::too_many_arguments)]
     pub fn query(
         &self,
@@ -276,13 +285,13 @@ impl MoeEpTable {
                 .any(|(kernel, _)| kernel == kernel_source);
             return Err(AicError::PerfDatabase(if kernel_seen {
                 format!(
-                    "moe_ep data missing for kernel_source={kernel_source:?} \
+                    "moe_expert_compute data missing for kernel_source={kernel_source:?} \
                      quant={quant_name:?} at {}",
                     self.data_root.display()
                 )
             } else {
                 format!(
-                    "moe_ep data missing for kernel_source={kernel_source:?} at {}",
+                    "moe_expert_compute data missing for kernel_source={kernel_source:?} at {}",
                     self.data_root.display()
                 )
             }));
@@ -291,7 +300,7 @@ impl MoeEpTable {
         // distributions that carry `inference_phase` data, in insertion
         // order. The key sorts the phase level directly under distribution,
         // so one range probe per candidate answers the coverage test.
-        let bound_key = |distribution: &str, fill: u32| MoeEpKey {
+        let bound_key = |distribution: &str, fill: u32| MoeExpertComputeKey {
             kernel_source: kernel_source.to_string(),
             quant: quant_name.to_string(),
             distribution: distribution.to_string(),
@@ -319,7 +328,7 @@ impl MoeEpTable {
             first
         } else {
             return Err(AicError::PerfDatabase(format!(
-                "moe_ep workload_distribution {workload_distribution:?} is not available for \
+                "moe_expert_compute workload_distribution {workload_distribution:?} is not available for \
                  {kernel_source}/{quant_name} at {}; no collected distribution carries \
                  {inference_phase:?} data",
                 self.data_root.display()
@@ -328,7 +337,7 @@ impl MoeEpTable {
         // The remaining shape walk is exact (`require_data_slice(quant_slice,
         // used_distribution, inference_phase, topk, ..., moe_ep_size)`) — a
         // shape present only under ANOTHER distribution still misses.
-        let key = MoeEpKey {
+        let key = MoeExpertComputeKey {
             kernel_source: kernel_source.to_string(),
             quant: quant_name.to_string(),
             distribution: used_distribution.to_string(),
@@ -347,7 +356,7 @@ impl MoeEpTable {
             .filter(|curve| !curve.is_empty())
             .ok_or_else(|| {
                 AicError::PerfDatabase(format!(
-                    "moe_ep data missing for {key:?} at {}",
+                    "moe_expert_compute data missing for {key:?} at {}",
                     self.data_root.display()
                 ))
             })?;
@@ -387,7 +396,7 @@ impl MoeEpTable {
     /// Distinct `kernel_source` keys present in the loaded table, in sorted
     /// (BTreeMap) order; EMPTY when the table failed to load with a typed
     /// data miss. Mirrors the `if ep_data:` guard of Python
-    /// `EPMoE._resolve_kernel_source` (moe_comm.py:1143-1151) — an
+    /// `MoEExpertCompute._resolve_kernel_source` (moe_comm.py:1143-1151) — an
     /// unloaded/empty store is falsy there and the caller keeps its
     /// architecture-preferred kernel. NOTE: Python's `list(ep_data.keys())`
     /// yields dict insertion (file row) order; sorted order is observable
@@ -403,7 +412,7 @@ impl MoeEpTable {
         };
         let mut names: Vec<String> = Vec::new();
         for key in grids.by_keys.keys() {
-            // `MoeEpKey` sorts by kernel_source first, so consecutive dedup
+            // `MoeExpertComputeKey` sorts by kernel_source first, so consecutive dedup
             // suffices.
             if names.last().map(String::as_str) != Some(key.kernel_source.as_str()) {
                 names.push(key.kernel_source.clone());
@@ -462,7 +471,7 @@ fn ep_sol_latency_ms(
 ) -> f64 {
     // moe_comm.py:1224: `total_tokens = tokens * topk`.
     let total_tokens = tokens as u64 * topk as u64;
-    let moe_ep = (moe_ep_size as u64).max(1);
+    let moe_expert_compute = (moe_ep_size as u64).max(1);
     let moe_tp = (moe_tp_size as u64).max(1);
     let h = hidden_size as u64;
     let inter = inter_size as u64;
@@ -472,13 +481,13 @@ fn ep_sol_latency_ms(
     // Gated (SwiGLU) = 3 GEMMs, non-gated (Relu2) = 2 — mirrors the Python
     // SOL's `3 if is_gated else 2` (legacy oracle moe.py:309).
     let num_gemms: u64 = if is_gated { 3 } else { 2 };
-    let ops = total_tokens * h * inter * num_gemms * 2 / moe_ep / moe_tp;
+    let ops = total_tokens * h * inter * num_gemms * 2 / moe_expert_compute / moe_tp;
     // moe_comm.py:1226-1234: the three integer byte terms, then one float
     // multiply by `quant_mode.value.memory`.
-    let mem_bytes_int = total_tokens / moe_ep * h * 2 // input+output (:1227)
-        + total_tokens / moe_ep * inter * num_gemms / moe_tp // intermediate activations (:1228)
+    let mem_bytes_int = total_tokens / moe_expert_compute * h * 2 // input+output (:1227)
+        + total_tokens / moe_expert_compute * inter * num_gemms / moe_tp // intermediate activations (:1228)
         + h * inter * num_gemms / moe_tp
-            * std::cmp::min(slots / moe_ep, total_tokens / moe_ep); // weights, num_slots-aware (:1229-1233)
+            * std::cmp::min(slots / moe_expert_compute, total_tokens / moe_expert_compute); // weights, num_slots-aware (:1229-1233)
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
     // moe_comm.py:1235: Python indexes `bfloat16_tc_flops` directly (KeyError
     // if absent); every shipped system populates it — the same fallback
@@ -495,7 +504,7 @@ fn ep_sol_latency_ms(
 /// trtllm-wideep, each keeping the first row on a collision (#1423
 /// shared-layer contract) — then the
 /// new schema (first occurrence of a key overwrites, repeats keep first) —
-/// Python `load_moe_ep_data` + `_load_legacy_ep`.
+/// Python `load_moe_expert_compute_data` + `_load_legacy_ep`.
 fn load_moe_ep_grids(
     moe_ep_sources: &[PerfSource],
     context_sources: &[PerfSource],
@@ -509,7 +518,7 @@ fn load_moe_ep_grids(
     any_source |= load_new_schema(moe_ep_sources, &mut grids)?;
     if !any_source || grids.by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no MoE EP rows loaded from {} source(s) (moe_ep + 3 legacy wideep tables; first: {})",
+            "no MoE EP rows loaded from {} source(s) (moe_expert_compute + 3 legacy wideep tables; first: {})",
             moe_ep_sources.len()
                 + context_sources.len()
                 + generation_sources.len()
@@ -517,7 +526,7 @@ fn load_moe_ep_grids(
             moe_ep_sources
                 .first()
                 .map(|s| s.path().display().to_string())
-                .unwrap_or_else(|| "<no moe_ep sources>".to_string())
+                .unwrap_or_else(|| "<no moe_expert_compute sources>".to_string())
         )));
     }
     Ok(grids)
@@ -567,7 +576,7 @@ fn adapt_legacy_sglang_wideep_moe(
             // moe_comm.py:759-772: `num_slots = num_experts` — the legacy
             // sglang tables have no EPLB redundancy axis.
             let num_experts = row.u32(num_experts_col)?;
-            let key = MoeEpKey {
+            let key = MoeExpertComputeKey {
                 kernel_source: SGLANG_ADAPTED_KERNEL_SOURCE.to_string(),
                 quant: row.str_owned(moe_dtype_col)?,
                 distribution: row.str_owned(distribution_col)?,
@@ -645,7 +654,7 @@ fn adapt_legacy_trtllm_wideep_moe(
             // moe_comm.py:814-816: no context/generation split in the legacy
             // table — one row registers under BOTH phases.
             for inference_phase in ["context", "generation"] {
-                let key = MoeEpKey {
+                let key = MoeExpertComputeKey {
                     kernel_source: kernel_source.clone(),
                     quant: quant.clone(),
                     distribution: distribution.clone(),
@@ -665,13 +674,13 @@ fn adapt_legacy_trtllm_wideep_moe(
     Ok(any_source)
 }
 
-/// New-schema `moe_ep_perf.parquet` rows (moe_comm.py:900-929). The
+/// New-schema `moe_expert_compute_perf.parquet` rows (moe_comm.py:900-929). The
 /// `latency` column is ALREADY in milliseconds — stored raw, no conversion.
 /// The FIRST occurrence of a key overwrites whatever a legacy adapter stored
 /// there; repeats of that key keep the first new-schema value.
 fn load_new_schema(sources: &[PerfSource], grids: &mut MoeEpGrids) -> Result<bool, AicError> {
     let mut any_source = false;
-    let mut seen: BTreeSet<(MoeEpKey, u32)> = BTreeSet::new();
+    let mut seen: BTreeSet<(MoeExpertComputeKey, u32)> = BTreeSet::new();
     for source in sources {
         let path = source.path();
         if !path.exists() {
@@ -697,7 +706,7 @@ fn load_new_schema(sources: &[PerfSource], grids: &mut MoeEpGrids) -> Result<boo
             if !kernel_source_ok(source.kernel_sources(), Some(ks_col), &row)? {
                 continue;
             }
-            let key = MoeEpKey {
+            let key = MoeExpertComputeKey {
                 kernel_source: row.str_owned(ks_col)?,
                 quant: row.str_owned(moe_dtype_col)?,
                 distribution: row.str_owned(distribution_col)?,
@@ -824,7 +833,7 @@ mod tests {
         }
     }
 
-    /// Write a synthetic new-schema `moe_ep_perf.parquet`.
+    /// Write a synthetic new-schema `moe_expert_compute_perf.parquet`.
     fn write_moe_ep_parquet(path: &Path, rows: &[EpRow]) {
         let schema = Arc::new(
             parse_message_type(
@@ -1065,7 +1074,7 @@ mod tests {
     /// hidden=7168, inter=2048, tp=1).
     #[allow(clippy::too_many_arguments)]
     fn q(
-        table: &MoeEpTable,
+        table: &MoeExpertComputeTable,
         kernel_source: &str,
         quant: MoeQuantMode,
         distribution: &str,
@@ -1102,7 +1111,7 @@ mod tests {
     fn new_schema_stores_ms_raw_and_keys_all_axes() {
         let tmp = tempfile::tempdir().unwrap();
         write_moe_ep_parquet(
-            &tmp.path().join("moe_ep_perf.parquet"),
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
             &[
                 ep_row(
                     "deepep_moe",
@@ -1136,7 +1145,7 @@ mod tests {
                 ),
             ],
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table,
@@ -1240,7 +1249,7 @@ mod tests {
             &[("uniform", 4, 2, 0.125)],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table,
@@ -1331,7 +1340,7 @@ mod tests {
             &[("uniform", 2, 32, 0.25)],
             false,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             table
                 .query(
@@ -1377,7 +1386,7 @@ mod tests {
             &[("uniform", 2, 32, 0.1), ("uniform", 2, 32, 0.9)],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table,
@@ -1415,7 +1424,7 @@ mod tests {
             )],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         for phase in ["context", "generation"] {
             approx(
                 q(
@@ -1473,7 +1482,7 @@ mod tests {
             ],
             true,
         );
-        let table2 = MoeEpTable::new(tmp2.path().to_path_buf(), test_spec());
+        let table2 = MoeExpertComputeTable::new(tmp2.path().to_path_buf(), test_spec());
         // sglang leaf intact under fp8_block...
         approx(
             q(
@@ -1521,7 +1530,7 @@ mod tests {
             &[(None, "uniform", 256, 2, 1, 1.5)],
             false,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table,
@@ -1547,7 +1556,7 @@ mod tests {
             ],
             true,
         );
-        let table2 = MoeEpTable::new(tmp2.path().to_path_buf(), test_spec());
+        let table2 = MoeExpertComputeTable::new(tmp2.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table2,
@@ -1606,7 +1615,7 @@ mod tests {
             true,
         );
         write_moe_ep_parquet(
-            &tmp.path().join("moe_ep_perf.parquet"),
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
             &[
                 ep_row(
                     "deepep_moe",
@@ -1630,7 +1639,7 @@ mod tests {
                 ),
             ],
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         approx(
             q(
                 &table,
@@ -1687,7 +1696,7 @@ mod tests {
             &[("uniform", 2, 64, 0.333), ("gen_only", 2, 64, 0.444)],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         let ctx = |dist: &str| {
             q(
                 &table,
@@ -1737,7 +1746,7 @@ mod tests {
             &[("uniform", 2, 64, 0.5)],
             true,
         );
-        let table2 = MoeEpTable::new(tmp2.path().to_path_buf(), test_spec());
+        let table2 = MoeExpertComputeTable::new(tmp2.path().to_path_buf(), test_spec());
         assert!(q(
             &table2,
             "deepep_moe",
@@ -1763,7 +1772,7 @@ mod tests {
             &[("uniform", 2, 64, 0.1), ("power_law_0.8", 4, 64, 0.2)],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         // ep=4 exists only under power_law_0.8; requesting uniform at ep=4
         // resolves the distribution to uniform (present + phase-carrying)
         // and then misses the shape.
@@ -1809,7 +1818,7 @@ mod tests {
             &[("uniform", 2, 64, 0.1)],
             true,
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         // fp8_block is the SOLE collected quant, yet nvfp4 must still miss.
         match q(
             &table,
@@ -1885,7 +1894,7 @@ mod tests {
     fn token_curve_lerp_and_roofline_util_hold() {
         let tmp = tempfile::tempdir().unwrap();
         write_moe_ep_parquet(
-            &tmp.path().join("moe_ep_perf.parquet"),
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
             &[
                 ep_row(
                     "deepep_moe",
@@ -1909,7 +1918,7 @@ mod tests {
                 ),
             ],
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         let at = |tokens: u32| {
             q(
                 &table,
@@ -1944,7 +1953,7 @@ mod tests {
     fn singleton_token_curve_underflow_is_a_typed_miss() {
         let tmp = tempfile::tempdir().unwrap();
         write_moe_ep_parquet(
-            &tmp.path().join("moe_ep_perf.parquet"),
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
             &[ep_row(
                 "deepep_moe",
                 "bfloat16",
@@ -1956,7 +1965,7 @@ mod tests {
                 0.8,
             )],
         );
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         let at = |tokens: u32| {
             q(
                 &table,
@@ -1995,7 +2004,7 @@ mod tests {
         use std::io::Read;
         let mut any_file = false;
         for basename in [
-            "moe_ep_perf.parquet",
+            "moe_expert_compute_perf.parquet",
             "wideep_context_moe_perf.parquet",
             "wideep_generation_moe_perf.parquet",
             "wideep_moe_perf.parquet",
@@ -2021,8 +2030,8 @@ mod tests {
         any_file
     }
 
-    /// Full-table parity against `PerfDatabase.query_moe_ep`. The fixture is
-    /// generated by `parity_tests/gen_moe_ep_oracle.py` (regeneration
+    /// Full-table parity against `PerfDatabase.query_moe_expert_compute`. The fixture is
+    /// generated by `parity_tests/gen_moe_expert_compute_oracle.py` (regeneration
     /// command in the JSON's `_regenerate` field) from the shipped
     /// h200_sxm/sglang/0.5.6.post2 (legacy sglang wideep pair — both phases,
     /// six distributions incl. the uniform-fallback leg) and
@@ -2033,18 +2042,18 @@ mod tests {
     /// roofline util-holds, and the distribution chain.
     ///
     /// NOTE(shared-layer merge): the oracle is generated with
-    /// `shared_layer=False` and `MoeEpTable::new` resolves single primary
+    /// `shared_layer=False` and `MoeExpertComputeTable::new` resolves single primary
     /// sources with no kernel_source filter, so both sides read exactly the
     /// same rows.
     #[test]
     fn moe_ep_matches_python_oracle() {
         let oracle: serde_json::Value =
-            serde_json::from_str(include_str!("testdata/moe_ep_oracle.json"))
+            serde_json::from_str(include_str!("testdata/moe_expert_compute_oracle.json"))
                 .expect("oracle fixture must parse");
         let systems =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator_core/systems");
         let samples = oracle["samples"].as_array().expect("samples array");
-        let mut tables: BTreeMap<String, MoeEpTable> = BTreeMap::new();
+        let mut tables: BTreeMap<String, MoeExpertComputeTable> = BTreeMap::new();
         let mut max_rel = 0.0_f64;
         let mut checked = 0_usize;
         for sample in samples {
@@ -2062,7 +2071,7 @@ mod tests {
                 let system = sample["system"].as_str().expect("system");
                 let spec = SystemSpec::load(&systems.join(format!("{system}.yaml")))
                     .expect("system yaml must load");
-                MoeEpTable::new(data_root.clone(), spec)
+                MoeExpertComputeTable::new(data_root.clone(), spec)
             });
             let u32_of = |field: &str| {
                 u32::try_from(sample[field].as_u64().expect(field)).expect("fits in u32")
@@ -2103,14 +2112,14 @@ mod tests {
             checked >= 150,
             "oracle unexpectedly small: {checked} samples"
         );
-        eprintln!("moe_ep oracle: {checked} samples, max relative error {max_rel:e}");
+        eprintln!("moe_expert_compute oracle: {checked} samples, max relative error {max_rel:e}");
     }
 
     /// No source file at all is a typed miss, not a panic.
     #[test]
     fn missing_sources_are_a_typed_miss() {
         let tmp = tempfile::tempdir().unwrap();
-        let table = MoeEpTable::new(tmp.path().to_path_buf(), test_spec());
+        let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), test_spec());
         match q(
             &table,
             "deepep_moe",

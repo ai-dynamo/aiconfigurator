@@ -164,7 +164,7 @@ mod tests {
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp,
+        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, MoeExpertComputeOp, GdnOp, GemmOp,
         GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
         MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp, VisionEncoderOp,
         WideEpContextMlaOp, WideEpGenerationMlaOp,
@@ -569,8 +569,8 @@ mod tests {
     /// Large-EP expert compute. `num_slots` / `kernel_source` are `Some(...)`
     /// here on purpose — the `None` (Python-default) case is what production
     /// emits, and both encodings must survive the wire.
-    fn ep_moe() -> EpMoeOp {
-        EpMoeOp {
+    fn moe_expert_compute() -> MoeExpertComputeOp {
+        MoeExpertComputeOp {
             name: "moe".into(),
             scale_factor: 61.0,
             hidden_size: 7168,
@@ -654,7 +654,7 @@ mod tests {
             // large-EP pair appended after it by this PR's re-bump.
             OpSpec::Kda(kda()),
             OpSpec::MoeAllToAll(moe_all_to_all()),
-            OpSpec::EpMoe(ep_moe()),
+            OpSpec::MoeExpertCompute(moe_expert_compute()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -694,7 +694,7 @@ mod tests {
                 | OpSpec::Dsv4MegaMoe(_)
                 | OpSpec::Kda(_)
                 | OpSpec::MoeAllToAll(_)
-                | OpSpec::EpMoe(_) => {}
+                | OpSpec::MoeExpertCompute(_) => {}
             }
         }
         ops
@@ -744,7 +744,7 @@ mod tests {
         const GEMM_INDEX: u32 = 0;
         // Re-derived after main's Kda append (Kimi-K3) shifted the tail.
         const MOE_ALL_TO_ALL_INDEX: u32 = 32;
-        const EP_MOE_INDEX: u32 = 33;
+        const MOE_EXPERT_COMPUTE_INDEX: u32 = 33;
 
         let index_of = |op: &OpSpec| -> u32 {
             let bytes = bincode::serialize(op).expect("serialize op");
@@ -757,13 +757,13 @@ mod tests {
             MOE_ALL_TO_ALL_INDEX,
             "MoeAllToAll index moved"
         );
-        assert_eq!(index_of(&OpSpec::EpMoe(ep_moe())), EP_MOE_INDEX, "EpMoe index moved");
+        assert_eq!(index_of(&OpSpec::MoeExpertCompute(moe_expert_compute())), MOE_EXPERT_COMPUTE_INDEX, "MoeExpertCompute index moved");
 
         // The two last variants must stay adjacent and terminal: appending is
         // the only safe growth direction.
-        assert_eq!(EP_MOE_INDEX, MOE_ALL_TO_ALL_INDEX + 1);
+        assert_eq!(MOE_EXPERT_COMPUTE_INDEX, MOE_ALL_TO_ALL_INDEX + 1);
         assert_eq!(
-            EP_MOE_INDEX as usize + 1,
+            MOE_EXPERT_COMPUTE_INDEX as usize + 1,
             all_op_variants().len(),
             "all_op_variants() must cover exactly the pinned variant count"
         );

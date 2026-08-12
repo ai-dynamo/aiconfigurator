@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-    Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, EpMoeOp, GdnOp, GemmOp,
+    Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, MoeExpertComputeOp, GdnOp, GemmOp,
     GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp,
     MoEDispatchOp, MoeAllToAllOp, MoeOp, MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source,
     VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
@@ -160,10 +160,10 @@ pub enum Op {
     /// APPENDED after `Kda` — same positional-index rule as above.
     MoeAllToAll(MoeAllToAllOp),
     /// Unified large-EP MoE expert compute (Python
-    /// `operations.moe_comm.EPMoE`) — one variant for both inference phases;
+    /// `operations.moe_comm.MoEExpertCompute`) — one variant for both inference phases;
     /// the op's `inference_phase` field selects the slice.
-    /// Measured-SILICON-only; see `operators/ep_moe.rs`.
-    EpMoe(EpMoeOp),
+    /// Measured-SILICON-only; see `operators/moe_expert_compute.rs`.
+    MoeExpertCompute(MoeExpertComputeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -244,7 +244,7 @@ impl Op {
             Op::Dsv4MegaMoe(o) => &o.name,
             Op::Kda(o) => &o.name,
             Op::MoeAllToAll(o) => &o.name,
-            Op::EpMoe(o) => &o.name,
+            Op::MoeExpertCompute(o) => &o.name,
         }
     }
 
@@ -431,7 +431,7 @@ impl Op {
             // side, `* attention_dp_size` for the compute side) happens INSIDE
             // each `query`, exactly where Python does it.
             Op::MoeAllToAll(op) => op.query(db, ctx.num_tokens),
-            Op::EpMoe(op) => op.query(db, ctx.num_tokens),
+            Op::MoeExpertCompute(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

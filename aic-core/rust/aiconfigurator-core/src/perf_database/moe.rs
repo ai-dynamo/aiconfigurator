@@ -6,7 +6,7 @@
 //! Mirrors the raw SILICON-path layout of
 //! `aiconfigurator.sdk.operations.moe.MoE._query_moe_table`:
 //!
-//! `moe_data[quant][distribution][topk][num_experts][hidden][inter][moe_tp][moe_ep]`
+//! `moe_data[quant][distribution][topk][num_experts][hidden][inter][moe_tp][moe_expert_compute]`
 //! returns a `{num_tokens -> latency_ms}` dict.
 //!
 //! Resolution mirrors Python v2's `_resolve_tokens`: the token curve rides
@@ -26,7 +26,7 @@
 //!
 //! WideEP MLA lives in `perf_database::wideep_mla`; the TRT-LLM all-to-all
 //! table in `perf_database::trtllm_alltoall`; large-EP expert compute in
-//! `perf_database::moe_ep`.
+//! `perf_database::moe_expert_compute`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -60,7 +60,7 @@ pub enum MoeKernel {
 }
 
 /// One collected sibling slice of the MoE table for a fixed
-/// `(quant, distribution, moe_tp, moe_ep)`: the categorical shape features
+/// `(quant, distribution, moe_tp, moe_expert_compute)`: the categorical shape features
 /// plus its `num_tokens -> latency_ms` curve. Consumed by the operator
 /// layer's cross-shape/cross-quant transfer ladder (the algorithm lives in
 /// `operators/moe.rs`; this is a data accessor payload only).
@@ -210,7 +210,7 @@ impl MoeTable {
     ///
     /// Returns `Ok(Some(value))` when the loaded `low_latency` grid
     /// contains a matching `(quant, distribution-after-uniform-fallback,
-    /// topk, num_experts, hidden, inter, moe_tp, moe_ep)` entry, and
+    /// topk, num_experts, hidden, inter, moe_tp, moe_expert_compute)` entry, and
     /// `Ok(None)` when the shape is absent — the caller should then fall
     /// through to `query()` (the default grid).
     ///
@@ -325,7 +325,7 @@ impl MoeTable {
     }
 
     /// All collected sibling slices for `(quant, distribution-after-uniform-
-    /// fallback, moe_tp, moe_ep)`; empty curves skipped, an empty result is
+    /// fallback, moe_tp, moe_expert_compute)`; empty curves skipped, an empty result is
     /// data (not an error). Mirrors the enumeration in Python `_collect`
     /// (`MoE._query_moe_table`), which walks the nested
     /// `topk -> num_experts -> hidden -> inter` dicts. NOTE: Python yields

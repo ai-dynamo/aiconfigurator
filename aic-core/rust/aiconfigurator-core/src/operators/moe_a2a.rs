@@ -11,7 +11,7 @@
 //!   (moe_comm.py:661) — plain floor division, legacy fidelity with
 //!   `MoEDispatch`'s `num_tokens // self._scale_num_tokens`. There is NO
 //!   `max(1, ...)` guard: 0 tokens is a reachable query point.
-//! - comm ops see PER-RANK tokens: unlike [`super::ep_moe::EpMoeOp`] this op
+//! - comm ops see PER-RANK tokens: unlike [`super::moe_expert_compute::MoeExpertComputeOp`] this op
 //!   NEVER multiplies by `attention_dp_size` (moe_comm.py:657, :473-474).
 //! - backend/phase validation against the `MOE_A2A_BACKENDS` registry
 //!   (`_validate_a2a_request`, moe_comm.py:419-424) — Python raises
@@ -661,7 +661,7 @@ mod tests {
     }
 
     /// The `"moe_a2a"` slice of the shared op-level oracle fixture (the same
-    /// file `ep_moe.rs` reads for its `"moe_ep"` slice — one generator run
+    /// file `moe_expert_compute.rs` reads for its `"moe_expert_compute"` slice — one generator run
     /// produces both).
     fn oracle_samples(op_kind: &str) -> Vec<serde_json::Value> {
         let oracle: serde_json::Value =

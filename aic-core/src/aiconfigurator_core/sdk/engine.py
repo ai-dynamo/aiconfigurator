@@ -56,7 +56,7 @@ from aiconfigurator_core.sdk.operations import (
     ElementWise,
     Embedding,
     EncoderAttention,
-    EPMoE,
+    MoEExpertCompute,
     FallbackOp,
     GDNKernel,
     GenerationAttention,
@@ -110,7 +110,7 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 #   `WideEpMoeDispatch`) were removed mid-enum, shifting every later bincode
 #   enum index; large-EP is now modeled natively by the `MoeAllToAll` /
-#   `EpMoe` variants appended after `Kda`, and `EpMoeOp` carries the
+#   `MoeExpertCompute` variants appended after `Kda`, and `MoeExpertComputeOp` carries the
 #   `enable_eplb` legacy-fidelity field.
 ENGINE_SPEC_SCHEMA_VERSION = 7
 ENGINE_CONFIG_SCHEMA_VERSION = 1
@@ -615,9 +615,9 @@ def _moe_all_to_all(op: MoEAllToAll) -> dict:
     }
 
 
-def _ep_moe(op: EPMoE) -> dict:
-    """Unified large-EP expert compute (Python `EPMoE`). Field names match the
-    Rust `EpMoeOp` (operators/ep_moe.rs). `kernel_source` crosses the wire
+def _moe_expert_compute(op: MoEExpertCompute) -> dict:
+    """Unified large-EP expert compute (Python `MoEExpertCompute`). Field names match the
+    Rust `MoeExpertComputeOp` (operators/moe_expert_compute.rs). `kernel_source` crosses the wire
     verbatim (null when unpinned — the production case): the Rust op ports
     every `_resolve_kernel_source` leg and resolves at query time, so nothing
     is pre-baked here. `num_slots` is the ctor-resolved value (Python already
@@ -701,13 +701,13 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"WideEpGenerationMla": _wideep_generation_mla(op)}
 
     # Unified large-EP ops (AIC-1601): one Python class per table, the phase
-    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::EpMoe` are
+    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
     # APPENDED after `Dsv4MegaMoe` (bincode enum indices are positional;
     # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
     if isinstance(op, MoEAllToAll):
         return {"MoeAllToAll": _moe_all_to_all(op)}
-    if isinstance(op, EPMoE):
-        return {"EpMoe": _ep_moe(op)}
+    if isinstance(op, MoEExpertCompute):
+        return {"MoeExpertCompute": _moe_expert_compute(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):

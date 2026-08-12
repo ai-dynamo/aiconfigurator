@@ -3,15 +3,15 @@
 
 """Generate the Python oracle for the Rust large-EP MoE OPERATORS.
 
-Unlike ``gen_moe_a2a_oracle.py`` / ``gen_moe_ep_oracle.py`` — which sample the
+Unlike ``gen_moe_a2a_oracle.py`` / ``gen_moe_expert_compute_oracle.py`` — which sample the
 raw ``PerfDatabase.query_moe_{a2a,ep}`` table lookups — this generator drives
 the PYTHON OP OBJECTS (``MoEAllToAll(...).query(db, x=...)`` and
-``EPMoE(...).query(db, x=...)``). What is under test is therefore the op
+``MoEExpertCompute(...).query(db, x=...)``). What is under test is therefore the op
 layer's own arithmetic:
 
 * ``MoEAllToAll``: ``x // attention_tp_size`` (plain floor division, no
   ``max(1, ...)`` guard; never ADP-scaled) and the ``* scale_factor`` tail;
-* ``EPMoE``: ``x * attention_dp_size``, the ``int(tokens * 0.8)`` EPLB context
+* ``MoEExpertCompute``: ``x * attention_dp_size``, the ``int(tokens * 0.8)`` EPLB context
   correction on the sglang-adapted kernel legs, the ``num_slots`` default, the
   ``kernel_source=None`` auto-resolution, the pinned ``moe_tp_size=1`` and the
   ``* scale_factor`` tail.
@@ -40,7 +40,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
-from aiconfigurator_core.sdk.operations.moe_comm import EPMoE, MoEAllToAll
+from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute, MoEAllToAll
 from aiconfigurator_core.sdk.perf_database import get_database
 
 OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "src", "operators", "testdata", "op_oracle.json")
@@ -223,7 +223,7 @@ def build_a2a_samples(db, system, backend, version, data_root):
 
 
 # ---------------------------------------------------------------------------
-# moe_ep (compute)
+# moe_expert_compute (compute)
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +271,7 @@ def ep_candidates(db):
     ``kernel_source`` (``None`` = exercise the auto-resolution) and
     ``scale_factor``.
     """
-    EPMoE.load_data(db)
+    MoEExpertCompute.load_data(db)
     slices = sorted(walk_ep_store(db._moe_ep_data), key=lambda item: item[0])
 
     out: dict[str, list] = {name: [] for name in EP_QUOTAS}
@@ -348,7 +348,7 @@ def build_ep_samples(db, system, backend, version, data_root):
                 moe_ep_size,
             ) = coord
             scale_factor = overrides.get("scale_factor", 1.0)
-            op = EPMoE(
+            op = MoEExpertCompute(
                 "oracle",
                 scale_factor,
                 hidden_size=hidden_size,
@@ -368,7 +368,7 @@ def build_ep_samples(db, system, backend, version, data_root):
             result = op.query(db, x=x)
             samples.append(
                 {
-                    "op": "moe_ep",
+                    "op": "moe_expert_compute",
                     "kind": category,
                     "system": system,
                     "backend": backend,
@@ -407,7 +407,7 @@ def main() -> None:
 
     header = {
         "_regenerate": (".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_op_oracle.py"),
-        "_source": "MoEAllToAll(...).query / EPMoE(...).query (shared_layer=False), SILICON mode",
+        "_source": "MoEAllToAll(...).query / MoEExpertCompute(...).query (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)

@@ -445,7 +445,7 @@ SMOKE_CASES = [
     #   - Tuples where the NCCL/OneCCL path fix (5ce469ff) was the root
     #     cause now compute and assert numeric parity going forward.
     #   - Tuples where the perf-DB lacks data for the smoke shape
-    #     (`tp=8, moe_ep=8, isl=1024, osl=2`) error symmetrically in both
+    #     (`tp=8, moe_expert_compute=8, isl=1024, osl=2`) error symmetrically in both
     #     engines, exercising the error-symmetry contract.
     # See the support-matrix scan triage notes in the project docs for the
     # full triage / cluster table.
@@ -1423,7 +1423,7 @@ class TestRustEngineStepTieBreakParity:
 # (seq_split), ContextAttention models rank-0's zigzag chunk split, and
 # MoEDispatch all-gathers (pre) / reduce-scatters (combine) the CP-sharded
 # tokens. sglang CP requires tp_size=1 and attention_dp_size=1, so the width
-# (tp*dp*cp) is carried entirely by cp and matched by moe_tp*moe_ep.
+# (tp*dp*cp) is carried entirely by cp and matched by moe_tp*moe_expert_compute.
 #
 # Validated on the mix-step surface: the prefill chunk exercises the CP ops
 # (context attention, GEMMs, comm, MoE dispatch). Without the Rust CP support

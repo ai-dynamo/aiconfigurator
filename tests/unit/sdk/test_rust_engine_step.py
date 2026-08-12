@@ -970,9 +970,9 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     error anywhere. The emitted key sets must therefore EQUAL the Rust struct
     field sets exactly — source of truth:
     ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
-    ``rust/aiconfigurator-core/src/operators/ep_moe.rs::EpMoeOp``."""
+    ``rust/aiconfigurator-core/src/operators/moe_expert_compute.rs::MoeExpertComputeOp``."""
     from aiconfigurator.sdk.engine import _to_opspec
-    from aiconfigurator.sdk.operations import EPMoE, MoEAllToAll
+    from aiconfigurator.sdk.operations import MoEExpertCompute, MoEAllToAll
 
     a2a = MoEAllToAll(
         "context_moe_dispatch",
@@ -1008,7 +1008,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         }
     )
 
-    ep = EPMoE(
+    ep = MoEExpertCompute(
         "context_moe",
         58.0,
         hidden_size=7168,
@@ -1026,9 +1026,9 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         enable_eplb=True,
     )
     ep_spec = _to_opspec(ep, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
-    assert set(ep_spec) == {"EpMoe"}
-    # rust `EpMoeOp` fields (operators/ep_moe.rs), verbatim.
-    assert frozenset(ep_spec["EpMoe"]) == frozenset(
+    assert set(ep_spec) == {"MoeExpertCompute"}
+    # rust `MoeExpertComputeOp` fields (operators/moe_expert_compute.rs), verbatim.
+    assert frozenset(ep_spec["MoeExpertCompute"]) == frozenset(
         {
             "name",
             "scale_factor",
@@ -1051,7 +1051,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     # ``MoEQuantMode`` member name; an unpinned kernel_source crosses as null
     # (the Rust op ports all five auto-resolution legs and resolves at query
     # time); the Python ctor already resolved num_slots=None -> num_experts.
-    fields = ep_spec["EpMoe"]
+    fields = ep_spec["MoeExpertCompute"]
     assert fields["quant_mode"] == "fp8_block"
     assert fields["kernel_source"] is None
     assert fields["num_slots"] == 256
@@ -1129,7 +1129,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
     )
     for phase_ops, comm_backend in ((spec["context_ops"], "deepep_ht"), (spec["generation_ops"], "deepep_ll")):
         a2a_fields = [op["MoeAllToAll"] for op in phase_ops if "MoeAllToAll" in op]
-        ep_fields = [op["EpMoe"] for op in phase_ops if "EpMoe" in op]
+        ep_fields = [op["MoeExpertCompute"] for op in phase_ops if "MoeExpertCompute" in op]
         assert a2a_fields and ep_fields, "the compiled spec must carry the large-EP variants"
         assert {fields["comm_backend"] for fields in a2a_fields} == {comm_backend}
         # Production graphs never pin a kernel: it crosses as null and the

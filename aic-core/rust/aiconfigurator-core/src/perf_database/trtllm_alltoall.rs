@@ -16,7 +16,7 @@
 //!
 //! The sibling wideEP MoE-compute and SGLang DeepEP dispatch tables that used
 //! to live here retired with AIC-1601; large-EP is served by
-//! `perf_database::moe_ep`.
+//! `perf_database::moe_expert_compute`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
