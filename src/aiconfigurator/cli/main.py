@@ -576,7 +576,9 @@ def _add_default_mode_arguments(parser):
         choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
         default=None,
         help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
     )
 
 
@@ -758,7 +760,9 @@ def _add_recommend_mode_arguments(parser):
         choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
         default=None,
         help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
     )
 
 
@@ -784,7 +788,9 @@ def _add_experiments_mode_arguments(parser):
         choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
         default=None,
         help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
     )
 
 
@@ -1324,7 +1330,9 @@ def _add_estimate_mode_arguments(parser):
         choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
         default=None,
         help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
     )
 
 
