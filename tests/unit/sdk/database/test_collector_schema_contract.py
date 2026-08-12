@@ -3,16 +3,16 @@
 
 """Two-sided schema contract: collector-written headers -> SDK loaders (D1).
 
-The ``moe_a2a_perf`` and ``moe_ep_perf`` tables are produced by collectors and
+The ``moe_a2a_perf`` and ``moe_expert_compute_perf`` tables are produced by collectors and
 consumed by ``aiconfigurator_core.sdk.operations.moe_comm``. Each side pins the
 CSV header independently; this module is the SDK-side half. The collector-side
 twins (which pin the same literals against the actual writers) are:
 
 - ``tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER``
 - ``tests/unit/collector/test_collect_trtllm_alltoall.py::MOE_A2A_HEADER``
-- ``tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER``
-- ``tests/unit/collector/trtllm/test_collect_moe_ep.py::MOE_EP_HEADER``
-- ``tests/unit/collector/test_vllm_collect_moe_ep.py::MOE_EP_HEADER``
+- ``tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
+- ``tests/unit/collector/trtllm/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
+- ``tests/unit/collector/test_vllm_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
 
 This file MUST NOT import anything from ``collector`` (module-boundary rule:
 SDK tests do not reach into the collector). The twin literals are verified by
@@ -34,7 +34,7 @@ import pandas as pd
 import pytest
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
-from aiconfigurator_core.sdk.operations.moe_comm import load_moe_a2a_data, load_moe_ep_data
+from aiconfigurator_core.sdk.operations.moe_comm import load_moe_a2a_data, load_moe_expert_compute_data
 
 pytestmark = pytest.mark.unit
 
@@ -55,11 +55,11 @@ MOE_A2A_HEADER = (
 )
 
 # Copied verbatim from the collector-side writer pins:
-# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER, repeated
+# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER, repeated
 # verbatim by tests/unit/collector/trtllm/test_collect_moe_ep.py and
 # tests/unit/collector/test_vllm_collect_moe_ep.py — all three moe_ep writers
 # emit this exact header.
-MOE_EP_HEADER = (
+MOE_EXPERT_COMPUTE_HEADER = (
     "framework,version,device,op_name,kernel_source,"
     "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
     "topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency"
@@ -71,9 +71,9 @@ MOE_EP_HEADER = (
 _TWIN_PINS = {
     "tests/unit/collector/test_collect_moe_a2a.py": MOE_A2A_HEADER,
     "tests/unit/collector/test_collect_trtllm_alltoall.py": MOE_A2A_HEADER,
-    "tests/unit/collector/sglang/test_collect_moe_ep.py": MOE_EP_HEADER,
-    "tests/unit/collector/trtllm/test_collect_moe_ep.py": MOE_EP_HEADER,
-    "tests/unit/collector/test_vllm_collect_moe_ep.py": MOE_EP_HEADER,
+    "tests/unit/collector/sglang/test_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
+    "tests/unit/collector/trtllm/test_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
+    "tests/unit/collector/test_vllm_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
 }
 
 
@@ -143,9 +143,9 @@ def test_moe_ep_header_row_loads_with_ms_stored_raw(tmp_path):
         "moe_ep_size": 16,
         "latency": 0.25,  # MILLISECONDS — the moe_ep writer convention
     }
-    path = _write_row_under_header(tmp_path, MOE_EP_HEADER, row, "moe_ep_perf.parquet")
+    path = _write_row_under_header(tmp_path, MOE_EXPERT_COMPUTE_HEADER, row, "moe_expert_compute_perf.parquet")
 
-    data = load_moe_ep_data([(path, None)])
+    data = load_moe_expert_compute_data([(path, None)])
 
     # 12-part nested key: [kernel_source][quant][distribution][inference_phase]
     # [topk][num_experts][num_slots][hidden_size][inter_size][moe_tp_size]

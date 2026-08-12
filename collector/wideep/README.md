@@ -59,7 +59,7 @@ Enrollment is one coordinated change:
 2. Create `collector/wideep/vllm/registry.py` with
    `OpEntry(op="moe_ep", module="collector.wideep.vllm.collect_moe_ep",
    get_func="get_moe_ep_test_cases", run_func="run_moe_ep",
-   perf_filename=PerfFile.MOE_EP)`, and enroll the framework key in
+   perf_filename=PerfFile.MOE_EXPERT_COMPUTE)`, and enroll the framework key in
    `collector/framework_manifest.py` `_REGISTRY_MODULES`
    (`"wideep_vllm": "collector.wideep.vllm.registry"`) — registry/runtime
    resolution raises for a manifest entry with no registered module.

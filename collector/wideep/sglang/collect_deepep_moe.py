@@ -7,8 +7,8 @@ Benchmarks the DeepEP MoE expert compute (``DeepEPMoE.run_moe_core``) through a
 minimal SGLang engine setup, simulating an EP world of ``moe_ep_size`` ranks on
 one GPU by loading only the rank-local expert shard. The module owns rank-local
 model runner construction, warmup/measurement and emission of the unified
-``moe_ep_perf`` rows (one table, ``inference_phase`` column) consumed by
-``aiconfigurator_core.sdk.operations.moe_comm.load_moe_ep_data``.
+``moe_expert_compute_perf`` rows (one table, ``inference_phase`` column) consumed by
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_expert_compute_data``.
 
 Shapes are DECLARED: every benchmarked geometry comes from the
 ``model_case_values.moe`` rows marked ``wideep: true`` crossed with the
@@ -94,7 +94,7 @@ def _measure_power_enabled() -> bool:
     """Whether this run measures power (mirrors ``helper._parse_bool_env``).
 
     Both phase writers gate their power columns on this single per-run flag, so
-    one ``moe_ep_perf`` file always has one column set (``helper.log_perf``
+    one ``moe_expert_compute_perf`` file always has one column set (``helper.log_perf``
     writes the CSV header from the first row it sees).
     """
     value = os.environ.get("COLLECTOR_MEASURE_POWER")
@@ -120,10 +120,10 @@ def _power_device():
     return torch.device("cuda", torch.cuda.current_device())
 
 
-def _moe_ep_perf_path(output_path, perf_filename) -> str:
+def _moe_expert_compute_perf_path(output_path, perf_filename) -> str:
     """Resolve the registry-provided perf filename into the run's output dir.
 
-    ``perf_filename`` is ``PerfFile.MOE_EP`` as bound by ``collect.py``; no
+    ``perf_filename`` is ``PerfFile.MOE_EXPERT_COMPUTE`` as bound by ``collect.py``; no
     collector-local filename literals.
     """
     directory = output_path if output_path is not None else os.getcwd()
@@ -145,10 +145,10 @@ def _build_moe_ep_row(
     moe_ep_size: int,
     latency_ms: float,
 ) -> dict:
-    """Build one unified ``moe_ep_perf`` payload row.
+    """Build one unified ``moe_expert_compute_perf`` payload row.
 
     Column set and order are the consumer contract
-    (``sdk/operations/moe_comm.py::load_moe_ep_data``); the
+    (``sdk/operations/moe_comm.py::load_moe_expert_compute_data``); the
     ``framework/version/device/op_name/kernel_source`` prefix is added by
     ``helper.log_perf``. ``latency`` is milliseconds — the loader stores the
     column raw, unlike the microsecond-collected a2a table.
@@ -403,7 +403,7 @@ def benchmark_moe_layer_prefill(
     Args:
         num_local_experts: Number of experts on this GPU (= declared num_experts // moe_ep_size)
         simulated_ep_size: The EP size being simulated (declared moe_ep_size)
-        perf_filename: Registry-provided ``PerfFile.MOE_EP`` filename
+        perf_filename: Registry-provided ``PerfFile.MOE_EXPERT_COMPUTE`` filename
         model_hidden_size: Declared hidden_size
         model_inter_size: Declared per-expert inter_size
         model_total_experts: Declared total expert count
@@ -615,7 +615,7 @@ def benchmark_moe_layer_prefill(
                     device_name=torch.cuda.get_device_name(server_args.device),
                     op_name=MOE_EP_OP_NAME,
                     kernel_source=MOE_EP_KERNEL_SOURCE,
-                    perf_filename=_moe_ep_perf_path(output_path, perf_filename),
+                    perf_filename=_moe_expert_compute_perf_path(output_path, perf_filename),
                     power_stats=_power_columns(power_stats),
                 ):
                     raise MoeEpBenchmarkError(
@@ -670,7 +670,7 @@ def benchmark_moe_layer_decode(
     """Benchmark MoE layer in the generation (decode) phase.
 
     Argument semantics are identical to :func:`benchmark_moe_layer_prefill`;
-    both phases write the same unified ``moe_ep_perf`` table and differ only in
+    both phases write the same unified ``moe_expert_compute_perf`` table and differ only in
     the ``inference_phase`` column.
     """
     model_runner.req_to_token_pool.clear()
@@ -907,7 +907,7 @@ def benchmark_moe_layer_decode(
                     device_name=torch.cuda.get_device_name(server_args.device),
                     op_name=MOE_EP_OP_NAME,
                     kernel_source=MOE_EP_KERNEL_SOURCE,
-                    perf_filename=_moe_ep_perf_path(output_path, perf_filename),
+                    perf_filename=_moe_expert_compute_perf_path(output_path, perf_filename),
                     power_stats=_power_columns(power_stats),
                 ):
                     raise MoeEpBenchmarkError(
@@ -1388,7 +1388,7 @@ def run_moe_ep(
     """Run one declared large-EP MoE compute case.
 
     Compatible with the collect.py framework — uses a subprocess for GPU
-    isolation. ``perf_filename`` is ``PerfFile.MOE_EP``, bound by collect.py
+    isolation. ``perf_filename`` is ``PerfFile.MOE_EXPERT_COMPUTE``, bound by collect.py
     from the registry OpEntry.
     """
     device_str = str(device) if not isinstance(device, str) else device
@@ -1430,7 +1430,7 @@ if __name__ == "__main__":
     print(f"Model path: {_get_moe_model_path()}")
 
     for test_case in get_moe_ep_test_cases():
-        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EP)
+        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EXPERT_COMPUTE)
 
     print("\n" + "=" * 60)
     print("SCRIPT COMPLETED SUCCESSFULLY")

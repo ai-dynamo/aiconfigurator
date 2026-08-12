@@ -28,8 +28,8 @@ SOURCE_TEXT = SOURCE_PATH.read_text()
 # The frozen moe_ep CSV header — identical to the sglang twin's literal
 # (tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER): the five
 # helper.log_perf prefix columns plus the payload owned by this collector, in
-# the order load_moe_ep_data keys them (aic-core
-# .../sdk/operations/moe_comm.py::load_moe_ep_data). The SDK-side twin is
+# the order load_moe_expert_compute_data keys them (aic-core
+# .../sdk/operations/moe_comm.py::load_moe_expert_compute_data). The SDK-side twin is
 # tests/unit/sdk/database/test_collector_schema_contract.py::MOE_EP_HEADER.
 MOE_EP_HEADER = (
     "framework,version,device,op_name,kernel_source,"
@@ -271,7 +271,7 @@ def test_row_builder_emits_the_frozen_moe_ep_payload(tmp_path, moe_ep_symbols):
         latency_ms=0.4321,
     )
 
-    perf_file = tmp_path / "moe_ep_perf.txt"
+    perf_file = tmp_path / "moe_expert_compute_perf.txt"
     assert log_perf(
         item_list=[row],
         framework="TRTLLM",
@@ -358,7 +358,7 @@ def test_one_measurement_emits_both_phases_matching_the_legacy_adapter(moe_ep_sy
 def test_both_phase_rows_share_one_table(tmp_path, moe_ep_symbols):
     from collector.helper import log_perf
 
-    perf_file = tmp_path / "moe_ep_perf.txt"
+    perf_file = tmp_path / "moe_expert_compute_perf.txt"
     log_perf(
         item_list=moe_ep_symbols["_build_moe_ep_phase_rows"](
             moe_dtype="fp8_block",
@@ -403,7 +403,7 @@ def test_registry_exposes_moe_ep_and_retires_trtllm_moe_wideep():
     assert entry.module == "collector.wideep.trtllm.collect_moe_compute"
     assert entry.get_func == "get_moe_ep_test_cases"
     assert entry.run_func == "run_moe_ep"
-    assert entry.perf_filename is PerfFile.MOE_EP
+    assert entry.perf_filename is PerfFile.MOE_EXPERT_COMPUTE
 
 
 def test_moe_ep_alone_resolves_to_the_wideep_trtllm_pin():
@@ -485,7 +485,7 @@ def test_sm120_drops_are_parked_as_a_kernel_limit():
 def test_power_is_measured_or_absent_never_zero():
     # D7: the power columns go through _power_columns — absent when the run
     # does not measure power (never a present-null column, which would crash
-    # load_moe_ep_data), NaN when the sampler yields nothing.
+    # load_moe_expert_compute_data), NaN when the sampler yields nothing.
     assert "power_stats=_power_columns(power_stats)" in SOURCE_TEXT
     assert "power_stats=power_stats" not in SOURCE_TEXT
 
@@ -493,7 +493,7 @@ def test_power_is_measured_or_absent_never_zero():
 def test_perf_file_comes_from_the_registry_not_the_retired_table():
     assert "PerfFile.WIDEEP_MOE" not in SOURCE_TEXT
     assert "wideep_moe_perf.txt" not in SOURCE_TEXT
-    assert "PerfFile.MOE_EP" in SOURCE_TEXT
+    assert "PerfFile.MOE_EXPERT_COMPUTE" in SOURCE_TEXT
 
 
 def test_source_path_is_the_registered_module():

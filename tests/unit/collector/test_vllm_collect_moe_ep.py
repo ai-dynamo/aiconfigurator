@@ -308,7 +308,7 @@ def test_mocked_bench_rows_round_trip_the_frozen_header(tmp_path, moe_ep_symbols
         num_slots=256,
     )
 
-    perf_file = tmp_path / "moe_ep_perf.txt"
+    perf_file = tmp_path / "moe_expert_compute_perf.txt"
     assert log_perf(
         item_list=[row],
         framework="VLLM",
@@ -325,7 +325,7 @@ def test_mocked_bench_rows_round_trip_the_frozen_header(tmp_path, moe_ep_symbols
 
     record = pq.read_table(parquet_path).to_pylist()[0]
     # The consumer resolves vllm large-EP compute onto the same kernel leg as
-    # sglang (moe_comm.py::EPMoE._resolve_kernel_source returns "deepep_moe"
+    # sglang (moe_comm.py::MoEExpertCompute._resolve_kernel_source returns "deepep_moe"
     # for both backends).
     assert record["kernel_source"] == "deepep_moe"
     assert record["op_name"] == "moe_ep"

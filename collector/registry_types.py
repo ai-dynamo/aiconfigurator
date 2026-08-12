@@ -45,7 +45,7 @@ class PerfFile(str, Enum):
     # communication and expert-parallel MoE compute. Consumer loaders live in
     # aiconfigurator_core.sdk.operations.moe_comm (shipped with PR 1).
     MOE_A2A = "moe_a2a_perf.txt"
-    MOE_EP = "moe_ep_perf.txt"
+    MOE_EXPERT_COMPUTE = "moe_expert_compute_perf.txt"
     MLA_CONTEXT_MODULE = "mla_context_module_perf.txt"
     MLA_GENERATION_MODULE = "mla_generation_module_perf.txt"
     DSA_CONTEXT_MODULE = "dsa_context_module_perf.txt"

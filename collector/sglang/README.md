@@ -85,7 +85,7 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 | Kernel | `attention_generation` | Standard Attention decode |
 | Module | `dsa_context_module` | DSA module prefill (DeepSeek-V3.2, GLM-5) |
 | Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
-| Wideep | `moe_ep` | Large-EP MoE expert compute (unified `moe_ep_perf` table) |
+| Wideep | `moe_ep` | Large-EP MoE expert compute (unified `moe_expert_compute_perf` table) |
 
 **Note:** Requested operators run sequentially. Cases within one operator are
 distributed across the selected GPU workers. Module-level operators use
@@ -216,7 +216,7 @@ The simulated EP size is calculated as: `simulated_ep_size = 256 / num_experts *
 
 ### Output
 Results are saved to:
-- `moe_ep_perf.txt`: both phases in one table, split by the `inference_phase`
+- `moe_expert_compute_perf.txt`: both phases in one table, split by the `inference_phase`
   column (`context` / `generation`)
 
 Output format:

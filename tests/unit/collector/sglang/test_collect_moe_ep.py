@@ -24,8 +24,8 @@ SOURCE_PATH = REPO_ROOT / "collector" / "wideep" / "sglang" / "collect_deepep_mo
 SOURCE_TEXT = SOURCE_PATH.read_text()
 
 # The frozen moe_ep CSV header: the five helper.log_perf prefix columns plus the
-# payload owned by this collector, in the order load_moe_ep_data keys them
-# (aic-core .../sdk/operations/moe_comm.py::load_moe_ep_data). The SDK-side
+# payload owned by this collector, in the order load_moe_expert_compute_data keys them
+# (aic-core .../sdk/operations/moe_comm.py::load_moe_expert_compute_data). The SDK-side
 # twin is tests/unit/sdk/database/test_collector_schema_contract.py::
 # MOE_EP_HEADER.
 MOE_EP_HEADER = (
@@ -252,7 +252,7 @@ def test_row_builder_emits_the_frozen_moe_ep_payload(tmp_path, moe_ep_symbols):
         latency_ms=0.4321,
     )
 
-    perf_file = tmp_path / "moe_ep_perf.txt"
+    perf_file = tmp_path / "moe_expert_compute_perf.txt"
     assert log_perf(
         item_list=[row],
         framework="SGLang",
@@ -299,7 +299,7 @@ def test_row_builder_emits_the_frozen_moe_ep_payload(tmp_path, moe_ep_symbols):
 def test_context_and_generation_rows_share_one_table(tmp_path, moe_ep_symbols):
     from collector.helper import log_perf
 
-    perf_file = tmp_path / "moe_ep_perf.txt"
+    perf_file = tmp_path / "moe_expert_compute_perf.txt"
     for phase in ("context", "generation"):
         log_perf(
             item_list=[
@@ -348,7 +348,7 @@ def test_registry_exposes_moe_ep_and_retires_wideep_moe():
     assert entry.module == "collector.wideep.sglang.collect_deepep_moe"
     assert entry.get_func == "get_moe_ep_test_cases"
     assert entry.run_func == "run_moe_ep"
-    assert entry.perf_filename is PerfFile.MOE_EP
+    assert entry.perf_filename is PerfFile.MOE_EXPERT_COMPUTE
 
 
 def test_hash_closures_declare_the_case_yaml_the_module_now_reads():

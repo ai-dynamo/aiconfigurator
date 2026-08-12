@@ -18,6 +18,6 @@ REGISTRY: list[OpEntry] = [
         module="collector.wideep.trtllm.collect_moe_compute",
         get_func="get_moe_ep_test_cases",
         run_func="run_moe_ep",
-        perf_filename=PerfFile.MOE_EP,
+        perf_filename=PerfFile.MOE_EXPERT_COMPUTE,
     ),
 ]

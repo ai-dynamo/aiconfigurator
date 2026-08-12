@@ -6,9 +6,9 @@
 Benchmarks vLLM's fused-experts kernel — the expert-compute equivalent of
 sglang's ``DeepEPMoE.run_moe_core`` — simulating an EP world of
 ``moe_ep_size`` ranks on one GPU by allocating only the rank-local expert
-shard, and emits the same unified ``moe_ep_perf`` rows (one table,
+shard, and emits the same unified ``moe_expert_compute_perf`` rows (one table,
 ``inference_phase`` column) consumed by
-``aiconfigurator_core.sdk.operations.moe_comm.load_moe_ep_data``.
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_expert_compute_data``.
 
 DORMANT per plan decision D3: there is no pinned vLLM-DeepEP runtime yet, so
 this module has NO ``OpEntry`` (no ``collector/wideep/vllm/registry.py``), no
@@ -56,7 +56,7 @@ from importlib.metadata import version as get_version
 MOE_EP_QUANT_MODE = "fp8_block"
 
 #: The unified table key the consumer resolves for vllm large-EP compute:
-#: ``EPMoE._resolve_kernel_source`` returns ``"deepep_moe"`` for BOTH sglang
+#: ``MoEExpertCompute._resolve_kernel_source`` returns ``"deepep_moe"`` for BOTH sglang
 #: and vllm (aic-core sdk/operations/moe_comm.py — vllm's large-EP serving
 #: path is DeepEP dispatch + fused-experts compute, the same kernel leg).
 #: Enrollment (D3 activation) must verify on the pinned vLLM-DeepEP image
@@ -98,7 +98,7 @@ def _power_columns(power_stats) -> dict | None:
 
     Returns ``None`` (no power columns at all) when the run does not measure
     power; otherwise the measured stats, or NaN when the sampler produced no
-    samples. A present-but-null power column would crash ``load_moe_ep_data``.
+    samples. A present-but-null power column would crash ``load_moe_expert_compute_data``.
     """
     if not _measure_power_enabled():
         return None
@@ -107,7 +107,7 @@ def _power_columns(power_stats) -> dict | None:
     return {"power": float("nan"), "power_limit": float("nan")}
 
 
-def _moe_ep_perf_path(output_path, perf_filename) -> str:
+def _moe_expert_compute_perf_path(output_path, perf_filename) -> str:
     """Resolve the registry-provided perf filename into the run's output dir."""
     directory = output_path if output_path is not None else os.getcwd()
     return os.path.join(directory, str(perf_filename))
@@ -143,10 +143,10 @@ def _build_moe_ep_row(
     moe_ep_size: int,
     latency_ms: float,
 ) -> dict:
-    """Build one unified ``moe_ep_perf`` payload row.
+    """Build one unified ``moe_expert_compute_perf`` payload row.
 
     Column set and order are the consumer contract
-    (``sdk/operations/moe_comm.py::load_moe_ep_data``); the
+    (``sdk/operations/moe_comm.py::load_moe_expert_compute_data``); the
     ``framework/version/device/op_name/kernel_source`` prefix is added by
     ``helper.log_perf``. ``latency`` is milliseconds. Identical payload to the
     sglang and trtllm moe_ep collectors: one table, one schema.
@@ -487,7 +487,7 @@ def run_moe_ep(
     """Run one declared large-EP MoE compute case through vllm fused_experts.
 
     ``perf_filename`` follows the sglang collector's convention
-    (``PerfFile.MOE_EP``, bound by the registry OpEntry at enrollment).
+    (``PerfFile.MOE_EXPERT_COMPUTE``, bound by the registry OpEntry at enrollment).
     ``bench`` is injectable for tests; the default is the real
     :func:`_make_fused_experts_bench` callable on ``device``.
     """
@@ -530,7 +530,7 @@ def run_moe_ep(
                 device_name=torch.cuda.get_device_name(device),
                 op_name=MOE_EP_OP_NAME,
                 kernel_source=MOE_EP_KERNEL_SOURCE,
-                perf_filename=_moe_ep_perf_path(output_path, perf_filename),
+                perf_filename=_moe_expert_compute_perf_path(output_path, perf_filename),
                 power_stats=_power_columns(power_stats),
             ):
                 raise MoeEpBenchmarkError(

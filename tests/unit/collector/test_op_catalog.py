@@ -51,9 +51,9 @@ def test_real_catalog_maps_moe_comm_tables():
     family_map = load_family_map()
     assert family_map is not None
     assert family_map["moe_a2a_perf"] == "comm"
-    assert family_map["moe_ep_perf"] == "moe"
+    assert family_map["moe_expert_compute_perf"] == "moe"
     assert family_for_perf_file(str(PerfFile.MOE_A2A), family_map) == "comm"
-    assert family_for_perf_file(str(PerfFile.MOE_EP), family_map) == "moe"
+    assert family_for_perf_file(str(PerfFile.MOE_EXPERT_COMPUTE), family_map) == "moe"
 
 
 def test_duplicate_table_across_families_is_rejected(tmp_path):

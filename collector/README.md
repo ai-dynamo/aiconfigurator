@@ -476,7 +476,7 @@ story); do not add new data through it.
 
 # Supporting a new large-EP (WideEP) model
 
-Large-EP MoE performance for a model is two tables: `moe_ep_perf` (expert
+Large-EP MoE performance for a model is two tables: `moe_expert_compute_perf` (expert
 compute, `moe` family) and `moe_a2a_perf` (dispatch/combine communication,
 `comm` family). To support model X end to end:
 
@@ -515,7 +515,7 @@ compute, `moe` family) and `moe_a2a_perf` (dispatch/combine communication,
    in step 1.
 
 4. **Publish with sidecars.** Finalized parquet goes into the family tree
-   (`aic-core/src/aiconfigurator_core/systems/data/<system>/moe/<backend>/<version>/moe_ep_perf.parquet`,
+   (`aic-core/src/aiconfigurator_core/systems/data/<system>/moe/<backend>/<version>/moe_expert_compute_perf.parquet`,
    `.../<system>/comm/<backend>/<version>/moe_a2a_perf.parquet`) together
    with its `collection_meta.yaml` entry — never a parquet without its
    provenance. The per-world `moe_a2a` outputs need the cross-job merge
@@ -528,7 +528,7 @@ compute, `moe` family) and `moe_a2a_perf` (dispatch/combine communication,
 | table | `latency` column | loader behavior |
 |---|---|---|
 | `moe_a2a_perf` | **microseconds** | `load_moe_a2a_data` divides by 1000 (`aic-core/.../sdk/operations/moe_comm.py`: "collector records us; leaves are ms") |
-| `moe_ep_perf` | **milliseconds** | `load_moe_ep_data` stores it raw — no conversion |
+| `moe_expert_compute_perf` | **milliseconds** | `load_moe_expert_compute_data` stores it raw — no conversion |
 
 The µs convention matches the legacy DeepEP tables the a2a loader also
 adapts (their per-phase transmit/notify columns are µs); the ms convention

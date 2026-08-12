@@ -15,9 +15,9 @@ distribution suffix — both flow into the unified table unchanged, exactly as
 ``moe_comm._adapt_legacy_trtllm_wideep_moe`` adapts the legacy
 ``wideep_moe_perf`` rows.
 
-Emits the unified ``moe_ep_perf`` rows (one table, ``inference_phase``
+Emits the unified ``moe_expert_compute_perf`` rows (one table, ``inference_phase``
 column) consumed by
-``aiconfigurator_core.sdk.operations.moe_comm.load_moe_ep_data``.
+``aiconfigurator_core.sdk.operations.moe_comm.load_moe_expert_compute_data``.
 """
 
 import gc
@@ -156,7 +156,7 @@ def _measure_power_enabled() -> bool:
     """Whether this run measures power (mirrors ``helper._parse_bool_env``).
 
     The writer gates its power columns on this single per-run flag, so one
-    ``moe_ep_perf`` file always has one column set (``helper.log_perf`` writes
+    ``moe_expert_compute_perf`` file always has one column set (``helper.log_perf`` writes
     the CSV header from the first row it sees).
     """
     value = os.environ.get("COLLECTOR_MEASURE_POWER")
@@ -169,7 +169,7 @@ def _power_columns(power_stats) -> dict | None:
     Returns ``None`` (no power columns at all) when the run does not measure
     power; otherwise the measured stats, or NaN when the sampler produced no
     samples — an unknown, which is not the same fact as "idle at zero watts".
-    A present-but-null power column would crash ``load_moe_ep_data``.
+    A present-but-null power column would crash ``load_moe_expert_compute_data``.
     """
     if not _measure_power_enabled():
         return None
@@ -193,10 +193,10 @@ def _build_moe_ep_row(
     moe_ep_size: int,
     latency_ms: float,
 ) -> dict:
-    """Build one unified ``moe_ep_perf`` payload row.
+    """Build one unified ``moe_expert_compute_perf`` payload row.
 
     Column set and order are the consumer contract
-    (``sdk/operations/moe_comm.py::load_moe_ep_data``); the
+    (``sdk/operations/moe_comm.py::load_moe_expert_compute_data``); the
     ``framework/version/device/op_name/kernel_source`` prefix is added by
     ``helper.log_perf``. ``latency`` is milliseconds — the loader stores the
     column raw, unlike the microsecond-collected a2a table. Identical payload
@@ -1253,7 +1253,7 @@ def run_moe_ep(
         # The retired table's extras stay observable here in the log, not in
         # the persisted row: moe_kernel / dp_num_tokens / rank0_num_tokens /
         # simulation_mode are not in the unified consumer contract
-        # (load_moe_ep_data reads none of them).
+        # (load_moe_expert_compute_data reads none of them).
         print(
             f"moe_ep[{source}] total={num_tokens}, dp={actual_dp_tokens}, rank0={actual_rank0_tokens}, "
             f"kernel={moe_kernel}, latency={latency:.4f}ms, dist={dist_str}, mode={sim_mode_str}"
@@ -1333,4 +1333,4 @@ if __name__ == "__main__":
     for i, test_case in enumerate(all_test_cases):
         print(f"\nProgress: {i + 1}/{len(all_test_cases)}")
         print(f"  Config: moe_type={test_case[0]}, kernel={test_case[1]}, model={test_case[10]}, eplb={test_case[13]}")
-        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EP)
+        run_moe_ep(*test_case, perf_filename=PerfFile.MOE_EXPERT_COMPUTE)
