@@ -66,7 +66,9 @@ def test_csa_cp_top_last_cache_separates_strict_provenance(monkeypatch, tmp_path
 
     monkeypatch.setattr(dsv4_mod, "resolve_op_data_path", lambda *a, **k: "primary")
     monkeypatch.setattr(dsv4_mod, "load_dsv4_sparse_op_data", lambda sources, keys: loads.append(1) or {})
-    ContextDeepSeekV4AttentionModule._csa_topk_abs_cache.clear()
+    # Swap in a fresh cache object (teardown restores the original), so the
+    # fake entries never leak into other tests — even on assertion failure.
+    monkeypatch.setattr(ContextDeepSeekV4AttentionModule, "_csa_topk_abs_cache", {})
 
     ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=False), _FLASH_NATIVE_HEADS)
     ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=True), _FLASH_NATIVE_HEADS)
@@ -74,7 +76,6 @@ def test_csa_cp_top_last_cache_separates_strict_provenance(monkeypatch, tmp_path
 
     ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=True), _FLASH_NATIVE_HEADS)
     assert len(loads) == 2, "same-flag reload must still hit the cache"
-    ContextDeepSeekV4AttentionModule._csa_topk_abs_cache.clear()
 
 
 def test_csa_cp_top_last_lookup_pins_adjudicated_repro_values():
