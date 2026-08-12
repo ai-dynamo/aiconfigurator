@@ -234,7 +234,7 @@ impl GemmTable {
         // mirroring Python `GEMM._normalize_for_lookup`. The
         // compute_scale / scale_matrix tables apply the same
         // normalization in their respective query methods.
-        let lookup_quant = normalize_fp8_static_quant(quant);
+        let lookup_quant = normalize_gemm_quant_for_table(quant);
         // Resolve flops BEFORE any perf-data lookup: Python resolves at
         // `_query_gemm_table` entry in every mode, so a missing dtype entry
         // must classify as MissingSystemFlops on both engines — not as a
@@ -292,7 +292,7 @@ impl GemmTable {
         k: u32,
     ) -> Result<LeafValue, AicError> {
         let grids = self.load_compute_scale()?;
-        let lookup = normalize_fp8_static_quant(quant);
+        let lookup = normalize_gemm_quant_for_table(quant);
         let spec = &self.system_spec;
         // sol_mem = 2 m k / bw * 1000 (read + write of the activation)
         let sol = move |c: &[f64]| 2.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
@@ -322,7 +322,7 @@ impl GemmTable {
         k: u32,
     ) -> Result<LeafValue, AicError> {
         let grids = self.load_scale_matrix()?;
-        let lookup = normalize_fp8_static_quant(quant);
+        let lookup = normalize_gemm_quant_for_table(quant);
         let spec = &self.system_spec;
         let sol = move |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
         query_scale_table(
@@ -342,7 +342,7 @@ impl GemmTable {
     /// Missing quant / empty table is a typed `PerfDatabase` miss.
     pub fn gemm_points(&self, quant: GemmQuantMode) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_gemm()?;
-        let quant_name = normalize_fp8_static_quant(quant).name();
+        let quant_name = normalize_gemm_quant_for_table(quant).name();
         let (node, _) = grids.by_quant.get(quant_name).ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "GEMM perf data missing for quant '{quant_name}' at {}",
@@ -368,7 +368,7 @@ impl GemmTable {
         let grids = self.load_compute_scale()?;
         Self::two_d_points(
             grids,
-            normalize_fp8_static_quant(quant),
+            normalize_gemm_quant_for_table(quant),
             "compute_scale",
             &self.data_root,
         )
@@ -383,7 +383,7 @@ impl GemmTable {
         let grids = self.load_scale_matrix()?;
         Self::two_d_points(
             grids,
-            normalize_fp8_static_quant(quant),
+            normalize_gemm_quant_for_table(quant),
             "scale_matrix",
             &self.data_root,
         )
@@ -546,21 +546,19 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "fp8_block" => Fp8Block,
         "fp8_ootb" => Fp8Ootb,
         "nvfp4" => Nvfp4,
+        "w4a16_nvfp4" => W4a16Nvfp4,
         _ => return None,
     })
 }
 
-/// Normalize the `fp8_static` quant mode to `fp8` for perf-table lookups.
-/// Mirrors Python `GEMM._normalize_for_lookup`: the `fp8_static` mode is
-/// behavioral (subtracts compute_scale + scale_matrix latency) but reuses
-/// the fp8 perf tables — the perf-DB never stores rows under
-/// `fp8_static`. Applied uniformly to the GEMM, compute_scale, and
-/// scale_matrix table queries.
-pub(crate) fn normalize_fp8_static_quant(quant: GemmQuantMode) -> GemmQuantMode {
-    if quant == GemmQuantMode::Fp8Static {
-        GemmQuantMode::Fp8
-    } else {
-        quant
+/// Normalize modeled quant modes to their collected perf-table lanes.
+/// `fp8_static` reuses dynamic-FP8 GEMM rows plus separate scale overheads;
+/// scale-aware weight-only NVFP4 reuses the `int4_wo` utilization table.
+pub(crate) fn normalize_gemm_quant_for_table(quant: GemmQuantMode) -> GemmQuantMode {
+    match quant {
+        GemmQuantMode::Fp8Static => GemmQuantMode::Fp8,
+        GemmQuantMode::W4a16Nvfp4 => GemmQuantMode::Int4Wo,
+        _ => quant,
     }
 }
 

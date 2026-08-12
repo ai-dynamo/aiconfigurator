@@ -20,7 +20,8 @@ use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::moe::policy_fingerprint;
 use crate::operators::util_empirical::{self, UtilGrid, ZeroAwareDeltaLookup};
 use crate::perf_database::gemm::{
-    gemm_quant_by_name, gemm_sol_latency_ms_with_flops, normalize_fp8_static_quant, quant_tc_flops,
+    gemm_quant_by_name, gemm_sol_latency_ms_with_flops, normalize_gemm_quant_for_table,
+    quant_tc_flops,
 };
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
@@ -230,6 +231,7 @@ const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
     (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
     (0.5, 1.0, 0.45),    // w4a16 / int4_wo                [inferred]
+    (0.5625, 1.0, 0.45), // scale-aware w4a16_nvfp4        [inferred]
     (1.0, 2.0, 0.45),    // w8a8 / fp8(_block/_ootb), sq   [data 0.28-0.55]
     (0.5, 2.0, 0.35),    // w4a8                           [inferred]
     (1.0, 4.0, 0.30),    // w8a4                           [inferred]
@@ -353,7 +355,7 @@ fn gemm_empirical(
     let spec = &db.system_spec;
     let tc_flops = quant_tc_flops(spec, quant.mapping())?;
     let sol = |c: &[f64]| gemm_sol_latency_ms_with_flops(spec, quant, tc_flops, c[0], c[1], c[2]);
-    let tqm = normalize_fp8_static_quant(quant);
+    let tqm = normalize_gemm_quant_for_table(quant);
     let key = format!("gemm:{}", tqm.name());
     let mut grid = db.util_grids.get_or_try_build(&key, || {
         match db.gemm.gemm_points(quant) {
@@ -467,7 +469,10 @@ fn compute_scale_empirical(
     m: u32,
     k: u32,
 ) -> Result<f64, AicError> {
-    let key = format!("compute_scale:{}", normalize_fp8_static_quant(quant).name());
+    let key = format!(
+        "compute_scale:{}",
+        normalize_gemm_quant_for_table(quant).name()
+    );
     let lookup =
         db.delta_lookups
             .get_or_try_build(&key, || match db.gemm.compute_scale_points(quant) {
@@ -534,7 +539,10 @@ fn scale_matrix_empirical(
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
     let sol = |c: &[f64]| 3.0 * c[0] * c[1] / spec.gpu.mem_bw * 1000.0;
-    let key = format!("scale_matrix:{}", normalize_fp8_static_quant(quant).name());
+    let key = format!(
+        "scale_matrix:{}",
+        normalize_gemm_quant_for_table(quant).name()
+    );
     let grid =
         db.util_grids
             .get_or_try_build(&key, || match db.gemm.scale_matrix_points(quant) {

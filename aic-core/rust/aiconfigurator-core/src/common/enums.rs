@@ -199,6 +199,7 @@ pub enum GemmQuantMode {
     Fp8Block,
     Fp8Ootb,
     Nvfp4,
+    W4a16Nvfp4,
 }
 
 impl GemmQuantMode {
@@ -257,6 +258,12 @@ impl GemmQuantMode {
                 compute: 4.0,
                 name: "nvfp4",
                 compute_dtype: Some(ComputeDtype::Fp4),
+            },
+            Self::W4a16Nvfp4 => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 1.0,
+                name: "w4a16_nvfp4",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
             },
         }
     }

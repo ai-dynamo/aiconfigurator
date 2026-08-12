@@ -1208,6 +1208,9 @@ class GEMMQuantMode(Enum):
         1, 2, "fp8_ootb", "fp8"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    w4a16_nvfp4 = QuantMapping(
+        9 / 16, 1, "w4a16_nvfp4", "bfloat16"
+    )  # NVFP4 weights + 1 fp8 scale per 16 weights, dequantized into the bf16 MMA lane.
 
 
 class MoEQuantMode(Enum):

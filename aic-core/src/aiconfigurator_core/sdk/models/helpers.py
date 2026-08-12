@@ -189,7 +189,7 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "mxfp8": "mxfp8",
         "nvfp4": "nvfp4",
         "fp4": "nvfp4",
-        "w4a16_nvfp4": "nvfp4",
+        "w4a16_nvfp4": "w4a16_nvfp4",
     }
     return aliases.get(algo, algo)
 
@@ -277,7 +277,20 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
     gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
     overrides: dict[str, object] = {}
 
-    if "fp8" in gemm_algos:
+    # Some expert-only requants retain the base checkpoint's non-expert lane
+    # in the mixed-precision header. Prefer that explicit base description to
+    # broad config-group targets such as ``Linear``: the latter are filtered
+    # by ``ignore`` at runtime and must not reclassify attention/shared GEMMs.
+    quant_cfg = raw_config.get("quantization_config")
+    base_quant_method = str(quant_cfg.get("quant_method", "")).lower() if isinstance(quant_cfg, dict) else ""
+    weight_block_size = quant_cfg.get("weight_block_size") if isinstance(quant_cfg, dict) else None
+    if base_quant_method == "fp8" and weight_block_size:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+    elif base_quant_method == "fp8":
+        overrides["gemm_quant_mode"] = (
+            common.GEMMQuantMode.fp8 if quant_dynamic is True else common.GEMMQuantMode.fp8_static
+        )
+    elif "fp8" in gemm_algos:
         if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
@@ -287,6 +300,8 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
         # dynamic FP8 compute lane, which has the same byte width and tensor-
         # core family, while preserving any routed-expert NVFP4 override.
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "w4a16_nvfp4" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.w4a16_nvfp4
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 

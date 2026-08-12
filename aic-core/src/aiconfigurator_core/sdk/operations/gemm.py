@@ -64,6 +64,7 @@ _GEMM_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
     (1, 1): 0.55,  # w8a16 / int8_wo                 [inferred]
     (0.5, 1): 0.45,  # w4a16 / int4_wo (fused-dequant weight-only runs below
     #                  the bf16 compute roofline it shares; Marlin-class) [inferred]
+    (0.5625, 1): 0.45,  # scale-aware w4a16_nvfp4       [inferred]
     (1, 2): 0.45,  # w8a8 / fp8(_block/_ootb), sq    [data 0.28-0.55]
     (0.5, 2): 0.35,  # w4a8                          [inferred]
     (1, 4): 0.30,  # w8a4                            [inferred]
@@ -325,9 +326,13 @@ class GEMM(Operation):
 
         ``fp8_static`` is modeled from the dynamic ``fp8`` GEMM row plus
         separately collected activation-quantization overhead tables.
+        ``w4a16_nvfp4`` has its own scale-aware SOL/memory profile but reuses
+        the weight-only ``int4_wo`` silicon-utilization table.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
+        if quant_mode == common.GEMMQuantMode.w4a16_nvfp4:
+            return common.GEMMQuantMode.int4_wo
         return quant_mode
 
     # ------------------------------------------------------------------

@@ -98,7 +98,7 @@ def test_nvfp4_variant_loads_offline_with_quant_metadata(hf_id, monkeypatch):
         *[
             (
                 hf_id,
-                common.GEMMQuantMode.nvfp4,
+                common.GEMMQuantMode.fp8_block,
                 common.MoEQuantMode.nvfp4,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.bfloat16,
@@ -148,18 +148,34 @@ def test_qwen36_uses_fp8_projections_and_nvfp4_ffn(hf_id, ffn_names):
     for name in ("context_gdn_in_proj_gemm", "context_qkv_gemm", "generation_proj_gemm"):
         assert by_name[name]._quant_mode == common.GEMMQuantMode.fp8_static
     for name in ffn_names:
-        assert by_name[name]._quant_mode == common.GEMMQuantMode.nvfp4
+        assert by_name[name]._quant_mode == common.GEMMQuantMode.w4a16_nvfp4
 
 
-def test_qwen36_preserves_explicit_global_gemm_override():
+@pytest.mark.parametrize(
+    "hf_id,ffn_name",
+    [
+        ("nvidia/Qwen3.6-27B-NVFP4", "generation_full_ffn2_gemm"),
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "generation_full_shared_down_gemm"),
+    ],
+)
+@pytest.mark.parametrize("gemm_mode", [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8_static])
+def test_qwen36_preserves_explicit_global_gemm_override(hf_id, ffn_name, gemm_mode):
     model_config = _model_config()
-    model_config.gemm_quant_mode = common.GEMMQuantMode.bfloat16
+    model_config.gemm_quant_mode = gemm_mode
 
-    model = get_model("nvidia/Qwen3.6-27B-NVFP4", model_config, backend_name="trtllm")
+    model = get_model(hf_id, model_config, backend_name="trtllm")
     by_name = {op._name: op for op in model.context_ops + model.generation_ops}
 
-    for name in ("context_gdn_in_proj_gemm", "context_qkv_gemm", "generation_full_ffn2_gemm"):
-        assert by_name[name]._quant_mode == common.GEMMQuantMode.bfloat16
+    for name in ("context_gdn_in_proj_gemm", "context_qkv_gemm", ffn_name):
+        assert by_name[name]._quant_mode == gemm_mode
+
+
+def test_w4a16_nvfp4_uses_scale_aware_weight_only_profile():
+    mode = common.GEMMQuantMode.w4a16_nvfp4
+
+    assert mode.value.memory == 9 / 16
+    assert mode.value.compute == 1
+    assert mode.value.compute_dtype == "bfloat16"
 
 
 def test_minimax_m3_uses_mxfp8_lane_for_non_experts_and_nvfp4_for_experts():
@@ -179,3 +195,19 @@ def test_dsv4_nvfp4_experts_skip_native_mxfp4_backend_remap(hf_id):
 
     assert resolve_dsv4_moe_arch_mode(hf_id, "b200_sxm", "sglang") is None
     assert resolve_dsv4_moe_arch_mode(hf_id, "h200_sxm", "sglang") is None
+
+
+@pytest.mark.parametrize(
+    "hf_id",
+    ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"),
+)
+def test_dsv4_nvfp4_experts_preserve_fp8_block_nonexpert_lane(hf_id):
+    model_config = _model_config()
+    model = get_model(hf_id, model_config, backend_name="trtllm")
+
+    assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+    assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+    module_modes = {
+        op._gemm_quant_mode for op in model.context_ops + model.generation_ops if hasattr(op, "_gemm_quant_mode")
+    }
+    assert module_modes == {common.GEMMQuantMode.fp8_block}
