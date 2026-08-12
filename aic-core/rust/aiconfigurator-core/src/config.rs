@@ -59,7 +59,15 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `enable_shared_layer` / `strict_provenance` policy flags; the engine
 //   re-derives every table's source list from the perf-data tree
 //   (`perf_database/source_resolution.rs`).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 13;
+// - 14 (AIC-1715/1716): `Context/GenerationAttentionOp` gained `lane_order`
+//   (appended at the struct tail; always serialized — bincode decodes
+//   positionally). Concurrently claimed v8, v9, v10, and v12 on its own
+//   branch (v8 alongside #1503's v7/v8, v9 alongside #1461's
+//   `Op::FpmForward` v9, v10 alongside issue #1498's Mhc `seq_split` v10,
+//   v12 alongside PR-6's `DsaModuleOp` `attn_projection_quant_modes` v12);
+//   each landed first, so this renumbers to 14 at merge (same v3/v4, v5/v6
+//   precedent).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 14;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
