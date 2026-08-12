@@ -137,14 +137,54 @@ model_case_values:
           # omission; same `--hf-overrides` serving path).
           allowed_modes:
             - fp8_block
+    - model_path: nvidia/DeepSeek-V4-Flash-NVFP4
+      hidden_size: 4096
+      inter_size: 2048
+      topk: 6
+      num_experts: 256
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 1.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
+    - model_path: nvidia/DeepSeek-V4-Pro-NVFP4
+      hidden_size: 7168
+      inter_size: 3072
+      topk: 6
+      num_experts: 384
+      sglang_moe_swiglu_limit: 10.0
+      sglang_moe_scoring_func: sqrtsoftplus
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      wideep: true
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   mhc:
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Flash
+        - nvidia/DeepSeek-V4-Flash-NVFP4
         - sgl-project/DeepSeek-V4-Flash-FP8
       hidden_size: 4096
       hc_mult: 4
     - model_paths:
         - deepseek-ai/DeepSeek-V4-Pro
+        - nvidia/DeepSeek-V4-Pro-NVFP4
         - sgl-project/DeepSeek-V4-Pro-FP8
       hidden_size: 7168
       hc_mult: 4
@@ -167,6 +207,8 @@ model_case_values:
     supported_model_paths:
       - deepseek-ai/DeepSeek-V4-Flash
       - deepseek-ai/DeepSeek-V4-Pro
+      - nvidia/DeepSeek-V4-Flash-NVFP4
+      - nvidia/DeepSeek-V4-Pro-NVFP4
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8
     attention_kinds:

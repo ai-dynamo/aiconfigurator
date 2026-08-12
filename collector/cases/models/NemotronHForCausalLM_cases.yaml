@@ -42,6 +42,27 @@ model_case_values:
           allowed_modes: [bfloat16]
         vllm:
           allowed_modes: [bfloat16]
+    - model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      hidden_size: 2688
+      inter_size: 1856
+      topk: 6
+      num_experts: 128
+      sglang_moe_activation: relu2
+      sglang_moe_is_gated: false
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
       hidden_size: 4096
       inter_size: 2688
@@ -197,6 +218,8 @@ model_case_values:
           allowed_modes: []
   mamba2:
     - model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      model_aliases:
+        - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
       d_model: 2688
       d_state: 128
       d_conv: 4
@@ -243,6 +266,8 @@ framework_specific_model_case_values:
       - id: nemotron_h_nano_attention
         architecture: NemotronHForCausalLM
         model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+        model_aliases:
+          - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
         num_attention_heads: 32
         num_key_value_heads: 2
         head_dim: 128

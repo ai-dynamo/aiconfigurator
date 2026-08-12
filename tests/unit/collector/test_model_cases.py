@@ -213,6 +213,48 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("model_path", "quant_mode"),
+    [
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "w4a16_nvfp4"),
+        ("nvidia/Qwen3.5-397B-A17B-NVFP4", "nvfp4"),
+        ("nvidia/Qwen3.5-122B-A10B-NVFP4", "nvfp4"),
+        ("nvidia/Gemma-4-26B-A4B-NVFP4", "bfloat16"),
+        ("nvidia/Kimi-K2.6-NVFP4", "nvfp4"),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Pro-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/MiniMax-M3-NVFP4", "nvfp4"),
+    ],
+)
+def test_nvfp4_quant_artifacts_have_exact_moe_profiles_and_lanes(monkeypatch, model_path, quant_mode):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {model_path}
+    for backend in ("sglang", "trtllm", "vllm"):
+        assert moe_model_allows_quantization(backend, model_path, quant_mode)
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/Qwen3.6-27B-NVFP4",
+        "nvidia/Gemma-4-31B-IT-NVFP4",
+    ],
+)
+def test_nvfp4_dense_artifacts_have_targeted_attention_profiles(monkeypatch, model_path):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    assert get_attention_context_shape_sweeps("sglang")
+
+
+@pytest.mark.parametrize(
     ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
     [
         ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
@@ -738,8 +780,9 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
-    assert len(moe_cases) == 5025
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4),
+    # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
+    assert len(moe_cases) == 6177
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -761,14 +804,16 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
     assert len(get_common_gdn_test_cases()) == 74
     mhc_cases = get_common_mhc_test_cases()
-    assert len(mhc_cases) == 8
+    assert len(mhc_cases) == 12
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
         (model_name, phase, hidden_size, 4)
         for model_name, hidden_size in (
             ("deepseek-ai/DeepSeek-V4-Flash", 4096),
             ("sgl-project/DeepSeek-V4-Flash-FP8", 4096),
+            ("nvidia/DeepSeek-V4-Flash-NVFP4", 4096),
             ("deepseek-ai/DeepSeek-V4-Pro", 7168),
             ("sgl-project/DeepSeek-V4-Pro-FP8", 7168),
+            ("nvidia/DeepSeek-V4-Pro-NVFP4", 7168),
         )
         for phase in ("pre", "post")
     }
@@ -1108,6 +1153,8 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("moonshotai/Kimi-K2-Instruct", "DeepseekV3ForCausalLM", 64),
         ("moonshotai/Kimi-K2.5", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.6-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "KimiK25ForConditionalGeneration", 64),
     }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",
