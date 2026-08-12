@@ -452,6 +452,7 @@ ops:
       - {framework: "vllm", version: "0.24.0", system: "h100_sxm", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.24.0", system: "h200_sxm", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.24.0", system: "rtx_pro_6000_server", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
   - op_file: dsa_context_module_perf
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]

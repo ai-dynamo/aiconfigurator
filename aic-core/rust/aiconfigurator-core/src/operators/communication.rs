@@ -8,9 +8,11 @@
 //! `_query_custom_allreduce_table` / `_query_nccl_table`. This is where the
 //! topology-aware scaling lives:
 //!
-//! - `CustomAllReduceOp`: caps `tp_size` to `num_gpus_per_node` before
-//!   the table lookup, then scales by `(tp-1)/tp * (per_node)/(per_node-1)
-//!   * intra_bw/p2p_bw` when the actual fan-out exceeds the node.
+//! - `CustomAllReduceOp`: uses the exactly-measured `tp_size` slice when the
+//!   table has one, else caps `tp_size` to `num_gpus_per_node` and scales by
+//!   `(tp-1)/tp * eff/(eff-1) * base_bw/p2p_bw`. The bandwidth correction is
+//!   applied only to the capped (unmeasured) case — a measured cross-node
+//!   curve already carries that cost.
 //! - `NcclOp`: caps `num_gpus` to the table's max recorded fan-out, then
 //!   scales by `(num_gpus-1)/num_gpus * max/(max-1) * max_bw/req_bw`.
 //! - `P2POp`: pure analytic formula — `(bytes / inter_node_bw +
@@ -158,11 +160,12 @@ fn custom_allreduce_sol_ms(spec: &SystemSpec, tp_size: u32, size: f64) -> f64 {
 
 /// `SOL(query)/util` over the collected custom-allreduce size curve.
 /// Mirrors Python `_query_custom_allreduce_table.get_empirical`: SOL uses
-/// the real `tp_size`; the util grid is built from the effective
-/// (node-capped) tp slice, so the SOL ratio carries any multi-node
-/// bandwidth scaling. Rank-count overflow borrows the node-boundary util
-/// slice regardless of the transfer policy — Python's documented
-/// compatibility exception (`xshape` provenance, TODO #1260).
+/// the real `tp_size`; when that tp was never measured the util grid comes
+/// from the node-capped slice, so the SOL ratio carries the multi-node
+/// bandwidth scaling. Only an *unmeasured* rank count borrows the
+/// node-boundary util slice regardless of the transfer policy — Python's
+/// documented compatibility exception (`xshape` provenance, TODO #1260).
+/// A measured cross-node slice reports plain `empirical` provenance.
 fn custom_allreduce_empirical(
     db: &PerfDatabase,
     quant: CommQuantMode,
@@ -175,7 +178,11 @@ fn custom_allreduce_empirical(
         // No communication for a single rank -> 0/SOL, not a data gap.
         return Ok(sol_q);
     }
-    let eff = tp_size.min(spec.node.num_gpus_per_node);
+    // Prefer an exactly-measured rank-count slice; only an unmeasured TP
+    // borrows the node-boundary util (issue #1416 / #1260).
+    let eff = db
+        .communication
+        .measured_tp_slice(quant, tp_size, spec.node.num_gpus_per_node);
     let sol = |c: &[f64]| custom_allreduce_sol_ms(spec, eff, c[0]);
     let key = format!("custom_allreduce:{}:{eff}", quant.name());
     let grid = db.util_grids.get_or_try_build(&key, || {

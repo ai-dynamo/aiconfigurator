@@ -153,6 +153,25 @@ impl CommunicationTable {
         interp_message_size(curve, message_size)
     }
 
+    /// Resolve which measured TP slice backs a query for `tp_size`.
+    ///
+    /// Returns `tp_size` when the table has rows for that exact rank count,
+    /// otherwise the node-capped slice. Mirrors Python's `measured_tp_slice`.
+    pub fn measured_tp_slice(&self, quant: CommQuantMode, tp_size: u32, per_node: u32) -> u32 {
+        if tp_size <= per_node {
+            return tp_size;
+        }
+        if let Ok(grids) = self.load_custom_allreduce() {
+            if grids
+                .by_keys
+                .contains_key(&(quant.name().to_string(), tp_size))
+            {
+                return tp_size;
+            }
+        }
+        tp_size.min(per_node)
+    }
+
     /// Custom-allreduce latency at a RAW tp_size, mirroring the full Python
     /// DB-level `_query_custom_allreduce_table.get_silicon`
     /// (operations/communication.py) so every consumer inherits the same
@@ -161,8 +180,9 @@ impl CommunicationTable {
     ///   2. GB200 NVL72 (`num_gpus_per_node == 72`) with `tp > 4` -> reroute
     ///      to NCCL all_reduce at the RAW tp (custom AR is only collected up
     ///      to tp4 there);
-    ///   3. clamp tp to the node size and interpolate the table;
-    ///   4. beyond-node overflow: scale by the p2p-bandwidth ratio.
+    ///   3. use the exactly-measured tp slice when present, else clamp tp to
+    ///      the node size, and interpolate the table;
+    ///   4. unmeasured overflow only: scale by the p2p-bandwidth ratio.
     pub fn query_custom_allreduce_scaled(
         &self,
         spec: &SystemSpec,
@@ -177,14 +197,23 @@ impl CommunicationTable {
         if per_node == 72 && tp_size > 4 {
             return self.query_nccl_scaled(spec, quant, "all_reduce", tp_size, message_size);
         }
-        let effective_tp = tp_size.min(per_node);
+        // Prefer an exactly-measured rank-count slice over the node-capped one:
+        // on NVL systems (4 GPUs per node) every serving-relevant TP spans
+        // nodes, so capping a measured TP8/TP16 slice to TP4 would throw away
+        // real data in favour of a synthesized estimate. Mirrors Python's
+        // `measured_tp_slice` (operations/communication.py); see issues #1416
+        // (multi-node collection) and #1260 (overflow policy).
+        let effective_tp = self.measured_tp_slice(quant, tp_size, per_node);
         let mut value = self.query_custom_allreduce(quant, effective_tp, message_size)?;
-        if tp_size > per_node {
-            let base_bw = spec.get_p2p_bandwidth(per_node);
+        // Only correct for bandwidth when the curve came from a SMALLER slice
+        // than requested; a measured cross-node curve already includes that
+        // cost and scaling it again would double-count the penalty.
+        if effective_tp < tp_size {
+            let base_bw = spec.get_p2p_bandwidth(effective_tp);
             let target_bw = spec.get_p2p_bandwidth(tp_size);
             let f_tp = tp_size as f64;
-            let f_pn = per_node as f64;
-            let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
+            let f_eff = effective_tp as f64;
+            let scale = (f_tp - 1.0) / f_tp * f_eff / (f_eff - 1.0).max(1.0) * base_bw / target_bw;
             // Python scales latency AND energy by the beyond-node factor.
             value.latency *= scale;
             value.energy *= scale;
@@ -802,6 +831,43 @@ mod tests {
                 .unwrap(),
             LeafValue::latency_only(2.0)
         );
+    }
+
+    /// Issue #1416: a measured cross-node TP slice must win over the
+    /// node-capped one, and must NOT get the beyond-node bandwidth scaling
+    /// applied on top (the measured curve already carries that cost).
+    #[test]
+    fn custom_allreduce_prefers_measured_multinode_tp_slice() {
+        let points = BTreeMap::from([(1024, 1.0), (4096, 4.0)]);
+        let tp4 = ("half".to_string(), 4);
+        let tp8 = ("half".to_string(), 8);
+
+        // per_node = 4, so TP8 spans nodes.
+        let with_tp8 = table_with_loaded_collectives(
+            BTreeMap::from([
+                (tp4.clone(), latency_curve(points.clone())),
+                (
+                    tp8,
+                    latency_curve(BTreeMap::from([(1024, 7.0), (4096, 9.0)])),
+                ),
+            ]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(with_tp8.measured_tp_slice(CommQuantMode::Half, 8, 4), 8);
+
+        // Without measured TP8 rows the node cap still applies (issue #1260
+        // compatibility path stays reachable).
+        let without_tp8 = table_with_loaded_collectives(
+            BTreeMap::from([(tp4, latency_curve(points))]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 8, 4), 4);
+
+        // Within-node TP is unchanged either way.
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 4, 4), 4);
+        assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 2, 4), 2);
     }
 
     #[test]
