@@ -586,14 +586,26 @@ class NaiveKVCacheEstimator:
         return 2
 
     @staticmethod
-    def _raw_dimension(hf_config: dict, *keys: str) -> Any:
+    def _raw_dimension(hf_config: dict, *keys: str) -> int | None:
         """Return the first usable raw-config dimension among equivalent HF keys.
 
         Hugging Face config families use several names for the same dimensions and
-        may serialize an unused preferred key as ``null``. Dimensions must be
-        positive, so false-y values are skipped in favor of a populated alias.
+        may serialize an unused preferred key as ``null``. Only positive integers
+        are dimensions; invalid preferred values are skipped in favor of an alias.
         """
-        return next((value for key in keys if (value := hf_config.get(key))), None)
+        for key in keys:
+            value = hf_config.get(key)
+            if isinstance(value, bool):
+                continue
+            try:
+                parsed = int(value)
+            except (OverflowError, TypeError, ValueError):
+                continue
+            if isinstance(value, float) and not value.is_integer():
+                continue
+            if parsed > 0:
+                return parsed
+        return None
 
     @classmethod
     def _swa_layout(cls, hf_config: dict) -> tuple[int | None, int | None, int | None]:

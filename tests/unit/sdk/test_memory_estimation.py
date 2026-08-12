@@ -460,6 +460,13 @@ def test_naive_geometry_supports_hf_alias_families(hf_config, expected):
     assert estimator.kv_bytes_per_token() == 2 * kv_heads * head_dim * layers * 2
 
 
+@pytest.mark.parametrize("invalid_preferred", [-1, 0, None, "not-an-int", 1.5, True])
+def test_naive_raw_dimension_skips_invalid_preferred_alias(invalid_preferred):
+    hf_config = {"hidden_size": invalid_preferred, "n_embd": 768}
+
+    assert memory.NaiveKVCacheEstimator._raw_dimension(hf_config, "hidden_size", "n_embd") == 768
+
+
 def test_naive_falcon_new_decoder_keeps_explicit_kv_head_count():
     hf_config = {
         "hidden_size": 8_192,
