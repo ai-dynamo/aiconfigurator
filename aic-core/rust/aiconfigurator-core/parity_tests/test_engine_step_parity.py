@@ -2321,6 +2321,8 @@ class TestRustEngineStepFpmParity:
             ("static_gen", 4, 1024, 2, 0),  # exact decode hit at B=4
             ("static_gen", 2, 1024, 2, 0),  # uncollected batch -> transfer (SOL)
             ("static_gen", 4, 9_000_000, 2, 0),  # out of domain -> both error
+            ("static_ctx", 16, 256, 1, 0),  # above the batch ceiling -> pure clamp (kv/T = 0)
+            ("static_ctx", 16, 320, 1, 256),  # high KV pressure -> SOL-rescaled clamp
         ],
     )
     def test_fpm_static_parity(self, fpm_systems_root, monkeypatch, mode, batch, isl, osl, prefix):

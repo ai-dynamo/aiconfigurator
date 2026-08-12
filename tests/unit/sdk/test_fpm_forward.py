@@ -275,6 +275,8 @@ class TestFPMForwardOpQuery:
         for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
             for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
                 rows.append(_row("prefill", b, total, 0, lat * bump))
+            # a high-KV slice so pressure >= 2 queries stay inside the box
+            rows.append(_row("prefill", b, 1024, 4096, 50.0 * bump))
         return rows
 
     def test_certified_prefill_batch_clamp_answers_above_the_ceiling(self, fake_db):
@@ -292,12 +294,11 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
             op.query_totals(db, batch_size=16, total_prefill_tokens=16384, total_kv_read_tokens=0)
 
-    def test_clamp_respects_the_kv_pressure_ceiling(self, fake_db):
-        # LOO-measured boundary (batch_clamp_loo): below kv/T=2 the clamp is
-        # median <=2%; above it the upper bound loosens badly (p90 up to
-        # 96%), so high-pressure queries stay hard-gated — deliberately
-        # WITHOUT a SOL-corrected substitute, which would re-couple FPM to
-        # op-level model correctness.
+    def test_clamp_tiers_on_the_kv_pressure_ceiling(self, fake_db):
+        # LOO-measured boundary (batch_clamp_loo): below kv/T=2 the raw clamp
+        # is median <=2% and is served as-is (measured value, no SOL); at or
+        # above it the ceiling row is SOL-rescaled instead (the raw bound
+        # would loosen to p90 96%).
         rows = []
         for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
             for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
@@ -306,13 +307,40 @@ class TestFPMForwardOpQuery:
                 rows.append(_row("prefill", b, total, 4 * total, lat * bump * 1.8))
         db = fake_db(rows)
         op = _make_op("prefill")
-        # kv/T = 1 (< 2): clamps to the ceiling row.
+        # kv/T = 1 (< 2): pure clamp to the ceiling row, no rescale.
         low = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=4096))
         assert low == pytest.approx(40.0 * 1.04 * 1.2)
-        # kv/T = 4 (>= 2): in-domain on every axis except batch, but the
-        # pressure ceiling keeps the hard gate.
+        # kv/T = 4 (>= 2): the ceiling row is deflated by the SOL ratio.
+        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))
+        high = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=16384))
+        assert high == pytest.approx(40.0 * 1.04 * 1.8 * sol(16, 4096, 16384) / sol(4, 4096, 16384))
+
+    def test_high_kv_pressure_clamp_rescales_by_the_sol_ratio(self, fake_db):
+        # kv/T = 4 >= 2: the measured ceiling row is rescaled by the
+        # whole-model SOL ratio between the true and clamped shapes (the
+        # coarser split's attention overprice is corrected at the roofline-
+        # predicted share). sol_fn here is the injected test roofline.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("prefill")
+        ceiling = float(op.query_totals(db, batch_size=4, total_prefill_tokens=1024, total_kv_read_tokens=4096))
+        assert ceiling == pytest.approx(52.0)  # exact row (4, 1024, 4096)
+        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))
+        expected = ceiling * (sol(16, 1024, 4096) / sol(4, 1024, 4096))
+        got = float(op.query_totals(db, batch_size=16, total_prefill_tokens=1024, total_kv_read_tokens=4096))
+        assert got == pytest.approx(expected)
+        assert got < ceiling  # the correction always deflates the upper bound
+
+    def test_high_kv_pressure_without_usable_sol_stays_hard_gated(self, fake_db):
+        # A model whose roofline is unusable (empty sol op list -> SOL 0)
+        # answers nothing above the ceiling at high pressure — no
+        # half-modeled value.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = FPMForwardOp("prefill", _model_config(), MODEL_PATH, sol_fn=lambda *coords: 0.0, weight_bytes=1.0)
         with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
-            op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=16384)
+            op.query_totals(db, batch_size=16, total_prefill_tokens=1024, total_kv_read_tokens=4096)
+        # ...while the low-pressure pure clamp needs no SOL at all.
+        low = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        assert low == pytest.approx(41.6)
 
     def test_uncertified_prefill_batch_stays_hard_gated(self, fake_db):
         # Default fixture rows carry a single sparse batch pair -> no

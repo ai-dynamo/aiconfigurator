@@ -64,9 +64,13 @@ FPM_FORWARD_MEASUREMENT_POLICY = "dynamo_native_single_sample_v1"
 # segments — a strict upper bound whose looseness grows with KV pressure
 # (total_kv / total_prefill). Randtok LOO (fpm_e2e_20260811/batch_clamp_loo,
 # 16k points, tp4+tp8, clamp ratios 2x/4x): below pressure 2 the clamp is
-# median <= 2% / p90 <= 6.5%; above it, up to median 14% / p90 96%. Queries
-# above the ceiling stay hard-gated — no SOL-corrected substitute (that
-# would re-couple FPM to op-level model correctness).
+# median <= 2% / p90 <= 6.5% — served as-is (measured value, no SOL).
+# Above it the raw clamp loosens to median 14% / p90 96%, so the measured
+# ceiling row is rescaled by the whole-model SOL ratio between the true and
+# clamped shapes (LOO: median 4.5% / p90 13%) — the same mechanism the
+# cross-site transfer already uses — and ONLY when this model's SOL is
+# actually available: a model whose roofline is unported answers nothing
+# rather than something half-modeled.
 _PREFILL_CLAMP_MAX_KV_PRESSURE = 2.0
 _PHASES = ("prefill", "decode")
 
@@ -784,13 +788,10 @@ class FPMForwardOp(Operation):
         interp_config = self._interp_config(database)
         table = cell["tables"][self._phase]
         domain = cell["domains"].get(self._phase)
+        clamp_scale = 1.0
         if self._phase == "prefill":
             clamp_max = cell.get("prefill_batch_clamp_max")
-            if (
-                clamp_max is not None
-                and coords[0] > clamp_max
-                and coords[2] < _PREFILL_CLAMP_MAX_KV_PRESSURE * coords[1]
-            ):
+            if clamp_max is not None and coords[0] > clamp_max:
                 # Data-certified batch clamp: answer at the collected batch
                 # ceiling with the TRUE totals. Same totals = same GEMM/MoE
                 # work and the same side of the CUDA-graph capture cliff (the
@@ -798,7 +799,27 @@ class FPMForwardOp(Operation):
                 # fewer, longer segments do slightly MORE attention work, so
                 # the answer is a bounded upper bound. total_kv stays the
                 # real per-step read and is gated honestly below.
-                coords = (clamp_max, *coords[1:])
+                if coords[2] < _PREFILL_CLAMP_MAX_KV_PRESSURE * coords[1]:
+                    coords = (clamp_max, *coords[1:])
+                else:
+                    # High KV pressure: the coarser segment split overprices
+                    # attention materially, so rescale the measured ceiling
+                    # row by the whole-model SOL ratio between the true and
+                    # clamped shapes. No usable SOL for this model -> stay
+                    # hard-gated (the batch coordinate fails the domain gate
+                    # below) rather than serve a half-modeled value.
+                    clamped_coords = (clamp_max, *coords[1:])
+                    sol = getattr(interp_config, "sol_fn", None)
+                    try:
+                        true_sol = float(sol(*coords)) if sol is not None else 0.0
+                        ceiling_sol = float(sol(*clamped_coords)) if sol is not None else 0.0
+                    except Exception:
+                        true_sol = ceiling_sol = 0.0
+                    if math.isfinite(true_sol) and math.isfinite(ceiling_sol) and true_sol > 0 and ceiling_sol > 0:
+                        # True shape is never costlier than the clamped one
+                        # (more, shorter segments); cap defensively at 1.
+                        clamp_scale = min(true_sol / ceiling_sol, 1.0)
+                        coords = clamped_coords
         if not table or domain is None:
             raise PerfDataNotAvailableError(
                 f"FPM cell {cell['cell_ids']} has no {self._phase} rows (model_path={cell['model_path']!r})."
@@ -825,7 +846,7 @@ class FPMForwardOp(Operation):
             )
         # Latency-only dataset: energy follows the Rust engine-step zero-energy
         # convention rather than fabricating a power figure.
-        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="silicon")
+        return PerformanceResult(latency * clamp_scale * self._scale_factor, energy=0.0, source="silicon")
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         batch_size = int(kwargs["batch_size"])

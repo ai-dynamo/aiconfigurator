@@ -193,20 +193,44 @@ impl FpmForwardOp {
         // clamped query prices the same side of the capture cliff and is a
         // bounded upper bound on attention. Decode is NEVER clamped (its
         // batch axis carries a real regime cliff — the Task B partition).
-        // KV-pressure ceiling (mirrors Python _PREFILL_CLAMP_MAX_KV_PRESSURE):
-        // randtok LOO measured the clamp at median <= 2% below kv/T = 2 and
-        // up to median 14% / p90 96% above it — high-pressure queries stay
-        // hard-gated, with no SOL-corrected substitute.
+        // KV-pressure tiering (mirrors Python _PREFILL_CLAMP_MAX_KV_PRESSURE):
+        // randtok LOO measured the raw clamp at median <= 2% below kv/T = 2
+        // (served as-is: measured value, no SOL) and median 14% / p90 96%
+        // above it — there the measured ceiling row is rescaled by the
+        // whole-model SOL ratio between the true and clamped shapes (LOO:
+        // median 4.5% / p90 13%), and ONLY when this model's SOL is usable:
+        // an unported roofline (DSA/MSA) answers nothing rather than
+        // something half-modeled (the batch coordinate then fails the
+        // domain gate below).
         const MAX_KV_PRESSURE: f64 = 2.0;
         let clamped: Vec<f64>;
+        let mut clamp_scale = 1.0_f64;
         let coords = match (self.phase, cell.prefill_batch_clamp_max) {
-            (FpmPhase::Prefill, Some(max))
-                if coords[0] > max as f64 && coords[2] < MAX_KV_PRESSURE * coords[1] =>
-            {
-                clamped = std::iter::once(max as f64)
-                    .chain(coords[1..].iter().copied())
-                    .collect();
-                clamped.as_slice()
+            (FpmPhase::Prefill, Some(max)) if coords[0] > max as f64 => {
+                let low_pressure = coords[2] < MAX_KV_PRESSURE * coords[1];
+                let mut routed = coords;
+                if low_pressure {
+                    clamped = std::iter::once(max as f64)
+                        .chain(coords[1..].iter().copied())
+                        .collect();
+                    routed = clamped.as_slice();
+                } else {
+                    let candidate: Vec<f64> = std::iter::once(max as f64)
+                        .chain(coords[1..].iter().copied())
+                        .collect();
+                    let true_sol = sol_total(&self.sol_ops, self.phase, db, coords);
+                    let ceiling_sol = sol_total(&self.sol_ops, self.phase, db, &candidate);
+                    if let (Ok(t), Ok(c)) = (true_sol, ceiling_sol) {
+                        if t.is_finite() && c.is_finite() && t > 0.0 && c > 0.0 {
+                            // True shape is never costlier than the clamped
+                            // one (more, shorter segments); cap at 1.
+                            clamp_scale = (t / c).min(1.0);
+                            clamped = candidate;
+                            routed = clamped.as_slice();
+                        }
+                    }
+                }
+                routed
             }
             _ => coords,
         };
@@ -272,7 +296,7 @@ impl FpmForwardOp {
         let cfg = interp_config(self.phase, &sol);
         let latency = index
             .resolve_value(&cfg, coords)
-            .map(|value| value.latency)
+            .map(|value| value.latency * clamp_scale)
             .map_err(|err| {
                 match sol_failure.borrow_mut().take() {
                     Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
@@ -452,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn clamp_respects_the_kv_pressure_ceiling() {
+    fn clamp_tiers_on_the_kv_pressure_ceiling() {
         use crate::perf_database::fpm_forward::tests::RowSpec;
         let mk = |batch: u32, total: u32, kv: u32, lat: f64| RowSpec {
             workload_kind: "prefill",
@@ -478,11 +502,27 @@ mod tests {
             .query_totals(&db, &[16.0, 4096.0, 4096.0])
             .unwrap();
         assert!((low.latency_ms - 40.0 * 1.04 * 1.2).abs() < 1e-9, "{}", low.latency_ms);
-        // kv/T = 4 (>= 2): the pressure ceiling keeps the hard gate.
+        // kv/T = 4 (>= 2): this op has NO usable SOL (empty sol_ops -> 0),
+        // so the high-pressure tier refuses rather than serve a
+        // half-modeled value.
         let err = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 4096.0, 16384.0])
             .unwrap_err();
         assert!(err.to_string().contains("outside the collected domain"), "{err}");
+        // With a usable roofline the same query answers, rescaled by the
+        // SOL ratio (elementwise SOL depends on the total alone -> ratio 1,
+        // proving the arm activates; the ratio math itself is pinned
+        // cross-engine by the parity suite).
+        let mut sol_op = op(FpmPhase::Prefill);
+        sol_op.sol_ops = vec![Op::Elementwise(crate::operators::ElementwiseOp {
+            name: "elementwise".to_string(),
+            scale_factor: 1.0,
+            bytes_per_token: 4096.0,
+            scale_num_tokens: 1,
+            seq_split: 0,
+        })];
+        let high = sol_op.query_totals(&db, &[16.0, 4096.0, 16384.0]).unwrap();
+        assert!((high.latency_ms - 40.0 * 1.04 * 1.8).abs() < 1e-9, "{}", high.latency_ms);
     }
 
     #[test]
