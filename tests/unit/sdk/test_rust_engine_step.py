@@ -1042,11 +1042,17 @@ def test_large_ep_op_graph_takes_the_documented_python_fallback(caplog):
 
         # (3) End to end through the backend gate: a rust-routed run_static
         # falls back to the Python step and produces finite per-op latencies.
+        # The fallback WARNING is once-per-reason-per-process, so reset the
+        # warn-once memory (test hook) — under xdist another test on the same
+        # worker may already have burned it — and pin the telemetry counter,
+        # which is deterministic regardless of test order.
         backend = get_backend("sglang")
         runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="rust")
+        rust_engine_step._python_step_fallback_reset()
         with caplog.at_level(logging.WARNING):
             summary = backend.run_static(model, database, runtime_config, mode="static", stride=32)
-        assert any("using the python step" in record.message for record in caplog.records)
+        assert any("using the python path" in record.message for record in caplog.records)
+        assert rust_engine_step.python_step_fallback_counts().get("unsupported_op_graph:static", 0) > 0
 
         context_latency = summary.get_context_latency_dict()
         generation_latency = summary.get_generation_latency_dict()
