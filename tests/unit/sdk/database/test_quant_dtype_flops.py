@@ -40,40 +40,50 @@ class TestDivergentRatioSol:
 
         num_tokens, hidden_size, inter_size = 512, 4096, 16384
         topk, num_experts = 2, 8
-        _, sol_math, _ = comprehensive_perf_db.query_moe(
-            num_tokens,
-            hidden_size,
-            inter_size,
-            topk,
-            num_experts,
-            1,
-            1,
-            common.MoEQuantMode.nvfp4,
-            "uniform",
-            database_mode=common.DatabaseMode.SOL_FULL,
+        # Compute-bound shape (sol_math >> sol_mem on the fixture spec even at
+        # 10x fp4 flops), so the SOL scalar IS sol_math — the FLOPs term the
+        # per-call SOL_FULL diagnostic tuple exposes directly.
+        sol_scalar = float(
+            comprehensive_perf_db.query_moe(
+                num_tokens,
+                hidden_size,
+                inter_size,
+                topk,
+                num_experts,
+                1,
+                1,
+                common.MoEQuantMode.nvfp4,
+                "uniform",
+                database_mode=common.DatabaseMode.SOL,
+            )
         )
 
         ops = num_tokens * topk * hidden_size * inter_size * 3 * 2
-        assert math.isclose(sol_math, ops / gpu["fp4_tc_flops"] * 1000, rel_tol=1e-9)
+        assert math.isclose(sol_scalar, ops / gpu["fp4_tc_flops"] * 1000, rel_tol=1e-9)
         legacy_math = ops / (gpu["bfloat16_tc_flops"] * common.MoEQuantMode.nvfp4.value.compute) * 1000
-        assert not math.isclose(sol_math, legacy_math, rel_tol=1e-2)
+        assert not math.isclose(sol_scalar, legacy_math, rel_tol=1e-2)
 
     def test_generation_attention_sol_uses_fp8_entry(self, comprehensive_perf_db, monkeypatch):
         gpu = comprehensive_perf_db.system_spec["gpu"]
         monkeypatch.setitem(gpu, "fp8_tc_flops", gpu["bfloat16_tc_flops"] * 5)
 
         b, s, n, n_kv = 4, 4096, 32, 8
-        _, sol_math, _ = comprehensive_perf_db.query_generation_attention(
-            b,
-            s,
-            n,
-            n_kv,
-            common.KVCacheQuantMode.fp8,
-            database_mode=common.DatabaseMode.SOL_FULL,
+        # Compute-bound on the fixture spec (1 TFLOPS : 1 TB/s), so the SOL
+        # scalar IS sol_math (the per-call SOL_FULL diagnostic tuple exposes
+        # it directly).
+        sol_scalar = float(
+            comprehensive_perf_db.query_generation_attention(
+                b,
+                s,
+                n,
+                n_kv,
+                common.KVCacheQuantMode.fp8,
+                database_mode=common.DatabaseMode.SOL,
+            )
         )
 
         ops = 2 * b * n * 128 * 2 * (s - 1)
-        assert math.isclose(sol_math, ops / gpu["fp8_tc_flops"] * 1000, rel_tol=1e-9)
+        assert math.isclose(sol_scalar, ops / gpu["fp8_tc_flops"] * 1000, rel_tol=1e-9)
 
 
 class TestEagerResolution:
@@ -142,16 +152,19 @@ class TestEagerResolution:
         # Distinct shape from the fp8-entry test above: these PerfDatabase
         # query methods are lru_cached, and identical args would replay the
         # earlier fp8-pipeline result instead of re-deriving under sm=80.
-        _, sol_math, _ = comprehensive_perf_db.query_generation_attention(
-            2,
-            2048,
-            32,
-            8,
-            common.KVCacheQuantMode.fp8,
-            database_mode=common.DatabaseMode.SOL_FULL,
+        # Compute-bound shape -> the SOL scalar IS sol_math.
+        sol_scalar = float(
+            comprehensive_perf_db.query_generation_attention(
+                2,
+                2048,
+                32,
+                8,
+                common.KVCacheQuantMode.fp8,
+                database_mode=common.DatabaseMode.SOL,
+            )
         )
         ops = 2 * 2 * 32 * 128 * 2 * (2048 - 1)
-        assert math.isclose(sol_math, ops / gpu["bfloat16_tc_flops"] * 1000, rel_tol=1e-9)
+        assert math.isclose(sol_scalar, ops / gpu["bfloat16_tc_flops"] * 1000, rel_tol=1e-9)
 
     def test_sm89_plus_fp8_kv_still_requires_fp8_entry(self, comprehensive_perf_db, monkeypatch):
         gpu = comprehensive_perf_db.system_spec["gpu"]

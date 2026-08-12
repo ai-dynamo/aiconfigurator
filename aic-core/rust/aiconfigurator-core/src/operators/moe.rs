@@ -34,7 +34,9 @@
 //! different op: `WideEpMoeOp`, `operators/wideep_moe.rs`.)
 //!
 //! Weights accounting (per-expert FFN weights + router) is in the model
-//! layer; the operator returns latency only.
+//! layer; the operator returns latency + energy (energy rides the standard
+//! `_moe_data` table only — the wideep/DeepEP tables stay latency-only in
+//! Rust, see the module docs of `perf_database::wideep`).
 
 use crate::common::enums::{DatabaseMode, MoeQuantMode, TransferKind, TransferPolicy};
 use crate::common::error::AicError;
@@ -266,9 +268,23 @@ impl MoeOp {
         // Database-mode dispatch, mirroring the Python `_query_moe_table`
         // tail (`database._query_silicon_or_hybrid`): EMPIRICAL always
         // estimates; HYBRID converts a typed silicon miss into the estimate;
-        // SILICON is unchanged. The SOL diagnostic modes never reach the
-        // compiled engine.
+        // SILICON is unchanged; SOL (and the retired SOL_FULL alias) is the
+        // pure roofline with `Source::Sol` and zero energy.
         match db.database_mode {
+            // Python `_query_moe_table`: `get_sol(num_tokens, hidden_size,
+            // inter_size, topk, num_experts, moe_tp_size, moe_ep_size,
+            // quant_mode, workload_distribution)[0]` — the distribution never
+            // enters the math, and the RAW (attention-dp scaled, non-EPLB-
+            // corrected) token count feeds the formula.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+                Ok(PerformanceResult::new(
+                    self.sol_latency_ms(db, num_tokens, tc_flops),
+                    Source::Sol,
+                )
+                .clamp_non_negative()
+                .scaled(self.scale_factor))
+            }
             DatabaseMode::Empirical => Ok(PerformanceResult::new(
                 self.empirical_latency(db, num_tokens)?,
                 Source::Empirical,
@@ -291,7 +307,11 @@ impl MoeOp {
 
     /// SILICON resolution (deepep routing + low-latency probe + the default
     /// grid, scale/clamp applied per branch — the audit-PR body, unchanged).
-    fn silicon_pr(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
+    fn silicon_pr(
+        &self,
+        db: &PerfDatabase,
+        num_tokens: u32,
+    ) -> Result<PerformanceResult, AicError> {
         let is_sglang = db.backend == "sglang";
         // SGLang EPLB prefill correction — INSIDE get_silicon only (Python
         // operations/moe.py:684, sglang branch: `num_tokens_corrected =
@@ -374,12 +394,14 @@ impl MoeOp {
                 &self.workload_distribution,
                 &sol,
             )? {
-                return Ok(PerformanceResult::new(ll, Source::Silicon)
-                    .clamp_non_negative()
-                    .scaled(self.scale_factor));
+                return Ok(
+                    PerformanceResult::with_energy(ll.latency, ll.energy, Source::Silicon)
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                );
             }
         }
-        let latency = db.moe.query(
+        let value = db.moe.query(
             num_tokens,
             self.hidden_size,
             self.inter_size,
@@ -391,9 +413,11 @@ impl MoeOp {
             &self.workload_distribution,
             &sol,
         )?;
-        Ok(PerformanceResult::new(latency, Source::Silicon)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(
+            PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+                .clamp_non_negative()
+                .scaled(self.scale_factor),
+        )
     }
 
     /// `SOL(query)/util` with the full transfer ladder. Mirrors Python
@@ -427,8 +451,7 @@ impl MoeOp {
         // wrong table would over-estimate by the ~3x kernel gap. The tag
         // folds the choice into every grid cache key so one table's grid
         // can't be served to another's query at the same shape.
-        let table = if db.backend == "sglang" && self.moe_backend.as_deref() == Some("deepep_moe")
-        {
+        let table = if db.backend == "sglang" && self.moe_backend.as_deref() == Some("deepep_moe") {
             MoeTableSel::Wideep {
                 is_context: self.is_context,
             }
@@ -574,7 +597,11 @@ impl MoeOp {
     }
 
     /// This op's own-slice token curve on the selected table.
-    fn slice_points(&self, db: &PerfDatabase, table: MoeTableSel) -> Result<Vec<(u32, f64)>, AicError> {
+    fn slice_points(
+        &self,
+        db: &PerfDatabase,
+        table: MoeTableSel,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
         match table {
             MoeTableSel::Standard | MoeTableSel::LowLatency => db.moe.slice_points(
                 moe_kernel(table),
@@ -696,8 +723,9 @@ impl MoeOp {
                 ]
             })
             .collect();
-        let chosen = &candidates[util_empirical::nearest_candidate_index(&query_features, &feature_rows)
-            .expect("candidate list is non-empty")];
+        let chosen =
+            &candidates[util_empirical::nearest_candidate_index(&query_features, &feature_rows)
+                .expect("candidate list is non-empty")];
 
         let spec = &db.system_spec;
         let key = format!(
@@ -741,7 +769,11 @@ impl MoeOp {
                 )
             };
             let mut grid = UtilGrid::new(util_empirical::build_samples(
-                chosen.slice.points.iter().map(|&(t, lat)| (vec![t as f64], lat)),
+                chosen
+                    .slice
+                    .points
+                    .iter()
+                    .map(|&(t, lat)| (vec![t as f64], lat)),
                 sol,
             ));
             grid.reference_provenance = Some(chosen.provenance);
@@ -820,7 +852,9 @@ mod tests {
     use std::path::PathBuf;
 
     fn b200_vllm_db() -> PerfDatabase {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         PerfDatabase::load(&root, "b200_sxm", "vllm", "0.19.0").expect("db loads")
     }
 
@@ -845,7 +879,9 @@ mod tests {
     }
 
     fn b200_trtllm_db() -> PerfDatabase {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         PerfDatabase::load(&root, "b200_sxm", "trtllm", "1.2.0rc5").expect("db loads")
     }
 
@@ -905,14 +941,25 @@ mod tests {
     /// Regenerate if the shipped MoE table or the util-empirical math changes.
     #[test]
     fn moe_empirical_own_shape_matches_python_oracles() {
-        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Empirical, TransferPolicy::ALL);
+        let db = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Empirical,
+            TransferPolicy::ALL,
+        );
         let op = qwen3_op(MoeQuantMode::Bfloat16);
         let r333 = op.query(&db, 333).expect("own-shape empirical t=333");
-        assert_oracle(&r333, 0.19184494219320924, Source::Empirical, "own_emp_t333");
+        assert_oracle(
+            &r333,
+            0.19184494219320924,
+            Source::Empirical,
+            "own_emp_t333",
+        );
         let r96 = op.query(&db, 96).expect("own-shape empirical t=96");
         assert_oracle(&r96, 0.13852159976959227, Source::Empirical, "own_emp_t96");
         // Python capture: {"empirical"} (own-shape grid, no borrow).
-        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::Empirical);
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::Empirical
+        );
     }
 
     /// HYBRID with data present must stay on silicon (exact hit and in-range
@@ -920,7 +967,10 @@ mod tests {
     /// reconstruction at the same point (0.19178... vs 0.19184...).
     #[test]
     fn moe_hybrid_prefers_silicon_when_covered() {
-        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+        let db = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Hybrid,
+            TransferPolicy::ALL,
+        );
         let op = qwen3_op(MoeQuantMode::Bfloat16);
         let hit = op.query(&db, 128).expect("collected token point");
         assert_oracle(&hit, 0.146451199054718, Source::Silicon, "hyb_silicon_t128");
@@ -933,12 +983,18 @@ mod tests {
     /// the borrowed util curve is reconstructed with the QUERY quant's SOL.
     #[test]
     fn moe_xquant_transfer_matches_python_oracle() {
-        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+        let db = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Hybrid,
+            TransferPolicy::ALL,
+        );
         let op = qwen3_op(MoeQuantMode::W4a16Mxfp4Cutlass);
         let r = op.query(&db, 96).expect("xquant transfer");
         assert_oracle(&r, 0.329638409614563, Source::Empirical, "xquant_t96");
         // Python capture: {"xquant"} (reference grid's tier, moe.py:534).
-        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XQuant);
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::XQuant
+        );
     }
 
     /// XPROFILE tier: `w4afp8` ((0.5, 2)) has no same-profile sibling in the
@@ -946,12 +1002,18 @@ mod tests {
     /// curve built with ITS own SOL, rescaled by e(w4afp8)/e(fp8) = 0.15/0.40.
     #[test]
     fn moe_xprofile_transfer_matches_python_oracle() {
-        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+        let db = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Hybrid,
+            TransferPolicy::ALL,
+        );
         let op = qwen3_op(MoeQuantMode::W4afp8);
         let r = op.query(&db, 96).expect("xprofile transfer");
         assert_oracle(&r, 0.13701972961425785, Source::Empirical, "xprofile_t96");
         // Python capture: {"xprofile"} (tier-3 borrow, moe.py:569).
-        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XProfile);
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::XProfile
+        );
     }
 
     /// XSHAPE tier: same quant (bfloat16), uncollected inter_size 1600 →
@@ -962,15 +1024,29 @@ mod tests {
         let mut op = qwen3_op(MoeQuantMode::Bfloat16);
         op.inter_size = 1600;
 
-        let db = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+        let db = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Hybrid,
+            TransferPolicy::ALL,
+        );
         let r = op.query(&db, 96).expect("xshape transfer");
         assert_oracle(&r, 0.14427836344943168, Source::Empirical, "xshape_t96");
         // Python capture: {"xshape"} (tier-1 borrow, moe.py:534).
-        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::XShape);
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::XShape
+        );
 
-        let conservative = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, CONSERVATIVE);
-        let rc = op.query(&conservative, 96).expect("xshape under conservative policy");
-        assert_oracle(&rc, 0.14427836344943168, Source::Empirical, "conservative_xshape_t96");
+        let conservative =
+            b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, CONSERVATIVE);
+        let rc = op
+            .query(&conservative, 96)
+            .expect("xshape under conservative policy");
+        assert_oracle(
+            &rc,
+            0.14427836344943168,
+            Source::Empirical,
+            "conservative_xshape_t96",
+        );
     }
 
     /// Policy gating: disabled tiers are SKIPPED, and the terminal
@@ -981,14 +1057,18 @@ mod tests {
     fn moe_transfer_policy_gates_tiers() {
         let op = qwen3_op(MoeQuantMode::W4a16Mxfp4Cutlass);
 
-        let off = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::OFF);
+        let off = b200_vllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Hybrid,
+            TransferPolicy::OFF,
+        );
         let blocked = op.query(&off, 96);
         assert!(
             matches!(blocked, Err(AicError::EmpiricalNotImplemented(_))),
             "off policy must surface the typed empirical miss, got {blocked:?}"
         );
 
-        let conservative = b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, CONSERVATIVE);
+        let conservative =
+            b200_vllm_db().with_mode(crate::common::enums::DatabaseMode::Hybrid, CONSERVATIVE);
         let blocked = op.query(&conservative, 96);
         assert!(
             matches!(blocked, Err(AicError::EmpiricalNotImplemented(_))),
@@ -1013,7 +1093,10 @@ mod tests {
     /// ```
     #[test]
     fn moe_empirical_low_latency_table_selection_matches_python_oracles() {
-        let db = b200_trtllm_db().with_mode(crate::common::enums::DatabaseMode::Empirical, TransferPolicy::ALL);
+        let db = b200_trtllm_db().with_mode(
+            crate::common::enums::DatabaseMode::Empirical,
+            TransferPolicy::ALL,
+        );
         let op = MoeOp {
             name: "moe-ll".into(),
             scale_factor: 1.0,
@@ -1034,12 +1117,24 @@ mod tests {
         let ll = op.query(&db, 100).expect("ll-table empirical t=100");
         assert_oracle(&ll, 0.023113779703977197, Source::Empirical, "ll_own_t100");
         let std_table = op.query(&db, 200).expect("std-table empirical t=200");
-        assert_oracle(&std_table, 0.058452753259364186, Source::Empirical, "std_own_t200");
+        assert_oracle(
+            &std_table,
+            0.058452753259364186,
+            Source::Empirical,
+            "std_own_t200",
+        );
 
         let mut off_shape = op.clone();
         off_shape.inter_size = 17000;
-        let xshape = off_shape.query(&db, 100).expect("failed ll probe -> std xshape");
-        assert_oracle(&xshape, 0.05842286435922407, Source::Empirical, "nvfp4_xshape_t100");
+        let xshape = off_shape
+            .query(&db, 100)
+            .expect("failed ll probe -> std xshape");
+        assert_oracle(
+            &xshape,
+            0.05842286435922407,
+            Source::Empirical,
+            "nvfp4_xshape_t100",
+        );
     }
 
     /// XPROFILE tie-break follows FILE-ROW quant order, not sorted order:
@@ -1065,7 +1160,9 @@ mod tests {
     /// 0.42024958928426115 at t=96 — a live ~13% divergence this pins.
     #[test]
     fn moe_xprofile_tie_break_follows_file_order() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         let no_xquant = TransferPolicy {
             xshape: true,
             xquant: false,
@@ -1093,9 +1190,19 @@ mod tests {
             is_context: false,
         };
         let r96 = op.query(&db, 96).expect("xprofile tie t=96");
-        assert_oracle(&r96, 0.47411200205485027, Source::Empirical, "xprofile_tie_t96");
+        assert_oracle(
+            &r96,
+            0.47411200205485027,
+            Source::Empirical,
+            "xprofile_tie_t96",
+        );
         let r512 = op.query(&db, 512).expect("xprofile tie t=512");
-        assert_oracle(&r512, 0.8249173482259117, Source::Empirical, "xprofile_tie_t512");
+        assert_oracle(
+            &r512,
+            0.8249173482259117,
+            Source::Empirical,
+            "xprofile_tie_t512",
+        );
     }
 
     /// SGLang deepep op used by the routing tests below: the h200 sglang
@@ -1124,7 +1231,9 @@ mod tests {
     }
 
     fn h200_sglang_db(mode: crate::common::enums::DatabaseMode) -> PerfDatabase {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         PerfDatabase::load(&root, "h200_sxm", "sglang", "0.5.10")
             .expect("db loads")
             .with_mode(mode, TransferPolicy::ALL)
@@ -1154,14 +1263,32 @@ mod tests {
         let r = ctx.query(&db, 300).expect("deepep ctx t=300");
         assert_oracle(&r, 0.6444098182832491, Source::Empirical, "deepep_ctx_t300");
         let r = ctx.query(&db, 200000).expect("deepep ctx t=200000");
-        assert_oracle(&r, 21.3889914448373, Source::Empirical, "deepep_ctx_t200000");
+        assert_oracle(
+            &r,
+            21.3889914448373,
+            Source::Empirical,
+            "deepep_ctx_t200000",
+        );
         let gen = h200_deepep_op(false);
         let r = gen.query(&db, 100).expect("deepep gen t=100");
-        assert_oracle(&r, 0.34094198365735795, Source::Empirical, "deepep_gen_t100");
+        assert_oracle(
+            &r,
+            0.34094198365735795,
+            Source::Empirical,
+            "deepep_gen_t100",
+        );
         let r = gen.query(&db, 3000).expect("deepep gen t=3000");
-        assert_oracle(&r, 0.4024570594575049, Source::Empirical, "deepep_gen_t3000");
+        assert_oracle(
+            &r,
+            0.4024570594575049,
+            Source::Empirical,
+            "deepep_gen_t3000",
+        );
         // Python capture: {"empirical"} (own-slice wideep calibration).
-        assert_eq!(db.worst_provenance(), util_empirical::ProvenanceTier::Empirical);
+        assert_eq!(
+            db.worst_provenance(),
+            util_empirical::ProvenanceTier::Empirical
+        );
     }
 
     /// The EPLB 0.8 prefill token correction applies INSIDE the silicon
@@ -1178,8 +1305,15 @@ mod tests {
 
         let silicon = h200_sglang_db(crate::common::enums::DatabaseMode::Hybrid);
         let corrected = eplb_op.query(&silicon, 160).expect("eplb-on silicon t=160");
-        assert_oracle(&corrected, 0.6220973747117179, Source::Silicon, "eplb_sil_t160");
-        let baseline = h200_deepep_op(true).query(&silicon, 128).expect("eplb-off silicon t=128");
+        assert_oracle(
+            &corrected,
+            0.6220973747117179,
+            Source::Silicon,
+            "eplb_sil_t160",
+        );
+        let baseline = h200_deepep_op(true)
+            .query(&silicon, 128)
+            .expect("eplb-off silicon t=128");
         assert!(
             (corrected.latency_ms - baseline.latency_ms).abs() < 1e-12,
             "silicon eplb-on(160) ({}) must equal eplb-off(128) ({})",
@@ -1188,7 +1322,9 @@ mod tests {
         );
 
         let empirical = h200_sglang_db(crate::common::enums::DatabaseMode::Empirical);
-        let raw = eplb_op.query(&empirical, 300).expect("eplb-on empirical t=300");
+        let raw = eplb_op
+            .query(&empirical, 300)
+            .expect("eplb-on empirical t=300");
         assert_oracle(&raw, 0.6444098182832491, Source::Empirical, "eplb_emp_t300");
     }
 
@@ -1209,5 +1345,21 @@ mod tests {
             equivalent.latency_ms
         );
         assert!(with_dp.latency_ms > op(1).query(&db, 1000).unwrap().latency_ms);
+    }
+
+    /// SOL mode returns the pure MoE roofline tagged `Source::Sol` — RAW
+    /// (attention-dp scaled, non-EPLB-corrected) tokens, distribution never
+    /// enters (Python `_query_moe_table` SOL branch).
+    #[test]
+    fn moe_sol_mode_returns_roofline_with_sol_source() {
+        let mut db = b200_vllm_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Sol;
+        let op = op(2); // attention_dp scales tokens 2x before the roofline
+        let result = op.query(&db, 256).expect("moe sol");
+        let tc_flops = quant_tc_flops(&db.system_spec, op.quant_mode.mapping()).unwrap();
+        let expected = op.sol_latency_ms(&db, 512, tc_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
     }
 }

@@ -35,15 +35,15 @@
 //! backends without DSV4 data.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use super::dsa::{bs_slice, lookup_2d, SparseGrid};
 use super::attention::generation_attn_mode;
+use super::dsa::{bs_slice, lookup_2d, SparseGrid};
 use super::gemm::quant_tc_flops;
-use super::perf_interp::{self, Node, OpInterpConfig};
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
@@ -80,7 +80,7 @@ impl AttnKind {
 // leaving an arbitrary row-order winner across rows whose latencies differ
 // 30-50%. Queries resolve the model's native count first, then its
 // rank-local count within the bucket (see `resolve_head_key`, per level).
-type ByBatch = BTreeMap<u32, f64>;
+type ByBatch = BTreeMap<u32, LeafValue>;
 type ByIsl = BTreeMap<u32, ByBatch>;
 type ByStep = BTreeMap<u32, ByIsl>;
 type ByLocal = BTreeMap<u32, ByStep>;
@@ -98,6 +98,13 @@ pub struct Dsv4Table {
     /// Same source resolution as the module files; an absent file loads as
     /// `None` and the correction is a no-op (Python parity).
     topk_calib_sources: Vec<PerfSource>,
+    /// The PRIMARY (own-version) path of the topk calib file — the path
+    /// Python's `_load_csa_topk_top_last` resolves. The CP top_last grid
+    /// loads from this source only; a positional `sources[0]` is NOT a
+    /// reliable primary marker (Python's `_build_op_sources` omits the
+    /// primary entirely for partial-marked version dirs, so the list can
+    /// start with a donor).
+    topk_primary_path: PathBuf,
     /// Sparse-kernel table (`dsv4_paged_mqa_logits_module_perf.parquet`) for
     /// the CP prefill composition's mqa full/per-card deltas. Same source
     /// resolution as the module files (Python `_load_sparse` runs the file
@@ -232,10 +239,16 @@ impl Dsv4Table {
     /// `perf_db_sources` (Python-supplied). Each DSV4 file falls back to its
     /// primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let csa_context_sources =
-            resolve_op_sources(perf_db_sources, "dsv4_csa_context_module_perf.parquet", &data_root);
-        let hca_context_sources =
-            resolve_op_sources(perf_db_sources, "dsv4_hca_context_module_perf.parquet", &data_root);
+        let csa_context_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsv4_csa_context_module_perf.parquet",
+            &data_root,
+        );
+        let hca_context_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsv4_hca_context_module_perf.parquet",
+            &data_root,
+        );
         let csa_generation_sources = resolve_op_sources(
             perf_db_sources,
             "dsv4_csa_generation_module_perf.parquet",
@@ -246,8 +259,16 @@ impl Dsv4Table {
             "dsv4_hca_generation_module_perf.parquet",
             &data_root,
         );
-        let topk_calib_sources =
-            resolve_op_sources(perf_db_sources, "dsv4_csa_topk_calib_perf.parquet", &data_root);
+        let topk_primary_path = crate::perf_database::find_in_family_dirs(
+            &data_root,
+            "dsv4_csa_topk_calib_perf.parquet",
+        )
+        .unwrap_or_else(|| data_root.join("dsv4_csa_topk_calib_perf.parquet"));
+        let topk_calib_sources = resolve_op_sources(
+            perf_db_sources,
+            "dsv4_csa_topk_calib_perf.parquet",
+            &data_root,
+        );
         let paged_mqa_sources = resolve_op_sources(
             perf_db_sources,
             "dsv4_paged_mqa_logits_module_perf.parquet",
@@ -259,6 +280,7 @@ impl Dsv4Table {
             csa_generation_sources,
             hca_generation_sources,
             topk_calib_sources,
+            topk_primary_path,
             paged_mqa_sources,
             csa_context: OnceLock::new(),
             hca_context: OnceLock::new(),
@@ -298,7 +320,7 @@ impl Dsv4Table {
         architecture: &str,
         prefix: u32,
         sol_dims: Option<Dsv4SolDims>,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Resolve flops BEFORE any perf-data lookup: a missing dtype entry
         // must classify as MissingSystemFlops on both engines, in every mode
         // (mirrors Python's query-entry resolution and GemmTable::query).
@@ -307,7 +329,14 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, native_heads, local_heads)?;
+        let node = select_resolved(
+            grids,
+            Some(fmha_quant),
+            kv_quant,
+            gemm_quant,
+            native_heads,
+            local_heads,
+        )?;
 
         let dims = sol_dims.unwrap_or_else(|| {
             Dsv4SolDims::from_pinned(dsv4_dims(architecture), local_heads as i64)
@@ -333,15 +362,16 @@ impl Dsv4Table {
             )
         };
         let cfg = OpInterpConfig::grid(&["prefix", "seq_len", "batch"], &sol);
-        let latency = perf_interp::query(&cfg, node, &[prefix as f64, isl as f64, b as f64])?;
+        let value = perf_interp::query_value(&cfg, node, &[prefix as f64, isl as f64, b as f64])?;
         // Mirrors Python `ContextDeepSeekV4AttentionModule` get_silicon
         // (operations/dsv4.py): for CSA (compress_ratio==4) ONLY, subtract the
         // measured topK DELTA = flat_ms - top_last_ms at the ORIGINAL query
-        // point (prefix, s, b) and clamp at 0. HCA (cr==128) is left untouched.
+        // point (prefix, s, b) and clamp at 0 (energy rescales by the
+        // corrected/base latency ratio). HCA (cr==128) is left untouched.
         if attn_kind == AttnKind::Csa {
-            return self.topk_corrected(latency, TopkPhase::Context, native_heads, prefix, isl, b);
+            return self.topk_corrected(value, TopkPhase::Context, native_heads, prefix, isl, b);
         }
-        Ok(latency)
+        Ok(value)
     }
 
     /// Generation-DSV4 latency. `sequence_tokens = isl + step` (absolute KV
@@ -366,7 +396,7 @@ impl Dsv4Table {
         gemm_quant: GemmQuantMode,
         architecture: &str,
         sol_dims: Option<Dsv4SolDims>,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // PR #1337: decode attention compute dtype follows the kv-cache dtype;
         // the fmha label is inert for generation (the table keys on kv dtype).
         // Derive the SOL dtype via the shared sm-gated rule
@@ -409,14 +439,14 @@ impl Dsv4Table {
             )
         };
         let cfg = OpInterpConfig::grid(&["batch", "seq_len"], &sol);
-        let latency = perf_interp::query(&cfg, node, &[b as f64, sequence_tokens as f64])?;
+        let value = perf_interp::query_value(&cfg, node, &[b as f64, sequence_tokens as f64])?;
         // Mirrors Python `GenerationDeepSeekV4AttentionModule` get_silicon
         // (operations/dsv4.py): subtract the topK DELTA for CSA (cr==4) only.
         // Decode is q_len=1 with past_kv = s_total - 1, so the DELTA keys at
         // (prefix = max(s_total - 1, 0), isl = 1, bs = b).
         if attn_kind == AttnKind::Csa {
             return self.topk_corrected(
-                latency,
+                value,
                 TopkPhase::Generation,
                 native_heads,
                 sequence_tokens.saturating_sub(1),
@@ -424,7 +454,7 @@ impl Dsv4Table {
                 b,
             );
         }
-        Ok(latency)
+        Ok(value)
     }
 
     fn load_csa_context(&self) -> Result<&ModuleNodes, AicError> {
@@ -452,23 +482,26 @@ impl Dsv4Table {
         cell.as_ref().map_err(clone_err)
     }
 
-    /// Apply the CSA topK DELTA correction to a module latency, mirroring the
+    /// Apply the CSA topK DELTA correction to a module value, mirroring the
     /// Python apply sites in `operations/dsv4.py` (context and generation
-    /// `get_silicon`): `latency = max(0, latency - DELTA(prefix, isl, bs))`.
+    /// `get_silicon`): `latency = max(0, latency - DELTA(prefix, isl, bs))`,
+    /// and energy rescales by `corrected_latency / latency` when both the
+    /// base latency and the energy are positive (Python:
+    /// `if latency > 0.0 and energy: energy *= corrected_latency / latency`).
     /// No-op when the correction is disabled (`AIC_DSV4_TOPK_CORRECTION=0`)
     /// or when no calibration file exists — Python gates the calib LOAD behind
     /// the env var too, so keep the load lazy-skipped when disabled.
     fn topk_corrected(
         &self,
-        latency: f64,
+        value: LeafValue,
         phase: TopkPhase,
         native_heads: u32,
         prefix: u32,
         isl: u32,
         bs: u32,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         if !topk_correction_enabled() {
-            return Ok(latency);
+            return Ok(value);
         }
         // Only the bucket matching the querying model's native identity
         // applies; an uncovered native (Pro today) is a no-op, never a
@@ -481,16 +514,26 @@ impl Dsv4Table {
             }
             .get(&native_heads)
         });
-        Ok(apply_topk_delta(latency, exact, prefix, isl, bs))
+        let corrected = apply_topk_delta(value.latency, exact, prefix, isl, bs);
+        let energy = if value.latency > 0.0 && value.energy != 0.0 {
+            value.energy * (corrected / value.latency)
+        } else {
+            value.energy
+        };
+        Ok(LeafValue {
+            latency: corrected,
+            power: value.power,
+            energy,
+        })
     }
 
     /// Lazy-load the topK DELTA calibration (Python `_get_dsv4_topk_calib`,
     /// which caches on the database object). `Ok(None)` when every source
     /// file is absent or no usable rows exist.
     fn load_topk_calib(&self) -> Result<Option<&TopkCalib>, AicError> {
-        let cell = self
-            .topk_calib
-            .get_or_init(|| load_topk_calib_parquet(&self.topk_calib_sources));
+        let cell = self.topk_calib.get_or_init(|| {
+            load_topk_calib_parquet(&self.topk_calib_sources, &self.topk_primary_path)
+        });
         match cell {
             Ok(calib) => Ok(calib.as_ref()),
             Err(err) => Err(clone_err(err)),
@@ -571,7 +614,14 @@ impl Dsv4Table {
             AttnKind::Csa => self.load_csa_context()?,
             AttnKind::Hca => self.load_hca_context()?,
         };
-        let node = select_resolved(grids, Some(fmha_quant), kv_quant, gemm_quant, native_heads, local_heads)?;
+        let node = select_resolved(
+            grids,
+            Some(fmha_quant),
+            kv_quant,
+            gemm_quant,
+            native_heads,
+            local_heads,
+        )?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
             return Err(AicError::PerfDatabase(format!(
@@ -657,8 +707,8 @@ fn context_nodes(grids: ModuleGrids) -> ModuleNodes {
                 let node = per_head.entry(head).or_insert_with(Node::branch);
                 for (step, by_isl) in by_step {
                     for (isl, by_batch) in by_isl {
-                        for (bb, lat) in by_batch {
-                            node.insert(&[step, isl, bb], lat);
+                        for (bb, leaf) in by_batch {
+                            node.insert_value(&[step, isl, bb], leaf);
                         }
                     }
                 }
@@ -684,8 +734,8 @@ fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
                 for (step, by_isl) in by_step {
                     for (isl, by_batch) in by_isl {
                         let s_total = isl + step;
-                        for (bb, lat) in by_batch {
-                            node.insert(&[bb, s_total], lat);
+                        for (bb, leaf) in by_batch {
+                            node.insert_value(&[bb, s_total], leaf);
                         }
                     }
                 }
@@ -708,7 +758,8 @@ fn generation_nodes(grids: ModuleGrids) -> ModuleNodes {
 // score_mode = v{1,2}_{flat,top_last}) per (step, isl, batch_size) shape;
 // DELTA = flat.latency - top_last.latency per variant. At query time the
 // matching variant's DELTA is SUBTRACTED from the CSA (compress_ratio==4)
-// module latency only.
+// module latency only; the module ENERGY rescales by the corrected/base
+// latency ratio (see `topk_corrected`).
 // Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
 // ---------------------------------------------------------------------------
 
@@ -777,20 +828,34 @@ fn apply_topk_delta(
 ///
 /// Mirrors Python `load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)` +
 /// `_build_topk_calib_from_rows`: rows nest under
-/// `(step, isl, batch_size, score_mode)` with last-write-wins per leaf; a
-/// shape missing either mode is skipped; `DELTA = max(0, flat - top_last)`.
+/// `(step, isl, batch_size, score_mode)`; a shape missing either mode is
+/// skipped; `DELTA = max(0, flat - top_last)`.
 /// The retained top_last grid mirrors `_load_csa_topk_top_last`'s
-/// `{bs: {(isl, step): latency}}` with the same last-row-wins overwrite.
+/// `{bs: {(isl, step): latency}}` — and, like that Python loader, reads the
+/// PRIMARY source only. Python's CP top_last loader is primary-path-only
+/// (it predates the reuse sidecar and does not honor `reuse.yaml` donors),
+/// while its DELTA consumer IS reuse-aware; honoring donors here for
+/// top_last made the compiled engine compute CSA CP configs the Python step
+/// refuses (one-sided scan DRIFT), so the split mirrors Python exactly
+/// until the upstream loader gap + the CP composition divergence are fixed
+/// together (tracked upstream; see the PR-2 notes).
 /// Returns `Ok(None)` when every source file is absent (Python: rows is
 /// None) or no usable row exists (no DELTA pair AND no top_last row —
 /// behaviourally identical to Python's two separate None/{} outcomes).
-fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, AicError> {
+fn load_topk_calib_parquet(
+    sources: &[PerfSource],
+    top_last_primary_path: &Path,
+) -> Result<Option<TopkCalib>, AicError> {
     let mut by_mode: BTreeMap<u32, BTreeMap<(u32, u32, u32), BTreeMap<String, f64>>> =
         BTreeMap::new();
     let mut top_last: BTreeMap<Option<u32>, SparseGrid> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
+        // Python parity: the CP top_last grid loads from the PRIMARY
+        // (own-version) path only — matched by PATH, not list position (see
+        // `topk_primary_path`); DELTA rows consume every source.
+        let primary_source = path == top_last_primary_path;
         if !path.exists() {
             continue;
         }
@@ -808,8 +873,11 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             if !kernel_source_ok(source.kernel_sources(), ks_col, &row)? {
                 continue;
             }
-            let (step, isl, bs) =
-                (row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?);
+            let (step, isl, bs) = (
+                row.u32(step_col)?,
+                row.u32(isl_col)?,
+                row.u32(batch_size_col)?,
+            );
             let mode = row.str_owned(score_mode_col)?;
             let latency = row.f64(latency_col)?;
             // The CP composition consumes the context (v1) selector's raw
@@ -817,14 +885,16 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
             // First-wins parity with Python `load_dsv4_sparse_op_data`
             // (skip-on-key-conflict; shared-layer contract, design §6.1).
             let native = row.u32_optional(num_heads_col)?;
-            if mode == "v1_top_last" {
+            if primary_source && mode == "v1_top_last" {
+                // Python `_load_csa_topk_top_last` assigns per row (iterrows
+                // overwrite): within the primary file the LAST duplicate row
+                // wins.
                 top_last
                     .entry(native)
                     .or_default()
                     .entry(bs)
                     .or_default()
-                    .entry((isl, step))
-                    .or_insert(latency);
+                    .insert((isl, step), latency);
             }
             // DELTA rows without a native identity are unusable (Python's
             // generic loader skips rows with a missing key cell).
@@ -847,17 +917,27 @@ fn load_topk_calib_parquet(sources: &[PerfSource]) -> Result<Option<TopkCalib>, 
     for (native, shapes) in by_mode {
         for (key, modes) in shapes {
             if let (Some(flat), Some(tl)) = (modes.get("v1_flat"), modes.get("v1_top_last")) {
-                exact_v1.entry(native).or_default().insert(key, (flat - tl).max(0.0));
+                exact_v1
+                    .entry(native)
+                    .or_default()
+                    .insert(key, (flat - tl).max(0.0));
             }
             if let (Some(flat), Some(tl)) = (modes.get("v2_flat"), modes.get("v2_top_last")) {
-                exact_v2.entry(native).or_default().insert(key, (flat - tl).max(0.0));
+                exact_v2
+                    .entry(native)
+                    .or_default()
+                    .insert(key, (flat - tl).max(0.0));
             }
         }
     }
     if exact_v1.is_empty() && exact_v2.is_empty() && top_last.is_empty() {
         return Ok(None);
     }
-    Ok(Some(TopkCalib { exact_v1, exact_v2, top_last }))
+    Ok(Some(TopkCalib {
+        exact_v1,
+        exact_v2,
+        top_last,
+    }))
 }
 
 /// Paged-mqa-logits sparse-kernel table: `[native_heads][tp]` -> engine Node
@@ -867,14 +947,14 @@ struct SparseKernelNodes {
     by_heads: BTreeMap<u32, BTreeMap<u32, Node>>,
 }
 
-/// Load one sparse-kernel parquet. Rows are nested with plain overwrite in
-/// read order — within a file the LAST row wins, and across shared-layer
-/// sources a later source overwrites an earlier one at a shared cell,
-/// matching Python (`_read_filtered_rows` concatenates sources in order and
-/// `load_dsv4_sparse_op_data` does a per-row dict overwrite; the module
-/// loader above follows the same policy). `Ok(None)` only when every source
-/// file is absent.
-fn load_sparse_kernel_parquet(sources: &[PerfSource]) -> Result<Option<SparseKernelNodes>, AicError> {
+/// Load one sparse-kernel parquet. Cells insert FIRST-wins in read order —
+/// within a file the first duplicate row wins and an earlier shared-layer
+/// source beats a later one at a shared cell, matching Python's
+/// `load_dsv4_sparse_op_data` skip-on-key-conflict contract (design §6.1).
+/// `Ok(None)` only when every source file is absent.
+fn load_sparse_kernel_parquet(
+    sources: &[PerfSource],
+) -> Result<Option<SparseKernelNodes>, AicError> {
     let mut by_heads: BTreeMap<u32, BTreeMap<u32, Node>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
@@ -904,7 +984,11 @@ fn load_sparse_kernel_parquet(sources: &[PerfSource]) -> Result<Option<SparseKer
                 .entry(row.u32(tp_size_col)?)
                 .or_insert_with(Node::branch)
                 .insert_first_wins(
-                    &[row.u32(step_col)?, row.u32(isl_col)?, row.u32(batch_size_col)?],
+                    &[
+                        row.u32(step_col)?,
+                        row.u32(isl_col)?,
+                        row.u32(batch_size_col)?,
+                    ],
                     row.f64(latency_col)?,
                 );
         }
@@ -927,8 +1011,10 @@ fn topk_interp_1d(points: &[(u32, f64)], x: u32) -> Option<f64> {
         entry.0 += value;
         entry.1 += 1;
     }
-    let vals: BTreeMap<u32, f64> =
-        merged.into_iter().map(|(k, (sum, n))| (k, sum / n as f64)).collect();
+    let vals: BTreeMap<u32, f64> = merged
+        .into_iter()
+        .map(|(k, (sum, n))| (k, sum / n as f64))
+        .collect();
     if let Some(&v) = vals.get(&x) {
         return Some(v);
     }
@@ -962,8 +1048,11 @@ fn topk_delta_ms(exact: &BTreeMap<(u32, u32, u32), f64>, prefix: u32, isl: u32, 
         topk_interp_1d(&points, query_prefix)
     };
     let isl_interp = |query_prefix: u32, query_isl: u32, anchor_bs: u32| -> Option<f64> {
-        let isl_values: BTreeSet<u32> =
-            exact.keys().filter(|(_, _, b)| *b == anchor_bs).map(|(_, i, _)| *i).collect();
+        let isl_values: BTreeSet<u32> = exact
+            .keys()
+            .filter(|(_, _, b)| *b == anchor_bs)
+            .map(|(_, i, _)| *i)
+            .collect();
         let points: Vec<(u32, f64)> = isl_values
             .into_iter()
             .filter_map(|i| prefix_interp(query_prefix, i, anchor_bs).map(|v| (i, v)))
@@ -1102,7 +1191,13 @@ fn sum_floor_upto(n: i128, divisor: i128) -> i128 {
 }
 
 /// Python `PerfDatabase._compressed_context_pairs`.
-fn compressed_context_pairs(batch: i128, query_len: i128, prefix: i128, ratio: i128, limit: i128) -> i128 {
+fn compressed_context_pairs(
+    batch: i128,
+    query_len: i128,
+    prefix: i128,
+    ratio: i128,
+    limit: i128,
+) -> i128 {
     if ratio <= 0 || query_len <= 0 || limit <= 0 {
         return 0;
     }
@@ -1159,10 +1254,16 @@ pub(crate) fn dsv4_attention_sol_ms(
     let lg = local_o_groups as i128; // Python local_groups = max(1, o_groups)
 
     let tokens = if is_context { b * s } else { b };
-    let kv_len = if is_context { prefix + s } else { (s - 1).max(0) };
+    let kv_len = if is_context {
+        prefix + s
+    } else {
+        (s - 1).max(0)
+    };
 
-    let gemm_projection_ops =
-        2 * tokens * h * qlr + 2 * tokens * qlr * nh * hd + 2 * tokens * h * hd + 2 * tokens * lg * olr * h;
+    let gemm_projection_ops = 2 * tokens * h * qlr
+        + 2 * tokens * qlr * nh * hd
+        + 2 * tokens * h * hd
+        + 2 * tokens * lg * olr * h;
     let output_absorption_ops = 2 * tokens * nh * hd * olr;
 
     let compressor_mult: i128 = if cr == 4 { 2 } else { 1 };
@@ -1215,8 +1316,7 @@ pub(crate) fn dsv4_attention_sol_ms(
 
     let gemm_mem = gemm_quant.mapping().memory;
     let bf16_mem = GemmQuantMode::Bfloat16.mapping().memory;
-    let mut gemm_weight_bytes =
-        (h * qlr + qlr * nh * hd + h * hd + lg * olr * h) as f64 * gemm_mem;
+    let mut gemm_weight_bytes = (h * qlr + qlr * nh * hd + h * hd + lg * olr * h) as f64 * gemm_mem;
     let mut bfloat16_weight_bytes = (nh * hd * olr) as f64 * bf16_mem;
     if cr != 0 {
         gemm_weight_bytes += (2 * h * compressor_mult * hd) as f64 * gemm_mem;
@@ -1294,7 +1394,12 @@ fn validate_dsv4_local_head_semantics(
     for ((model, version), pairs) in observed {
         let tps: BTreeSet<u32> = pairs.iter().map(|&(_, tp)| tp).collect();
         let heads_constant = pairs.iter().map(|&(h, _)| h).collect::<BTreeSet<_>>().len() == 1;
-        let product_constant = pairs.iter().map(|&(h, tp)| h * tp).collect::<BTreeSet<_>>().len() == 1;
+        let product_constant = pairs
+            .iter()
+            .map(|&(h, tp)| h * tp)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 1;
         if tps.len() > 1 && heads_constant && !product_constant {
             return Err(AicError::PerfDatabase(format!(
                 "DSV4 module rows for model={model:?} version={version:?} keep num_heads \
@@ -1317,7 +1422,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         step: u32,
         isl: u32,
         batch: u32,
-        latency: f64,
+        value: LeafValue,
     }
     let mut raw_rows: Vec<RawRow> = Vec::new();
     let mut observed: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
@@ -1329,7 +1434,11 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         }
         any_source = true;
         let reader = PerfReader::open(path)?;
-        let mla_dtype_col = if key_on_fmha { Some(reader.col("mla_dtype")?) } else { None };
+        let mla_dtype_col = if key_on_fmha {
+            Some(reader.col("mla_dtype")?)
+        } else {
+            None
+        };
         let kv_cache_dtype_col = reader.col("kv_cache_dtype")?;
         let gemm_type_col = reader.col("gemm_type")?;
         let model_col = reader.col_optional("model");
@@ -1340,6 +1449,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         let isl_col = reader.col("isl")?;
         let step_col = reader.col("step")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
 
         for row in reader.rows()? {
@@ -1371,7 +1481,12 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
             };
             let heads = row.u32(num_heads_col)?;
             let tp = row.u32(tp_size_col)?.max(1);
-            observed.entry((model, version)).or_default().insert((heads, tp));
+            observed
+                .entry((model, version))
+                .or_default()
+                .insert((heads, tp));
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             raw_rows.push(RawRow {
                 key,
                 heads,
@@ -1379,7 +1494,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
                 step: row.u32(step_col)?,
                 isl: row.u32(isl_col)?,
                 batch: row.u32(batch_size_col)?,
-                latency: row.f64(latency_col)?,
+                value: LeafValue::with_power(latency, power),
             });
         }
     }
@@ -1387,7 +1502,10 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
         return Err(AicError::PerfDatabase(format!(
             "no DSV4 module rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
 
@@ -1411,7 +1529,7 @@ fn load_module_parquet(sources: &[PerfSource], key_on_fmha: bool) -> Result<Modu
             .entry(row.isl)
             .or_default()
             .entry(row.batch)
-            .or_insert(row.latency);
+            .or_insert(row.value);
     }
     Ok(ModuleGrids { by_keys })
 }
@@ -1486,17 +1604,29 @@ mod tests {
         let observed = |pairs: &[(u32, u32)]| {
             let mut m: BTreeMap<(String, String), BTreeSet<(u32, u32)>> = BTreeMap::new();
             m.insert(
-                ("deepseek-ai/DeepSeek-V4-Pro".to_string(), "0.5.10".to_string()),
+                (
+                    "deepseek-ai/DeepSeek-V4-Pro".to_string(),
+                    "0.5.10".to_string(),
+                ),
                 pairs.iter().copied().collect(),
             );
             m
         };
         // Stale: native 128 constant across tp 1/2/4/8.
-        let err = validate_dsv4_local_head_semantics(&observed(&[(128, 1), (128, 2), (128, 4), (128, 8)]))
-            .unwrap_err();
-        assert!(err.to_string().contains("pre-#1131 NATIVE semantics"), "{err}");
+        let err = validate_dsv4_local_head_semantics(&observed(&[
+            (128, 1),
+            (128, 2),
+            (128, 4),
+            (128, 8),
+        ]))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("pre-#1131 NATIVE semantics"),
+            "{err}"
+        );
         // Local: 128/64/32/16 across tp 1/2/4/8 (product constant).
-        validate_dsv4_local_head_semantics(&observed(&[(128, 1), (64, 2), (32, 4), (16, 8)])).unwrap();
+        validate_dsv4_local_head_semantics(&observed(&[(128, 1), (64, 2), (32, 4), (16, 8)]))
+            .unwrap();
         // Single tp is unambiguous under the convention.
         validate_dsv4_local_head_semantics(&observed(&[(64, 1)])).unwrap();
         validate_dsv4_local_head_semantics(&observed(&[(16, 8)])).unwrap();
@@ -1510,19 +1640,38 @@ mod tests {
         let q_ctx = |kind, b, isl, prefix| {
             table
                 .query_context(
-                    &spec, kind, b, isl, 16, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", prefix, None,
+                    &spec,
+                    kind,
+                    b,
+                    isl,
+                    16,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
+                    prefix,
+                    None,
                 )
                 .unwrap()
+                .latency
         };
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, 128, KvCacheQuantMode::Fp8,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    &spec,
+                    kind,
+                    b,
+                    s,
+                    16,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
                     None,
                 )
                 .unwrap()
+                .latency
         };
         let approx = |got: f64, want: f64| {
             assert!(
@@ -1570,19 +1719,38 @@ mod tests {
         let q_gen = |kind, b, s| {
             table
                 .query_generation(
-                    &spec, kind, b, s, 16, 128, KvCacheQuantMode::Fp8,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM",
+                    &spec,
+                    kind,
+                    b,
+                    s,
+                    16,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
                     None,
                 )
                 .unwrap()
+                .latency
         };
         let q_ctx = |kind, b, isl| {
             table
                 .query_context(
-                    &spec, kind, b, isl, 16, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
+                    &spec,
+                    kind,
+                    b,
+                    isl,
+                    16,
+                    128,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
+                    0,
+                    None,
                 )
                 .unwrap()
+                .latency
         };
         let approx = |got: f64, want: f64| {
             assert!(
@@ -1627,8 +1795,8 @@ mod tests {
                 AttnKind::Csa,
                 8,   // batch
                 512, // isl
-                64, // local_heads (Flash tp1)
-                64, // native_heads (Flash)
+                64,  // local_heads (Flash tp1)
+                64,  // native_heads (Flash)
                 KvCacheQuantMode::Fp8,
                 FmhaQuantMode::Bfloat16,
                 GemmQuantMode::Fp8Block,
@@ -1636,8 +1804,12 @@ mod tests {
                 0, // prefix
                 None,
             )
-            .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8");
-        assert!(latency.is_finite() && latency > 0.0, "unexpected latency: {latency}");
+            .expect("DSV4 context lookup must resolve fp8_e4m3 kv_cache_dtype as fp8")
+            .latency;
+        assert!(
+            latency.is_finite() && latency > 0.0,
+            "unexpected latency: {latency}"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1816,6 +1988,7 @@ mod tests {
                     sol_dims,
                 )
                 .unwrap()
+                .latency
         };
         let approx = |got: f64, want: f64| {
             assert!(
@@ -1900,7 +2073,7 @@ mod tests {
                 ("v1_flat", 8192, 512, 1, 64, 9.9),     // no top_last -> shape skipped
             ],
         );
-        let calib = load_topk_calib_parquet(&[PerfSource(path, None)])
+        let calib = load_topk_calib_parquet(&[PerfSource(path.clone(), None)], &path)
             .unwrap()
             .expect("calib must load");
         // Pairing (Python _build_topk_calib_from_rows): DELTA = max(0, flat - top_last).
@@ -1921,7 +2094,10 @@ mod tests {
         assert!(calib.exact_v1.get(&128).is_none());
         for (key, want) in expected_exact {
             let got = v1_native[&key];
-            assert!((got - want).abs() < 1e-12, "exact[{key:?}] = {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1e-12,
+                "exact[{key:?}] = {got} vs {want}"
+            );
         }
         let oracle = [
             ((0u32, 512u32, 1u32), 0.6),          // exact hit
@@ -1949,7 +2125,8 @@ mod tests {
     fn topk_calib_absent_file_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("dsv4_csa_topk_calib_perf.parquet");
-        let calib = load_topk_calib_parquet(&[PerfSource(missing, None)]).unwrap();
+        let calib =
+            load_topk_calib_parquet(&[PerfSource(missing.clone(), None)], &missing).unwrap();
         assert!(calib.is_none(), "absent file must load as None");
         // Missing calib -> DELTA machinery is a no-op (Python
         // `_dsv4_topk_delta_ms(None, ...) == 0.0`).
@@ -1999,8 +2176,14 @@ mod tests {
         ];
         let make_root = |with_calib: bool| {
             let dir = tempfile::tempdir().unwrap();
-            write_module_parquet(&dir.path().join("dsv4_csa_context_module_perf.parquet"), &csa_ctx_rows);
-            write_module_parquet(&dir.path().join("dsv4_hca_context_module_perf.parquet"), &hca_ctx_rows);
+            write_module_parquet(
+                &dir.path().join("dsv4_csa_context_module_perf.parquet"),
+                &csa_ctx_rows,
+            );
+            write_module_parquet(
+                &dir.path().join("dsv4_hca_context_module_perf.parquet"),
+                &hca_ctx_rows,
+            );
             write_module_parquet(
                 &dir.path().join("dsv4_csa_generation_module_perf.parquet"),
                 &csa_gen_rows,
@@ -2016,18 +2199,38 @@ mod tests {
         let q_ctx = |table: &Dsv4Table, kind| {
             table
                 .query_context(
-                    &spec, kind, 8, 512, 64, 64, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
+                    &spec,
+                    kind,
+                    8,
+                    512,
+                    64,
+                    64,
+                    KvCacheQuantMode::Fp8,
+                    FmhaQuantMode::Bfloat16,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
+                    0,
+                    None,
                 )
                 .unwrap()
+                .latency
         };
         let q_gen = |table: &Dsv4Table, kind| {
             table
                 .query_generation(
-                    &spec, kind, 16, 385, 64, 64, KvCacheQuantMode::Fp8,
-                    GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", None,
+                    &spec,
+                    kind,
+                    16,
+                    385,
+                    64,
+                    64,
+                    KvCacheQuantMode::Fp8,
+                    GemmQuantMode::Fp8Block,
+                    "DeepseekV4ForCausalLM",
+                    None,
                 )
                 .unwrap()
+                .latency
         };
 
         let root = make_root(true);
@@ -2035,16 +2238,27 @@ mod tests {
         assert!((q_ctx(&table, AttnKind::Csa) - 0.88).abs() < 1e-12); // 1.0 - 0.12
         assert!((q_gen(&table, AttnKind::Csa) - 0.47).abs() < 1e-12); // 0.5 - 0.03
         assert!((q_ctx(&table, AttnKind::Hca) - 0.7).abs() < 1e-12); // HCA untouched
-        // A query whose native identity has no calib bucket (Pro 128 vs the
-        // Flash-64 calibration here) must stay UNCORRECTED — mismatched
-        // calibration is never borrowed (#1460 review). The module row still
-        // resolves via the single-native ladder, so only the DELTA differs.
+                                                                     // A query whose native identity has no calib bucket (Pro 128 vs the
+                                                                     // Flash-64 calibration here) must stay UNCORRECTED — mismatched
+                                                                     // calibration is never borrowed (#1460 review). The module row still
+                                                                     // resolves via the single-native ladder, so only the DELTA differs.
         let uncorrected = table
             .query_context(
-                &spec, AttnKind::Csa, 8, 512, 64, 128, KvCacheQuantMode::Fp8,
-                FmhaQuantMode::Bfloat16, GemmQuantMode::Fp8Block, "DeepseekV4ForCausalLM", 0, None,
+                &spec,
+                AttnKind::Csa,
+                8,
+                512,
+                64,
+                128,
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Fp8Block,
+                "DeepseekV4ForCausalLM",
+                0,
+                None,
             )
-            .unwrap();
+            .unwrap()
+            .latency;
         assert!((uncorrected - 1.0).abs() < 1e-12);
 
         let bare_root = make_root(false);
@@ -2140,16 +2354,31 @@ mod tests {
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());
         // Exact 3-axis hits.
-        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(), Some(0.2));
-        assert_eq!(table.query_paged_mqa_logits(1, 8192, 8192, 1, 64).unwrap(), Some(0.3));
+        assert_eq!(
+            table.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(),
+            Some(0.2)
+        );
+        assert_eq!(
+            table.query_paged_mqa_logits(1, 8192, 8192, 1, 64).unwrap(),
+            Some(0.3)
+        );
         // tp=8 not collected -> falls back to the tp=1 slice.
-        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 8, 64).unwrap(), Some(0.2));
+        assert_eq!(
+            table.query_paged_mqa_logits(1, 8192, 0, 8, 64).unwrap(),
+            Some(0.2)
+        );
         // Missing head slice -> None.
-        assert_eq!(table.query_paged_mqa_logits(1, 8192, 0, 1, 32).unwrap(), None);
+        assert_eq!(
+            table.query_paged_mqa_logits(1, 8192, 0, 1, 32).unwrap(),
+            None
+        );
         // Absent file -> None.
         let empty = tempfile::tempdir().unwrap();
         let bare = Dsv4Table::new(empty.path().to_path_buf());
-        assert_eq!(bare.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(), None);
+        assert_eq!(
+            bare.query_paged_mqa_logits(1, 8192, 0, 1, 64).unwrap(),
+            None
+        );
     }
 
     /// Raw top_last retention + lookup (Python `_load_csa_topk_top_last` +
@@ -2171,16 +2400,25 @@ mod tests {
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());
         // num_heads column absent -> no filter (any native_heads resolves).
-        assert_eq!(table.csa_topk_top_last(16384, 0, 64, 1).unwrap(), Some(800.0));
+        assert_eq!(
+            table.csa_topk_top_last(16384, 0, 64, 1).unwrap(),
+            Some(800.0)
+        );
         // flat row (130.0) must not shadow the top_last value.
-        assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), Some(100.0));
+        assert_eq!(
+            table.csa_topk_top_last(2048, 0, 64, 1).unwrap(),
+            Some(100.0)
+        );
         // Without a num_heads column the DELTA rows carry no native identity
         // and pair nothing (#1460 review); only the top_last grid loads.
         let calib = table.load_topk_calib().unwrap().expect("calib must load");
         assert!(calib.exact_v1.is_empty());
         // isl beyond the collected grid -> fail loud (dsa::lookup_2d contract).
         let err = table.csa_topk_top_last(32768, 0, 64, 1).unwrap_err();
-        assert!(err.to_string().contains("exceeds the collected"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("exceeds the collected"),
+            "unexpected: {err}"
+        );
         // Absent calib -> None (operator fails loud on top).
         let empty = tempfile::tempdir().unwrap();
         let bare = Dsv4Table::new(empty.path().to_path_buf());
@@ -2203,7 +2441,75 @@ mod tests {
         );
         let table = Dsv4Table::new(dir.path().to_path_buf());
         assert_eq!(table.csa_topk_top_last(2048, 0, 64, 1).unwrap(), Some(42.0));
-        assert_eq!(table.csa_topk_top_last(2048, 0, 128, 1).unwrap(), Some(77.0));
+        assert_eq!(
+            table.csa_topk_top_last(2048, 0, 128, 1).unwrap(),
+            Some(77.0)
+        );
         assert_eq!(table.csa_topk_top_last(2048, 0, 32, 1).unwrap(), None);
+    }
+
+    /// ENERGY semantics of the CSA topK DELTA correction. Python twin
+    /// (pandas fixture with `power`, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_context_deepseek_v4_attention_module(b=8, s=512, prefix=0,
+    ///     num_heads=64, native_heads=64, tp_size=1, ..., compress_ratio=4,
+    ///     kvcache_quant_mode=fp8, fmha_quant_mode=bfloat16,
+    ///     gemm_quant_mode=fp8_block, database_mode=SILICON)
+    /// # -> latency=0.88, energy=88.0
+    /// ```
+    ///
+    /// Exact-hit leaf (latency 1.0, power 100 -> energy 100) minus the calib
+    /// DELTA 0.12 clamps latency to 0.88; energy rescales by
+    /// corrected/base = 0.88 (Python: `energy *= corrected_latency/latency`).
+    #[test]
+    fn dsv4_csa_topk_energy_rescale_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("dsv4_csa_context_module_perf.parquet"),
+            &[
+                Col::Str("architecture", vec!["DeepseekV4ForCausalLM"]),
+                Col::Str("mla_dtype", vec!["bfloat16"]),
+                Col::Str("kv_cache_dtype", vec!["fp8"]),
+                Col::Str("gemm_type", vec!["fp8_block"]),
+                Col::Str("model", vec!["m"]),
+                Col::Str("version", vec!["v"]),
+                Col::I64("num_heads", vec![64]),
+                Col::I64("tp_size", vec![1]),
+                Col::I64("batch_size", vec![8]),
+                Col::I64("isl", vec![512]),
+                Col::I64("step", vec![0]),
+                Col::F64("latency", vec![1.0]),
+                Col::F64("power", vec![100.0]),
+            ],
+        );
+        write_calib_parquet_with_heads(
+            &tmp.path().join("dsv4_csa_topk_calib_perf.parquet"),
+            &[
+                ("v1_flat", 0, 512, 8, 64, 0.30),
+                ("v1_top_last", 0, 512, 8, 64, 0.18), // DELTA = 0.12
+            ],
+        );
+        let table = Dsv4Table::new(tmp.path().to_path_buf());
+        let spec = energy_test_spec();
+        let v = table
+            .query_context(
+                &spec,
+                AttnKind::Csa,
+                8,
+                512,
+                64,
+                64,
+                KvCacheQuantMode::Fp8,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Fp8Block,
+                "DeepseekV4ForCausalLM",
+                0,
+                None,
+            )
+            .unwrap();
+        assert!((v.latency - 0.88).abs() < 1e-12, "latency {}", v.latency);
+        assert!((v.energy - 88.0).abs() < 1e-9 * 88.0, "energy {}", v.energy);
     }
 }

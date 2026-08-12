@@ -33,13 +33,30 @@ use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
 
 /// Analytic memory-op latency (ms). Matches Python's
-/// `PerfDatabase.query_mem_op` empirical path (the only path used for
-/// SILICON queries — there's no perf table for raw memory ops).
+/// `PerfDatabase.query_mem_op` empirical path (the path shared by
+/// SILICON / HYBRID / EMPIRICAL — there's no perf table for raw memory ops).
 pub(crate) fn mem_op_latency_ms(spec: &SystemSpec, mem_bytes: f64) -> f64 {
     let mem_bw = spec.gpu.mem_bw.max(1.0);
     let scaling = spec.gpu.mem_bw_empirical_scaling_factor.max(1e-9);
     let constant = spec.gpu.mem_empirical_constant_latency;
     (mem_bytes / (mem_bw * scaling) + constant) * 1000.0
+}
+
+/// Mode-dispatched memory-op query. Mirrors `PerfDatabase.query_mem_op`:
+/// SOL (and the retired SOL_FULL alias) is the pure `bytes / mem_bw` bound
+/// tagged `Source::Sol` (no empirical scaling, no constant latency); every
+/// other mode shares the empirical formula tagged `Source::Empirical`.
+pub(crate) fn query_mem_op(db: &PerfDatabase, mem_bytes: f64) -> PerformanceResult {
+    match db.database_mode {
+        DatabaseMode::Sol | DatabaseMode::SolFull => PerformanceResult::new(
+            mem_bytes / db.system_spec.gpu.mem_bw.max(1.0) * 1000.0,
+            Source::Sol,
+        ),
+        _ => PerformanceResult::new(
+            mem_op_latency_ms(&db.system_spec, mem_bytes),
+            Source::Empirical,
+        ),
+    }
 }
 
 fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
@@ -60,12 +77,27 @@ fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
 /// `_ATTN_PREFILL_HS_RATIO`). Used to rescale a borrowed util curve when the
 /// exact head_size has no collected data. DECODE util is ~head_size-
 /// independent (memory-bound KV read), so decode transfer uses no table.
-const ATTN_PREFILL_HS_RATIO_TRTLLM: &[(u32, f64)] =
-    &[(64, 0.58), (128, 1.00), (192, 1.10), (256, 1.17), (512, 1.20)];
-const ATTN_PREFILL_HS_RATIO_SGLANG: &[(u32, f64)] =
-    &[(64, 0.60), (128, 1.00), (192, 1.18), (256, 1.32), (512, 1.38)];
-const ATTN_PREFILL_HS_RATIO_VLLM: &[(u32, f64)] =
-    &[(64, 0.60), (128, 1.00), (192, 1.27), (256, 1.51), (512, 1.60)];
+const ATTN_PREFILL_HS_RATIO_TRTLLM: &[(u32, f64)] = &[
+    (64, 0.58),
+    (128, 1.00),
+    (192, 1.10),
+    (256, 1.17),
+    (512, 1.20),
+];
+const ATTN_PREFILL_HS_RATIO_SGLANG: &[(u32, f64)] = &[
+    (64, 0.60),
+    (128, 1.00),
+    (192, 1.18),
+    (256, 1.32),
+    (512, 1.38),
+];
+const ATTN_PREFILL_HS_RATIO_VLLM: &[(u32, f64)] = &[
+    (64, 0.60),
+    (128, 1.00),
+    (192, 1.27),
+    (256, 1.51),
+    (512, 1.60),
+];
 
 /// Prefill-attention util ratio vs head_size=128, log2-interpolated between
 /// table points and clamped at the ends. Unknown backend -> 1.0 (no
@@ -88,9 +120,17 @@ fn attn_prefill_hs_ratio(backend: &str, head_size: u32) -> f64 {
         return last.1;
     }
     // Bracketing keys exist by the checks above (table is sorted ascending).
-    let (lo, lo_ratio) = *table.iter().rev().find(|&&(h, _)| h < head_size).expect("lower bracket");
-    let (hi, hi_ratio) = *table.iter().find(|&&(h, _)| h > head_size).expect("upper bracket");
-    let t = ((head_size as f64).log2() - (lo as f64).log2()) / ((hi as f64).log2() - (lo as f64).log2());
+    let (lo, lo_ratio) = *table
+        .iter()
+        .rev()
+        .find(|&&(h, _)| h < head_size)
+        .expect("lower bracket");
+    let (hi, hi_ratio) = *table
+        .iter()
+        .find(|&&(h, _)| h > head_size)
+        .expect("upper bracket");
+    let t = ((head_size as f64).log2() - (lo as f64).log2())
+        / ((hi as f64).log2() - (lo as f64).log2());
     lo_ratio + t * (hi_ratio - lo_ratio)
 }
 
@@ -171,7 +211,7 @@ impl ContextAttentionOp {
         // dispatches through the database mode — the silicon table at the
         // full sequence `s + pfx` with the prefix correction, or the
         // util-space empirical estimate (whose SOL already discounts prefix).
-        let ctx = |s: u32, pfx: u32| -> Result<(f64, Source), AicError> {
+        let ctx = |s: u32, pfx: u32| -> Result<PerformanceResult, AicError> {
             query_context_attention_table(
                 db,
                 batch_size,
@@ -190,41 +230,51 @@ impl ContextAttentionOp {
         // balanced chunks. c = ceil(isl / 2cp); rank 0 owns chunk 0 (prefix
         // unchanged) and chunk 2cp-1 (attends almost the full sequence). Only
         // the FMHA table term is split; the fused extras below are added once.
-        let (mut latency, source) = if self.cp_size > 1 {
+        // Latency and energy both sum across the chunks (Python `__add__`).
+        let mut result = if self.cp_size > 1 {
             let c = isl.div_ceil(2 * self.cp_size).max(1);
-            let (first, first_source) = ctx(c, prefix)?;
-            let (second, second_source) = ctx(c, prefix + isl - c)?;
-            (first + second, first_source.combine(second_source))
+            ctx(c, prefix)?.plus(ctx(c, prefix + isl - c)?)
         } else {
             ctx(isl, prefix)?
         };
 
         // Fused-op extras (qk_norm optional, rope + kv_write mandatory).
+        // Python evaluates them through the mode-aware `query_mem_op` and
+        // composes full PerformanceResults, so the extras keep their
+        // provenance (empirical formula under SILICON/HYBRID/EMPIRICAL, sol
+        // under SOL) and the final add below merges it into the table
+        // result's source — silicon table + empirical extras -> "mixed".
         let q_num = (self.n * self.head_size) as f64;
         let k_num = (self.n_kv * self.head_size) as f64;
         let v_num = (self.n_kv * self.head_size) as f64;
-        let spec = &db.system_spec;
+        let mem_op = |bytes: f64| query_mem_op(db, bytes);
 
-        let mut extra = 0.0;
+        // Python `extra_latency = 0`: a zero PerformanceResult is an add
+        // identity (`plus` passes the first accumulated term through
+        // verbatim, source included).
+        let mut extra = PerformanceResult::new(0.0, Source::Empirical);
         if self.use_qk_norm {
-            let qk_norm = 2.0 * mem_op_latency_ms(spec, q_num * 2.0)
-                + 2.0 * mem_op_latency_ms(spec, k_num * 2.0);
-            extra += qk_norm * 2.0; // elementwise before norm
+            let qk_norm = mem_op(q_num * 2.0)
+                .scaled(2.0)
+                .plus(mem_op(k_num * 2.0).scaled(2.0));
+            extra = extra.plus(qk_norm.scaled(2.0)); // elementwise before norm
         }
-        let apply_rope = 2.0 * mem_op_latency_ms(spec, q_num * 2.0 + k_num * 2.0);
-        let kv_write = mem_op_latency_ms(spec, k_num * self.fmha_quant_mode.mapping().memory)
-            + mem_op_latency_ms(spec, v_num * self.fmha_quant_mode.mapping().memory);
-        extra += apply_rope + kv_write;
+        let apply_rope = mem_op(q_num * 2.0 + k_num * 2.0).scaled(2.0);
+        let kv_write = mem_op(k_num * self.fmha_quant_mode.mapping().memory)
+            .plus(mem_op(v_num * self.fmha_quant_mode.mapping().memory));
+        extra = extra.plus(apply_rope.plus(kv_write));
 
-        latency += extra * 1.1; // Python's correction factor for the fused extras.
+        // Python's correction factor for the fused extras
+        // (`result += extra_latency * 1.1`): latency and energy both sum
+        // (the mem-op extras carry zero energy) and the sources merge.
+        result = result.plus(extra.scaled(1.1));
 
         if seq_imbalance_correction_scale != 1.0 {
-            latency *= seq_imbalance_correction_scale;
+            // Python `result * scale` scales latency AND energy.
+            result = result.scaled(seq_imbalance_correction_scale);
         }
 
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 
@@ -269,7 +319,7 @@ impl GenerationAttentionOp {
         kv_seq_tokens: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<PerformanceResult, AicError> {
-        let (table_latency, source) = query_generation_attention_table(
+        let mut result = query_generation_attention_table(
             db,
             batch_size,
             kv_seq_tokens,
@@ -279,13 +329,11 @@ impl GenerationAttentionOp {
             self.window_size,
             self.kv_cache_dtype,
         )?;
-        let mut latency = table_latency;
         if gen_seq_imbalance_correction_scale != 1.0 {
-            latency *= gen_seq_imbalance_correction_scale;
+            // Python `result * scale` scales latency AND energy.
+            result = result.scaled(gen_seq_imbalance_correction_scale);
         }
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 
@@ -331,7 +379,7 @@ impl EncoderAttentionOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let (mut latency, source) = query_encoder_attention_table(
+        let mut result = query_encoder_attention_table(
             db,
             batch_size,
             s,
@@ -343,17 +391,18 @@ impl EncoderAttentionOp {
         // operations/attention.py): Q + K bytes (bf16) over all tokens,
         // rotated fractionally, with the 1.1 correction factor. Added on top
         // of the mode-dispatched table value (Python applies it after the
-        // table query in every mode).
+        // table query in every mode, through the mode-aware `query_mem_op`)
+        // as a full PerformanceResult, so the rope extra keeps its mem-op
+        // provenance and the add merges sources (silicon table + empirical
+        // rope -> "mixed").
         if self.partial_rotary_factor > 0.0 {
             let qk_num = (self.n as u64) * (self.head_size as u64); // MHA: q == k
             let qk_bytes = 2 * (qk_num * 2) * (batch_size as u64) * (s as u64);
             let apply_rope =
-                self.partial_rotary_factor * 2.0 * mem_op_latency_ms(&db.system_spec, qk_bytes as f64);
-            latency += apply_rope * 1.1;
+                query_mem_op(db, qk_bytes as f64).scaled(self.partial_rotary_factor * 2.0);
+            result = result.plus(apply_rope.scaled(1.1));
         }
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 
@@ -361,14 +410,17 @@ impl EncoderAttentionOp {
 // Database-mode dispatch, mirroring the Python `_query_*_attention_table`
 // classmethods (`operations/attention.py`): SILICON queries the table; HYBRID
 // converts a typed silicon miss into the util-space empirical estimate;
-// EMPIRICAL always estimates. The SOL diagnostic modes never reach the
-// compiled engine (the routing gate delegates them to the Python step).
+// EMPIRICAL always estimates; SOL (and the retired SOL_FULL alias) returns
+// the pure speed-of-light roofline with `Source::Sol` and zero energy.
 // ---------------------------------------------------------------------------
 
-/// Context attention latency for `(b, s, prefix, shape)` under the database's
-/// query mode. The silicon path queries the table at `full_s = s + prefix`
-/// and applies the prefix correction; the empirical path bakes the prefix
-/// into the query SOL instead (mirroring Python's `get_sol`).
+/// Context attention latency + energy for `(b, s, prefix, shape)` under the
+/// database's query mode. The silicon path queries the table at
+/// `full_s = s + prefix` and applies the prefix correction to latency AND
+/// energy (Python: `latency = get_value(result, "latency") *
+/// prefix_correction; energy = get_value(result, "energy") *
+/// prefix_correction`); the empirical path bakes the prefix into the query
+/// SOL instead (mirroring Python's `get_sol`) and carries no energy.
 #[allow(clippy::too_many_arguments)]
 fn query_context_attention_table(
     db: &PerfDatabase,
@@ -381,32 +433,83 @@ fn query_context_attention_table(
     window_size: u32,
     kv_quant: KvCacheQuantMode,
     fmha_quant: FmhaQuantMode,
-) -> Result<(f64, Source), AicError> {
-    let silicon = || -> Result<f64, AicError> {
+) -> Result<PerformanceResult, AicError> {
+    let silicon = || -> Result<PerformanceResult, AicError> {
         let full_s = s + prefix;
-        let latency = db.attention.query_context(
-            b, full_s, n, n_kv, head_size, window_size, kv_quant, fmha_quant,
+        let value = db.attention.query_context(
+            b,
+            full_s,
+            n,
+            n_kv,
+            head_size,
+            window_size,
+            kv_quant,
+            fmha_quant,
         )?;
-        Ok(latency * prefix_correction(full_s, prefix))
+        let correction = prefix_correction(full_s, prefix);
+        Ok(PerformanceResult::with_energy(
+            value.latency * correction,
+            value.energy * correction,
+            Source::Silicon,
+        ))
     };
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((
+        // Python `_query_context_attention_table`: `get_sol(b, s, prefix, n,
+        // n_kv, head_size, window_size, kvcache_quant_mode, fmha_quant_mode)[0]`
+        // at the REAL n_kv (no MHA sentinel).
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
+            Ok(PerformanceResult::new(
+                context_attention_sol_with_prefix_ms(
+                    &db.system_spec,
+                    b as f64,
+                    s as f64,
+                    prefix as f64,
+                    n as f64,
+                    n_kv as f64,
+                    head_size,
+                    window_size,
+                    kv_quant,
+                    attn_flops,
+                ),
+                Source::Sol,
+            ))
+        }
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_attention_empirical(
-                db, b, s, prefix, n, n_kv, head_size, window_size, kv_quant, fmha_quant,
+                db,
+                b,
+                s,
+                prefix,
+                n,
+                n_kv,
+                head_size,
+                window_size,
+                kv_quant,
+                fmha_quant,
             )?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
-            Ok(latency) => Ok((latency, Source::Silicon)),
-            Err(err) if err.is_missing_perf_data() => Ok((
+            Ok(result) => Ok(result),
+            Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                 context_attention_empirical(
-                    db, b, s, prefix, n, n_kv, head_size, window_size, kv_quant, fmha_quant,
+                    db,
+                    b,
+                    s,
+                    prefix,
+                    n,
+                    n_kv,
+                    head_size,
+                    window_size,
+                    kv_quant,
+                    fmha_quant,
                 )?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((silicon()?, Source::Silicon)),
+        _ => silicon(),
     }
 }
 
@@ -446,7 +549,11 @@ fn context_attention_empirical(
     let n_kv_lookup = if n == n_kv { 0 } else { n_kv };
     let query = [n as f64, (s + prefix) as f64, b as f64];
 
-    let windows: Vec<u32> = if window_size > 0 { vec![window_size, 0] } else { vec![window_size] };
+    let windows: Vec<u32> = if window_size > 0 {
+        vec![window_size, 0]
+    } else {
+        vec![window_size]
+    };
     for &slice_window in &windows {
         // Own-slice grid: samples are full attention (prefix=0), so the
         // per-sample SOL is the prefix=0 specialization at the slice's own
@@ -460,7 +567,13 @@ fn context_attention_empirical(
             slice_window
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
-            match db.attention.context_points(fmha_quant, kv_quant, n_kv_lookup, head_size, slice_window) {
+            match db.attention.context_points(
+                fmha_quant,
+                kv_quant,
+                n_kv_lookup,
+                head_size,
+                slice_window,
+            ) {
                 Ok(points) => {
                     let sol = |c: &[f64]| {
                         context_attention_sol_ms(
@@ -475,7 +588,9 @@ fn context_attention_empirical(
                             attn_flops,
                         )
                     };
-                    Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol))))
+                    Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                        points, sol,
+                    ))))
                 }
                 // Typed coverage miss -> no grid (fall through the ladder);
                 // schema/load errors propagate.
@@ -495,9 +610,14 @@ fn context_attention_empirical(
         // prefill head_size-util ratio (SOL still uses the query's own
         // head_size).
         if db.transfer_policy.contains(TransferKind::XShape) {
-            if let Some((ref_grid, ref_hs)) =
-                ctx_headsize_ref_grid(db, fmha_quant, kv_quant, n_kv_lookup, head_size, slice_window)?
-            {
+            if let Some((ref_grid, ref_hs)) = ctx_headsize_ref_grid(
+                db,
+                fmha_quant,
+                kv_quant,
+                n_kv_lookup,
+                head_size,
+                slice_window,
+            )? {
                 let scale = attn_prefill_hs_ratio(&db.backend, head_size)
                     / attn_prefill_hs_ratio(&db.backend, ref_hs);
                 let (latency, _) =
@@ -526,7 +646,10 @@ fn ctx_headsize_ref_grid(
     target_hs: u32,
     window_size: u32,
 ) -> Result<Option<(std::sync::Arc<UtilGrid>, u32)>, AicError> {
-    let head_sizes = match db.attention.context_head_sizes(fmha_quant, kv_quant, n_kv_lookup) {
+    let head_sizes = match db
+        .attention
+        .context_head_sizes(fmha_quant, kv_quant, n_kv_lookup)
+    {
         Ok(sizes) => sizes,
         Err(err) if err.is_missing_perf_data() => return Ok(None),
         Err(err) => return Err(err),
@@ -547,7 +670,10 @@ fn ctx_headsize_ref_grid(
         window_size
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.attention.context_points(fmha_quant, kv_quant, n_kv_lookup, ref_hs, window_size) {
+        match db
+            .attention
+            .context_points(fmha_quant, kv_quant, n_kv_lookup, ref_hs, window_size)
+        {
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     context_attention_sol_ms(
@@ -573,8 +699,8 @@ fn ctx_headsize_ref_grid(
     Ok(grid.filter(|g| !g.is_empty()).map(|g| (g, ref_hs)))
 }
 
-/// Generation attention latency for `(b, s, shape)` under the database's
-/// query mode.
+/// Generation attention latency + energy for `(b, s, shape)` under the
+/// database's query mode. Empirical estimates carry no energy.
 #[allow(clippy::too_many_arguments)]
 fn query_generation_attention_table(
     db: &PerfDatabase,
@@ -585,28 +711,68 @@ fn query_generation_attention_table(
     head_size: u32,
     window_size: u32,
     kv_quant: KvCacheQuantMode,
-) -> Result<(f64, Source), AicError> {
+) -> Result<PerformanceResult, AicError> {
+    let silicon = |v: crate::perf_database::perf_interp::LeafValue| {
+        PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon)
+    };
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((
+        // Python `_query_generation_attention_table`: `get_sol(b, s, n, n_kv,
+        // head_size, window_size, kvcache_quant_mode)[0]` — the FMHA flops are
+        // implied by the kv-cache dtype (`generation_attn_flops`). Passing the
+        // real n_kv as the lookup value is exact: the 0 sentinel only matters
+        // for table slicing, and `n_kv > 0` resolves to itself in the formula.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let attn_flops = generation_attn_flops(&db.system_spec, kv_quant)?;
+            Ok(PerformanceResult::new(
+                generation_attention_sol_ms(
+                    &db.system_spec,
+                    n_kv,
+                    head_size,
+                    window_size,
+                    kv_quant,
+                    n as f64,
+                    b as f64,
+                    s as f64,
+                    attn_flops,
+                ),
+                Source::Sol,
+            ))
+        }
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_attention_empirical(db, b, s, n, n_kv, head_size, window_size, kv_quant)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => {
-            match db.attention.query_generation(b, s, n, n_kv, head_size, window_size, kv_quant) {
-                Ok(latency) => Ok((latency, Source::Silicon)),
-                Err(err) if err.is_missing_perf_data() => Ok((
+            match db
+                .attention
+                .query_generation(b, s, n, n_kv, head_size, window_size, kv_quant)
+            {
+                Ok(value) => Ok(silicon(value)),
+                Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                     generation_attention_empirical(
-                        db, b, s, n, n_kv, head_size, window_size, kv_quant,
+                        db,
+                        b,
+                        s,
+                        n,
+                        n_kv,
+                        head_size,
+                        window_size,
+                        kv_quant,
                     )?,
                     Source::Empirical,
                 )),
                 Err(err) => Err(err),
             }
         }
-        _ => Ok((
-            db.attention.query_generation(b, s, n, n_kv, head_size, window_size, kv_quant)?,
-            Source::Silicon,
-        )),
+        _ => Ok(silicon(db.attention.query_generation(
+            b,
+            s,
+            n,
+            n_kv,
+            head_size,
+            window_size,
+            kv_quant,
+        )?)),
     }
 }
 
@@ -643,7 +809,11 @@ fn generation_attention_empirical(
     );
     let query = [n as f64, b as f64, s as f64];
 
-    let windows: Vec<u32> = if window_size > 0 { vec![window_size, 0] } else { vec![window_size] };
+    let windows: Vec<u32> = if window_size > 0 {
+        vec![window_size, 0]
+    } else {
+        vec![window_size]
+    };
     for &slice_window in &windows {
         let key = format!(
             "gen_attn:{}:{}:{}:{}",
@@ -653,7 +823,10 @@ fn generation_attention_empirical(
             slice_window
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
-            match db.attention.generation_points(kv_quant, n_kv_lookup, head_size, slice_window) {
+            match db
+                .attention
+                .generation_points(kv_quant, n_kv_lookup, head_size, slice_window)
+            {
                 Ok(points) => {
                     let sol = |c: &[f64]| {
                         generation_attention_sol_ms(
@@ -668,7 +841,9 @@ fn generation_attention_empirical(
                             attn_flops,
                         )
                     };
-                    Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol))))
+                    Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                        points, sol,
+                    ))))
                 }
                 Err(err) if err.is_missing_perf_data() => Ok(None),
                 Err(err) => Err(err),
@@ -724,7 +899,10 @@ fn gen_headsize_ref_grid(
         window_size
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.attention.generation_points(kv_quant, n_kv_lookup, ref_hs, window_size) {
+        match db
+            .attention
+            .generation_points(kv_quant, n_kv_lookup, ref_hs, window_size)
+        {
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     generation_attention_sol_ms(
@@ -750,8 +928,8 @@ fn gen_headsize_ref_grid(
     Ok(grid.filter(|g| !g.is_empty()).map(|g| (g, ref_hs)))
 }
 
-/// Encoder attention latency for `(b, s, shape)` under the database's query
-/// mode.
+/// Encoder attention latency + energy for `(b, s, shape)` under the
+/// database's query mode. Empirical estimates carry no energy.
 fn query_encoder_attention_table(
     db: &PerfDatabase,
     b: u32,
@@ -759,23 +937,41 @@ fn query_encoder_attention_table(
     n: u32,
     head_size: u32,
     fmha_quant: FmhaQuantMode,
-) -> Result<(f64, Source), AicError> {
+) -> Result<PerformanceResult, AicError> {
+    let silicon = |v: crate::perf_database::perf_interp::LeafValue| {
+        PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon)
+    };
     match db.database_mode {
-        DatabaseMode::Empirical => Ok((
+        // Python `_query_encoder_attention_table`:
+        // `get_sol(b, s, n, head_size, fmha_quant_mode)[0]`.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
+            Ok(PerformanceResult::new(
+                encoder_attention_sol_ms(
+                    &db.system_spec,
+                    head_size,
+                    n as f64,
+                    s as f64,
+                    b as f64,
+                    attn_flops,
+                ),
+                Source::Sol,
+            ))
+        }
+        DatabaseMode::Empirical => Ok(PerformanceResult::new(
             encoder_attention_empirical(db, b, s, n, head_size, fmha_quant)?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match db.attention.query_encoder(b, s, n, head_size, fmha_quant) {
-            Ok(latency) => Ok((latency, Source::Silicon)),
-            Err(err) if err.is_missing_perf_data() => Ok((
+            Ok(value) => Ok(silicon(value)),
+            Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                 encoder_attention_empirical(db, b, s, n, head_size, fmha_quant)?,
                 Source::Empirical,
             )),
             Err(err) => Err(err),
         },
-        _ => Ok((
+        _ => Ok(silicon(
             db.attention.query_encoder(b, s, n, head_size, fmha_quant)?,
-            Source::Silicon,
         )),
     }
 }
@@ -798,7 +994,9 @@ fn encoder_attention_empirical(
     let key = format!("encoder_attn:{}:{}", fmha_quant.name(), head_size);
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.attention.encoder_points(fmha_quant, head_size) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                points, sol,
+            )))),
             Err(err) if err.is_missing_perf_data() => Ok(None),
             Err(err) => Err(err),
         }
@@ -840,7 +1038,9 @@ mod tests {
             .expect("context attention query must succeed");
         // Table value at exact hit is 19.82; mem_op extras add ~0-1ms on top.
         assert!(result.latency_ms > 19.0 && result.latency_ms < 30.0);
-        assert_eq!(result.source, Source::Silicon);
+        // Measured table leaf + empirical rope/kv_write extras -> "mixed"
+        // (Python `ContextAttention.query` PerformanceResult composition).
+        assert_eq!(result.source, Source::Mixed);
     }
 
     #[test]
@@ -859,7 +1059,10 @@ mod tests {
             .query(&db, 8, 8192, 8192, 1.0)
             .expect("query must succeed")
             .latency_ms;
-        let no_prefix = op.query(&db, 8, 16384, 0, 1.0).expect("query must succeed").latency_ms;
+        let no_prefix = op
+            .query(&db, 8, 16384, 0, 1.0)
+            .expect("query must succeed")
+            .latency_ms;
         assert!(
             with_prefix < no_prefix,
             "prefix correction must shrink latency: {with_prefix} vs {no_prefix}"
@@ -913,24 +1116,94 @@ mod tests {
         // (b, s, prefix, n, n_kv, hs, w, kv, expected)
         let cases: &[(u32, u32, u32, u32, u32, u32, u32, KvCacheQuantMode, f64)] = &[
             // own-shape off-grid query on the collected hs=128 slice
-            (7, 3000, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, 0.771381792089557),
+            (
+                7,
+                3000,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                0.771381792089557,
+            ),
             // exact collected hit: util reconstruction returns the measured value
-            (8, 16384, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, 19.820667266845703),
+            (
+                8,
+                16384,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                19.820667266845703,
+            ),
             // prefix baked into the query SOL (util from the full-seq point)
-            (4, 8192, 8192, 64, 1, 128, 0, KvCacheQuantMode::Fp8, 7.964372158050536),
+            (
+                4,
+                8192,
+                8192,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                7.964372158050536,
+            ),
             // head_size=192 XSHAPE transfer (collected head sizes are {128, 256};
             // ref=128, util_scale = ratio(vllm,192)/ratio(vllm,128) = 1.27)
-            (4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, 0.7588535312592514),
+            (
+                4,
+                4096,
+                0,
+                48,
+                8,
+                192,
+                0,
+                KvCacheQuantMode::Fp8,
+                0.7588535312592514,
+            ),
             // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
-            (2, 10000, 0, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, 6.254832211751053),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                6.254832211751053,
+            ),
             // uncollected window (w=4096) -> window=0 slice as the util carrier
-            (2, 10000, 0, 32, 1, 128, 4096, KvCacheQuantMode::Bfloat16, 1.0547865593548398),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                4096,
+                KvCacheQuantMode::Bfloat16,
+                1.0547865593548398,
+            ),
         ];
         for &(b, s, prefix, n, n_kv, hs, w, kv, expected) in cases {
-            let (latency, source) = query_context_attention_table(
-                &db, b, s, prefix, n, n_kv, hs, w, kv, FmhaQuantMode::Bfloat16,
+            let result = query_context_attention_table(
+                &db,
+                b,
+                s,
+                prefix,
+                n,
+                n_kv,
+                hs,
+                w,
+                kv,
+                FmhaQuantMode::Bfloat16,
             )
             .expect("empirical query");
+            let (latency, source) = (result.latency_ms, result.source);
             assert!(
                 (latency - expected).abs() < 1e-9,
                 "(b={b}, s={s}, p={prefix}, n={n}, n_kv={n_kv}, hs={hs}, w={w}): \
@@ -951,21 +1224,66 @@ mod tests {
         // (b, s, n, n_kv, hs, w, kv, expected)
         let cases: &[(u32, u32, u32, u32, u32, u32, KvCacheQuantMode, f64)] = &[
             // own-shape off-grid query on the collected hs=128 slice
-            (48, 7777, 64, 8, 128, 0, KvCacheQuantMode::Fp8, 0.1302149492334821),
+            (
+                48,
+                7777,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                0.1302149492334821,
+            ),
             // exact collected hit (isl=1 + step=1 -> stored s=2), calibrated
             // from the RAW (SOL-clamped) table -- NOT the 5-sample silicon avg
-            (32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8, 0.008661333471536636),
+            (
+                32,
+                2,
+                64,
+                4,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                0.008661333471536636,
+            ),
             // head_size=192 XSHAPE transfer (decode util_scale stays 1.0)
-            (16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8, 0.03992800042033196),
+            (
+                16,
+                4096,
+                48,
+                8,
+                192,
+                0,
+                KvCacheQuantMode::Fp8,
+                0.03992800042033196,
+            ),
             // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
-            (8, 12000, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, 0.07096281754412269),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                0.07096281754412269,
+            ),
             // uncollected window (w=2048) -> window=0 slice as the util carrier
-            (8, 12000, 32, 1, 128, 2048, KvCacheQuantMode::Bfloat16, 0.0023706380832401778),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                2048,
+                KvCacheQuantMode::Bfloat16,
+                0.0023706380832401778,
+            ),
         ];
         for &(b, s, n, n_kv, hs, w, kv, expected) in cases {
-            let (latency, source) =
-                query_generation_attention_table(&db, b, s, n, n_kv, hs, w, kv)
-                    .expect("empirical query");
+            let result = query_generation_attention_table(&db, b, s, n, n_kv, hs, w, kv)
+                .expect("empirical query");
+            let (latency, source) = (result.latency_ms, result.source);
             assert!(
                 (latency - expected).abs() < 1e-9,
                 "(b={b}, s={s}, n={n}, n_kv={n_kv}, hs={hs}, w={w}): \
@@ -984,17 +1302,23 @@ mod tests {
     fn encoder_attention_empirical_and_hybrid_match_python_oracles() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        let (latency, source) =
-            query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
-                .expect("empirical query");
-        assert!((latency - 0.03625488888618745).abs() < 1e-9, "got {latency}");
+        let result = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
+            .expect("empirical query");
+        let (latency, source) = (result.latency_ms, result.source);
+        assert!(
+            (latency - 0.03625488888618745).abs() < 1e-9,
+            "got {latency}"
+        );
         assert_eq!(source, Source::Empirical);
 
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
-        let (latency, source) =
-            query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
-                .expect("hybrid query");
-        assert!((latency - 0.038151752523614205).abs() < 1e-9, "got {latency}");
+        let result = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
+            .expect("hybrid query");
+        let (latency, source) = (result.latency_ms, result.source);
+        assert!(
+            (latency - 0.038151752523614205).abs() < 1e-9,
+            "got {latency}"
+        );
         assert_eq!(source, Source::Silicon);
     }
 
@@ -1006,18 +1330,38 @@ mod tests {
     fn context_attention_hybrid_dispatch_matches_python() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
-        let (latency, source) = query_context_attention_table(
-            &db, 4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+        let result = query_context_attention_table(
+            &db,
+            4,
+            4096,
+            0,
+            48,
+            8,
+            192,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
         )
         .expect("hybrid query");
+        let (latency, source) = (result.latency_ms, result.source);
         assert!((latency - 0.7588535312592514).abs() < 1e-9, "got {latency}");
         assert_eq!(source, Source::Empirical);
 
         // Collected slice: silicon exact hit, untouched by the fallback.
-        let (latency, source) = query_context_attention_table(
-            &db, 8, 16384, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+        let result = query_context_attention_table(
+            &db,
+            8,
+            16384,
+            0,
+            64,
+            1,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
         )
         .expect("hybrid query");
+        let (latency, source) = (result.latency_ms, result.source);
         assert!((latency - 19.820667266845703).abs() < 1e-9, "got {latency}");
         assert_eq!(source, Source::Silicon);
     }
@@ -1032,10 +1376,211 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         db.transfer_policy = crate::common::enums::TransferPolicy::OFF;
         let ctx = query_context_attention_table(
-            &db, 4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, FmhaQuantMode::Bfloat16,
+            &db,
+            4,
+            4096,
+            0,
+            48,
+            8,
+            192,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
         );
-        assert!(matches!(ctx, Err(AicError::EmpiricalNotImplemented(_))), "got {ctx:?}");
-        let gen = query_generation_attention_table(&db, 16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8);
-        assert!(matches!(gen, Err(AicError::EmpiricalNotImplemented(_))), "got {gen:?}");
+        assert!(
+            matches!(ctx, Err(AicError::EmpiricalNotImplemented(_))),
+            "got {ctx:?}"
+        );
+        let gen =
+            query_generation_attention_table(&db, 16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8);
+        assert!(
+            matches!(gen, Err(AicError::EmpiricalNotImplemented(_))),
+            "got {gen:?}"
+        );
+    }
+
+    /// ENERGY oracle for the context-attention PREFIX CORRECTION
+    /// (attention.py:517-518: latency AND energy both scale by
+    /// `(full_s^2 - prefix^2) / full_s^2`). Synthetic power-carrying fixture
+    /// through a full `PerfDatabase`; Python twin:
+    ///
+    /// ```text
+    /// db.query_context_attention(2, 512, 1024, 16, 16, bfloat16, bfloat16,
+    ///                            SILICON, window_size=0, head_size=128)
+    /// # -> latency=1.0366807798802438, energy=155.50211698203657
+    /// ```
+    ///
+    /// full_s = 1536 sqrt-blends (isl 1024: 1.0 ms/100 W) and (isl 2048:
+    /// 3.0 ms/200 W) to (1.8660254..., energy 279.9038...); the correction
+    /// (1536^2 - 1024^2)/1536^2 = 5/9 scales both.
+    #[test]
+    fn context_attention_prefix_correction_scales_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{
+            write_energy_systems_root, write_parquet, Col,
+        };
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let data = write_energy_systems_root(tmp.path());
+        write_parquet(
+            &data.join("context_attention_perf.parquet"),
+            &[
+                Col::Str("attn_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::Str("kv_cache_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("batch_size", vec![2, 2]),
+                Col::I64("isl", vec![1024, 2048]),
+                Col::I64("num_heads", vec![16, 16]),
+                Col::I64("num_key_value_heads", vec![16, 16]),
+                Col::I64("head_dim", vec![128, 128]),
+                Col::I64("step", vec![0, 0]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let db = PerfDatabase::load(tmp.path(), "testsys", "vllm", "1.0").expect("db must load");
+        let r = query_context_attention_table(
+            &db,
+            2,
+            512,
+            1024,
+            16,
+            16,
+            128,
+            0,
+            KvCacheQuantMode::Bfloat16,
+            FmhaQuantMode::Bfloat16,
+        )
+        .expect("silicon query");
+        assert!(
+            ((r.latency_ms - 1.0366807798802438) / 1.0366807798802438).abs() < 1e-9,
+            "latency {}",
+            r.latency_ms
+        );
+        assert!(
+            ((r.energy_wms - 155.50211698203657) / 155.50211698203657).abs() < 1e-9,
+            "energy {}",
+            r.energy_wms
+        );
+        assert_eq!(r.source, Source::Silicon);
+    }
+
+    /// SOL mode: the three attention table dispatches return the pure
+    /// roofline tagged `Source::Sol`, the fused mem-op extras use the SOL
+    /// mem formula, and `query_mem_op` flips formula and tag (Python parity:
+    /// `_query_*_attention_table` SOL branches + mode-aware `query_mem_op`).
+    #[test]
+    fn attention_sol_mode_returns_roofline_with_sol_source() {
+        let mut db = b200_vllm_db();
+        db.database_mode = DatabaseMode::Sol;
+        let spec = db.system_spec.clone();
+
+        // query_mem_op: SOL drops the empirical scaling + constant latency.
+        let mem_op = query_mem_op(&db, 1_000_000.0);
+        assert_eq!(mem_op.latency_ms, 1_000_000.0 / spec.gpu.mem_bw * 1000.0);
+        assert_eq!(mem_op.source, Source::Sol);
+        assert!(mem_op.latency_ms < mem_op_latency_ms(&spec, 1_000_000.0));
+
+        // Context: table SOL (prefix inside the formula) + rope/kv_write
+        // extras through the SOL mem-op formula, `* 1.1`, source preserved.
+        let ctx = ContextAttentionOp::new(
+            "ctx",
+            64,
+            8,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        );
+        let result = ctx.query(&db, 4, 2048, 256, 1.0).expect("ctx sol");
+        let attn_flops = quant_tc_flops(&spec, FmhaQuantMode::Bfloat16.mapping()).unwrap();
+        let table = context_attention_sol_with_prefix_ms(
+            &spec,
+            4.0,
+            2048.0,
+            256.0,
+            64.0,
+            8.0,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            attn_flops,
+        );
+        let sol_mem_op = |bytes: f64| bytes / spec.gpu.mem_bw * 1000.0;
+        let q_num = (64 * 128) as f64;
+        let k_num = (8 * 128) as f64;
+        let fmha_mem = FmhaQuantMode::Bfloat16.mapping().memory;
+        let extras = 2.0 * sol_mem_op(q_num * 2.0 + k_num * 2.0)
+            + sol_mem_op(k_num * fmha_mem)
+            + sol_mem_op(k_num * fmha_mem);
+        assert!((result.latency_ms - (table + extras * 1.1)).abs() < 1e-12);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+
+        // Generation: flops implied by the kv-cache dtype.
+        let gen = GenerationAttentionOp::new("gen", 64, 8, 128, KvCacheQuantMode::Fp8);
+        let result = gen.query(&db, 8, 4096, 1.0).expect("gen sol");
+        let gen_flops = generation_attn_flops(&spec, KvCacheQuantMode::Fp8).unwrap();
+        let expected = generation_attention_sol_ms(
+            &spec,
+            8,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            64.0,
+            8.0,
+            4096.0,
+            gen_flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+
+        // Encoder (partial_rotary_factor 0 -> table only).
+        let enc = EncoderAttentionOp::new("enc", 16, 72, FmhaQuantMode::Bfloat16);
+        let result = enc.query(&db, 2, 64).expect("enc sol");
+        let enc_flops = quant_tc_flops(&spec, FmhaQuantMode::Bfloat16.mapping()).unwrap();
+        let expected = encoder_attention_sol_ms(&spec, 72, 16.0, 64.0, 2.0, enc_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+    }
+
+    /// SILICON mode: the fused rope/kv_write extras are empirical formulas,
+    /// so the op-level context result must MERGE provenance — measured table
+    /// leaf + empirical extras -> `Source::Mixed`, with the table's energy
+    /// unchanged (the mem-op extras carry none). Guards the
+    /// PerformanceResult composition against regressing to a latency-only
+    /// scalar add (which mislabeled the result `silicon`).
+    #[test]
+    fn context_attention_silicon_merges_extras_provenance_into_mixed() {
+        let db = b200_vllm_db();
+        let op = ContextAttentionOp::new(
+            "ctx",
+            64,
+            8,
+            128,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        );
+        let result = op.query(&db, 4, 2048, 256, 1.0).expect("ctx silicon");
+
+        let table = query_context_attention_table(
+            &db,
+            4,
+            2048,
+            256,
+            64,
+            8,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        )
+        .expect("table silicon");
+        let q_num = (64 * 128) as f64;
+        let k_num = (8 * 128) as f64;
+        let fmha_mem = FmhaQuantMode::Bfloat16.mapping().memory;
+        let mem_op = |bytes: f64| query_mem_op(&db, bytes).latency_ms;
+        // Same association as the op body: rope + (kv_q + kv_v).
+        let extras = 2.0 * mem_op(q_num * 2.0 + k_num * 2.0)
+            + (mem_op(k_num * fmha_mem) + mem_op(k_num * fmha_mem));
+        assert_eq!(result.latency_ms, table.latency_ms + extras * 1.1);
+        assert_eq!(result.energy_wms, table.energy_wms);
+        assert_eq!(result.source, Source::Mixed);
     }
 }

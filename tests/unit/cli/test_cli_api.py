@@ -422,6 +422,26 @@ class TestCLIRecommendUnit:
         assert kwargs["total_gpus"] == 8
         assert kwargs["model_path"] == "Qwen/Qwen3-32B"
 
+    def test_forwards_forward_model(self, monkeypatch):
+        # `recommend --forward-model fpm` must reach task building — silently
+        # dropping it would run op_level while the user believes fpm is active.
+        import aiconfigurator.cli.api as api
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        with patch.object(api, "build_default_tasks", autospec=True, return_value={}) as mock_build:
+            api.cli_recommend(
+                model_path="Qwen/Qwen3-32B",
+                system="h200_sxm",
+                target_request_rate=10.0,
+                forward_model="fpm",
+            )
+
+        assert mock_build.call_args.kwargs["forward_model"] == "fpm"
+
     def test_forwards_load_match_params(self, monkeypatch):
         import aiconfigurator.cli.api as api
 

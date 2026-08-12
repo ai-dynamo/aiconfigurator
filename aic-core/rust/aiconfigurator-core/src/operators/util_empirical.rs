@@ -241,7 +241,11 @@ impl UtilGrid {
         // log-floor-collapsed coordinates deterministically prefer the first
         // sample (mirrors `np.argsort(kind="stable")`).
         let mut order: Vec<usize> = (0..distances.len()).collect();
-        order.sort_by(|&i, &j| distances[i].partial_cmp(&distances[j]).expect("finite distances"));
+        order.sort_by(|&i, &j| {
+            distances[i]
+                .partial_cmp(&distances[j])
+                .expect("finite distances")
+        });
 
         if distances[order[0]] == 0.0 {
             return Some(self.utils[order[0]]);
@@ -359,7 +363,11 @@ impl UtilGridCache {
     /// the caller then raises via [`estimate`] with `grid=None`), `Err` for
     /// programming/schema errors (propagated, NOT memoised, never converted
     /// into a fallback).
-    pub fn get_or_try_build<F>(&self, key: &str, builder: F) -> Result<Option<Arc<UtilGrid>>, AicError>
+    pub fn get_or_try_build<F>(
+        &self,
+        key: &str,
+        builder: F,
+    ) -> Result<Option<Arc<UtilGrid>>, AicError>
     where
         F: FnOnce() -> Result<Option<UtilGrid>, AicError>,
     {
@@ -396,7 +404,8 @@ impl ZeroAwareDeltaLookup {
     /// Keep every point with `latency >= 0` (zero INCLUDED, unlike
     /// [`build_samples`]).
     pub fn new(points: Vec<(Vec<f64>, f64)>) -> Self {
-        let kept: Vec<(Vec<f64>, f64)> = points.into_iter().filter(|(_, lat)| *lat >= 0.0).collect();
+        let kept: Vec<(Vec<f64>, f64)> =
+            points.into_iter().filter(|(_, lat)| *lat >= 0.0).collect();
         if kept.is_empty() {
             return Self {
                 coords: Vec::new(),
@@ -494,7 +503,11 @@ impl DeltaLookupCache {
         Self::default()
     }
 
-    pub fn get_or_try_build<F>(&self, key: &str, builder: F) -> Result<Arc<ZeroAwareDeltaLookup>, AicError>
+    pub fn get_or_try_build<F>(
+        &self,
+        key: &str,
+        builder: F,
+    ) -> Result<Arc<ZeroAwareDeltaLookup>, AicError>
     where
         F: FnOnce() -> Result<ZeroAwareDeltaLookup, AicError>,
     {
@@ -553,7 +566,8 @@ mod tests {
         ]);
         let distance_9 = 11.0_f64.ln() - 9.0_f64.ln();
         let distance_8 = 11.0_f64.ln() - 8.0_f64.ln();
-        let expected = (0.4 / distance_9 + 0.2 / distance_8) / (1.0 / distance_9 + 1.0 / distance_8);
+        let expected =
+            (0.4 / distance_9 + 0.2 / distance_8) / (1.0 / distance_9 + 1.0 / distance_8);
 
         approx(grid.util(&[11.0]).unwrap(), expected);
     }
@@ -623,7 +637,10 @@ mod tests {
         assert!(matches!(missing, Err(AicError::EmpiricalNotImplemented(_))));
         let empty = UtilGrid::new(vec![]);
         let empty_res = estimate(1.0, &[1.0], Some(&empty), 1.0);
-        assert!(matches!(empty_res, Err(AicError::EmpiricalNotImplemented(_))));
+        assert!(matches!(
+            empty_res,
+            Err(AicError::EmpiricalNotImplemented(_))
+        ));
     }
 
     #[test]
@@ -693,10 +710,8 @@ mod tests {
 
     #[test]
     fn zero_aware_delta_keeps_zeroes_and_freezes_utilization() {
-        let lookup = ZeroAwareDeltaLookup::new(vec![
-            (vec![16.0, 16.0], 0.0),
-            (vec![1024.0, 1024.0], 2.0),
-        ]);
+        let lookup =
+            ZeroAwareDeltaLookup::new(vec![(vec![16.0, 16.0], 0.0), (vec![1024.0, 1024.0], 2.0)]);
         let sol = |c: &[f64]| c[0] * c[1];
 
         // Nearest to the zero point: the measured zero delta stays zero.

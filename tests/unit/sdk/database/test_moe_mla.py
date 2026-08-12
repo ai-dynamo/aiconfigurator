@@ -59,7 +59,7 @@ class TestMoE:
         assert result.source == "sol"
 
     def test_query_moe_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_moe(
             8,
             1024,
@@ -603,7 +603,7 @@ class TestMLABMM:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mla_bmm_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mla_bmm(
             8, 4, common.GEMMQuantMode.bfloat16, True, database_mode=common.DatabaseMode.SOL_FULL
         )
@@ -676,7 +676,7 @@ class TestMemoryOperations:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_mem_op_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         mem_bytes = 500_000
 
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_mem_op(
@@ -732,7 +732,7 @@ class TestP2P:
         assert math.isclose(result, expected, rel_tol=1e-6)
 
     def test_query_p2p_sol_full_mode(self, comprehensive_perf_db):
-        """Test SOL_FULL mode returns (sol_time, sol_math, sol_mem)."""
+        """Per-call SOL_FULL diagnostic returns (sol_time, sol_math, sol_mem)."""
         message_bytes = 500_000
 
         sol_time, sol_math, sol_mem = comprehensive_perf_db.query_p2p(

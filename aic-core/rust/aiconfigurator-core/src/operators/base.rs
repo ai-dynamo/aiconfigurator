@@ -55,20 +55,34 @@ impl Source {
     }
 }
 
-/// Latency result returned by every operator query.
+/// Latency + energy result returned by every operator query.
 ///
-/// Energy / power fields are intentionally not modeled here; the Python
-/// SDK does not expose them either, and adding them would require new
-/// collected data we don't have today.
+/// Mirrors Python's `PerformanceResult`: the float value is latency in ms
+/// and `energy_wms` rides along in watt-milliseconds (0.0 for tables that
+/// carry no power data and for empirical / SOL fallbacks, exactly like the
+/// Python paths that construct results without an energy argument).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PerformanceResult {
     pub latency_ms: f64,
+    pub energy_wms: f64,
     pub source: Source,
 }
 
 impl PerformanceResult {
     pub fn new(latency_ms: f64, source: Source) -> Self {
-        Self { latency_ms, source }
+        Self {
+            latency_ms,
+            energy_wms: 0.0,
+            source,
+        }
+    }
+
+    pub fn with_energy(latency_ms: f64, energy_wms: f64, source: Source) -> Self {
+        Self {
+            latency_ms,
+            energy_wms,
+            source,
+        }
     }
 
     /// Convenience constructor — `Source::Silicon` is the most common case
@@ -81,19 +95,42 @@ impl PerformanceResult {
         Self::default()
     }
 
-    /// Multiply the latency by `factor`, preserving the source tag.
+    /// Multiply latency AND energy by `factor`, preserving the source tag
+    /// (Python `__mul__` / `__truediv__` scale energy the same way).
     pub fn scaled(self, factor: f64) -> Self {
         Self {
             latency_ms: self.latency_ms * factor,
+            energy_wms: self.energy_wms * factor,
             source: self.source,
         }
     }
 
-    /// Clamp latency to `>= 0` (sub-op subtraction can go negative when
-    /// interpolation overshoots; the Python code clamps the same way).
+    /// Additive composition: latencies and energies sum, sources combine
+    /// to `Mixed` on mismatch (Python `__add__`). A zero result (latency
+    /// AND energy both 0.0) is a source-neutral identity — the other
+    /// side's tag survives, mirroring Python's zero-identity rule.
+    pub fn plus(self, other: PerformanceResult) -> Self {
+        let source = if self.latency_ms == 0.0 && self.energy_wms == 0.0 {
+            other.source
+        } else if other.latency_ms == 0.0 && other.energy_wms == 0.0 {
+            self.source
+        } else {
+            self.source.combine(other.source)
+        };
+        Self {
+            latency_ms: self.latency_ms + other.latency_ms,
+            energy_wms: self.energy_wms + other.energy_wms,
+            source,
+        }
+    }
+
+    /// Clamp latency and energy to `>= 0` (sub-op subtraction can go
+    /// negative when interpolation overshoots; the Python code clamps the
+    /// same way).
     pub fn clamp_non_negative(self) -> Self {
         Self {
             latency_ms: self.latency_ms.max(0.0),
+            energy_wms: self.energy_wms.max(0.0),
             source: self.source,
         }
     }
@@ -131,5 +168,21 @@ mod tests {
     fn performance_result_clamp_non_negative() {
         let r = PerformanceResult::silicon(-1.5).clamp_non_negative();
         assert_eq!(r.latency_ms, 0.0);
+    }
+
+    #[test]
+    fn plus_zero_result_is_source_neutral() {
+        // Mirrors Python test_zero_latency_energy_source_is_neutral: a
+        // (0.0, 0.0) operand must not force `Mixed`.
+        let zero = PerformanceResult::new(0.0, Source::Empirical);
+        let real = PerformanceResult::with_energy(2.0, 10.0, Source::Silicon);
+        assert_eq!(zero.plus(real).source, Source::Silicon);
+        assert_eq!(real.plus(zero).source, Source::Silicon);
+        // Non-zero operands with different tags still merge to Mixed.
+        let sol = PerformanceResult::new(1.0, Source::Sol);
+        assert_eq!(real.plus(sol).source, Source::Mixed);
+        // A zero-latency result that still carries energy is NOT neutral.
+        let energetic_zero = PerformanceResult::with_energy(0.0, 5.0, Source::Empirical);
+        assert_eq!(real.plus(energetic_zero).source, Source::Mixed);
     }
 }

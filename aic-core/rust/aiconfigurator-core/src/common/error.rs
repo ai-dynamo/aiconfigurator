@@ -78,4 +78,3 @@ impl AicError {
         matches!(self, Self::PerfDatabase(_) | Self::Io { .. })
     }
 }
-

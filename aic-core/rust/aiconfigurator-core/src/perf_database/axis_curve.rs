@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use super::perf_interp::LeafValue;
 use crate::common::error::AicError;
 
 pub(crate) trait AxisCoordinate: Copy + Ord {
@@ -150,6 +151,137 @@ impl<K: AxisCoordinate> AxisCurve<K> {
     }
 }
 
+/// Power-carrying twin of [`AxisCurve`]: an immutable one-axis curve over
+/// measured `{latency, power, energy}` leaves, specialized away from the
+/// generic nested-`Node` engine but preserving `perf_interp::query_value`
+/// semantics bit-for-bit (exact hit returns the leaf verbatim; in-range
+/// blends lerp latency and blend-power and re-derive
+/// `energy = power * latency`; boundary util-holds scale latency by the SOL
+/// ratio while power holds at the anchor — "energy scales with latency",
+/// mirroring Python `_resolve_tokens`). Shared by the MoE, mHC, MegaMoE and
+/// communication tables; the WideEP curve families stay latency-only on
+/// [`AxisCurve`] by design (see the wideep module docs).
+#[derive(Clone, Debug)]
+pub(crate) struct LeafAxisCurve<K = u32> {
+    axis_label: &'static str,
+    points: Box<[(K, LeafValue)]>,
+}
+
+impl Default for LeafAxisCurve<u32> {
+    fn default() -> Self {
+        Self::from_map("num_tokens", BTreeMap::new())
+    }
+}
+
+impl<K: AxisCoordinate> LeafAxisCurve<K> {
+    pub(crate) fn from_map(axis_label: &'static str, points: BTreeMap<K, LeafValue>) -> Self {
+        Self {
+            axis_label,
+            points: points.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    pub(crate) fn get(&self, coordinate: K) -> Option<LeafValue> {
+        self.points
+            .binary_search_by_key(&coordinate, |&(coordinate, _)| coordinate)
+            .ok()
+            .map(|index| self.points[index].1)
+    }
+
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = (K, LeafValue)> + '_ {
+        self.points.iter().copied()
+    }
+
+    /// Python `_require_moe_token_points`: a singleton curve queried below
+    /// its only measured point is a structured miss (it cannot define the
+    /// low-token launch-overhead regime). Multi-point underflow and
+    /// singleton overflow go to the engine's util-hold unchanged.
+    pub(crate) fn singleton_underflow(&self, coordinate: K) -> Option<K> {
+        if self.points.len() == 1 && coordinate < self.points[0].0 {
+            Some(self.points[0].0)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve with the one-axis `perf_interp` Grid contract on full
+    /// leaves: exact hits verbatim, raw interpolation within the measured
+    /// range (latency and blend-power lerped with the same weight, energy
+    /// re-derived as `power * latency`), and a boundary-util hold outside
+    /// it with `k_tail=1` (latency scales by the SOL ratio; power holds at
+    /// the anchor's blend power). Keep this in sync with
+    /// `perf_interp::query_value`; the differential tests below guard the
+    /// shared behavior.
+    pub(crate) fn query(
+        &self,
+        coordinate: f64,
+        sol: &dyn Fn(f64) -> f64,
+    ) -> Result<LeafValue, AicError> {
+        if self.points.is_empty() {
+            return Err(self.miss(coordinate, "empty table"));
+        }
+
+        if let Some(axis_value) = K::exact(coordinate) {
+            if let Some(leaf) = self.get(axis_value) {
+                return Ok(leaf);
+            }
+        }
+
+        let upper = self
+            .points
+            .partition_point(|&(axis_value, _)| axis_value.as_f64() < coordinate);
+        if upper == 0 || upper == self.points.len() {
+            let anchor = if upper == 0 {
+                self.points[0]
+            } else {
+                self.points[self.points.len() - 1]
+            };
+            let anchor_sol = sol(anchor.0.as_f64());
+            if anchor.1.latency.is_nan()
+                || anchor.1.latency <= 0.0
+                || anchor_sol.is_nan()
+                || anchor_sol <= 0.0
+            {
+                return Err(self.miss(coordinate, "no positive-util boundary anchor"));
+            }
+            let query_sol = sol(coordinate);
+            if query_sol.is_nan() || query_sol <= 0.0 {
+                return Err(self.miss(coordinate, "non-positive SOL at query"));
+            }
+            let latency = query_sol / (anchor_sol / anchor.1.latency);
+            let power = anchor.1.blend_power();
+            return Ok(LeafValue {
+                latency,
+                power,
+                energy: power * latency,
+            });
+        }
+
+        let lower = self.points[upper - 1];
+        let upper = self.points[upper];
+        let weight = (coordinate - lower.0.as_f64()) / (upper.0.as_f64() - lower.0.as_f64());
+        let latency = lower.1.latency + (upper.1.latency - lower.1.latency) * weight;
+        let lower_power = lower.1.blend_power();
+        let power = lower_power + (upper.1.blend_power() - lower_power) * weight;
+        Ok(LeafValue {
+            latency,
+            power,
+            energy: power * latency,
+        })
+    }
+
+    fn miss(&self, coordinate: f64, reason: &str) -> AicError {
+        AicError::PerfDatabase(format!(
+            "perf_interp: no data to anchor query {{{}={coordinate}}} ({reason})",
+            self.axis_label
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +381,78 @@ mod tests {
     #[should_panic(expected = "AxisCurve points must be strictly ascending and unique")]
     fn axis_curve_rejects_duplicate_points() {
         AxisCurve::from_sorted_iter("num_tokens", [(1_u32, 1.0), (1, 2.0)]);
+    }
+
+    /// The specialized leaf curve must be indistinguishable from the generic
+    /// engine's `query_value` on power-carrying leaves — bit-exact
+    /// latency/power/energy on exact hits, interior lerps, and both
+    /// boundary util-holds, and identical error strings on the miss paths
+    /// (the LeafValue twin of `axis_curve_is_bit_exact_with_the_generic_grid`).
+    #[test]
+    fn leaf_axis_curve_is_bit_exact_with_the_generic_engine() {
+        let points = BTreeMap::from([
+            (10, LeafValue::with_power(1.25, 100.0)),
+            (20, LeafValue::with_power(2.75, 150.0)),
+            (40, LeafValue::with_power(5.5, 275.0)),
+        ]);
+        let curve = LeafAxisCurve::from_map("num_tokens", points.clone());
+        let mut node = Node::branch();
+        for (&token, &leaf) in &points {
+            node.insert_value(&[token], leaf);
+        }
+        let sol = |tokens: f64| tokens * tokens + 1.0;
+        let generic_sol = |coords: &[f64]| sol(coords[0]);
+        let config = OpInterpConfig::grid(&["num_tokens"], &generic_sol);
+
+        for tokens in [5.0, 10.0, 15.5, 20.0, 31.0, 40.0, 80.0] {
+            let expected = perf_interp::query_value(&config, &node, &[tokens]).unwrap();
+            let actual = curve.query(tokens, &sol).unwrap();
+            for (name, actual, expected) in [
+                ("latency", actual.latency, expected.latency),
+                ("power", actual.power, expected.power),
+                ("energy", actual.energy, expected.energy),
+            ] {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "tokens={tokens}, field={name}"
+                );
+            }
+        }
+
+        // Miss paths: an empty curve and a non-positive SOL hold must
+        // produce the exact generic-engine error strings.
+        let empty = LeafAxisCurve::default();
+        let empty_node = Node::branch();
+        assert_eq!(
+            empty.query(10.0, &sol).unwrap_err().to_string(),
+            perf_interp::query_value(&config, &empty_node, &[10.0])
+                .unwrap_err()
+                .to_string()
+        );
+        let zero_sol = |_: f64| 0.0;
+        let generic_zero_sol = |_: &[f64]| 0.0;
+        let zero_config = OpInterpConfig::grid(&["num_tokens"], &generic_zero_sol);
+        assert_eq!(
+            curve.query(80.0, &zero_sol).unwrap_err().to_string(),
+            perf_interp::query_value(&zero_config, &node, &[80.0])
+                .unwrap_err()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn leaf_axis_curve_uses_its_axis_label_and_u64_keys() {
+        let curve = LeafAxisCurve::from_map(
+            "message_bytes",
+            BTreeMap::from([(1024_u64, LeafValue::latency_only(0.0))]),
+        );
+        assert_eq!(curve.singleton_underflow(512), Some(1024));
+        let err = curve.query(2048.0, &|bytes| bytes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "perf database error: perf_interp: no data to anchor query \
+             {message_bytes=2048} (no positive-util boundary anchor)"
+        );
     }
 }

@@ -230,7 +230,7 @@ def check_range_matches_database(data_rows: list[list[str]]) -> list[str]:
 
     # Each base combination should have both agg and disagg entries
     # Note: generate_combinations returns (huggingface_id, system, backend, version)
-    # Models are identified by HuggingFace IDs from DefaultHFModels
+    # Models are identified by HuggingFace IDs from the generated matrix roster.
     expected_combinations = set()
     for huggingface_id, system, backend, version in expected_base_combinations:
         architecture = support_matrix.get_architecture(huggingface_id)
