@@ -142,8 +142,10 @@ REGISTRY: list[OpEntry] = [
         # MiniMax-M3 MSA modules: hardware-validated on SM90 (h100/h200,
         # rc23 Triton reference path) and SM100/103 (b200/b300/gb200/gb300,
         # rc23 implementation="msa" fmha_sm100 path — see collect_msa_module).
-        # SM120 runs the Triton path and is being collected in this
-        # campaign; SM121 has never run on hardware and stays marked.
+        # SM120 runs the Triton path; its table is pending (collection-pool
+        # availability) and lands in a follow-up — trtllm-on-SM120 queries
+        # fall back to the HYBRID path until then. SM121 has never run on
+        # hardware and stays marked.
         unverified_sms=(121,),
     ),
     OpEntry(
