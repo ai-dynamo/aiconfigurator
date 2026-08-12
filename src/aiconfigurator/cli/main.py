@@ -570,6 +570,14 @@ def _add_default_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
+    )
 
 
 def _add_recommend_mode_arguments(parser):
@@ -743,6 +751,14 @@ def _add_recommend_mode_arguments(parser):
         default=None,
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
+    )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system.",
     )
 
 
@@ -1614,6 +1630,7 @@ def build_default_tasks(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
     serving_mode: str = "auto",
@@ -1807,6 +1824,7 @@ def build_default_tasks(
         "transfer_policy": transfer_policy,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
+        "attention_backend": attention_backend,
         "engine_step_backend": engine_step_backend,
     }
     if forward_model is not None:
@@ -3069,6 +3087,7 @@ def _run_recommend(args) -> None:
             max_seq_len=args.max_seq_len,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
             top_n=args.top_n,
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
@@ -3238,6 +3257,7 @@ def main(args):
             afd_candidate_overflow=getattr(args, "afd_candidate_overflow", "error"),
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
         )
     elif args.mode == "exp":
         try:

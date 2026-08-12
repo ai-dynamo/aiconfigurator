@@ -319,6 +319,20 @@ def test_invalid_attention_backend_rejected():
         t.validate()
 
 
+def test_valid_attention_backend_choices_accepted():
+    """Test that all valid attention_backend choices are accepted without raising."""
+    valid_choices = ["flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default"]
+    for choice in valid_choices:
+        t = Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            attention_backend=choice,
+        )
+        # Should not raise
+        t.validate()
+
+
 def test_invalid_wideep_num_slots_rejected():
     t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", wideep_num_slots=0)
     with pytest.raises(ValueError, match="wideep_num_slots"):
