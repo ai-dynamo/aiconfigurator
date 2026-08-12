@@ -351,3 +351,90 @@ def test_step_expert_field_spellings_are_parsed():
     parsed = _parse_hf_config_json(hf_config)
     assert parsed["num_experts"] == 288
     assert parsed["topk"] == 8
+
+
+def _build_step37(hf_config):
+    result = _parse_hf_config_json(hf_config)
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=1,
+        attention_dp_size=1,
+        cp_size=1,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+    return model
+
+
+def test_qk_norm_is_enabled_on_every_attention_op():
+    """Step3p7Attention builds q_norm/k_norm unconditionally, so every layer pays it.
+
+    The flag has a real cost (extra mem-ops over Q and K in ContextAttention /
+    GenerationAttention). BaseModel only reads ``use_qk_norm`` when extra_params
+    is a dict, and the hybrid path passes a HybridMoEConfig, so it was never set.
+    """
+    model = _build_step37(_step37_hf_config())
+    attn = [o for o in model.context_ops + model.generation_ops if hasattr(o, "_use_qk_norm")]
+    assert attn, "expected attention ops"
+    assert all(o._use_qk_norm for o in attn)
+
+
+def test_head_wise_attn_gate_emits_g_proj_sized_per_layer_type():
+    """use_head_wise_attn_gate adds g_proj: hidden_size -> that layer's head count.
+
+    Sliding layers declare 96 heads and global 64, so the gate is not one shared
+    width -- asserting on both catches a gate wired off the global head count.
+    """
+    hf_config = dict(_step37_hf_config())
+    hf_config["attention_other_setting"] = {"num_attention_heads": 96, "head_dim": 128}
+    hf_config["use_head_wise_attn_gate"] = True
+    model = _build_step37(hf_config)
+
+    h = 4096
+    by_name = {o._name: o for o in model.context_ops + model.generation_ops}
+    for prefix, heads in (
+        ("context_global", 64),
+        ("context_swa", 96),
+        ("generation_global", 64),
+        ("generation_swa", 96),
+    ):
+        gemm = by_name.get(f"{prefix}_attn_gate_gemm")
+        assert gemm is not None, f"missing {prefix}_attn_gate_gemm"
+        assert gemm._n == heads, f"{prefix} gate should project to {heads} heads, got {gemm._n}"
+        assert gemm._k == h
+        # one gate scalar per head, so the gate weight is head_dim times smaller
+        # than the out-projection it scales
+        assert by_name[f"{prefix}_attn_gate"]._dim_out == heads * 128
+
+
+def test_head_wise_attn_gate_is_off_by_default():
+    """HybridMoEModel is shared with MiMo-V2-Flash, Llama 4 and Gemma 4.
+
+    None of them have this gate, so a config that does not ask for it must emit
+    no gate ops at all.
+    """
+    model = _build_step37(_step37_hf_config())
+    assert not [o for o in model.context_ops + model.generation_ops if "attn_gate" in o._name]

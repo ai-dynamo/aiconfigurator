@@ -242,6 +242,24 @@ class HybridMoEModel(BaseModel):
                     f"context parallelism but appears in a CP-enabled context pipeline."
                 )
 
+    def _attn_gate_ops(self, prefix: str, c: int, h: int, n_q_per_gpu: int, proj_in: int, gemm_q) -> list:
+        """Head-wise attention gate, or ``[]`` when the model doesn't use one.
+
+        Step-3.7 sets ``use_head_wise_attn_gate``: ``g_proj`` projects
+        hidden_size -> num_attention_heads and its sigmoid scales each head's
+        attention output before ``o_proj``. The gate width follows the layer's
+        own head count, so sliding layers (96 heads) carry a wider gate than
+        global ones (64).
+        """
+        if not (self._hybrid_config and self._hybrid_config.use_head_wise_attn_gate):
+            return []
+        return [
+            ops.GEMM(f"{prefix}_attn_gate_gemm", c, n_q_per_gpu, h, gemm_q),
+            # Reads the attention output plus the per-head gate, writes the
+            # attention output back; one scalar per head, not per element.
+            ops.ElementWise(f"{prefix}_attn_gate", c, proj_in + n_q_per_gpu, proj_in, 0.8),
+        ]
+
     def _build_context_ops(self) -> None:
         """Build the context (prefill) operations for all four layer types."""
         if not self._hybrid_config:
@@ -284,7 +302,9 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_global", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q),
                     ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -307,7 +327,9 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_swa", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -330,7 +352,9 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_swa_dense", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("context_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -353,6 +377,10 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
+                    ),
+                    *self._attn_gate_ops(
+                        "context_global_dense", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q
                     ),
                     ops.GEMM(
                         "context_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
@@ -464,7 +492,9 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_global", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q),
                     ops.GEMM(
                         "generation_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
                     ),
@@ -488,7 +518,9 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_swa", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -510,7 +542,9 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_swa_dense", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM(
                         "generation_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True
                     ),
@@ -534,6 +568,10 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
+                    ),
+                    *self._attn_gate_ops(
+                        "generation_global_dense", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q
                     ),
                     ops.GEMM(
                         "generation_global_dense_proj_gemm",

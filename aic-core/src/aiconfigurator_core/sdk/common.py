@@ -131,6 +131,12 @@ class HybridMoEConfig:
 
     sliding_window_size: token window for SWA/local attention layers
     dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+
+    Step-specific attention extras, both off by default so the shared families
+    (MiMo-V2-Flash, Llama 4, Gemma 4) are unaffected:
+        use_qk_norm: per-head RMSNorm on Q and K before RoPE, every layer.
+        use_head_wise_attn_gate: g_proj (hidden_size → num_heads) whose sigmoid
+                          scales each head's attention output before o_proj.
     """
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
@@ -142,6 +148,8 @@ class HybridMoEConfig:
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+    use_qk_norm: bool = False
+    use_head_wise_attn_gate: bool = False
 
 
 @dataclass(frozen=True)

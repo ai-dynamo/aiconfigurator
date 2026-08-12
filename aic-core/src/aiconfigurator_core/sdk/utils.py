@@ -864,6 +864,10 @@ def _parse_hf_config_json(config: dict) -> dict:
             swa_head_dim=swa_hd_other,
             sliding_window_size=config.get("sliding_window", 0) or config.get("sliding_window_size", 0),
             dense_inter_size=0,  # dense layers use model-level inter_size
+            # Step3p7Attention builds q_norm/k_norm unconditionally, so there is
+            # no config flag to read -- it is on for every layer of this family.
+            use_qk_norm=True,
+            use_head_wise_attn_gate=bool(config.get("use_head_wise_attn_gate", False)),
         )
         logger.info(
             f"Step3p7 hybrid config: "
@@ -871,6 +875,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}, "
             f"swa_num_heads={extra_params.swa_num_heads or 'default'}, "
+            f"head_wise_attn_gate={extra_params.use_head_wise_attn_gate}, "
             f"share_expert_dim={config.get('share_expert_dim', 0)}"
         )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
