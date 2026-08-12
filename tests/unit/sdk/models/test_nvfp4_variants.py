@@ -172,6 +172,23 @@ def test_qwen36_task_preserves_inferred_provenance_for_mixed_precision_split():
     assert by_name["context_gdn_gate_ffn1_gemm"]._quant_mode == common.GEMMQuantMode.w4a16_nvfp4
 
 
+def test_model_config_provenance_does_not_shift_positional_quant_modes():
+    model_config = config.ModelConfig(
+        2,
+        1,
+        common.GEMMQuantMode.fp8,
+        common.MoEQuantMode.nvfp4,
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.fp8,
+    )
+
+    assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8
+    assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+    assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    assert model_config.fmha_quant_mode == common.FMHAQuantMode.fp8
+    assert model_config._gemm_quant_mode_is_explicit is None
+
+
 def test_qwen36_task_preserves_explicit_gemm_override():
     task = Task(
         model_path="nvidia/Qwen3.6-27B-NVFP4",
