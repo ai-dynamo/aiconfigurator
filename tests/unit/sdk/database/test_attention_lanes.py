@@ -720,3 +720,63 @@ def test_a_serving_lane_is_not_point_merged_with_later_lanes(lane_systems_root, 
     )
     assert donor_only != pytest.approx(_FAST_LATENCY), "the donor's own point must not leak into the head lane's slice"
     assert donor_only >= _SLOW_LATENCY, "the value is the head lane's own out-of-grid extrapolation"
+
+
+def _sparse_and_dense_context_lanes():
+    """A 1-slice lane and a strictly denser 3-slice lane, both carrying hs=64.
+
+    Both answer the ``head_size=64`` query, at latencies a factor
+    :data:`_LANE_RATIO` apart, so which lane HEADS the walk is observable in the
+    returned latency and not only in the order tuple.
+    """
+    sparse = _ctx_lane(_SLOW_LATENCY, head_size=64)
+    dense = _ctx_lane(_FAST_LATENCY, head_size=64)
+    for extra_head in (256, 512):
+        dense[QM][KCD][KV_N][extra_head] = _ctx_lane(_FAST_LATENCY, head_size=extra_head)[QM][KCD][KV_N][extra_head]
+    return sparse, dense
+
+
+def test_pinned_override_head_is_exempt_from_donor_density_ranking(lane_systems_root, no_op_load_data):
+    """An EXPLICIT ``attention_backend`` override heads the walk even when a
+    donor lane is denser — density ranks donors, never the pin.
+
+    Regression (AIC-1715/1716): the tier split used to be reconstructed from the
+    flat tuple, and a pin of ``fa3`` is byte-identical to the unpinned
+    alphabetical donor tier (``fa3`` sorts first), so the override collapsed into
+    the donor tier and the densest lane took the head.
+    """
+    from aiconfigurator.sdk.operations.attention import lane_walk_order, resolve_lane_order
+
+    sparse, dense = _sparse_and_dense_context_lanes()
+    # sm 999 has no entry in the fixture map: the override is the ONLY pin.
+    db = _StubDatabase(lane_systems_root, context_lanes={"fa3": sparse, "trtllm_mha": dense}, sm_version=999)
+
+    order = lane_walk_order(db._context_attention_data, resolve_lane_order(db, "fa3"), _CTX_DEPTH)
+
+    assert order[0] == "fa3", f"the explicit override must head the walk; got {order}"
+    assert order[1] == "trtllm_mha", f"the denser donor ranks first WITHIN the donor tier; got {order}"
+    assert float(_ctx_query(db, head_size=64, lane_order=resolve_lane_order(db, "fa3"))) == pytest.approx(
+        _SLOW_LATENCY
+    ), "the pinned lane serves, not the denser donor"
+
+
+def test_pinned_framework_default_head_is_exempt_from_donor_density_ranking(lane_systems_root, no_op_load_data):
+    """The framework-default map lane heads the walk even when a donor is denser.
+
+    Same regression as the override case, on the sm90 map entry (``fa3``): the
+    reconstruction classified the pinned head as donor tier, so the densest lane
+    silently replaced the framework default the map exists to express.
+    """
+    from aiconfigurator.sdk.operations.attention import lane_walk_order, resolve_lane_order
+
+    sparse, dense = _sparse_and_dense_context_lanes()
+    db = _StubDatabase(lane_systems_root, context_lanes={"fa3": sparse, "trtllm_mha": dense}, sm_version=90)
+
+    order = lane_walk_order(db._context_attention_data, resolve_lane_order(db), _CTX_DEPTH)
+
+    assert order[0] == "fa3", f"sglang 0.5.14 @ sm90 maps to fa3; it must head the walk; got {order}"
+    assert order[1] == "trtllm_mha", f"the denser donor ranks first WITHIN the donor tier; got {order}"
+    assert order[-1] == "default", "'default' stays the last resort of the known-lane tier"
+    assert float(_ctx_query(db, head_size=64)) == pytest.approx(_SLOW_LATENCY), (
+        "the framework-default lane serves, not the denser donor"
+    )
