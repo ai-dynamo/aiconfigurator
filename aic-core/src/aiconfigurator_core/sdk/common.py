@@ -121,6 +121,9 @@ class HybridMoEConfig:
     SWA/local attention dims — set to 0 to fall back to model-level defaults
     (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
     Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_heads:    Query heads for SWA/local layers (0 → num_heads). Step-3.7-Flash
+                          declares these separately (96 on sliding vs 64 global) in
+                          ``text_config.attention_other_setting``.
         swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
         swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
         swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
@@ -128,6 +131,12 @@ class HybridMoEConfig:
 
     sliding_window_size: token window for SWA/local attention layers
     dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+
+    Step-specific attention extras, both off by default so the shared families
+    (MiMo-V2-Flash, Llama 4, Gemma 4) are unaffected:
+        use_qk_norm: per-head RMSNorm on Q and K before RoPE, every layer.
+        use_head_wise_attn_gate: g_proj (hidden_size → num_heads) whose sigmoid
+                          scales each head's attention output before o_proj.
     """
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
@@ -138,6 +147,12 @@ class HybridMoEConfig:
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+    # New fields are appended, never inserted: this dataclass has a generated
+    # positional constructor, so inserting ahead of an existing optional field
+    # silently changes what a legacy positional call means.
+    swa_num_heads: int = 0
+    use_qk_norm: bool = False
+    use_head_wise_attn_gate: bool = False
 
 
 @dataclass(frozen=True)
@@ -590,6 +605,8 @@ DefaultHFModels = {
     "nvidia/Nemotron-H-56B-Base-8K",
     # Google Gemma 4 Models
     "google/gemma-4-26B-A4B",
+    # StepFun Step-3.7 Models
+    "stepfun-ai/Step-3.7-Flash",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
@@ -654,6 +671,7 @@ ModelFamily = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -679,6 +697,14 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiniMaxM3ForCausalLM": "MINIMAXM3",
     "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
+    # The published checkpoints declare Step3p7ForConditionalGeneration at the top
+    # level with a nested text_config architecture of Step3p5ForCausalLM. The
+    # *Flash* spellings only ever existed in this repo's curated configs, so both
+    # are mapped: real checkpoints and the curated fixtures.
+    "Step3p7ForConditionalGeneration": "STEP3P7",
+    "Step3p5ForCausalLM": "STEP3P7",
+    "Step3p7FlashForCausalLM": "STEP3P7",
+    "Step3p5FlashForCausalLM": "STEP3P7",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
@@ -691,6 +717,11 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
     "KimiK3ForConditionalGeneration": "text_config",
+    # Step-3.7/3.5-Flash ship a vision tower and nest the whole decoder under
+    # text_config; without this the parser reads the top level and rejects real
+    # checkpoints for having no num_hidden_layers.
+    "Step3p7ForConditionalGeneration": "text_config",
+    "Step3p7FlashForCausalLM": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",

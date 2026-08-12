@@ -44,6 +44,7 @@ class TRTLLMBackend(BaseBackend):
         "LLAMA": {1: 11, 2: 6.5, 4: 5, 8: 5},
         "MOE": {1: 22, 2: 13, 4: 10, 8: 10},
         "GEMMA4MIX": {1: 22, 2: 13, 4: 10, 8: 10},
+        "STEP3P7": {1: 22, 2: 13, 4: 10, 8: 10},
         "DEEPSEEK": {1: 22, 2: 13, 4: 10, 8: 10},
         "DEEPSEEKV32": {1: 22, 2: 13, 4: 10, 8: 10},
         "DEEPSEEKV4": {1: 22, 2: 13, 4: 10, 8: 10},
@@ -57,11 +58,11 @@ class TRTLLMBackend(BaseBackend):
         self.name = common.BackendName.trtllm
 
     def _moe_workspace_width(self, model: BaseModel, model_family: str, h: int) -> int:
-        # TRT-LLM uses ``_hidden_size`` for GEMMA4MIX but keeps the raw ``h``
-        # for the DEEPSEEK family — this is an existing TRT-LLM accounting
-        # quirk predating DeepSeek-V4's attention expansion. Still an
-        # improvement opportunity in trtllm to align with SGLang's accounting.
-        if model_family == "GEMMA4MIX":
+        # TRT-LLM uses the residual hidden size for hybrid MoE families whose
+        # attention width differs from the residual stream, but keeps raw ``h``
+        # for the DEEPSEEK family — an existing accounting quirk predating
+        # DeepSeek-V4's attention expansion.
+        if model_family in {"GEMMA4MIX", "STEP3P7"}:
             return getattr(model, "_hidden_size", h)
         return h
 
