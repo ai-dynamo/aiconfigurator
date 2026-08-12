@@ -946,6 +946,14 @@ class Task:
         self._gemm_quant_mode_explicit_by_role = {
             role: self._role_attr(role, "gemm_quant_mode") is not None for role in roles
         }
+        if self.serving_mode == "afd" and self.afd_combined_with_pd:
+            # AFD's internal static-prefill view inherits the agg quant mode
+            # later in _resolve_search_space(). Preserve either an explicit
+            # prefill override or the explicitness of that inherited agg mode.
+            self._gemm_quant_mode_explicit_by_role["prefill"] = (
+                self.prefill_gemm_quant_mode is not None
+                or self._gemm_quant_mode_explicit_by_role["agg"]
+            )
         base = _infer_quant_modes_from_raw_config(self._raw_config)
 
         # GPT-OSS on Blackwell (trtllm): default MoE to w4a8_mxfp4_mxfp8 for higher

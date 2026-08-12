@@ -190,6 +190,24 @@ def test_qwen36_task_preserves_explicit_gemm_override():
     assert by_name["context_gdn_gate_ffn1_gemm"]._quant_mode == common.GEMMQuantMode.fp8_static
 
 
+def test_qwen36_afd_prefill_preserves_explicit_gemm_override():
+    task = Task(
+        serving_mode="afd",
+        model_path="nvidia/Qwen3.6-27B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+        total_gpus=16,
+        afd_combined_with_pd=True,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    model_config = task.sweep_afd_kwargs(database=None)["prefill_model_config"]
+    model = get_model(task.model_path, model_config, task.backend_name)
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+
+    assert model_config._gemm_quant_mode_is_explicit is True
+    assert by_name["context_gdn_gate_ffn1_gemm"]._quant_mode == common.GEMMQuantMode.fp8_static
+
+
 @pytest.mark.parametrize(
     "hf_id,ffn_name",
     [
