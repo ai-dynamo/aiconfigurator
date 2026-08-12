@@ -31,11 +31,13 @@ when routing through Rust).
 
 from __future__ import annotations
 
+import bisect
 import functools
 import hashlib
 import json
 import math
 import os
+import statistics
 from collections.abc import Callable
 from enum import Enum
 from typing import TYPE_CHECKING, ClassVar
@@ -370,8 +372,78 @@ def load_fpm_forward_data(primary_path: str, expected_version: str, expected_sys
                     for axis in range(len(axes))
                 )
         cell["domains"] = domains
+        # Decode batch-axis regime partition: the ScatteredSites batch
+        # distance is regime-blind (a b=600 query would mix one eager vote
+        # with three graph votes), so split at the data-encoded capture
+        # boundary and let each side interpolate among its own kind. The
+        # domain gate stays on the FULL decode box (gate first, route after).
+        boundary = _detect_decode_regime_boundary(cell["tables"]["decode"])
+        cell["decode_regime_boundary"] = boundary
+        if boundary is not None:
+            decode_table = cell["tables"]["decode"]
+            # Two NEW dicts -> two new id(data) keys: the perf_interp site
+            # index cache can never serve one side's index for the other.
+            cell["tables"]["decode_graph"] = {b: c for b, c in decode_table.items() if b <= boundary}
+            cell["tables"]["decode_eager"] = {b: c for b, c in decode_table.items() if b > boundary}
 
     return {"cells": cells}
+
+
+def _decode_curve_value(curve: dict, kv: float) -> float:
+    """Piecewise-linear evaluation of one decode KV curve at ``kv``.
+
+    Detection-only helper (the query path uses perf_interp); callers
+    guarantee ``kv`` lies within the curve's key range.
+    """
+    keys = sorted(curve)
+    if kv <= keys[0]:
+        return float(curve[keys[0]])
+    if kv >= keys[-1]:
+        return float(curve[keys[-1]])
+    hi = bisect.bisect_left(keys, kv)
+    lo = hi - 1
+    k0, k1 = keys[lo], keys[hi]
+    if k1 == k0:
+        return float(curve[k0])
+    w = (kv - k0) / (k1 - k0)
+    return float(curve[k0]) + (float(curve[k1]) - float(curve[k0])) * w
+
+
+def _detect_decode_regime_boundary(table: dict) -> int | None:
+    """Find the CUDA-graph capture boundary encoded in the decode grid.
+
+    The collector deliberately samples cliff PAIRS (adjacent batches b, b+1
+    straddling the capture limit, e.g. 512/513). On the overlapping KV range
+    the eager side runs a whole regime above the graph side (measured
+    2.6-3.5x), while pad-up neighbours inside the graph region differ by only
+    5-15% — a median ratio >= 2.0 over >= 3 overlapping KV points (the >= 3
+    floor keeps one bad row from minting a cliff) cleanly separates the two.
+    Exactly one cliff is expected per cell; several mean the data does not
+    look like one capture boundary and a human must look.
+    """
+    batches = sorted(table)
+    hits = []
+    for b in batches:
+        upper = table.get(b + 1)
+        if upper is None:
+            continue
+        lower = table[b]
+        lo_keys = sorted(lower)
+        ratios = []
+        for kv in sorted(upper):
+            if lo_keys[0] <= kv <= lo_keys[-1]:
+                base = _decode_curve_value(lower, kv)
+                if base > 0:
+                    ratios.append(float(upper[kv]) / base)
+        if len(ratios) >= 3 and statistics.median(ratios) >= 2.0:
+            hits.append(b)
+    if len(hits) > 1:
+        raise ValueError(
+            f"ambiguous decode regime cliffs at batches {hits}: expected at most one "
+            "CUDA-graph capture boundary per cell; the pair data does not look like "
+            "one capture surface — inspect the collection before serving it."
+        )
+    return hits[0] if hits else None
 
 
 def _walk_points(table: dict, depth: int) -> list[tuple]:
@@ -669,6 +741,11 @@ class FPMForwardOp(Operation):
                     "FPM never extrapolates; collect a wider sweep or use forward_model='op_level'."
                 )
 
+        if self._phase == "decode" and cell.get("decode_regime_boundary") is not None:
+            # Route AFTER the full-domain gate: each side interpolates among
+            # its own regime; the boundary batch itself is graph-side.
+            side = "decode_graph" if coords[0] <= cell["decode_regime_boundary"] else "decode_eager"
+            table = cell["tables"][side]
         result = perf_interp.query(interp_config, table, *coords)
         latency = perf_interp.get_value(result, "latency")
         if not math.isfinite(latency) or latency <= 0:

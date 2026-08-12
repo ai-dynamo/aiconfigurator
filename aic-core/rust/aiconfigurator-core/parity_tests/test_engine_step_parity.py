@@ -2133,6 +2133,17 @@ _FPM_ROWS = [
     ("decode", 4, 0, 4, 4.0),
     ("decode", 4, 0, 4100, 4.5),
     ("decode", 4, 0, 262144, 7.9),
+    # CUDA-graph cliff pair at capture=512 plus an eager anchor: exercises
+    # the decode batch-axis regime routing on both engines.
+    ("decode", 512, 0, 4096, 10.0),
+    ("decode", 512, 0, 65536, 11.0),
+    ("decode", 512, 0, 262144, 12.0),
+    ("decode", 513, 0, 4096, 30.0),
+    ("decode", 513, 0, 65536, 33.0),
+    ("decode", 513, 0, 262144, 36.0),
+    ("decode", 1024, 0, 4096, 60.0),
+    ("decode", 1024, 0, 65536, 66.0),
+    ("decode", 1024, 0, 262144, 72.0),
 ]
 
 
@@ -2323,6 +2334,7 @@ class TestRustEngineStepFpmParity:
             (1024, 4, 1024, 2),  # mixed: prefill chunk + marginal decode
             (512, 4, 1024, 2),  # partial chunk (chunk_scale > 1)
             (0, 4, 1024, 2),  # gen-only keeps full decode
+            (0, 600, 100, 2),  # gen-only across the decode regime boundary (eager side)
             (1024, 0, 1024, 2),  # prefill-only chunk
         ],
     )

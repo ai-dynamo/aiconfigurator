@@ -201,7 +201,17 @@ impl FpmForwardOp {
                 let Some(domain) = cell.decode_domain.as_ref() else {
                     return Err(self.no_rows_err(cell));
                 };
-                (&FPM_DECODE_AXES, domain.as_slice(), cell.decode_index.as_ref())
+                // Regime routing AFTER the full-domain gate (the gate uses
+                // the whole decode box): the boundary batch itself is
+                // graph-side; each side interpolates among its own regime.
+                let index = match cell.decode_regime_boundary {
+                    Some(boundary) if coords[0] <= boundary as f64 => {
+                        cell.decode_graph_index.as_ref()
+                    }
+                    Some(_) => cell.decode_eager_index.as_ref(),
+                    None => cell.decode_index.as_ref(),
+                };
+                (&FPM_DECODE_AXES, domain.as_slice(), index)
             }
         };
         for (axis_index, (axis_name, &value)) in axes.iter().zip(coords).enumerate() {

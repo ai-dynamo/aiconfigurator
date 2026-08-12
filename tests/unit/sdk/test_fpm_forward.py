@@ -253,6 +253,65 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
 
+    def test_decode_regime_boundary_detection(self):
+        from aiconfigurator_core.sdk.operations.fpm_forward import _detect_decode_regime_boundary
+
+        graph = {kv: 10.0 + i for i, kv in enumerate((1024, 2048, 4096))}
+        eager = {kv: 3.0 * (10.0 + i) for i, kv in enumerate((1024, 2048, 4096))}
+        # Cliff pair 512/513 (~3x on 3 overlapping KV points) -> boundary 512.
+        assert _detect_decode_regime_boundary({512: graph, 513: eager}) == 512
+        # Pad-up neighbours (~10%) never mint a cliff.
+        pad = {kv: v * 1.1 for kv, v in graph.items()}
+        assert _detect_decode_regime_boundary({8: graph, 9: pad}) is None
+        # Fewer than 3 overlapping points: one bad row cannot mint a cliff.
+        assert _detect_decode_regime_boundary({512: {1024: 10.0, 2048: 11.0}, 513: {1024: 30.0, 2048: 33.0}}) is None
+        # Two cliffs do not look like one capture surface: loud error.
+        with pytest.raises(ValueError, match="ambiguous decode regime cliffs"):
+            _detect_decode_regime_boundary(
+                {512: graph, 513: eager, 1024: eager, 1025: {k: v * 3 for k, v in eager.items()}}
+            )
+
+    def _cliff_rows(self):
+        rows = []
+        for b, base in ((496, 9.5), (497, 10.0), (512, 10.5)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + i))
+        for b, base in ((513, 31.0), (1024, 62.0)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + 3 * i))
+        return rows
+
+    def test_decode_regime_routing_separates_the_cliff(self, fake_db):
+        # The b=600 pathology: pre-split, k-NN mixes one eager vote (513)
+        # with three graph votes (496/497/512) and answers ~44% of truth.
+        # Post-split it interpolates among eager batches only.
+        db = fake_db(self._cliff_rows())
+        op = _make_op("decode")
+        cell = op._load_cell(db)
+        assert cell["decode_regime_boundary"] == 512
+        assert set(cell["tables"]["decode_graph"]) == {496, 497, 512}
+        assert set(cell["tables"]["decode_eager"]) == {513, 1024}
+        # Exact hits on either side are untouched by the split.
+        assert float(op.query_totals(db, batch_size=512, total_kv_read_tokens=2048)) == pytest.approx(11.5)
+        assert float(op.query_totals(db, batch_size=513, total_kv_read_tokens=2048)) == pytest.approx(34.0)
+        # Off-site queries route by regime: eager-level above, graph-level at
+        # or below the boundary (coarse bands — transfer math is interp's).
+        eager_q = float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048))
+        graph_q = float(op.query_totals(db, batch_size=500, total_kv_read_tokens=2048))
+        assert eager_q > 25.0
+        assert graph_q < 15.0
+        # In-between eager batches keep working (frontier semantics live
+        # inside the eager sub-table).
+        mid_q = float(op.query_totals(db, batch_size=800, total_kv_read_tokens=2048))
+        assert mid_q > 25.0
+
+    def test_decode_without_cliff_is_unsplit(self, fake_db):
+        db = fake_db()
+        op = _make_op("decode")
+        cell = op._load_cell(db)
+        assert cell["decode_regime_boundary"] is None
+        assert "decode_graph" not in cell["tables"]
+
     def test_query_totals_addresses_raw_coordinates(self, fake_db):
         # Totals a mixed step schedules (chunk + riders) are generally not
         # divisible into a per-request (b, s, prefix) shape; query_totals
