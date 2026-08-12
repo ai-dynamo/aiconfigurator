@@ -17,7 +17,6 @@ import os
 import shlex
 import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
-from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
@@ -59,33 +58,6 @@ SUPPORT_MATRIX_BASE_HEADER = [
 # transfer tier that fired: empirical/xshape/xquant/xprofile/xop). Empty otherwise.
 SUPPORT_MATRIX_HEADER = SUPPORT_MATRIX_BASE_HEADER + ["Command", "Source"]
 _BYTES_PER_PARAM = 2
-DEFAULT_ENGINE_STEP_COMPARISON_RTOL = 0.05
-DEFAULT_ENGINE_STEP_COMPARISON_ATOL = 1e-3
-DEFAULT_ENGINE_STEP_FRONTIER_RTOL = 0.75
-DEFAULT_ENGINE_STEP_FRONTIER_ATOL = 1e-3
-_RUST_CORE_AUTOBUILD_ENV = "AICONFIGURATOR_RUST_CORE_AUTOBUILD"
-_APPROXIMATE_ENGINE_STEP_COLUMNS = frozenset(
-    {
-        "request_rate",
-        "ttft",
-        "tpot",
-        "request_latency",
-        "seq/s",
-        "seq/s/gpu",
-        "tokens/s",
-        "tokens/s/gpu",
-        "tokens/s/user",
-        "(p)seq/s/worker",
-        "(d)seq/s/worker",
-        "balance_score",
-        "power_w",
-    }
-)
-_FRONTIER_ENVELOPE_COLUMNS = {
-    "tokens/s/user": "max",
-    "tpot": "min",
-    "request_latency": "min",
-}
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
@@ -128,11 +100,6 @@ def _support_matrix_row_command(
     database_mode: str = "SILICON",
     transfer_policy: str | None = None,
     constraints: TestConstraints | None = None,
-    compare_engine_step_backends: bool = False,
-    engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
-    engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
-    engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
-    engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -171,18 +138,7 @@ def _support_matrix_row_command(
     ]
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
-    if compare_engine_step_backends:
-        # ``cli default`` does not expose the support-matrix Python/Rust
-        # comparator; use the default Python engine-step path for the public
-        # replay command.
-        parts.extend(["--engine-step-backend", "python"])
-    _ = (
-        mode,
-        engine_step_comparison_rtol,
-        engine_step_comparison_atol,
-        engine_step_frontier_rtol,
-        engine_step_frontier_atol,
-    )
+    _ = mode
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
@@ -453,169 +409,11 @@ def get_hardware_incompatibility(
     )
 
 
-@contextmanager
-def _rust_core_autobuild_enabled():
-    previous_value = os.environ.get(_RUST_CORE_AUTOBUILD_ENV)
-    os.environ[_RUST_CORE_AUTOBUILD_ENV] = "1"
-    try:
-        yield
-    finally:
-        if previous_value is None:
-            os.environ.pop(_RUST_CORE_AUTOBUILD_ENV, None)
-        else:
-            os.environ[_RUST_CORE_AUTOBUILD_ENV] = previous_value
-
-
 def _format_exception_for_csv(error_message: str | None) -> str | None:
     if not error_message:
         return None
     cwd = os.getcwd() + os.sep
     return error_message.replace(cwd, "").replace("\n", "\\n")
-
-
-def _shorten_error(error_message: str, max_chars: int = 600) -> str:
-    if len(error_message) <= max_chars:
-        return error_message
-    return error_message[: max_chars - 3] + "..."
-
-
-def _normalize_pareto_df_for_comparison(df: pd.DataFrame, sort_columns: list[str]) -> pd.DataFrame:
-    normalized = df.copy().reset_index(drop=True)
-    if not sort_columns:
-        return normalized
-    return normalized.sort_values(
-        by=sort_columns,
-        kind="mergesort",
-        key=lambda col: col.astype(str),
-    ).reset_index(drop=True)
-
-
-def _values_are_close(python_value: float, rust_value: float, *, rtol: float, atol: float) -> bool:
-    denominator = max(abs(python_value), abs(rust_value), atol)
-    return abs(python_value - rust_value) <= atol + rtol * denominator
-
-
-def _compare_frontier_envelope(
-    python_df: pd.DataFrame,
-    rust_df: pd.DataFrame,
-    *,
-    rtol: float,
-    atol: float,
-) -> str | None:
-    """Compare user-facing Pareto frontier envelope metrics when exact rows differ."""
-    mismatches: list[str] = []
-    comparable_columns = [
-        col for col in _FRONTIER_ENVELOPE_COLUMNS if col in python_df.columns and col in rust_df.columns
-    ]
-    for column in comparable_columns:
-        aggregate = _FRONTIER_ENVELOPE_COLUMNS[column]
-        python_values = pd.to_numeric(python_df[column], errors="coerce").dropna()
-        rust_values = pd.to_numeric(rust_df[column], errors="coerce").dropna()
-        if python_values.empty or rust_values.empty:
-            continue
-
-        if aggregate == "max":
-            python_value = float(python_values.max())
-            rust_value = float(rust_values.max())
-        else:
-            python_value = float(python_values.min())
-            rust_value = float(rust_values.min())
-
-        if _values_are_close(python_value, rust_value, rtol=rtol, atol=atol):
-            continue
-        denominator = max(abs(python_value), abs(rust_value), atol)
-        relative_diff = abs(python_value - rust_value) / denominator
-        mismatches.append(
-            f"{aggregate}({column}) python={python_value:.6g} rust={rust_value:.6g} rel_diff={relative_diff:.3%}"
-        )
-
-    if not comparable_columns:
-        return "no common frontier envelope metrics were available"
-    if mismatches:
-        return f"Rust frontier envelope differs beyond relaxed tolerance rtol={rtol:g}, atol={atol:g}: " + "; ".join(
-            mismatches[:5]
-        )
-    return None
-
-
-def _compare_pareto_dfs(
-    python_df: pd.DataFrame,
-    rust_df: pd.DataFrame,
-    *,
-    rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
-    atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
-    frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
-    frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
-) -> str | None:
-    """Return a mismatch description when Rust and Python Pareto results drift."""
-    python_columns = list(python_df.columns)
-    rust_columns = list(rust_df.columns)
-    if python_columns != rust_columns:
-        return f"Rust pareto_df columns differ from Python: python={python_columns}, rust={rust_columns}"
-
-    if python_df.empty and rust_df.empty:
-        return None
-
-    approximate_columns = [col for col in python_columns if col in _APPROXIMATE_ENGINE_STEP_COLUMNS]
-    identity_columns = [col for col in python_columns if col not in _APPROXIMATE_ENGINE_STEP_COLUMNS]
-
-    def _compare_relaxed_frontier(reason: str) -> str | None:
-        mismatch = _compare_frontier_envelope(
-            python_df,
-            rust_df,
-            rtol=frontier_rtol,
-            atol=frontier_atol,
-        )
-        if mismatch:
-            return f"{reason}; {mismatch}"
-        return None
-
-    if len(python_df) != len(rust_df):
-        return _compare_relaxed_frontier(
-            f"Rust pareto_df row count differs from Python: python={len(python_df)}, rust={len(rust_df)}"
-        )
-
-    python_normalized = _normalize_pareto_df_for_comparison(python_df, identity_columns)
-    rust_normalized = _normalize_pareto_df_for_comparison(rust_df, identity_columns)
-
-    try:
-        pd.testing.assert_frame_equal(
-            python_normalized[identity_columns],
-            rust_normalized[identity_columns],
-            check_dtype=False,
-            check_exact=True,
-        )
-    except AssertionError as exc:
-        return _compare_relaxed_frontier(
-            f"Rust pareto_df selected different configurations: {_shorten_error(str(exc))}"
-        )
-
-    mismatches: list[str] = []
-    for column in approximate_columns:
-        python_values = pd.to_numeric(python_normalized[column], errors="coerce")
-        rust_values = pd.to_numeric(rust_normalized[column], errors="coerce")
-        absolute_diff = (python_values - rust_values).abs()
-        tolerance = atol + rtol * rust_values.abs()
-        both_missing = python_values.isna() & rust_values.isna()
-        within_tolerance = both_missing | (absolute_diff <= tolerance)
-        if within_tolerance.all():
-            continue
-
-        bad_indexes = within_tolerance[~within_tolerance].index
-        first_bad_index = int(bad_indexes[0])
-        denominator = max(
-            abs(float(python_values.iloc[first_bad_index])), abs(float(rust_values.iloc[first_bad_index])), atol
-        )
-        relative_diff = float(absolute_diff.iloc[first_bad_index]) / denominator
-        mismatches.append(
-            f"{column}[{first_bad_index}] python={python_values.iloc[first_bad_index]} "
-            f"rust={rust_values.iloc[first_bad_index]} abs_diff={absolute_diff.iloc[first_bad_index]:.6g} "
-            f"rel_diff={relative_diff:.3%}"
-        )
-
-    if mismatches:
-        return f"Rust pareto_df differs beyond tolerance rtol={rtol:g}, atol={atol:g}: " + "; ".join(mismatches[:5])
-    return None
 
 
 # Per-process SupportMatrix instance for ProcessPoolExecutor workers.
@@ -643,11 +441,6 @@ def _process_combination_worker(
         backend=backend,
         version=version,
         modes_to_test=_worker_modes_to_test,
-        compare_engine_step_backends=_worker_matrix.compare_engine_step_backends,
-        engine_step_comparison_rtol=_worker_matrix.engine_step_comparison_rtol,
-        engine_step_comparison_atol=_worker_matrix.engine_step_comparison_atol,
-        engine_step_frontier_rtol=_worker_matrix.engine_step_frontier_rtol,
-        engine_step_frontier_atol=_worker_matrix.engine_step_frontier_atol,
         include_commands=True,
     )
     architecture = _worker_matrix.get_architecture(model)
@@ -673,20 +466,7 @@ class SupportMatrix:
     Helper to generate and validate the model/system/backend/version support matrix.
     """
 
-    def __init__(
-        self,
-        *,
-        compare_engine_step_backends: bool = False,
-        engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
-        engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
-        engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
-        engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
-    ):
-        self.compare_engine_step_backends = compare_engine_step_backends
-        self.engine_step_comparison_rtol = engine_step_comparison_rtol
-        self.engine_step_comparison_atol = engine_step_comparison_atol
-        self.engine_step_frontier_rtol = engine_step_frontier_rtol
-        self.engine_step_frontier_atol = engine_step_frontier_atol
+    def __init__(self):
         logger.info("Loading models...")
         self.models: set[str] = self.get_models()
         logger.info("Found %d models", len(self.models))
@@ -825,11 +605,6 @@ class SupportMatrix:
         *,
         system_spec: dict | None = None,
         modes_to_test: tuple[str, ...] | list[str] | None = None,
-        compare_engine_step_backends: bool = False,
-        engine_step_comparison_rtol: float = DEFAULT_ENGINE_STEP_COMPARISON_RTOL,
-        engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
-        engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
-        engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
         include_commands: bool = False,
     ) -> tuple[dict[str, str], dict[str, str | None]] | tuple[dict[str, str], dict[str, str | None], dict[str, str]]:
         """
@@ -841,11 +616,6 @@ class SupportMatrix:
             backend: Backend name
             version: Backend version
             system_spec: Optional system spec to avoid reloading the database for hardware preflight.
-            compare_engine_step_backends: When True, run both Python and Rust engine-step backends.
-            engine_step_comparison_rtol: Relative tolerance for Python-vs-Rust Pareto metrics.
-            engine_step_comparison_atol: Absolute tolerance for Python-vs-Rust Pareto metrics.
-            engine_step_frontier_rtol: Loose relative tolerance when frontiers choose different rows.
-            engine_step_frontier_atol: Loose absolute tolerance when frontiers choose different rows.
 
         Returns:
             Tuple of (dict with statuses, dict with error messages).
@@ -876,11 +646,6 @@ class SupportMatrix:
                 database_mode="SILICON",
                 transfer_policy=transfer_policy,
                 constraints=constraints,
-                compare_engine_step_backends=compare_engine_step_backends,
-                engine_step_comparison_rtol=engine_step_comparison_rtol,
-                engine_step_comparison_atol=engine_step_comparison_atol,
-                engine_step_frontier_rtol=engine_step_frontier_rtol,
-                engine_step_frontier_atol=engine_step_frontier_atol,
             )
             for mode in modes_to_test
         }
@@ -922,44 +687,19 @@ class SupportMatrix:
                 # capture_provenance spans task.run() (the contextvar propagates down the
                 # call stack), so we learn the worst empirical transfer tier that fired.
                 with capture_provenance() as prov_tags:
-                    python_pareto_df = SupportMatrix._run_mode(
+                    pareto_df = SupportMatrix._run_mode(
                         mode=mode,
                         model=model,
                         system=system,
                         backend=backend,
                         version=version,
                         constraints=constraints,
-                        engine_step_backend="python" if compare_engine_step_backends else None,
+                        engine_step_backend=None,
                         database_mode=db_mode,
                     )
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
-                if python_pareto_df is None or python_pareto_df.empty:
+                if pareto_df is None or pareto_df.empty:
                     raise RuntimeError("Configuration returned no results, failed to catch traceback")
-
-                if compare_engine_step_backends:
-                    with _rust_core_autobuild_enabled():
-                        rust_pareto_df = SupportMatrix._run_mode(
-                            mode=mode,
-                            model=model,
-                            system=system,
-                            backend=backend,
-                            version=version,
-                            constraints=constraints,
-                            engine_step_backend="rust",
-                            database_mode=db_mode,
-                        )
-                    if rust_pareto_df is None or rust_pareto_df.empty:
-                        raise RuntimeError("Rust engine-step backend returned no results")
-                    mismatch = _compare_pareto_dfs(
-                        python_pareto_df,
-                        rust_pareto_df,
-                        rtol=engine_step_comparison_rtol,
-                        atol=engine_step_comparison_atol,
-                        frontier_rtol=engine_step_frontier_rtol,
-                        frontier_atol=engine_step_frontier_atol,
-                    )
-                    if mismatch:
-                        raise RuntimeError(mismatch)
 
                 tier = worst_provenance(prov_tags)
                 if db_mode == "SILICON" and tier != "silicon":
@@ -1015,11 +755,6 @@ class SupportMatrix:
                         database_mode="HYBRID",
                         transfer_policy=transfer_policy,
                         constraints=constraints,
-                        compare_engine_step_backends=compare_engine_step_backends,
-                        engine_step_comparison_rtol=engine_step_comparison_rtol,
-                        engine_step_comparison_atol=engine_step_comparison_atol,
-                        engine_step_frontier_rtol=engine_step_frontier_rtol,
-                        engine_step_frontier_atol=engine_step_frontier_atol,
                     )
 
             statuses[mode] = status
@@ -1112,12 +847,6 @@ class SupportMatrix:
         print("AIConfigurator Support Matrix Test")
         print("=" * 80)
         print("Testing requested support-matrix modes for selected combinations")
-        if self.compare_engine_step_backends:
-            print(
-                "Comparing Python and Rust engine-step backends "
-                f"(rtol={self.engine_step_comparison_rtol:g}, atol={self.engine_step_comparison_atol:g}, "
-                f"frontier_rtol={self.engine_step_frontier_rtol:g}, frontier_atol={self.engine_step_frontier_atol:g})"
-            )
         print("Tiered constraints by model size:")
         print(
             f"  <10B:      GPUs={_SMALL.total_gpus}, ISL={_SMALL.isl}, OSL={_SMALL.osl}, "
@@ -1196,11 +925,6 @@ class SupportMatrix:
                                     backend=backend,
                                     version=version,
                                     modes_to_test=modes_to_test,
-                                    compare_engine_step_backends=self.compare_engine_step_backends,
-                                    engine_step_comparison_rtol=self.engine_step_comparison_rtol,
-                                    engine_step_comparison_atol=self.engine_step_comparison_atol,
-                                    engine_step_frontier_rtol=self.engine_step_frontier_rtol,
-                                    engine_step_frontier_atol=self.engine_step_frontier_atol,
                                     include_commands=True,
                                 )
                                 architecture = self.get_architecture(model)
@@ -1235,11 +959,6 @@ class SupportMatrix:
                                         backend=backend,
                                         version=version,
                                         mode=mode,
-                                        compare_engine_step_backends=self.compare_engine_step_backends,
-                                        engine_step_comparison_rtol=self.engine_step_comparison_rtol,
-                                        engine_step_comparison_atol=self.engine_step_comparison_atol,
-                                        engine_step_frontier_rtol=self.engine_step_frontier_rtol,
-                                        engine_step_frontier_atol=self.engine_step_frontier_atol,
                                     )
                                     results.append(
                                         (
@@ -1373,19 +1092,6 @@ class SupportMatrix:
                     version=version,
                     mode=mode,
                     constraints=_DEFAULT_TIER,
-                    compare_engine_step_backends=getattr(self, "compare_engine_step_backends", False),
-                    engine_step_comparison_rtol=getattr(
-                        self, "engine_step_comparison_rtol", DEFAULT_ENGINE_STEP_COMPARISON_RTOL
-                    ),
-                    engine_step_comparison_atol=getattr(
-                        self, "engine_step_comparison_atol", DEFAULT_ENGINE_STEP_COMPARISON_ATOL
-                    ),
-                    engine_step_frontier_rtol=getattr(
-                        self, "engine_step_frontier_rtol", DEFAULT_ENGINE_STEP_FRONTIER_RTOL
-                    ),
-                    engine_step_frontier_atol=getattr(
-                        self, "engine_step_frontier_atol", DEFAULT_ENGINE_STEP_FRONTIER_ATOL
-                    ),
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
