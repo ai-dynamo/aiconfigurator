@@ -572,8 +572,17 @@ def _parse_hf_config_json(config: dict) -> dict:
     if topk is None:
         topk = config.get("top_k_experts")
     if topk is None:
+        # Step-3.7/3.5 spell the routing width moe_top_k.
+        topk = config.get("moe_top_k")
+    if topk is None:
         topk = 0
-    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
+    num_experts = (
+        config.get("num_local_experts")
+        or config.get("n_routed_experts")
+        # Step-3.7/3.5 spell the expert count moe_num_experts.
+        or config.get("moe_num_experts")
+        or config.get("num_experts", 0)
+    )
     moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)

@@ -279,3 +279,75 @@ def test_shared_expert_ops_are_cp_audited():
     assert shared, "expected shared-expert context ops"
     split = {getattr(o, "_seq_split", None) for o in shared}
     assert split == {cp}, f"shared-expert ops must split by cp={cp}, got {split}"
+
+
+def test_sliding_attention_ops_use_the_swa_query_head_count():
+    """The SWA head count must reach the attention ops, not just the GEMM widths.
+
+    Step-3.7 widens sliding layers to 96 query heads while global layers keep 64
+    (``attention_other_setting``). An earlier fix resized only the QKV/out-proj
+    GEMMs in ``_resolve_dims``; the ContextAttention/GenerationAttention ops kept
+    passing the global ``num_attention_heads``, so FMHA cost -- the dominant term
+    for sliding layers -- was still charged at 64 heads. Assert on the ops.
+    """
+    hf_config = dict(_step37_hf_config())
+    hf_config["attention_other_setting"] = {"num_attention_heads": 96, "head_dim": 128}
+
+    result = _parse_hf_config_json(hf_config)
+    assert result["extra_params"].swa_num_heads == 96
+
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=1,
+        attention_dp_size=1,
+        cp_size=1,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+
+    for label, op_list in (("context", model.context_ops), ("generation", model.generation_ops)):
+        attn = [o for o in op_list if hasattr(o, "_window_size") and hasattr(o, "_n")]
+        sliding = {o._n for o in attn if o._window_size == 512}
+        globals_ = {o._n for o in attn if o._window_size == 0}
+        assert sliding == {96}, f"{label}: sliding attention should use 96 query heads, got {sliding}"
+        assert globals_ == {64}, f"{label}: global attention should use 64 query heads, got {globals_}"
+
+
+def test_step_expert_field_spellings_are_parsed():
+    """Step-3.7 spells the MoE width moe_num_experts / moe_top_k.
+
+    Neither was read, so ``num_experts`` resolved to 0 and building the model
+    asserted out on ``ep size cannot be larger than num_experts 0``.
+    """
+    hf_config = dict(_step37_hf_config())
+    del hf_config["num_experts"]
+    del hf_config["num_experts_per_tok"]
+    hf_config["moe_num_experts"] = 288
+    hf_config["moe_top_k"] = 8
+
+    parsed = _parse_hf_config_json(hf_config)
+    assert parsed["num_experts"] == 288
+    assert parsed["topk"] == 8

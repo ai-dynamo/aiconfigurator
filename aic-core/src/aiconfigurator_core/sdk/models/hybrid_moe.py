@@ -301,7 +301,7 @@ class HybridMoEModel(BaseModel):
                     ops.ContextAttention(
                         "context_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         fmha_q,
@@ -324,7 +324,7 @@ class HybridMoEModel(BaseModel):
                     ops.ContextAttention(
                         "context_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         fmha_q,
@@ -483,7 +483,7 @@ class HybridMoEModel(BaseModel):
                     ops.GenerationAttention(
                         "generation_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
@@ -505,7 +505,7 @@ class HybridMoEModel(BaseModel):
                     ops.GenerationAttention(
                         "generation_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
