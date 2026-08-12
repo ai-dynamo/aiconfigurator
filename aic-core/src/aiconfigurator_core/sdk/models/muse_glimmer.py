@@ -24,10 +24,14 @@ class MuseGlimmerModel(BaseModel):
     ``attention_k_eq_v``, and no routed-MoE branch: every layer runs one gated
     SwiGLU dense MLP at ``inter_size``.
 
+    Modeled: QK RMS-norm (``qk_norm``) applied to q and k on every layer;
+    attention output gate (``gate_proj``, sigmoid-multiply before o_proj) on
+    every layer; TP all-reduces mirroring the llama.py dense pattern.
     Deliberately unmodeled (shape-neutral for op-level perf): NoPE on global
-    layers (layer_rope_theta = 0), final logit softcapping, qk_scale_factor,
-    output_multiplier. The vision tower (muse_glimmer_vision) is not priced —
-    text-serving convention shared with Kimi-K2.5/K3, Llama-4, and Qwen3.5.
+    layers (layer_rope_theta = 0), final logit softcapping, ``qk_scale_factor``
+    (scalar fold, timing-neutral), output_multiplier. The vision tower
+    (muse_glimmer_vision) is not priced — text-serving convention shared with
+    Kimi-K2.5/K3, Llama-4, and Qwen3.5.
     """
 
     @classmethod
@@ -110,7 +114,16 @@ class MuseGlimmerModel(BaseModel):
         ]
 
     def _attention_block(self, phase: str, kind: str, count: float, window_size: int, d: dict) -> list:
-        """One layer-type recipe: norm -> qkv -> attention -> proj -> norm + MLP."""
+        """One layer-type recipe: norm -> qkv -> attention -> gate -> proj -> norm + MLP.
+
+        The attention output gate (``gate_proj`` in MuseGlimmerTextAttention) is modeled as
+        a hidden-size → proj_in GEMM followed by a sigmoid-multiply ElementWise applied to
+        the attention output BEFORE o_proj — matches the HF reference on all 52 layers.
+        QK RMS-norm (``qk_norm``) is now modeled on both ContextAttention and GenerationAttention.
+        Convention for the gate multiply (2*proj_in, proj_in, 0.8) follows kimi_k3.py MLA
+        output gate (lines 247-248 / 453-454) — the strongest in-repo attention output-gate
+        precedent with an identical sigmoid-multiply shape.
+        """
         h = self._hidden_size
         tp = self.config.tp_size
         gemm_q = self.config.gemm_quant_mode
@@ -125,6 +138,7 @@ class MuseGlimmerModel(BaseModel):
                 self.config.fmha_quant_mode,
                 window_size=window_size,
                 head_size=self._head_size,
+                use_qk_norm=True,
             )
         else:
             attention = ops.GenerationAttention(
@@ -135,11 +149,17 @@ class MuseGlimmerModel(BaseModel):
                 kvcache_q,
                 window_size=window_size,
                 head_size=self._head_size,
+                use_qk_norm=True,
             )
         return [
             ops.ElementWise(f"{phase}_{kind}_attn_norm", count, 2 * h, 2 * h, 0.8),
             ops.GEMM(f"{phase}_{kind}_qkv_gemm", count, d["qkv_out"], h, gemm_q),
             attention,
+            # Attention output gate: gate_proj(hidden_states) → sigmoid → multiply with attn_output.
+            # HF: attn_output = attn_output * torch.sigmoid(self.gate_proj(hidden_states))
+            # gate_proj = nn.Linear(hidden_size, num_heads*head_dim, bias=False); applied before o_proj.
+            ops.GEMM(f"{phase}_{kind}_gate_gemm", count, d["proj_in"], h, gemm_q),
+            ops.ElementWise(f"{phase}_{kind}_gate_mul", count, 2 * d["proj_in"], d["proj_in"], 0.8),
             ops.GEMM(f"{phase}_{kind}_proj_gemm", count, h, d["proj_in"], gemm_q, low_precision_input=True),
             ops.ElementWise(f"{phase}_{kind}_ffn_norm", count, 2 * h, 2 * h, 0.8),
         ] + self._shared_mlp_ops(f"{phase}_{kind}", count, h, d["inter_per_tp"])
@@ -154,13 +174,18 @@ class MuseGlimmerModel(BaseModel):
         pp = self.config.pp_size
         d = self._resolve_dims(tp)
 
-        self.context_ops = [ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3)]
+        self.context_ops = [
+            ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
+            ops.CustomAllReduce("context_embedding_ar", 1, h, tp),
+        ]
         if counts["swa"] > 0:
             self.context_ops.extend(self._attention_block("context", "swa", counts["swa"], cfg.sliding_window_size, d))
         if counts["global"] > 0:
             self.context_ops.extend(self._attention_block("context", "global", counts["global"], 0, d))
         self.context_ops.extend(
             [
+                ops.CustomAllReduce("context_ar_1", self._num_layers, h, tp),
+                ops.CustomAllReduce("context_ar_2", self._num_layers, h, tp),
                 ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("context_p2p", pp - 1, h, pp),
             ]
@@ -207,7 +232,10 @@ class MuseGlimmerModel(BaseModel):
         pp = self.config.pp_size
         d = self._resolve_dims(tp)
 
-        self.generation_ops = [ops.Embedding("generation_embedding", 1 * sf, self._vocab_size, h, 0.3)]
+        self.generation_ops = [
+            ops.Embedding("generation_embedding", 1 * sf, self._vocab_size, h, 0.3),
+            ops.CustomAllReduce("generation_embedding_ar", 1 * sf, h, tp),
+        ]
         if counts["swa"] > 0:
             self.generation_ops.extend(
                 self._attention_block("generation", "swa", counts["swa"] * sf, cfg.sliding_window_size, d)
@@ -216,6 +244,8 @@ class MuseGlimmerModel(BaseModel):
             self.generation_ops.extend(self._attention_block("generation", "global", counts["global"] * sf, 0, d))
         self.generation_ops.extend(
             [
+                ops.CustomAllReduce("generation_ar_1", self._num_layers * sf, h, tp),
+                ops.CustomAllReduce("generation_ar_2", self._num_layers * sf, h, tp),
                 ops.GEMM("generation_logits_gemm", 1 * sf, self._vocab_size // tp, h, common.GEMMQuantMode.bfloat16),
                 ops.P2P("generation_p2p", (pp - 1) * sf, h, pp),
             ]

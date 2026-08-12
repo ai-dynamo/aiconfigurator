@@ -369,3 +369,22 @@ def test_muse_glimmer_cp_wiring_emits_single_uniform_all_gather():
     # KV bytes are uniform across layer types (same n_kv/head_dim) -> one all-gather
     # weighted by total layer count.  The NCCL scale_factor carries that count.
     assert gathers[0]._scale_factor == 52
+
+
+def test_muse_glimmer_ar_cp_seq_split():
+    """At cp=2, the three context CustomAllReduce ops (embedding_ar, ar_1, ar_2) each
+    receive _seq_split=2 from Muse's CP loop (CustomAllReduce._CP_AWARE=True means the
+    loop's `elif op._CP_AWARE: op._seq_split = cp` branch handles them automatically).
+    Equivalence proof: constructing without seq_split then having the loop assign it
+    is identical to passing seq_split=cp at construction — both set the same attr."""
+    model = _build_muse_glimmer(cp=2)
+    ar_ops = [op for op in model.context_ops if isinstance(op, ops.CustomAllReduce)]
+    assert len(ar_ops) == 3, (
+        f"Expected 3 context CustomAllReduce ops (embedding_ar + ar_1 + ar_2), "
+        f"got {len(ar_ops)}: {[op._name for op in ar_ops]}"
+    )
+    names = {op._name for op in ar_ops}
+    assert names == {"context_embedding_ar", "context_ar_1", "context_ar_2"}, f"Unexpected AR op names: {names}"
+    assert all(op._seq_split == 2 for op in ar_ops), (
+        f"Expected _seq_split=2 on all context AR ops; got {[(op._name, op._seq_split) for op in ar_ops]}"
+    )

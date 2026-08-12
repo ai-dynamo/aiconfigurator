@@ -1102,6 +1102,74 @@ class TestMuseGlimmerModelBuilder:
             by_window = {op._window_size: op._scale_factor for op in attn}
             assert by_window == {2048: 39, 0: 13}
 
+    def test_gate_gemm_per_kind_and_shape(self):
+        """Each phase/kind emits exactly one gate GEMM with n=proj_in, k=hidden_size.
+        Attention gate GEMMs end with '_gate_gemm' (distinct from '_mlp_gate_up_gemm').
+        HF ref: MuseGlimmerTextAttention.gate_proj = nn.Linear(hidden_size, num_heads*head_dim).
+        In-repo convention: kimi_k3.py MLA output gate (lines 247-248 / 453-454)."""
+        model = self._build(tp_size=1)
+        h = 6656
+        proj_in = model._resolve_dims(1)["proj_in"]  # 32*128 = 4096 at tp=1
+
+        expected = {
+            "context_swa_gate_gemm",
+            "context_global_gate_gemm",
+            "generation_swa_gate_gemm",
+            "generation_global_gate_gemm",
+        }
+        all_gate_gemms = {
+            op._name: op
+            for op in model.context_ops + model.generation_ops
+            if isinstance(op, ops.GEMM) and op._name.endswith("_gate_gemm")
+        }
+        assert all_gate_gemms.keys() == expected, f"Gate GEMM names mismatch: got {set(all_gate_gemms.keys())}"
+        for name, gate in all_gate_gemms.items():
+            assert gate._n == proj_in, f"{name}: n={gate._n}, expected proj_in={proj_in}"
+            assert gate._k == h, f"{name}: k={gate._k}, expected hidden={h}"
+
+    def test_gate_param_count_at_tp1(self):
+        """52 gate GEMMs x 4096 x 6656 = 1,417,674,752 params (counted from context_ops only;
+        generation shares the same weights). Param count = sum(n * k * scale_factor) for gate GEMMs."""
+        model = self._build(tp_size=1)
+        gate_gemms = [op for op in model.context_ops if isinstance(op, ops.GEMM) and op._name.endswith("_gate_gemm")]
+        # swa: n=4096, k=6656, scale_factor=39; global: same n/k, scale_factor=13.
+        total_params = sum(int(op._n * op._k * op._scale_factor) for op in gate_gemms)
+        assert total_params == 52 * 4096 * 6656  # 1,417,674,752
+
+    def test_allreduce_ops_present(self):
+        """context and generation each have embedding_ar (scale 1) + ar_1 + ar_2 (scale=num_layers=52),
+        mirroring the llama.py dense TP all-reduce pattern (llama.py lines 202-213)."""
+        model = self._build(tp_size=8)
+        sf = model._mtp_scale_factor  # 1.0 for nextn=0 (no MTP)
+
+        def _check(phase_ops, prefix, emb_scale, layer_scale):
+            ars = {op._name: op for op in phase_ops if isinstance(op, ops.CustomAllReduce)}
+            for name in (f"{prefix}_embedding_ar", f"{prefix}_ar_1", f"{prefix}_ar_2"):
+                assert name in ars, f"Missing CustomAllReduce: {name}"
+            assert ars[f"{prefix}_embedding_ar"]._scale_factor == pytest.approx(emb_scale)
+            assert ars[f"{prefix}_ar_1"]._scale_factor == pytest.approx(layer_scale)
+            assert ars[f"{prefix}_ar_2"]._scale_factor == pytest.approx(layer_scale)
+
+        _check(model.context_ops, "context", 1.0, 52.0)
+        _check(model.generation_ops, "generation", 1.0 * sf, 52.0 * sf)
+
+    def test_qk_norm_enabled_on_all_attention_ops(self):
+        """use_qk_norm=True on every ContextAttention and GenerationAttention in both phases.
+        HF ref: qk_norm RMSNorm applied to q and k on every Muse layer."""
+        model = self._build(tp_size=1)
+        ctx_attn = [op for op in model.context_ops if isinstance(op, ops.ContextAttention)]
+        gen_attn = [op for op in model.generation_ops if isinstance(op, ops.GenerationAttention)]
+        assert ctx_attn, "No ContextAttention ops found in context_ops"
+        assert gen_attn, "No GenerationAttention ops found in generation_ops"
+        assert all(op._use_qk_norm for op in ctx_attn), (
+            f"Expected use_qk_norm=True on all ContextAttention ops; "
+            f"False on: {[op._name for op in ctx_attn if not op._use_qk_norm]}"
+        )
+        assert all(op._use_qk_norm for op in gen_attn), (
+            f"Expected use_qk_norm=True on all GenerationAttention ops; "
+            f"False on: {[op._name for op in gen_attn if not op._use_qk_norm]}"
+        )
+
 
 class TestHybridMoEModelBuilder:
     """Builder-level tests that verify HybridMoEModel wiring through set_hybrid_config."""
