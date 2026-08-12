@@ -142,6 +142,32 @@ def test_pep440_suffix_floor_matches_numeric_prefix(systems_root):
     assert result[0] == "triton", f"'0.5.14.post1' should floor-match '0.5.14' and yield triton head; got {result}"
 
 
+def test_pinned_head_is_carried_not_reconstructed(systems_root):
+    """The resolved order must REPORT its pinned head, for every head lane.
+
+    Regression (AIC-1715/1716): the split used to be reconstructed by scanning
+    the flat tuple for the donor tier, which cannot see a pinned ``fa3`` — the
+    donor tier starts with ``fa3`` too, so a pin of it is byte-identical to
+    "nothing pinned" and the pinned head was handed to the density ranking as a
+    donor. Only an explicitly carried tier boundary distinguishes the two.
+    """
+    from aiconfigurator_core.sdk.attention_lanes import split_attention_lane_tiers
+
+    cases = {
+        ("sglang", 90, None): ("fa3",),  # framework-default map lane
+        ("sglang", 90, "fa3"): ("fa3",),  # override == map lane, listed once
+        ("sglang", 999, "fa3"): ("fa3",),  # override only (no sm entry)
+        ("sglang", 103, "fa3"): ("fa3", "triton"),  # override, then map lane
+        ("sglang", 103, None): ("triton",),  # control: non-fa3 head
+        ("sglang", 999, None): (),  # control: nothing pinned
+    }
+    for (backend, sm, override), expected_pinned in cases.items():
+        order = _resolve(backend, "0.5.14", sm, override, systems_root)
+        pinned, donors = split_attention_lane_tiers(order)
+        assert pinned == expected_pinned, f"pinned head for ({backend!r}, {sm}, {override!r}); got {pinned}"
+        assert pinned + donors == order, "the two tiers must reconstitute the flat order exactly"
+
+
 def test_real_shipped_yaml_sglang_0514_sm103_triton():
     """Sanity-pin against the real shipped YAML: sglang/0.5.14/sm103 → triton head."""
     result = _resolve("sglang", "0.5.14", 103, None, None)

@@ -59,20 +59,41 @@ def _donor_tier(pinned) -> tuple[str, ...]:
     return tuple(lane for lane in sorted(_KNOWN_LANES) if lane not in pinned) + ("default",)
 
 
+class LaneOrder(tuple):
+    """A resolved lane order that REMEMBERS how long its pinned head is.
+
+    The value is an ordinary tuple of lane names — callers index, iterate,
+    compare and serialize it exactly as before — plus one extra bit:
+    ``pinned_count``, the length of the intent-ordered prefix (override, then
+    the framework-default map lane). Downstream re-ranking
+    (:func:`operations.attention.lane_walk_order`) needs that boundary, and it
+    CANNOT be recovered from the flat tuple: a pinned ``("fa3", …)`` head and
+    the unpinned alphabetical donor tier — which also starts with ``fa3`` — are
+    byte-identical, so a reconstruction silently demotes the pin.
+    """
+
+    def __new__(cls, lanes, pinned_count: int = 0):
+        self = super().__new__(cls, lanes)
+        self.pinned_count = pinned_count
+        return self
+
+
 def split_attention_lane_tiers(lane_order: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split a resolved order into ``(pinned, donors)``.
 
     *pinned* is the intent-ordered head this module produced from the override
-    and the framework-default map entry; *donors* is the generic tail
-    (:func:`_donor_tier`). A tuple this module did not produce — e.g. a
-    hand-specified order such as ``("triton",)`` — yields ``(lane_order, ())``
-    so explicit orders are always honoured verbatim.
+    and the framework-default map entry — carried explicitly on the
+    :class:`LaneOrder` this module returns, never re-derived; *donors* is the
+    generic tail (:func:`_donor_tier`). A plain tuple this module did not
+    produce — e.g. a hand-specified order such as ``("triton",)``, or a walk
+    order that was already expanded — yields ``(lane_order, ())`` so explicit
+    orders are always honoured verbatim.
     """
+    pinned_count = getattr(lane_order, "pinned_count", None)
     lane_order = tuple(lane_order)
-    for k in range(len(lane_order) + 1):
-        if lane_order[k:] == _donor_tier(lane_order[:k]):
-            return lane_order[:k], lane_order[k:]
-    return lane_order, ()
+    if pinned_count is None:
+        return lane_order, ()
+    return lane_order[:pinned_count], lane_order[pinned_count:]
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -92,28 +113,21 @@ def _parse_version(v: str) -> tuple[int, ...]:
     return tuple(parts) if parts else (0,)
 
 
-def resolve_attention_lane_order(
+def resolve_attention_lane_tiers(
     backend: str,
     version: str,
     sm_version: int,
     override: Optional[str],
     systems_root: Optional[str] = None,
-) -> tuple[str, ...]:
-    """Return an ordered tuple of attention lane names for the given context.
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ``(pinned, donors)`` for the given context.
 
-    Precedence rules (applied in order, each lane included at most once):
-
-    1. *override* — always first when given.
-    2. The framework-default lane for (*backend*, floor-matched *version*,
-       *sm_version*) from ``attention_lane_defaults.yaml``, if present and
-       not already listed.
-    3. The remaining known lanes ``{"fa3","triton","trtllm_mha","flashinfer",
-       "fla"}`` minus already-listed entries, in sorted (alphabetical) order.
-    4. ``"default"`` — always last, exactly once.
-
-    Floor-match on version: the highest version key in the map that is
-    ``<= version`` (dotted-numeric comparison).  Unknown backend or no
-    matching version/sm entry: skip step 2 and log one WARNING.
+    *pinned* is the explicit-intent head — the override and the
+    framework-default map lane, in that precedence, ``"default"`` excluded (it
+    is always the donor tier's last element). *donors* is the generic tail from
+    :func:`_donor_tier`. :func:`resolve_attention_lane_order` concatenates the
+    two; this function is what makes the boundary between them knowable
+    downstream (see :class:`LaneOrder`).
     """
     defaults = _load_defaults(systems_root)
 
@@ -156,4 +170,35 @@ def resolve_attention_lane_order(
     # Steps 3-4: the donor tier — remaining known lanes alphabetically, then
     # "default" last exactly once (so a pinned "default" moves to the tail).
     pinned = tuple(lane for lane in listed if lane != "default")
-    return pinned + _donor_tier(pinned)
+    return pinned, _donor_tier(pinned)
+
+
+def resolve_attention_lane_order(
+    backend: str,
+    version: str,
+    sm_version: int,
+    override: Optional[str],
+    systems_root: Optional[str] = None,
+) -> LaneOrder:
+    """Return an ordered tuple of attention lane names for the given context.
+
+    Precedence rules (applied in order, each lane included at most once):
+
+    1. *override* — always first when given.
+    2. The framework-default lane for (*backend*, floor-matched *version*,
+       *sm_version*) from ``attention_lane_defaults.yaml``, if present and
+       not already listed.
+    3. The remaining known lanes ``{"fa3","triton","trtllm_mha","flashinfer",
+       "fla"}`` minus already-listed entries, in sorted (alphabetical) order.
+    4. ``"default"`` — always last, exactly once.
+
+    Floor-match on version: the highest version key in the map that is
+    ``<= version`` (dotted-numeric comparison).  Unknown backend or no
+    matching version/sm entry: skip step 2 and log one WARNING.
+
+    The return value is the flat tuple of steps 1-4 (:class:`LaneOrder`, which
+    is a ``tuple``), carrying the length of its pinned head so downstream
+    re-ranking can leave that head alone.
+    """
+    pinned, donors = resolve_attention_lane_tiers(backend, version, sm_version, override, systems_root)
+    return LaneOrder(pinned + donors, len(pinned))

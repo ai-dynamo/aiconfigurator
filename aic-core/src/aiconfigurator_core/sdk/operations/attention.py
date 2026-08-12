@@ -119,6 +119,10 @@ def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tup
 
     1. **Pinned** — the override and the framework-default map lane, in the
        precedence the resolver produced. Never re-ordered: explicit intent wins.
+       The boundary comes from the resolver itself (``LaneOrder.pinned_count``,
+       read by ``split_attention_lane_tiers``) — a lane order that is not
+       resolver-produced (hand-specified, or an already-expanded walk) is pinned
+       in full and replayed verbatim.
     2. **Donor tier** — the remaining known lanes (plus ``"default"`` last, per
        the resolver's contract), ranked by measured coverage in THIS table
        (slices, then rows, then name) instead of alphabetically. Gap-fill should
@@ -137,7 +141,7 @@ def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tup
     """
     if not table:
         return tuple(lane_order)
-    pinned, donors = split_attention_lane_tiers(tuple(lane_order))
+    pinned, donors = split_attention_lane_tiers(lane_order)
     density = _lane_density(table, slice_depth)
 
     def _rank(lane: str) -> tuple[int, int, str]:
