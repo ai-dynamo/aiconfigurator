@@ -60,7 +60,7 @@ from tensorrt_llm._torch.attention_backend.utils import get_attention_backend
 from tensorrt_llm._torch.metadata import KVCacheParams
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.models.modeling_minimaxm3 import MiniMaxM3DecoderLayer
-from tensorrt_llm._torch.modules.rms_norm import RMSNorm
+from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
 
 # ═══════════════════════════════════════════════════════════════════════
 # Config registry patch — TRT-LLM's _CONFIG_REGISTRY has no "minimax_m3"
@@ -79,7 +79,6 @@ from tensorrt_llm._torch.modules.rms_norm import RMSNorm
 # ═══════════════════════════════════════════════════════════════════════
 from tensorrt_llm._torch.pyexecutor.config_utils import _CONFIG_REGISTRY
 from tensorrt_llm._torch.pyexecutor.model_loader import initialize_dummy_weights
-from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
 from tensorrt_llm._torch.utils import AuxStreamType, get_model_extra_attrs, model_extra_attrs
 from tensorrt_llm._utils import torch_dtype_to_binding
 
@@ -97,14 +96,14 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
-from collector.helper import _resolve_local_model_path, benchmark_with_power, get_sm_version, log_perf
-from collector.registry_types import PerfFile
-
 # LazyConfigDict resolves entries via getattr(tensorrt_llm._torch.configs,
 # name) (config_utils.py:493-498@1.3.0rc20), so expose the base class there
 # before registering the model_type.
-import tensorrt_llm._torch.configs as _trtllm_configs  # noqa: E402
+import tensorrt_llm._torch.configs as _trtllm_configs
+
+from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+from collector.helper import _resolve_local_model_path, benchmark_with_power, get_sm_version, log_perf
+from collector.registry_types import PerfFile
 
 if not hasattr(_trtllm_configs, "PretrainedConfig"):
     _trtllm_configs.PretrainedConfig = transformers.PretrainedConfig
@@ -503,9 +502,7 @@ def create_msa_attention_layer(
 
     attn_module = layer.self_attn
     if not getattr(attn_module, "is_sparse_attention_layer", False):
-        raise RuntimeError(
-            "benchmark layer came out dense; sparse_attention_freq surgery did not take"
-        )
+        raise RuntimeError("benchmark layer came out dense; sparse_attention_freq surgery did not take")
     return attn_module, model_config, original_architecture
 
 
@@ -627,9 +624,7 @@ def create_kv_cache_and_metadata(
     # for the Triton reference (py_executor_creator.py:427@1.3.0rc23:
     # `tokens_per_block = 128 if m3_sparse_config.implementation == "msa"
     # else 32`; rc19/rc20 have no implementation field and use 32).
-    tokens_per_block = (
-        128 if getattr(model_config.sparse_attention_config, "implementation", "triton") == "msa" else 32
-    )
+    tokens_per_block = 128 if getattr(model_config.sparse_attention_config, "implementation", "triton") == "msa" else 32
 
     prefix_len = int(prefix_len) if is_context else 0
 
@@ -689,7 +684,9 @@ def create_kv_cache_and_metadata(
     # add_dummy_requests docstring); is_gen marks decode requests so the
     # committed-history hint matches a decode step's cache state.
     token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [seq_len] * batch_size
-    dummy_result = kv_cache_manager.add_dummy_requests(token_nums=token_nums, request_ids=request_ids, is_gen=not is_context)
+    dummy_result = kv_cache_manager.add_dummy_requests(
+        token_nums=token_nums, request_ids=request_ids, is_gen=not is_context
+    )
     if dummy_result is None:
         raise RuntimeError(
             f"KVCacheManagerV2.add_dummy_requests failed (returned None) for "
@@ -718,14 +715,10 @@ def create_kv_cache_and_metadata(
         serving_metadata_kwargs["max_num_sequences"] = batch_size
     if "num_heads_per_kv" in init_field_names:
         num_q_heads = int(getattr(config, "num_attention_heads", 0) or 0)
-        serving_metadata_kwargs["num_heads_per_kv"] = (
-            num_q_heads // num_kv_heads if num_q_heads and num_kv_heads else 1
-        )
+        serving_metadata_kwargs["num_heads_per_kv"] = num_q_heads // num_kv_heads if num_q_heads and num_kv_heads else 1
     if "sparse_metadata_params" in init_field_names:
         serving_metadata_kwargs["sparse_metadata_params"] = (
-            model_config.sparse_attention_config.to_sparse_metadata_params(
-                pretrained_config=config
-            )
+            model_config.sparse_attention_config.to_sparse_metadata_params(pretrained_config=config)
         )
 
     attn_metadata = metadata_cls(
@@ -855,8 +848,7 @@ def run_msa_module(
     if layer_is_msa != (kernel_source == "msa_fmha_sm100"):
         _cleanup(kv_cache_manager)
         raise RuntimeError(
-            f"metadata contract ({kernel_source}) does not match the layer's "
-            f"attention backend ({layer_backend_name})"
+            f"metadata contract ({kernel_source}) does not match the layer's attention backend ({layer_backend_name})"
         )
 
     hidden_size = model_config.pretrained_config.hidden_size

@@ -393,9 +393,9 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     # a generator defect could drop it while unrelated cases preserve the
     # aggregate counts above. (case[:8] = moe_type, num_tokens, hidden,
     # inter, topk, num_experts, tp, ep.)
-    assert any(
-        case[2] == 6144 and case[3] == 3072 and case[4] == 4 and case[5] == 128 for case in cases
-    ), "MiniMax-M3 MoE row (6144/3072, topk4, 128 experts) missing from the vLLM SM90 getter"
+    assert any(case[2] == 6144 and case[3] == 3072 and case[4] == 4 and case[5] == 128 for case in cases), (
+        "MiniMax-M3 MoE row (6144/3072, topk4, 128 experts) missing from the vLLM SM90 getter"
+    )
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —

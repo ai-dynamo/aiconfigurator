@@ -562,6 +562,7 @@ fn msa_attention_sol_ms_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf_database::perf_interp::LeafValue;
     use crate::common::enums::TransferPolicy;
     use std::path::PathBuf;
 
@@ -689,7 +690,7 @@ mod tests {
             .or_default()
             .entry(1024)
             .or_default()
-            .insert(1, 10.0);
+            .insert(1, LeafValue::latency_only(10.0));
         let mut gen_head = DsaHeadGrid::new();
         gen_head
             .entry(8)
@@ -698,7 +699,7 @@ mod tests {
             .or_default()
             .entry(4097)
             .or_default()
-            .insert(1, 0.5);
+            .insert(1, LeafValue::latency_only(0.5));
         let context = DsaGrids {
             by_keys: BTreeMap::from([(
                 msa_key(),
