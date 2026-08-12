@@ -75,6 +75,7 @@ def _args(**overrides):
         "fpm_attention_backend": None,
         "fpm_enable_wideep": None,
         "fpm_enable_eplb": None,
+        "fpm_strict_admission": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
         "fpm_model_config": None,
@@ -1651,3 +1652,78 @@ def test_unplumbed_backend_identity_fails_closed():
                 options=options,
                 generator_overrides={},
             )
+
+
+def test_strict_admission_rejects_aic_structural_invalidity_by_default(monkeypatch):
+    """A structural ValueError from the AIC estimator means the modeling
+    consumer would fail on the same math - the topology is dropped up front
+    (default --fpm-strict-admission true)."""
+
+    def structurally_invalid(*_args, **_kwargs):
+        raise ValueError(
+            "Invalid quantized MoE configuration: (moe_intermediate_size=1536 / moe_tp_size=8) "
+            "% weight_block_size=128 != 0"
+        )
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        structurally_invalid,
+    )
+    with pytest.raises(ValueError, match="rejected every structurally valid FPM topology"):
+        build_collection_plan(
+            backend="vllm",
+            model_path="nvidia/GLM-5.2-NVFP4",
+            model_architecture="GlmMoeDsaForCausalLM",
+            system="b200_sxm",
+            selected_ops={"dsa_context_module", "dsa_generation_module"},
+            options=FPMCollectionOptions.from_args(_args()),
+        )
+
+
+def test_strict_admission_false_keeps_predicted_invalid_for_runtime_verification(monkeypatch):
+    def structurally_invalid(*_args, **_kwargs):
+        raise ValueError("Invalid quantized MoE configuration: 192 % 128 != 0")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        structurally_invalid,
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args(fpm_strict_admission="false")),
+    )
+
+    assert len(plan.topologies) == 3
+    decisions = plan.topology_memory_admission
+    assert {decision.disposition for decision in decisions} == {"unknown"}
+    assert all("predicts this configuration is invalid" in decision.reason for decision in decisions)
+
+
+def test_missing_perf_data_stays_runnable_under_strict_admission(monkeypatch):
+    """Coverage gaps are not structural invalidity: collection may be exactly
+    what fills them, so strict admission must not reject them."""
+
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
+    def unavailable(*_args, **_kwargs):
+        raise PerfDataNotAvailableError("no perf rows for this shape")
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        unavailable,
+    )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert len(plan.topologies) == 3
+    assert {decision.disposition for decision in plan.topology_memory_admission} == {"unknown"}

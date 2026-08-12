@@ -11,6 +11,14 @@ from dataclasses import dataclass
 
 from aiconfigurator.sdk.memory import KVCacheEstimator
 
+# Messages that identify AIC's deterministic structural validators (math the
+# modeling consumer re-runs identically). Only these justify rejecting a
+# topology without silicon evidence; every other ValueError (unknown model,
+# template bootstrap, estimator gaps) stays runnable. Extend the tuple as new
+# validators appear; the durable fix is typed exceptions in aic-core.
+_STRUCTURAL_VALIDATION_MARKERS = ("Invalid quantized MoE configuration",)
+from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
 from .capabilities import ModelCapabilityProfile
 from .types import ParallelTopology
 
@@ -102,6 +110,44 @@ def _estimate_dtype(
             fmha_quant_mode=fmha_quant_mode,
             comm_quant_mode=capability.dtype.comm_quant_mode,
         ).breakdown
+    except PerfDataNotAvailableError as error:
+        # Coverage gap: collection may be exactly what fills it - stay runnable.
+        return DTypeMemoryEstimate(
+            kv_cache_dtype=kv_cache_dtype,
+            disposition="unknown",
+            estimated_non_kv_bytes=None,
+            gpu_capacity_bytes=None,
+            reason=f"AIC memory estimate unavailable: {type(error).__name__}: {error}",
+        )
+    except ValueError as error:
+        if any(marker in str(error) for marker in _STRUCTURAL_VALIDATION_MARKERS):
+            # Deterministic structural validation: the modeling consumer runs
+            # the same math and would fail identically, so silicon data for
+            # this configuration is dead on arrival.
+            return DTypeMemoryEstimate(
+                kv_cache_dtype=kv_cache_dtype,
+                disposition="predicted_invalid",
+                estimated_non_kv_bytes=None,
+                gpu_capacity_bytes=None,
+                reason=f"AIC structural validation rejects this configuration: {error}",
+            )
+        return DTypeMemoryEstimate(
+            kv_cache_dtype=kv_cache_dtype,
+            disposition="unknown",
+            estimated_non_kv_bytes=None,
+            gpu_capacity_bytes=None,
+            reason=f"AIC memory estimate unavailable: {type(error).__name__}: {error}",
+        )
+    except Exception as error:
+        return DTypeMemoryEstimate(
+            kv_cache_dtype=kv_cache_dtype,
+            disposition="unknown",
+            estimated_non_kv_bytes=None,
+            gpu_capacity_bytes=None,
+            reason=f"AIC memory estimate unavailable: {type(error).__name__}: {error}",
+        )
+
+    try:
         non_kv = math.ceil(float(breakdown["non_kv_bytes"]))
         capacity = math.floor(float(breakdown["gpu_memory_capacity_bytes"]))
         if non_kv < 0 or capacity <= 0:
@@ -137,6 +183,7 @@ def filter_memory_infeasible_topologies(
     capability: ModelCapabilityProfile,
     topologies: tuple[ParallelTopology, ...],
     max_new_tokens: int,
+    strict_admission: bool = True,
 ) -> tuple[tuple[ParallelTopology, ...], tuple[TopologyMemoryDecision, ...]]:
     """Drop topologies that cannot fit the configured max-new-token envelope.
 
@@ -170,9 +217,19 @@ def filter_memory_infeasible_topologies(
             disposition = "admitted"
             reason = "at least one requested KV dtype fits the configured max-new-token envelope"
             admitted.append(topology)
-        elif "unknown" in dispositions:
+        elif strict_admission and "predicted_invalid" in dispositions and "unknown" not in dispositions:
+            disposition = "rejected"
+            reason = (
+                "AIC structural validation rejects every requested KV dtype for this topology; "
+                "the modeling consumer would fail on the same math, so its data is unusable. "
+                "Rerun with --fpm-strict-admission false to force runtime verification"
+            )
+            rejected.append((topology, estimates))
+        elif "unknown" in dispositions or "predicted_invalid" in dispositions:
             disposition = "unknown"
             reason = "AIC could not prove the topology is impossible; runtime verification is required"
+            if "predicted_invalid" in dispositions:
+                reason += " (WARNING: AIC structural validation predicts this configuration is invalid)"
             admitted.append(topology)
         else:
             disposition = "rejected"
@@ -197,11 +254,14 @@ def filter_memory_infeasible_topologies(
                 if estimate.estimated_non_kv_bytes is not None
                 else math.inf,
             )
-            details.append(
-                f"{topology.to_dict()}="
-                f"{best.estimated_non_kv_bytes / 2**30:.2f}/"
-                f"{best.gpu_capacity_bytes / 2**30:.2f} GiB"
-            )
+            if best.estimated_non_kv_bytes is None:
+                details.append(f"{topology.to_dict()}={best.reason}")
+            else:
+                details.append(
+                    f"{topology.to_dict()}="
+                    f"{best.estimated_non_kv_bytes / 2**30:.2f}/"
+                    f"{best.gpu_capacity_bytes / 2**30:.2f} GiB"
+                )
         logger.warning(
             "fpm_forward: dropped %d/%d topologies (AIC configured max-new-token non-KV memory "
             "exceeds GPU capacity, system=%s, max_new_tokens=%d): %s",
