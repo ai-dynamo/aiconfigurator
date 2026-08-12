@@ -1143,8 +1143,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         assert rust_engine_step._cached_engine_handle(model, database) is not None
 
         # (3) End to end through the backend gate: the rust-routed run_static
-        # answers natively — no python-step fallback warning, and the
-        # breakdown is the scalar engine-step totals, not per-op keys.
+        # answers natively — no python-step fallback warning, and (since the
+        # per-op FFI, #1496) the breakdown carries per-op keys like the
+        # Python step's, including the large-EP ops priced by the Rust
+        # engine.
         backend = get_backend("sglang")
         runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="rust")
         rust_engine_step._python_step_fallback_reset()
@@ -1154,12 +1156,17 @@ def test_large_ep_op_graph_compiles_natively(caplog):
 
         context_latency = summary.get_context_latency_dict()
         generation_latency = summary.get_generation_latency_dict()
-        assert set(context_latency) == {"rust_engine_step_context"}
-        assert set(generation_latency) == {"rust_engine_step_generation"}
-        rust_context = context_latency["rust_engine_step_context"]
-        rust_generation = generation_latency["rust_engine_step_generation"]
-        assert math.isfinite(rust_context) and rust_context > 0.0
-        assert math.isfinite(rust_generation) and rust_generation > 0.0
+        for phase_latency in (context_latency, generation_latency):
+            assert phase_latency, "the rust step must report a per-op breakdown"
+            assert any("moe_dispatch" in name or "moe_combine" in name for name in phase_latency), (
+                "the large-EP comm ops must be priced by the rust engine",
+                sorted(phase_latency),
+            )
+            for name, value in phase_latency.items():
+                assert math.isfinite(value) and value >= 0.0, name
+        rust_context = sum(context_latency.values())
+        rust_generation = sum(generation_latency.values())
+        assert rust_context > 0.0 and rust_generation > 0.0
 
         # (4) Parity with the Python step on the same config at rel <= 0.01
         # (the PR 2.5 bar; the per-op oracles hold 1e-9, so this graph-level
