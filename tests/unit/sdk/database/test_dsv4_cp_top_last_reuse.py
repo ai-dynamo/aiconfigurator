@@ -42,6 +42,41 @@ def test_csa_cp_top_last_loads_via_approved_reuse_donor():
     assert grid == ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(donor, _FLASH_NATIVE_HEADS)
 
 
+def test_csa_cp_top_last_cache_separates_strict_provenance(monkeypatch, tmp_path):
+    """A permissive-database warm must not serve a strict database: the
+    rows ``_build_op_sources`` admits depend on ``strict_provenance``
+    (fail-closed), and both database flavors coexist in one process
+    (``databases_cache`` keys on the flag)."""
+    import aiconfigurator_core.sdk.operations.dsv4 as dsv4_mod
+
+    loads = []
+
+    class _FakeDb:
+        def __init__(self, strict: bool):
+            self.systems_root = str(tmp_path)
+            self.system = "fake_sys"
+            self.backend = "sglang"
+            self.version = "0.0.1"
+            self.enable_shared_layer = True
+            self.strict_provenance = strict
+            self.system_spec = {"data_dir": "fake_sys"}
+
+        def _build_op_sources(self, enum, primary_path, system_data_root):
+            return [(primary_path, None)]
+
+    monkeypatch.setattr(dsv4_mod, "resolve_op_data_path", lambda *a, **k: "primary")
+    monkeypatch.setattr(dsv4_mod, "load_dsv4_sparse_op_data", lambda sources, keys: loads.append(1) or {})
+    ContextDeepSeekV4AttentionModule._csa_topk_abs_cache.clear()
+
+    ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=False), _FLASH_NATIVE_HEADS)
+    ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=True), _FLASH_NATIVE_HEADS)
+    assert len(loads) == 2, "strict database reused the permissive warm"
+
+    ContextDeepSeekV4AttentionModule._load_csa_topk_top_last(_FakeDb(strict=True), _FLASH_NATIVE_HEADS)
+    assert len(loads) == 2, "same-flag reload must still hit the cache"
+    ContextDeepSeekV4AttentionModule._csa_topk_abs_cache.clear()
+
+
 def test_csa_cp_top_last_lookup_pins_adjudicated_repro_values():
     # The exact sparse-gate values of the issue #1498 repro
     # (DeepSeek-V4-Flash | tp1 ep8 cp8 | b=1 isl=8192): tl_full 0.048698 /

@@ -1169,12 +1169,17 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         # Full database identity so two systems under the same root/backend/
         # version don't reuse each other's dsv4_csa_topk_calib table.
+        # ``strict_provenance`` is part of the identity because
+        # ``_build_op_sources`` admits rows fail-closed under strict mode: a
+        # permissive warm must not serve a strict database (the two coexist
+        # in one process — ``databases_cache`` itself keys on the flag).
         key = (
             database.systems_root,
             database.system,
             database.backend,
             database.version,
             database.enable_shared_layer,
+            database.strict_provenance,
             native_heads,
         )
         if key in cls._csa_topk_abs_cache:
