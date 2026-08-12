@@ -181,7 +181,7 @@ def run_resolved(args: argparse.Namespace, resolved_inputs: ResolvedFPMInputs) -
         smoke=args.smoke,
         cell_limit=args.limit,
         database_root=args.fpm_database_root,
-        publish_partial=getattr(args, "fpm_publish_partial", False),
+        publish_partial=bool(getattr(args, "fpm_publish_partial", None)),
     )
 
 

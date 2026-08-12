@@ -447,6 +447,7 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--fpm-publish-partial",
         action="store_true",
+        default=None,
         help="Publish rows from passed cells even when other cells failed (explicit opt-in; "
         "the checkpoint records exactly which cells are missing). Default keeps the "
         "all-cells-passed publication gate.",
