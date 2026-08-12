@@ -829,6 +829,12 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +114 for the nvidia/MiniMax-M3-NVFP4 row (same 6144/3072, 128x4
     # geometry; quant-distinct artifact — NVFP4 routed experts — so it is a
     # separate row, never merged with the BF16 parent).
+    # AIC-1715/1716 rebase: nvidia/Qwen3.5-397B-A17B-NVFP4's moe row is now
+    # sglang-only (frameworks: [sglang], citing the InferenceX serving pin)
+    # instead of main's prior generic sglang/trtllm/vllm declaration, so the
+    # net delta vs the pre-rebase 6720 baseline is not a simple +117; the
+    # exact figure is re-verified against a live run in the rebase's gate
+    # pass (tests/unit/collector, "collector data checks").
     assert len(moe_cases) == 6720
 
     assert any(
@@ -1772,6 +1778,34 @@ def test_nemotron_super_fp8_vllm_moe_case_covers_missing_consumer_key(monkeypatc
 
     config_path = REPO_ROOT / "src/aiconfigurator/model_configs" / f"{model_path.replace('/', '--')}_config.json"
     assert config_path.is_file()
+
+
+def test_qwen35_397b_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner():
+    from collector.case_generator import (
+        get_common_moe_test_cases,
+        get_sglang_moe_backend,
+        moe_model_allows_quantization,
+    )
+
+    cases = get_common_moe_test_cases()
+    nvfp4_cases = [case for case in cases if case.model_name == "nvidia/Qwen3.5-397B-A17B-NVFP4"]
+
+    # Row exists and carries the 397B shape tuple
+    assert nvfp4_cases, "nvidia/Qwen3.5-397B-A17B-NVFP4 moe cases not found"
+    assert all(case.hidden_size == 4096 for case in nvfp4_cases)
+    assert all(case.inter_size == 1024 for case in nvfp4_cases)
+    assert all(case.topk == 10 for case in nvfp4_cases)
+    assert all(case.num_experts == 512 for case in nvfp4_cases)
+
+    # Runner map resolves flashinfer_trtllm at sm100 and sm103
+    sample = nvfp4_cases[0]
+    assert get_sglang_moe_backend(sample, "nvfp4", 100) == "flashinfer_trtllm"
+    assert get_sglang_moe_backend(sample, "nvfp4", 103) == "flashinfer_trtllm"
+
+    # Quant policy: nvfp4 allowed for sglang; bfloat16 and fp8_block excluded
+    assert moe_model_allows_quantization("sglang", "nvidia/Qwen3.5-397B-A17B-NVFP4", "nvfp4")
+    assert not moe_model_allows_quantization("sglang", "nvidia/Qwen3.5-397B-A17B-NVFP4", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "nvidia/Qwen3.5-397B-A17B-NVFP4", "fp8_block")
 
 
 def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(monkeypatch):
