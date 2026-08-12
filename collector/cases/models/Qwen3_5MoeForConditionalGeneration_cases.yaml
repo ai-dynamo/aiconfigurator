@@ -70,6 +70,18 @@ model_case_values:
       sglang_moe_backends:
         bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
         fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+  gemm:
+    # Exact widths below the base feature grid (min 32): scalar shared-expert
+    # gate (hidden -> 1) and GDN in_proj_ba (2 * num_v_heads / tp).
+    - model_path: Qwen/Qwen3.5-35B-A3B
+      output_feature_sizes: [1, 4, 8, 16]
+      input_feature_sizes: [2048]
+    - model_path: Qwen/Qwen3.5-122B-A10B
+      output_feature_sizes: [1, 8, 16]
+      input_feature_sizes: [3072]
+    - model_path: Qwen/Qwen3.5-397B-A17B
+      output_feature_sizes: [1, 8, 16]
+      input_feature_sizes: [4096]
   gdn:
     - model_path: Qwen/Qwen3.5-35B-A3B
       d_model: 2048
@@ -78,6 +90,8 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 32
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+    # 122B/397B attention declares TP32, but num_k_heads=16 cannot shard 32 ways — no TP32 GDN geometry.
     - model_path: Qwen/Qwen3.5-122B-A10B
       d_model: 3072
       d_conv: 4
@@ -85,6 +99,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 64
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - model_path: Qwen/Qwen3.5-397B-A17B
       d_model: 4096
       d_conv: 4
@@ -92,6 +107,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 64
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
 
 all_frameworks_op_cases:
   moe:
