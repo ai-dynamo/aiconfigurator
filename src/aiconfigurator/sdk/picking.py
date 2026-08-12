@@ -405,8 +405,9 @@ def pick_autoscale(
 ) -> dict[str, Any]:
     """Pick prefill and decode engines independently for autoscaling.
 
-    No rate matching is performed.  Returns disagg configs with
-    ``(p)workers=1`` and ``(d)workers=1``.
+    No worker-count rate matching is performed.  Returns disagg configs with
+    ``(p)workers=1`` and ``(d)workers=1``; the min-rate calculation still
+    applies the degradation factors below.
 
     Args:
         prefill_df: Prefill candidates DataFrame (``ColumnsStatic`` schema).
