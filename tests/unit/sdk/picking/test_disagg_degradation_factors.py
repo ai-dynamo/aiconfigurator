@@ -3,9 +3,9 @@
 
 """Unit tests for exposed rate-match degradation factors in pick_autoscale.
 
-``pick_autoscale`` used to call ``_build_disagg_summary_dict`` with the built-in
-prefill/decode degradation constants hardcoded. They are now keyword args so a
-caller can calibrate the analytical disagg point against measured silicon.
+``pick_autoscale`` used to rely on ``_build_disagg_summary_dict`` defaults for
+prefill/decode degradation. They are now keyword args so a caller can calibrate
+the analytical disagg point against measured silicon.
 """
 
 import pandas as pd
@@ -94,9 +94,9 @@ def _decode_dict(**overrides) -> dict:
     return base
 
 
-def _run(**kwargs):
-    prefill_df = pd.DataFrame([_prefill_dict()])
-    decode_df = pd.DataFrame([_decode_dict()])
+def _run(*, prefill_seq_s: float = 10.0, decode_seq_s: float = 3.0, **kwargs):
+    prefill_df = pd.DataFrame([_prefill_dict(**{"seq/s": prefill_seq_s, "seq/s/gpu": prefill_seq_s / 4})])
+    decode_df = pd.DataFrame([_decode_dict(**{"seq/s": decode_seq_s, "seq/s/gpu": decode_seq_s / 4})])
     # Loose SLAs so both single candidates always survive filtering.
     return pick_autoscale(prefill_df, decode_df, target_ttft=1e9, target_tpot=1e9, **kwargs)
 
@@ -125,6 +125,17 @@ def test_decode_bound_seq_s_scales_with_decode_factor() -> None:
     seq_lo = r_lo["best_config_df"].iloc[0]["seq/s"]
     assert seq_hi == pytest.approx(3.0 * 0.92)
     assert seq_lo == pytest.approx(3.0 * 0.5)
+    assert seq_lo < seq_hi
+
+
+def test_prefill_bound_seq_s_scales_with_prefill_factor() -> None:
+    """With prefill as the bottleneck, seq/s tracks the prefill factor."""
+    r_hi = _run(prefill_seq_s=2.0, decode_seq_s=10.0, prefill_degradation_factor=0.9)
+    r_lo = _run(prefill_seq_s=2.0, decode_seq_s=10.0, prefill_degradation_factor=0.5)
+    seq_hi = r_hi["best_config_df"].iloc[0]["seq/s"]
+    seq_lo = r_lo["best_config_df"].iloc[0]["seq/s"]
+    assert seq_hi == pytest.approx(2.0 * 0.9)
+    assert seq_lo == pytest.approx(2.0 * 0.5)
     assert seq_lo < seq_hi
 
 
