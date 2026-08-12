@@ -193,9 +193,16 @@ impl FpmForwardOp {
         // clamped query prices the same side of the capture cliff and is a
         // bounded upper bound on attention. Decode is NEVER clamped (its
         // batch axis carries a real regime cliff — the Task B partition).
+        // KV-pressure ceiling (mirrors Python _PREFILL_CLAMP_MAX_KV_PRESSURE):
+        // randtok LOO measured the clamp at median <= 2% below kv/T = 2 and
+        // up to median 14% / p90 96% above it — high-pressure queries stay
+        // hard-gated, with no SOL-corrected substitute.
+        const MAX_KV_PRESSURE: f64 = 2.0;
         let clamped: Vec<f64>;
         let coords = match (self.phase, cell.prefill_batch_clamp_max) {
-            (FpmPhase::Prefill, Some(max)) if coords[0] > max as f64 => {
+            (FpmPhase::Prefill, Some(max))
+                if coords[0] > max as f64 && coords[2] < MAX_KV_PRESSURE * coords[1] =>
+            {
                 clamped = std::iter::once(max as f64)
                     .chain(coords[1..].iter().copied())
                     .collect();
@@ -440,6 +447,40 @@ mod tests {
         // The token axis stays honestly gated.
         let err = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 16384.0, 0.0])
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the collected domain"), "{err}");
+    }
+
+    #[test]
+    fn clamp_respects_the_kv_pressure_ceiling() {
+        use crate::perf_database::fpm_forward::tests::RowSpec;
+        let mk = |batch: u32, total: u32, kv: u32, lat: f64| RowSpec {
+            workload_kind: "prefill",
+            batch_size: batch,
+            total_prefill_tokens: total,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        let mut rows = Vec::new();
+        for (b, bump) in [(1u32, 1.0), (2, 1.02), (4, 1.04)] {
+            for (total, lat) in [(1024u32, 10.0), (2048, 20.0), (4096, 40.0)] {
+                rows.push(mk(b, total, 0, lat * bump));
+                rows.push(mk(b, total, total, lat * bump * 1.2));
+                rows.push(mk(b, total, 4 * total, lat * bump * 1.8));
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        write_pair(tmp.path(), &rows);
+        let db = db_with_pair(tmp.path());
+        // kv/T = 1 (< 2): clamps to the (4, 4096, 4096) leaf.
+        let low = op(FpmPhase::Prefill)
+            .query_totals(&db, &[16.0, 4096.0, 4096.0])
+            .unwrap();
+        assert!((low.latency_ms - 40.0 * 1.04 * 1.2).abs() < 1e-9, "{}", low.latency_ms);
+        // kv/T = 4 (>= 2): the pressure ceiling keeps the hard gate.
+        let err = op(FpmPhase::Prefill)
+            .query_totals(&db, &[16.0, 4096.0, 16384.0])
             .unwrap_err();
         assert!(err.to_string().contains("outside the collected domain"), "{err}");
     }

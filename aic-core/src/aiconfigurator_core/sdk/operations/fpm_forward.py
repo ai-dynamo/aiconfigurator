@@ -59,6 +59,15 @@ FPM_FORWARD_PARTITION_POLICY = "balanced_v1"
 # The only measurement policy the collector publishes; pinned in the sidecar
 # gate so a pair measured under a different regime is a loud structural error.
 FPM_FORWARD_MEASUREMENT_POLICY = "dynamo_native_single_sample_v1"
+# Batch-clamp KV-pressure ceiling: the clamp answers with a measured row at
+# the batch ceiling, which prices the same totals split into FEWER, LONGER
+# segments — a strict upper bound whose looseness grows with KV pressure
+# (total_kv / total_prefill). Randtok LOO (fpm_e2e_20260811/batch_clamp_loo,
+# 16k points, tp4+tp8, clamp ratios 2x/4x): below pressure 2 the clamp is
+# median <= 2% / p90 <= 6.5%; above it, up to median 14% / p90 96%. Queries
+# above the ceiling stay hard-gated — no SOL-corrected substitute (that
+# would re-couple FPM to op-level model correctness).
+_PREFILL_CLAMP_MAX_KV_PRESSURE = 2.0
 _PHASES = ("prefill", "decode")
 
 
@@ -777,7 +786,11 @@ class FPMForwardOp(Operation):
         domain = cell["domains"].get(self._phase)
         if self._phase == "prefill":
             clamp_max = cell.get("prefill_batch_clamp_max")
-            if clamp_max is not None and coords[0] > clamp_max:
+            if (
+                clamp_max is not None
+                and coords[0] > clamp_max
+                and coords[2] < _PREFILL_CLAMP_MAX_KV_PRESSURE * coords[1]
+            ):
                 # Data-certified batch clamp: answer at the collected batch
                 # ceiling with the TRUE totals. Same totals = same GEMM/MoE
                 # work and the same side of the CUDA-graph capture cliff (the

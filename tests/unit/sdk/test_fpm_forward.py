@@ -292,6 +292,28 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
             op.query_totals(db, batch_size=16, total_prefill_tokens=16384, total_kv_read_tokens=0)
 
+    def test_clamp_respects_the_kv_pressure_ceiling(self, fake_db):
+        # LOO-measured boundary (batch_clamp_loo): below kv/T=2 the clamp is
+        # median <=2%; above it the upper bound loosens badly (p90 up to
+        # 96%), so high-pressure queries stay hard-gated — deliberately
+        # WITHOUT a SOL-corrected substitute, which would re-couple FPM to
+        # op-level model correctness.
+        rows = []
+        for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
+            for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
+                rows.append(_row("prefill", b, total, 0, lat * bump))
+                rows.append(_row("prefill", b, total, total, lat * bump * 1.2))
+                rows.append(_row("prefill", b, total, 4 * total, lat * bump * 1.8))
+        db = fake_db(rows)
+        op = _make_op("prefill")
+        # kv/T = 1 (< 2): clamps to the ceiling row.
+        low = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=4096))
+        assert low == pytest.approx(40.0 * 1.04 * 1.2)
+        # kv/T = 4 (>= 2): in-domain on every axis except batch, but the
+        # pressure ceiling keeps the hard gate.
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=16384)
+
     def test_uncertified_prefill_batch_stays_hard_gated(self, fake_db):
         # Default fixture rows carry a single sparse batch pair -> no
         # certificate -> the domain gate rejects exactly as before.
