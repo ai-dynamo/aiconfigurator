@@ -1010,6 +1010,7 @@ def cli_estimate(
     decode_max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    attention_backend: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int | str = 0,
