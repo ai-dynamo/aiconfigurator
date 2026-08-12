@@ -213,6 +213,35 @@ class HybridMoEModel(BaseModel):
             ops.GEMM(f"{prefix}_dense_down_gemm", count, h, dense_inter_per_tp, gemm_q, low_precision_input=True),
         ]
 
+    def apply_cp_to_context_ops(self, op_list, cp: int) -> None:
+        """Wire context parallelism into ``op_list``.
+
+        Subclasses that append context ops after ``_build_context_ops`` has run
+        must call this on the ops they added; otherwise those ops silently keep
+        ``_seq_split=1`` while the rest of the pipeline is split, AND they skip
+        the un-audited-op guard below, so the miss surfaces as a wrong number
+        rather than an error.
+        """
+        for op in op_list:
+            if isinstance(op, ops.ContextAttention):
+                op._cp_size = cp
+            elif isinstance(op, ops.MoEDispatch):
+                # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
+                # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
+                # otherwise wrongly take the TP all-reduce path.
+                op._attn_cp_size = cp
+            elif op._CP_AWARE:
+                # Token-major op: shrink the M-axis. This post-construction
+                # mutation bypasses the constructor's _CP_AWARE gate, so
+                # re-assert the opt-in here -- an un-audited op in a
+                # CP-enabled pipeline must fail loud, not silently skip CP.
+                op._seq_split = cp
+            else:
+                raise NotImplementedError(
+                    f"{type(op).__name__} ('{op._name}') has not been audited for "
+                    f"context parallelism but appears in a CP-enabled context pipeline."
+                )
+
     def _build_context_ops(self) -> None:
         """Build the context (prefill) operations for all four layer types."""
         if not self._hybrid_config:
@@ -360,25 +389,7 @@ class HybridMoEModel(BaseModel):
             # built across separate passes, so CP is applied here once every op
             # exists. The per-op _CP_AWARE opt-in is re-asserted in the loop so an
             # un-audited op still fails loud instead of silently skipping CP.
-            for op in self.context_ops:
-                if isinstance(op, ops.ContextAttention):
-                    op._cp_size = cp
-                elif isinstance(op, ops.MoEDispatch):
-                    # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
-                    # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
-                    # otherwise wrongly take the TP all-reduce path.
-                    op._attn_cp_size = cp
-                elif op._CP_AWARE:
-                    # Token-major op: shrink the M-axis. This post-construction
-                    # mutation bypasses the constructor's _CP_AWARE gate, so
-                    # re-assert the opt-in here -- an un-audited op in a
-                    # CP-enabled pipeline must fail loud, not silently skip CP.
-                    op._seq_split = cp
-                else:
-                    raise NotImplementedError(
-                        f"{type(op).__name__} ('{op._name}') has not been audited for "
-                        f"context parallelism but appears in a CP-enabled context pipeline."
-                    )
+            self.apply_cp_to_context_ops(self.context_ops, cp)
             global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
             swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
             # Per-layer KV bytes = n_kv * (k_hd + v_hd) * bytes (K and V head

@@ -74,8 +74,13 @@ class Step3p7Model(HybridMoEModel):
 
         Runs on every MoE layer (``moe_layer_freq == 1``). Aggregate op time is a
         sum, so appending (rather than inserting mid-block) does not change the
-        modeled latency/throughput. cp_size==1 for the Step-3.7 sweeps here, so
-        these plain GEMM/ElementWise ops need no CP auditing.
+        modeled latency/throughput.
+
+        These ops are appended after ``_build_context_ops`` has already wired CP,
+        so they must be audited explicitly. Without that they keep
+        ``_seq_split=1`` while the inherited dense FFN ops carry ``cp``, charging
+        the full shared-expert token count on every rank -- and they also miss the
+        un-audited-op guard, so it shows up as a wrong number, not an error.
         """
         if self._share_expert_dim <= 0:
             return
@@ -88,9 +93,12 @@ class Step3p7Model(HybridMoEModel):
         gemm_q = self.config.gemm_quant_mode
         share_inter_per_tp = self._share_expert_dim // tp
 
-        self.context_ops.extend(
-            self._dense_ffn_ops("context_shared_expert", num_moe_layers, h, tp, share_inter_per_tp, gemm_q)
+        context_shared_ops = self._dense_ffn_ops(
+            "context_shared_expert", num_moe_layers, h, tp, share_inter_per_tp, gemm_q
         )
+        if self.config.cp_size > 1:
+            self.apply_cp_to_context_ops(context_shared_ops, self.config.cp_size)
+        self.context_ops.extend(context_shared_ops)
         sf = self._mtp_scale_factor
         self.generation_ops.extend(
             self._dense_ffn_ops("generation_shared_expert", num_moe_layers * sf, h, tp, share_inter_per_tp, gemm_q)

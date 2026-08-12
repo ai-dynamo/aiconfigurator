@@ -230,3 +230,52 @@ def test_step3p7_parses_the_published_checkpoint_schema():
     # MoE placement from moe_layers_enum, so layers 0-1 stay dense
     assert extra.moe_layer_freq == (0, 0, 1, 1, 1, 1)
     assert extra.sliding_window_size == 512
+
+
+def test_shared_expert_ops_are_cp_audited():
+    """Shared-expert ops must carry the same seq_split as the rest of the pipeline.
+
+    They are appended after ``_build_context_ops`` has already wired context
+    parallelism. Before the fix they kept ``_seq_split=1`` while the inherited
+    dense FFN ops carried ``cp``, so every rank was charged the full
+    shared-expert token count; they also bypassed the un-audited-op guard, so it
+    surfaced as a wrong number rather than an error.
+    """
+    cp = 2
+    result = _parse_hf_config_json(_step37_hf_config())
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=cp,  # tp * dp * cp must equal moe_tp * moe_ep
+        attention_dp_size=1,
+        cp_size=cp,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+
+    shared = [o for o in model.context_ops if "context_shared_expert" in getattr(o, "_name", "")]
+    assert shared, "expected shared-expert context ops"
+    split = {getattr(o, "_seq_split", None) for o in shared}
+    assert split == {cp}, f"shared-expert ops must split by cp={cp}, got {split}"
