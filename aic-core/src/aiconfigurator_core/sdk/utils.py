@@ -797,7 +797,12 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"num_experts={num_experts}, top_k={topk}, "
             f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
         )
-    elif architecture in {"Step3p7FlashForCausalLM", "Step3p5FlashForCausalLM"}:
+    elif architecture in {
+        "Step3p7ForConditionalGeneration",
+        "Step3p5ForCausalLM",
+        "Step3p7FlashForCausalLM",
+        "Step3p5FlashForCausalLM",
+    }:
         # StepFun Step-3.7-Flash: hybrid SWA/global attention (Gemma-style
         # ``layer_types``) + dense-first-``first_k_dense_replace`` then MoE FFN,
         # with one shared expert on the MoE layers. attn_layer_pattern: 1=full,
@@ -813,13 +818,35 @@ def _parse_hf_config_json(config: dict) -> dict:
         swa_n_heads = int(other.get("num_attention_heads", 0) or 0)
         swa_hd_other = int(other.get("head_dim", 0) or 0)
         layer_types_raw = config.get("layer_types", [])
+        # The published config sizes layer_types over the decoder PLUS the MTP
+        # predict layers (45 + 3 = 48), so trim to the decoder's share before
+        # building the per-layer pattern.
+        mtp_layers = int(config.get("num_nextn_predict_layers", 0) or 0)
+        if len(layer_types_raw) == layers + mtp_layers and mtp_layers:
+            layer_types_raw = layer_types_raw[:layers]
         if len(layer_types_raw) != layers:
-            raise ValueError(f"Step3p7 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
+            raise ValueError(
+                f"Step3p7 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers} "
+                f"(num_nextn_predict_layers={mtp_layers})"
+            )
         if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
             raise ValueError("Step3p7 layer_types must contain only 'sliding_attention' or 'full_attention'")
         attn_pattern = tuple(1 if lt == "full_attention" else 0 for lt in layer_types_raw)
-        first_k_dense = int(config.get("first_k_dense_replace", 0) or 0)
-        moe_freq = tuple(0 if i < first_k_dense else 1 for i in range(layers))
+        # MoE placement: the published config enumerates the MoE layer indices in
+        # ``moe_layers_enum`` (a comma-separated string); the curated fixtures use
+        # the DeepSeek-style ``first_k_dense_replace`` prefix count. Honour both,
+        # preferring the authoritative enumeration.
+        moe_enum_raw = config.get("moe_layers_enum")
+        moe_indices: set[int] | None = None
+        if isinstance(moe_enum_raw, str) and moe_enum_raw.strip():
+            moe_indices = {int(tok) for tok in moe_enum_raw.split(",") if tok.strip()}
+        elif isinstance(moe_enum_raw, (list, tuple)) and moe_enum_raw:
+            moe_indices = {int(tok) for tok in moe_enum_raw}
+        if moe_indices is not None:
+            moe_freq = tuple(1 if i in moe_indices else 0 for i in range(layers))
+        else:
+            first_k_dense = int(config.get("first_k_dense_replace", 0) or 0)
+            moe_freq = tuple(0 if i < first_k_dense else 1 for i in range(layers))
         extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,

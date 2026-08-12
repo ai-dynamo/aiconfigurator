@@ -172,18 +172,24 @@ class TestStep3p7KVCache:
         assert len(gen) == 3
 
 
-def test_step3p7_reads_nested_text_config_and_sliding_head_count():
-    """The authoritative HF config nests the decoder under ``text_config`` and
-    declares a second attention geometry for the sliding layers.
+def test_step3p7_parses_the_published_checkpoint_schema():
+    """Parse the schema the published checkpoint actually ships.
 
-    Reading only the flat top level rejected real checkpoints outright and sized
-    all 33 sliding layers with the global layers' 64 query heads instead of 96.
+    Four things differ from the curated fixture and each one silently broke the
+    model: the architecture strings are Step3p7ForConditionalGeneration /
+    Step3p5ForCausalLM (not the *Flash* spellings this repo invented), the decoder
+    is nested under text_config, layer_types is sized over the decoder PLUS the 3
+    MTP predict layers, and MoE placement comes from moe_layers_enum rather than
+    first_k_dense_replace.
     """
     hf_config = {
-        "architectures": ["Step3p7FlashForCausalLM"],
+        "architectures": ["Step3p7ForConditionalGeneration"],
         "model_type": "step3p7",
         "text_config": {
-            "num_hidden_layers": 4,
+            "architectures": ["Step3p5ForCausalLM"],
+            "model_type": "step3p5",
+            "num_hidden_layers": 6,
+            "num_nextn_predict_layers": 2,
             "hidden_size": 4096,
             "num_attention_heads": 64,
             "num_key_value_heads": 8,
@@ -192,13 +198,19 @@ def test_step3p7_reads_nested_text_config_and_sliding_head_count():
             "sliding_window": 512,
             "vocab_size": 128896,
             "max_position_embeddings": 65536,
+            # 8 entries = 6 decoder layers + 2 MTP predict layers
             "layer_types": [
                 "full_attention",
                 "sliding_attention",
                 "sliding_attention",
+                "full_attention",
                 "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
             ],
-            "first_k_dense_replace": 1,
+            "moe_layers_enum": "2,3,4,5",
+            "moe_num_experts": 288,
             "num_experts": 288,
             "num_experts_per_tok": 8,
             "moe_intermediate_size": 1280,
@@ -209,7 +221,12 @@ def test_step3p7_reads_nested_text_config_and_sliding_head_count():
     parsed = _parse_hf_config_json(hf_config)
     extra = parsed["extra_params"]
 
-    assert extra.swa_num_heads == 96, "sliding layers must use the declared 96 query heads"
+    # sliding layers take the declared 96 query heads, not the global 64
+    assert extra.swa_num_heads == 96
     assert extra.swa_head_dim == 128
-    assert extra.attn_layer_pattern == (1, 0, 0, 0)
+    # layer_types trimmed to the 6 decoder layers, MTP tail dropped
+    assert len(extra.attn_layer_pattern) == 6
+    assert extra.attn_layer_pattern == (1, 0, 0, 1, 0, 0)
+    # MoE placement from moe_layers_enum, so layers 0-1 stay dense
+    assert extra.moe_layer_freq == (0, 0, 1, 1, 1, 1)
     assert extra.sliding_window_size == 512

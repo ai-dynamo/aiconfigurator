@@ -686,6 +686,12 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiniMaxM3ForCausalLM": "MINIMAXM3",
     "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
+    # The published checkpoints declare Step3p7ForConditionalGeneration at the top
+    # level with a nested text_config architecture of Step3p5ForCausalLM. The
+    # *Flash* spellings only ever existed in this repo's curated configs, so both
+    # are mapped: real checkpoints and the curated fixtures.
+    "Step3p7ForConditionalGeneration": "STEP3P7",
+    "Step3p5ForCausalLM": "STEP3P7",
     "Step3p7FlashForCausalLM": "STEP3P7",
     "Step3p5FlashForCausalLM": "STEP3P7",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
@@ -703,8 +709,8 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     # Step-3.7/3.5-Flash ship a vision tower and nest the whole decoder under
     # text_config; without this the parser reads the top level and rejects real
     # checkpoints for having no num_hidden_layers.
+    "Step3p7ForConditionalGeneration": "text_config",
     "Step3p7FlashForCausalLM": "text_config",
-    "Step3p5FlashForCausalLM": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
