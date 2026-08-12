@@ -423,6 +423,7 @@ def cli_recommend(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
     engine_step_backend: str | None = None,
@@ -543,6 +544,7 @@ def cli_recommend(
         forward_model=forward_model,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
+        attention_backend=attention_backend,
     )
 
     # Build escalation sequence: gpus_per_node, *2, *4, *8, capped at _MAX_GPUS_PER_WORKER.

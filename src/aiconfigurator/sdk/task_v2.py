@@ -2107,8 +2107,12 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
-            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        valid_attention_backends = ("flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default")
+        if self.attention_backend is not None and self.attention_backend not in valid_attention_backends:
+            raise ValueError(
+                f"attention_backend must be one of {', '.join(repr(b) for b in valid_attention_backends)}, "
+                f"got {self.attention_backend!r}."
+            )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         self._check_encoder_knobs_require_epd()

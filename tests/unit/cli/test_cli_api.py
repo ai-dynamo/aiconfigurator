@@ -540,6 +540,30 @@ class TestCLIRecommendUnit:
         assert captured_kwargs["enable_wideep"] is True
         assert captured_kwargs["moe_backend"] == "deepep_moe"
 
+    def test_attention_backend_forwarded(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        captured_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+            attention_backend="trtllm_mha",
+        )
+
+        assert captured_kwargs["attention_backend"] == "trtllm_mha"
+
     def test_escalates_on_oom(self, monkeypatch):
         import aiconfigurator.cli.api as api
         from aiconfigurator.sdk.errors import ExperimentOutcome, InsufficientMemoryError
