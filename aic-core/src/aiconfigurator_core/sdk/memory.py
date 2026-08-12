@@ -586,7 +586,17 @@ class NaiveKVCacheEstimator:
         return 2
 
     @staticmethod
-    def _swa_layout(hf_config: dict) -> tuple[int | None, int | None, int | None]:
+    def _raw_dimension(hf_config: dict, *keys: str) -> Any:
+        """Return the first usable raw-config dimension among equivalent HF keys.
+
+        Hugging Face config families use several names for the same dimensions and
+        may serialize an unused preferred key as ``null``. Dimensions must be
+        positive, so false-y values are skipped in favor of a populated alias.
+        """
+        return next((value for key in keys if (value := hf_config.get(key))), None)
+
+    @classmethod
+    def _swa_layout(cls, hf_config: dict) -> tuple[int | None, int | None, int | None]:
         """Sliding-window size + (SWA, global) layer counts from an HF config.
 
         Returns ``(sliding_window, num_swa_layers, num_global_layers)`` for a hybrid
@@ -608,7 +618,7 @@ class NaiveKVCacheEstimator:
             num_swa = sum(1 for t in layer_types if "sliding" in str(t).lower())
             return sliding_window, num_swa, len(layer_types) - num_swa
 
-        num_layers = hf_config.get("num_hidden_layers")
+        num_layers = cls._raw_dimension(hf_config, "num_hidden_layers", "n_layer", "num_layers")
         pattern = hf_config.get("sliding_window_pattern")
         if sliding_window and num_layers and pattern and int(pattern) > 0:
             num_global = int(num_layers) // int(pattern)
@@ -657,23 +667,45 @@ class NaiveKVCacheEstimator:
                 "num_global_layers": None,
             }
 
-        hidden = hf_config.get("hidden_size")
-        heads = hf_config.get("num_attention_heads")
-        head_dim = hf_config.get("head_dim") or hf_config.get("attention_head_dim")
+        dimension = cls._raw_dimension
+        hidden = dimension(hf_config, "hidden_size", "n_embd", "n_embed")
+        layers = dimension(hf_config, "num_hidden_layers", "n_layer", "num_layers")
+        heads = dimension(hf_config, "num_attention_heads", "n_head", "num_heads")
+        head_dim = dimension(hf_config, "head_dim", "attention_head_dim")
         if head_dim is None and hidden and heads:
             head_dim = int(hidden) // int(heads)
+        num_experts = (
+            dimension(
+                hf_config,
+                "n_routed_experts",
+                "num_local_experts",
+                "num_experts",
+            )
+            or 0
+        )
+        inter = dimension(hf_config, "intermediate_size", "ffn_dim", "n_inner", "ffn_hidden_size")
+        if inter is None and hidden and not num_experts:
+            # Dense decoder families conventionally use a 4x hidden FFN when the
+            # config omits the intermediate dimension (or serializes it as null).
+            inter = 4 * int(hidden)
+        num_kv_heads = dimension(hf_config, "num_key_value_heads", "num_kv_heads", "n_head_kv", "n_kv_heads")
+        # Legacy Falcon configs retain num_kv_heads=num_attention_heads while
+        # multi_query selects one shared K/V head. New-decoder configs use the
+        # explicit KV-head count instead.
+        if hf_config.get("multi_query") and not hf_config.get("new_decoder_architecture"):
+            num_kv_heads = 1
         sliding_window, num_swa_layers, num_global_layers = cls._swa_layout(hf_config)
         return {
-            "layers": hf_config.get("num_hidden_layers"),
-            "num_kv_heads": hf_config.get("num_key_value_heads") or heads,
+            "layers": layers,
+            "num_kv_heads": num_kv_heads or heads,
             "head_dim": head_dim,
             "kv_lora_rank": hf_config.get("kv_lora_rank"),
             "qk_rope_head_dim": hf_config.get("qk_rope_head_dim"),
             "vocab": hf_config.get("vocab_size"),
             "hidden": hidden,
-            "inter": hf_config.get("intermediate_size"),
-            "num_experts": hf_config.get("n_routed_experts") or hf_config.get("num_local_experts") or 0,
-            "moe_inter": hf_config.get("moe_intermediate_size") or hf_config.get("intermediate_size") or 0,
+            "inter": inter,
+            "num_experts": num_experts,
+            "moe_inter": hf_config.get("moe_intermediate_size") or inter or 0,
             "sliding_window": sliding_window,
             "num_swa_layers": num_swa_layers,
             "num_global_layers": num_global_layers,
@@ -720,9 +752,10 @@ class NaiveKVCacheEstimator:
         Coarse param count (embeddings + per-layer attention + dense/MoE FFN), times
         dtype bytes, divided by TP*PP. NOT calibrated; for models AIC cannot fully
         model. Attention-DP replicates rather than shards, so it does NOT divide
-        here. ``hidden_size`` / ``num_hidden_layers`` / ``vocab_size`` /
-        ``intermediate_size`` are all required: returns ``None`` (the caller raises)
-        when any is missing, rather than fabricating a placeholder.
+        here. Hidden size and layer count accept their standard Hugging Face aliases;
+        dense models without an explicit intermediate size use the conventional
+        ``4 * hidden_size`` expansion. Returns ``None`` (the caller raises) when a
+        required dimension is still missing, rather than fabricating a placeholder.
         """
         geom = self.geometry
         hidden = geom.get("hidden")
@@ -805,13 +838,13 @@ class NaiveKVCacheEstimator:
         if kv_per_token is None or not (math.isfinite(kv_per_token) and kv_per_token > 0.0):
             raise ValueError(
                 "insufficient model metadata; missing: per-token KV geometry "
-                "(num_hidden_layers + num_key_value_heads/head_dim, or the MLA latent dims)"
+                "(layer count + KV attention heads/head dimension, or the MLA latent dims)"
             )
         weight_bytes = self.weight_bytes()
         if weight_bytes is None:
             raise ValueError(
                 "insufficient model metadata; missing: weight-estimate fields "
-                "(hidden_size, num_hidden_layers, vocab_size, intermediate_size)"
+                "(hidden size, layer count, vocab_size, FFN intermediate size)"
             )
         kv_per_token = float(kv_per_token)
         weight_bytes = float(weight_bytes)

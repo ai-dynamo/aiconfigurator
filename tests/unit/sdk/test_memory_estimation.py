@@ -350,6 +350,161 @@ def test_naive_geometry_from_raw_unsupported_arch():
     assert _estimator({**geom, "inter": None}).weight_bytes() is None
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        pytest.param(
+            {
+                "n_embd": 768,
+                "n_layer": 12,
+                "n_head": 12,
+                "n_inner": None,
+                "vocab_size": 50_257,
+            },
+            (768, 12, 12, 64, 3_072, 50_257),
+            id="gpt2",
+        ),
+        pytest.param(
+            {
+                "hidden_size": 768,
+                "num_hidden_layers": 12,
+                "num_attention_heads": 12,
+                "intermediate_size": None,
+                "ffn_dim": 3_072,
+                "vocab_size": 50_272,
+            },
+            (768, 12, 12, 64, 3_072, 50_272),
+            id="opt",
+        ),
+        pytest.param(
+            {"hidden_size": 64, "n_layer": 2, "n_head": 8, "vocab_size": 250_880},
+            (64, 2, 8, 8, 256, 250_880),
+            id="bloom",
+        ),
+        pytest.param(
+            {
+                "n_embd": 4_096,
+                "n_layer": 28,
+                "n_head": 16,
+                "n_inner": None,
+                "vocab_size": 50_400,
+            },
+            (4_096, 28, 16, 256, 16_384, 50_400),
+            id="gpt-j",
+        ),
+        pytest.param(
+            {
+                "hidden_size": 2_048,
+                "num_layers": 24,
+                "num_heads": 16,
+                "intermediate_size": None,
+                "vocab_size": 50_257,
+            },
+            (2_048, 24, 16, 128, 8_192, 50_257),
+            id="gpt-neo",
+        ),
+        pytest.param(
+            {
+                "hidden_size": 4_544,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 71,
+                "num_kv_heads": 71,
+                "ffn_hidden_size": 18_176,
+                "multi_query": True,
+                "new_decoder_architecture": False,
+                "vocab_size": 65_024,
+            },
+            (4_544, 32, 1, 64, 18_176, 65_024),
+            id="falcon",
+        ),
+        pytest.param(
+            {
+                "n_embd": 4_096,
+                "n_layer": 28,
+                "n_head": 16,
+                "n_inner": None,
+                "vocab_size": 50_400,
+            },
+            (4_096, 28, 16, 256, 16_384, 50_400),
+            id="codegen",
+        ),
+        pytest.param(
+            {"n_embed": 1_024, "n_layer": 20, "n_head": 16, "n_inner": 0, "vocab_size": 50_400},
+            (1_024, 20, 16, 64, 4_096, 50_400),
+            id="n-embed-alias",
+        ),
+    ],
+)
+def test_naive_geometry_supports_hf_alias_families(hf_config, expected):
+    geom = memory.NaiveKVCacheEstimator._geometry(hf_config, None)
+    hidden, layers, kv_heads, head_dim, inter, vocab = expected
+    assert geom == {
+        "layers": layers,
+        "num_kv_heads": kv_heads,
+        "head_dim": head_dim,
+        "kv_lora_rank": None,
+        "qk_rope_head_dim": None,
+        "vocab": vocab,
+        "hidden": hidden,
+        "inter": inter,
+        "num_experts": 0,
+        "moe_inter": inter,
+        "sliding_window": None,
+        "num_swa_layers": None,
+        "num_global_layers": None,
+    }
+
+    estimator = _estimator(geom)
+    expected_weight_params = 2 * vocab * hidden + layers * (4 * hidden**2 + 3 * hidden * inter)
+    assert estimator.weight_bytes() == expected_weight_params * 2
+    assert estimator.kv_bytes_per_token() == 2 * kv_heads * head_dim * layers * 2
+
+
+def test_naive_falcon_new_decoder_keeps_explicit_kv_head_count():
+    hf_config = {
+        "hidden_size": 8_192,
+        "num_hidden_layers": 60,
+        "num_attention_heads": 64,
+        "num_kv_heads": 8,
+        "ffn_hidden_size": 32_768,
+        "multi_query": True,
+        "new_decoder_architecture": True,
+        "vocab_size": 65_024,
+    }
+    geom = memory.NaiveKVCacheEstimator._geometry(hf_config, None)
+    assert geom["num_kv_heads"] == 8
+
+
+@pytest.mark.parametrize("missing_key", ["n_embd", "n_layer", "vocab_size"])
+def test_naive_raw_alias_geometry_keeps_required_dimensions_fail_closed(missing_key):
+    hf_config = {
+        "n_embd": 768,
+        "n_layer": 12,
+        "n_head": 12,
+        "head_dim": 64,
+        "vocab_size": 50_257,
+    }
+    hf_config.pop(missing_key)
+    geom = memory.NaiveKVCacheEstimator._geometry(hf_config, None)
+    assert _estimator(geom).weight_bytes() is None
+
+
+def test_naive_num_experts_alias_does_not_use_dense_ffn_fallback():
+    hf_config = {
+        "hidden_size": 1_024,
+        "num_hidden_layers": 12,
+        "num_attention_heads": 16,
+        "num_experts": 8,
+        "vocab_size": 32_000,
+    }
+
+    geom = memory.NaiveKVCacheEstimator._geometry(hf_config, None)
+
+    assert geom["num_experts"] == 8
+    assert geom["inter"] is None
+    assert _estimator(geom).weight_bytes() is None
+
+
 def test_naive_kv_per_token_empty_geometry_is_none():
     assert _estimator({}).kv_bytes_per_token() is None
     assert _estimator({}).weight_bytes() is None
@@ -408,6 +563,12 @@ def test_naive_swa_layout_from_layer_types():
 def test_naive_swa_layout_from_pattern():
     # sliding_window + sliding_window_pattern=6: one global layer every 6 layers.
     hf_config = {"sliding_window": 4096, "num_hidden_layers": 30, "sliding_window_pattern": 6}
+    assert memory.NaiveKVCacheEstimator._swa_layout(hf_config) == (4096, 25, 5)
+
+
+@pytest.mark.parametrize("layer_key", ["n_layer", "num_layers"])
+def test_naive_swa_layout_from_pattern_supports_layer_aliases(layer_key):
+    hf_config = {"sliding_window": 4096, layer_key: 30, "sliding_window_pattern": 6}
     assert memory.NaiveKVCacheEstimator._swa_layout(hf_config) == (4096, 25, 5)
 
 
@@ -515,6 +676,35 @@ def test_naive_fallback_unsupported_arch_uses_raw_read(monkeypatch):
     assert out["source"] == "naive_fallback"
     # Raw-read standard branch: layers=48, n_kv=8, head_dim=4096/32=128, bf16.
     assert out["kv_size_per_token_bytes"] == 2 * 8 * 128 * 48 * 2  # 196608
+
+
+def test_naive_fallback_unsupported_arch_uses_hf_aliases(monkeypatch):
+    raw_config = {
+        "architectures": ["FooBarForCausalLM"],
+        "n_embd": 768,
+        "n_layer": 12,
+        "n_head": 12,
+        "n_inner": None,
+        "vocab_size": 50_257,
+        "torch_dtype": "float16",
+    }
+    monkeypatch.setattr(
+        memory.NaiveKVCacheEstimator,
+        "_load_config",
+        lambda *a, **k: dict(raw_config),
+    )
+
+    out = _naive_estimate(
+        "foo/bar-aliased-unknown-arch",
+        tp_size=1,
+        pp_size=1,
+        gpu_memory_capacity_bytes_override=20 * _GIB,
+        naive_kv_reservation=memory._DEFAULT_NAIVE_KV_RESERVATION,
+        allow_hf_config_download=False,
+    )
+
+    assert out["source"] == "naive_fallback"
+    assert out["kv_size_per_token_bytes"] == 2 * 12 * 64 * 12 * 2
 
 
 def test_naive_fallback_raises_without_config():
