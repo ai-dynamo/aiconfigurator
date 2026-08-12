@@ -47,7 +47,7 @@ from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
 )
 from aiconfigurator.sdk.models import get_model
-from aiconfigurator.sdk.perf_database import PerfDatabase
+from aiconfigurator.sdk.perf_database import PerfDatabase, has_perf_data_not_available_cause
 from aiconfigurator.sdk.picking import parallel_dim, worker_gpus
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
@@ -88,6 +88,22 @@ _DEFAULT_AGG_BATCH_SCHEDULE: list[int] = (
     + list(range(512, 1024, 256))
     + [1024]
 )
+
+
+def _preferred_sweep_exception(exceptions: list[Exception]) -> Exception:
+    """Keep a structured data miss visible across skipped parallel configs.
+
+    Sweeps deliberately skip invalid parallel choices. If no choice produces a
+    result, the last skipped error can therefore be an unrelated TP-divisibility
+    assertion even though valid choices reached a structured performance-data
+    miss. Prefer that miss so callers such as the support-matrix generator can
+    make the intended SILICON-to-HYBRID decision. Otherwise retain the legacy
+    last-exception behavior.
+    """
+    return next(
+        (error for error in exceptions if has_perf_data_not_available_cause(error)),
+        exceptions[-1],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -524,9 +540,10 @@ def sweep_agg(
         return results_df
 
     if exceptions:
+        terminal_error = _preferred_sweep_exception(exceptions)
         raise RuntimeError(
-            f"sweep_agg: no results for any parallel configuration. Last exception: {exceptions[-1]}"
-        ) from exceptions[-1]
+            f"sweep_agg: no results for any parallel configuration. Selected exception: {terminal_error}"
+        ) from terminal_error
     if not saw_model_fit:
         raise InsufficientMemoryError(
             "sweep_agg: no results — model does not fit in GPU memory for any parallel config. "
@@ -640,9 +657,10 @@ def _get_disagg_worker_candidates(
 
     if not result_rows:
         if exceptions:
+            terminal_error = _preferred_sweep_exception(exceptions)
             raise RuntimeError(
-                f"sweep_disagg/{role}: no results for any parallel config. Last exception: {exceptions[-1]}"
-            ) from exceptions[-1]
+                f"sweep_disagg/{role}: no results for any parallel config. Selected exception: {terminal_error}"
+            ) from terminal_error
         if all_configs_oom:
             raise InsufficientMemoryError(
                 f"sweep_disagg/{role}: no results — model does not fit in GPU memory for any parallel config. "
