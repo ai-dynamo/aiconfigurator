@@ -800,9 +800,18 @@ def _parse_hf_config_json(config: dict) -> dict:
     elif architecture in {"Step3p7FlashForCausalLM", "Step3p5FlashForCausalLM"}:
         # StepFun Step-3.7-Flash: hybrid SWA/global attention (Gemma-style
         # ``layer_types``) + dense-first-``first_k_dense_replace`` then MoE FFN,
-        # with one shared expert on the MoE layers. Same head geometry (num_kv_heads
-        # / head_dim) on both attention types, so the SWA dim fields stay 0 and fall
-        # back to the model-level defaults. attn_layer_pattern: 1=full, 0=sliding.
+        # with one shared expert on the MoE layers. attn_layer_pattern: 1=full,
+        # 0=sliding.
+        #
+        # The authoritative HF config nests the decoder under ``text_config`` and
+        # declares a SECOND attention geometry under
+        # ``text_config.attention_other_setting`` — the sliding layers run 96 query
+        # heads against the global layers' 64. Reading only the flat top level both
+        # rejects real checkpoints and silently sizes every sliding layer with the
+        # global head count.
+        other = config.get("attention_other_setting") or {}
+        swa_n_heads = int(other.get("num_attention_heads", 0) or 0)
+        swa_hd_other = int(other.get("head_dim", 0) or 0)
         layer_types_raw = config.get("layer_types", [])
         if len(layer_types_raw) != layers:
             raise ValueError(f"Step3p7 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers}")
@@ -814,7 +823,9 @@ def _parse_hf_config_json(config: dict) -> dict:
         extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,
-            # SWA and global layers share head geometry -> 0 = fall back to defaults.
+            # 0 on any field = fall back to the model-level default.
+            swa_num_heads=swa_n_heads,
+            swa_head_dim=swa_hd_other,
             sliding_window_size=config.get("sliding_window", 0) or config.get("sliding_window_size", 0),
             dense_inter_size=0,  # dense layers use model-level inter_size
         )
@@ -823,6 +834,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"global_attn_layers={sum(attn_pattern)}, swa_layers={attn_pattern.count(0)}, "
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
             f"sliding_window_size={extra_params.sliding_window_size}, "
+            f"swa_num_heads={extra_params.swa_num_heads or 'default'}, "
             f"share_expert_dim={config.get('share_expert_dim', 0)}"
         )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:

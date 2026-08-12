@@ -140,6 +140,7 @@ class HybridMoEModel(BaseModel):
         Q/K head dims for attention kernels, and dense FFN intermediate size per TP.
         """
         cfg = self._hybrid_config
+        swa_n_q = cfg.swa_num_heads if cfg.swa_num_heads > 0 else self._num_heads
         swa_n_kv = cfg.swa_num_kv_heads if cfg.swa_num_kv_heads > 0 else self._num_kv_heads
         swa_hd = cfg.swa_head_dim if cfg.swa_head_dim > 0 else self._head_size
         swa_v_hd = cfg.swa_v_head_dim if cfg.swa_v_head_dim > 0 else self._head_size
@@ -150,11 +151,12 @@ class HybridMoEModel(BaseModel):
         return {
             "swa_n_kv_per_gpu": swa_n_kv_per_gpu,
             "global_n_kv_per_gpu": global_n_kv_per_gpu,
-            "swa_qkv_out": self._num_heads * swa_hd // tp_size + swa_n_kv_per_gpu * (swa_hd + swa_v_hd),
+            "swa_qkv_out": swa_n_q * swa_hd // tp_size + swa_n_kv_per_gpu * (swa_hd + swa_v_hd),
             "global_qkv_out": self._num_heads * self._head_size // tp_size
             + global_n_kv_per_gpu * (self._head_size + global_v_hd),
-            "swa_proj_in": self._num_heads * swa_v_hd // tp_size,
+            "swa_proj_in": swa_n_q * swa_v_hd // tp_size,
             "global_proj_in": self._num_heads * global_v_hd // tp_size,
+            "swa_n_q": swa_n_q,
             "swa_hd": swa_hd,
             "global_hd": self._head_size,
             "swa_v_hd": swa_v_hd,

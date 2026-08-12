@@ -170,3 +170,46 @@ class TestStep3p7KVCache:
         # dense gate_up + act + down = 3 ops on each side.
         assert len(ctx) == 3
         assert len(gen) == 3
+
+
+def test_step3p7_reads_nested_text_config_and_sliding_head_count():
+    """The authoritative HF config nests the decoder under ``text_config`` and
+    declares a second attention geometry for the sliding layers.
+
+    Reading only the flat top level rejected real checkpoints outright and sized
+    all 33 sliding layers with the global layers' 64 query heads instead of 96.
+    """
+    hf_config = {
+        "architectures": ["Step3p7FlashForCausalLM"],
+        "model_type": "step3p7",
+        "text_config": {
+            "num_hidden_layers": 4,
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "intermediate_size": 11264,
+            "sliding_window": 512,
+            "vocab_size": 128896,
+            "max_position_embeddings": 65536,
+            "layer_types": [
+                "full_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+            ],
+            "first_k_dense_replace": 1,
+            "num_experts": 288,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 1280,
+            "attention_other_setting": {"num_attention_heads": 96, "head_dim": 128},
+        },
+    }
+
+    parsed = _parse_hf_config_json(hf_config)
+    extra = parsed["extra_params"]
+
+    assert extra.swa_num_heads == 96, "sliding layers must use the declared 96 query heads"
+    assert extra.swa_head_dim == 128
+    assert extra.attn_layer_pattern == (1, 0, 0, 0)
+    assert extra.sliding_window_size == 512

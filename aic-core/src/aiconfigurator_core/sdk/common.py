@@ -121,6 +121,9 @@ class HybridMoEConfig:
     SWA/local attention dims — set to 0 to fall back to model-level defaults
     (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
     Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_heads:    Query heads for SWA/local layers (0 → num_heads). Step-3.7-Flash
+                          declares these separately (96 on sliding vs 64 global) in
+                          ``text_config.attention_other_setting``.
         swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
         swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
         swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
@@ -132,6 +135,7 @@ class HybridMoEConfig:
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
     moe_layer_freq: tuple[int, ...]  # per-layer: 0=dense, 1=MoE
+    swa_num_heads: int = 0
     swa_num_kv_heads: int = 0
     swa_head_dim: int = 0
     swa_v_head_dim: int = 0
@@ -696,6 +700,11 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
     "KimiK3ForConditionalGeneration": "text_config",
+    # Step-3.7/3.5-Flash ship a vision tower and nest the whole decoder under
+    # text_config; without this the parser reads the top level and rejects real
+    # checkpoints for having no num_hidden_layers.
+    "Step3p7FlashForCausalLM": "text_config",
+    "Step3p5FlashForCausalLM": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
