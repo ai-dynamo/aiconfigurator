@@ -951,8 +951,7 @@ class Task:
             # later in _resolve_search_space(). Preserve either an explicit
             # prefill override or the explicitness of that inherited agg mode.
             self._gemm_quant_mode_explicit_by_role["prefill"] = (
-                self.prefill_gemm_quant_mode is not None
-                or self._gemm_quant_mode_explicit_by_role["agg"]
+                self.prefill_gemm_quant_mode is not None or self._gemm_quant_mode_explicit_by_role["agg"]
             )
         base = _infer_quant_modes_from_raw_config(self._raw_config)
 
