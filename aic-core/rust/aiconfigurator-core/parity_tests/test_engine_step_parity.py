@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Smoke parity checks for Python SDK engine-step latency versus Rust core.
+"""Smoke parity checks for the Rust engine step versus the frozen reference.
 
-Each test compares an apples-to-apples Python and Rust value for the
-surface under test (static_ctx + static_gen, the agg/disagg pipelines
-through `cli_estimate`, and Python's `_get_mix_step_latency` vs Rust's
-mix-step FPM). A drift outside ``PARITY_RTOL`` fails the assertion with
+Each test compares the LIVE Rust value for the surface under test
+(static_ctx + static_gen, the agg/disagg pipelines through `cli_estimate`,
+the mix-step composition) against a FROZEN golden fixture. The goldens were
+captured from the Python engine step while that path was still alive
+(dedup-plan Gate 2); with the Python step removed, they are the permanent
+regression oracle. A drift outside ``PARITY_RTOL`` fails the assertion with
 a per-metric delta report so the failure mode is informative.
 """
 
@@ -954,8 +956,8 @@ def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
     routing gate allows; that internal RuntimeConfig carries no explicit
     ``engine_step_backend`` (the kwarg reaches only the static complement),
     so callers pin the AFD side via the ``AICONFIGURATOR_ENGINE_STEP_BACKEND``
-    env var (regenerate_goldens.py exports "python"; the parity test sets
-    "rust").
+    env var (the parity test sets "rust"; the retired golden capture exported
+    "python" while that path was still alive).
     """
 
     def call():
@@ -1048,52 +1050,15 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
     )
 
 
-def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
-    """Python `_get_mix_step_latency` for the case's mix-step shape."""
-    database = _case_database(case)
-    if database is None:
-        raise RuntimeError(
-            f"failed to load perf database for {case.system_name}/{case.backend_name}/{case.backend_version}"
-        )
-    model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
-    backend = get_backend(case.backend_name)
-    runtime_config = config.RuntimeConfig(
-        batch_size=case.batch_size,
-        beam_width=1,
-        isl=case.isl,
-        osl=max(case.osl, 2),
-        prefix=case.prefix,
-        # Pinned so this helper measures the FROZEN Python step: since the
-        # rust default flip (PR-1), a bare RuntimeConfig routes `run_mixed`
-        # to the compiled engine, which would silently turn this "python
-        # reference" into a rust self-comparison — and poison golden capture
-        # (same rationale as tools/prediction_regression_gate/collect_static.py).
-        engine_step_backend="python",
-    )
-    shape = _mix_step_shape(case)
-    latency_ms, _, _, _ = _quiet_call(
-        backend._get_mix_step_latency,
-        model,
-        database,
-        runtime_config,
-        shape["ctx_tokens"],
-        shape["gen_tokens"],
-        shape["isl"],
-        shape["osl"],
-        shape["prefix"],
-    )
-    return float(latency_ms)
-
-
 def _cp_static_ctx_ms(case: EngineStepParityCase, *, engine_step_backend: str) -> float:
     """Context-phase static sum through the cp-aware model builder.
 
     The "static" surface goes through `cli_estimate`, which has no cp knob —
     a cp>1 case fails model validation there before any op runs. CP cases
     anchor the context phase (the only phase the CP composition runs on)
-    with the same `_case_model_config` construction the mixed surface uses,
-    routed to the requested engine per RuntimeConfig (the golden capture
-    pins "python"; the live test side passes "rust").
+    with the same `_case_model_config` construction the mixed surface uses.
+    (The Python-side values were captured into the goldens before the Python
+    step path was removed; only the rust side runs live.)
     """
     database = _case_database(case)
     if database is None:
@@ -1200,10 +1165,12 @@ def _parity_mismatch_reason(
 
 
 # --------------------------------------------------------------------------- #
-# Surface plumbing shared with `regenerate_goldens.py`. A "surface" is one of
-# the four apples-to-apples comparison granularities; `_surface_metrics` maps
-# a (case, surface, engine side) triple to the comparison-metric dict, keyed
-# by the names the golden fixtures persist.
+# Surface plumbing. A "surface" is one of the apples-to-apples comparison
+# granularities; `_surface_metrics` maps a (case, surface) pair to the live
+# rust comparison-metric dict, keyed by the names the golden fixtures persist.
+# (The Python side of every fixture was captured by the retired
+# `regenerate_goldens.py` while the Python step path was still alive; the
+# goldens are frozen artifacts now — see README.)
 # --------------------------------------------------------------------------- #
 
 ENGINE_STEP_SURFACES = ("static", "mixed", "agg", "disagg")
@@ -1230,8 +1197,7 @@ def _surface_metrics(
             out["static_gen_power"] = metrics["gen_power_w"]
         return out
     if surface == "mixed":
-        step_ms = _python_mixed_step_ms if engine_step_backend == "python" else _rust_mixed_step_ms
-        return {"mixed_step": _safe_value(lambda: step_ms(case))}
+        return {"mixed_step": _safe_value(lambda: _rust_mixed_step_ms(case))}
     if surface == "cp_static_ctx":
         return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case, engine_step_backend=engine_step_backend))}
     if surface == "agg":
@@ -1286,18 +1252,19 @@ def _disagg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[fl
 
 
 # --------------------------------------------------------------------------- #
-# Golden fixtures (dedup-plan Gate 2). The Python side of every comparison is
-# a FROZEN reference captured by `regenerate_goldens.py` while the Python
-# latency path is still alive; only the Rust side runs live. Regenerate the
-# fixtures whenever a case list / compared metric changes, or when a Python
-# reference change is deliberate and reviewed.
+# Golden fixtures (dedup-plan Gate 2, frozen at Gate 3). The Python side of
+# every comparison is a FROZEN reference captured while the Python latency
+# path was still alive; only the Rust side runs live. The Python-era records
+# never regenerate (the capture path is gone with the Python step). New cases
+# and deliberate rust-side modeling changes pin values from the live rust
+# engine via `pin_goldens.py` — the golden diff is the review artifact.
 # --------------------------------------------------------------------------- #
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
 _REGENERATE_HINT = (
-    "regenerate the golden fixtures with "
-    "`.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py` "
-    "(captures the frozen Python reference; see parity_tests/README.md)"
+    "pin the missing/changed records with "
+    "`.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/pin_goldens.py` "
+    "(appends records from the live rust engine; see parity_tests/README.md)"
 )
 _GOLDEN_CACHE: dict[str, dict] = {}
 
@@ -2015,10 +1982,10 @@ class TestRustEngineStepAfdParity:
 
 
 # The full engine-step golden matrix: every (case, surface) pair the parity
-# classes above compare, in one importable structure so
-# `regenerate_goldens.py` captures exactly what the tests consume (single
-# source of truth — the capture script defines no case of its own). Keep in
-# lockstep with the class parametrizations.
+# classes above compare, in one importable structure so `pin_goldens.py`
+# pins exactly what the tests consume (single source of truth — the pin
+# script defines no case of its own). Keep in lockstep with the class
+# parametrizations.
 ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SMOKE_CASES, ENGINE_STEP_SURFACES),
     (POWER_CASES, ENGINE_STEP_SURFACES),
