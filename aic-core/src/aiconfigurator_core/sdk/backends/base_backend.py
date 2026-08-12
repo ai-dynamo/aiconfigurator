@@ -7,7 +7,6 @@ import inspect
 import logging
 import math
 from collections import defaultdict
-from collections.abc import Callable
 from typing import ClassVar
 
 import numpy as np
@@ -19,11 +18,9 @@ from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 from aiconfigurator_core.sdk.rust_engine_step import (
-    RustEngineUnsupportedError,
     estimate_decode_step_breakdown_with_rust,
     estimate_mixed_step_breakdown_with_rust,
     estimate_static_latency_breakdown_with_rust,
-    note_python_step_fallback,
     should_use_rust_engine_step,
 )
 from aiconfigurator_core.sdk.step_estimate import MixedStepInput, StepEstimate
@@ -187,7 +184,6 @@ class BaseBackend:
         osl: int,
         b: int,
         ctx_tokens: int,
-        engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
         """Build the cache key for ``run_agg`` results.
@@ -195,7 +191,7 @@ class BaseBackend:
         The resolved fraction is part of the key: the cached summary embeds
         the KV-budget OOM verdict, which depends on it.
         """
-        return (isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra.get("free_gpu_memory_fraction"))
+        return (isl, osl, b, ctx_tokens, agg_extra.get("free_gpu_memory_fraction"))
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
@@ -226,6 +222,23 @@ class BaseBackend:
         return {}
 
     # ============== STATIC INFERENCE (shared) ==========================
+
+    @staticmethod
+    def _require_rust_engine_step(runtime_config: RuntimeConfig, database, *, surface: str) -> None:
+        """Raise when the step cannot route to the compiled engine.
+
+        The compiled engine is the ONLY engine-step executor; it re-loads
+        perf data from disk by (system, backend, version) identity, so a
+        duck-typed/synthetic database has nothing it could resolve.
+        """
+        if should_use_rust_engine_step(runtime_config, database):
+            return
+        raise TypeError(
+            f"the compiled engine is the only {surface} engine-step executor, and it resolves "
+            f"perf data from disk by (system, backend, version) — a {type(database).__name__} "
+            "database has no on-disk identity. Use a PerfDatabase from "
+            "get_database()/get_database_view()."
+        )
 
     @staticmethod
     def _visual_context_tokens_from_encoder_config(enc_cfg, runtime_config: RuntimeConfig) -> int:
@@ -338,35 +351,14 @@ class BaseBackend:
                 return pre_merge_per_image
             return tokens_per_image if use_post else pre_merge_per_image
 
-        if should_use_rust_engine_step(runtime_config, database):
-            rust = self._run_encoder_phase_with_rust(
-                model,
-                database,
-                images_local,
-                _encoder_eff_s,
-                include_energy=include_energy,
-            )
-            if rust is not None:
-                encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict = rust
-                return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
-
-        for op in model.encoder_ops:
-            eff_batch, eff_s = images_local, _encoder_eff_s(op)
-            x = eff_batch * eff_s
-            result = op.query(
-                database,
-                x=x,
-                batch_size=eff_batch,
-                beam_width=1,
-                s=eff_s,
-                prefix=0,
-                model_name=getattr(model, "model_name", ""),
-            )
-            encoder_latency_dict[op._name] += float(result)
-            if include_energy:
-                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-            encoder_source_dict[op._name] = getattr(result, "source", "silicon")
-
+        self._require_rust_engine_step(runtime_config, database, surface="encoder")
+        encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict = self._run_encoder_phase_with_rust(
+            model,
+            database,
+            images_local,
+            _encoder_eff_s,
+            include_energy=include_energy,
+        )
         return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
 
     def _run_encoder_phase_with_rust(
@@ -377,23 +369,22 @@ class BaseBackend:
         eff_s_of,
         *,
         include_energy: bool,
-    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]] | None:
-        """Compiled-engine path of the encoder per-op loop, or ``None`` for
-        the Python ``op.query()`` fallback.
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+        """Compiled-engine path of the encoder per-op loop.
 
         Encoder ops are deliberately NOT in the compiled ``EngineSpec`` (the
         compile path threads no image configuration), so they travel through
         the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
         ``eff_s`` (the shape math above), each group serialized to OpSpec
         JSON and evaluated at ``batch=images_local, s=eff_s, x=batch*s``.
-        Accumulation matches the Python loop for the shipped encoder op
-        lists (unique names): latency/energy fold with ``+=``; sources are
-        last-wins ACROSS shape groups, while duplicate names WITHIN one
-        group would merge to ``"mixed"`` inside the engine (the Python loop
-        is last-wins there — divergent only for duplicate-name encoder ops,
-        which ``build_encoder_ops`` never emits today).
+        Latency/energy fold with ``+=``; sources are last-wins ACROSS shape
+        groups, while duplicate names WITHIN one group would merge to
+        ``"mixed"`` inside the engine (``build_encoder_ops`` never emits
+        duplicate names today). An encoder op the spec cannot express raises
+        ``OpConversionError`` — the opspec coverage tripwire keeps that
+        unreachable for shipped models.
         """
-        from aiconfigurator_core.sdk.engine import OpConversionError, build_ops_json
+        from aiconfigurator_core.sdk.engine import build_ops_json
         from aiconfigurator_core.sdk.rust_engine_step import evaluate_ops_json_with_rust
 
         groups: dict[int, list] = {}
@@ -404,27 +395,23 @@ class BaseBackend:
         energy_dict: dict[str, float] = defaultdict(float)
         source_dict: dict[str, str] = {}
         backend_name = getattr(database.backend, "value", database.backend)
-        try:
-            for eff_s, ops in groups.items():
-                ops_json = build_ops_json(ops, model=model, backend=str(backend_name), database=database)
-                entries = evaluate_ops_json_with_rust(
-                    model,
-                    database,
-                    ops_json=ops_json,
-                    is_context=True,
-                    batch_size=images_local,
-                    s=eff_s,
-                    prefix=0,
-                    x=images_local * eff_s,
-                )
-                for name, latency_ms, energy_wms, source in entries:
-                    latency_dict[name] += float(latency_ms)
-                    if include_energy:
-                        energy_dict[name] += float(energy_wms)
-                    source_dict[name] = source
-        except (OpConversionError, RustEngineUnsupportedError) as exc:
-            note_python_step_fallback("unsupported_op_graph:encoder", str(exc))
-            return None
+        for eff_s, ops in groups.items():
+            ops_json = build_ops_json(ops, model=model, backend=str(backend_name), database=database)
+            entries = evaluate_ops_json_with_rust(
+                model,
+                database,
+                ops_json=ops_json,
+                is_context=True,
+                batch_size=images_local,
+                s=eff_s,
+                prefix=0,
+                x=images_local * eff_s,
+            )
+            for name, latency_ms, energy_wms, source in entries:
+                latency_dict[name] += float(latency_ms)
+                if include_energy:
+                    energy_dict[name] += float(energy_wms)
+                source_dict[name] = source
         return latency_dict, energy_dict, source_dict
 
     def run_encoder_static(
@@ -468,16 +455,8 @@ class BaseBackend:
         prefix: int,
         *,
         include_energy: bool = True,
-        op_filter: Callable[[str], bool] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
-        """One pass over ``model.context_ops``.
-
-        ``op_filter`` (by op name) lets ``run_mixed``'s passes query ONLY the
-        ops whose values they consume — the exact sets the rust mixed step
-        walks (`ContextOpFilter::{Skip,Only}ContextAttention`). Querying and
-        discarding the rest is not free: a raise in a discarded query blocks
-        an otherwise-computable estimate, one-sidedly vs the compiled engine.
-        """
+        """One pass over ``model.context_ops`` (the retired Python walk)."""
         context_latency_dict = defaultdict(float)
         context_energy_wms_dict = defaultdict(float)
         # Per-op data source, accumulated by merging across calls to the same op.
@@ -489,8 +468,6 @@ class BaseBackend:
             raise ValueError(f"isl must be greater than 0 after removing prefix, but got {effective_isl}")
 
         for op in model.context_ops:
-            if op_filter is not None and not op_filter(op._name):
-                continue
             x = batch_size * effective_isl if "logits_gemm" not in op._name else batch_size
             result = op.query(
                 database,
@@ -525,10 +502,8 @@ class BaseBackend:
         stride: int,
         *,
         include_energy: bool = True,
-        op_filter: Callable[[str], bool] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
-        """One pass over ``model.generation_ops``. ``op_filter`` as in
-        :meth:`_run_context_phase` (rust twin: ``only_generation_attention``)."""
+        """One pass over ``model.generation_ops`` (the retired Python walk)."""
         generation_latency_dict = defaultdict(float)
         generation_energy_wms_dict = defaultdict(float)
         generation_source_dict: dict[str, str] = {}
@@ -540,8 +515,6 @@ class BaseBackend:
             energy_wms_dict = defaultdict(float)
 
             for op in model.generation_ops:
-                if op_filter is not None and not op_filter(op._name):
-                    continue
                 result = op.query(
                     database,
                     x=batch_size * beam_width,
@@ -589,116 +562,34 @@ class BaseBackend:
         dict[str, str],
         dict[str, str],
     ]:
-        batch_size, beam_width, isl, osl, prefix = (
-            runtime_config.batch_size,
-            runtime_config.beam_width,
-            runtime_config.isl,
-            runtime_config.osl,
-            runtime_config.prefix,
+        isl_eff = runtime_config.isl + img_ctx_tokens
+
+        self._require_rust_engine_step(runtime_config, database, surface="static")
+        rust_runtime_config = runtime_config
+        if img_ctx_tokens:
+            rust_runtime_config = copy.copy(runtime_config)
+            rust_runtime_config.isl = isl_eff
+        (
+            context_latency_dict,
+            generation_latency_dict,
+            context_energy_wms_dict,
+            generation_energy_wms_dict,
+            context_source_dict,
+            generation_source_dict,
+        ) = estimate_static_latency_breakdown_with_rust(
+            model,
+            database,
+            rust_runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
         )
-        isl_eff = isl + img_ctx_tokens
-
-        context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
-        generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
-
-        # FPM models compile to Op::FpmForward (#1461); like run_mixed, the
-        # compiled engine is attempted first and the Python walk remains the
-        # gate/unsupported fallback.
-        if should_use_rust_engine_step(runtime_config, database):
-            try:
-                rust_runtime_config = runtime_config
-                if img_ctx_tokens:
-                    rust_runtime_config = copy.copy(runtime_config)
-                    rust_runtime_config.isl = isl_eff
-                (
-                    context_latency_dict,
-                    generation_latency_dict,
-                    context_energy_wms_dict,
-                    generation_energy_wms_dict,
-                    context_source_dict,
-                    generation_source_dict,
-                ) = estimate_static_latency_breakdown_with_rust(
-                    model,
-                    database,
-                    rust_runtime_config,
-                    mode,
-                    stride,
-                    latency_correction_scale,
-                )
-                if not include_energy:
-                    # Latency-only callers must not observe energy; keep the
-                    # key sets identical to the latency dicts (the power
-                    # coverage gate pairs latency and energy by name).
-                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
-                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
-                return (
-                    context_latency_dict,
-                    context_energy_wms_dict,
-                    generation_latency_dict,
-                    generation_energy_wms_dict,
-                    context_source_dict,
-                    generation_source_dict,
-                )
-            except RustEngineUnsupportedError as exc:
-                # Op graph not expressible as a compiled EngineSpec: fall back
-                # to the Python step (parity by delegation — Python computes
-                # what Rust cannot yet express). Perf-data misses are NOT
-                # caught here; they must stay error-symmetric.
-                note_python_step_fallback("unsupported_op_graph:static", str(exc))
-
-        if mode == "static_ctx":
-            context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                isl_eff,
-                prefix,
-                include_energy=include_energy,
-            )
-        elif mode == "static_gen":
-            generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                beam_width,
-                isl_eff,
-                osl,
-                stride,
-                include_energy=include_energy,
-            )
-        else:
-            context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                isl_eff,
-                prefix,
-                include_energy=include_energy,
-            )
-            generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                beam_width,
-                isl_eff,
-                osl,
-                stride,
-                include_energy=include_energy,
-            )
-
-        if latency_correction_scale != 1.0:
-            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
-            for op in context_latency_dict:
-                context_latency_dict[op] *= latency_correction_scale
-                context_energy_wms_dict[op] *= latency_correction_scale
-            for op in generation_latency_dict:
-                generation_latency_dict[op] *= latency_correction_scale
-                generation_energy_wms_dict[op] *= latency_correction_scale
-
+        if not include_energy:
+            # Latency-only callers must not observe energy; keep the key sets
+            # identical to the latency dicts (the power coverage gate pairs
+            # latency and energy by name).
+            context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+            generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
         return (
             context_latency_dict,
             context_energy_wms_dict,
@@ -787,12 +678,6 @@ class BaseBackend:
 
         def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
             return self._run_encoder_phase(model, database, runtime_config, batch_size)
-
-        def _run_context(bs: int, effective_isl: int, pfx: int):
-            return self._run_context_phase(model, database, runtime_config, bs, effective_isl, pfx)
-
-        def _run_generation(bs: int, bw: int, effective_isl: int, eff_osl: int, strd: int):
-            return self._run_generation_phase(model, database, runtime_config, bs, bw, effective_isl, eff_osl, strd)
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl, prefix = (
@@ -1260,187 +1145,25 @@ class BaseBackend:
         isl += self._visual_context_tokens(model, runtime_config)
 
         decode_query_tokens = step.num_decode_requests * (model._nextn + 1)
-        if should_use_rust_engine_step(runtime_config, database):
-            try:
-                components = estimate_mixed_step_breakdown_with_rust(
-                    model,
-                    database,
-                    ctx_tokens=step.context_tokens,
-                    gen_tokens=step.num_decode_requests,
-                    isl=isl,
-                    osl=osl,
-                    prefix=prefix,
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                )
-            except RustEngineUnsupportedError as exc:
-                note_python_step_fallback("unsupported_op_graph:mixed", str(exc))
-            else:
-                return StepEstimate(
-                    latency_ms=components["latency_ms"],
-                    energy_wms=components["energy_wms"],
-                    component_latency_ms=components["component_latency_ms"],
-                    component_energy_wms=components["component_energy_wms"],
-                    per_op_latency_ms=components["per_op_latency_ms"],
-                    per_op_source=components["per_op_source"],
-                    context_tokens=step.context_tokens,
-                    num_decode_requests=step.num_decode_requests,
-                    num_decode_query_tokens=decode_query_tokens,
-                )
-
-        if model.forward_model == "fpm":
-            # The 3-pass split below recognizes granular attention op NAMES
-            # ("context_attention"/"generation_attention"); a whole-model op
-            # matches neither and would be mis-accounted. Compose pure
-            # prefill + the decode work's MARGINAL cost instead. The Rust
-            # route above already branches identically inside
-            # Engine::mixed_step_breakdown.
-            latency_ms, energy_wms, per_op_latency, per_op_source = self._get_fpm_mix_step_latency(
-                model,
-                database,
-                runtime_config,
-                step.context_tokens,
-                step.num_decode_requests,
-                isl,
-                osl,
-                prefix,
-            )
-            return StepEstimate(
-                latency_ms=latency_ms,
-                energy_wms=energy_wms,
-                per_op_latency_ms=per_op_latency,
-                per_op_source=per_op_source,
-                context_tokens=step.context_tokens,
-                num_decode_requests=step.num_decode_requests,
-                num_decode_query_tokens=decode_query_tokens,
-            )
-
-        ctx_scale = runtime_config.seq_imbalance_correction_scale
-        gen_scale = runtime_config.gen_seq_imbalance_correction_scale
-
-        # The three passes below query ONLY the ops whose values they consume
-        # (pass 1: everything but context_attention; pass 2/3: the attention
-        # bucket alone) — the exact op sets the rust mixed step walks
-        # (`ContextOpFilter::SkipContextAttention` / `OnlyContextAttention` /
-        # `only_generation_attention`). The passes previously ran the full
-        # lists through `run_static` and discarded the rest, so a raise in a
-        # discarded query (e.g. a generation-MoE low-token miss in pass 3)
-        # blocked the estimate on the Python side only — a one-sided error
-        # surface vs the compiled engine (issue #1498 follow-through).
-
-        # Pass 1: combined single-batch inference for the non-attention latency.
-        # Every decode request verifies one target token plus all scheduled
-        # drafts. Acceptance does not reduce this current-iteration work.
-        num_tokens_combined = step.context_tokens + decode_query_tokens
-        # num tokens for gemm needs to be adjusted for prefix, depends on the
-        # avg prefix len per request. int(): np.floor yields a float64 that
-        # contaminates the ops' s = isl - prefix (the DSV4 CP composition
-        # chunks s with range()); the product is integral, so the cast is
-        # lossless.
-        prefix_combined = int(prefix * np.floor(step.context_tokens / isl))
-        pass1_config = RuntimeConfig(
-            batch_size=1,
-            beam_width=1,
-            isl=num_tokens_combined,
-            osl=1,
-            prefix=prefix_combined,
-            seq_imbalance_correction_scale=ctx_scale,
-        )
-        latency_dict, energy_wms_dict, source_dict = self._run_context_phase(
+        self._require_rust_engine_step(runtime_config, database, surface="mixed")
+        components = estimate_mixed_step_breakdown_with_rust(
             model,
             database,
-            pass1_config,
-            1,
-            num_tokens_combined,
-            prefix_combined,
-            op_filter=lambda name: name != "context_attention",
-        )
-        non_attention_latency_ms = float(sum(latency_dict.values()))
-        non_attention_energy_wms = float(sum(energy_wms_dict.values()))
-        mix_non_attn_ops: dict[str, float] = dict(latency_dict)
-        mix_non_attn_sources: dict[str, str] = {
-            layer_name: source_dict.get(layer_name, "silicon") for layer_name in latency_dict
-        }
-
-        # Pass 2: context attention split full isl over num_steps and averaged.
-        batch_size = np.ceil(step.context_tokens / isl)
-        pass2_config = RuntimeConfig(
-            batch_size=batch_size,
-            beam_width=1,
+            ctx_tokens=step.context_tokens,
+            gen_tokens=step.num_decode_requests,
             isl=isl,
-            osl=1,
+            osl=osl,
             prefix=prefix,
-            seq_imbalance_correction_scale=ctx_scale,
+            seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
         )
-        latency_dict, energy_wms_dict, source_dict = self._run_context_phase(
-            model,
-            database,
-            pass2_config,
-            batch_size,
-            isl,
-            prefix,
-            op_filter=lambda name: name == "context_attention",
-        )
-        ctx_attn_source = source_dict.get("context_attention", "silicon")
-        scale_factor = np.ceil(isl / step.context_tokens)
-        ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
-        ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
-
-        # Pass 3: generation attention (use isl + osl//2 for the avg seq len).
-        gen_attention_latency_ms = 0.0
-        gen_attention_energy_wms = 0.0
-        gen_attn_source = "silicon"
-        if step.num_decode_requests > 0:
-            pass3_config = RuntimeConfig(
-                batch_size=step.num_decode_requests,
-                beam_width=1,
-                isl=isl + osl // 2,
-                osl=2,
-                gen_seq_imbalance_correction_scale=gen_scale,
-            )
-            latency_dict, energy_wms_dict, source_dict = self._run_generation_phase(
-                model,
-                database,
-                pass3_config,
-                step.num_decode_requests,
-                1,
-                isl + osl // 2,
-                2,
-                1,
-                op_filter=lambda name: name == "generation_attention",
-            )
-            gen_attention_latency_ms = latency_dict["generation_attention"]
-            gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
-            gen_attn_source = source_dict.get("generation_attention", "silicon")
-
-        per_ops_step_data: dict[str, float] = {
-            **mix_non_attn_ops,
-            "context_attention (scaled)": ctx_attention_latency_ms,
-            "generation_attention": gen_attention_latency_ms,
-        }
-        per_ops_step_source = {
-            **mix_non_attn_sources,
-            "context_attention (scaled)": ctx_attn_source,
-            "generation_attention": gen_attn_source,
-        }
-
-        component_latency_ms = {
-            "shared_non_attention": non_attention_latency_ms,
-            "context_attention": ctx_attention_latency_ms,
-            "decode_attention": gen_attention_latency_ms,
-        }
-        component_energy_wms = {
-            "shared_non_attention": non_attention_energy_wms,
-            "context_attention": ctx_attention_energy_wms,
-            "decode_attention": gen_attention_energy_wms,
-        }
         return StepEstimate(
-            latency_ms=sum(component_latency_ms.values()),
-            energy_wms=sum(component_energy_wms.values()),
-            component_latency_ms=component_latency_ms,
-            component_energy_wms=component_energy_wms,
-            per_op_latency_ms=per_ops_step_data,
-            per_op_source=per_ops_step_source,
+            latency_ms=components["latency_ms"],
+            energy_wms=components["energy_wms"],
+            component_latency_ms=components["component_latency_ms"],
+            component_energy_wms=components["component_energy_wms"],
+            per_op_latency_ms=components["per_op_latency_ms"],
+            per_op_source=components["per_op_source"],
             context_tokens=step.context_tokens,
             num_decode_requests=step.num_decode_requests,
             num_decode_query_tokens=decode_query_tokens,
@@ -1585,48 +1308,15 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        # FPM models included (#1461's Op::FpmForward): the compiled engine is
-        # attempted first; the Python walk remains the gate/unsupported fallback.
-        if should_use_rust_engine_step(runtime_config, database):
-            try:
-                return estimate_decode_step_breakdown_with_rust(
-                    model,
-                    database,
-                    gen_tokens=gen_tokens,
-                    isl=isl,
-                    osl=osl,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                )
-            except RustEngineUnsupportedError as exc:
-                note_python_step_fallback("unsupported_op_graph:decode", str(exc))
-
-        gen_scale = runtime_config.gen_seq_imbalance_correction_scale
-        summary = self.run_static(
+        self._require_rust_engine_step(runtime_config, database, surface="decode")
+        return estimate_decode_step_breakdown_with_rust(
             model,
             database,
-            RuntimeConfig(
-                batch_size=gen_tokens,
-                beam_width=1,
-                isl=isl + osl // 2,
-                osl=2,
-                engine_step_backend=runtime_config.engine_step_backend,
-                gen_seq_imbalance_correction_scale=gen_scale,
-            ),
-            mode="static_gen",
+            gen_tokens=gen_tokens,
+            isl=isl,
+            osl=osl,
+            gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
         )
-        latency_dict = summary.get_generation_latency_dict()
-        energy_wms_dict = summary.get_generation_energy_wms_dict()
-        source_dict = summary.get_generation_source_dict()
-        total_latency_ms = 0.0
-        total_energy_wms = 0.0
-        per_ops_step_data: dict[str, float] = {}
-        per_ops_step_source: dict[str, str] = {}
-        for layer_name, latency in latency_dict.items():
-            total_latency_ms += latency
-            total_energy_wms += energy_wms_dict.get(layer_name, 0.0)
-            per_ops_step_data[layer_name] = latency
-            per_ops_step_source[layer_name] = source_dict.get(layer_name, "silicon")
-        return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
 
     # ============== AGG INFERENCE (shared) =============================
 
@@ -1689,7 +1379,6 @@ class BaseBackend:
         b = runtime_config.batch_size
         img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         isl = text_isl + img_ctx_tokens
-        engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config, database) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         # None (or an omitted kwarg) means the caller did not model speculative
@@ -1720,7 +1409,7 @@ class BaseBackend:
             runtime_config.num_images_per_request,
         )
         cache_key = (
-            self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
+            self._make_agg_cache_key(isl, osl, b, ctx_tokens, agg_extra),
             visual_cache_key,
             # Explicit progress and an omitted kwarg schedule identically at
             # 1.0 but record different scheduling metadata, so they must not

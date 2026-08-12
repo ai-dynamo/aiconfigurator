@@ -25,9 +25,11 @@ from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--aic-engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
-        help="Run Python tests with a selected static engine-step backend.",
+        help="Pin the engine-step backend env for the test run. 'rust' is the only "
+        "live value (the Python step path was removed; 'python' is a deprecated "
+        "runtime no-op and not offered here).",
     )
     parser.addoption(
         "--aic-rust-core-autobuild",

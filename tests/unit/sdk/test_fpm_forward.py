@@ -804,9 +804,11 @@ class TestFPMStaticAndMixed:
         # (isl tokens) plus 2 decode riders -> totals (1, isl+2, 0) = 23.0.
         # gen component rides the prefill pass, so only its marginal counts:
         # full decode at s=isl+osl//2+1 (7.0) minus the pass baseline at the
-        # KV-domain floor (the 2*(isl+1)=1026 row, 6.0) -> 1.0.
+        # KV-domain floor (the 2*(isl+1)=1026 row, 6.0) -> 1.0. The compiled
+        # engine reports the decode marginal under the mixed breakdown's
+        # uniform "generation_attention" component key.
         assert per_op["fpm_forward_prefill"] == pytest.approx(23.0)
-        assert per_op["fpm_forward_decode"] == pytest.approx(1.0)
+        assert per_op["generation_attention"] == pytest.approx(1.0)
         assert total == pytest.approx(24.0)
         assert energy == 0.0
         assert set(per_src.values()) == {"silicon"}
@@ -863,7 +865,13 @@ class TestFPMStaticAndMixed:
         total, _, per_op, _ = backend._get_mix_step_latency(
             model, database, runtime_config, ctx_tokens=isl, gen_tokens=0, isl=isl, osl=osl, prefix=0
         )
-        assert per_op == {"fpm_forward_prefill": pytest.approx(22.0)}
+        assert per_op == {
+            "fpm_forward_prefill": pytest.approx(22.0),
+            # The mixed breakdown's uniform component keys are always present
+            # (zero when the pass contributed nothing).
+            "context_attention (scaled)": 0,
+            "generation_attention": 0,
+        }
         assert total == pytest.approx(22.0)
 
     def test_genonly_step_keeps_full_decode_pass(self, fpm_session):

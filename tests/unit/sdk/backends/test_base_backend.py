@@ -33,27 +33,6 @@ class _StaticOp:
         return _LatencyResult(self._latency_ms, self._energy_wms)
 
 
-class _EnergyAccessTrapResult:
-    def __init__(self, latency_ms: float) -> None:
-        self._latency_ms = latency_ms
-
-    def __float__(self) -> float:
-        return self._latency_ms
-
-    @property
-    def energy(self) -> float:
-        raise AssertionError("latency-only execution must not access energy")
-
-
-class _EnergyAccessTrapOp:
-    def __init__(self, name: str, latency_ms: float = 1.0) -> None:
-        self._name = name
-        self._latency_ms = latency_ms
-
-    def query(self, *args, **kwargs) -> _EnergyAccessTrapResult:
-        return _EnergyAccessTrapResult(self._latency_ms)
-
-
 class _TestBackend(BaseBackend):
     def find_best_agg_result_under_constraints(self, model, database, runtime_config, **kwargs):
         raise NotImplementedError
@@ -94,6 +73,7 @@ def model():
     model = MagicMock()
     model.model_path = "test-model"
     model.model_name = "test-model"
+    model.forward_model = "op_level"
     model._nextn = 0
     model.encoder_ops = []
     model.context_ops = [
@@ -184,13 +164,36 @@ class TestMTPActivationMemoryScaling:
 @pytest.mark.parametrize("mode", ["static", "static_ctx", "static_gen"])
 @pytest.mark.parametrize("latency_correction_scale", [1.0, 1.25])
 def test_run_static_latency_only_matches_run_static_latency(
+    monkeypatch,
     backend: BaseBackend,
     model,
     database,
-    runtime_config: RuntimeConfig,
     mode: str,
     latency_correction_scale: float,
 ) -> None:
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    def _fake_rust_breakdown(model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg):
+        # Mode- and scale-aware like the real bridge: the engine applies the
+        # flat correction scale itself and only fills the phases the mode ran.
+        ctx = {"context_attention": 11.0 * scale_arg, "logits_gemm": 3.0 * scale_arg}
+        gen = {"generation_attention": 2.0 * scale_arg, "generation_mlp": 1.0 * scale_arg}
+        if mode_arg == "static_ctx":
+            gen = {}
+        elif mode_arg == "static_gen":
+            ctx = {}
+        return (
+            ctx,
+            gen,
+            {name: latency * 10.0 for name, latency in ctx.items()},
+            {name: latency * 10.0 for name, latency in gen.items()},
+            dict.fromkeys(ctx, "silicon"),
+            dict.fromkeys(gen, "silicon"),
+        )
+
+    monkeypatch.setattr(base_backend_module, "estimate_static_latency_breakdown_with_rust", _fake_rust_breakdown)
+    runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust")
+
     summary = backend.run_static(
         model,
         database,
@@ -366,27 +369,33 @@ def test_run_agg_b1_uses_scheduled_activation_peak(
 
 
 def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
+    monkeypatch,
     backend: BaseBackend,
     model,
     database,
 ) -> None:
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
     calls: list[dict] = []
 
-    class _RecordingOp(_StaticOp):
-        def query(self, *args, **kwargs) -> _LatencyResult:
-            calls.append(kwargs)
-            return super().query(*args, **kwargs)
+    def _fake_mixed_breakdown(model_arg, database_arg, **kwargs):
+        calls.append(kwargs)
+        return {
+            "latency_ms": 8.5,
+            "energy_wms": 85.0,
+            "component_latency_ms": {"shared_non_attention": 5.0, "context_attention": 2.0, "decode_attention": 1.5},
+            "component_energy_wms": {"shared_non_attention": 50.0, "context_attention": 20.0, "decode_attention": 15.0},
+            "per_op_latency_ms": {"context_mlp": 5.0},
+            "per_op_source": {"context_mlp": "silicon"},
+        }
 
+    monkeypatch.setattr(base_backend_module, "estimate_mixed_step_breakdown_with_rust", _fake_mixed_breakdown)
     model._nextn = 2
-    model.context_ops = [
-        _StaticOp("context_attention", latency_ms=11.0, energy_wms=110.0),
-        _RecordingOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
-    ]
 
     estimate = backend.run_mixed(
         model,
         database,
-        RuntimeConfig(isl=8, osl=5, prefix=2),
+        RuntimeConfig(isl=8, osl=5, prefix=2, engine_step_backend="rust"),
         MixedStepInput(
             context_tokens=8,
             num_decode_requests=2,
@@ -394,6 +403,8 @@ def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
     )
 
     assert estimate.num_decode_requests == 2
+    # Every decode request verifies one target token plus the two scheduled
+    # drafts (nextn=2); scheduling metadata is computed before the bridge call.
     assert estimate.num_decode_query_tokens == 6
     assert estimate.latency_ms == pytest.approx(sum(estimate.component_latency_ms.values()))
     assert set(estimate.component_latency_ms) == {
@@ -401,59 +412,10 @@ def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
         "context_attention",
         "decode_attention",
     }
-    # Six new prefill tokens plus two requests verifying three target tokens each.
-    assert calls[0]["x"] == 12
-
-
-def test_run_mixed_python_passes_filter_discarded_ops_and_keep_prefix_integral(
-    backend: BaseBackend,
-    model,
-    database,
-) -> None:
-    """Live-Python regression for the issue #1498 follow-through pair.
-
-    1. The three passes query ONLY the ops they consume: a raise in a
-       DISCARDED query (the generation-MoE low-token miss class) must not
-       block the estimate — pass 3 walks generation_attention alone, so the
-       raising non-attention generation op is never consulted.
-    2. Pass 1's prefix stays integral: `np.floor` yields a float64 that
-       would contaminate the ops' `s = isl - prefix`; a strict-int consumer
-       (the DSV4 CP composition chunks `s` with `range()`) is emulated by an
-       op that runs `range(s)` and rejects float coordinates.
-    """
-
-    class _RaisingDiscardedOp:
-        _name = "generation_moe"
-
-        def query(self, *args, **kwargs):
-            raise RuntimeError("low-token miss in a DISCARDED query must not block the estimate")
-
-    class _StrictIntOp(_StaticOp):
-        def query(self, *args, **kwargs) -> _LatencyResult:
-            assert not isinstance(kwargs["prefix"], float), "pass-1 prefix leaked as float"
-            range(kwargs["s"])  # raises TypeError on a float-contaminated s
-            return super().query(*args, **kwargs)
-
-    model.context_ops = [
-        _StaticOp("context_attention", latency_ms=11.0, energy_wms=110.0),
-        _StrictIntOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
-    ]
-    model.generation_ops = [
-        _StaticOp("generation_attention", latency_ms=2.0, energy_wms=20.0),
-        _RaisingDiscardedOp(),
-    ]
-
-    estimate = backend.run_mixed(
-        model,
-        database,
-        RuntimeConfig(isl=8, osl=5, prefix=2),
-        MixedStepInput(context_tokens=8, num_decode_requests=2),
-    )
-
-    assert estimate.latency_ms > 0
-    # The discarded op was never queried (it would have raised), and its
-    # value is genuinely absent rather than smuggled in as 0.0.
-    assert "generation_moe" not in estimate.per_op_latency_ms
+    # The bridge receives the RAW decode-request count; the engine applies the
+    # (nextn + 1) scaling internally, exactly like the deleted Python passes.
+    assert calls[0]["gen_tokens"] == 2
+    assert calls[0]["ctx_tokens"] == 8
 
 
 def test_run_mixed_rust_path_returns_the_same_structured_contract(
@@ -673,54 +635,44 @@ def _vision_encoder_config() -> common.VisionEncoderConfig:
 
 
 def test_run_mixed_derives_effective_multimodal_isl_for_direct_calls(
+    monkeypatch,
     backend: BaseBackend,
     model,
     database,
 ) -> None:
     """Regression: a direct run_mixed call with a plain (text-only isl) config
-    must query attention at the image-augmented effective isl, exactly as
+    must hand the bridge the image-augmented effective isl, exactly as
     run_static / run_agg model it. Text isl=8 plus 16 visual tokens gives
-    effective isl 24: context attention runs as (batch=ceil(24/24)=1, s=24)
-    and decode attention at kv length 24 + osl//2, not the text-only shapes
-    (batch=3, s=8) / s=11."""
+    effective isl 24 — the visual adjustment happens before the bridge call,
+    not inside the engine."""
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
     model.encoder_config = _vision_encoder_config()
 
-    ctx_attn_calls: list[dict] = []
-    gen_attn_calls: list[dict] = []
+    calls: list[dict] = []
 
-    class _RecordingCtxAttn(_StaticOp):
-        def query(self, *args, **kwargs) -> _LatencyResult:
-            ctx_attn_calls.append(kwargs)
-            return super().query(*args, **kwargs)
+    def _fake_mixed_breakdown(model_arg, database_arg, **kwargs):
+        calls.append(kwargs)
+        return {
+            "latency_ms": 1.0,
+            "energy_wms": 1.0,
+            "component_latency_ms": {"shared_non_attention": 1.0},
+            "component_energy_wms": {"shared_non_attention": 1.0},
+            "per_op_latency_ms": {},
+            "per_op_source": {},
+        }
 
-    class _RecordingGenAttn(_StaticOp):
-        def query(self, *args, **kwargs) -> _LatencyResult:
-            gen_attn_calls.append(kwargs)
-            return super().query(*args, **kwargs)
-
-    model.context_ops = [
-        _RecordingCtxAttn("context_attention", latency_ms=11.0, energy_wms=110.0),
-        _StaticOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
-    ]
-    model.generation_ops = [
-        _RecordingGenAttn("generation_attention", latency_ms=2.0, energy_wms=20.0),
-    ]
+    monkeypatch.setattr(base_backend_module, "estimate_mixed_step_breakdown_with_rust", _fake_mixed_breakdown)
 
     backend.run_mixed(
         model,
         database,
-        RuntimeConfig(isl=8, osl=6, num_images_per_request=1, num_image_tokens=16),
+        RuntimeConfig(isl=8, osl=6, num_images_per_request=1, num_image_tokens=16, engine_step_backend="rust"),
         MixedStepInput(context_tokens=24, num_decode_requests=1),
     )
 
-    # Pass 2 (context attention): batch = ceil(ctx_tokens / effective_isl).
-    pass2 = ctx_attn_calls[-1]
-    assert pass2["batch_size"] == 1
-    assert pass2["s"] == 24
-    # Pass 3 (decode attention): kv length = effective_isl + osl // 2 (+1 for
-    # the first decode step inside the static generation phase).
-    pass3 = gen_attn_calls[-1]
-    assert pass3["s"] == 24 + 6 // 2 + 1
+    assert calls[-1]["isl"] == 24
+    assert calls[-1]["ctx_tokens"] == 24
 
 
 def test_run_agg_does_not_double_count_visual_tokens_in_run_mixed(
@@ -834,44 +786,35 @@ def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
     gen_phase.assert_not_called()
 
 
-def test_run_static_latency_only_does_not_access_energy_in_python_fallback(
-    monkeypatch,
+def test_step_requires_a_real_perf_database(
     backend: BaseBackend,
     model,
     database,
 ) -> None:
-    """Latency-only Python execution must skip encoder, context, and generation energy."""
-    from aiconfigurator.sdk.backends import base_backend as base_backend_module
-
-    monkeypatch.setattr(base_backend_module, "should_use_rust_engine_step", lambda *args, **kwargs: False)
-    model.encoder_ops = [_EnergyAccessTrapOp("encoder_attention")]
-    model.context_ops = [_EnergyAccessTrapOp("context_attention")]
-    model.generation_ops = [_EnergyAccessTrapOp("generation_attention")]
-    model.encoder_config = common.VisionEncoderConfig(
-        depth=1,
-        hidden_size=64,
-        num_heads=1,
-        intermediate_size=128,
-        patch_size=16,
-        temporal_patch_size=2,
-        spatial_merge_size=2,
-        out_hidden_size=64,
-    )
-
-    latency = backend.run_static_latency_only(
-        model,
-        database,
-        RuntimeConfig(
-            batch_size=1,
-            beam_width=1,
+    """The compiled engine resolves perf data from disk by identity, so a
+    step over a synthetic database is a hard TypeError now that the Python
+    step branch is gone (op-level and FPM models alike)."""
+    with pytest.raises(TypeError, match="on-disk identity"):
+        backend.run_static(
+            model,
+            database,
+            RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2),
+            mode="static",
+            stride=2,
+        )
+    with pytest.raises(TypeError, match="on-disk identity"):
+        backend.run_mixed(
+            model,
+            database,
+            RuntimeConfig(isl=8, osl=5),
+            MixedStepInput(context_tokens=8, num_decode_requests=1),
+        )
+    with pytest.raises(TypeError, match="on-disk identity"):
+        backend._get_genonly_step_latency(
+            model,
+            database,
+            RuntimeConfig(isl=8, osl=5),
+            gen_tokens=2,
             isl=8,
             osl=5,
-            image_height=32,
-            image_width=32,
-            num_images_per_request=1,
-        ),
-        mode="static",
-        stride=2,
-    )
-
-    assert latency == pytest.approx(6.0)
+        )

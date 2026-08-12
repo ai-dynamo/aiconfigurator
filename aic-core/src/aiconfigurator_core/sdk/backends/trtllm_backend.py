@@ -110,7 +110,6 @@ class TRTLLMBackend(BaseBackend):
         osl: int,
         b: int,
         ctx_tokens: int,
-        engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
         return (
@@ -118,7 +117,6 @@ class TRTLLMBackend(BaseBackend):
             osl,
             b,
             ctx_tokens,
-            engine_step_backend_key,
             agg_extra["max_seq_len"],
             agg_extra["max_num_tokens"],
             agg_extra["free_gpu_memory_fraction"],

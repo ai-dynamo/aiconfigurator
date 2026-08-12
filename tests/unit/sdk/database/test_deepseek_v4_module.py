@@ -679,7 +679,14 @@ class TestDeepSeekV4AttentionModule:
         assert result.energy >= 0
 
 
-def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
+def test_deepseek_v4_per_op_sol_walk_runs_end_to_end(mutable_comprehensive_perf_db):
+    """Every DSV4 op must answer a per-op SOL query through the Python phase
+    walk. This is the surface FPM rooflines stand on (``_oplevel_sol_fn``
+    queries the model's original op list in DatabaseMode.SOL); the engine-step
+    SOL path itself is rust-routed and covered by the parity suite on real
+    databases, so the walk is exercised directly here — the fixture is a real
+    PerfDatabase stuffed with synthetic in-memory data the compiled engine
+    could not resolve from disk."""
     db = mutable_comprehensive_perf_db
     db.system_spec["gpu"]["mem_capacity"] = 288400343040
     db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
@@ -693,17 +700,13 @@ def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
     )
     model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="trtllm")
     backend = TRTLLMBackend()
-    # Pin the Python step: this fixture is a real PerfDatabase stuffed with
-    # synthetic in-memory data, so the compiled engine (which re-loads perf
-    # data from disk by identity, and now answers SOL itself) cannot resolve
-    # it. The Rust SOL path is covered by the engine-step parity suite on
-    # real databases.
-    runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0, engine_step_backend="python")
+    runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
 
     db.set_default_database_mode(common.DatabaseMode.SOL)
-    summary = backend.run_static(model, db, runtime, mode="static", stride=1)
-    assert sum(summary.get_context_latency_dict().values()) > 0
-    assert sum(summary.get_generation_latency_dict().values()) > 0
+    context_latency, _, _ = backend._run_context_phase(model, db, runtime, batch_size=1, isl=128, prefix=0)
+    generation_latency, _, _ = backend._run_generation_phase(model, db, runtime, 1, 1, 128, 4, 1)
+    assert sum(context_latency.values()) > 0
+    assert sum(generation_latency.values()) > 0
 
 
 def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_comprehensive_perf_db):

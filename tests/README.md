@@ -68,32 +68,24 @@ python3 -m pytest -m "unit or build"
 
 > Note: if encoutering error `NotImplementedError: Implement enable_gui in a subclass`, please add `MPLBACKEND=agg` to your command
 
-### Rust Engine Step Opt-In
+### Rust Engine Step
 
-The Python SDK keeps using the existing Python latency path by default. To run Python tests through the experimental Rust engine-step path, build the Rust core shared library first or let pytest build it on demand:
+The compiled Rust engine is the only engine-step executor (the Python step
+path was removed after the golden fixtures froze its reference values —
+see `aic-core/rust/aiconfigurator-core/parity_tests/README.md`). The
+maturin-built `aiconfigurator_core` extension must be importable; build it
+on demand with:
 
 ```bash
-# Build manually, then run any pytest target with the Rust path enabled
-cargo build --manifest-path aic-core/rust/aiconfigurator-core/Cargo.toml
-python3 -m pytest tests/unit/sdk/test_rust_engine_step.py --aic-engine-step-backend=rust
-
-# Or let the test harness build the shared library when needed
 python3 -m pytest tests/unit/sdk/test_rust_engine_step.py \
   --aic-engine-step-backend=rust \
   --aic-rust-core-autobuild
 ```
 
-The support-matrix PR regression now runs Python first and compares Rust engine-step output against it.
-Rust core autobuild is enabled by the support-matrix runner for the Rust pass, so the usual command is:
+The support-matrix PR regression runs on the compiled engine:
 
 ```bash
 TEST_SUPPORT_MATRIX=true python3 -m pytest tests/e2e/support_matrix
-```
-
-For the full support-matrix generation runner, enable the same parity check explicitly:
-
-```bash
-python3 tools/support_matrix/generate_support_matrix.py --compare-engine-step-backends
 ```
 
 ### Where tests live

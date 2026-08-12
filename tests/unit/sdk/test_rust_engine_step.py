@@ -22,7 +22,8 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
-    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
+    # The retired escape hatch is a deprecation no-op: it still routes rust.
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
 def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
@@ -32,9 +33,26 @@ def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
     database = _real_database()
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
-    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-    # Unknown values keep their historical meaning: not rust.
-    assert not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
+    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
+    # Unknown values fail closed instead of silently picking an engine.
+    with pytest.raises(ValueError, match="engine_step_backend"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
+
+
+def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
+    """The one-release deprecation contract: ``"python"`` is accepted, warns
+    exactly once per process, and routes to the compiled engine anyway."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    rust_engine_step._python_step_fallback_reset()
+    database = _real_database()
+
+    with caplog.at_level("WARNING", logger="aiconfigurator_core.sdk.rust_engine_step"):
+        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
+        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
+    deprecations = [r for r in caplog.records if "deprecated" in r.message]
+    assert len(deprecations) == 1
+    # A no-op is not a python-step use: telemetry must not count it.
+    assert "explicit_python" not in rust_engine_step.python_step_fallback_counts()
 
 
 def _real_database():
@@ -1023,11 +1041,12 @@ def test_engine_config_json_identity_includes_database_policy():
     assert shared_on != strict_on
 
 
-def test_op_conversion_error_falls_back_to_python_step(monkeypatch):
+def test_op_conversion_error_raises_typed_and_memoized(monkeypatch):
     """An OpConversionError (op graph not expressible in Rust) must be
-    surfaced as RustEngineUnsupportedError, cached per engine identity, and
-    caught by the base_backend gates (fallback to the Python step) — NOT
-    crash the sweep."""
+    surfaced as RustEngineUnsupportedError and cached per engine identity so
+    a sweep does not re-walk a known-unconvertible op graph. (The AFD op-list
+    path catches it; the engine-step surfaces propagate it — the opspec
+    coverage tripwire keeps it unreachable for shipped op-level models.)"""
     import pytest
 
     from aiconfigurator.sdk.engine import OpConversionError
@@ -1305,9 +1324,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
 def test_every_selectable_database_mode_routes_to_rust():
     """The compiled engine answers every selectable database mode — SILICON,
     the util-space empirical layer (HYBRID / EMPIRICAL), and SOL (also ported
-    to Rust) — so none of them delegates to the Python step. SOL_FULL is a
-    Python-side PER-CALL diagnostic, never a default mode (mode entry refuses
-    to activate it), so only that name still trips the defensive gate."""
+    to Rust). The former mode-based delegation is gone: SOL_FULL, the only
+    non-rust name, is a Python-side PER-CALL diagnostic that mode entry
+    refuses to activate as a default mode, so the gate no longer inspects the
+    database mode at all."""
     from enum import Enum
 
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1318,7 +1338,6 @@ def test_every_selectable_database_mode_routes_to_rust():
         HYBRID = "HYBRID"
         EMPIRICAL = "EMPIRICAL"
         SOL = "SOL"
-        SOL_FULL = "SOL_FULL"
 
     class _DB:
         def __init__(self, mode):
@@ -1332,7 +1351,6 @@ def test_every_selectable_database_mode_routes_to_rust():
     assert should_use_rust_engine_step(rc, _DB(_Mode.HYBRID))
     assert should_use_rust_engine_step(rc, _DB(_Mode.EMPIRICAL))
     assert should_use_rust_engine_step(rc, _DB(_Mode.SOL))
-    assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL_FULL))
     assert should_use_rust_engine_step(rc)  # no database context -> unchanged
 
 
@@ -1408,10 +1426,13 @@ def test_python_step_fallback_telemetry_counts_and_warns_once(caplog) -> None:
     res._python_step_fallback_reset()
     try:
         with caplog.at_level(logging.DEBUG, logger="aiconfigurator_core.sdk.rust_engine_step"):
-            res.note_python_step_fallback("explicit_python", "python")
-            res.note_python_step_fallback("explicit_python", "python")
-            res.note_python_step_fallback("database_mode", "SOL_FULL")
-        assert res.python_step_fallback_counts() == {"explicit_python": 2, "database_mode": 1}
+            res.note_python_step_fallback("non_perf_database", "SimpleNamespace")
+            res.note_python_step_fallback("non_perf_database", "SimpleNamespace")
+            res.note_python_step_fallback("unsupported_op_graph:afd", "no OpSpec conversion")
+        assert res.python_step_fallback_counts() == {
+            "non_perf_database": 2,
+            "unsupported_op_graph:afd": 1,
+        }
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warning_records) == 2  # warn-once per distinct reason
     finally:
