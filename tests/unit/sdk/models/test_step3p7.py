@@ -438,3 +438,33 @@ def test_head_wise_attn_gate_is_off_by_default():
     """
     model = _build_step37(_step37_hf_config())
     assert not [o for o in model.context_ops + model.generation_ops if "attn_gate" in o._name]
+
+
+def test_hybrid_moe_config_positional_layout_is_stable():
+    """New HybridMoEConfig fields must be appended, never inserted.
+
+    The dataclass has a generated positional constructor, so inserting a field
+    ahead of an existing optional one silently changes the meaning of a legacy
+    positional call -- swa_num_kv_heads would start receiving a query-head
+    count. Pin the prefix that predates the Step-3.7 work.
+    """
+    import dataclasses
+
+    names = [f.name for f in dataclasses.fields(common.HybridMoEConfig)]
+    assert names[:8] == [
+        "attn_layer_pattern",
+        "moe_layer_freq",
+        "swa_num_kv_heads",
+        "swa_head_dim",
+        "swa_v_head_dim",
+        "global_v_head_dim",
+        "sliding_window_size",
+        "dense_inter_size",
+    ]
+
+    # A legacy positional call keeps its original meaning.
+    cfg = common.HybridMoEConfig((1, 0), (1, 1), 4, 128, 128, 128, 512, 2048)
+    assert cfg.swa_num_kv_heads == 4
+    assert cfg.sliding_window_size == 512
+    assert cfg.dense_inter_size == 2048
+    assert cfg.swa_num_heads == 0

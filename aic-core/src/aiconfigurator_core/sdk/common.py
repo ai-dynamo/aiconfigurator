@@ -141,13 +141,16 @@ class HybridMoEConfig:
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
     moe_layer_freq: tuple[int, ...]  # per-layer: 0=dense, 1=MoE
-    swa_num_heads: int = 0
     swa_num_kv_heads: int = 0
     swa_head_dim: int = 0
     swa_v_head_dim: int = 0
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+    # New fields are appended, never inserted: this dataclass has a generated
+    # positional constructor, so inserting ahead of an existing optional field
+    # silently changes what a legacy positional call means.
+    swa_num_heads: int = 0
     use_qk_norm: bool = False
     use_head_wise_attn_gate: bool = False
 
