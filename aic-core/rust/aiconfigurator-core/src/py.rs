@@ -619,7 +619,7 @@ impl AicEngine {
 /// op-transfer). Python's `compile_engine` builds the `EngineSpec` as a JSON
 /// string (externally-tagged `Op` variants + `EngineConfig`) — JSON is the
 /// debuggable wire and the only format Python can produce — and calls this to
-/// get the bincode bytes that `AicEngine.from_spec` /
+/// get the bincode bytes that `AicEngine::from_spec` /
 /// [`AicEngineBuilder::build`] consume. `serde_json` round-trips
 /// `EngineConfig`'s `#[serde(flatten)]`
 /// cleanly (only bincode rejected it; that is exactly why `to_bincode`
