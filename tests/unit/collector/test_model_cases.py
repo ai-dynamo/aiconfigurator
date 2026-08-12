@@ -670,6 +670,27 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
+    # Step-3.7-Flash: assert the shape and the routing contract, not just the
+    # aggregate -- the total stays correct if unrelated cases replace these rows.
+    # The BF16 path is a model_alias of the FP8 row, so it selects that row
+    # rather than materializing a second set of cases (see _matches_model_path).
+    step_cases = [case for case in moe_cases if case.model_name == "stepfun-ai/Step-3.7-Flash-FP8"]
+    assert step_cases, "no Step-3.7-Flash MoE cases"
+    assert all(
+        case.hidden_size == 4096 and case.inter_size == 1280 and case.topk == 8 and case.num_experts == 288
+        for case in step_cases
+    )
+    # Sigmoid gate + correction bias before top-k, renormalized and scaled by
+    # 3.0. The defaults (softmax, no bias, no scaling) would benchmark a
+    # different MoE invocation from the one that is actually served.
+    assert all(
+        case.sglang_moe_scoring_func == "sigmoid"
+        and case.sglang_moe_has_correction_bias
+        and case.sglang_moe_renormalize
+        and case.sglang_moe_routed_scaling_factor == 3.0
+        for case in step_cases
+    )
+
     # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
     # expanding the MLA spec grids.
     assert len(get_context_mla_case_specs()) == 330
@@ -1477,3 +1498,37 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
 
     assert violations == []
+
+
+def test_step3p7_plans_correlated_attention_topologies(monkeypatch):
+    """Step-3.7 must plan (64 Q, window 0) and (96 Q, window 512), not their cross-product.
+
+    The pinned vLLM Step3p5 block substitutes 96 query heads on
+    sliding_attention layers while global layers keep 64. A single row
+    cross-producting num_attention_heads=64 with window_sizes [0, 512] plans
+    64-head SWA cases that never run and omits the 96-head SWA cases that do --
+    without changing the total case count, so an aggregate assertion misses it.
+    """
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    # Both artifacts, to cover the BF16 path resolving through model_aliases.
+    for model_path in ("stepfun-ai/Step-3.7-Flash-FP8", "stepfun-ai/Step-3.7-Flash"):
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        configs = {
+            (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+            for sweep in get_attention_context_shape_sweeps("vllm")
+            for config in get_attention_head_configs(sweep, phase="context")
+        }
+
+        assert configs == {
+            # global attention: 64 Q / 8 KV, sharded over TP 1/2/4/8
+            (64, 8, 128, 0),
+            (32, 4, 128, 0),
+            (16, 2, 128, 0),
+            (8, 1, 128, 0),
+            # sliding attention (window 512): 96 Q / 8 KV
+            (96, 8, 128, 512),
+            (48, 4, 128, 512),
+            (24, 2, 128, 512),
+            (12, 1, 128, 512),
+        }, model_path

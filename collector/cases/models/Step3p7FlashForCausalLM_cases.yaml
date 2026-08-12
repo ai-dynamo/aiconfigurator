@@ -37,13 +37,27 @@ framework_specific_op_cases:
 
 model_case_values:
   attention:
-    - model_path: stepfun-ai/Step-3.7-Flash-FP8
+    # Two correlated rows, not one cross-product: the pinned vLLM Step3p5 block
+    # substitutes 96 query heads on sliding_attention layers while global layers
+    # keep 64. Cross-producting 64 heads with [0, 512] would plan 64-head SWA
+    # cases that never run and omit the 96-head SWA cases that do.
+    - id: step3p7_global_attention
+      model_path: stepfun-ai/Step-3.7-Flash-FP8
       model_aliases:
         - stepfun-ai/Step-3.7-Flash
       num_attention_heads: 64
       num_key_value_heads: 8
       head_dim: 128
-      window_sizes: [0, 512]
+      window_size: 0
+      tensor_parallel_sizes: [1, 2, 4, 8]
+    - id: step3p7_swa_attention
+      model_path: stepfun-ai/Step-3.7-Flash-FP8
+      model_aliases:
+        - stepfun-ai/Step-3.7-Flash
+      num_attention_heads: 96
+      num_key_value_heads: 8
+      head_dim: 128
+      window_size: 512
       tensor_parallel_sizes: [1, 2, 4, 8]
   moe:
     - model_path: stepfun-ai/Step-3.7-Flash-FP8
@@ -53,3 +67,14 @@ model_case_values:
       inter_size: 1280
       topk: 8
       num_experts: 288
+      # Routing contract, from the published config and Step3p7MoE.router_bias_func:
+      # sigmoid over the gate, plus a correction bias added before top-k, then
+      # renormalized (norm_expert_weight) and scaled by moe_router_scaling_factor.
+      # Left at the defaults these would benchmark softmax with no bias and no
+      # scaling -- a different MoE invocation from the one vLLM/SGLang serve.
+      # The model declares no expert grouping, so num_expert_group/topk_group
+      # stay unset.
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_has_correction_bias: true
+      sglang_moe_renormalize: true
+      sglang_moe_routed_scaling_factor: 3.0
