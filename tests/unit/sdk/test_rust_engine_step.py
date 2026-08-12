@@ -972,7 +972,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
     ``rust/aiconfigurator-core/src/operators/moe_expert_compute.rs::MoeExpertComputeOp``."""
     from aiconfigurator.sdk.engine import _to_opspec
-    from aiconfigurator.sdk.operations import MoEExpertCompute, MoEAllToAll
+    from aiconfigurator.sdk.operations import MoEAllToAll, MoEExpertCompute
 
     a2a = MoEAllToAll(
         "context_moe_dispatch",

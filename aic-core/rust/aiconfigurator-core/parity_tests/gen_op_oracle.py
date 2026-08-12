@@ -40,7 +40,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
-from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute, MoEAllToAll
+from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
 from aiconfigurator_core.sdk.perf_database import get_database
 
 OUT_PATH = os.path.join(os.path.dirname(__file__), "..", "src", "operators", "testdata", "op_oracle.json")
