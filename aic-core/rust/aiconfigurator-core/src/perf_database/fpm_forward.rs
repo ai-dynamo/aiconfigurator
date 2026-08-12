@@ -102,6 +102,13 @@ pub struct FpmForwardCell {
     /// graph-regime batches only, `batch > boundary` among eager ones — the
     /// ScatteredSites batch distance is regime-blind and would otherwise mix
     /// votes across the cliff. `None` = no cliff collected, single table.
+    /// Collected prefill batch ceiling, present only when the data
+    /// certifies the batch axis flat at matched totals (median |ratio-1|
+    /// <= 5% across consecutive collected batches, >= 3 overlap points):
+    /// queries above it clamp their batch coordinate to this value with
+    /// TRUE totals — same GEMM/MoE work, same side of the capture cliff,
+    /// bounded-conservative on attention. `None` = hard gate as before.
+    pub prefill_batch_clamp_max: Option<u32>,
     pub decode_regime_boundary: Option<u32>,
     pub decode_graph: Option<Node>,
     pub decode_eager: Option<Node>,
@@ -652,6 +659,7 @@ fn load_pair(
                 decode_domain: None,
                 prefill_index: None,
                 decode_index: None,
+                prefill_batch_clamp_max: None,
                 decode_regime_boundary: None,
                 decode_graph: None,
                 decode_eager: None,
@@ -688,6 +696,9 @@ fn load_pair(
             if cell.prefill_domain.is_some() {
                 // prefill sites (batch, kv) at axes (0, 2); curve = axis 1
                 cell.prefill_index = Some(SiteIndex::build(&[0, 2], 1, &cell.prefill));
+            }
+            if cell.prefill_domain.is_some() && prefill_batch_axis_is_flat(&cell.prefill) {
+                cell.prefill_batch_clamp_max = cell.prefill_domain.map(|d| d[0].1);
             }
             if cell.decode_domain.is_some() {
                 // decode sites (batch,) at axis 0; curve = axis 1
@@ -786,6 +797,61 @@ fn detect_decode_regime_boundary(decode: &Node) -> Result<Option<u32>, AicError>
         )));
     }
     Ok(hits.first().copied())
+}
+
+/// Data certificate for the prefill batch clamp, mirroring Python
+/// `_prefill_batch_axis_is_flat`: consecutive collected batches must agree
+/// (median |ratio - 1| <= 5% over >= 3 overlapping total-token points per
+/// shared KV slice). Compared at matched totals = within one CUDA-graph
+/// regime; the capture cliff lives on the token axis and cannot leak in.
+fn prefill_batch_axis_is_flat(prefill: &Node) -> bool {
+    // batch -> kv -> (total -> latency)
+    let mut slices: BTreeMap<u32, BTreeMap<u32, BTreeMap<u32, f64>>> = BTreeMap::new();
+    if let Node::Branch(batches) = prefill {
+        for (&batch, totals_node) in batches {
+            if let Node::Branch(totals) = totals_node {
+                for (&total, kv_node) in totals {
+                    if let Node::Branch(kvs) = kv_node {
+                        for (&kv, leaf) in kvs {
+                            if let Node::Leaf(value) = leaf {
+                                slices
+                                    .entry(batch)
+                                    .or_default()
+                                    .entry(kv)
+                                    .or_default()
+                                    .insert(total, value.latency);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let batches: Vec<u32> = slices.keys().copied().collect();
+    if batches.len() < 2 {
+        return false;
+    }
+    let mut deviations: Vec<f64> = Vec::new();
+    for pair in batches.windows(2) {
+        let (lo_b, hi_b) = (pair[0], pair[1]);
+        for (kv, upper) in &slices[&hi_b] {
+            let Some(lower) = slices[&lo_b].get(kv) else {
+                continue;
+            };
+            let lo_first = *lower.keys().next().expect("non-empty") as f64;
+            let lo_last = *lower.keys().next_back().expect("non-empty") as f64;
+            for (&total, &lat) in upper {
+                let t = total as f64;
+                if lo_first <= t && t <= lo_last {
+                    let base = decode_curve_value(lower, t);
+                    if base > 0.0 {
+                        deviations.push((lat / base - 1.0).abs());
+                    }
+                }
+            }
+        }
+    }
+    deviations.len() >= 3 && median(&mut deviations) <= 0.05
 }
 
 /// Python `statistics.median`: even count averages the two middle values.
@@ -1418,6 +1484,56 @@ pub(crate) mod tests {
             }
         }
         rows
+    }
+
+    fn flat_prefill_rows() -> Vec<RowSpec> {
+        let mk = |batch: u32, total: u32, lat: f64| RowSpec {
+            workload_kind: "prefill",
+            batch_size: batch,
+            total_prefill_tokens: total,
+            total_kv_read_tokens: 0,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        let mut rows = Vec::new();
+        for (b, bump) in [(1u32, 1.0), (2, 1.02), (4, 1.04)] {
+            for (total, lat) in [(1024u32, 10.0), (2048, 20.0), (4096, 40.0)] {
+                rows.push(mk(b, total, lat * bump));
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn certified_prefill_batch_clamp_is_issued_and_denied_correctly() {
+        // Flat ladder (2%/batch) -> certificate -> clamp ceiling = 4.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &flat_prefill_rows());
+        let cell_max = loaded_table(tmp.path())
+            .select_cell(&default_identity(4), "org/model-a")
+            .expect("select")
+            .prefill_batch_clamp_max;
+        assert_eq!(cell_max, Some(4));
+        // Default fixture: one sparse batch pair -> no evidence -> no clamp.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &default_rows());
+        let cell_max = loaded_table(tmp.path())
+            .select_cell(&default_identity(4), "org/model-a")
+            .expect("select")
+            .prefill_batch_clamp_max;
+        assert_eq!(cell_max, None);
+        // A real batch effect (>5%) fails the certificate.
+        let mut bumpy = flat_prefill_rows();
+        for row in bumpy.iter_mut().filter(|r| r.batch_size == 4) {
+            row.latency_ms *= 1.2;
+        }
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &bumpy);
+        let cell_max = loaded_table(tmp.path())
+            .select_cell(&default_identity(4), "org/model-a")
+            .expect("select")
+            .prefill_batch_clamp_max;
+        assert_eq!(cell_max, None);
     }
 
     #[test]

@@ -34,6 +34,7 @@ from __future__ import annotations
 import bisect
 import functools
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -377,6 +378,15 @@ def load_fpm_forward_data(primary_path: str, expected_version: str, expected_sys
         # with three graph votes), so split at the data-encoded capture
         # boundary and let each side interpolate among its own kind. The
         # domain gate stays on the FULL decode box (gate first, route after).
+        # Prefill batch-axis clamp certificate: real steps can schedule more
+        # whole prefills than the collected batch ceiling (short sequences);
+        # at fixed totals the batch coordinate is provably near-flat for
+        # attention-light models, and the DATA must show it before the op
+        # may clamp. No certificate -> the hard domain gate stays.
+        prefill_batches = sorted(cell["tables"]["prefill"])
+        cell["prefill_batch_clamp_max"] = (
+            prefill_batches[-1] if prefill_batches and _prefill_batch_axis_is_flat(cell["tables"]["prefill"]) else None
+        )
         boundary = _detect_decode_regime_boundary(cell["tables"]["decode"])
         cell["decode_regime_boundary"] = boundary
         if boundary is not None:
@@ -407,6 +417,43 @@ def _decode_curve_value(curve: dict, kv: float) -> float:
         return float(curve[k0])
     w = (kv - k0) / (k1 - k0)
     return float(curve[k0]) + (float(curve[k1]) - float(curve[k0])) * w
+
+
+def _prefill_batch_axis_is_flat(table: dict) -> bool:
+    """Certify from the collected data that the prefill batch axis is flat.
+
+    At fixed TOTAL tokens the batch count only changes how the tokens split
+    into causal-attention segments (more, shorter segments = slightly less
+    work); GEMM/MoE see the total alone. Whether that effect is negligible
+    is a property of the MODEL, so it is certified from the data rather than
+    assumed: for each consecutive pair of collected batches, compare their
+    total-token curves (per shared KV slice) on the overlapping range —
+    median |ratio - 1| <= 5% over >= 3 points across the ladder passes.
+    A single collected batch offers no evidence and fails the certificate.
+
+    The comparison happens at matched totals, i.e. within one CUDA-graph
+    regime — the capture cliff lives on the token axis and cannot leak in.
+    """
+    batches = sorted(table)
+    if len(batches) < 2:
+        return False
+    deviations: list[float] = []
+    for lo_b, hi_b in itertools.pairwise(batches):
+        # per-KV-slice total->latency curves for both batches
+        for kv in {kv for totals in table[lo_b].values() for kv in totals} & {
+            kv for totals in table[hi_b].values() for kv in totals
+        }:
+            lower = {total: kvs[kv] for total, kvs in table[lo_b].items() if kv in kvs}
+            upper = {total: kvs[kv] for total, kvs in table[hi_b].items() if kv in kvs}
+            if not lower or not upper:
+                continue
+            lo_keys = sorted(lower)
+            for total in sorted(upper):
+                if lo_keys[0] <= total <= lo_keys[-1]:
+                    base = _decode_curve_value(lower, total)
+                    if base > 0:
+                        deviations.append(abs(float(upper[total]) / base - 1.0))
+    return len(deviations) >= 3 and statistics.median(deviations) <= 0.05
 
 
 def _detect_decode_regime_boundary(table: dict) -> int | None:
@@ -728,6 +775,17 @@ class FPMForwardOp(Operation):
         interp_config = self._interp_config(database)
         table = cell["tables"][self._phase]
         domain = cell["domains"].get(self._phase)
+        if self._phase == "prefill":
+            clamp_max = cell.get("prefill_batch_clamp_max")
+            if clamp_max is not None and coords[0] > clamp_max:
+                # Data-certified batch clamp: answer at the collected batch
+                # ceiling with the TRUE totals. Same totals = same GEMM/MoE
+                # work and the same side of the CUDA-graph capture cliff (the
+                # regime coordinate is the token total, untouched here);
+                # fewer, longer segments do slightly MORE attention work, so
+                # the answer is a bounded upper bound. total_kv stays the
+                # real per-step read and is gated honestly below.
+                coords = (clamp_max, *coords[1:])
         if not table or domain is None:
             raise PerfDataNotAvailableError(
                 f"FPM cell {cell['cell_ids']} has no {self._phase} rows (model_path={cell['model_path']!r})."

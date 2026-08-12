@@ -253,6 +253,62 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
 
+    def test_prefill_batch_flatness_certificate(self):
+        from aiconfigurator_core.sdk.operations.fpm_forward import _prefill_batch_axis_is_flat
+
+        flat = {
+            1: {1024: {0: 10.0}, 2048: {0: 20.0}, 4096: {0: 40.0}},
+            2: {1024: {0: 10.2}, 2048: {0: 20.4}, 4096: {0: 40.8}},
+            4: {1024: {0: 10.4}, 2048: {0: 20.8}, 4096: {0: 41.6}},
+        }
+        assert _prefill_batch_axis_is_flat(flat)
+        # A real batch effect (>5% median) fails the certificate.
+        bumpy = {1: flat[1], 2: {t: {0: v[0] * 1.2} for t, v in flat[1].items()}}
+        assert not _prefill_batch_axis_is_flat(bumpy)
+        # A single collected batch offers no evidence.
+        assert not _prefill_batch_axis_is_flat({1: flat[1]})
+        # Fewer than 3 overlapping points: insufficient evidence.
+        assert not _prefill_batch_axis_is_flat({1: {1024: {0: 10.0}, 2048: {0: 20.0}}, 2: {2048: {0: 20.2}}})
+
+    def _flat_prefill_rows(self):
+        rows = []
+        for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
+            for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
+                rows.append(_row("prefill", b, total, 0, lat * bump))
+        return rows
+
+    def test_certified_prefill_batch_clamp_answers_above_the_ceiling(self, fake_db):
+        # Real steps can schedule more whole prefills than the collected
+        # batch ceiling (short sequences). With the flatness certificate the
+        # query clamps its batch coordinate to the ceiling, keeping the TRUE
+        # token total — the regime coordinate — untouched.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("prefill")
+        assert op._load_cell(db)["prefill_batch_clamp_max"] == 4
+        clamped = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        ceiling = float(op.query_totals(db, batch_size=4, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        assert clamped == pytest.approx(ceiling) == pytest.approx(41.6)
+        # The other axes stay honestly gated: totals beyond the box still miss.
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=16384, total_kv_read_tokens=0)
+
+    def test_uncertified_prefill_batch_stays_hard_gated(self, fake_db):
+        # Default fixture rows carry a single sparse batch pair -> no
+        # certificate -> the domain gate rejects exactly as before.
+        db = fake_db()
+        op = _make_op("prefill")
+        assert op._load_cell(db)["prefill_batch_clamp_max"] is None
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=512, total_kv_read_tokens=0)
+
+    def test_decode_batch_is_never_clamped(self, fake_db):
+        # The decode batch axis carries a REAL regime cliff (the Task B
+        # partition); a flat-prefill certificate must not leak into it.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("decode")
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=4096, total_kv_read_tokens=4096)
+
     def test_decode_regime_boundary_detection(self):
         from aiconfigurator_core.sdk.operations.fpm_forward import _detect_decode_regime_boundary
 

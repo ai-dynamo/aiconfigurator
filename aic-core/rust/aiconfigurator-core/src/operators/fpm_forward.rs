@@ -188,6 +188,21 @@ impl FpmForwardOp {
         cell: &FpmForwardCell,
         coords: &[f64],
     ) -> Result<PerformanceResult, AicError> {
+        // Data-certified prefill batch clamp (mirrors Python _resolve): the
+        // regime coordinate is the token TOTAL, which stays untouched — the
+        // clamped query prices the same side of the capture cliff and is a
+        // bounded upper bound on attention. Decode is NEVER clamped (its
+        // batch axis carries a real regime cliff — the Task B partition).
+        let clamped: Vec<f64>;
+        let coords = match (self.phase, cell.prefill_batch_clamp_max) {
+            (FpmPhase::Prefill, Some(max)) if coords[0] > max as f64 => {
+                clamped = std::iter::once(max as f64)
+                    .chain(coords[1..].iter().copied())
+                    .collect();
+                clamped.as_slice()
+            }
+            _ => coords,
+        };
         // Per-axis inclusive bounding-box gate BEFORE perf_interp: whole-model
         // latency has no principled boundary-hold semantics.
         let (axes, domain, index): (&[&str], &[(u32, u32)], _) = match self.phase {
@@ -394,6 +409,39 @@ mod tests {
             prefix,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn certified_prefill_batch_clamp_routes_to_the_ceiling() {
+        use crate::perf_database::fpm_forward::tests::RowSpec;
+        let mk = |batch: u32, total: u32, lat: f64| RowSpec {
+            workload_kind: "prefill",
+            batch_size: batch,
+            total_prefill_tokens: total,
+            total_kv_read_tokens: 0,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        let mut rows = Vec::new();
+        for (b, bump) in [(1u32, 1.0), (2, 1.02), (4, 1.04)] {
+            for (total, lat) in [(1024u32, 10.0), (2048, 20.0), (4096, 40.0)] {
+                rows.push(mk(b, total, lat * bump));
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        write_pair(tmp.path(), &rows);
+        let db = db_with_pair(tmp.path());
+        // batch 16 > ceiling 4: clamp keeps the TRUE total (regime
+        // coordinate) and answers the (4, 4096, 0) leaf.
+        let clamped = op(FpmPhase::Prefill)
+            .query_totals(&db, &[16.0, 4096.0, 0.0])
+            .unwrap();
+        assert!((clamped.latency_ms - 41.6).abs() < 1e-9, "{}", clamped.latency_ms);
+        // The token axis stays honestly gated.
+        let err = op(FpmPhase::Prefill)
+            .query_totals(&db, &[16.0, 16384.0, 0.0])
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the collected domain"), "{err}");
     }
 
     #[test]
