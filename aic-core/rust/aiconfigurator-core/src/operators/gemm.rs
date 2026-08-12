@@ -189,6 +189,10 @@ fn query_gemm_table(
     let silicon = |v: crate::perf_database::perf_interp::LeafValue| {
         PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon)
     };
+    // W4A16-NVFP4 has no measured table lane. Its modeled profile may borrow
+    // int4_wo utilization in EMPIRICAL/HYBRID, but must never turn that
+    // borrowed reference into a measured-silicon result.
+    let uses_borrowed_table = quant == GemmQuantMode::W4a16Nvfp4;
     match db.database_mode {
         // Python `_query_gemm_table`: `get_sol(m, n, k, quant_mode)[0]` at the
         // RAW quant mode (not the fp8_static-normalized table quant).
@@ -210,6 +214,10 @@ fn query_gemm_table(
             gemm_empirical(db, quant, m, n, k)?,
             Source::Empirical,
         )),
+        DatabaseMode::Hybrid if uses_borrowed_table => Ok(PerformanceResult::new(
+            gemm_empirical(db, quant, m, n, k)?,
+            Source::Empirical,
+        )),
         DatabaseMode::Hybrid => match db.gemm.query(quant, m, n, k) {
             Ok(value) => Ok(silicon(value)),
             Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
@@ -218,6 +226,10 @@ fn query_gemm_table(
             )),
             Err(err) => Err(err),
         },
+        DatabaseMode::Silicon if uses_borrowed_table => Err(AicError::PerfDatabase(
+            "No measured W4A16-NVFP4 GEMM lane is available; int4_wo rows are used only as an empirical utilization reference."
+                .to_string(),
+        )),
         _ => Ok(silicon(db.gemm.query(quant, m, n, k)?)),
     }
 }
@@ -356,7 +368,10 @@ fn gemm_empirical(
     let tc_flops = quant_tc_flops(spec, quant.mapping())?;
     let sol = |c: &[f64]| gemm_sol_latency_ms_with_flops(spec, quant, tc_flops, c[0], c[1], c[2]);
     let tqm = normalize_gemm_quant_for_table(quant);
-    let key = format!("gemm:{}", tqm.name());
+    // The collected table alias and modeled profile are both part of the
+    // utilization-grid identity. In particular, W4A16-NVFP4 reads int4_wo
+    // samples but uses a distinct scale-aware memory/SOL profile.
+    let key = format!("gemm:{}:{}", tqm.name(), quant.name());
     let mut grid = db.util_grids.get_or_try_build(&key, || {
         match db.gemm.gemm_points(quant) {
             Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
@@ -720,6 +735,24 @@ mod tests {
                 "empirical fallback carries no energy"
             );
         }
+    }
+
+    #[test]
+    fn w4a16_nvfp4_borrowed_int4_data_is_hybrid_not_silicon() {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, "h200_sxm", "trtllm", "1.3.0rc20")
+            .expect("database must load");
+
+        let silicon = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32);
+        assert!(matches!(silicon, Err(AicError::PerfDatabase(_))));
+
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let hybrid = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32)
+            .expect("borrowed INT4 utilization should be HYBRID-estimable");
+        assert_eq!(hybrid.source, Source::Empirical);
+        assert!(hybrid.latency_ms.is_finite() && hybrid.latency_ms > 0.0);
     }
 
     /// HYBRID on a quant with NO collected table under a policy WITHOUT

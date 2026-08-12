@@ -335,6 +335,19 @@ class GEMM(Operation):
             return common.GEMMQuantMode.int4_wo
         return quant_mode
 
+    @staticmethod
+    def _empirical_grid_key(database: PerfDatabase, modeled_quant: common.GEMMQuantMode) -> tuple:
+        """Key a util grid by both its collected table and modeled profile."""
+        table_quant = GEMM._normalize_gemm_quant_mode_for_table(modeled_quant)
+        return (
+            "gemm",
+            database.system,
+            database.backend,
+            database.version,
+            table_quant.name,
+            modeled_quant.name,
+        )
+
     # ------------------------------------------------------------------
     # SOL correction (formerly in PerfDatabase._correct_data)
     # ------------------------------------------------------------------
@@ -508,7 +521,7 @@ class GEMM(Operation):
                 return util_empirical.require_data_slice(wrapper, tqm)  # m -> n -> k -> leaf
 
             grid = util_empirical.grid_for(
-                ("gemm", database.system, database.backend, database.version, tqm.name),
+                cls._empirical_grid_key(database, qm),
                 _slice,
                 lambda c: get_sol(c[0], c[1], c[2], qm)[0],
                 depth=3,
@@ -544,7 +557,7 @@ class GEMM(Operation):
 
                 grid, util_scale, ref_prov = util_empirical.quant_transfer_grid(
                     "gemm",
-                    (database.system, database.backend, database.version, tqm.name),
+                    cls._empirical_grid_key(database, qm)[1:],
                     (1.0,),
                     policy,
                     tqm,
@@ -584,6 +597,12 @@ class GEMM(Operation):
         gemm_data_wrapper = database._gemm_data
 
         def get_silicon():
+            if quant_mode == common.GEMMQuantMode.w4a16_nvfp4:
+                raise PerfDataNotAvailableError(
+                    "No measured W4A16-NVFP4 GEMM lane is available; int4_wo rows "
+                    "are used only as an empirical utilization reference."
+                )
+
             def _to_performance_result(result, *, source: str = "silicon"):
                 """Normalize GEMM table entries into a PerformanceResult.
 

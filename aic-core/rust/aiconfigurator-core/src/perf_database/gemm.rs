@@ -38,7 +38,8 @@ const GEMM_QUERY_CACHE_SHARDS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct GemmQueryKey {
-    quant: GemmQuantMode,
+    table_quant: GemmQuantMode,
+    modeled_quant: GemmQuantMode,
     m: u32,
     n: u32,
     k: u32,
@@ -240,11 +241,12 @@ impl GemmTable {
         // must classify as MissingSystemFlops on both engines — not as a
         // data miss when the quant's table also happens to be uncollected.
         let spec = &self.system_spec;
-        let tc_flops = quant_tc_flops(spec, lookup_quant.mapping())?;
+        let tc_flops = quant_tc_flops(spec, quant.mapping())?;
         // Keep the cache probe below FLOPS resolution, even on hits. Hoisting
         // it would change MissingSystemFlops-over-PerfDatabase error precedence.
         let key = GemmQueryKey {
-            quant: lookup_quant,
+            table_quant: lookup_quant,
+            modeled_quant: quant,
             m,
             n,
             k,
@@ -261,7 +263,7 @@ impl GemmTable {
                 ))
             })?;
             let sol = move |c: &[f64]| {
-                gemm_sol_latency_ms_with_flops(spec, lookup_quant, tc_flops, c[0], c[1], c[2])
+                gemm_sol_latency_ms_with_flops(spec, quant, tc_flops, c[0], c[1], c[2])
             };
             let cfg = gemm_engine_config(&sol);
             index.resolve_value(&cfg, &[m as f64, n as f64, k as f64])
@@ -955,6 +957,49 @@ mod tests {
     }
 
     #[test]
+    fn aliased_table_quants_keep_distinct_profiles_in_both_query_orders() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["int4_wo", "int4_wo"]),
+                Col::I64("m", vec![128, 256]),
+                Col::I64("n", vec![1024, 1024]),
+                Col::I64("k", vec![1024, 1024]),
+                Col::F64("latency", vec![1.0, 3.0]),
+            ],
+        );
+
+        let int4_first = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let int4_a = int4_first
+            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
+            .unwrap()
+            .latency;
+        let nvfp4_a = int4_first
+            .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
+            .unwrap()
+            .latency;
+
+        let nvfp4_first = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let nvfp4_b = nvfp4_first
+            .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
+            .unwrap()
+            .latency;
+        let int4_b = nvfp4_first
+            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
+            .unwrap()
+            .latency;
+
+        assert_eq!(int4_a.to_bits(), int4_b.to_bits());
+        assert_eq!(nvfp4_a.to_bits(), nvfp4_b.to_bits());
+        assert_ne!(int4_a.to_bits(), nvfp4_a.to_bits());
+        assert_eq!(query_cache_len(&int4_first), 2);
+        assert_eq!(query_cache_len(&nvfp4_first), 2);
+    }
+
+    #[test]
     fn gemm_lazy_loads_on_first_query_only() {
         // Same data root, two queries — second must not re-read the CSV.
         // We can't directly observe I/O count, but if the cache isn't being
@@ -1034,7 +1079,8 @@ mod tests {
     fn gemm_query_cache_enforces_production_per_shard_bound() {
         let cache = gemm_query_cache();
         let key = |m| GemmQueryKey {
-            quant: GemmQuantMode::Bfloat16,
+            table_quant: GemmQuantMode::Bfloat16,
+            modeled_quant: GemmQuantMode::Bfloat16,
             m,
             n: 32,
             k: 32,
@@ -1074,7 +1120,8 @@ mod tests {
         let barrier = Arc::new(Barrier::new(THREADS));
         let resolutions = Arc::new(AtomicUsize::new(0));
         let key = GemmQueryKey {
-            quant: GemmQuantMode::Bfloat16,
+            table_quant: GemmQuantMode::Bfloat16,
+            modeled_quant: GemmQuantMode::Bfloat16,
             m: 259,
             n: 32,
             k: 32,

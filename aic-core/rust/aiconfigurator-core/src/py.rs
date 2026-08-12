@@ -1002,8 +1002,8 @@ pub(crate) fn compile_engine_to_engine(
 }
 
 /// `DataType` → `GEMMQuantMode` enum name. `None` (auto-infer) for DataTypes
-/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4;
-/// `int8`→`int8_wo`, `int4`→`int4_wo`.
+/// with no GEMM equivalent. Identity for bf16/fp8/fp8_static/fp8_block/nvfp4
+/// and w4a16_nvfp4; `int8`→`int8_wo`, `int4`→`int4_wo`.
 fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
     match dtype? {
         DataType::Bfloat16 => Some("bfloat16"),
@@ -1013,6 +1013,7 @@ fn gemm_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::Nvfp4 => Some("nvfp4"),
         DataType::Int8 => Some("int8_wo"),
         DataType::Int4 => Some("int4_wo"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         // float16, w4afp8, w4a16_mxfp4, w4a8_mxfp4_mxfp8 have no GEMM enum name.
         _ => None,
     }
@@ -1225,6 +1226,18 @@ mod tests {
     /// build). Idempotent.
     fn py_init() {
         pyo3::prepare_freethreaded_python();
+    }
+
+    #[test]
+    fn w4a16_nvfp4_wire_dtype_maps_to_distinct_gemm_mode() {
+        assert_eq!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
+            gemm_quant_name(Some(&DataType::Int4))
+        );
     }
 
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";

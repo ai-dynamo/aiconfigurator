@@ -66,6 +66,17 @@ class TestStaticHelpers:
         for qm in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8, common.GEMMQuantMode.nvfp4]:
             assert GEMM._normalize_gemm_quant_mode_for_table(qm) == qm
 
+    def test_empirical_grid_key_separates_w4a16_nvfp4_from_int4_table_profile(self):
+        database = type("Database", (), {"system": "b200", "backend": "vllm", "version": "1.0"})()
+
+        int4_key = GEMM._empirical_grid_key(database, common.GEMMQuantMode.int4_wo)
+        nvfp4_key = GEMM._empirical_grid_key(database, common.GEMMQuantMode.w4a16_nvfp4)
+
+        assert int4_key[-2] == nvfp4_key[-2] == "int4_wo"
+        assert int4_key[-1] == "int4_wo"
+        assert nvfp4_key[-1] == "w4a16_nvfp4"
+        assert int4_key != nvfp4_key
+
     def test_get_quant_tc_flops_uses_specific_key_when_present(self):
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 2000.0, "fp4_tc_flops": 4000.0}}
         assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.bfloat16) == 1000.0
@@ -173,6 +184,31 @@ class TestQueryDelegation:
         result = stub_perf_db.query_gemm(
             128, 256, 256, common.GEMMQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
         )
+        assert float(result) > 0
+
+    def test_w4a16_nvfp4_uses_int4_only_as_hybrid_empirical_reference(self, mutable_comprehensive_perf_db):
+        import copy
+
+        db = mutable_comprehensive_perf_db
+        db._gemm_data[common.GEMMQuantMode.int4_wo] = copy.deepcopy(db._gemm_data[common.GEMMQuantMode.bfloat16])
+
+        with pytest.raises(PerfDataNotAvailableError, match="No measured W4A16-NVFP4"):
+            db.query_gemm(
+                4,
+                256,
+                256,
+                common.GEMMQuantMode.w4a16_nvfp4,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        result = db.query_gemm(
+            4,
+            256,
+            256,
+            common.GEMMQuantMode.w4a16_nvfp4,
+            database_mode=common.DatabaseMode.HYBRID,
+        )
+        assert result.source == "empirical"
         assert float(result) > 0
 
     def test_query_compute_scale_sol_mode(self, stub_perf_db):

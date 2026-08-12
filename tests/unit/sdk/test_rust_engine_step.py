@@ -610,6 +610,29 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
+def test_engine_config_json_preserves_w4a16_nvfp4_weight_profile() -> None:
+    model = SimpleNamespace(
+        model_path="Test/W4A16Nvfp4",
+        architecture="Qwen3ForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=None,
+            moe_ep_size=None,
+            gemm_quant_mode=common.GEMMQuantMode.w4a16_nvfp4,
+            moe_quant_mode=None,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["weight_dtype"] == "w4a16_nvfp4"
+
+
 def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch) -> None:
     """Rust reads parquet directly, so the wrapper just hands its
     ``AICONFIGURATOR_SYSTEMS_PATH`` through unchanged to the Rust crate."""

@@ -3,10 +3,13 @@
 
 """Coverage for the current NVIDIA NVFP4 support-matrix checkpoints."""
 
+import dataclasses
+
 import pytest
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
@@ -149,6 +152,42 @@ def test_qwen36_uses_fp8_projections_and_nvfp4_ffn(hf_id, ffn_names):
         assert by_name[name]._quant_mode == common.GEMMQuantMode.fp8_static
     for name in ffn_names:
         assert by_name[name]._quant_mode == common.GEMMQuantMode.w4a16_nvfp4
+
+
+def test_qwen36_task_preserves_inferred_provenance_for_mixed_precision_split():
+    task = Task(
+        model_path="nvidia/Qwen3.6-27B-NVFP4",
+        system_name="gb300",
+        backend_name="sglang",
+        backend_version="0.5.12",
+        total_gpus=32,
+    )
+    model_config = task.build_model_config(role="agg")
+    model_config = dataclasses.replace(model_config, tp_size=1)
+    model = get_model(task.model_path, model_config, task.backend_name)
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+
+    assert model_config._gemm_quant_mode_is_explicit is False
+    assert by_name["context_gdn_in_proj_gemm"]._quant_mode == common.GEMMQuantMode.fp8_static
+    assert by_name["context_gdn_gate_ffn1_gemm"]._quant_mode == common.GEMMQuantMode.w4a16_nvfp4
+
+
+def test_qwen36_task_preserves_explicit_gemm_override():
+    task = Task(
+        model_path="nvidia/Qwen3.6-27B-NVFP4",
+        system_name="gb300",
+        backend_name="sglang",
+        backend_version="0.5.12",
+        total_gpus=32,
+        gemm_quant_mode=common.GEMMQuantMode.fp8_static,
+    )
+    model_config = task.build_model_config(role="agg")
+    model_config = dataclasses.replace(model_config, tp_size=1)
+    model = get_model(task.model_path, model_config, task.backend_name)
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+
+    assert model_config._gemm_quant_mode_is_explicit is True
+    assert by_name["context_gdn_gate_ffn1_gemm"]._quant_mode == common.GEMMQuantMode.fp8_static
 
 
 @pytest.mark.parametrize(
