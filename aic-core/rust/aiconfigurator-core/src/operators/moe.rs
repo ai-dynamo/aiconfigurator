@@ -55,6 +55,7 @@ use std::sync::Arc;
 const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.53),    // w16a16 / bfloat16              [data]
     (1.0, 1.0, 0.45),    // w8a16                          [inferred]
+    (0.5625, 1.0, 0.07), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies measured (0.5,1)]
     (0.5, 1.0, 0.07),    // w4a16 (int4_wo, mxfp4)         [data]
     (1.0, 2.0, 0.40),    // w8a8 / fp8(_block)             [data]
     (0.5, 2.0, 0.15),    // w4a8 (w4afp8, mxfp4_mxfp8)     [data]
@@ -85,6 +86,7 @@ const ALL_MOE_QUANTS: &[MoeQuantMode] = &[
     MoeQuantMode::Fp8Block,
     MoeQuantMode::W4afp8,
     MoeQuantMode::Nvfp4,
+    MoeQuantMode::Nvfp4Wo,
     MoeQuantMode::W4a16Mxfp4,
     MoeQuantMode::W4a8Mxfp4Mxfp8,
     MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm,
@@ -1041,6 +1043,50 @@ mod tests {
     ///     quant_mode=common.MoEQuantMode.nvfp4, workload_distribution="balanced",
     ///     database_mode=common.DatabaseMode.EMPIRICAL))
     /// ```
+    /// nvfp4_wo ladder-approach parity: no collected data exists, so the query
+    /// walks the transfer ladder (XPROFILE to bfloat16, rescaled by the
+    /// util-level ratio e(nvfp4_wo)/e(bfloat16)). Python oracle (shared_layer=False,
+    /// HYBRID, h200/vllm/0.19.0, same shape as the GEMM oracle):
+    ///
+    /// ```python
+    /// db = perf_database.get_database_view("h200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
+    ///     transfer_policy=None, shared_layer=False)
+    /// float(MoE._query_moe_table(db, num_tokens=96, hidden_size=7168,
+    ///     inter_size=2048, topk=8, num_experts=256, moe_tp_size=1, moe_ep_size=1,
+    ///     quant_mode=MoEQuantMode.nvfp4_wo, workload_distribution="power_law_1.2",
+    ///     database_mode=DatabaseMode.HYBRID))
+    /// # → 8.439357376098632  (XPROFILE borrow from bfloat16, rescaled by 0.07/0.53)
+    /// ```
+    #[test]
+    fn moe_nvfp4_wo_ladder_matches_python_oracle() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let db = PerfDatabase::load(&root, "h200_sxm", "vllm", "0.19.0")
+            .expect("h200/vllm/0.19.0 db loads")
+            .with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+
+        let op = MoeOp {
+            name: "moe-nvfp4wo-ladder".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 1,
+            quant_mode: MoeQuantMode::Nvfp4Wo,
+            workload_distribution: "power_law_1.2".into(),
+            attention_dp_size: 1,
+            is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
+        };
+        let r = op.query(&db, 96).expect("nvfp4_wo resolves via XPROFILE ladder");
+        assert_oracle(&r, 8.439357376098632, Source::Empirical, "nvfp4_wo_ladder_t96");
+    }
+
     #[test]
     fn moe_empirical_low_latency_table_selection_matches_python_oracles() {
         let db = b200_trtllm_db().with_mode(

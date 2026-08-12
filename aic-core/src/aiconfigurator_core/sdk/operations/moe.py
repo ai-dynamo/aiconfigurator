@@ -87,6 +87,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
 _MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
     (2, 1): 0.53,  # w16a16 / bfloat16              [data]
     (1, 1): 0.45,  # w8a16                          [inferred]
+    (0.5625, 1): 0.07,  # w4a16+scales / nvfp4_wo (Marlin FP4, weight-only BF16) [copies measured (0.5,1)]
     (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
     (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
     (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]

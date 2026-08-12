@@ -1132,30 +1132,42 @@
     },
     "minimax-m25-nvfp4-h200-vllm-019-hybrid-balanced-miss": {
       "agg": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       },
       "disagg": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       },
       "mixed": {
         "error": "MissingSystemFlopsError"
       },
       "static": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       }
     },
     "minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile": {
       "agg": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "agg_request": 210.6834999458623,
+          "agg_tpot": 72.8863529156999,
+          "agg_ttft": 137.7971470301624
+        }
       },
       "disagg": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "disagg_request": 152.294,
+          "disagg_tpot": 9.466,
+          "disagg_ttft": 142.828
+        }
       },
       "mixed": {
         "error": "MissingSystemFlopsError"
       },
       "static": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "static_ctx": 72.135,
+          "static_gen": 6.818,
+          "static_total": 78.953
+        }
       }
     },
     "minimax-m27-b200-vllm-019-isl1024-osl2": {

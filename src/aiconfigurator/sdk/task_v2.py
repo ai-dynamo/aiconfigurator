@@ -1074,6 +1074,17 @@ class Task:
         roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         fmha_explicit = self._fmha_explicit
 
+        # nvfp4 → nvfp4_wo on non-Blackwell: no native FP4 tensor cores, so all
+        # runtimes dequantize to BF16 before the MMA. The transfer ladder models
+        # the Marlin-class memory savings via the (0.5625, 1) util-level entry.
+        for role in roles:
+            system = self._role_attr(role, "system_name")
+            if not is_blackwell_system(system):
+                if self._role_attr(role, "gemm_quant_mode") == common.GEMMQuantMode.nvfp4:
+                    self._set_role_attr(role, "gemm_quant_mode", common.GEMMQuantMode.nvfp4_wo)
+                if self._role_attr(role, "moe_quant_mode") == common.MoEQuantMode.nvfp4:
+                    self._set_role_attr(role, "moe_quant_mode", common.MoEQuantMode.nvfp4_wo)
+
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
         # the role's fmha-keyed context-attention table, fall back to bfloat16
         # with a warning instead of failing validate later.  bf16-as-fp8 is
