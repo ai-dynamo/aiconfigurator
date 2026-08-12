@@ -58,6 +58,7 @@ class BaseBackend:
     # the base activation budget.
     MOE_WORKSPACE_FAMILIES: ClassVar[tuple[str, ...]] = (
         "GEMMA4MIX",
+        "STEP3P7",
         "DEEPSEEK",
         "DEEPSEEKV32",
         "DEEPSEEKV4",
