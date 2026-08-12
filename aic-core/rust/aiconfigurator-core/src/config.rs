@@ -34,7 +34,11 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
 //   branch concurrently with #1460, so the merge renumbered it (same
 //   precedent as the v3/v4 collision above).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 6;
+// - 7: `MoEDispatchOp` gained `attn_ar_modeled` — a bincode op-layout
+//   change (same class as v5).
+// - 8: `GemmOp` gained `below_grid_sol` — a bincode op-layout change (same
+//   class as v5).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 8;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

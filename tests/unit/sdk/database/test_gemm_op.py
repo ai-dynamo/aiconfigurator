@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.errors import MissingSystemFlopsError
+from aiconfigurator.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.gemm import GEMM
 
 
@@ -214,3 +214,38 @@ def test_query_returns_silicon_source_for_loaded_table(comprehensive_perf_db, qu
     GEMM migration."""
     result = comprehensive_perf_db.query_gemm(4, 256, 256, quant_mode)
     assert getattr(result, "source", None) == "silicon"
+
+
+def test_below_grid_shape_degrades_to_sol_only_with_flag(comprehensive_perf_db):
+    """`below_grid_sol` opt-in: a SILICON shape miss degrades to SOL; without
+    the flag it raises, and a quant-mode miss stays strict either way."""
+    db = comprehensive_perf_db
+    quant = common.GEMMQuantMode.bfloat16
+
+    # n=1 is octaves below the fixture grid (n >= 128).
+    with pytest.raises(PerfDataNotAvailableError):
+        db.query_gemm(4, 1, 256, quant)
+
+    result = db.query_gemm(4, 1, 256, quant, below_grid_sol=True)
+    assert result.source == "sol"
+    assert float(result) == float(db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.SOL))
+
+    # int8_wo has system flops but no collected table: strict despite the flag.
+    with pytest.raises(PerfDataNotAvailableError):
+        db.query_gemm(4, 1, 256, common.GEMMQuantMode.int8_wo, below_grid_sol=True)
+
+
+def test_below_grid_flag_threads_from_op_and_leaves_hybrid_unchanged(comprehensive_perf_db):
+    db = comprehensive_perf_db
+    quant = common.GEMMQuantMode.bfloat16
+
+    # Op-level: the constructor kwarg must reach the table query.
+    assert GEMM("gate", 1, 1, 256, quant, below_grid_sol=True).query(db, x=4).source == "sol"
+    with pytest.raises(PerfDataNotAvailableError):
+        GEMM("gate", 1, 1, 256, quant).query(db, x=4)
+
+    # HYBRID keeps its empirical fallback regardless of the flag.
+    with_flag = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID, below_grid_sol=True)
+    without = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID)
+    assert with_flag.source == without.source == "empirical"
+    assert float(with_flag) == float(without)
