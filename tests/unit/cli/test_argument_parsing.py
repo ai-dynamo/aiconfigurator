@@ -730,3 +730,30 @@ class TestCLIArgumentParsing:
             ]
         )
         assert args.attention_backend == "triton"
+
+    def test_attention_backend_in_estimate_mode(self, cli_parser):
+        """Test that --attention-backend works in estimate mode."""
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--attention-backend",
+                "trtllm_mha",
+            ]
+        )
+        assert args.attention_backend == "trtllm_mha"
+
+    def test_attention_backend_estimate_default_none(self, cli_parser):
+        """Test that --attention-backend defaults to None in estimate mode."""
+        args = cli_parser.parse_args(
+            ["estimate", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm"]
+        )
+        assert args.attention_backend is None
+
+    def test_attention_backend_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
+        """Test that --attention-backend works in exp mode."""
+        args = cli_parser.parse_args(["exp", "--yaml-path", str(mock_exp_yaml_path), "--attention-backend", "fa3"])
+        assert args.attention_backend == "fa3"

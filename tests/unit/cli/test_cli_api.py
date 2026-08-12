@@ -164,6 +164,16 @@ class TestCLIEstimateUnit:
         assert hybrid_default.mode is common.DatabaseMode.HYBRID
         assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
+    def test_attention_backend_parameter_accepted_in_estimate(self, monkeypatch):
+        """Test that cli_estimate accepts attention_backend parameter (forwarded from CLI)."""
+        import aiconfigurator.cli.api as api
+        import inspect
+
+        # Verify that cli_estimate has attention_backend parameter
+        sig = inspect.signature(api.cli_estimate)
+        assert "attention_backend" in sig.parameters
+        assert sig.parameters["attention_backend"].default is None
+
 
 class TestCLIDefaultNextn:
     """cli_default exposes MTP control with the same semantics as the CLI flags."""
@@ -252,6 +262,16 @@ class TestCLIExpUnit:
         assert isinstance(result, CLIResult)
         assert "exp_agg_simplified" in result.tasks
         assert "exp_agg_simplified" in result.best_throughputs
+
+    def test_build_experiment_tasks_accepts_attention_backend_parameter(self):
+        """Test that build_experiment_tasks accepts attention_backend parameter."""
+        from aiconfigurator.cli.main import build_experiment_tasks
+        import inspect
+
+        # Verify build_experiment_tasks has attention_backend parameter
+        sig = inspect.signature(build_experiment_tasks)
+        assert "attention_backend" in sig.parameters
+        assert sig.parameters["attention_backend"].default is None
 
 
 class TestCLIGenerateEquivalence:
@@ -650,6 +670,30 @@ class TestCLIRecommendUnit:
         )
 
         assert captured_kwargs["attention_backend"] == "trtllm_mha"
+
+    def test_attention_backend_reaches_model_config_in_default_tasks(self, monkeypatch):
+        """Test that --attention-backend reaches ModelConfig via build_default_tasks (default mode path)."""
+        from aiconfigurator.cli.main import build_default_tasks
+        from aiconfigurator.sdk.task_v2 import Task
+
+        # Build default tasks with attention_backend
+        tasks = build_default_tasks(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            attention_backend="triton",
+        )
+
+        # Verify that tasks were created
+        assert tasks is not None and len(tasks) > 0
+
+        # Verify that the attention_backend reached the Task and ModelConfig
+        for task in tasks.values():
+            assert isinstance(task, Task)
+            assert task.attention_backend == "triton"
+            # Build ModelConfig and verify attention_backend is there
+            model_config = task.build_model_config(role="agg")
+            assert model_config.attention_backend == "triton"
 
     def test_escalates_on_oom(self, monkeypatch):
         import aiconfigurator.cli.api as api
