@@ -1039,13 +1039,13 @@ mod tests {
     }
 
     #[test]
-    fn gemm_query_cache_normalizes_quant_and_separates_shape_fields() {
+    fn gemm_query_cache_separates_modeled_quant_and_shape_fields() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
 
         let fp8 = table.query(GemmQuantMode::Fp8, 256, 32, 32).unwrap();
         let fp8_static = table.query(GemmQuantMode::Fp8Static, 256, 32, 32).unwrap();
         assert_eq!(leaf_bits(fp8), leaf_bits(fp8_static));
-        assert_eq!(query_cache_len(&table), 1);
+        assert_eq!(query_cache_len(&table), 2);
 
         for (quant, m, n, k) in [
             (GemmQuantMode::Bfloat16, 256, 32, 32),
@@ -1055,7 +1055,7 @@ mod tests {
         ] {
             table.query(quant, m, n, k).unwrap();
         }
-        assert_eq!(query_cache_len(&table), 5);
+        assert_eq!(query_cache_len(&table), 6);
     }
 
     #[test]
