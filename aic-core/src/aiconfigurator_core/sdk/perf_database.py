@@ -1024,8 +1024,29 @@ def _normalize_database_mode(database_mode: str | common.DatabaseMode | None) ->
     if database_mode is None:
         return common.DatabaseMode.SILICON
     if isinstance(database_mode, common.DatabaseMode):
+        _reject_retired_database_mode(database_mode)
         return database_mode
-    return common.DatabaseMode[database_mode.upper()]
+    mode = common.DatabaseMode[database_mode.upper()]
+    _reject_retired_database_mode(mode)
+    return mode
+
+
+def _reject_retired_database_mode(mode: common.DatabaseMode) -> None:
+    """SOL_FULL is a Python-side PER-CALL diagnostic, never a default mode.
+
+    Per-call ``query_*(..., database_mode=SOL_FULL)`` returns the raw
+    ``(sol_time, sol_math, sol_mem)`` tuple the sanity-check notebook
+    (``tools/sanity_check/validate_database.ipynb``) plots — that surface
+    stays, permanently Python-side per the freeze plan (#1357). As a
+    database's ACTIVE mode it has never worked (the phase runners cannot
+    consume a bare tuple), so mode entry rejects it with a clear error."""
+    if mode == common.DatabaseMode.SOL_FULL:
+        raise ValueError(
+            "DatabaseMode.SOL_FULL cannot be a database's default mode; it is "
+            "a per-call diagnostic (query_*(..., database_mode=SOL_FULL) "
+            "returns the raw (sol_time, sol_math, sol_mem) tuple). Use "
+            "DatabaseMode.SOL for engine-step speed-of-light estimates."
+        )
 
 
 @functools.cache
@@ -2471,6 +2492,7 @@ class PerfDatabase:
         """
         Set the default database mode
         """
+        _reject_retired_database_mode(mode)
         if getattr(self, "_is_query_view", False) and mode != self._default_database_mode:
             raise RuntimeError(
                 "A cached query view has immutable mode/policy state; request a different view with "
@@ -2989,8 +3011,9 @@ class PerfDatabase:
         """Query memory-operation latency analytically (no CSV data).
 
         Returns:
-            PerformanceResult acting as float (latency in ms); energy via ``.energy``.
-            For SOL_FULL, returns a ``(sol_time, 0, sol_time)`` tuple.
+            PerformanceResult acting as float (latency in ms); energy via
+            ``.energy``. ``SOL_FULL`` (per-call diagnostic) returns the raw
+            ``(sol_time, sol_math, sol_mem)`` tuple.
         """
         gpu_spec = self.system_spec["gpu"]
 
@@ -3008,7 +3031,7 @@ class PerfDatabase:
             database_mode = self._default_database_mode
         if database_mode == common.DatabaseMode.SOL:
             return PerformanceResult(get_sol()[0], energy=0.0, source="sol")
-        if database_mode == common.DatabaseMode.SOL_FULL:
+        elif database_mode == common.DatabaseMode.SOL_FULL:
             return get_sol()
         # EMPIRICAL / SILICON / HYBRID share the same empirical formula. There is
         # no silicon table for raw memory ops, so always tag as ``empirical``.

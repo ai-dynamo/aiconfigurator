@@ -26,10 +26,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::axis_curve::LeafAxisCurve;
+use super::perf_interp::LeafValue;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::moe::query_token_curve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct MhcTable {
@@ -42,7 +43,7 @@ pub struct MhcTable {
 }
 
 struct MhcGrids {
-    by_keys: BTreeMap<MhcKey, BTreeMap<u32, f64>>,
+    by_keys: BTreeMap<MhcKey, LeafAxisCurve>,
 }
 
 /// Python `load_mhc_module_data` keys `data[op][hc_mult][hidden_size]` — NO
@@ -77,8 +78,10 @@ impl MhcTable {
         }
     }
 
-    /// Query one mHC op. `op` is `pre`, `post`, or `both` (sum of pre+post),
-    /// mirroring Python `_query_mhc_table`'s `op` argument.
+    /// Query one mHC op (latency ms + power/energy). `op` is `pre`, `post`,
+    /// or `both` (sum of pre+post — latency AND energy each sum, Python's
+    /// `PerformanceResult.__add__`), mirroring Python `_query_mhc_table`'s
+    /// `op` argument.
     ///
     /// `sol(op_name, tokens)` is the analytic mHC roofline for one RESOLVED
     /// half (`"pre"` / `"post"`); it anchors beyond-range util-holds exactly
@@ -93,12 +96,19 @@ impl MhcTable {
         hc_mult: u32,
         hidden_size: u32,
         sol: &dyn Fn(&str, f64) -> f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load()?;
-        // "both" aggregates the two silicon look-ups (Python sums pre+post).
+        // "both" aggregates the two silicon look-ups (Python sums pre+post
+        // PerformanceResults: latencies AND energies both add; the power
+        // field is dropped at this boundary like Python `_interp_pr`).
         if op == "both" {
-            return Ok(self.query_single("pre", num_tokens, hc_mult, hidden_size, sol, grids)?
-                + self.query_single("post", num_tokens, hc_mult, hidden_size, sol, grids)?);
+            let pre = self.query_single("pre", num_tokens, hc_mult, hidden_size, sol, grids)?;
+            let post = self.query_single("post", num_tokens, hc_mult, hidden_size, sol, grids)?;
+            return Ok(LeafValue {
+                latency: pre.latency + post.latency,
+                power: 0.0,
+                energy: pre.energy + post.energy,
+            });
         }
         self.query_single(op, num_tokens, hc_mult, hidden_size, sol, grids)
     }
@@ -111,7 +121,7 @@ impl MhcTable {
         hidden_size: u32,
         sol: &dyn Fn(&str, f64) -> f64,
         grids: &MhcGrids,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let key = MhcKey {
             op_name: op.to_string(),
             hc_mult,
@@ -126,7 +136,7 @@ impl MhcTable {
         // Engine 1-axis token curve; the caller-threaded per-op roofline
         // anchors beyond-range holds (Python `sol_fn=lambda t: get_sol(t,
         // op_name)[0]`).
-        query_token_curve(by_tokens, num_tokens as f64, &|t| sol(op, t))
+        by_tokens.query(num_tokens as f64, &|t| sol(op, t))
     }
 
     /// Collected `(num_tokens,) -> latency` points for one RESOLVED op half
@@ -162,7 +172,7 @@ impl MhcTable {
         }
         Ok(by_tokens
             .iter()
-            .map(|(&tokens, &latency)| (vec![f64::from(tokens)], latency))
+            .map(|(tokens, leaf)| (vec![f64::from(tokens)], leaf.latency))
             .collect())
     }
 
@@ -179,7 +189,7 @@ impl MhcTable {
 /// sibling declared in the manifest need not exist for every system); an error
 /// is returned only when no source yields rows.
 fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
-    let mut by_keys: BTreeMap<MhcKey, BTreeMap<u32, f64>> = BTreeMap::new();
+    let mut by_keys: BTreeMap<MhcKey, BTreeMap<u32, LeafValue>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -193,6 +203,7 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
         let hc_mult_col = reader.col("hc_mult")?;
         let hidden_size_col = reader.col("hidden_size")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
 
         for row in reader.rows()? {
@@ -211,6 +222,8 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 hc_mult: row.u32(hc_mult_col)?,
                 hidden_size: row.u32(hidden_size_col)?,
             };
+            let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_mhc_module_data`, which now
             // guards with the standard skip-on-key-conflict idiom
             // (shared-layer contract, design §6.1).
@@ -218,7 +231,7 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 .entry(key)
                 .or_default()
                 .entry(row.u32(num_tokens_col)?)
-                .or_insert(row.f64(latency_col)?);
+                .or_insert(LeafValue::with_power(latency, power));
         }
     }
     if !any_source || by_keys.is_empty() {
@@ -231,7 +244,12 @@ fn load_mhc_parquet(sources: &[PerfSource]) -> Result<MhcGrids, AicError> {
                 .unwrap_or_default()
         )));
     }
-    Ok(MhcGrids { by_keys })
+    Ok(MhcGrids {
+        by_keys: by_keys
+            .into_iter()
+            .map(|(key, curve)| (key, LeafAxisCurve::from_map("num_tokens", curve)))
+            .collect(),
+    })
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -288,7 +306,8 @@ mod tests {
         for &(op, nt, expected) in cases {
             let got = table
                 .query_module(op, nt, 4, 7168, &linear_sol)
-                .expect("query must succeed");
+                .expect("query must succeed")
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "op={op}, nt={nt}: rust {got} vs python {expected}"
@@ -298,7 +317,10 @@ mod tests {
 
     #[test]
     fn mhc_absent_on_vllm_b200_errors_clearly() {
-        let table = MhcTable::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0"));
+        let table = MhcTable::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0"),
+        );
         let err = table
             .query_module("pre", 1024, 2, 4096, &linear_sol)
             .unwrap_err();
@@ -336,7 +358,9 @@ mod tests {
                 .map(|r| ByteArray::from(if str_field == 0 { r.0 } else { r.1 }))
                 .collect();
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write str");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write str");
             col.close().expect("close col");
         }
         let int_cols: [Vec<i64>; 3] = [
@@ -346,12 +370,16 @@ mod tests {
         ];
         for values in &int_cols {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(values, None, None).expect("write ints");
+            col.typed::<Int64Type>()
+                .write_batch(values, None, None)
+                .expect("write ints");
             col.close().expect("close col");
         }
         let latencies: Vec<f64> = rows.iter().map(|r| r.5).collect();
         let mut col = rg.next_column().expect("next col").expect("latency col");
-        col.typed::<DoubleType>().write_batch(&latencies, None, None).expect("write latency");
+        col.typed::<DoubleType>()
+            .write_batch(&latencies, None, None)
+            .expect("write latency");
         col.close().expect("close col");
         rg.close().expect("close row group");
         writer.close().expect("close writer");
@@ -377,13 +405,15 @@ mod tests {
         // Exact hit at the duplicated coordinate: the merged view answers 1.0.
         let got = table
             .query_module("pre", 8, 4, 7168, &linear_sol)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert_eq!(got, 1.0);
         // The ArchA-only token joins the same curve (single merged view):
         // interior lerp between 1.0@8 and 4.0@16.
         let mid = table
             .query_module("pre", 12, 4, 7168, &linear_sol)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert_eq!(mid, 2.5);
     }
 
@@ -405,10 +435,62 @@ mod tests {
         let quadratic = |_op: &str, t: f64| t * t;
         let got = table
             .query_module("pre", 262144, 4, 7168, &quadratic)
-            .expect("query must succeed");
+            .expect("query must succeed")
+            .latency;
         assert!(
             (got - 12.0).abs() < 1e-12,
             "hold must scale by the threaded sol ratio (expected 12.0, got {got})"
+        );
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_mhc_module(num_tokens=12, hidden_size=7168, hc_mult=4,
+    ///                     sinkhorn_iters=3, op="pre",  SILICON)   # -> 2.0 / 300.0
+    /// db.query_mhc_module(..., op="both", SILICON)                # -> 3.0 / 375.0
+    /// ```
+    ///
+    /// t=12 lerps pre between (8: 1.0/100W) and (16: 3.0/200W) -> 2.0 ms,
+    /// 300 W*ms; post between (8: 0.5/50W) and (16: 1.5/100W) -> 1.0 ms,
+    /// 75 W*ms; "both" sums latencies AND energies.
+    #[test]
+    fn mhc_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("mhc_module_perf.parquet"),
+            &[
+                Col::Str("architecture", vec!["DeepseekV4ForCausalLM"; 4]),
+                Col::Str("op_name", vec!["pre", "pre", "post", "post"]),
+                Col::I64("num_tokens", vec![8, 16, 8, 16]),
+                Col::I64("hc_mult", vec![4, 4, 4, 4]),
+                Col::I64("hidden_size", vec![7168, 7168, 7168, 7168]),
+                Col::F64("latency", vec![1.0, 3.0, 0.5, 1.5]),
+                Col::F64("power", vec![100.0, 200.0, 50.0, 100.0]),
+            ],
+        );
+        let table = MhcTable::new(tmp.path().to_path_buf());
+        let pre = table.query_module("pre", 12, 4, 7168, &linear_sol).unwrap();
+        assert!((pre.latency - 2.0).abs() < 1e-9, "latency {}", pre.latency);
+        assert!(
+            (pre.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            pre.energy
+        );
+        let both = table
+            .query_module("both", 12, 4, 7168, &linear_sol)
+            .unwrap();
+        assert!(
+            (both.latency - 3.0).abs() < 1e-9,
+            "latency {}",
+            both.latency
+        );
+        assert!(
+            (both.energy - 375.0).abs() < 1e-9 * 375.0,
+            "energy {}",
+            both.energy
         );
     }
 }

@@ -1008,8 +1008,28 @@ class AFDInferenceSession:
         for decode we pass ``gen_seq_imbalance_correction_scale``.  Tokens
         processed per call = ``batch_size`` for decode, ``batch_size*seq_len``
         for prefill (one token per sequence vs. full sequence).
+
+        The per-op values come from the compiled engine when the routing gate
+        allows (the op-list evaluation FFI); the AFD orchestration — the A/F
+        partitioning, the stride integration, the comm ops — stays Python-side
+        permanently. The Python ``op.query()`` loop remains the fallback for
+        the explicit escape hatch and for op lists the compiled spec cannot
+        express.
         """
+        ops = list(ops_iter)
         x = batch_size * seq_len if is_context else batch_size
+
+        rust = self._sum_latency_with_rust(
+            ops,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            x=x,
+            model=model,
+            runtime_config=runtime_config,
+            is_context=is_context,
+        )
+        if rust is not None:
+            return rust
 
         kwargs_common = {
             "x": x,
@@ -1025,9 +1045,97 @@ class AFDInferenceSession:
             kwargs_common["gen_seq_imbalance_correction_scale"] = runtime_config.gen_seq_imbalance_correction_scale
 
         per_op = defaultdict(float)
-        for op in ops_iter:
+        for op in ops:
             result = op.query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
+        return sum(per_op.values()), per_op
+
+    def _sum_latency_with_rust(
+        self,
+        ops: list,
+        *,
+        batch_size: int,
+        seq_len: int,
+        x: int,
+        model,
+        runtime_config: config.RuntimeConfig,
+        is_context: bool,
+    ):
+        """Compiled-engine path of :meth:`_sum_latency`, or ``None`` to fall
+        back to the Python ``op.query()`` loop.
+
+        Maps the partitioned op objects to their positions in
+        ``model.context_ops`` / ``model.generation_ops`` (the compiled spec
+        preserves that order 1:1) and evaluates them through the thin op-list
+        FFI with ``_sum_latency``'s exact query shape: uniform ``x`` (no
+        logits-GEMM exception) and the runtime ``prefix`` threaded into BOTH
+        phases. Falls back (returns ``None``) for ops outside the model lists
+        and for op graphs the spec cannot express.
+        """
+        from aiconfigurator.sdk.rust_engine_step import (
+            RustEngineUnsupportedError,
+            evaluate_context_ops_with_rust,
+            evaluate_generation_ops_with_rust,
+            note_python_step_fallback,
+            should_use_rust_engine_step,
+        )
+
+        if not ops or not should_use_rust_engine_step(runtime_config, self._database):
+            return None
+
+        phase_ops = model.context_ops if is_context else model.generation_ops
+        memo_attr = "_afd_rust_context_index" if is_context else "_afd_rust_generation_index"
+        # Memo keyed by the LIST OBJECT's identity, not its length: a rebuilt
+        # equal-length op list could otherwise serve stale id()->index
+        # mappings silently (CPython id reuse).
+        memo = getattr(model, memo_attr, None)
+        if memo is not None and memo[0] is phase_ops:
+            index_by_id = memo[1]
+        else:
+            index_by_id = {id(op): i for i, op in enumerate(phase_ops)}
+            try:
+                setattr(model, memo_attr, (phase_ops, index_by_id))
+            except (AttributeError, TypeError):
+                pass  # slotted/frozen model objects: recompute per call
+        try:
+            indices = [index_by_id[id(op)] for op in ops]
+        except KeyError:
+            # An op outside the compiled phase list (the synthetic comm ops
+            # never come through here, so this is unexpected) — let the
+            # Python loop own it.
+            return None
+
+        prefix = int(runtime_config.prefix or 0)
+        try:
+            if is_context:
+                entries = evaluate_context_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                    x=x,
+                )
+            else:
+                entries = evaluate_generation_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                    prefix=prefix,
+                    x=x,
+                )
+        except RustEngineUnsupportedError as exc:
+            note_python_step_fallback("unsupported_op_graph:afd", str(exc))
+            return None
+
+        per_op = defaultdict(float)
+        for name, latency_ms, _energy_wms, _source in entries:
+            per_op[name] += float(latency_ms)
         return sum(per_op.values()), per_op
 
     def _afd_batch_shape(self) -> tuple[int, int, int, int, int]:

@@ -3,9 +3,11 @@
 
 """Tests for ``collector.helper._resolve_local_model_path``."""
 
+import builtins
 import json
 import os
 import sys
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +17,9 @@ import pytest
 _COLLECTOR_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "collector")
 sys.path.insert(0, os.path.abspath(_COLLECTOR_DIR))
 
-from helper import _resolve_local_model_path
+from helper import _resolve_local_model_path, config_norm_cache_key
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -168,3 +172,143 @@ class TestResolveLocalModelPath:
     def test_empty_model_id_rejected(self):
         with pytest.raises(ValueError):
             _resolve_local_model_path("")
+
+
+class TestBundledConfigRefresh:
+    """Regressions for the #1487 review: a bundled-config update under an
+    unchanged slug must reach consumers on a reused host (the materialized
+    copy used to be write-once, so content-keyed caches downstream hashed
+    stale bytes), and config.json + hf_quant_config.json must publish as ONE
+    immutable snapshot so a concurrent reader can never copytree a torn pair
+    (new config with an old or removed side-car)."""
+
+    def _bundle(self, tmp_path, monkeypatch, slug, config, quant=None):
+        cache_dir = tmp_path / "model_configs"
+        cache_dir.mkdir(exist_ok=True)
+        (cache_dir / f"{slug}_config.json").write_text(json.dumps(config))
+        quant_path = cache_dir / f"{slug}_hf_quant_config.json"
+        if quant is not None:
+            quant_path.write_text(json.dumps(quant))
+        elif quant_path.exists():
+            quant_path.unlink()
+        monkeypatch.setattr("helper._AIC_MODEL_CONFIG_DIR", str(cache_dir))
+
+    def test_materialized_config_refreshes_when_bundled_source_changes(self, isolated_tmp, tmp_path, monkeypatch):
+        self._bundle(
+            tmp_path,
+            monkeypatch,
+            "fake-org--refresh",
+            {"model_type": "fake", "rev": 1, "auto_map": {"AutoConfig": "configuration_fake.FakeConfig"}},
+        )
+        first = _resolve_local_model_path("fake-org/refresh")
+        with open(os.path.join(first, "config.json")) as f:
+            assert json.load(f)["rev"] == 1
+
+        self._bundle(
+            tmp_path,
+            monkeypatch,
+            "fake-org--refresh",
+            {"model_type": "fake", "rev": 2, "auto_map": {"AutoConfig": "configuration_fake.FakeConfig"}},
+        )
+        second = _resolve_local_model_path("fake-org/refresh")
+        assert second != first  # new content publishes a NEW immutable snapshot
+        with open(os.path.join(second, "config.json")) as f:
+            materialized = json.load(f)
+        assert materialized["rev"] == 2  # the update reaches new resolvers
+        assert "auto_map" not in materialized  # the strip survives the refresh
+        with open(os.path.join(first, "config.json")) as f:
+            assert json.load(f)["rev"] == 1  # published snapshots are immutable
+
+    def test_quant_side_car_updates_and_removal_publish_fresh_snapshots(self, isolated_tmp, tmp_path, monkeypatch):
+        slug, model_id = "fake-org--quant-refresh", "fake-org/quant-refresh"
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant={"quant": "fp8", "rev": 1})
+        p1 = _resolve_local_model_path(model_id)
+        with open(os.path.join(p1, "hf_quant_config.json")) as f:
+            assert json.load(f)["rev"] == 1
+
+        # A side-car-only update publishes a new snapshot; the pair travels
+        # together, so no reader can see new config with an old side-car.
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant={"quant": "fp8", "rev": 2})
+        p2 = _resolve_local_model_path(model_id)
+        assert p2 != p1
+        with open(os.path.join(p2, "hf_quant_config.json")) as f:
+            assert json.load(f)["rev"] == 2
+
+        # A side-car removed from the bundle must not linger for NEW
+        # resolvers: a stale copy would keep feeding quant config to
+        # ModelConfig.from_pretrained. In-flight readers of p1/p2 keep
+        # their consistent (immutable) snapshots.
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake"}, quant=None)
+        p3 = _resolve_local_model_path(model_id)
+        assert p3 not in (p1, p2)
+        assert not os.path.exists(os.path.join(p3, "hf_quant_config.json"))
+        assert os.path.exists(os.path.join(p2, "hf_quant_config.json"))  # immutability
+
+    def test_norm_cache_key_tracks_bundled_updates_end_to_end(self, isolated_tmp, tmp_path, monkeypatch):
+        # The GLM DSA normalized-config cache keys on config_norm_cache_key;
+        # the P1 failure mode was a bundled update that never changed the key
+        # because the hash read write-once stale materialized bytes.
+        slug, model_id = "fake-org--keyed", "fake-org/keyed"
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake", "rev": 1})
+        path = _resolve_local_model_path(model_id)
+        key_rev1 = config_norm_cache_key(path)
+        assert key_rev1 == config_norm_cache_key(path)  # stable when nothing changes
+
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake", "rev": 2})
+        key_rev2 = config_norm_cache_key(_resolve_local_model_path(model_id))
+        assert key_rev2 != key_rev1  # the bundled update reaches the cache key
+
+        # A side-car-only change must also move the key: the normalized copy
+        # materializes side-cars and ModelConfig.from_pretrained reads them.
+        self._bundle(tmp_path, monkeypatch, slug, {"model_type": "fake", "rev": 2}, quant={"quant": "fp8"})
+        key_rev3 = config_norm_cache_key(_resolve_local_model_path(model_id))
+        assert key_rev3 not in (key_rev1, key_rev2)
+
+    def test_norm_cache_key_requires_config_json(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            config_norm_cache_key(str(tmp_path))
+
+    def test_failed_staging_write_leaves_no_debris(self, isolated_tmp, tmp_path, monkeypatch):
+        # A write failure between mkdtemp and the publish rename must not
+        # leak the staging directory (repeated I/O failures would otherwise
+        # accumulate partial cache dirs), and must still surface the error.
+        self._bundle(tmp_path, monkeypatch, "fake-org--debris", {"model_type": "fake"})
+        real_open = builtins.open
+
+        def failing_open(file, *args, **kwargs):
+            if ".stage-" in str(file):
+                raise OSError(28, "No space left on device")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", failing_open)
+        with pytest.raises(OSError):
+            _resolve_local_model_path("fake-org/debris")
+        slug_dir = isolated_tmp / "aic_model_config_fake-org--debris"
+        leftovers = list(slug_dir.iterdir()) if slug_dir.exists() else []
+        assert leftovers == []  # no staging debris, no torn snapshot published
+
+    def test_concurrent_materialization_from_threads_is_safe(self, isolated_tmp, tmp_path, monkeypatch):
+        # Staging dirs must be unique per invocation, not per pid: threads
+        # share a pid, and a shared staging path would let one thread rename
+        # the directory out from under another mid-write.
+        self._bundle(tmp_path, monkeypatch, "fake-org--threads", {"model_type": "fake", "rev": 1})
+        results, errors = [], []
+        thread_count = 8
+        barrier = threading.Barrier(thread_count)
+
+        def resolve():
+            try:
+                barrier.wait()  # force every worker into materialization together
+                results.append(_resolve_local_model_path("fake-org/threads"))
+            except Exception as e:  # pragma: no cover - the assertion below reports it
+                errors.append(e)
+
+        threads = [threading.Thread(target=resolve) for _ in range(thread_count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert len(set(results)) == 1  # all threads converge on one snapshot
+        with open(os.path.join(results[0], "config.json")) as f:
+            assert json.load(f)["rev"] == 1

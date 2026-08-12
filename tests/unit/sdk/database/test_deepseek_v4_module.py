@@ -11,8 +11,10 @@ from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.operations.attention import generation_attn_mode
 from aiconfigurator.sdk.operations.dsv4 import (
     _deep_merge_dsv4_dicts,
+    _deepseek_v4_attention_sol,
 )
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
@@ -45,6 +47,26 @@ def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
         "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
         "gemm_quant_mode": common.GEMMQuantMode.fp8_block,
     }
+
+
+def _attention_sol_tuple(db, *, is_context: bool, **query_kwargs) -> tuple[float, float, float]:
+    """Direct call into the shared DSv4 SOL formula.
+
+    A direct stand-in for the per-call ``database_mode=SOL_FULL`` diagnostic:
+    takes the same kwargs the ``query_*_deepseek_v4_attention_module`` wrappers
+    take and returns the raw ``(sol_time, sol_math, sol_mem)`` tuple. Mirrors the
+    wrappers' pre-binding: ``native_heads``/``tp_size`` never enter the SOL,
+    and the generation path rebinds the fmha label from the kv-cache dtype
+    and pins ``prefix=0``.
+    """
+    kwargs = dict(query_kwargs)
+    kwargs.pop("native_heads", None)
+    kwargs.pop("tp_size", None)
+    if not is_context:
+        kwargs.pop("prefix", None)
+        kwargs["prefix"] = 0
+        kwargs["fmha_quant_mode"] = generation_attn_mode(db.system_spec, kwargs["kvcache_quant_mode"])
+    return _deepseek_v4_attention_sol(db, is_context=is_context, **kwargs)
 
 
 def _deepseek_v4_value(latency: float) -> dict[str, float]:
@@ -167,7 +189,7 @@ class TestDeepSeekV4MHCModule:
                 database_mode=common.DatabaseMode.EMPIRICAL,
             )
 
-    def test_mhc_sol_full_shape(self, comprehensive_perf_db):
+    def test_mhc_sol_mode_scalar(self, comprehensive_perf_db):
         result = comprehensive_perf_db.query_mhc_module(
             num_tokens=512,
             hidden_size=7168,
@@ -175,12 +197,10 @@ class TestDeepSeekV4MHCModule:
             sinkhorn_iters=20,
             op="both",
             quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SOL_FULL,
+            database_mode=common.DatabaseMode.SOL,
         )
-        assert len(result) == 3
-        sol_time, sol_math, sol_mem = result
-        assert sol_time > 0
-        assert math.isclose(sol_time, max(sol_math, sol_mem), rel_tol=1e-6)
+        assert float(result) > 0
+        assert result.source == "sol"
 
     def test_mhc_weight_memory_uses_quant_mode(self, comprehensive_perf_db):
         bf16_op = ops.DeepSeekV4MHCModule(
@@ -203,6 +223,9 @@ class TestDeepSeekV4MHCModule:
         )
         assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
 
+        # Lower-precision weights shrink both the FLOPs and the byte terms of
+        # the mHC roofline, so the SOL scalar must drop (the per-call SOL_FULL
+        # diagnostic tuple exposes the sol_mem slot in isolation).
         bf16_sol = comprehensive_perf_db.query_mhc_module(
             num_tokens=512,
             hidden_size=7168,
@@ -210,7 +233,7 @@ class TestDeepSeekV4MHCModule:
             sinkhorn_iters=20,
             op="pre",
             quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SOL_FULL,
+            database_mode=common.DatabaseMode.SOL,
         )
         fp8_sol = comprehensive_perf_db.query_mhc_module(
             num_tokens=512,
@@ -219,9 +242,9 @@ class TestDeepSeekV4MHCModule:
             sinkhorn_iters=20,
             op="pre",
             quant_mode=common.GEMMQuantMode.fp8_block,
-            database_mode=common.DatabaseMode.SOL_FULL,
+            database_mode=common.DatabaseMode.SOL,
         )
-        assert fp8_sol[2] < bf16_sol[2]
+        assert float(fp8_sol) < float(bf16_sol)
 
     def test_mhc_loader_and_query_use_shape(self, mutable_comprehensive_perf_db, tmp_path):
         path = _write_mhc_perf(
@@ -251,14 +274,8 @@ class TestDeepSeekV4AttentionModule:
     def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
         base = _deepseek_v4_attn_kwargs(4)
         base.pop("prefix")
-        current = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-            **{**base, "s": 512},
-            database_mode=common.DatabaseMode.SOL_FULL,
-        )
-        next_step = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-            **{**base, "s": 513},
-            database_mode=common.DatabaseMode.SOL_FULL,
-        )
+        current = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**base, "s": 512})
+        next_step = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**base, "s": 513})
 
         assert next_step[1] > current[1]
 
@@ -354,21 +371,26 @@ class TestDeepSeekV4AttentionModule:
         context_results = {}
         generation_results = {}
         for name, shape in shapes.items():
-            context_result = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-                **{**common_kwargs, **shape},
-                database_mode=common.DatabaseMode.SOL_FULL,
-            )
+            context_result = _attention_sol_tuple(comprehensive_perf_db, is_context=True, **{**common_kwargs, **shape})
             generation_kwargs = {**common_kwargs, **shape}
             generation_kwargs.pop("prefix")
-            generation_result = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-                **generation_kwargs,
-                database_mode=common.DatabaseMode.SOL_FULL,
-            )
+            generation_result = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **generation_kwargs)
 
             assert context_result[0] == max(context_result[1], context_result[2])
             assert generation_result[0] == max(generation_result[1], generation_result[2])
             assert context_result[0] > 0
             assert generation_result[0] > 0
+            # The SOL-mode query scalar must be exactly the formula's sol_time.
+            context_scalar = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+                **{**common_kwargs, **shape},
+                database_mode=common.DatabaseMode.SOL,
+            )
+            generation_scalar = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
+                **generation_kwargs,
+                database_mode=common.DatabaseMode.SOL,
+            )
+            assert math.isclose(float(context_scalar), context_result[0], rel_tol=1e-9)
+            assert math.isclose(float(generation_scalar), generation_result[0], rel_tol=1e-9)
             context_results[name] = context_result
             generation_results[name] = generation_result
 
@@ -433,15 +455,9 @@ class TestDeepSeekV4AttentionModule:
         }
         kwargs.pop("prefix")
 
-        # SOL_FULL returns a tuple-like (max(sol_math, sol_mem), sol_math, sol_mem).
-        small = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-            **kwargs,
-            database_mode=common.DatabaseMode.SOL_FULL,
-        )
-        large = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-            **{**kwargs, "num_heads": 128},
-            database_mode=common.DatabaseMode.SOL_FULL,
-        )
+        # The direct sol call returns (max(sol_math, sol_mem), sol_math, sol_mem).
+        small = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **kwargs)
+        large = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**kwargs, "num_heads": 128})
 
         # sol_math (index 1) must scale with num_heads: more compute per token.
         assert large[1] > small[1]
@@ -493,37 +509,39 @@ class TestDeepSeekV4AttentionModule:
 
     def test_csa_indexer_logits_scale_with_compressed_length_not_topk_only(self, comprehensive_perf_db):
         base = {**_deepseek_v4_attn_kwargs(4), "s": 4096}
-        short_cache = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-            **{**base, "prefix": 0, "index_topk": 16},
-            database_mode=common.DatabaseMode.SOL_FULL,
+        short_cache = _attention_sol_tuple(
+            comprehensive_perf_db, is_context=True, **{**base, "prefix": 0, "index_topk": 16}
         )
-        long_cache = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-            **{**base, "prefix": 4096, "index_topk": 16},
-            database_mode=common.DatabaseMode.SOL_FULL,
+        long_cache = _attention_sol_tuple(
+            comprehensive_perf_db, is_context=True, **{**base, "prefix": 4096, "index_topk": 16}
         )
         assert long_cache[1] > short_cache[1]
 
     def test_kvcache_quant_changes_sol_memory(self, comprehensive_perf_db):
         base = {**_deepseek_v4_attn_kwargs(128), "s": 4096, "prefix": 4096}
-        bf16 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+        bf16 = _attention_sol_tuple(
+            comprehensive_perf_db,
+            is_context=True,
             **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.bfloat16},
-            database_mode=common.DatabaseMode.SOL_FULL,
         )
-        fp8 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+        fp8 = _attention_sol_tuple(
+            comprehensive_perf_db,
+            is_context=True,
             **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.fp8},
-            database_mode=common.DatabaseMode.SOL_FULL,
         )
         assert fp8[2] < bf16[2]
 
     def test_gemm_quant_changes_sol_math_and_memory(self, comprehensive_perf_db):
         base = {**_deepseek_v4_attn_kwargs(4), "s": 4096, "prefix": 1024}
-        bf16 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+        bf16 = _attention_sol_tuple(
+            comprehensive_perf_db,
+            is_context=True,
             **{**base, "gemm_quant_mode": common.GEMMQuantMode.bfloat16},
-            database_mode=common.DatabaseMode.SOL_FULL,
         )
-        fp8 = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
+        fp8 = _attention_sol_tuple(
+            comprehensive_perf_db,
+            is_context=True,
             **{**base, "gemm_quant_mode": common.GEMMQuantMode.fp8_block},
-            database_mode=common.DatabaseMode.SOL_FULL,
         )
         assert fp8[1] < bf16[1]
         assert fp8[2] < bf16[2]
@@ -647,7 +665,12 @@ def test_deepseek_v4_static_sol_runs_end_to_end(mutable_comprehensive_perf_db):
     )
     model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="trtllm")
     backend = TRTLLMBackend()
-    runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
+    # Pin the Python step: this fixture is a real PerfDatabase stuffed with
+    # synthetic in-memory data, so the compiled engine (which re-loads perf
+    # data from disk by identity, and now answers SOL itself) cannot resolve
+    # it. The Rust SOL path is covered by the engine-step parity suite on
+    # real databases.
+    runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0, engine_step_backend="python")
 
     db.set_default_database_mode(common.DatabaseMode.SOL)
     summary = backend.run_static(model, db, runtime, mode="static", stride=1)

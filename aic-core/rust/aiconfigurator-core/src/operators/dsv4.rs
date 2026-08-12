@@ -219,30 +219,55 @@ impl Dsv4ModuleOp {
     /// paths (Python `_module_base` -> the standard module query, which
     /// includes the CSA topk DELTA correction and dispatches on the database
     /// mode): SILICON queries the table; HYBRID converts a typed silicon miss
-    /// into the util-space empirical estimate; EMPIRICAL always estimates.
-    /// The SOL diagnostic modes never reach the compiled engine (the routing
-    /// gate delegates them to the Python step).
+    /// into the util-space empirical estimate; EMPIRICAL always estimates;
+    /// SOL (and the retired SOL_FULL alias) returns the pure analytic
+    /// roofline with `Source::Sol` and zero energy.
     fn module_base(
         &self,
         db: &PerfDatabase,
         batch_size: u32,
         s: u32,
         prefix: u32,
-    ) -> Result<(f64, Source), AicError> {
+    ) -> Result<PerformanceResult, AicError> {
         match db.database_mode {
-            DatabaseMode::Empirical => Ok((
+            // Python `_query_context_attn_table`: `get_sol()[0]` — the
+            // pre-bound `_deepseek_v4_attention_sol(is_context=True, b, s,
+            // prefix, ...)` at the op's own shape/quant modes.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let spec = &db.system_spec;
+                let dims = self.sol_dims();
+                let flops = dsv4_sol_flops(spec, self.gemm_quant_mode, self.fmha_quant_mode)?;
+                Ok(PerformanceResult::new(
+                    dsv4_attention_sol_ms(
+                        spec,
+                        &dims,
+                        self.attn_kind.compress_ratio(),
+                        true,
+                        self.kv_cache_dtype,
+                        self.fmha_quant_mode,
+                        self.gemm_quant_mode,
+                        i64::from(batch_size),
+                        i64::from(s),
+                        i64::from(prefix),
+                        i64::from(self.num_heads),
+                        flops,
+                    ),
+                    Source::Sol,
+                ))
+            }
+            DatabaseMode::Empirical => Ok(PerformanceResult::new(
                 self.context_empirical(db, batch_size, s, prefix)?,
                 Source::Empirical,
             )),
             DatabaseMode::Hybrid => match self.context_silicon(db, batch_size, s, prefix) {
-                Ok(latency) => Ok((latency, Source::Silicon)),
-                Err(err) if err.is_missing_perf_data() => Ok((
+                Ok(result) => Ok(result),
+                Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                     self.context_empirical(db, batch_size, s, prefix)?,
                     Source::Empirical,
                 )),
                 Err(err) => Err(err),
             },
-            _ => Ok((self.context_silicon(db, batch_size, s, prefix)?, Source::Silicon)),
+            _ => self.context_silicon(db, batch_size, s, prefix),
         }
     }
 
@@ -252,8 +277,8 @@ impl Dsv4ModuleOp {
         batch_size: u32,
         s: u32,
         prefix: u32,
-    ) -> Result<f64, AicError> {
-        db.dsv4.query_context(
+    ) -> Result<PerformanceResult, AicError> {
+        let value = db.dsv4.query_context(
             &db.system_spec,
             self.attn_kind,
             batch_size,
@@ -266,7 +291,12 @@ impl Dsv4ModuleOp {
             &self.architecture,
             prefix,
             Some(self.sol_dims()),
-        )
+        )?;
+        Ok(PerformanceResult::with_energy(
+            value.latency,
+            value.energy,
+            Source::Silicon,
+        ))
     }
 
     /// `SOL(query)/util` over the op's own context slice. Mirrors Python
@@ -367,7 +397,9 @@ impl Dsv4ModuleOp {
                 if p0_points.is_empty() {
                     return Ok(None);
                 }
-                Ok(Some(UtilGrid::new(util_empirical::build_samples(p0_points, sol2))))
+                Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    p0_points, sol2,
+                ))))
             })?;
             let query = [f64::from(s) + f64::from(prefix), f64::from(b)];
             let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
@@ -398,10 +430,8 @@ impl Dsv4ModuleOp {
         // collected range resolves via util-hold with the prefix-aware SOL
         // carrying the effect — matching Python. HYBRID/EMPIRICAL route
         // through `module_base`'s mode dispatch.
-        let (raw, source) = self.module_base(db, batch_size, isl, prefix)?;
-        Ok(PerformanceResult::new(raw, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        let result = self.module_base(db, batch_size, isl, prefix)?;
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 
     /// Context-Parallel (CP) prefill — DeepSeek-V4 CSA / HCA composition.
@@ -431,7 +461,7 @@ impl Dsv4ModuleOp {
             prefix,
             &mut |per_card| {
                 self.module_base(db, batch_size, per_card, prefix)
-                    .map(|(latency, _)| latency)
+                    .map(|r| r.latency_ms)
             },
             &mut |chunk_isl, past| {
                 db.dsv4.query_paged_mqa_logits(
@@ -495,8 +525,8 @@ impl Dsv4ModuleOp {
     ) -> Result<PerformanceResult, AicError> {
         let cp = self.cp_size;
         let per_card = isl.div_ceil(cp).max(1); // ceil: critical path = busiest CP rank
-        // AG element widths come from the op's own dims (Python uses
-        // `self._index_head_dim` / `self._head_dim` in `_query_cp`).
+                                                // AG element widths come from the op's own dims (Python uses
+                                                // `self._index_head_dim` / `self._head_dim` in `_query_cp`).
         let (index_head_dim, head_dim) = (u64::from(self.index_head_dim), u64::from(self.head_dim));
         // Base: per-card monolithic module at (b, per_card, prefix).
         let mut latency = base(per_card)?;
@@ -557,38 +587,69 @@ impl Dsv4ModuleOp {
     /// Database-mode dispatch mirroring Python
     /// `_query_generation_attn_table` (`operations/dsv4.py`): SILICON queries
     /// the table; HYBRID converts a typed silicon miss into the util-space
-    /// empirical estimate; EMPIRICAL always estimates.
+    /// empirical estimate; EMPIRICAL always estimates; SOL (and the retired
+    /// SOL_FULL alias) returns the pure analytic roofline with `Source::Sol`.
     pub fn query_generation(
         &self,
         db: &PerfDatabase,
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let (latency, source) = match db.database_mode {
-            DatabaseMode::Empirical => (
+        let result = match db.database_mode {
+            // Python `_query_generation_attn_table`: `get_sol()[0]` — the
+            // pre-bound `_deepseek_v4_attention_sol(is_context=False, b, s,
+            // prefix=0, ...)` with the fmha label rebound from the kv-cache
+            // dtype (`generation_attn_mode`) before `get_sol` is defined.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let spec = &db.system_spec;
+                let dims = self.sol_dims();
+                let fmha = generation_attn_mode(spec, self.kv_cache_dtype);
+                let flops = dsv4_sol_flops(spec, self.gemm_quant_mode, fmha)?;
+                PerformanceResult::new(
+                    dsv4_attention_sol_ms(
+                        spec,
+                        &dims,
+                        self.attn_kind.compress_ratio(),
+                        false,
+                        self.kv_cache_dtype,
+                        fmha,
+                        self.gemm_quant_mode,
+                        i64::from(batch_size),
+                        i64::from(s),
+                        0,
+                        i64::from(self.num_heads),
+                        flops,
+                    ),
+                    Source::Sol,
+                )
+            }
+            DatabaseMode::Empirical => PerformanceResult::new(
                 self.generation_empirical(db, batch_size, s)?,
                 Source::Empirical,
             ),
             DatabaseMode::Hybrid => match self.generation_silicon(db, batch_size, s) {
-                Ok(latency) => (latency, Source::Silicon),
-                Err(err) if err.is_missing_perf_data() => (
+                Ok(result) => result,
+                Err(err) if err.is_missing_perf_data() => PerformanceResult::new(
                     self.generation_empirical(db, batch_size, s)?,
                     Source::Empirical,
                 ),
                 Err(err) => return Err(err),
             },
-            _ => (self.generation_silicon(db, batch_size, s)?, Source::Silicon),
+            _ => self.generation_silicon(db, batch_size, s)?,
         };
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 
     /// No fmha argument: the generation table keys on kv dtype only and the
     /// SOL dtype is derived from kv inside `query_generation` (PR #1337).
     /// `self.fmha_quant_mode` stays on the op for the context path.
-    fn generation_silicon(&self, db: &PerfDatabase, batch_size: u32, s: u32) -> Result<f64, AicError> {
-        db.dsv4.query_generation(
+    fn generation_silicon(
+        &self,
+        db: &PerfDatabase,
+        batch_size: u32,
+        s: u32,
+    ) -> Result<PerformanceResult, AicError> {
+        let value = db.dsv4.query_generation(
             &db.system_spec,
             self.attn_kind,
             batch_size,
@@ -599,7 +660,12 @@ impl Dsv4ModuleOp {
             self.gemm_quant_mode,
             &self.architecture,
             Some(self.sol_dims()),
-        )
+        )?;
+        Ok(PerformanceResult::with_energy(
+            value.latency,
+            value.energy,
+            Source::Silicon,
+        ))
     }
 
     /// `SOL(query)/util` over the op's own `(b, s_total)` generation slice.
@@ -646,11 +712,16 @@ impl Dsv4ModuleOp {
             cr
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
-            match db
-                .dsv4
-                .generation_points(self.attn_kind, self.num_heads, self.native_heads, kv, gemm)
-            {
-                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+            match db.dsv4.generation_points(
+                self.attn_kind,
+                self.num_heads,
+                self.native_heads,
+                kv,
+                gemm,
+            ) {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    points, sol,
+                )))),
                 // Typed coverage miss -> no grid (estimate() raises the
                 // empirical miss); schema/load errors propagate.
                 Err(err) if err.is_missing_perf_data() => Ok(None),
@@ -709,11 +780,7 @@ impl Dsv4MegaMoeOp {
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         // Python `DeepSeekV4MegaMoEModule.query`: Blackwell-only guard
         // (`ValueError`, not a perf-data miss).
-        let sm_version = db
-            .system_spec
-            .gpu
-            .sm_version
-            .map_or(-1_i64, i64::from);
+        let sm_version = db.system_spec.gpu.sm_version.map_or(-1_i64, i64::from);
         if sm_version < 100 {
             return Err(AicError::ModelConfig(format!(
                 "DeepSeek-V4 MegaMoE is only supported on Blackwell-class GPUs (SM >= 100); \
@@ -740,7 +807,7 @@ impl Dsv4MegaMoeOp {
         } else {
             self.workload_distribution.as_str()
         };
-        let latency = db.dsv4_megamoe.query_module(
+        let value = db.dsv4_megamoe.query_module(
             num_tokens,
             self.hidden_size,
             self.inter_size,
@@ -757,9 +824,13 @@ impl Dsv4MegaMoeOp {
             &self.kernel_source,
             &self.kernel_dtype,
         )?;
-        // Python: `PerformanceResult(float(result) * scale, source="silicon")`
-        // — no clamp (nothing is subtracted on this path).
-        Ok(PerformanceResult::new(latency, Source::Silicon).scaled(self.scale_factor))
+        // Python: `PerformanceResult(float(result) * scale,
+        // energy=result.energy * scale, source="silicon")` — no clamp
+        // (nothing is subtracted on this path).
+        Ok(
+            PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+                .scaled(self.scale_factor),
+        )
     }
 }
 
@@ -921,7 +992,8 @@ mod tests {
                 "DeepSeek-V4 CSA CP modeling needs sparse tables (paged_mqa_logits + \
                  csa_topk_calib top_last)"
             ) && msg.contains("num_heads=64, b=1")
-                && msg.contains("collect dsv4_paged_mqa_logits_module / dsv4_csa_topk_calib first."),
+                && msg
+                    .contains("collect dsv4_paged_mqa_logits_module / dsv4_csa_topk_calib first."),
             "unexpected message: {msg}"
         );
     }
@@ -1118,7 +1190,10 @@ mod tests {
     fn dsv4_empirical_prefix_interp_matches_python_oracles() {
         let systems_root = systems_root();
         let data_root = systems_root.join("data/b200_sxm/sglang/0.5.14");
-        if !data_root.join("dsv4_csa_context_module_perf.parquet").exists() {
+        if !data_root
+            .join("dsv4_csa_context_module_perf.parquet")
+            .exists()
+        {
             return; // git-lfs data not materialized
         }
         let mut db = PerfDatabase::load(&systems_root, "b200_sxm", "sglang", "0.5.14")
@@ -1185,7 +1260,12 @@ mod tests {
     /// shared experts / kernel identity.
     fn megamoe_op(is_context: bool, distribution: &str) -> Dsv4MegaMoeOp {
         Dsv4MegaMoeOp {
-            name: if is_context { "context_megamoe" } else { "generation_megamoe" }.into(),
+            name: if is_context {
+                "context_megamoe"
+            } else {
+                "generation_megamoe"
+            }
+            .into(),
             scale_factor: 1.0,
             hidden_size: 7168,
             inter_size: 3072,
@@ -1293,7 +1373,8 @@ mod tests {
         let err = op.query(&db, 1024).unwrap_err();
         assert!(err.is_missing_perf_data(), "got {err:?}");
         assert!(
-            err.to_string().contains("No DSv4 MegaMoE context module data")
+            err.to_string()
+                .contains("No DSv4 MegaMoE context module data")
                 && err.to_string().contains("num_experts=999"),
             "unexpected message: {err}"
         );
@@ -1357,12 +1438,71 @@ mod tests {
     /// lookup.
     #[test]
     fn cp_fields_default_in_serde() {
-        let mut v = serde_json::to_value(dsv4_cp_op(AttnKind::Csa, 3, Some(2048))).expect("serialize");
+        let mut v =
+            serde_json::to_value(dsv4_cp_op(AttnKind::Csa, 3, Some(2048))).expect("serialize");
         let obj = v.as_object_mut().expect("object");
         obj.remove("cp_size");
         obj.remove("window_size");
         let de: Dsv4ModuleOp = serde_json::from_value(v).expect("deserialize");
         assert_eq!(de.cp_size, 1);
         assert_eq!(de.window_size, None);
+    }
+
+    /// SOL mode returns the pure DSv4 attention roofline tagged
+    /// `Source::Sol` — context via `module_base`, generation with the
+    /// kv-implied fmha rebind (Python `_query_{context,generation}_attn_table`
+    /// SOL branches).
+    #[test]
+    fn dsv4_sol_mode_returns_roofline_with_sol_source() {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, "b200_sxm", "sglang", "0.5.10")
+            .expect("db must load");
+        db.database_mode = DatabaseMode::Sol;
+        let spec = db.system_spec.clone();
+        let op = dsv4_cp_op(AttnKind::Csa, 1, None);
+        let dims = op.sol_dims();
+        let cr = op.attn_kind.compress_ratio();
+
+        let result = op.query_context(&db, 2, 4096, 1024).expect("ctx sol");
+        let flops = dsv4_sol_flops(&spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
+        let expected = dsv4_attention_sol_ms(
+            &spec,
+            &dims,
+            cr,
+            true,
+            op.kv_cache_dtype,
+            op.fmha_quant_mode,
+            op.gemm_quant_mode,
+            2,
+            4096,
+            1024,
+            i64::from(op.num_heads),
+            flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+
+        let result = op.query_generation(&db, 8, 4096).expect("gen sol");
+        let fmha = generation_attn_mode(&spec, op.kv_cache_dtype);
+        let flops = dsv4_sol_flops(&spec, op.gemm_quant_mode, fmha).unwrap();
+        let expected = dsv4_attention_sol_ms(
+            &spec,
+            &dims,
+            cr,
+            false,
+            op.kv_cache_dtype,
+            fmha,
+            op.gemm_quant_mode,
+            8,
+            4096,
+            0,
+            i64::from(op.num_heads),
+            flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
     }
 }

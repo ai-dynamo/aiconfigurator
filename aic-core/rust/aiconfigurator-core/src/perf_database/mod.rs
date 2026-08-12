@@ -61,7 +61,7 @@ pub(crate) fn resolve_op_sources(
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
 /// derived from `data_root` (`<data_dir>/<backend>/<version>`).
-fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
     let data_dir = data_root.parent()?.parent()?;
@@ -121,7 +121,10 @@ fn has_family_backend_version(system_data_root: &Path, backend: &str, version: &
 /// NCCL/OneCCL only ever land under that name in practice — a plain path
 /// check is simpler than a directory scan and behaves identically here.
 fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathBuf {
-    let family_root = system_data_root.join("comm").join(backend_dir).join(version);
+    let family_root = system_data_root
+        .join("comm")
+        .join(backend_dir)
+        .join(version);
     if family_root.is_dir() {
         family_root
     } else {
@@ -149,6 +152,7 @@ pub(crate) fn kernel_source_ok(
 }
 
 pub mod attention;
+mod axis_curve;
 pub mod communication;
 pub mod dsa;
 pub mod dsv4;
@@ -158,6 +162,7 @@ mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+mod moe_index;
 pub mod msa;
 pub mod parquet_loader;
 pub mod perf_interp;
@@ -269,7 +274,13 @@ impl PerfDatabase {
         backend: &str,
         version: &str,
     ) -> Result<Self, AicError> {
-        Self::load_with_sources(systems_root, system, backend, version, &PerfDbSources::default())
+        Self::load_with_sources(
+            systems_root,
+            system,
+            backend,
+            version,
+            &PerfDbSources::default(),
+        )
     }
 
     /// Like [`PerfDatabase::load`], but honours the shared-layer
@@ -332,7 +343,11 @@ impl PerfDatabase {
             // NCCL/OneCCL are framework-agnostic and never inherit siblings, so
             // their roots stay as the direct system-wide dirs.
             gemm: GemmTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
-            attention: AttentionTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            attention: AttentionTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
             communication: CommunicationTable::with_sources(
@@ -350,7 +365,11 @@ impl PerfDatabase {
             dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            wideep_mla: WideEpMlaTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
             state_space: StateSpaceTable::with_sources(
                 data_root.clone(),
@@ -399,7 +418,11 @@ impl PerfDatabase {
     /// Configure the query mode + transfer policy (both immutable per
     /// database instance afterwards, mirroring Python's configured query
     /// views). Called by `Engine::from_spec_bytes` with the spec's values.
-    pub fn with_mode(mut self, database_mode: DatabaseMode, transfer_policy: TransferPolicy) -> Self {
+    pub fn with_mode(
+        mut self,
+        database_mode: DatabaseMode,
+        transfer_policy: TransferPolicy,
+    ) -> Self {
         self.database_mode = database_mode;
         self.transfer_policy = transfer_policy;
         self
@@ -433,6 +456,155 @@ impl PerfDatabase {
     }
 }
 
+/// Shared fixtures for the per-family ENERGY oracle tests.
+///
+/// The shipped perf databases carry no `power` column (their energies are
+/// all 0.0), so the energy oracles run on synthetic power-carrying parquet
+/// fixtures. Each test documents its fixture rows and query; the pinned
+/// values were minted by rebuilding the identical fixture with pandas and
+/// querying the frozen Python SDK, e.g.:
+///
+/// ```text
+/// cd <repo> && uv run python - <<'PY'
+/// import pandas as pd, yaml, tempfile, os
+/// from aiconfigurator_core.sdk.perf_database import PerfDatabase
+/// from aiconfigurator_core.sdk import common
+/// root = tempfile.mkdtemp(); data = os.path.join(root, "data", "vllm", "1.0")
+/// os.makedirs(data)
+/// yaml.safe_dump({...the testsys spec below...},
+///                open(os.path.join(root, "testsys.yaml"), "w"))
+/// pd.DataFrame([...the test's rows...]).to_parquet(
+///     os.path.join(data, "<family>_perf.parquet"))
+/// db = PerfDatabase("testsys", "vllm", "1.0", root)
+/// r = db.query_<family>(..., database_mode=common.DatabaseMode.SILICON)
+/// print(float(r), r.energy)
+/// PY
+/// ```
+///
+/// The system spec here mirrors that script's `testsys.yaml` byte for byte
+/// so SOL-dependent paths (the GEMM load clamp, the fp8_static latency
+/// floor) agree across both engines.
+#[cfg(test)]
+pub(crate) mod energy_test_fixtures {
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, DoubleType, Int64Type};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
+    use parquet::schema::parser::parse_message_type;
+
+    use crate::common::system_spec::{GpuSpec, MiscSpec, NodeSpec, SystemSpec};
+
+    /// One parquet column of the fixture: name + values (row-aligned).
+    pub(crate) enum Col {
+        Str(&'static str, Vec<&'static str>),
+        I64(&'static str, Vec<i64>),
+        F64(&'static str, Vec<f64>),
+        Bool(&'static str, Vec<bool>),
+    }
+
+    fn write_typed<T: DataType>(rg: &mut SerializedRowGroupWriter<'_, File>, values: &[T::T]) {
+        let mut col = rg.next_column().unwrap().expect("column");
+        col.typed::<T>().write_batch(values, None, None).unwrap();
+        col.close().unwrap();
+    }
+
+    /// Write one single-row-group parquet with the given columns.
+    pub(crate) fn write_parquet(path: &Path, cols: &[Col]) {
+        let fields: Vec<String> = cols
+            .iter()
+            .map(|c| match c {
+                Col::Str(name, _) => format!("REQUIRED BYTE_ARRAY {name} (UTF8);"),
+                Col::I64(name, _) => format!("REQUIRED INT64 {name};"),
+                Col::F64(name, _) => format!("REQUIRED DOUBLE {name};"),
+                Col::Bool(name, _) => format!("REQUIRED BOOLEAN {name};"),
+            })
+            .collect();
+        let schema = format!("message energy_fixture {{ {} }}", fields.join(" "));
+        let schema = Arc::new(parse_message_type(&schema).expect("schema must parse"));
+        let file = File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        for col in cols {
+            match col {
+                Col::Str(_, v) => {
+                    let bytes: Vec<ByteArray> = v.iter().map(|s| ByteArray::from(*s)).collect();
+                    write_typed::<ByteArrayType>(&mut rg, &bytes);
+                }
+                Col::I64(_, v) => write_typed::<Int64Type>(&mut rg, v),
+                Col::F64(_, v) => write_typed::<DoubleType>(&mut rg, v),
+                Col::Bool(_, v) => write_typed::<BoolType>(&mut rg, v),
+            }
+        }
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// The oracle script's `testsys.yaml` gpu/node numbers, as an in-code
+    /// spec for family tables constructed directly from a data dir.
+    pub(crate) fn energy_test_spec() -> SystemSpec {
+        SystemSpec {
+            data_dir: "data".into(),
+            gpu: GpuSpec {
+                mem_bw: 7.7e12,
+                mem_bw_empirical_scaling_factor: 0.92,
+                mem_empirical_constant_latency: 2e-6,
+                mem_capacity: None,
+                bfloat16_tc_flops: Some(2.25e15),
+                int8_tc_flops: Some(4.5e15),
+                fp8_tc_flops: Some(4.5e15),
+                fp4_tc_flops: Some(9e15),
+                power: None,
+                sm_version: Some(100),
+            },
+            node: NodeSpec {
+                num_gpus_per_node: 8,
+                intra_node_bw: 900e9,
+                inter_node_bw: 50e9,
+                pcie_bw: None,
+                p2p_latency: 2e-6,
+                num_gpus_per_rack: None,
+                inter_rack_bw: None,
+            },
+            misc: MiscSpec::default(),
+        }
+    }
+
+    /// Write `testsys.yaml` (the YAML twin of [`energy_test_spec`]) into a
+    /// synthetic systems root and return the fixture data dir
+    /// `<root>/data/vllm/1.0` — the layout `PerfDatabase::load(root,
+    /// "testsys", "vllm", "1.0")` resolves.
+    pub(crate) fn write_energy_systems_root(root: &Path) -> std::path::PathBuf {
+        let yaml = r#"
+data_dir: data
+gpu:
+  mem_bw: 7.7e12
+  mem_bw_empirical_scaling_factor: 0.92
+  mem_empirical_constant_latency: 2.0e-6
+  bfloat16_tc_flops: 2.25e15
+  int8_tc_flops: 4.5e15
+  fp8_tc_flops: 4.5e15
+  fp4_tc_flops: 9.0e15
+  sm_version: 100
+node:
+  num_gpus_per_node: 8
+  intra_node_bw: 900.0e9
+  inter_node_bw: 50.0e9
+  p2p_latency: 2.0e-6
+misc:
+  nccl_version: test
+"#;
+        std::fs::write(root.join("testsys.yaml"), yaml).expect("write yaml");
+        let data = root.join("data").join("vllm").join("1.0");
+        std::fs::create_dir_all(&data).expect("mkdir data");
+        data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,8 +624,11 @@ mod tests {
         assert_eq!(db.system, "b200_sxm");
         assert_eq!(db.backend, "vllm");
         assert_eq!(db.version, "0.19.0");
-        let gemm_sources =
-            resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &db.data_root);
+        let gemm_sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "gemm_perf.parquet",
+            &db.data_root,
+        );
         assert_eq!(gemm_sources.len(), 1);
         assert!(
             gemm_sources[0].0.is_file(),
@@ -508,7 +683,11 @@ mod tests {
         std::fs::create_dir_all(&family_data_root).unwrap();
         std::fs::write(family_data_root.join("gemm_perf.parquet"), b"stub").unwrap();
 
-        let sources = resolve_op_sources(&PerfDbSources::default(), "gemm_perf.parquet", &legacy_data_root);
+        let sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "gemm_perf.parquet",
+            &legacy_data_root,
+        );
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].0, family_data_root.join("gemm_perf.parquet"));
         assert!(sources[0].1.is_none());
@@ -528,7 +707,11 @@ mod tests {
         std::fs::create_dir_all(&decoy).unwrap();
         std::fs::write(decoy.join("nccl_perf.parquet"), b"stub").unwrap();
 
-        let sources = resolve_op_sources(&PerfDbSources::default(), "nccl_perf.parquet", &legacy_data_root);
+        let sources = resolve_op_sources(
+            &PerfDbSources::default(),
+            "nccl_perf.parquet",
+            &legacy_data_root,
+        );
         // Falls back to the legacy (nonexistent) path since "vllm" is a known
         // backend dir, not a family dir, and must be skipped during the scan.
         assert_eq!(sources.len(), 1);
@@ -561,12 +744,19 @@ node:
 
         // Family-first layout only: <data>/gemm/<backend>/<version>/gemm_perf.parquet.
         // No legacy <data>/<backend>/<version> dir exists at all.
-        let family_dir = systems_root.join("data").join("gemm").join(backend).join(version);
+        let family_dir = systems_root
+            .join("data")
+            .join("gemm")
+            .join(backend)
+            .join(version);
         std::fs::create_dir_all(&family_dir).unwrap();
         std::fs::write(family_dir.join("gemm_perf.parquet"), b"stub").unwrap();
 
         let legacy_data_root = systems_root.join("data").join(backend).join(version);
-        assert!(!legacy_data_root.is_dir(), "fixture must not have a legacy dir");
+        assert!(
+            !legacy_data_root.is_dir(),
+            "fixture must not have a legacy dir"
+        );
 
         let db = PerfDatabase::load(systems_root, system, backend, version)
             .expect("family-only layout must load");
@@ -602,8 +792,14 @@ node:
 
         match PerfDatabase::load(systems_root, system, backend, version) {
             Err(AicError::PerfDatabase(msg)) => {
-                assert!(msg.contains("legacy"), "error should mention legacy layout: {msg}");
-                assert!(msg.contains("family"), "error should mention family layout: {msg}");
+                assert!(
+                    msg.contains("legacy"),
+                    "error should mention legacy layout: {msg}"
+                );
+                assert!(
+                    msg.contains("family"),
+                    "error should mention family layout: {msg}"
+                );
             }
             Ok(_) => panic!("expected load to fail for a totally missing tuple"),
             Err(other) => panic!("expected PerfDatabase error, got {other:?}"),
