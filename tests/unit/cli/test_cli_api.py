@@ -208,8 +208,73 @@ class TestCLIEstimateUnit:
         assert result.ttft == 100.0
 
         # CRITICAL: Verify attention_backend parameter actually reached the runner
-        assert captured_kwargs.get("attention_backend") == "trtllm_mha", \
+        assert captured_kwargs.get("attention_backend") == "trtllm_mha", (
             f"attention_backend not passed to _run_agg_estimate; captured_kwargs: {captured_kwargs}"
+        )
+
+    def test_agg_estimate_attention_backend_reaches_model_config(self, monkeypatch):
+        """attention_backend flows from _run_agg_estimate into the constructed ModelConfig.
+
+        Patches _build_model_config at the api module level with a wrapper that:
+        1. Records the call kwargs (especially attention_backend).
+        2. Delegates to the real build_model_config and captures the returned ModelConfig.
+        3. Raises _CaptureComplete to exit before the perf-database/InferenceSession boundary.
+        Asserts BOTH the recorded kwarg value AND the captured config's field value.
+        """
+        import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.config_builders import build_model_config as _real_build_model_config
+
+        captured_kwargs: dict = {}
+        captured_configs: list = []
+
+        class _CaptureCompleteError(Exception):
+            pass
+
+        def _wrapping_build_model_config(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            cfg = _real_build_model_config(*args, **kwargs)
+            captured_configs.append(cfg)
+            raise _CaptureCompleteError
+
+        monkeypatch.setattr(api, "_build_model_config", _wrapping_build_model_config)
+
+        with pytest.raises(_CaptureCompleteError):
+            api._run_agg_estimate(
+                model_path="Qwen/Qwen3-32B",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                resolved_version="test",
+                isl=1024,
+                osl=512,
+                image_height=0,
+                image_width=0,
+                num_images=1,
+                enable_encoder_dp=True,
+                batch_size=32,
+                ctx_tokens=1024,
+                tp_size=8,
+                pp_size=1,
+                attention_dp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=1,
+                gemm_quant_mode=None,
+                kvcache_quant_mode=None,
+                fmha_quant_mode=None,
+                moe_quant_mode=None,
+                comm_quant_mode=None,
+                load_database=lambda _: MagicMock(),
+                get_backend=lambda _: MagicMock(),
+                get_model=lambda *_: MagicMock(),
+                attention_backend="trtllm_mha",
+            )
+
+        assert captured_kwargs.get("attention_backend") == "trtllm_mha", (
+            f"attention_backend not forwarded to _build_model_config; captured_kwargs: {captured_kwargs}"
+        )
+        assert len(captured_configs) == 1
+        assert captured_configs[0].attention_backend == "trtllm_mha", (
+            f"attention_backend not set in ModelConfig; got: {captured_configs[0].attention_backend}"
+        )
 
 
 class TestCLIDefaultNextn:
