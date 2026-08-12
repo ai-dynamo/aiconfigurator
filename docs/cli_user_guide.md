@@ -116,7 +116,7 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--estimate-mode`: `agg` (default, IFB) or `disagg` (separate prefill/decode workers), or one of the single-pass static breakdown modes `static` / `static_ctx` / `static_gen`
 - `--backend`: Backend name (`trtllm`, `vllm`, `sglang`). Default: `trtllm`
 - `--backend-version`: Backend database version. Default: latest
-- `--attention-backend`: Attention kernel backend — one of `fa3`, `triton`, `trtllm_mha`, `flashinfer`, `fla`, or `default`. Perf data is measured per kernel; set this to match your serving deployment's attention backend when it differs from the framework default for your system/backend version.
+- `--attention-backend`: Attention kernel backend — one of `fa3`, `triton`, `trtllm_mha`, `flashinfer`, `fla`, or `default`. Perf data is measured per kernel; set this to match your serving deployment's attention backend when it differs from the framework default for your system/backend version. Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore this override.
 - `--database-mode`: Database mode (`SILICON`, `HYBRID`, `EMPIRICAL`, `SOL`). Default: `SILICON`
 - `--isl`: Input sequence length. Default: `1024`
 - `--osl`: Output sequence length. Default: `1024`
@@ -426,7 +426,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: **Deprecated and ignored for large-EP modeling** (accepted with a one-time warning). On SGLang, it still narrows the default `moe_tp` candidates to `[1]`; explicit `*_moe_tp_candidates` values take precedence. Large-EP (wideEP) is explored automatically — see the note below.
-- `--attention-backend`: Attention kernel backend — one of `fa3`, `triton`, `trtllm_mha`, `flashinfer`, `fla`, or `default`. Perf data is measured per kernel; set this to match your serving deployment's attention backend when it differs from the framework default for your system/backend version.
+- `--attention-backend`: Attention kernel backend — one of `fa3`, `triton`, `trtllm_mha`, `flashinfer`, `fla`, or `default`. Perf data is measured per kernel; set this to match your serving deployment's attention backend when it differs from the framework default for your system/backend version. Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore this override.
 - `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
 
 > **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
