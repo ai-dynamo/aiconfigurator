@@ -97,11 +97,6 @@ pub struct FpmForwardCell {
     /// Prebuilt scattered-sites indexes (tables are immutable after load).
     pub prefill_index: Option<SiteIndex>,
     pub decode_index: Option<SiteIndex>,
-    /// CUDA-graph capture boundary detected from the decode grid's cliff
-    /// pair (e.g. 512/513): queries at `batch <= boundary` interpolate among
-    /// graph-regime batches only, `batch > boundary` among eager ones — the
-    /// ScatteredSites batch distance is regime-blind and would otherwise mix
-    /// votes across the cliff. `None` = no cliff collected, single table.
     /// Collected prefill batch ceiling, present only when the data
     /// certifies the batch axis flat at matched totals (median |ratio-1|
     /// <= 5% across consecutive collected batches, >= 3 overlap points):
@@ -109,11 +104,15 @@ pub struct FpmForwardCell {
     /// TRUE totals — same GEMM/MoE work, same side of the capture cliff,
     /// bounded-conservative on attention. `None` = hard gate as before.
     pub prefill_batch_clamp_max: Option<u32>,
-    pub decode_regime_boundary: Option<u32>,
-    pub decode_graph: Option<Node>,
-    pub decode_eager: Option<Node>,
-    pub decode_graph_index: Option<SiteIndex>,
-    pub decode_eager_index: Option<SiteIndex>,
+    /// Decode batch-axis bracket metadata (mirrors Python): the engine pads
+    /// decode batches to capture rungs — every rung is marked in the data by
+    /// an (x, x+1) row pair — and off-lattice queries interpolate between
+    /// their segment's bracket rows at the op layer instead of the
+    /// regime-blind cross-batch k-NN. `decode_curve_bounds` feeds the
+    /// op-layer coverage guard.
+    pub decode_batches: Vec<u32>,
+    pub decode_rungs: Vec<u32>,
+    pub decode_curve_bounds: BTreeMap<u32, (u32, u32)>,
 }
 
 pub struct FpmForwardTable {
@@ -660,11 +659,9 @@ fn load_pair(
                 prefill_index: None,
                 decode_index: None,
                 prefill_batch_clamp_max: None,
-                decode_regime_boundary: None,
-                decode_graph: None,
-                decode_eager: None,
-                decode_graph_index: None,
-                decode_eager_index: None,
+                decode_batches: Vec::new(),
+                decode_rungs: Vec::new(),
+                decode_curve_bounds: BTreeMap::new(),
             },
         });
         if !building.cell.cell_ids.contains(&row.cell_id) {
@@ -703,16 +700,23 @@ fn load_pair(
             if cell.decode_domain.is_some() {
                 // decode sites (batch,) at axis 0; curve = axis 1
                 cell.decode_index = Some(SiteIndex::build(&[0], 1, &cell.decode));
-                // Decode batch-axis regime partition (mirrors Python's
-                // load-time split; the domain gate stays on the FULL box).
-                cell.decode_regime_boundary = detect_decode_regime_boundary(&cell.decode)?;
-                if let Some(boundary) = cell.decode_regime_boundary {
-                    let (graph, eager) = split_decode_node(&cell.decode, boundary);
-                    cell.decode_graph_index = Some(SiteIndex::build(&[0], 1, &graph));
-                    cell.decode_eager_index = Some(SiteIndex::build(&[0], 1, &eager));
-                    cell.decode_graph = Some(graph);
-                    cell.decode_eager = Some(eager);
-                }
+                // Bracket metadata (mirrors Python's loader).
+                let curves = decode_curves(&cell.decode);
+                cell.decode_batches = curves.keys().copied().collect();
+                cell.decode_rungs = cell
+                    .decode_batches
+                    .iter()
+                    .copied()
+                    .filter(|b| b.checked_add(1).is_some_and(|n| curves.contains_key(&n)))
+                    .collect();
+                cell.decode_curve_bounds = curves
+                    .iter()
+                    .map(|(&b, curve)| {
+                        let low = *curve.keys().next().expect("non-empty curve");
+                        let high = *curve.keys().next_back().expect("non-empty curve");
+                        (b, (low, high))
+                    })
+                    .collect();
             }
             Ok(cell)
         })
@@ -757,46 +761,6 @@ fn decode_curves(decode: &Node) -> BTreeMap<u32, BTreeMap<u32, f64>> {
         }
     }
     out
-}
-
-/// Find the CUDA-graph capture boundary encoded in the decode grid: for each
-/// adjacent collected batch pair `(b, b+1)`, the median latency ratio over
-/// their overlapping KV range separates a regime cliff (measured 2.6-3.5x)
-/// from pad-up neighbours (5-15%) at threshold 2.0; >= 3 overlapping points
-/// keep one bad row from minting a cliff. Exactly one cliff is expected —
-/// several mean the data does not look like one capture surface (loud error,
-/// mirroring Python). Mirrors `_detect_decode_regime_boundary`.
-fn detect_decode_regime_boundary(decode: &Node) -> Result<Option<u32>, AicError> {
-    let curves = decode_curves(decode);
-    let mut hits: Vec<u32> = Vec::new();
-    for (&b, lower) in &curves {
-        let Some(upper) = b.checked_add(1).and_then(|n| curves.get(&n)) else {
-            continue;
-        };
-        let lo_first = *lower.keys().next().expect("non-empty curve") as f64;
-        let lo_last = *lower.keys().next_back().expect("non-empty curve") as f64;
-        let mut ratios: Vec<f64> = Vec::new();
-        for (&kv, &lat) in upper {
-            let kvf = kv as f64;
-            if lo_first <= kvf && kvf <= lo_last {
-                let base = decode_curve_value(lower, kvf);
-                if base > 0.0 {
-                    ratios.push(lat / base);
-                }
-            }
-        }
-        if ratios.len() >= 3 && median(&mut ratios) >= 2.0 {
-            hits.push(b);
-        }
-    }
-    if hits.len() > 1 {
-        return Err(structural(format!(
-            "ambiguous decode regime cliffs at batches {hits:?}: expected at most one \
-             CUDA-graph capture boundary per cell; the pair data does not look like \
-             one capture surface — inspect the collection before serving it."
-        )));
-    }
-    Ok(hits.first().copied())
 }
 
 /// Data certificate for the prefill batch clamp, mirroring Python
@@ -863,25 +827,6 @@ fn median(values: &mut [f64]) -> f64 {
     } else {
         (values[n / 2 - 1] + values[n / 2]) / 2.0
     }
-}
-
-/// Split the decode node at the capture boundary (boundary batch itself is
-/// graph-side), preserving leaves verbatim.
-fn split_decode_node(decode: &Node, boundary: u32) -> (Node, Node) {
-    let (mut graph, mut eager) = (Node::branch(), Node::branch());
-    if let Node::Branch(batches) = decode {
-        for (&batch, curve_node) in batches {
-            if let Node::Branch(kvs) = curve_node {
-                for (&kv, leaf) in kvs {
-                    if let Node::Leaf(value) = leaf {
-                        let side = if batch <= boundary { &mut graph } else { &mut eager };
-                        side.insert_value(&[batch, kv], value.clone());
-                    }
-                }
-            }
-        }
-    }
-    (graph, eager)
 }
 
 /// Per-axis `(min, max)` over all leaf paths — the axis-aligned bounding box
@@ -1537,53 +1482,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn decode_regime_boundary_detected_and_split() {
+    fn decode_bracket_metadata_built() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         write_pair(tmp.path(), &cliff_decode_rows());
         let table = loaded_table(tmp.path());
         let cell = table
             .select_cell(&default_identity(4), "org/model-a")
             .expect("select");
-        // Cliff pair 512/513 (~3x over 3 overlapping KV points) -> 512;
-        // pad-up-scale neighbours 496/497 (~5%) never mint a cliff.
-        assert_eq!(cell.decode_regime_boundary, Some(512));
-        assert!(cell.decode_graph_index.is_some() && cell.decode_eager_index.is_some());
+        // Rungs = batches whose (x, x+1) pair was collected.
+        assert_eq!(cell.decode_rungs, vec![496, 512]);
+        assert_eq!(cell.decode_batches, vec![496, 497, 512, 513, 1024]);
+        assert_eq!(cell.decode_curve_bounds[&513], (1024, 4096));
         // The full-domain gate still sees the whole box.
         assert_eq!(cell.decode_domain.unwrap()[0], (496, 1024));
     }
 
     #[test]
-    fn decode_without_cliff_is_unsplit() {
+    fn decode_without_pairs_has_no_rungs() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         write_pair(tmp.path(), &default_rows());
         let table = loaded_table(tmp.path());
         let cell = table
             .select_cell(&default_identity(4), "org/model-a")
             .expect("select");
-        assert_eq!(cell.decode_regime_boundary, None);
-        assert!(cell.decode_graph.is_none() && cell.decode_eager.is_none());
-    }
-
-    #[test]
-    fn ambiguous_decode_cliffs_fail_loudly() {
-        let mk = |batch: u32, kv: u32, lat: f64| RowSpec {
-            workload_kind: "decode",
-            batch_size: batch,
-            total_prefill_tokens: 0,
-            total_kv_read_tokens: kv,
-            latency_ms: lat,
-            ..RowSpec::default()
-        };
-        let mut rows = Vec::new();
-        for (b, scale) in [(512u32, 1.0), (513, 3.0), (1024, 3.3), (1025, 10.0)] {
-            for (i, kv) in [1024u32, 2048, 4096].into_iter().enumerate() {
-                rows.push(mk(b, kv, (10.0 + i as f64) * scale));
-            }
-        }
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        write_pair(tmp.path(), &rows);
-        let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("ambiguous decode regime cliffs"), "{err}");
+        assert!(cell.decode_rungs.is_empty());
+        assert_eq!(cell.decode_batches, vec![8, 16]);
     }
 
     #[test]

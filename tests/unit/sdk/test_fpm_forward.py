@@ -359,23 +359,14 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
             op.query_totals(db, batch_size=4096, total_kv_read_tokens=4096)
 
-    def test_decode_regime_boundary_detection(self):
-        from aiconfigurator_core.sdk.operations.fpm_forward import _detect_decode_regime_boundary
-
-        graph = {kv: 10.0 + i for i, kv in enumerate((1024, 2048, 4096))}
-        eager = {kv: 3.0 * (10.0 + i) for i, kv in enumerate((1024, 2048, 4096))}
-        # Cliff pair 512/513 (~3x on 3 overlapping KV points) -> boundary 512.
-        assert _detect_decode_regime_boundary({512: graph, 513: eager}) == 512
-        # Pad-up neighbours (~10%) never mint a cliff.
-        pad = {kv: v * 1.1 for kv, v in graph.items()}
-        assert _detect_decode_regime_boundary({8: graph, 9: pad}) is None
-        # Fewer than 3 overlapping points: one bad row cannot mint a cliff.
-        assert _detect_decode_regime_boundary({512: {1024: 10.0, 2048: 11.0}, 513: {1024: 30.0, 2048: 33.0}}) is None
-        # Two cliffs do not look like one capture surface: loud error.
-        with pytest.raises(ValueError, match="ambiguous decode regime cliffs"):
-            _detect_decode_regime_boundary(
-                {512: graph, 513: eager, 1024: eager, 1025: {k: v * 3 for k, v in eager.items()}}
-            )
+    def test_decode_rung_metadata(self, fake_db):
+        # Capture rungs are the batches whose (x, x+1) pair the collector
+        # deliberately sampled; per-row curve bounds feed the coverage guard.
+        db = fake_db(self._cliff_rows())
+        cell = _make_op("decode")._load_cell(db)
+        assert cell["decode_rungs"] == [496, 512]
+        assert cell["decode_batches"] == [496, 497, 512, 513, 1024]
+        assert cell["decode_curve_bounds"][513] == (1024, 4096)
 
     def _cliff_rows(self):
         rows = []
@@ -387,36 +378,58 @@ class TestFPMForwardOpQuery:
                 rows.append(_row("decode", b, 0, kv, base + 3 * i))
         return rows
 
-    def test_decode_regime_routing_separates_the_cliff(self, fake_db):
-        # The b=600 pathology: pre-split, k-NN mixes one eager vote (513)
-        # with three graph votes (496/497/512) and answers ~44% of truth.
-        # Post-split it interpolates among eager batches only.
+    def test_decode_bracket_resolution(self, fake_db):
+        # The b=600 pathology: k-NN mixed one eager vote (513) with three
+        # graph votes (496/497/512) and answered ~44% of truth. Bracket
+        # resolution interpolates between the segment's own rows only.
         db = fake_db(self._cliff_rows())
         op = _make_op("decode")
-        cell = op._load_cell(db)
-        assert cell["decode_regime_boundary"] == 512
-        assert set(cell["tables"]["decode_graph"]) == {496, 497, 512}
-        assert set(cell["tables"]["decode_eager"]) == {513, 1024}
-        # Exact hits on either side are untouched by the split.
+        # Own-site hits are untouched.
         assert float(op.query_totals(db, batch_size=512, total_kv_read_tokens=2048)) == pytest.approx(11.5)
         assert float(op.query_totals(db, batch_size=513, total_kv_read_tokens=2048)) == pytest.approx(34.0)
-        # Off-site queries route by regime: eager-level above, graph-level at
-        # or below the boundary (coarse bands — transfer math is interp's).
-        eager_q = float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048))
-        graph_q = float(op.query_totals(db, batch_size=500, total_kv_read_tokens=2048))
-        assert eager_q > 25.0
-        assert graph_q < 15.0
-        # In-between eager batches keep working (frontier semantics live
-        # inside the eager sub-table).
-        mid_q = float(op.query_totals(db, batch_size=800, total_kv_read_tokens=2048))
-        assert mid_q > 25.0
+        # b=600 > last rung (512): eager bracket {513, 1024}, linear blend.
+        w = (600 - 513) / (1024 - 513)
+        expected = 34.0 + (65.0 - 34.0) * w
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048)) == pytest.approx(expected)
+        # b=500 in segment (496, 512]: bracket {497, 512} — same padded graph.
+        w = (500 - 497) / (512 - 497)
+        expected = 11.0 + (11.5 - 11.0) * w
+        assert float(op.query_totals(db, batch_size=500, total_kv_read_tokens=2048)) == pytest.approx(expected)
 
-    def test_decode_without_cliff_is_unsplit(self, fake_db):
-        db = fake_db()
+    def test_decode_bracket_coverage_guard(self, fake_db):
+        # Bracket rows with disjoint KV coverage must degrade to the covered
+        # side — or miss loudly — NEVER fall back to cross-batch k-NN.
+        rows = self._cliff_rows()
+        # replace the 1024 row set with a far-KV-only curve
+        rows = [r for r in rows if r["batch_size"] != 1024]
+        for i, kv in enumerate((8192, 16384)):
+            rows.append(_row("decode", 1024, 0, kv, 62.0 + 3 * i))
+        db = fake_db(rows)
+        op = _make_op("decode")
+        # kv covered only by the low row (513): single-sided value.
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048)) == pytest.approx(34.0)
+        # kv covered only by the high row (1024): single-sided value.
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=8192)) == pytest.approx(62.0)
+        # kv covered by NEITHER bracket row (in-domain gap): loud miss — the
+        # legacy k-NN would have silently answered here.
+        with pytest.raises(PerfDataNotAvailableError, match="bracket rows"):
+            op.query_totals(db, batch_size=600, total_kv_read_tokens=6000)
+
+    def test_decode_without_rungs_keeps_the_legacy_path(self, fake_db):
+        # No (x, x+1) pairs collected -> no bracket structure: off-lattice
+        # queries keep today's scattered-sites transfer.
+        rows = []
+        for b, base in ((8, 6.0), (64, 12.0)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + i))
+        db = fake_db(rows)
         op = _make_op("decode")
         cell = op._load_cell(db)
-        assert cell["decode_regime_boundary"] is None
-        assert "decode_graph" not in cell["tables"]
+        assert cell["decode_rungs"] == []
+        # off-lattice: legacy transfer answers (value between the two sites'
+        # magnitudes; exact math is the interp engine's).
+        got = float(op.query_totals(db, batch_size=20, total_kv_read_tokens=2048))
+        assert 5.0 < got < 15.0
 
     def test_query_totals_addresses_raw_coordinates(self, fake_db):
         # Totals a mixed step schedules (chunk + riders) are generally not

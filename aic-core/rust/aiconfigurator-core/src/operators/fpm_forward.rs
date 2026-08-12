@@ -247,17 +247,7 @@ impl FpmForwardOp {
                 let Some(domain) = cell.decode_domain.as_ref() else {
                     return Err(self.no_rows_err(cell));
                 };
-                // Regime routing AFTER the full-domain gate (the gate uses
-                // the whole decode box): the boundary batch itself is
-                // graph-side; each side interpolates among its own regime.
-                let index = match cell.decode_regime_boundary {
-                    Some(boundary) if coords[0] <= boundary as f64 => {
-                        cell.decode_graph_index.as_ref()
-                    }
-                    Some(_) => cell.decode_eager_index.as_ref(),
-                    None => cell.decode_index.as_ref(),
-                };
-                (&FPM_DECODE_AXES, domain.as_slice(), index)
+                (&FPM_DECODE_AXES, domain.as_slice(), cell.decode_index.as_ref())
             }
         };
         for (axis_index, (axis_name, &value)) in axes.iter().zip(coords).enumerate() {
@@ -294,6 +284,16 @@ impl FpmForwardOp {
             }
         };
         let cfg = interp_config(self.phase, &sol);
+        if self.phase == FpmPhase::Decode {
+            if let Some(latency) = self.decode_bracket(cell, coords, index, &cfg)? {
+                if !latency.is_finite() || latency <= 0.0 {
+                    return Err(data_err(format!(
+                        "FPM decode bracket interpolation produced an invalid latency ({latency}) at {coords:?}."
+                    )));
+                }
+                return Ok(PerformanceResult::new(latency, Source::Silicon));
+            }
+        }
         let latency = index
             .resolve_value(&cfg, coords)
             .map(|value| value.latency * clamp_scale)
@@ -311,6 +311,74 @@ impl FpmForwardOp {
         }
         // Latency-only dataset; scale_factor is fixed 1.0 in Python.
         Ok(PerformanceResult::new(latency, Source::Silicon))
+    }
+
+    /// Resolve an OFF-LATTICE decode batch by its segment bracket (mirrors
+    /// Python `_decode_bracket`): the engine pads decode batches to capture
+    /// rungs — every rung marked by an (x, x+1) row pair — so a query
+    /// between rungs interpolates linearly between its segment's bracket
+    /// rows {lower_rung + 1, upper_rung}, both running the SAME padded
+    /// graph. Coverage of each bracket row's own KV curve is checked here:
+    /// an uncovered row degrades to the single covered side (or a loud
+    /// miss) — never to the engine's regime-blind cross-batch k-NN.
+    ///
+    /// `Ok(None)` = own-site hit or no rung structure (legacy path stays).
+    fn decode_bracket(
+        &self,
+        cell: &FpmForwardCell,
+        coords: &[f64],
+        index: &crate::perf_database::perf_interp::SiteIndex,
+        cfg: &OpInterpConfig,
+    ) -> Result<Option<f64>, AicError> {
+        let (batch, kv) = (coords[0], coords[1]);
+        if cell.decode_rungs.is_empty()
+            || cell.decode_curve_bounds.keys().any(|&b| b as f64 == batch)
+        {
+            return Ok(None);
+        }
+        let Some(&lower_rung) = cell.decode_rungs.iter().rev().find(|&&r| (r as f64) < batch)
+        else {
+            // Between the domain floor and the first rung: no pair structure
+            // to bracket with — keep the legacy path.
+            return Ok(None);
+        };
+        let lo_row = lower_rung + 1;
+        let hi_row = cell
+            .decode_rungs
+            .iter()
+            .copied()
+            .find(|&r| (r as f64) >= batch)
+            .unwrap_or(*cell.decode_batches.last().expect("non-empty lattice"));
+        let covers = |row: u32| {
+            let (low, high) = cell.decode_curve_bounds[&row];
+            (low as f64) <= kv && kv <= (high as f64)
+        };
+        let (lo_ok, hi_ok) = (covers(lo_row), covers(hi_row));
+        if !lo_ok && !hi_ok {
+            return Err(data_err(format!(
+                "FPM decode bracket rows {lo_row}/{hi_row} do not cover total_kv_read_tokens={kv}                  (curves span {:?} and {:?}); FPM never extrapolates.",
+                cell.decode_curve_bounds[&lo_row], cell.decode_curve_bounds[&hi_row]
+            )));
+        }
+        let row_value = |row: u32| -> Result<f64, AicError> {
+            // Own-curve evaluation (coverage pre-checked): the engine's
+            // bisect on that row's own curve — cross-batch transfer never
+            // runs.
+            index
+                .resolve_value(cfg, &[row as f64, kv])
+                .map(|value| value.latency)
+        };
+        if !(lo_ok && hi_ok) {
+            let row = if lo_ok { lo_row } else { hi_row };
+            return Ok(Some(row_value(row)?));
+        }
+        let lo_value = row_value(lo_row)?;
+        if hi_row == lo_row {
+            return Ok(Some(lo_value));
+        }
+        let hi_value = row_value(hi_row)?;
+        let weight = (batch - lo_row as f64) / (hi_row as f64 - lo_row as f64);
+        Ok(Some(lo_value + (hi_value - lo_value) * weight))
     }
 
     fn no_rows_err(&self, cell: &FpmForwardCell) -> AicError {
@@ -523,6 +591,52 @@ mod tests {
         })];
         let high = sol_op.query_totals(&db, &[16.0, 4096.0, 16384.0]).unwrap();
         assert!((high.latency_ms - 40.0 * 1.04 * 1.8).abs() < 1e-9, "{}", high.latency_ms);
+    }
+
+    #[test]
+    fn decode_bracket_resolution_and_coverage_guard() {
+        use crate::perf_database::fpm_forward::tests::RowSpec;
+        let mk = |batch: u32, kv: u32, lat: f64| RowSpec {
+            workload_kind: "decode",
+            batch_size: batch,
+            total_prefill_tokens: 0,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        let mut rows = Vec::new();
+        for (b, base) in [(496u32, 9.5), (497, 10.0), (512, 10.5)] {
+            for (i, kv) in [1024u32, 2048, 4096].into_iter().enumerate() {
+                rows.push(mk(b, kv, base + i as f64));
+            }
+        }
+        for (i, kv) in [1024u32, 2048, 4096].into_iter().enumerate() {
+            rows.push(mk(513, kv, 31.0 + 3.0 * i as f64));
+        }
+        for (i, kv) in [8192u32, 16384].into_iter().enumerate() {
+            rows.push(mk(1024, kv, 62.0 + 3.0 * i as f64));
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        write_pair(tmp.path(), &rows);
+        let db = db_with_pair(tmp.path());
+        let dec = op(FpmPhase::Decode);
+        // b=500 in segment (496, 512]: bracket {497, 512}, linear blend.
+        let got = dec.query_totals(&db, &[500.0, 2048.0]).unwrap();
+        let expected = 11.0 + (11.5 - 11.0) * (500.0 - 497.0) / (512.0 - 497.0);
+        assert!((got.latency_ms - expected).abs() < 1e-9, "{}", got.latency_ms);
+        // b=600 above the last rung: bracket {513, 1024}; kv=2048 covered
+        // only by 513 -> single-sided (never the cross-batch k-NN).
+        let got = dec.query_totals(&db, &[600.0, 2048.0]).unwrap();
+        assert!((got.latency_ms - 34.0).abs() < 1e-9, "{}", got.latency_ms);
+        // kv=8192 covered only by 1024 -> the other single side.
+        let got = dec.query_totals(&db, &[600.0, 8192.0]).unwrap();
+        assert!((got.latency_ms - 62.0).abs() < 1e-9, "{}", got.latency_ms);
+        // kv=6000 covered by NEITHER bracket row: loud miss.
+        let err = dec.query_totals(&db, &[600.0, 6000.0]).unwrap_err();
+        assert!(err.to_string().contains("bracket rows"), "{err}");
+        // Own-site hits untouched by any of this.
+        let got = dec.query_totals(&db, &[512.0, 2048.0]).unwrap();
+        assert!((got.latency_ms - 11.5).abs() < 1e-9);
     }
 
     #[test]
