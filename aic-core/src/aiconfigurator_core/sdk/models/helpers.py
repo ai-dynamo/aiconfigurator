@@ -305,7 +305,9 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 
-    if "nvfp4" in moe_algos:
+    if "w4a16_nvfp4" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_nvfp4
+    elif "nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
     elif "fp8" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.fp8

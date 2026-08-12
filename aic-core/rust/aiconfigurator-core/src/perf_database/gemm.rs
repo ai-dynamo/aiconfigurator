@@ -274,7 +274,7 @@ impl GemmTable {
     /// loaded GEMM table. Lets `GemmOp`'s below-grid SOL degrade stay
     /// scoped to shape misses — a quant-mode miss keeps the strict error.
     pub fn has_quant(&self, quant: GemmQuantMode) -> Result<bool, AicError> {
-        let lookup_quant = normalize_fp8_static_quant(quant);
+        let lookup_quant = normalize_gemm_quant_for_table(quant);
         Ok(self.load_gemm()?.by_quant.contains_key(lookup_quant.name()))
     }
 
@@ -554,12 +554,12 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
 }
 
 /// Normalize modeled quant modes to their collected perf-table lanes.
-/// `fp8_static` reuses dynamic-FP8 GEMM rows plus separate scale overheads;
-/// scale-aware weight-only NVFP4 reuses the `int4_wo` utilization table.
+/// `fp8_static` reuses dynamic-FP8 GEMM rows plus separate scale overheads.
+/// Every other mode retains its identity; cross-profile borrowing is owned by
+/// the empirical transfer policy rather than a hard table alias.
 pub(crate) fn normalize_gemm_quant_for_table(quant: GemmQuantMode) -> GemmQuantMode {
     match quant {
         GemmQuantMode::Fp8Static => GemmQuantMode::Fp8,
-        GemmQuantMode::W4a16Nvfp4 => GemmQuantMode::Int4Wo,
         _ => quant,
     }
 }
@@ -957,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn aliased_table_quants_keep_distinct_profiles_in_both_query_orders() {
+    fn w4a16_nvfp4_does_not_alias_int4_table() {
         use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
 
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -972,31 +972,16 @@ mod tests {
             ],
         );
 
-        let int4_first = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
-        let int4_a = int4_first
+        let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        let int4 = table
             .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
             .unwrap()
             .latency;
-        let nvfp4_a = int4_first
+        assert!(int4.is_finite() && int4 > 0.0);
+        assert!(table
             .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
-            .unwrap()
-            .latency;
-
-        let nvfp4_first = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
-        let nvfp4_b = nvfp4_first
-            .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
-            .unwrap()
-            .latency;
-        let int4_b = nvfp4_first
-            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
-            .unwrap()
-            .latency;
-
-        assert_eq!(int4_a.to_bits(), int4_b.to_bits());
-        assert_eq!(nvfp4_a.to_bits(), nvfp4_b.to_bits());
-        assert_ne!(int4_a.to_bits(), nvfp4_a.to_bits());
-        assert_eq!(query_cache_len(&int4_first), 2);
-        assert_eq!(query_cache_len(&nvfp4_first), 2);
+            .is_err());
+        assert_eq!(query_cache_len(&table), 1);
     }
 
     #[test]

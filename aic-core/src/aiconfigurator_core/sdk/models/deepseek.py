@@ -8,7 +8,11 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions, mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import (
+    attention_projection_exclusions,
+    mtp_scale_factor,
+    quant_exclude_patterns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,13 @@ class DeepSeekModel(BaseModel):
         # only q/kv projections and keeps o_proj NVFP4; native FP8 checkpoints
         # exclude nothing. Drives per-GEMM dtypes and the MLA-module perf key.
         attn_exclusions = attention_projection_exclusions(model_info.get("raw_config") or {})
+        shared_expert_excluded = any(
+            "shared_expert" in str(pattern).lower()
+            for pattern in quant_exclude_patterns(model_info.get("raw_config") or {})
+        )
+        shared_expert_quant_mode = model_config.gemm_quant_mode
+        if shared_expert_excluded and not model_info["gemm_quant_mode_is_explicit"]:
+            shared_expert_quant_mode = common.GEMMQuantMode.bfloat16
 
         if family == "KIMIK25":
             # Kimi K2.5 reuses the DeepSeek architecture, but skips the WideEP
@@ -71,6 +82,7 @@ class DeepSeekModel(BaseModel):
                 extra_params,
                 backend_name=backend_name,
                 attention_quant_exclusions=attn_exclusions,
+                shared_expert_quant_mode=shared_expert_quant_mode,
             )
 
         # DEEPSEEK family — three-way dispatch on WideEP.
@@ -80,11 +92,20 @@ class DeepSeekModel(BaseModel):
                 model_info["model_path"],
                 backend_name,
             )
-            return WideEPDeepSeekModel(*moe_args, *base_args, attention_quant_exclusions=attn_exclusions)
+            return WideEPDeepSeekModel(
+                *moe_args,
+                *base_args,
+                attention_quant_exclusions=attn_exclusions,
+                shared_expert_quant_mode=shared_expert_quant_mode,
+            )
         if backend_name == "trtllm" and model_config.enable_wideep:
             logger.debug("TensorRT-LLM WideEP is enabled for model %s", model_info["model_path"])
             return TrtllmWideEPDeepSeekModel(
-                *moe_args, *base_args, extra_params, attention_quant_exclusions=attn_exclusions
+                *moe_args,
+                *base_args,
+                extra_params,
+                attention_quant_exclusions=attn_exclusions,
+                shared_expert_quant_mode=shared_expert_quant_mode,
             )
         logger.debug(
             "WideEP is not enabled for model %s with backend %s",
@@ -100,6 +121,7 @@ class DeepSeekModel(BaseModel):
             extra_params,
             backend_name=backend_name,
             attention_quant_exclusions=attn_exclusions,
+            shared_expert_quant_mode=shared_expert_quant_mode,
         )
 
     def __init__(
@@ -110,6 +132,7 @@ class DeepSeekModel(BaseModel):
         *args,
         backend_name: str = "",
         attention_quant_exclusions: frozenset = frozenset(),
+        shared_expert_quant_mode: common.GEMMQuantMode | None = None,
     ) -> None:
         super().__init__(*args)
         # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
@@ -151,6 +174,7 @@ class DeepSeekModel(BaseModel):
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
+        shared_gemm_quant_mode = shared_expert_quant_mode or gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
         # Attention projections follow the checkpoint's PER-PROJECTION dtype,
@@ -324,7 +348,7 @@ class DeepSeekModel(BaseModel):
                     self._num_layers,
                     2 * self._moe_inter_size // tp_size,
                     h,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                     seq_split=cp,
                 ),
                 ops.ElementWise(
@@ -340,7 +364,7 @@ class DeepSeekModel(BaseModel):
                     self._num_layers,
                     h,
                     self._moe_inter_size // tp_size,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                     seq_split=cp,
                 ),
             ]
@@ -561,7 +585,7 @@ class DeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 2 * self._moe_inter_size // tp_size,
                 h,
-                gemm_quant_mode,
+                shared_gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
@@ -575,7 +599,7 @@ class DeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor,
                 h,
                 self._moe_inter_size // tp_size,
-                gemm_quant_mode,
+                shared_gemm_quant_mode,
             ),
         ]
 
@@ -701,6 +725,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         moe_inter_size: int,
         *args,
         attention_quant_exclusions: frozenset = frozenset(),
+        shared_expert_quant_mode: common.GEMMQuantMode | None = None,
     ) -> None:
         super().__init__(*args)
 
@@ -725,6 +750,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
         self._power_law_alpha = 1.01
 
         gemm_quant_mode = self.config.gemm_quant_mode
+        shared_gemm_quant_mode = shared_expert_quant_mode or gemm_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
 
         # Attention projections follow the checkpoint's PER-PROJECTION dtype
@@ -859,7 +885,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     2 * self._moe_inter_size,
                     h,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "context_shared_act_gate",
@@ -873,7 +899,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     h,
                     self._moe_inter_size,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                 ),
             ]
         )
@@ -1078,7 +1104,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 2 * self._moe_inter_size,
                 h,
-                gemm_quant_mode,
+                shared_gemm_quant_mode,
             ),
             ops.ElementWise(
                 "generation_shared_act_gate",
@@ -1092,7 +1118,7 @@ class TrtllmWideEPDeepSeekModel(BaseModel):
                 self._num_layers * self._mtp_scale_factor * self._pdl_factor,
                 h,
                 self._moe_inter_size,
-                gemm_quant_mode,
+                shared_gemm_quant_mode,
             ),
         ]
 
@@ -1201,6 +1227,7 @@ class WideEPDeepSeekModel(BaseModel):
         moe_inter_size: int,
         *args,
         attention_quant_exclusions: frozenset = frozenset(),
+        shared_expert_quant_mode: common.GEMMQuantMode | None = None,
     ) -> None:
         super().__init__(*args)
 
@@ -1225,6 +1252,7 @@ class WideEPDeepSeekModel(BaseModel):
         fmha_quant_mode = self.config.fmha_quant_mode
         moe_quant_mode = self.config.moe_quant_mode
         gemm_quant_mode = self.config.gemm_quant_mode
+        shared_gemm_quant_mode = shared_expert_quant_mode or gemm_quant_mode
         moe_backend = self.config.moe_backend
         attn_backend = self.config.attention_backend
 
@@ -1329,7 +1357,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     2 * self._moe_inter_size,
                     h,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                     scale_num_tokens=tp_size,
                     seq_split=cp,
                 ),
@@ -1347,7 +1375,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers,
                     h,
                     self._moe_inter_size,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                     scale_num_tokens=tp_size,
                     seq_split=cp,
                 ),
@@ -1449,7 +1477,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     2 * self._moe_inter_size,
                     h,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                 ),
                 ops.ElementWise(
                     "generation_act_gate",
@@ -1463,7 +1491,7 @@ class WideEPDeepSeekModel(BaseModel):
                     self._num_layers * self._mtp_scale_factor,
                     h,
                     self._moe_inter_size,
-                    gemm_quant_mode,
+                    shared_gemm_quant_mode,
                 ),
             ]
         )

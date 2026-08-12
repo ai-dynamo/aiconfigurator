@@ -69,7 +69,7 @@ def test_nvfp4_variant_loads_offline_with_quant_metadata(hf_id, monkeypatch):
         (
             "nvidia/Qwen3.6-35B-A3B-NVFP4",
             common.GEMMQuantMode.fp8_static,
-            common.MoEQuantMode.nvfp4,
+            common.MoEQuantMode.w4a16_nvfp4,
             common.KVCacheQuantMode.fp8,
             common.FMHAQuantMode.fp8,
         ),
@@ -136,7 +136,7 @@ def test_nvfp4_variant_infers_checkpoint_quant_modes(hf_id, gemm_mode, moe_mode,
     [
         (
             "nvidia/Qwen3.6-35B-A3B-NVFP4",
-            ("context_gdn_shared_up_gemm", "generation_full_shared_down_gemm"),
+            ("context_gdn_shared_gate_up_gemm", "generation_full_shared_down_gemm"),
         ),
         (
             "nvidia/Qwen3.6-27B-NVFP4",
@@ -144,7 +144,7 @@ def test_nvfp4_variant_infers_checkpoint_quant_modes(hf_id, gemm_mode, moe_mode,
         ),
     ],
 )
-def test_qwen36_uses_fp8_projections_and_nvfp4_ffn(hf_id, ffn_names):
+def test_qwen36_uses_fp8_projections_and_w4a16_nvfp4_ffn(hf_id, ffn_names):
     model = get_model(hf_id, _model_config(), backend_name="trtllm")
     by_name = {op._name: op for op in model.context_ops + model.generation_ops}
 
@@ -152,6 +152,8 @@ def test_qwen36_uses_fp8_projections_and_nvfp4_ffn(hf_id, ffn_names):
         assert by_name[name]._quant_mode == common.GEMMQuantMode.fp8_static
     for name in ffn_names:
         assert by_name[name]._quant_mode == common.GEMMQuantMode.w4a16_nvfp4
+    if hf_id == "nvidia/Qwen3.6-35B-A3B-NVFP4":
+        assert by_name["context_gdn_moe"]._quant_mode == common.MoEQuantMode.w4a16_nvfp4
 
 
 def test_qwen36_task_preserves_inferred_provenance_for_mixed_precision_split():
@@ -245,11 +247,44 @@ def test_qwen36_preserves_explicit_global_gemm_override(hf_id, ffn_name, gemm_mo
 
 
 def test_w4a16_nvfp4_uses_scale_aware_weight_only_profile():
-    mode = common.GEMMQuantMode.w4a16_nvfp4
+    for mode in (common.GEMMQuantMode.w4a16_nvfp4, common.MoEQuantMode.w4a16_nvfp4):
+        assert mode.value.memory == 9 / 16
+        assert mode.value.compute == 1
+        assert mode.value.compute_dtype == "bfloat16"
 
-    assert mode.value.memory == 9 / 16
-    assert mode.value.compute == 1
-    assert mode.value.compute_dtype == "bfloat16"
+
+def test_qwen35_nvfp4_exclusions_keep_attention_and_shared_experts_bf16():
+    model = get_model("nvidia/Qwen3.5-122B-A10B-NVFP4", _model_config(), backend_name="trtllm")
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+
+    assert by_name["context_gdn_in_proj_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_qkv_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_gdn_shared_gate_up_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_gdn_moe"]._quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_gemma4_exclusions_keep_attention_and_mlp_bf16():
+    model = get_model("nvidia/Gemma-4-26B-A4B-NVFP4", _model_config(), backend_name="trtllm")
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+
+    assert by_name["context_swa_qkv_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_swa_shared_mlp_gate_up_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_swa_moe"]._quant_mode == common.MoEQuantMode.bfloat16
+
+
+def test_kimi_k26_exclusions_keep_attention_and_shared_experts_bf16():
+    model = get_model("nvidia/Kimi-K2.6-NVFP4", _model_config(), backend_name="vllm")
+    by_name = {op._name: op for op in model.context_ops + model.generation_ops}
+    attention_block = by_name["context_mla_block"]
+
+    assert attention_block._primary._gemm_quant_mode == common.GEMMQuantMode.bfloat16
+    assert all(
+        op._quant_mode == common.GEMMQuantMode.bfloat16
+        for op in attention_block._fallback
+        if hasattr(op, "_quant_mode")
+    )
+    assert by_name["context_shared_gate_up_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert by_name["context_moe"]._quant_mode == common.MoEQuantMode.nvfp4
 
 
 def test_minimax_m3_uses_mxfp8_lane_for_non_experts_and_nvfp4_for_experts():

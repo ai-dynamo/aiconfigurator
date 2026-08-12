@@ -1239,6 +1239,8 @@ class MoEQuantMode(Enum):
     # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
     # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
     # GPT-OSS's triton_kernels mxfp4 path. (DSV4 Hopper silicon data pending.)
+    w4a16_nvfp4 = QuantMapping(9 / 16, 1, "w4a16_nvfp4", "bfloat16")
+    # Scale-aware NVFP4 weights dequantized into the BF16 MoE compute lane.
 
 
 class FMHAQuantMode(Enum):

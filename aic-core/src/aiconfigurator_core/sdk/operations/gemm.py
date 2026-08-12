@@ -326,13 +326,11 @@ class GEMM(Operation):
 
         ``fp8_static`` is modeled from the dynamic ``fp8`` GEMM row plus
         separately collected activation-quantization overhead tables.
-        ``w4a16_nvfp4`` has its own scale-aware SOL/memory profile but reuses
-        the weight-only ``int4_wo`` silicon-utilization table.
+        Other modes retain their own identity so the empirical transfer policy
+        can choose and attribute any fallback reference explicitly.
         """
         if quant_mode == common.GEMMQuantMode.fp8_static:
             return common.GEMMQuantMode.fp8
-        if quant_mode == common.GEMMQuantMode.w4a16_nvfp4:
-            return common.GEMMQuantMode.int4_wo
         return quant_mode
 
     @staticmethod
@@ -597,12 +595,6 @@ class GEMM(Operation):
         gemm_data_wrapper = database._gemm_data
 
         def get_silicon():
-            if quant_mode == common.GEMMQuantMode.w4a16_nvfp4:
-                raise PerfDataNotAvailableError(
-                    "No measured W4A16-NVFP4 GEMM lane is available; int4_wo rows "
-                    "are used only as an empirical utilization reference."
-                )
-
             def _to_performance_result(result, *, source: str = "silicon"):
                 """Normalize GEMM table entries into a PerformanceResult.
 

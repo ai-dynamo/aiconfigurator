@@ -294,6 +294,9 @@ pub enum MoeQuantMode {
     /// (`sglang_flashinfer_cutlass_moe`); loader-remapped from
     /// `w4a16_mxfp4` (mirrors Python `load_moe_data`).
     W4a16Mxfp4Cutlass,
+    /// Scale-aware NVFP4 weights dequantized into the BF16 MoE compute lane.
+    /// Kept last so existing serialized enum discriminants remain stable.
+    W4a16Nvfp4,
 }
 
 impl MoeQuantMode {
@@ -357,6 +360,12 @@ impl MoeQuantMode {
                 memory: 0.5,
                 compute: 1.0,
                 name: "w4a16_mxfp4_cutlass",
+                compute_dtype: Some(ComputeDtype::Bfloat16),
+            },
+            Self::W4a16Nvfp4 => QuantMapping {
+                memory: 9.0 / 16.0,
+                compute: 1.0,
+                name: "w4a16_nvfp4",
                 compute_dtype: Some(ComputeDtype::Bfloat16),
             },
         }

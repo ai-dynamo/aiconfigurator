@@ -17,6 +17,8 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.gemm import GEMM
 
+pytestmark = pytest.mark.unit
+
 
 class TestGEMMCacheStructure:
     """The three caches must exist as class-level dicts."""
@@ -63,16 +65,22 @@ class TestStaticHelpers:
         assert result == common.GEMMQuantMode.fp8
 
     def test_normalize_passes_through_other_modes(self):
-        for qm in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8, common.GEMMQuantMode.nvfp4]:
+        for qm in [
+            common.GEMMQuantMode.bfloat16,
+            common.GEMMQuantMode.fp8,
+            common.GEMMQuantMode.nvfp4,
+            common.GEMMQuantMode.w4a16_nvfp4,
+        ]:
             assert GEMM._normalize_gemm_quant_mode_for_table(qm) == qm
 
-    def test_empirical_grid_key_separates_w4a16_nvfp4_from_int4_table_profile(self):
+    def test_empirical_grid_key_keeps_w4a16_nvfp4_table_identity(self):
         database = type("Database", (), {"system": "b200", "backend": "vllm", "version": "1.0"})()
 
         int4_key = GEMM._empirical_grid_key(database, common.GEMMQuantMode.int4_wo)
         nvfp4_key = GEMM._empirical_grid_key(database, common.GEMMQuantMode.w4a16_nvfp4)
 
-        assert int4_key[-2] == nvfp4_key[-2] == "int4_wo"
+        assert int4_key[-2] == "int4_wo"
+        assert nvfp4_key[-2] == "w4a16_nvfp4"
         assert int4_key[-1] == "int4_wo"
         assert nvfp4_key[-1] == "w4a16_nvfp4"
         assert int4_key != nvfp4_key
@@ -186,13 +194,9 @@ class TestQueryDelegation:
         )
         assert float(result) > 0
 
-    def test_w4a16_nvfp4_uses_int4_only_as_hybrid_empirical_reference(self, mutable_comprehensive_perf_db):
-        import copy
-
-        db = mutable_comprehensive_perf_db
-        db._gemm_data[common.GEMMQuantMode.int4_wo] = copy.deepcopy(db._gemm_data[common.GEMMQuantMode.bfloat16])
-
-        with pytest.raises(PerfDataNotAvailableError, match="No measured W4A16-NVFP4"):
+    def test_w4a16_nvfp4_uses_transfer_policy_instead_of_table_alias(self, comprehensive_perf_db):
+        db = comprehensive_perf_db
+        with pytest.raises(PerfDataNotAvailableError):
             db.query_gemm(
                 4,
                 256,

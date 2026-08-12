@@ -6,7 +6,7 @@ from __future__ import annotations
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor, quant_exclude_patterns
 
 
 @register_model("GEMMA4MIX")
@@ -58,12 +58,32 @@ class Gemma4MixModel(BaseModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            raw_config=model_info["raw_config"],
+            allow_checkpoint_split=not model_info["gemm_quant_mode_is_explicit"],
         )
         model.set_gemma4_config(model_info["extra_params"])
         return model
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        raw_config: dict | None = None,
+        allow_checkpoint_split: bool = True,
+    ) -> None:
         super().__init__(*args)
+        exclusions = tuple(str(pattern).lower() for pattern in quant_exclude_patterns(raw_config or {}))
+        self._projection_gemm_quant_mode = self.config.gemm_quant_mode
+        self._shared_mlp_gemm_quant_mode = self.config.gemm_quant_mode
+        self._routed_moe_quant_mode = self.config.moe_quant_mode
+        if allow_checkpoint_split:
+            if any("self_attn" in pattern for pattern in exclusions):
+                self._projection_gemm_quant_mode = common.GEMMQuantMode.bfloat16
+            if any(".mlp" in pattern for pattern in exclusions):
+                self._shared_mlp_gemm_quant_mode = common.GEMMQuantMode.bfloat16
+                self._routed_moe_quant_mode = common.MoEQuantMode.bfloat16
         # Gemma 4 family includes both MoE variants (e.g. gemma-4-26B-A4B-it,
         # topk=8/num_experts=128) and dense variants (e.g. gemma-4-31B-it,
         # gemma-4-E2B-it, gemma-4-E4B-it: topk=0/num_experts=None). For dense
@@ -162,7 +182,7 @@ class Gemma4MixModel(BaseModel):
 
     def _shared_mlp_ops(self, prefix: str, count: float, h: int, dense_inter_per_tp: int) -> list:
         """Shared dense MLP (Gemma4TextMLP): gated SwiGLU. Runs on every layer."""
-        gemm_q = self.config.gemm_quant_mode
+        gemm_q = self._shared_mlp_gemm_quant_mode
         return [
             ops.GEMM(f"{prefix}_shared_mlp_gate_up_gemm", count, 2 * dense_inter_per_tp, h, gemm_q),
             ops.ElementWise(f"{prefix}_shared_mlp_act", count, 2 * dense_inter_per_tp, dense_inter_per_tp, 0.8),
@@ -243,10 +263,10 @@ class Gemma4MixModel(BaseModel):
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
         pp = self.config.pp_size
-        gemm_q = self.config.gemm_quant_mode
+        gemm_q = self._projection_gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
         fmha_q = self.config.fmha_quant_mode
-        moe_q = self.config.moe_quant_mode
+        moe_q = self._routed_moe_quant_mode
         wl_dist = (
             self.config.workload_distribution + f"_{self._power_law_alpha}"
             if self.config.workload_distribution == "power_law"
@@ -383,9 +403,9 @@ class Gemma4MixModel(BaseModel):
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
         pp = self.config.pp_size
-        gemm_q = self.config.gemm_quant_mode
+        gemm_q = self._projection_gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
-        moe_q = self.config.moe_quant_mode
+        moe_q = self._routed_moe_quant_mode
         wl_dist = (
             self.config.workload_distribution + f"_{self._power_law_alpha}"
             if self.config.workload_distribution == "power_law"

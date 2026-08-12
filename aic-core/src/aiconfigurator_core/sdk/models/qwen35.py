@@ -6,7 +6,81 @@ from __future__ import annotations
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.helpers import (
+    _is_routing_expert_target,
+    _normalize_mixed_precision_layer_algo,
+    mtp_scale_factor,
+    quant_exclude_patterns,
+)
+
+
+def _qwen35_mixed_precision_gemm_modes(
+    raw_config: dict,
+    default: common.GEMMQuantMode,
+    *,
+    allow_checkpoint_split: bool,
+) -> tuple[common.GEMMQuantMode, common.GEMMQuantMode, common.GEMMQuantMode]:
+    """Resolve projection, dense-FFN, and shared-expert GEMM modes.
+
+    Explicit per-layer metadata is authoritative. When a category has no
+    explicit entry, checkpoint exclusions keep it in BF16 instead of applying
+    a broad ``Linear`` config group to every operation.
+    """
+    if not allow_checkpoint_split:
+        return default, default, default
+
+    modes = {"projection": default, "dense_ffn": default, "shared_expert": default}
+    explicit: set[str] = set()
+    algo_modes = {
+        "fp8": common.GEMMQuantMode.fp8_static,
+        "mxfp8": common.GEMMQuantMode.fp8,
+        "nvfp4": common.GEMMQuantMode.nvfp4,
+        "w4a16_nvfp4": common.GEMMQuantMode.w4a16_nvfp4,
+    }
+
+    layer_maps: list[object] = []
+    hf_quant = raw_config.get("hf_quant_config")
+    if isinstance(hf_quant, dict):
+        quantization = hf_quant.get("quantization")
+        if isinstance(quantization, dict):
+            layer_maps.append(quantization.get("quantized_layers"))
+    quantization = raw_config.get("quantization_config")
+    if isinstance(quantization, dict):
+        layer_maps.append(quantization.get("quantized_layers"))
+
+    for layer_map in layer_maps:
+        if not isinstance(layer_map, dict):
+            continue
+        for target, metadata in layer_map.items():
+            algo_value = (
+                metadata.get("quant_algo") or metadata.get("quantization_algo") or metadata.get("quant_method")
+                if isinstance(metadata, dict)
+                else metadata
+            )
+            mode = algo_modes.get(_normalize_mixed_precision_layer_algo(algo_value))
+            if mode is None:
+                continue
+            target_name = str(target).lower()
+            category = None
+            if ".linear_attn." in target_name or ".self_attn." in target_name:
+                category = "projection"
+            elif "shared_expert" in target_name:
+                category = "shared_expert"
+            elif ".mlp." in target_name and not _is_routing_expert_target(target_name):
+                category = "dense_ffn"
+            if category is not None:
+                modes[category] = mode
+                explicit.add(category)
+
+    exclusions = tuple(str(pattern).lower() for pattern in quant_exclude_patterns(raw_config))
+    if "projection" not in explicit and any("linear_attn" in p or "self_attn" in p for p in exclusions):
+        modes["projection"] = common.GEMMQuantMode.bfloat16
+    if "shared_expert" not in explicit and any("shared_expert" in p for p in exclusions):
+        modes["shared_expert"] = common.GEMMQuantMode.bfloat16
+    if "dense_ffn" not in explicit and any(".mlp" in p and "shared_expert" not in p for p in exclusions):
+        modes["dense_ffn"] = common.GEMMQuantMode.bfloat16
+
+    return modes["projection"], modes["dense_ffn"], modes["shared_expert"]
 
 
 @register_model("QWEN35")
@@ -42,14 +116,32 @@ class Qwen35Model(BaseModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
+            raw_config=model_info["raw_config"],
+            allow_checkpoint_split=not model_info["gemm_quant_mode_is_explicit"],
             backend_name=backend_name,
         )
 
-    def __init__(self, *args, backend_name: str) -> None:
+    def __init__(
+        self,
+        *args,
+        raw_config: dict | None = None,
+        allow_checkpoint_split: bool = True,
+        backend_name: str,
+    ) -> None:
         super().__init__(*args)
         self._backend_name = backend_name
         cfg: common.Qwen35Config = self.extra_params
         assert isinstance(cfg, common.Qwen35Config), "Qwen35Model requires Qwen35Config extra_params"
+
+        (
+            self._projection_gemm_quant_mode,
+            self._dense_ffn_gemm_quant_mode,
+            self._shared_expert_gemm_quant_mode,
+        ) = _qwen35_mixed_precision_gemm_modes(
+            raw_config or {},
+            self.config.gemm_quant_mode,
+            allow_checkpoint_split=allow_checkpoint_split,
+        )
 
         tp = self.config.tp_size
         if cfg.linear_num_key_heads % tp != 0 or cfg.linear_num_value_heads % tp != 0:
@@ -136,7 +228,9 @@ class Qwen35Model(BaseModel):
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
         attn_ar_folded = self._sglang_folds_attn_ar()
-        gemm_q = self.config.gemm_quant_mode
+        projection_gemm_q = self._projection_gemm_quant_mode
+        dense_ffn_gemm_q = self._dense_ffn_gemm_quant_mode
+        shared_expert_gemm_q = self._shared_expert_gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
         fmha_q = self.config.fmha_quant_mode
         moe_q = self.config.moe_quant_mode
@@ -177,9 +271,9 @@ class Qwen35Model(BaseModel):
             self.context_ops.extend(
                 [
                     ops.ElementWise("context_gdn_norm", c, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("context_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
+                    ops.GEMM("context_gdn_in_proj_gemm", c, gdn_in_proj_out, h, projection_gemm_q),
                     # 2*nv/tp drops below the collected GEMM n-grid at high TP.
-                    ops.GEMM("context_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q, below_grid_sol=True),
+                    ops.GEMM("context_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, projection_gemm_q, below_grid_sol=True),
                     ops.GDNKernel(
                         "context_gdn_conv1d",
                         c,
@@ -204,13 +298,31 @@ class Qwen35Model(BaseModel):
                         hv,
                         d_conv,
                     ),
-                    ops.GEMM("context_gdn_out_proj_gemm", c, h, gdn_out_proj_in, gemm_q, low_precision_input=True),
+                    ops.GEMM(
+                        "context_gdn_out_proj_gemm",
+                        c,
+                        h,
+                        gdn_out_proj_in,
+                        projection_gemm_q,
+                        low_precision_input=True,
+                    ),
                     *([] if attn_ar_folded else [ops.CustomAllReduce("context_gdn_ar", c, h, tp)]),
                 ]
             )
             self.context_ops.extend(
                 self._ffn_context_ops(
-                    "context_gdn", c, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg
+                    "context_gdn",
+                    c,
+                    h,
+                    tp,
+                    moe_tp,
+                    moe_ep,
+                    attn_dp,
+                    dense_ffn_gemm_q,
+                    shared_expert_gemm_q,
+                    moe_q,
+                    workload_dist,
+                    cfg,
                 )
             )
 
@@ -223,7 +335,7 @@ class Qwen35Model(BaseModel):
             self.context_ops.extend(
                 [
                     ops.ElementWise("context_full_attn_norm", c, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("context_qkv_gemm", c, qkv_out, h, gemm_q),
+                    ops.GEMM("context_qkv_gemm", c, qkv_out, h, projection_gemm_q),
                     ops.ContextAttention(
                         "context_attention",
                         c,
@@ -234,13 +346,31 @@ class Qwen35Model(BaseModel):
                         head_size=self._head_size,
                         use_qk_norm=True,
                     ),
-                    ops.GEMM("context_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True),
+                    ops.GEMM(
+                        "context_proj_gemm",
+                        c,
+                        h,
+                        n_q_per_tp * self._head_size,
+                        projection_gemm_q,
+                        low_precision_input=True,
+                    ),
                     *([] if attn_ar_folded else [ops.CustomAllReduce("context_full_ar", c, h, tp)]),
                 ]
             )
             self.context_ops.extend(
                 self._ffn_context_ops(
-                    "context_full", c, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg
+                    "context_full",
+                    c,
+                    h,
+                    tp,
+                    moe_tp,
+                    moe_ep,
+                    attn_dp,
+                    dense_ffn_gemm_q,
+                    shared_expert_gemm_q,
+                    moe_q,
+                    workload_dist,
+                    cfg,
                 )
             )
 
@@ -348,7 +478,19 @@ class Qwen35Model(BaseModel):
         return ops.ElementWise(f"{prefix}_shared_merge", count, 2 * h, h, 0.8, scale_num_tokens=scale_num_tokens)
 
     def _ffn_context_ops(
-        self, prefix, count, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg: common.Qwen35Config
+        self,
+        prefix,
+        count,
+        h,
+        tp,
+        moe_tp,
+        moe_ep,
+        attn_dp,
+        dense_ffn_gemm_q,
+        shared_expert_gemm_q,
+        moe_q,
+        workload_dist,
+        cfg: common.Qwen35Config,
     ):
         """Return FFN ops for context phase: dense SwiGLU or MoE."""
         ops_list = [ops.ElementWise(f"{prefix}_ffn_norm", count, 2 * h, 2 * h, 0.8)]
@@ -425,17 +567,26 @@ class Qwen35Model(BaseModel):
                 # attn-TP scattered token slice.
                 shared_scale = tp if self._sglang_deepep() else 1
                 ops_list.extend(
-                    self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg, scale_num_tokens=shared_scale)
+                    self._shared_expert_ops(
+                        prefix, count, h, tp, shared_expert_gemm_q, cfg, scale_num_tokens=shared_scale
+                    )
                 )
                 ops_list.append(self._shared_merge_op(prefix, count, h, scale_num_tokens=shared_scale))
         else:
             ops_list.extend(
                 [
-                    ops.GEMM(f"{prefix}_gate_ffn1_gemm", count, 2 * self._inter_size // tp, h, gemm_q),
+                    ops.GEMM(f"{prefix}_gate_ffn1_gemm", count, 2 * self._inter_size // tp, h, dense_ffn_gemm_q),
                     ops.ElementWise(
                         f"{prefix}_act_gate", count, 2 * self._inter_size // tp, self._inter_size // tp, 0.8
                     ),
-                    ops.GEMM(f"{prefix}_ffn2_gemm", count, h, self._inter_size // tp, gemm_q, low_precision_input=True),
+                    ops.GEMM(
+                        f"{prefix}_ffn2_gemm",
+                        count,
+                        h,
+                        self._inter_size // tp,
+                        dense_ffn_gemm_q,
+                        low_precision_input=True,
+                    ),
                     ops.CustomAllReduce(f"{prefix}_ffn_ar", count, h, tp),
                 ]
             )
@@ -450,7 +601,9 @@ class Qwen35Model(BaseModel):
         moe_ep = self.config.moe_ep_size
         attn_dp = self.config.attention_dp_size
         attn_ar_folded = self._sglang_folds_attn_ar()
-        gemm_q = self.config.gemm_quant_mode
+        projection_gemm_q = self._projection_gemm_quant_mode
+        dense_ffn_gemm_q = self._dense_ffn_gemm_quant_mode
+        shared_expert_gemm_q = self._shared_expert_gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
         moe_q = self.config.moe_quant_mode
         workload_dist = (
@@ -487,8 +640,10 @@ class Qwen35Model(BaseModel):
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_gdn_norm", c, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("generation_gdn_in_proj_gemm", c, gdn_in_proj_out, h, gemm_q),
-                    ops.GEMM("generation_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, gemm_q, below_grid_sol=True),
+                    ops.GEMM("generation_gdn_in_proj_gemm", c, gdn_in_proj_out, h, projection_gemm_q),
+                    ops.GEMM(
+                        "generation_gdn_in_proj_ba_gemm", c, gdn_ba_out, h, projection_gemm_q, below_grid_sol=True
+                    ),
                     ops.GDNKernel(
                         "generation_gdn_conv1d",
                         c,
@@ -513,13 +668,31 @@ class Qwen35Model(BaseModel):
                         hv,
                         d_conv,
                     ),
-                    ops.GEMM("generation_gdn_out_proj_gemm", c, h, gdn_out_proj_in, gemm_q, low_precision_input=True),
+                    ops.GEMM(
+                        "generation_gdn_out_proj_gemm",
+                        c,
+                        h,
+                        gdn_out_proj_in,
+                        projection_gemm_q,
+                        low_precision_input=True,
+                    ),
                     *([] if attn_ar_folded else [ops.CustomAllReduce("generation_gdn_ar", c, h, tp)]),
                 ]
             )
             self.generation_ops.extend(
                 self._ffn_generation_ops(
-                    "generation_gdn", c, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg
+                    "generation_gdn",
+                    c,
+                    h,
+                    tp,
+                    moe_tp,
+                    moe_ep,
+                    attn_dp,
+                    dense_ffn_gemm_q,
+                    shared_expert_gemm_q,
+                    moe_q,
+                    workload_dist,
+                    cfg,
                 )
             )
 
@@ -532,7 +705,7 @@ class Qwen35Model(BaseModel):
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_full_attn_norm", c, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("generation_qkv_gemm", c, qkv_out, h, gemm_q),
+                    ops.GEMM("generation_qkv_gemm", c, qkv_out, h, projection_gemm_q),
                     ops.GenerationAttention(
                         "generation_attention",
                         c,
@@ -543,14 +716,30 @@ class Qwen35Model(BaseModel):
                         use_qk_norm=True,
                     ),
                     ops.GEMM(
-                        "generation_proj_gemm", c, h, n_q_per_tp * self._head_size, gemm_q, low_precision_input=True
+                        "generation_proj_gemm",
+                        c,
+                        h,
+                        n_q_per_tp * self._head_size,
+                        projection_gemm_q,
+                        low_precision_input=True,
                     ),
                     *([] if attn_ar_folded else [ops.CustomAllReduce("generation_full_ar", c, h, tp)]),
                 ]
             )
             self.generation_ops.extend(
                 self._ffn_generation_ops(
-                    "generation_full", c, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg
+                    "generation_full",
+                    c,
+                    h,
+                    tp,
+                    moe_tp,
+                    moe_ep,
+                    attn_dp,
+                    dense_ffn_gemm_q,
+                    shared_expert_gemm_q,
+                    moe_q,
+                    workload_dist,
+                    cfg,
                 )
             )
 
@@ -562,7 +751,19 @@ class Qwen35Model(BaseModel):
         )
 
     def _ffn_generation_ops(
-        self, prefix, count, h, tp, moe_tp, moe_ep, attn_dp, gemm_q, moe_q, workload_dist, cfg: common.Qwen35Config
+        self,
+        prefix,
+        count,
+        h,
+        tp,
+        moe_tp,
+        moe_ep,
+        attn_dp,
+        dense_ffn_gemm_q,
+        shared_expert_gemm_q,
+        moe_q,
+        workload_dist,
+        cfg: common.Qwen35Config,
     ):
         """Return FFN ops for generation phase: dense SwiGLU or MoE."""
         ops_list = [ops.ElementWise(f"{prefix}_ffn_norm", count, 2 * h, 2 * h, 0.8)]
@@ -617,7 +818,9 @@ class Qwen35Model(BaseModel):
                 )
             )
             shared_ops = (
-                self._shared_expert_ops(prefix, count, h, tp, gemm_q, cfg) if cfg.shared_expert_inter_size > 0 else []
+                self._shared_expert_ops(prefix, count, h, tp, shared_expert_gemm_q, cfg)
+                if cfg.shared_expert_inter_size > 0
+                else []
             )
             # vLLM and sglang decode run shared and routed experts on
             # parallel CUDA streams; sglang DeepEP runs them serially.
@@ -657,11 +860,18 @@ class Qwen35Model(BaseModel):
         else:
             ops_list.extend(
                 [
-                    ops.GEMM(f"{prefix}_gate_ffn1_gemm", count, 2 * self._inter_size // tp, h, gemm_q),
+                    ops.GEMM(f"{prefix}_gate_ffn1_gemm", count, 2 * self._inter_size // tp, h, dense_ffn_gemm_q),
                     ops.ElementWise(
                         f"{prefix}_act_gate", count, 2 * self._inter_size // tp, self._inter_size // tp, 0.8
                     ),
-                    ops.GEMM(f"{prefix}_ffn2_gemm", count, h, self._inter_size // tp, gemm_q, low_precision_input=True),
+                    ops.GEMM(
+                        f"{prefix}_ffn2_gemm",
+                        count,
+                        h,
+                        self._inter_size // tp,
+                        dense_ffn_gemm_q,
+                        low_precision_input=True,
+                    ),
                     ops.CustomAllReduce(f"{prefix}_ffn_ar", count, h, tp),
                 ]
             )

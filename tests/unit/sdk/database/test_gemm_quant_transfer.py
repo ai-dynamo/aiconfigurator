@@ -81,6 +81,38 @@ def test_xprofile_weight_only_borrows_bf16_not_fp8(comprehensive_perf_db):
     assert not math.isclose(borrowed, expected_from_fp8, rel_tol=1e-6)
 
 
+def test_w4a16_nvfp4_borrows_bf16_via_xprofile(comprehensive_perf_db):
+    """The scale-aware weight-only lane has its own identity and reaches BF16
+    only through the explicit XPROFILE relation, never an INT4 table alias."""
+    db = comprehensive_perf_db
+    m, n, k = 16, 256, 512
+    quant = common.GEMMQuantMode.w4a16_nvfp4
+    _assert_dataless(db, quant)
+
+    with util_empirical.capture_provenance() as tags:
+        borrowed = float(db.query_gemm(m, n, k, quant, database_mode=common.DatabaseMode.HYBRID))
+
+    assert "xprofile" in tags
+    assert borrowed > 0
+
+
+def test_w4a16_nvfp4_balanced_policy_rejects_missing_profile(comprehensive_perf_db):
+    db = comprehensive_perf_db
+    _assert_dataless(db, common.GEMMQuantMode.w4a16_nvfp4)
+    db.set_transfer_policy("balanced")
+    try:
+        with pytest.raises(EmpiricalNotImplementedError):
+            db.query_gemm(
+                16,
+                256,
+                512,
+                common.GEMMQuantMode.w4a16_nvfp4,
+                database_mode=common.DatabaseMode.HYBRID,
+            )
+    finally:
+        db.set_transfer_policy(None)
+
+
 def test_xprofile_is_policy_gated(comprehensive_perf_db):
     """balanced (XSHAPE+XQUANT) finds nothing for (0.5, 1) — no same-profile
     sibling — and must raise the typed empirical miss, not silently borrow."""

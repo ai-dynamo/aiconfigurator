@@ -610,7 +610,7 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
-def test_engine_config_json_preserves_w4a16_nvfp4_weight_profile() -> None:
+def test_engine_config_json_preserves_w4a16_nvfp4_weight_and_moe_profiles() -> None:
     model = SimpleNamespace(
         model_path="Test/W4A16Nvfp4",
         architecture="Qwen3ForCausalLM",
@@ -621,7 +621,7 @@ def test_engine_config_json_preserves_w4a16_nvfp4_weight_profile() -> None:
             moe_tp_size=None,
             moe_ep_size=None,
             gemm_quant_mode=common.GEMMQuantMode.w4a16_nvfp4,
-            moe_quant_mode=None,
+            moe_quant_mode=common.MoEQuantMode.w4a16_nvfp4,
             kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
             fmha_quant_mode=common.FMHAQuantMode.bfloat16,
         ),
@@ -631,6 +631,7 @@ def test_engine_config_json_preserves_w4a16_nvfp4_weight_profile() -> None:
     config = json.loads(rust_engine_step._engine_config_json(model, database))
 
     assert config["weight_dtype"] == "w4a16_nvfp4"
+    assert config["moe_dtype"] == "w4a16_nvfp4"
 
 
 def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch) -> None:

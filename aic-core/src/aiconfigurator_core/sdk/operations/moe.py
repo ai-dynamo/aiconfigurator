@@ -88,6 +88,7 @@ _MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
     (2, 1): 0.53,  # w16a16 / bfloat16              [data]
     (1, 1): 0.45,  # w8a16                          [inferred]
     (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
+    (0.5625, 1): 0.07,  # w4a16 / scale-aware nvfp4  [inferred]
     (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
     (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]
     (1, 4): 0.30,  # w8a4                           [inferred]

@@ -1030,6 +1030,7 @@ fn moe_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
         DataType::W4afp8 => Some("w4afp8"),
         DataType::W4a16Mxfp4 => Some("w4a16_mxfp4"),
         DataType::W4a8Mxfp4Mxfp8 => Some("w4a8_mxfp4_mxfp8"),
+        DataType::W4a16Nvfp4 => Some("w4a16_nvfp4"),
         _ => None,
     }
 }
@@ -1237,6 +1238,14 @@ mod tests {
         assert_ne!(
             gemm_quant_name(Some(&DataType::W4a16Nvfp4)),
             gemm_quant_name(Some(&DataType::Int4))
+        );
+        assert_eq!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            Some("w4a16_nvfp4")
+        );
+        assert_ne!(
+            moe_quant_name(Some(&DataType::W4a16Nvfp4)),
+            moe_quant_name(Some(&DataType::Int4))
         );
     }
 
