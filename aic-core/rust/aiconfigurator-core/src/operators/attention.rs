@@ -176,6 +176,23 @@ pub struct ContextAttentionOp {
     /// added once, not per chunk.
     #[serde(default = "crate::operators::gemm::default_seq_split")]
     pub cp_size: u32,
+    /// Kernel-source lane precedence, RESOLVED python-side
+    /// (`sdk/engine.py::_attention_lane_order` = `resolve_lane_order` +
+    /// `attention.lane_walk_order`). This is the COMPLETE walk order — pinned
+    /// lanes, density-ranked donor tiers, `"default"`, and the table's own
+    /// leftover lanes — and it is REPLAYED VERBATIM here: no re-deriving, no
+    /// extending, no sorting. Appended at the struct TAIL because bincode
+    /// payloads are positional (ENGINE_SPEC_SCHEMA_VERSION 8).
+    #[serde(default = "default_lane_order")]
+    pub lane_order: Vec<String>,
+}
+
+/// Lane precedence for ops built without an explicit order (Rust-side
+/// constructors and pre-v8 hand-written JSON). Mirrors the Python fallback in
+/// `_attention_lane_order` for an unresolvable database: the always-valid
+/// `("default",)`.
+pub(crate) fn default_lane_order() -> Vec<String> {
+    vec![crate::perf_database::attention::DEFAULT_LANE.to_string()]
 }
 
 impl ContextAttentionOp {
@@ -198,6 +215,7 @@ impl ContextAttentionOp {
             fmha_quant_mode,
             use_qk_norm: false,
             cp_size: 1,
+            lane_order: default_lane_order(),
         }
     }
 
@@ -216,6 +234,7 @@ impl ContextAttentionOp {
         let ctx = |s: u32, pfx: u32| -> Result<PerformanceResult, AicError> {
             query_context_attention_table(
                 db,
+                &self.lane_order,
                 batch_size,
                 s,
                 pfx,
@@ -293,6 +312,11 @@ pub struct GenerationAttentionOp {
     pub head_size: u32,
     pub window_size: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
+    /// Kernel-source lane precedence; see
+    /// [`ContextAttentionOp::lane_order`] (appended at the struct TAIL —
+    /// bincode payloads are positional, ENGINE_SPEC_SCHEMA_VERSION 8).
+    #[serde(default = "default_lane_order")]
+    pub lane_order: Vec<String>,
 }
 
 impl GenerationAttentionOp {
@@ -311,6 +335,7 @@ impl GenerationAttentionOp {
             head_size,
             window_size: 0,
             kv_cache_dtype,
+            lane_order: default_lane_order(),
         }
     }
 
@@ -323,6 +348,7 @@ impl GenerationAttentionOp {
     ) -> Result<PerformanceResult, AicError> {
         let mut result = query_generation_attention_table(
             db,
+            &self.lane_order,
             batch_size,
             kv_seq_tokens,
             self.n,
@@ -426,6 +452,7 @@ impl EncoderAttentionOp {
 #[allow(clippy::too_many_arguments)]
 fn query_context_attention_table(
     db: &PerfDatabase,
+    lane_order: &[String],
     b: u32,
     s: u32,
     prefix: u32,
@@ -439,6 +466,7 @@ fn query_context_attention_table(
     let silicon = || -> Result<PerformanceResult, AicError> {
         let full_s = s + prefix;
         let value = db.attention.query_context(
+            lane_order,
             b,
             full_s,
             n,
@@ -477,6 +505,7 @@ fn query_context_attention_table(
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_attention_empirical(
                 db,
+                lane_order,
                 b,
                 s,
                 prefix,
@@ -494,6 +523,7 @@ fn query_context_attention_table(
             Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                 context_attention_empirical(
                     db,
+                    lane_order,
                     b,
                     s,
                     prefix,
@@ -512,6 +542,14 @@ fn query_context_attention_table(
     }
 }
 
+/// Cache-key fragment for a lane walk. Python folds the whole `lane_order`
+/// tuple into its `util_empirical.grid_for` cache key, so two ops with
+/// different `attention_backend` overrides never share a cached util grid;
+/// mirror that here.
+fn lane_key(lane_order: &[String]) -> String {
+    lane_order.join(">")
+}
+
 /// `SOL(query)/util` for context (prefill) attention. Mirrors Python
 /// `_query_context_attention_table::get_empirical`: the query SOL always uses
 /// the real window/prefix; the UTIL carrier is borrowed by slice — exact
@@ -521,6 +559,7 @@ fn query_context_attention_table(
 #[allow(clippy::too_many_arguments)]
 fn context_attention_empirical(
     db: &PerfDatabase,
+    lane_order: &[String],
     b: u32,
     s: u32,
     prefix: u32,
@@ -558,7 +597,8 @@ fn context_attention_empirical(
         // per-sample SOL is the prefix=0 specialization at the slice's own
         // head_size/window (c = [n, full_s, b]).
         let key = format!(
-            "ctx_attn:{}:{}:{}:{}:{}",
+            "ctx_attn:{}:{}:{}:{}:{}:{}",
+            lane_key(lane_order),
             fmha_quant.name(),
             kv_quant.name(),
             n_kv_lookup,
@@ -567,6 +607,7 @@ fn context_attention_empirical(
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
             match db.attention.context_points(
+                lane_order,
                 fmha_quant,
                 kv_quant,
                 n_kv_lookup,
@@ -611,6 +652,7 @@ fn context_attention_empirical(
         if db.transfer_policy.contains(TransferKind::XShape) {
             if let Some((ref_grid, ref_hs)) = ctx_headsize_ref_grid(
                 db,
+                lane_order,
                 fmha_quant,
                 kv_quant,
                 n_kv_lookup,
@@ -634,34 +676,58 @@ fn context_attention_empirical(
 
 /// Reference util grid for context attention borrowed from the nearest
 /// collected head_size (same fmha/kv/n_kv/window). Mirrors Python
-/// `_ctx_headsize_ref_grid`: built with the REFERENCE slice's own SOL
-/// (reference head_size in the formula). `Ok(None)` when nothing usable is
-/// collected.
+/// `_ctx_headsize_ref_grid` + `_ref_lane_and_head_size`: walk the lane order
+/// and take the FIRST lane that both offers a reference head_size for
+/// `target_hs` AND carries the full `(ref_hs, window_size)` slice — the same
+/// own-lane-first / donor-gap-fill rule the direct lookups use. The grid is
+/// built with the REFERENCE slice's own SOL (reference head_size in the
+/// formula). `Ok(None)` when no lane qualifies.
+#[allow(clippy::too_many_arguments)]
 fn ctx_headsize_ref_grid(
     db: &PerfDatabase,
+    lane_order: &[String],
     fmha_quant: FmhaQuantMode,
     kv_quant: KvCacheQuantMode,
     n_kv_lookup: u32,
     target_hs: u32,
     window_size: u32,
 ) -> Result<Option<(std::sync::Arc<UtilGrid>, u32)>, AicError> {
-    let head_sizes = match db
-        .attention
-        .context_head_sizes(fmha_quant, kv_quant, n_kv_lookup)
-    {
-        Ok(sizes) => sizes,
-        Err(err) if err.is_missing_perf_data() => return Ok(None),
-        Err(err) => return Err(err),
-    };
-    let Some(ref_hs) = ref_head_size(&head_sizes, target_hs) else {
+    let mut chosen: Option<(&String, u32)> = None;
+    for lane in lane_order {
+        let head_sizes = match db
+            .attention
+            .context_head_sizes(lane, fmha_quant, kv_quant, n_kv_lookup)
+        {
+            Ok(sizes) => sizes,
+            Err(err) if err.is_missing_perf_data() => continue,
+            Err(err) => return Err(err),
+        };
+        let Some(ref_hs) = ref_head_size(&head_sizes, target_hs) else {
+            continue;
+        };
+        if db.attention.context_has_slice(
+            lane,
+            fmha_quant,
+            kv_quant,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        )? {
+            chosen = Some((lane, ref_hs));
+            break;
+        }
+    }
+    let Some((ref_lane, ref_hs)) = chosen else {
         return Ok(None);
     };
     let spec = &db.system_spec;
     let attn_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
-    // Reference identity (ref_hs) + provenance in the key, so a policy that
-    // later reuses the same slice as own-shape cannot alias this grid.
+    // Reference identity (ref_lane + ref_hs) + provenance in the key, so a
+    // policy that later reuses the same slice as own-shape cannot alias this
+    // grid. Python keys the same way (`ref_lane` in its `grid_for` tuple).
     let key = format!(
-        "ctx_attn_xhs:{}:{}:{}:{}:{}:xshape",
+        "ctx_attn_xhs:{}:{}:{}:{}:{}:{}:xshape",
+        ref_lane,
         fmha_quant.name(),
         kv_quant.name(),
         n_kv_lookup,
@@ -669,10 +735,14 @@ fn ctx_headsize_ref_grid(
         window_size
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db
-            .attention
-            .context_points(fmha_quant, kv_quant, n_kv_lookup, ref_hs, window_size)
-        {
+        match db.attention.context_points(
+            std::slice::from_ref(ref_lane),
+            fmha_quant,
+            kv_quant,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        ) {
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     context_attention_sol_ms(
@@ -703,6 +773,7 @@ fn ctx_headsize_ref_grid(
 #[allow(clippy::too_many_arguments)]
 fn query_generation_attention_table(
     db: &PerfDatabase,
+    lane_order: &[String],
     b: u32,
     s: u32,
     n: u32,
@@ -735,25 +806,19 @@ fn query_generation_attention_table(
             )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
-            generation_attention_empirical(db, b, s, n, n_kv, head_size, window_size, kv_quant)?,
+            generation_attention_empirical(
+                db, lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
+            )?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => {
-            match db
-                .attention
-                .query_generation(b, s, n, n_kv, head_size, window_size, kv_quant)
-            {
+            match db.attention.query_generation(
+                lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
+            ) {
                 Ok(value) => Ok(silicon(value)),
                 Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                     generation_attention_empirical(
-                        db,
-                        b,
-                        s,
-                        n,
-                        n_kv,
-                        head_size,
-                        window_size,
-                        kv_quant,
+                        db, lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
                     )?,
                     Source::Empirical,
                 )),
@@ -761,6 +826,7 @@ fn query_generation_attention_table(
             }
         }
         _ => Ok(silicon(db.attention.query_generation(
+            lane_order,
             b,
             s,
             n,
@@ -781,6 +847,7 @@ fn query_generation_attention_table(
 #[allow(clippy::too_many_arguments)]
 fn generation_attention_empirical(
     db: &PerfDatabase,
+    lane_order: &[String],
     b: u32,
     s: u32,
     n: u32,
@@ -812,17 +879,21 @@ fn generation_attention_empirical(
     };
     for &slice_window in &windows {
         let key = format!(
-            "gen_attn:{}:{}:{}:{}",
+            "gen_attn:{}:{}:{}:{}:{}",
+            lane_key(lane_order),
             kv_quant.name(),
             n_kv_lookup,
             head_size,
             slice_window
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
-            match db
-                .attention
-                .generation_points(kv_quant, n_kv_lookup, head_size, slice_window)
-            {
+            match db.attention.generation_points(
+                lane_order,
+                kv_quant,
+                n_kv_lookup,
+                head_size,
+                slice_window,
+            ) {
                 Ok(points) => {
                     let sol = |c: &[f64]| {
                         generation_attention_sol_ms(
@@ -852,9 +923,14 @@ fn generation_attention_empirical(
             return Ok(latency);
         }
         if db.transfer_policy.contains(TransferKind::XShape) {
-            if let Some((ref_grid, _ref_hs)) =
-                gen_headsize_ref_grid(db, kv_quant, n_kv_lookup, head_size, slice_window)?
-            {
+            if let Some((ref_grid, _ref_hs)) = gen_headsize_ref_grid(
+                db,
+                lane_order,
+                kv_quant,
+                n_kv_lookup,
+                head_size,
+                slice_window,
+            )? {
                 let (latency, _) =
                     util_empirical::estimate(sol_time, &query, Some(&ref_grid), 1.0)?;
                 // Cross-head_size borrow (Python attention.py:802 "xshape").
@@ -869,36 +945,55 @@ fn generation_attention_empirical(
 
 /// Reference util grid for generation attention borrowed from the nearest
 /// collected head_size (same kv/n_kv/window). Mirrors Python
-/// `_gen_headsize_ref_grid` (reference head_size in the sample SOL).
+/// `_gen_headsize_ref_grid` + `_ref_lane_and_head_size` (lane walk as in
+/// [`ctx_headsize_ref_grid`]; reference head_size in the sample SOL).
 fn gen_headsize_ref_grid(
     db: &PerfDatabase,
+    lane_order: &[String],
     kv_quant: KvCacheQuantMode,
     n_kv_lookup: u32,
     target_hs: u32,
     window_size: u32,
 ) -> Result<Option<(std::sync::Arc<UtilGrid>, u32)>, AicError> {
-    let head_sizes = match db.attention.generation_head_sizes(kv_quant, n_kv_lookup) {
-        Ok(sizes) => sizes,
-        Err(err) if err.is_missing_perf_data() => return Ok(None),
-        Err(err) => return Err(err),
-    };
-    let Some(ref_hs) = ref_head_size(&head_sizes, target_hs) else {
+    let mut chosen: Option<(&String, u32)> = None;
+    for lane in lane_order {
+        let head_sizes = match db.attention.generation_head_sizes(lane, kv_quant, n_kv_lookup) {
+            Ok(sizes) => sizes,
+            Err(err) if err.is_missing_perf_data() => continue,
+            Err(err) => return Err(err),
+        };
+        let Some(ref_hs) = ref_head_size(&head_sizes, target_hs) else {
+            continue;
+        };
+        if db
+            .attention
+            .generation_has_slice(lane, kv_quant, n_kv_lookup, ref_hs, window_size)?
+        {
+            chosen = Some((lane, ref_hs));
+            break;
+        }
+    }
+    let Some((ref_lane, ref_hs)) = chosen else {
         return Ok(None);
     };
     let spec = &db.system_spec;
     let attn_flops = generation_attn_flops(spec, kv_quant)?;
     let key = format!(
-        "gen_attn_xhs:{}:{}:{}:{}:xshape",
+        "gen_attn_xhs:{}:{}:{}:{}:{}:xshape",
+        ref_lane,
         kv_quant.name(),
         n_kv_lookup,
         ref_hs,
         window_size
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db
-            .attention
-            .generation_points(kv_quant, n_kv_lookup, ref_hs, window_size)
-        {
+        match db.attention.generation_points(
+            std::slice::from_ref(ref_lane),
+            kv_quant,
+            n_kv_lookup,
+            ref_hs,
+            window_size,
+        ) {
             Ok(points) => {
                 let sol = |c: &[f64]| {
                     generation_attention_sol_ms(
@@ -1000,6 +1095,28 @@ fn encoder_attention_empirical(
     Ok(latency)
 }
 
+/// The b200_sxm/vllm/0.19.0 attention walk order Python serializes for an op
+/// with no `attention_backend` override (`resolve_lane_order` +
+/// `attention.lane_walk_order`): every named lane misses and the table's own
+/// leftover lane `vllm_flashinfer` serves. Shared by the hand-built op
+/// fixtures in the `fpm`, `engine::runtime` and `py` test modules, which all
+/// run against that data root.
+#[cfg(test)]
+pub(crate) fn b200_vllm_lane_order() -> Vec<String> {
+    [
+        "fa3",
+        "fla",
+        "flashinfer",
+        "triton",
+        "trtllm_mha",
+        "default",
+        "vllm_flashinfer",
+    ]
+    .iter()
+    .map(|lane| lane.to_string())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,17 +1131,37 @@ mod tests {
         PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load")
     }
 
+    /// The walk order Python serializes for a no-override op on
+    /// b200_sxm/vllm/0.19.0 — see [`b200_vllm_lane_order`]. Every pre-lane
+    /// assertion below is a query through this order, so the collapsed-table
+    /// values must survive the lane axis unchanged.
+    fn vllm_lanes() -> Vec<String> {
+        b200_vllm_lane_order()
+    }
+
+    /// Attach the b200/vllm walk order to a constructor-built op (whose
+    /// default is the always-valid `["default"]`).
+    fn with_vllm_lanes_ctx(mut op: ContextAttentionOp) -> ContextAttentionOp {
+        op.lane_order = vllm_lanes();
+        op
+    }
+
+    fn with_vllm_lanes_gen(mut op: GenerationAttentionOp) -> GenerationAttentionOp {
+        op.lane_order = vllm_lanes();
+        op
+    }
+
     #[test]
     fn context_attention_smoke() {
         let db = b200_vllm_db();
-        let op = ContextAttentionOp::new(
+        let op = with_vllm_lanes_ctx(ContextAttentionOp::new(
             "ctx",
             64,
             1,
             128,
             KvCacheQuantMode::Fp8,
             FmhaQuantMode::Bfloat16,
-        );
+        ));
         // prefix=0 means prefix_correction=1.0, table latency is consumed full.
         let result = op
             .query(&db, 8, 16384, 0, 1.0)
@@ -1039,14 +1176,14 @@ mod tests {
     #[test]
     fn context_attention_prefix_correction_shrinks_latency() {
         let db = b200_vllm_db();
-        let op = ContextAttentionOp::new(
+        let op = with_vllm_lanes_ctx(ContextAttentionOp::new(
             "ctx",
             64,
             1,
             128,
             KvCacheQuantMode::Fp8,
             FmhaQuantMode::Bfloat16,
-        );
+        ));
         // prefix=8192 -> prefix_correction = (16384^2 - 8192^2)/16384^2 = 0.75
         let with_prefix = op
             .query(&db, 8, 8192, 8192, 1.0)
@@ -1065,7 +1202,7 @@ mod tests {
     #[test]
     fn generation_attention_smoke() {
         let db = b200_vllm_db();
-        let op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
+        let op = with_vllm_lanes_gen(GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8));
         // b=32 isl+step=2 n=64 n_kv=4. The query averages 5 interp samples
         // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the raw grid,
         // matching Python's `_query_generation_attention_table`; s=1 sits
@@ -1189,6 +1326,7 @@ mod tests {
         for &(b, s, prefix, n, n_kv, hs, w, kv, expected) in cases {
             let result = query_context_attention_table(
                 &db,
+                &vllm_lanes(),
                 b,
                 s,
                 prefix,
@@ -1278,8 +1416,9 @@ mod tests {
             ),
         ];
         for &(b, s, n, n_kv, hs, w, kv, expected) in cases {
-            let result = query_generation_attention_table(&db, b, s, n, n_kv, hs, w, kv)
-                .expect("empirical query");
+            let result =
+                query_generation_attention_table(&db, &vllm_lanes(), b, s, n, n_kv, hs, w, kv)
+                    .expect("empirical query");
             let (latency, source) = (result.latency_ms, result.source);
             assert!(
                 (latency - expected).abs() < 1e-9,
@@ -1329,6 +1468,7 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result = query_context_attention_table(
             &db,
+            &vllm_lanes(),
             4,
             4096,
             0,
@@ -1347,6 +1487,7 @@ mod tests {
         // Collected slice: silicon exact hit, untouched by the fallback.
         let result = query_context_attention_table(
             &db,
+            &vllm_lanes(),
             8,
             16384,
             0,
@@ -1374,6 +1515,7 @@ mod tests {
         db.transfer_policy = crate::common::enums::TransferPolicy::OFF;
         let ctx = query_context_attention_table(
             &db,
+            &vllm_lanes(),
             4,
             4096,
             0,
@@ -1388,8 +1530,9 @@ mod tests {
             matches!(ctx, Err(AicError::EmpiricalNotImplemented(_))),
             "got {ctx:?}"
         );
-        let gen =
-            query_generation_attention_table(&db, 16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8);
+        let gen = query_generation_attention_table(
+            &db, &vllm_lanes(), 16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8,
+        );
         assert!(
             matches!(gen, Err(AicError::EmpiricalNotImplemented(_))),
             "got {gen:?}"
@@ -1435,6 +1578,7 @@ mod tests {
         let db = PerfDatabase::load(tmp.path(), "testsys", "vllm", "1.0").expect("db must load");
         let r = query_context_attention_table(
             &db,
+            &default_lane_order(),
             2,
             512,
             1024,
@@ -1477,6 +1621,8 @@ mod tests {
 
         // Context: table SOL (prefix inside the formula) + rope/kv_write
         // extras through the SOL mem-op formula, `* 1.1`, source preserved.
+        // SOL mode never touches the table, so the op's default lane_order
+        // (`default_lane_order()`, unused here) is fine as-is.
         let ctx = ContextAttentionOp::new(
             "ctx",
             64,
@@ -1542,22 +1688,25 @@ mod tests {
     /// leaf + empirical extras -> `Source::Mixed`, with the table's energy
     /// unchanged (the mem-op extras carry none). Guards the
     /// PerformanceResult composition against regressing to a latency-only
-    /// scalar add (which mislabeled the result `silicon`).
+    /// scalar add (which mislabeled the result `silicon`). Uses the real
+    /// b200/vllm lane order (`with_vllm_lanes_ctx` / `vllm_lanes()`) so both
+    /// the op and the direct table probe resolve the same SILICON slice.
     #[test]
     fn context_attention_silicon_merges_extras_provenance_into_mixed() {
         let db = b200_vllm_db();
-        let op = ContextAttentionOp::new(
+        let op = with_vllm_lanes_ctx(ContextAttentionOp::new(
             "ctx",
             64,
             8,
             128,
             KvCacheQuantMode::Fp8,
             FmhaQuantMode::Bfloat16,
-        );
+        ));
         let result = op.query(&db, 4, 2048, 256, 1.0).expect("ctx silicon");
 
         let table = query_context_attention_table(
             &db,
+            &vllm_lanes(),
             4,
             2048,
             256,
@@ -1579,5 +1728,167 @@ mod tests {
         assert_eq!(result.latency_ms, table.latency_ms + extras * 1.1);
         assert_eq!(result.energy_wms, table.energy_wms);
         assert_eq!(result.source, Source::Mixed);
+    }
+
+    // ------------------------------------------------------------------
+    // Kernel-source lanes in the empirical layer (AIC-1715/1716)
+    // ------------------------------------------------------------------
+
+    fn b200_sglang_0514_db() -> PerfDatabase {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        PerfDatabase::load(&systems_root, "b200_sxm", "sglang", "0.5.14").expect("db must load")
+    }
+
+    fn lane_vec(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Walk order Python serializes on b200_sxm/sglang/0.5.14 without and
+    /// with an `attention_backend="flashinfer"` override — see the twins in
+    /// `perf_database::attention::tests`.
+    fn sglang_default_lanes() -> Vec<String> {
+        lane_vec(&["triton", "trtllm_mha", "flashinfer", "fa3", "fla", "default"])
+    }
+
+    fn sglang_flashinfer_lanes() -> Vec<String> {
+        lane_vec(&["flashinfer", "triton", "trtllm_mha", "fa3", "fla", "default"])
+    }
+
+    /// The lane walk owns the EMPIRICAL util carrier too, not just the silicon
+    /// slice: the util grid is calibrated from the serving lane's points, and
+    /// the XSHAPE reference head_size is picked PER LANE (Python
+    /// `_ref_lane_and_head_size`). Oracles (shared layer OFF, EMPIRICAL) on
+    /// b200_sxm/sglang/0.5.14:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.14",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.EMPIRICAL,
+    ///     shared_layer=False)
+    /// order = attention.lane_walk_order(db._context_attention_data,
+    ///     attention.resolve_lane_order(db, override), attention._CONTEXT_SLICE_DEPTH)
+    /// float(ContextAttention._query_context_attention_table(db, b, s, 0, 64, 8,
+    ///     KVCacheQuantMode.bfloat16, FMHAQuantMode.bfloat16,
+    ///     database_mode=DatabaseMode.EMPIRICAL, window_size=0, head_size=hs,
+    ///     lane_order=order))
+    /// ```
+    ///
+    /// `hs=80` is collected nowhere, so it exercises the per-lane XSHAPE
+    /// reference: the no-override walk lands on `triton`, whose only collected
+    /// head_size under `(bfloat16, bfloat16, n_kv=8)` is 192, while the
+    /// `flashinfer` override borrows that lane's 128 — different reference
+    /// head_size, different `util_scale`, different answer.
+    #[test]
+    fn context_attention_empirical_lane_selection_matches_python_oracles() {
+        let mut db = b200_sglang_0514_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Empirical;
+        // (lane_order, b, s, head_size, expected)
+        let cases: &[(Vec<String>, u32, u32, u32, f64)] = &[
+            // own/donor slice carrier (hs=128 lives in trtllm_mha + flashinfer)
+            (sglang_default_lanes(), 4, 4096, 128, 0.9642000198364257),
+            (sglang_default_lanes(), 3, 3000, 128, 0.42010576839184),
+            (sglang_flashinfer_lanes(), 4, 4096, 128, 1.2178943634033204),
+            (sglang_flashinfer_lanes(), 3, 3000, 128, 0.5368660377101362),
+            // per-lane XSHAPE reference (triton ref hs=192 vs flashinfer 128)
+            (sglang_default_lanes(), 4, 4096, 80, 0.8269055926093262),
+            (sglang_flashinfer_lanes(), 4, 4096, 80, 1.044475875945771),
+        ];
+        for (order, b, s, hs, expected) in cases {
+            let result = query_context_attention_table(
+                &db,
+                order,
+                *b,
+                *s,
+                0,
+                64,
+                8,
+                *hs,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .expect("empirical query");
+            let (latency, source) = (result.latency_ms, result.source);
+            assert!(
+                (latency - expected).abs() < 1e-9,
+                "({order:?}, b={b}, s={s}, hs={hs}): expected {expected}, got {latency}"
+            );
+            assert_eq!(source, Source::Empirical);
+        }
+    }
+
+    /// Decode twin of
+    /// [`context_attention_empirical_lane_selection_matches_python_oracles`]
+    /// (`GenerationAttention._query_generation_attention_table(..., EMPIRICAL,
+    /// window_size=0, head_size=hs, lane_order=order)`). Decode XSHAPE keeps
+    /// `util_scale = 1.0`, so `hs=80` differs between the walks purely because
+    /// the borrowed reference lane/head_size differs.
+    #[test]
+    fn generation_attention_empirical_lane_selection_matches_python_oracles() {
+        let mut db = b200_sglang_0514_db();
+        db.database_mode = crate::common::enums::DatabaseMode::Empirical;
+        let cases: &[(Vec<String>, u32, u32, u32, f64)] = &[
+            (sglang_default_lanes(), 8, 4096, 128, 0.028808000683784484),
+            (sglang_default_lanes(), 16, 2048, 128, 0.027752000093460082),
+            (sglang_flashinfer_lanes(), 8, 4096, 128, 0.0370959997177124),
+            (sglang_flashinfer_lanes(), 16, 2048, 128, 0.03883999884128571),
+            (sglang_default_lanes(), 8, 4096, 80, 0.018005000427365303),
+            (sglang_flashinfer_lanes(), 8, 4096, 80, 0.02318499982357025),
+        ];
+        for (order, b, s, hs, expected) in cases {
+            let result = query_generation_attention_table(
+                &db,
+                order,
+                *b,
+                *s,
+                64,
+                8,
+                *hs,
+                0,
+                KvCacheQuantMode::Bfloat16,
+            )
+            .expect("empirical query");
+            let (latency, source) = (result.latency_ms, result.source);
+            assert!(
+                (latency - expected).abs() < 1e-9,
+                "({order:?}, b={b}, s={s}, hs={hs}): expected {expected}, got {latency}"
+            );
+            assert_eq!(source, Source::Empirical);
+        }
+    }
+
+    /// The op carries its lane order into the query. Two ops that differ ONLY
+    /// in `lane_order` must produce different latencies on a table where the
+    /// lanes disagree — the wiring regression this field exists to prevent.
+    #[test]
+    fn attention_ops_carry_lane_order_into_the_query() {
+        let db = b200_sglang_0514_db();
+        let mut ctx = ContextAttentionOp::new(
+            "ctx",
+            64,
+            8,
+            128,
+            KvCacheQuantMode::Bfloat16,
+            FmhaQuantMode::Bfloat16,
+        );
+        ctx.lane_order = sglang_default_lanes();
+        let default_ms = ctx.query(&db, 4, 4096, 0, 1.0).expect("query").latency_ms;
+        ctx.lane_order = sglang_flashinfer_lanes();
+        let flashinfer_ms = ctx.query(&db, 4, 4096, 0, 1.0).expect("query").latency_ms;
+        // Table oracles 0.96420002 (trtllm_mha donor) vs 1.21789436
+        // (flashinfer own lane), plus identical fused-op extras.
+        assert!(
+            (flashinfer_ms - default_ms - (1.2178943634033204 - 0.9642000198364258)).abs() < 1e-9,
+            "lane order must reach the table: {default_ms} vs {flashinfer_ms}"
+        );
+
+        let mut gen = GenerationAttentionOp::new("gen", 64, 8, 128, KvCacheQuantMode::Bfloat16);
+        gen.lane_order = sglang_default_lanes();
+        let default_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
+        gen.lane_order = sglang_flashinfer_lanes();
+        let flashinfer_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
+        assert!((default_ms - 0.028358187839476155).abs() < 1e-9, "got {default_ms}");
+        assert!((flashinfer_ms - 0.03659885138535173).abs() < 1e-9, "got {flashinfer_ms}");
     }
 }

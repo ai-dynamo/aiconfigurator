@@ -18,6 +18,13 @@
 //! (MHA sentinel), matching Python's `n_kv_lookup` rule. `window_size`
 //! defaults to `0` for backends whose collectors don't record it.
 //!
+//! Context and generation carry one extra, OUTERMOST axis: the kernel-source
+//! LANE (`kernel_source`, `"default"` when the column is absent/empty),
+//! mirroring Python's `load_{context,generation}_attention_data`
+//! (`data[kernel_source][...]`). Callers pass the resolved lane precedence
+//! (`lane_order`) and the FIRST lane carrying the requested slice serves the
+//! query in full — see [`lane_slice`].
+//!
 //! Queries resolve on the RAW grids via the shared perf_interp v2 engine
 //! (`perf_interp.rs`, mirroring Python `sdk/perf_interp`): context/encoder
 //! use the Grid resolver with sqrt-space blending on the seq axis
@@ -45,7 +52,12 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::operators::base::SolComponents;
-use crate::perf_database::parquet_loader::PerfReader;
+use crate::perf_database::parquet_loader::{PerfReader, PerfRow};
+
+/// Lane key for rows without a usable `kernel_source`. Mirrors Python's
+/// `ks = row.get("kernel_source") or "default"` (absent column, null, and
+/// empty string all collapse here).
+pub const DEFAULT_LANE: &str = "default";
 
 pub struct AttentionTable {
     data_root: PathBuf,
@@ -61,17 +73,52 @@ pub struct AttentionTable {
     encoder: OnceLock<Result<EncoderGrids, AicError>>,
 }
 
-/// Engine-ready tables: per discrete key, the raw nested grid as a `Node`.
+/// Engine-ready tables: per kernel-source LANE, per discrete key, the raw
+/// nested grid as a `Node`. The lane axis is outermost, mirroring Python's
+/// `data[kernel_source][...]` nesting.
 struct ContextGrids {
-    by_keys: BTreeMap<ContextKey, Node>,
+    by_lane: BTreeMap<String, BTreeMap<ContextKey, Node>>,
 }
 
 struct GenerationGrids {
-    by_keys: BTreeMap<GenerationKey, Node>,
+    by_lane: BTreeMap<String, BTreeMap<GenerationKey, Node>>,
 }
 
+/// Encoder attention has no kernel-source axis on the Python side either
+/// (`load_encoder_attention_data` keys straight from the quant mode), so it
+/// stays lane-free.
 struct EncoderGrids {
     by_keys: BTreeMap<EncoderKey, Node>,
+}
+
+/// First lane in `lane_order` that carries `key`.
+///
+/// Mirrors Python `operations/attention.py::_lane_data_slice`: own-lane-first,
+/// whole-slice donor gap-fill. A lane whose slice EXISTS serves the query in
+/// full — interpolation happens strictly inside that lane's node and a
+/// cross-lane point merge WITHIN a slice is intentionally not performed.
+///
+/// `lane_order` is the COMPLETE walk order resolved python-side
+/// (`attention.lane_walk_order`, serialized on the op spec); it is replayed
+/// VERBATIM here — no re-deriving, no extending, no sorting. Lanes absent from
+/// the table are skipped; an exhausted list is a miss, exactly as the
+/// pre-lane code behaved when the single collapsed table lacked the slice.
+fn lane_slice<'a, K: Ord, V>(
+    by_lane: &'a BTreeMap<String, BTreeMap<K, V>>,
+    lane_order: &[String],
+    key: &K,
+) -> Option<&'a V> {
+    lane_order
+        .iter()
+        .find_map(|lane| by_lane.get(lane).and_then(|slices| slices.get(key)))
+}
+
+/// Lane key for one parquet row (see [`DEFAULT_LANE`]).
+fn row_lane(ks_col: Option<usize>, row: &PerfRow) -> Result<String, AicError> {
+    Ok(match row.str_optional(ks_col)? {
+        Some(ks) if !ks.is_empty() => ks.to_string(),
+        _ => DEFAULT_LANE.to_string(),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,9 +187,12 @@ impl AttentionTable {
     /// `full_seq_tokens = isl + prefix` from the caller's perspective. The
     /// operator layer applies the prefix correction multiplier
     /// `(full_s² - prefix²) / full_s²` to latency AND energy (mirroring
-    /// Python's `get_silicon`).
+    /// Python's `get_silicon`). `lane_order` is the op's serialized
+    /// kernel-lane walk order (see [`lane_slice`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn query_context(
         &self,
+        lane_order: &[String],
         b: u32,
         full_seq_tokens: u32,
         n: u32,
@@ -164,10 +214,8 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids
-            .by_keys
-            .get(&key)
-            .ok_or_else(|| missing_key(&self.data_root, &key))?;
+        let node = lane_slice(&grids.by_lane, lane_order, &key)
+            .ok_or_else(|| missing_key(&self.data_root, lane_order, &key))?;
         // Python `perf_interp.context_attention_config`: Grid resolver,
         // sqrt-space blend on the seq axis only (~seq^2 curvature; heads and
         // batch are ~linear). Past the staircase frontier (large seq x large
@@ -201,9 +249,12 @@ impl AttentionTable {
     /// like Python's `_interp_pr(latency, energy=energy)`).
     ///
     /// `kv_seq_tokens` is the total decode context length (Python passes
-    /// `s` from the caller; the CSV stores `isl + step`).
+    /// `s` from the caller; the CSV stores `isl + step`). `lane_order` is the
+    /// op's serialized kernel-lane walk order (see [`lane_slice`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn query_generation(
         &self,
+        lane_order: &[String],
         b: u32,
         kv_seq_tokens: u32,
         n: u32,
@@ -223,10 +274,8 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids
-            .by_keys
-            .get(&key)
-            .ok_or_else(|| missing_gen_key(&self.data_root, &key))?;
+        let node = lane_slice(&grids.by_lane, lane_order, &key)
+            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &key))?;
         // Python `perf_interp.generation_attention_config`: Grid resolver, RAW
         // blend everywhere (~linear in seq), axes [num_heads][batch][seq_len].
         // The ±10% 5-sample seq averaging is op-level smoothing (decode s
@@ -308,13 +357,15 @@ impl AttentionTable {
 
     /// Collected `(num_heads, full_seq, batch) -> latency` points of one
     /// context slice, for the operator-layer util-calibration grid (Python's
-    /// `require_data_slice(_context_attention_data, fmha, kv, n_kv, hs, w)` +
-    /// `iter_grid(..., depth=3)`). `n_kv_lookup` is the MHA-normalized
-    /// kv-head count (`0` == MHA). Missing slice / empty node is a typed
-    /// `PerfDatabase` miss. No estimation logic here — callers own the
-    /// SOL/util math.
+    /// `_lane_data_slice(_context_attention_data, lane_order, fmha, kv, n_kv,
+    /// hs, w)` + `iter_grid(..., depth=3)`). `n_kv_lookup` is the
+    /// MHA-normalized kv-head count (`0` == MHA); the slice is served by the
+    /// first lane in `lane_order` that carries it. Missing slice / empty node
+    /// is a typed `PerfDatabase` miss. No estimation logic here — callers own
+    /// the SOL/util math.
     pub fn context_points(
         &self,
+        lane_order: &[String],
         fmha_quant: FmhaQuantMode,
         kv_quant: KvCacheQuantMode,
         n_kv_lookup: u32,
@@ -329,25 +380,52 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids
-            .by_keys
-            .get(&key)
-            .ok_or_else(|| missing_key(&self.data_root, &key))?;
+        let node = lane_slice(&grids.by_lane, lane_order, &key)
+            .ok_or_else(|| missing_key(&self.data_root, lane_order, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_key(&self.data_root, &key));
+            return Err(missing_key(&self.data_root, lane_order, &key));
         }
         Ok(points)
     }
 
-    /// Distinct collected `head_size` keys under `(fmha, kv, n_kv_lookup)`,
-    /// any window — the cross-head_size (XSHAPE) candidate list (Python's
-    /// `require_data_slice(wrapper, fmha, kv, n_kv).keys()`). Returned in
-    /// ascending order; Python yields CSV insertion order instead, which is
-    /// observable only on exact log-distance ties in the reference pick.
-    /// Typed `PerfDatabase` miss when nothing matches.
+    /// Whether ONE lane carries the full context slice. Mirrors the second
+    /// `require_data_slice(table, lane, *prefix_keys, ref_hs, window_size)`
+    /// probe in Python `_ref_lane_and_head_size`.
+    pub fn context_has_slice(
+        &self,
+        lane: &str,
+        fmha_quant: FmhaQuantMode,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+        head_size: u32,
+        window_size: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load_context()?;
+        let key = ContextKey {
+            fmha_quant: fmha_quant.name().to_string(),
+            kv_quant: kv_quant.name().to_string(),
+            n_kv_lookup,
+            head_size,
+            window_size,
+        };
+        Ok(grids
+            .by_lane
+            .get(lane)
+            .and_then(|slices| slices.get(&key))
+            .is_some())
+    }
+
+    /// Distinct collected `head_size` keys of ONE lane under
+    /// `(fmha, kv, n_kv_lookup)`, any window — the cross-head_size (XSHAPE)
+    /// candidate list (Python's `require_data_slice(wrapper, lane, fmha, kv,
+    /// n_kv).keys()`, which is per-lane because the lane axis is outermost).
+    /// Returned in ascending order; Python yields CSV insertion order instead,
+    /// which is observable only on exact log-distance ties in the reference
+    /// pick. Typed `PerfDatabase` miss when nothing matches.
     pub fn context_head_sizes(
         &self,
+        lane: &str,
         fmha_quant: FmhaQuantMode,
         kv_quant: KvCacheQuantMode,
         n_kv_lookup: u32,
@@ -356,7 +434,7 @@ impl AttentionTable {
         let fmha = fmha_quant.name();
         let kv = kv_quant.name();
         let mut sizes: Vec<u32> = Vec::new();
-        for key in grids.by_keys.keys() {
+        for key in grids.by_lane.get(lane).into_iter().flat_map(|s| s.keys()) {
             if key.fmha_quant == fmha
                 && key.kv_quant == kv
                 && key.n_kv_lookup == n_kv_lookup
@@ -367,7 +445,7 @@ impl AttentionTable {
         }
         if sizes.is_empty() {
             return Err(AicError::PerfDatabase(format!(
-                "context attention data missing for fmha={fmha}, kv={kv}, \
+                "context attention data missing for lane={lane}, fmha={fmha}, kv={kv}, \
                  n_kv={n_kv_lookup} at {}",
                 self.data_root.display()
             )));
@@ -384,6 +462,7 @@ impl AttentionTable {
     /// slice is absent/empty.
     pub fn generation_points(
         &self,
+        lane_order: &[String],
         kv_quant: KvCacheQuantMode,
         n_kv_lookup: u32,
         head_size: u32,
@@ -396,29 +475,53 @@ impl AttentionTable {
             head_size,
             window_size,
         };
-        let node = grids
-            .by_keys
-            .get(&key)
-            .ok_or_else(|| missing_gen_key(&self.data_root, &key))?;
+        let node = lane_slice(&grids.by_lane, lane_order, &key)
+            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_gen_key(&self.data_root, &key));
+            return Err(missing_gen_key(&self.data_root, lane_order, &key));
         }
         Ok(points)
     }
 
-    /// Distinct collected `head_size` keys under `(kv, n_kv_lookup)`, any
-    /// window — the decode XSHAPE candidate list. Same ordering note as
+    /// Whether ONE lane carries the full generation slice. Decode twin of
+    /// [`AttentionTable::context_has_slice`].
+    pub fn generation_has_slice(
+        &self,
+        lane: &str,
+        kv_quant: KvCacheQuantMode,
+        n_kv_lookup: u32,
+        head_size: u32,
+        window_size: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load_generation()?;
+        let key = GenerationKey {
+            kv_quant: kv_quant.name().to_string(),
+            n_kv_lookup,
+            head_size,
+            window_size,
+        };
+        Ok(grids
+            .by_lane
+            .get(lane)
+            .and_then(|slices| slices.get(&key))
+            .is_some())
+    }
+
+    /// Distinct collected `head_size` keys of ONE lane under
+    /// `(kv, n_kv_lookup)`, any window — the decode XSHAPE candidate list.
+    /// Same per-lane scoping and ordering note as
     /// [`AttentionTable::context_head_sizes`].
     pub fn generation_head_sizes(
         &self,
+        lane: &str,
         kv_quant: KvCacheQuantMode,
         n_kv_lookup: u32,
     ) -> Result<Vec<u32>, AicError> {
         let grids = self.load_generation()?;
         let kv = kv_quant.name();
         let mut sizes: Vec<u32> = Vec::new();
-        for key in grids.by_keys.keys() {
+        for key in grids.by_lane.get(lane).into_iter().flat_map(|s| s.keys()) {
             if key.kv_quant == kv
                 && key.n_kv_lookup == n_kv_lookup
                 && !sizes.contains(&key.head_size)
@@ -428,7 +531,8 @@ impl AttentionTable {
         }
         if sizes.is_empty() {
             return Err(AicError::PerfDatabase(format!(
-                "generation attention data missing for kv={kv}, n_kv={n_kv_lookup} at {}",
+                "generation attention data missing for lane={lane}, kv={kv}, \
+                 n_kv={n_kv_lookup} at {}",
                 self.data_root.display()
             )));
         }
@@ -465,9 +569,14 @@ impl AttentionTable {
             // No load-time SOL clamp: Python's `_correct_data` historically
             // skipped context attention, and v2 keeps that.
             Ok(ContextGrids {
-                by_keys: raw
+                by_lane: raw
                     .into_iter()
-                    .map(|(k, g)| (k, grid3_to_node(&g)))
+                    .map(|(lane, slices)| {
+                        (
+                            lane,
+                            slices.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                        )
+                    })
                     .collect(),
             })
         });
@@ -484,9 +593,14 @@ impl AttentionTable {
             // (clamped) data.
             clamp_generation_attention_grids_to_sol(&self.system_spec, &mut raw);
             Ok(GenerationGrids {
-                by_keys: raw
+                by_lane: raw
                     .into_iter()
-                    .map(|(k, g)| (k, grid3_to_node(&g)))
+                    .map(|(lane, slices)| {
+                        (
+                            lane,
+                            slices.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                        )
+                    })
                     .collect(),
             })
         });
@@ -529,13 +643,17 @@ fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {
 }
 
 /// Load the context-attention table from an ordered, priority-sorted source
-/// list. Sources are read in order; the first source containing a key wins
-/// (`or_insert`). Missing files are skipped; an error is returned only when no
-/// source yields rows.
+/// list, keyed by kernel-source LANE first. Sources are read in order; the
+/// first source containing a key wins (`or_insert`), per lane — Python's
+/// dedup key carries `kernel_source` too, so an identical shape measured on
+/// two kernels lands in two lanes rather than colliding. `kernel_source`
+/// filtering ([`kernel_source_ok`], shared-layer inheritance) still gates
+/// which ROWS load; the lane axis only structures what is KEPT. Missing files
+/// are skipped; an error is returned only when no source yields rows.
 fn load_context_parquet(
     sources: &[PerfSource],
-) -> Result<BTreeMap<ContextKey, Grid3<LeafValue>>, AicError> {
-    let mut by_keys: BTreeMap<ContextKey, Grid3<LeafValue>> = BTreeMap::new();
+) -> Result<BTreeMap<String, BTreeMap<ContextKey, Grid3<LeafValue>>>, AicError> {
+    let mut by_lane: BTreeMap<String, BTreeMap<ContextKey, Grid3<LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -573,7 +691,9 @@ fn load_context_parquet(
             let power = row.f64_optional(power_col)?.unwrap_or(0.0);
             // First-wins parity with Python `load_context_attention_data`,
             // extended across shared-layer sources (earlier source wins).
-            by_keys
+            by_lane
+                .entry(row_lane(ks_col, &row)?)
+                .or_default()
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
@@ -584,7 +704,7 @@ fn load_context_parquet(
                 .or_insert(LeafValue::with_power(latency, power));
         }
     }
-    if !any_source || by_keys.is_empty() {
+    if !any_source || by_lane.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no context-attention rows loaded from {} source(s) (first: {})",
             sources.len(),
@@ -594,16 +714,16 @@ fn load_context_parquet(
                 .unwrap_or_default()
         )));
     }
-    Ok(by_keys)
+    Ok(by_lane)
 }
 
 /// Load the generation-attention table from an ordered, priority-sorted source
-/// list. Same first-wins-across-sources + missing-file-skip semantics as
-/// [`load_context_parquet`].
+/// list, keyed by kernel-source LANE first. Same first-wins-across-sources +
+/// missing-file-skip + lane semantics as [`load_context_parquet`].
 fn load_generation_parquet(
     sources: &[PerfSource],
-) -> Result<BTreeMap<GenerationKey, Grid3<LeafValue>>, AicError> {
-    let mut by_keys: BTreeMap<GenerationKey, Grid3<LeafValue>> = BTreeMap::new();
+) -> Result<BTreeMap<String, BTreeMap<GenerationKey, Grid3<LeafValue>>>, AicError> {
+    let mut by_lane: BTreeMap<String, BTreeMap<GenerationKey, Grid3<LeafValue>>> = BTreeMap::new();
     let mut any_source = false;
     for source in sources {
         let path = source.path();
@@ -644,7 +764,9 @@ fn load_generation_parquet(
             // Grid axis order is `[n][b][s]` to match Python's `interp_3d(n, b, s)`
             // (1-D over n, bilinear over (b, s)). Nesting: num_heads -> batch_size
             // -> sequence_tokens.
-            by_keys
+            by_lane
+                .entry(row_lane(ks_col, &row)?)
+                .or_default()
                 .entry(key)
                 .or_default()
                 .entry(num_heads)
@@ -655,7 +777,7 @@ fn load_generation_parquet(
                 .or_insert(LeafValue::with_power(latency, power));
         }
     }
-    if !any_source || by_keys.is_empty() {
+    if !any_source || by_lane.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no generation-attention rows loaded from {} source(s) (first: {})",
             sources.len(),
@@ -665,7 +787,7 @@ fn load_generation_parquet(
                 .unwrap_or_default()
         )));
     }
-    Ok(by_keys)
+    Ok(by_lane)
 }
 
 /// Speed-of-light context-attention latency in ms, at prefix=0.
@@ -924,12 +1046,14 @@ pub(crate) fn generation_attn_flops(
 }
 
 /// In-place SOL clamp for every raw row in the generation-attention grid set.
-/// Mirrors Python `GenerationAttention._correct_sol` (which v2 keeps).
+/// Mirrors Python `GenerationAttention._correct_sol` (which v2 keeps) —
+/// including its EVERY-LANE scope: any lane may serve a query (own lane or
+/// donor gap-fill), so a sub-SOL row is just as wrong in a donor.
 fn clamp_generation_attention_grids_to_sol(
     spec: &SystemSpec,
-    grids: &mut BTreeMap<GenerationKey, Grid3<LeafValue>>,
+    grids: &mut BTreeMap<String, BTreeMap<GenerationKey, Grid3<LeafValue>>>,
 ) {
-    for (key, grid) in grids.iter_mut() {
+    for (key, grid) in grids.values_mut().flat_map(|slices| slices.iter_mut()) {
         let Some(kv_quant) = kv_cache_quant_by_name(&key.kv_quant) else {
             continue;
         };
@@ -1036,16 +1160,16 @@ fn load_encoder_parquet(
     Ok(by_keys)
 }
 
-fn missing_key(data_root: &Path, key: &ContextKey) -> AicError {
+fn missing_key(data_root: &Path, lane_order: &[String], key: &ContextKey) -> AicError {
     AicError::PerfDatabase(format!(
-        "context attention data missing for {key:?} at {}",
+        "context attention data missing for {key:?} in lanes {lane_order:?} at {}",
         data_root.display()
     ))
 }
 
-fn missing_gen_key(data_root: &Path, key: &GenerationKey) -> AicError {
+fn missing_gen_key(data_root: &Path, lane_order: &[String], key: &GenerationKey) -> AicError {
     AicError::PerfDatabase(format!(
-        "generation attention data missing for {key:?} at {}",
+        "generation attention data missing for {key:?} in lanes {lane_order:?} at {}",
         data_root.display()
     ))
 }
@@ -1093,6 +1217,25 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("gb200.yaml must parse")
     }
 
+    fn lanes(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Walk order Python serializes for a no-override op on vllm/0.19.0:
+    /// every named lane misses and the table's own leftover lane
+    /// `vllm_flashinfer` serves (`resolve_lane_order` + `lane_walk_order`).
+    fn vllm_lanes() -> Vec<String> {
+        lanes(&[
+            "fa3",
+            "fla",
+            "flashinfer",
+            "triton",
+            "trtllm_mha",
+            "default",
+            "vllm_flashinfer",
+        ])
+    }
+
     // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
     #[test]
     fn generation_query_ragged_corner_matches_python_v2_engine() {
@@ -1104,7 +1247,7 @@ mod tests {
         // SILICON, window_size=0, head_size=128)` on gb200/vllm/0.19.0.
         let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
         let latency = table
-            .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
+            .query_generation(&vllm_lanes(), 256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed")
             .latency;
         let expected = 0.37153384771269;
@@ -1122,6 +1265,7 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_context(
+                &vllm_lanes(),
                 8,
                 16384,
                 64,
@@ -1151,7 +1295,7 @@ mod tests {
         // fp8, SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
-            .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
+            .query_generation(&vllm_lanes(), 32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed")
             .latency;
         let expected = 0.009131092737966444;
@@ -1180,6 +1324,7 @@ mod tests {
         for &(b, s, expected) in cases {
             let got = table
                 .query_context(
+                    &vllm_lanes(),
                     b,
                     s,
                     64,
@@ -1207,6 +1352,7 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_context(
+                &vllm_lanes(),
                 4,
                 16384,
                 64,
@@ -1230,6 +1376,7 @@ mod tests {
         // vLLM b200 context attention has fmha=bfloat16 only; Fp8 fmha
         // is genuinely absent.
         match table.query_context(
+            &vllm_lanes(),
             1,
             1024,
             64,
@@ -1287,6 +1434,7 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let first = table
             .query_context(
+                &vllm_lanes(),
                 8,
                 16384,
                 64,
@@ -1299,6 +1447,7 @@ mod tests {
             .unwrap();
         let second = table
             .query_context(
+                &vllm_lanes(),
                 8,
                 16384,
                 64,
@@ -1346,6 +1495,7 @@ mod tests {
         let table = AttentionTable::new(tmp.path().to_path_buf(), energy_test_spec());
         let v = table
             .query_context(
+                &lanes(&[DEFAULT_LANE]),
                 2,
                 1536,
                 16,
@@ -1366,5 +1516,234 @@ mod tests {
             "energy {}",
             v.energy
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Kernel-source lanes (AIC-1715/1716)
+    // ------------------------------------------------------------------
+
+    fn b200_sglang_0514_data_root() -> PathBuf {
+        PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems/data/b200_sxm/sglang/0.5.14")
+    }
+
+    /// Walk order Python serializes for a no-override op on
+    /// b200_sxm/sglang/0.5.14 (`resolve_lane_order` + `lane_walk_order`):
+    /// `triton` is the framework-default map lane and the donor tier is
+    /// density-ranked, so `trtllm_mha` (66 slices) precedes `flashinfer` (10).
+    fn sglang_default_lanes() -> Vec<String> {
+        lanes(&["triton", "trtllm_mha", "flashinfer", "fa3", "fla", "default"])
+    }
+
+    /// Same table, `attention_backend="flashinfer"`: the override pins
+    /// `flashinfer` ahead of the map lane `triton`.
+    fn sglang_flashinfer_lanes() -> Vec<String> {
+        lanes(&["flashinfer", "triton", "trtllm_mha", "fa3", "fla", "default"])
+    }
+
+    /// Two-lane in-memory context table: `head` carries only the `hs=128`
+    /// slice, `donor` only the `hs=64` slice, and both carry `hs=256` with
+    /// DIFFERENT latencies. Rows land on exact grid coordinates so the engine
+    /// returns the stored value verbatim.
+    fn in_memory_two_lane_context_table() -> AttentionTable {
+        let key = |head_size: u32| ContextKey {
+            fmha_quant: "bfloat16".to_string(),
+            kv_quant: "bfloat16".to_string(),
+            n_kv_lookup: 0,
+            head_size,
+            window_size: 0,
+        };
+        let leaf = |latency: f64| {
+            let mut node = Node::branch();
+            node.insert(&[8, 1024, 1], latency);
+            node
+        };
+        let mut by_lane: BTreeMap<String, BTreeMap<ContextKey, Node>> = BTreeMap::new();
+        by_lane
+            .entry("head".to_string())
+            .or_default()
+            .extend([(key(128), leaf(1.0)), (key(256), leaf(2.0))]);
+        by_lane
+            .entry("donor".to_string())
+            .or_default()
+            .extend([(key(64), leaf(3.0)), (key(256), leaf(4.0))]);
+        let table = AttentionTable::new(PathBuf::from("test-data"), b200_sxm_spec());
+        assert!(table.context.set(Ok(ContextGrids { by_lane })).is_ok());
+        table
+    }
+
+    fn two_lane_query(table: &AttentionTable, lane_order: &[String], head_size: u32) -> Result<f64, AicError> {
+        table
+            .query_context(
+                lane_order,
+                1,
+                1024,
+                8,
+                8,
+                head_size,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .map(|v| v.latency)
+    }
+
+    /// The three lane-walk rules, on a synthetic table so the assertions are
+    /// about the walk and nothing else (mirrors Python `_lane_data_slice`):
+    /// the head lane serves a slice it owns; a slice it LACKS falls through to
+    /// the donor at whole-slice granularity; and an exhausted `lane_order` is
+    /// a typed miss — Rust replays the serialized order VERBATIM and never
+    /// re-derives or extends it with the table's other lanes.
+    #[test]
+    fn context_lane_walk_serves_head_lane_then_donor_then_misses() {
+        let table = in_memory_two_lane_context_table();
+        let order = lanes(&["head", "donor"]);
+
+        // Own-lane serve: both lanes carry hs=256, the head lane wins. NO
+        // cross-lane merge — the donor's 4.0 never enters the interpolation.
+        assert_eq!(two_lane_query(&table, &order, 256).unwrap(), 2.0);
+        // Head-lane-only slice.
+        assert_eq!(two_lane_query(&table, &order, 128).unwrap(), 1.0);
+        // Donor gap-fill: the head lane has no hs=64 slice at all.
+        assert_eq!(two_lane_query(&table, &order, 64).unwrap(), 3.0);
+        // Reversing the order flips which lane serves the shared slice.
+        assert_eq!(two_lane_query(&table, &lanes(&["donor", "head"]), 256).unwrap(), 4.0);
+
+        // Walk exhausted: neither lane in the order exists in the table, and
+        // the present lanes are NOT consulted.
+        let miss = two_lane_query(&table, &lanes(&["fa3", "default"]), 256);
+        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
+        // Every lane present but none carrying the slice is the same miss.
+        let miss = two_lane_query(&table, &order, 999);
+        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
+        // An empty order can serve nothing.
+        let miss = two_lane_query(&table, &[], 128);
+        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
+    }
+
+    /// The loader KEEPS every `kernel_source` as its own lane instead of
+    /// collapsing them (Python `load_context_attention_data` ->
+    /// `data[kernel_source][...]`). b200_sxm/sglang/0.5.14 collects
+    /// `trtllm_mha`, `triton` and `flashinfer`; a collapsed table would let
+    /// whichever kernel happened to be read first answer for all three.
+    #[test]
+    fn loader_keeps_every_kernel_source_lane() {
+        let table = AttentionTable::new(b200_sglang_0514_data_root(), b200_sxm_spec());
+        let ctx_lanes: Vec<&str> = table
+            .load_context()
+            .expect("context table must load")
+            .by_lane
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ctx_lanes, vec!["flashinfer", "triton", "trtllm_mha"]);
+        let gen_lanes: Vec<&str> = table
+            .load_generation()
+            .expect("generation table must load")
+            .by_lane
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(gen_lanes, vec!["flashinfer", "triton", "trtllm_mha"]);
+    }
+
+    /// Lane selection changes the ANSWER, anchored on Python. Oracle
+    /// generation (shared layer OFF, SILICON) on b200_sxm/sglang/0.5.14:
+    ///
+    /// ```text
+    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.14",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.SILICON,
+    ///     shared_layer=False)
+    /// order = attention.lane_walk_order(db._context_attention_data,
+    ///     attention.resolve_lane_order(db, override), attention._CONTEXT_SLICE_DEPTH)
+    /// float(ContextAttention._query_context_attention_table(db, b, s, 0, 64, 8,
+    ///     KVCacheQuantMode.bfloat16, FMHAQuantMode.bfloat16,
+    ///     database_mode=DatabaseMode.SILICON, window_size=0, head_size=128,
+    ///     lane_order=order))
+    /// ```
+    ///
+    /// The `(bfloat16, bfloat16, n_kv=8, hs=128, w=0)` slice is collected in
+    /// `trtllm_mha` and `flashinfer` but NOT in `triton`, so the no-override
+    /// walk gap-fills from `trtllm_mha` while the `flashinfer` override is
+    /// served by its own lane — ~26% apart, which is exactly the kernel
+    /// difference the lane axis exists to preserve.
+    #[test]
+    fn context_lane_selection_matches_python_oracles() {
+        let table = AttentionTable::new(b200_sglang_0514_data_root(), b200_sxm_spec());
+        // (lane_order, b, full_s, expected)
+        let cases: &[(Vec<String>, u32, u32, f64)] = &[
+            (sglang_default_lanes(), 4, 4096, 0.9642000198364258),
+            (sglang_default_lanes(), 2, 2000, 0.15175898359817958),
+            (sglang_flashinfer_lanes(), 4, 4096, 1.2178943634033204),
+            (sglang_flashinfer_lanes(), 2, 2000, 0.2179272220499033),
+        ];
+        for (order, b, s, expected) in cases {
+            let got = table
+                .query_context(
+                    order,
+                    *b,
+                    *s,
+                    64,
+                    8,
+                    128,
+                    0,
+                    KvCacheQuantMode::Bfloat16,
+                    FmhaQuantMode::Bfloat16,
+                )
+                .expect("lane-served query must succeed")
+                .latency;
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "({order:?}, b={b}, s={s}): rust {got} vs python {expected}"
+            );
+        }
+
+        // Donor gap-fill past TWO lanes: hs=64 is collected only in
+        // `trtllm_mha` (Python oracle, same call with head_size=64, n_kv=64).
+        let got = table
+            .query_context(
+                &sglang_default_lanes(),
+                4,
+                4096,
+                64,
+                64,
+                64,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .expect("donor gap-fill must succeed")
+            .latency;
+        let expected = 3.8185985565185545;
+        assert!(
+            ((got - expected) / expected).abs() < 1e-9,
+            "donor gap-fill: rust {got} vs python {expected}"
+        );
+    }
+
+    /// Decode twin of [`context_lane_selection_matches_python_oracles`].
+    /// Oracle: `GenerationAttention._query_generation_attention_table(db, b, s,
+    /// 64, 8, KVCacheQuantMode.bfloat16, database_mode=DatabaseMode.SILICON,
+    /// window_size=0, head_size=128, lane_order=order)` on the same view.
+    #[test]
+    fn generation_lane_selection_matches_python_oracles() {
+        let table = AttentionTable::new(b200_sglang_0514_data_root(), b200_sxm_spec());
+        let cases: &[(Vec<String>, u32, u32, f64)] = &[
+            (sglang_default_lanes(), 8, 4096, 0.028358187839476155),
+            (sglang_default_lanes(), 16, 2048, 0.027373899476369846),
+            (sglang_flashinfer_lanes(), 8, 4096, 0.03659885138535173),
+            (sglang_flashinfer_lanes(), 16, 2048, 0.038325441025081085),
+        ];
+        for (order, b, s, expected) in cases {
+            let got = table
+                .query_generation(order, *b, *s, 64, 8, 128, 0, KvCacheQuantMode::Bfloat16)
+                .expect("lane-served query must succeed")
+                .latency;
+            assert!(
+                ((got - expected) / expected).abs() < 1e-9,
+                "({order:?}, b={b}, s={s}): rust {got} vs python {expected}"
+            );
+        }
     }
 }
