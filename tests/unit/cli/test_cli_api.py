@@ -207,6 +207,10 @@ class TestCLIEstimateUnit:
         assert result is not None
         assert result.ttft == 100.0
 
+        # CRITICAL: Verify attention_backend parameter actually reached the runner
+        assert captured_kwargs.get("attention_backend") == "trtllm_mha", \
+            f"attention_backend not passed to _run_agg_estimate; captured_kwargs: {captured_kwargs}"
+
 
 class TestCLIDefaultNextn:
     """cli_default exposes MTP control with the same semantics as the CLI flags."""

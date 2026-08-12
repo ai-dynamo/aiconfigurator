@@ -1298,6 +1298,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
 
     if mode == "agg":
@@ -1332,6 +1333,7 @@ def cli_estimate(
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1404,6 +1406,7 @@ def cli_estimate(
             get_model=get_model,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1465,6 +1468,7 @@ def cli_estimate(
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1559,6 +1563,7 @@ def _run_agg_estimate(
     max_seq_len=None,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by disagg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1585,6 +1590,7 @@ def _run_agg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
@@ -1698,6 +1704,7 @@ def _run_static_estimate(
     get_backend,
     get_model,
     forward_model=None,
+    attention_backend: str | None = None,
 ) -> EstimateResult:
     """Run a single-pass static-batching estimation.
 
@@ -1729,6 +1736,7 @@ def _run_static_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     database = load_database(system_name)
@@ -1862,6 +1870,7 @@ def _run_disagg_estimate(
     get_model,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by agg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1906,6 +1915,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     decode_model_config = _build_model_config(
         decode_tp_size,
@@ -1920,6 +1930,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
@@ -2172,6 +2183,7 @@ def _run_afd_estimate(
     get_model,
     free_gpu_memory_fraction,
     max_seq_len,
+    attention_backend: str | None = None,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accepted: float | None = None,
@@ -2227,6 +2239,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     f_model_config = _build_model_config(
         f_tp_size,
@@ -2239,6 +2252,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
