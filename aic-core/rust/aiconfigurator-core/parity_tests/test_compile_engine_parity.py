@@ -701,7 +701,8 @@ def _build_wideep_sglang():
         tp_size=8,
         moe_tp_size=1,
         moe_ep_size=8,
-        moe_backend="deepep_moe",
+        moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+        num_gpus_per_node=8,
         attention_backend="flashinfer",
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
@@ -733,6 +734,16 @@ def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
 
 def _python_wideep_sglang_references() -> dict[str, float]:
     """Capture path for the SGLang WideEP golden references."""
+    try:
+        return _python_wideep_sglang_references_impl()
+    except engine.OpConversionError as exc:
+        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
+        # below it the surface is skipped (its tests carry the same skip).
+        print(f"[goldens] {exc}: skipping wideep_sglang surface until AIC-1601")
+        return {}
+
+
+def _python_wideep_sglang_references_impl() -> dict[str, float]:
     model, backend, database, _spec_json = _build_wideep_sglang()
     rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
     ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
@@ -758,47 +769,6 @@ class TestWideEpDeepEpParity:
     shipped version with the deepep dispatch parquets)."""
 
     pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
-
-    _MODEL = "deepseek-ai/DeepSeek-V3"
-    _SYSTEM = "h200_sxm"
-    _VERSION = "0.5.6.post2"
-
-    def _build(self):
-        from aiconfigurator.sdk import common
-
-        database = _quiet(perf_database.get_database, self._SYSTEM, "sglang", self._VERSION)
-        if database is None:
-            pytest.skip(f"no perf database for {self._SYSTEM}/sglang/{self._VERSION}")
-        model_config = config.ModelConfig(
-            tp_size=8,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
-            num_gpus_per_node=8,
-            attention_backend="flashinfer",
-            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
-            moe_quant_mode=common.MoEQuantMode.fp8_block,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
-        )
-        model = _quiet(get_model, self._MODEL, model_config, "sglang")
-        backend = get_backend("sglang")
-        spec_json = _quiet(
-            engine.build_engine_spec_json,
-            model,
-            model_path=self._MODEL,
-            system=self._SYSTEM,
-            backend="sglang",
-            backend_version=self._VERSION,
-            kv_block_size=None,
-            systems_path=None,
-            nextn=0,
-            database=database,
-        )
-        import aiconfigurator_core
-
-        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
-        return model, backend, database, handle
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
@@ -835,7 +805,8 @@ def _build_wideep_trtllm():
         attention_dp_size=8,
         moe_tp_size=1,
         moe_ep_size=8,
-        enable_wideep=True,
+        moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+        num_gpus_per_node=4,
         gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
@@ -860,6 +831,16 @@ def _build_wideep_trtllm():
 
 def _python_wideep_trtllm_references() -> dict[str, float]:
     """Capture path for the TRT-LLM WideEP golden references."""
+    try:
+        return _python_wideep_trtllm_references_impl()
+    except engine.OpConversionError as exc:
+        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
+        # below it the surface is skipped (its tests carry the same skip).
+        print(f"[goldens] {exc}: skipping wideep_trtllm surface until AIC-1601")
+        return {}
+
+
+def _python_wideep_trtllm_references_impl() -> dict[str, float]:
     model, backend, database, _spec_json = _build_wideep_trtllm()
     rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
     ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
@@ -878,43 +859,6 @@ class TestTrtllmWideEpParity:
     loader collapsed 1,556 of 2,096 gb200 rows)."""
 
     pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
-
-    def _build(self):
-        from aiconfigurator.sdk import common
-
-        database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
-        if database is None:
-            pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
-        model_config = config.ModelConfig(
-            tp_size=1,
-            attention_dp_size=8,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
-            num_gpus_per_node=4,
-            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
-            moe_quant_mode=common.MoEQuantMode.nvfp4,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-        )
-        model = _quiet(get_model, "deepseek-ai/DeepSeek-V3", model_config, "trtllm")
-        backend = get_backend("trtllm")
-        spec_json = _quiet(
-            engine.build_engine_spec_json,
-            model,
-            model_path="deepseek-ai/DeepSeek-V3",
-            system="gb200",
-            backend="trtllm",
-            backend_version="1.3.0rc10",
-            kv_block_size=None,
-            systems_path=None,
-            nextn=0,
-            database=database,
-        )
-        import aiconfigurator_core
-
-        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
-        return model, backend, database, handle
 
     def test_trtllm_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_trtllm()
