@@ -42,6 +42,7 @@ class TRTLLMBackend(BaseBackend):
     ACTIVATION_COEFFICIENTS: ClassVar[dict[str, dict[int, float]]] = {
         "GPT": {1: 10, 2: 6, 4: 5, 8: 5},
         "LLAMA": {1: 11, 2: 6.5, 4: 5, 8: 5},
+        "MUSEGLIMMER": {1: 11, 2: 6.5, 4: 5, 8: 5},
         "MOE": {1: 22, 2: 13, 4: 10, 8: 10},
         "GEMMA4MIX": {1: 22, 2: 13, 4: 10, 8: 10},
         "DEEPSEEK": {1: 22, 2: 13, 4: 10, 8: 10},

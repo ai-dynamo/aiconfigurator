@@ -40,6 +40,7 @@ CORE_SDK_LEAF_MODULES = [
     "models.llama",
     "models.minimax_m3",
     "models.moe",
+    "models.muse_glimmer",
     "models.nemotron_h",
     "models.nemotron_nas",
     "models.qwen35",

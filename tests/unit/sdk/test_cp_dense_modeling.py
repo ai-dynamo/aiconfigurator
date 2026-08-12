@@ -315,3 +315,76 @@ def test_hybrid_moe_cp_per_type_allgather():
     assert "context_cp_all_gather_swa" in names
     attn = [o for o in m.context_ops if o._name == "context_attention"]
     assert attn and all(o._cp_size == 8 for o in attn)
+
+
+# --------------------------------------------------------------------------
+# MuseGlimmer CP wiring
+# --------------------------------------------------------------------------
+
+# 52-layer Muse Glimmer: 3:1 sliding/full pattern.
+# 52 // 4 = 13 repetitions -> 39 sliding_attention + 13 full_attention.
+_MUSE_LAYER_TYPES = ("sliding_attention", "sliding_attention", "sliding_attention", "full_attention") * 13
+
+
+def _build_muse_glimmer(cp: int):
+    from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+    m = MuseGlimmerModel(
+        "m",
+        "MUSEGLIMMER",
+        "MuseGlimmerForConditionalGeneration",
+        52,  # num_layers
+        32,  # num_heads
+        2,  # num_kv_heads
+        128,  # head_size
+        6656,  # hidden_size
+        19968,  # inter_size
+        202048,  # vocab_size
+        131072,  # context_length
+        _mkcfg(cp),
+    )
+    m.set_muse_glimmer_config(
+        common.MuseGlimmerConfig(
+            layer_types=_MUSE_LAYER_TYPES,
+            sliding_window_size=2048,
+        )
+    )
+    return m
+
+
+def test_muse_glimmer_supports_cp_matrix():
+    from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+    assert MuseGlimmerModel.supports_cp("sglang") is True
+    assert MuseGlimmerModel.supports_cp("trtllm") is False
+    assert MuseGlimmerModel.supports_cp("vllm") is False
+
+
+def test_muse_glimmer_cp_wiring_emits_single_uniform_all_gather():
+    model = _build_muse_glimmer(cp=2)
+    attn = [op for op in model.context_ops if isinstance(op, ops.ContextAttention)]
+    assert attn and all(op._cp_size == 2 for op in attn)
+    gathers = [op for op in model.context_ops if isinstance(op, ops.NCCL) and op._name == "context_cp_all_gather"]
+    assert len(gathers) == 1
+    # KV bytes are uniform across layer types (same n_kv/head_dim) -> one all-gather
+    # weighted by total layer count.  The NCCL scale_factor carries that count.
+    assert gathers[0]._scale_factor == 52
+
+
+def test_muse_glimmer_ar_cp_seq_split():
+    """At cp=2, the three context CustomAllReduce ops (embedding_ar, ar_1, ar_2) each
+    receive _seq_split=2 from Muse's CP loop (CustomAllReduce._CP_AWARE=True means the
+    loop's `elif op._CP_AWARE: op._seq_split = cp` branch handles them automatically).
+    Equivalence proof: constructing without seq_split then having the loop assign it
+    is identical to passing seq_split=cp at construction — both set the same attr."""
+    model = _build_muse_glimmer(cp=2)
+    ar_ops = [op for op in model.context_ops if isinstance(op, ops.CustomAllReduce)]
+    assert len(ar_ops) == 3, (
+        f"Expected 3 context CustomAllReduce ops (embedding_ar + ar_1 + ar_2), "
+        f"got {len(ar_ops)}: {[op._name for op in ar_ops]}"
+    )
+    names = {op._name for op in ar_ops}
+    assert names == {"context_embedding_ar", "context_ar_1", "context_ar_2"}, f"Unexpected AR op names: {names}"
+    assert all(op._seq_split == 2 for op in ar_ops), (
+        f"Expected _seq_split=2 on all context AR ops; got {[(op._name, op._seq_split) for op in ar_ops]}"
+    )

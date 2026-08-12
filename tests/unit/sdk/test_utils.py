@@ -12,8 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
+import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
+from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
+from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+from aiconfigurator.sdk.backends.vllm_backend import VLLMBackend
 from aiconfigurator.sdk.models import Gemma4MixModel, HybridMoEModel
 from aiconfigurator.sdk.utils import (
     _parse_hf_config_json,
@@ -581,6 +585,75 @@ class TestParseHFConfig:
         with pytest.raises(ValueError, match="must contain only"):
             _parse_hf_config_json(hf_config)
 
+    @staticmethod
+    def _muse_glimmer_config(layer_types, sliding_window=2048):
+        """Minimal valid Muse Glimmer HF config wrapping the text_config branch."""
+        return {
+            "architectures": ["MuseGlimmerForConditionalGeneration"],
+            "text_config": {
+                "num_hidden_layers": len(layer_types),
+                "hidden_size": 6656,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "intermediate_size": 19968,
+                "vocab_size": 202048,
+                "max_position_embeddings": 131072,
+                "layer_types": layer_types,
+                "sliding_window": sliding_window,
+            },
+        }
+
+    def test_parse_muse_glimmer_config(self):
+        """Real meta-models/Muse-Glimmer-30B shape: 3:1 SWA:global, 52 layers, dense."""
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"]) * 13
+        result = _parse_hf_config_json(self._muse_glimmer_config(layer_types))
+        assert result["architecture"] == "MuseGlimmerForConditionalGeneration"
+        assert result["layers"] == 52
+        assert result["n"] == 32
+        assert result["n_kv"] == 2
+        assert result["d"] == 128
+        assert result["hidden_size"] == 6656
+        assert result["inter_size"] == 19968
+        assert result["vocab"] == 202048
+        assert not result["topk"]  # dense: no routed MoE
+        cfg = result["extra_params"]
+        assert isinstance(cfg, common.MuseGlimmerConfig)
+        assert cfg.layer_types.count("sliding_attention") == 39
+        assert cfg.layer_types.count("full_attention") == 13
+        assert cfg.sliding_window_size == 2048
+
+    def test_muse_glimmer_layer_types_length_mismatch_raises(self):
+        hf_config = self._muse_glimmer_config(["sliding_attention"] * 5)
+        hf_config["text_config"]["num_hidden_layers"] = 52
+        with pytest.raises(ValueError, match="layer_types length"):
+            _parse_hf_config_json(hf_config)
+
+    def test_muse_glimmer_invalid_layer_type_raises(self):
+        hf_config = self._muse_glimmer_config(["sliding_attention", "linear_attention"])
+        with pytest.raises(ValueError, match="must contain only"):
+            _parse_hf_config_json(hf_config)
+
+    def test_muse_glimmer_missing_sliding_window_raises(self):
+        layer_types = (["sliding_attention"] * 3 + ["full_attention"]) * 13
+        hf_config = self._muse_glimmer_config(layer_types, sliding_window=0)
+        with pytest.raises(ValueError, match="positive sliding_window"):
+            _parse_hf_config_json(hf_config)
+
+    def test_muse_glimmer_family_mapping(self):
+        """MuseGlimmerForConditionalGeneration maps to the dedicated MUSEGLIMMER family."""
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY["MuseGlimmerForConditionalGeneration"] == "MUSEGLIMMER"
+        assert common.MULTIMODAL_TEXT_CONFIG_KEY["MuseGlimmerForConditionalGeneration"] == "text_config"
+        assert "MUSEGLIMMER" in common.ModelFamily
+        cfg = common.MuseGlimmerConfig(layer_types=("sliding_attention", "full_attention"), sliding_window_size=2048)
+        assert cfg.sliding_window_size == 2048
+
+    def test_muse_glimmer_attention_op_keys_default_routing(self):
+        from aiconfigurator.sdk.models.helpers import attention_op_keys
+
+        for backend in ("sglang", "trtllm", "vllm"):
+            assert attention_op_keys("MUSEGLIMMER", backend) == ("context_attention", "generation_attention")
+
 
 class TestGemma4MixModelBuilder:
     """Builder-level tests that verify Gemma4MixModel wiring through set_gemma4_config."""
@@ -897,6 +970,205 @@ class TestGemma4MixModelBuilder:
                 bad_config,
                 None,
             )
+
+
+class TestMuseGlimmerModelBuilder:
+    """Builder-level tests for MuseGlimmerModel op wiring and KV accounting."""
+
+    LAYER_TYPES = tuple((["sliding_attention"] * 3 + ["full_attention"]) * 13)
+
+    @staticmethod
+    def _make_model_config(tp_size=1):
+        return config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+
+    def _build(self, tp_size=1):
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model_info = {
+            "model_path": "meta-models/Muse-Glimmer-30B",
+            "model_family": "MUSEGLIMMER",
+            "architecture": "MuseGlimmerForConditionalGeneration",
+            "layers": 52,
+            "n": 32,
+            "n_kv": 2,
+            "d": 128,
+            "hidden_size": 6656,
+            "inter_size": 19968,
+            "vocab": 202048,
+            "context": 131072,
+            "extra_params": common.MuseGlimmerConfig(layer_types=self.LAYER_TYPES, sliding_window_size=2048),
+        }
+        model_config = self._make_model_config(tp_size=tp_size)
+        return MuseGlimmerModel.create(model_info, model_config, "sglang")
+
+    def test_context_attention_split_by_window(self):
+        model = self._build(tp_size=1)
+        ctx_attn = [op for op in model.context_ops if isinstance(op, ops.ContextAttention)]
+        assert len(ctx_attn) == 2
+        windows = sorted(op._window_size for op in ctx_attn)
+        assert windows == [0, 2048]
+
+    def test_generation_attention_split_by_window(self):
+        model = self._build(tp_size=1)
+        gen_attn = [op for op in model.generation_ops if isinstance(op, ops.GenerationAttention)]
+        assert len(gen_attn) == 2
+        assert sorted(op._window_size for op in gen_attn) == [0, 2048]
+
+    def test_no_moe_ops(self):
+        model = self._build(tp_size=1)
+        assert not [op for op in model.context_ops + model.generation_ops if isinstance(op, ops.MoE)]
+        assert not [op for op in model.context_ops + model.generation_ops if isinstance(op, ops.MoEDispatch)]
+
+    def test_resolve_dims_tp_shards(self):
+        model = self._build(tp_size=1)
+        assert model._resolve_dims(1) == {
+            "n_kv_per_gpu": 2,
+            "qkv_out": 32 * 128 + 2 * 128 * 2,
+            "proj_in": 32 * 128,
+            "inter_per_tp": 19968,
+        }
+        assert model._resolve_dims(2)["n_kv_per_gpu"] == 1
+        assert model._resolve_dims(4)["n_kv_per_gpu"] == 1
+        assert model._resolve_dims(8) == {
+            "n_kv_per_gpu": 1,
+            "qkv_out": 32 * 128 // 8 + 1 * 128 * 2,
+            "proj_in": 32 * 128 // 8,
+            "inter_per_tp": 19968 // 8,
+        }
+
+    def test_kvcache_window_capped_math(self):
+        model = self._build(tp_size=1)
+        # per token per layer (bf16): 2 kv-heads * 128 hd * 2 tensors * 2 bytes = 1024 B
+        assert model.get_kvcache_elements_per_token() == 2 * 52 * 2 * 128
+        # below the window every layer grows linearly
+        assert model.get_kvcache_bytes_per_sequence(1024) == float(52 * 1024 * 1024)
+        # above the window SWA layers cap at 2048
+        expected = 39 * 1024 * 2048 + 13 * 1024 * 8192
+        assert model.get_kvcache_bytes_per_sequence(8192) == float(expected)
+
+    def test_kvcache_capacity_inverse_round_trips(self):
+        model = self._build(tp_size=1)
+        budget = model.get_kvcache_bytes_per_sequence(8192)
+        assert model.get_kvcache_max_tokens(budget) == 8192
+
+    def test_layer_types_length_mismatch_raises(self):
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model_info = {
+            "model_path": "x",
+            "model_family": "MUSEGLIMMER",
+            "architecture": "MuseGlimmerForConditionalGeneration",
+            "layers": 52,
+            "n": 32,
+            "n_kv": 2,
+            "d": 128,
+            "hidden_size": 6656,
+            "inter_size": 19968,
+            "vocab": 202048,
+            "context": 131072,
+            "extra_params": common.MuseGlimmerConfig(layer_types=("sliding_attention",), sliding_window_size=2048),
+        }
+        with pytest.raises(ValueError, match="layer_types length"):
+            MuseGlimmerModel.create(model_info, self._make_model_config(tp_size=1), "sglang")
+
+    def test_get_model_muse_glimmer_end_to_end(self):
+        from aiconfigurator.sdk.models import get_model
+        from aiconfigurator.sdk.models.muse_glimmer import MuseGlimmerModel
+
+        model = get_model("meta-models/Muse-Glimmer-30B", self._make_model_config(tp_size=1), "sglang")
+        assert isinstance(model, MuseGlimmerModel)
+        counts = model._count_layer_types()
+        assert counts == {"swa": 39, "global": 13}
+
+    def test_attention_block_scale_factors(self):
+        """SWA ops must be weighted 39, global 13 — a swap passes every other test."""
+        model = self._build(tp_size=1)
+        phase_pairs = [
+            (model.context_ops, ops.ContextAttention),
+            (model.generation_ops, ops.GenerationAttention),
+        ]
+        for phase_ops, op_cls in phase_pairs:
+            attn = [op for op in phase_ops if isinstance(op, op_cls)]
+            by_window = {op._window_size: op._scale_factor for op in attn}
+            assert by_window == {2048: 39, 0: 13}
+
+    def test_gate_gemm_per_kind_and_shape(self):
+        """Each phase/kind emits exactly one gate GEMM with n=proj_in, k=hidden_size.
+        Attention gate GEMMs end with '_gate_gemm' (distinct from '_mlp_gate_up_gemm').
+        HF ref: MuseGlimmerTextAttention.gate_proj = nn.Linear(hidden_size, num_heads*head_dim).
+        In-repo convention: kimi_k3.py MLA output gate (lines 247-248 / 453-454)."""
+        model = self._build(tp_size=1)
+        h = 6656
+        proj_in = model._resolve_dims(1)["proj_in"]  # 32*128 = 4096 at tp=1
+
+        expected = {
+            "context_swa_gate_gemm",
+            "context_global_gate_gemm",
+            "generation_swa_gate_gemm",
+            "generation_global_gate_gemm",
+        }
+        all_gate_gemms = {
+            op._name: op
+            for op in model.context_ops + model.generation_ops
+            if isinstance(op, ops.GEMM) and op._name.endswith("_gate_gemm")
+        }
+        assert all_gate_gemms.keys() == expected, f"Gate GEMM names mismatch: got {set(all_gate_gemms.keys())}"
+        for name, gate in all_gate_gemms.items():
+            assert gate._n == proj_in, f"{name}: n={gate._n}, expected proj_in={proj_in}"
+            assert gate._k == h, f"{name}: k={gate._k}, expected hidden={h}"
+
+    def test_gate_param_count_at_tp1(self):
+        """52 gate GEMMs x 4096 x 6656 = 1,417,674,752 params (counted from context_ops only;
+        generation shares the same weights). Param count = sum(n * k * scale_factor) for gate GEMMs."""
+        model = self._build(tp_size=1)
+        gate_gemms = [op for op in model.context_ops if isinstance(op, ops.GEMM) and op._name.endswith("_gate_gemm")]
+        # swa: n=4096, k=6656, scale_factor=39; global: same n/k, scale_factor=13.
+        total_params = sum(int(op._n * op._k * op._scale_factor) for op in gate_gemms)
+        assert total_params == 52 * 4096 * 6656  # 1,417,674,752
+
+    def test_allreduce_ops_present(self):
+        """context and generation each have embedding_ar (scale 1) + ar_1 + ar_2 (scale=num_layers=52),
+        mirroring the llama.py dense TP all-reduce pattern (llama.py lines 202-213)."""
+        model = self._build(tp_size=8)
+        sf = model._mtp_scale_factor  # 1.0 for nextn=0 (no MTP)
+
+        def _check(phase_ops, prefix, emb_scale, layer_scale):
+            ars = {op._name: op for op in phase_ops if isinstance(op, ops.CustomAllReduce)}
+            for name in (f"{prefix}_embedding_ar", f"{prefix}_ar_1", f"{prefix}_ar_2"):
+                assert name in ars, f"Missing CustomAllReduce: {name}"
+            assert ars[f"{prefix}_embedding_ar"]._scale_factor == pytest.approx(emb_scale)
+            assert ars[f"{prefix}_ar_1"]._scale_factor == pytest.approx(layer_scale)
+            assert ars[f"{prefix}_ar_2"]._scale_factor == pytest.approx(layer_scale)
+
+        _check(model.context_ops, "context", 1.0, 52.0)
+        _check(model.generation_ops, "generation", 1.0 * sf, 52.0 * sf)
+
+    def test_qk_norm_enabled_on_all_attention_ops(self):
+        """use_qk_norm=True on every ContextAttention and GenerationAttention in both phases.
+        HF ref: qk_norm RMSNorm applied to q and k on every Muse layer."""
+        model = self._build(tp_size=1)
+        ctx_attn = [op for op in model.context_ops if isinstance(op, ops.ContextAttention)]
+        gen_attn = [op for op in model.generation_ops if isinstance(op, ops.GenerationAttention)]
+        assert ctx_attn, "No ContextAttention ops found in context_ops"
+        assert gen_attn, "No GenerationAttention ops found in generation_ops"
+        assert all(op._use_qk_norm for op in ctx_attn), (
+            f"Expected use_qk_norm=True on all ContextAttention ops; "
+            f"False on: {[op._name for op in ctx_attn if not op._use_qk_norm]}"
+        )
+        assert all(op._use_qk_norm for op in gen_attn), (
+            f"Expected use_qk_norm=True on all GenerationAttention ops; "
+            f"False on: {[op._name for op in gen_attn if not op._use_qk_norm]}"
+        )
 
 
 class TestHybridMoEModelBuilder:
@@ -1677,3 +1949,18 @@ class TestQwen3VLVisionEncoderParsing:
         cfg = {**_QWEN3VL_HF_CONFIG, "vision_config": vision_cfg}
         result = _parse_hf_config_json(cfg)
         assert result["extra_params"].deepstack_visual_indexes == (8, 17, 26)
+
+
+class TestBackendActivationCoefficients:
+    """Test activation coefficients for model families across backends."""
+
+    def test_muse_glimmer_activation_coefficients_dense_tier(self):
+        """Verify MUSEGLIMMER dense-tier activation coefficients across backends."""
+        trtllm_coefs = TRTLLMBackend.ACTIVATION_COEFFICIENTS
+        sglang_coefs = SGLANGBackend.ACTIVATION_COEFFICIENTS
+        vllm_coefs = VLLMBackend.ACTIVATION_COEFFICIENTS
+
+        assert trtllm_coefs["MUSEGLIMMER"] == trtllm_coefs["LLAMA"]
+        assert sglang_coefs["MUSEGLIMMER"] == sglang_coefs["LLAMA"]
+        assert vllm_coefs["MUSEGLIMMER"] == trtllm_coefs["MUSEGLIMMER"]
+        assert "MUSEGLIMMER" not in BaseBackend.MOE_WORKSPACE_FAMILIES
