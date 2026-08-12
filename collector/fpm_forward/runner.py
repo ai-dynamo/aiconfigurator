@@ -1359,6 +1359,7 @@ def run_collection(
     smoke: bool = False,
     cell_limit: int | None = None,
     database_root: str | None = None,
+    publish_partial: bool = False,
 ) -> list[dict[str, object]]:
     """Render and run every cell, always tearing down owned resources."""
 
@@ -1373,6 +1374,7 @@ def run_collection(
             smoke=smoke,
             cell_limit=cell_limit,
             database_root=database_root,
+            publish_partial=publish_partial,
         )
 
 
@@ -1387,6 +1389,7 @@ def _run_collection_impl(
     smoke: bool = False,
     cell_limit: int | None = None,
     database_root: str | None = None,
+    publish_partial: bool = False,
 ) -> list[dict[str, object]]:
     root = Path(artifact_root).expanduser().resolve() / plan.sha256[:16]
     if smoke:
@@ -1616,15 +1619,32 @@ def _run_collection_impl(
             "formal_database_written": False,
         }
         _atomic_json(checkpoint_path, checkpoint)
-    elif not errors and all_passed and covers_full_plan:
+    elif (not errors and all_passed and covers_full_plan) or (
+        publish_partial
+        and any(
+            isinstance(checkpoint["cells"].get(cell.cell_id), dict)
+            and checkpoint["cells"][cell.cell_id].get("status") == "passed"
+            for cell in plan.cells
+        )
+    ):
         from .database import aggregate_cell, write_formal_database
 
+        # Explicit partial publication: rows from passed cells only; the
+        # missing cells are recorded so coverage is auditable, never implied.
+        publishable_cells = [
+            cell
+            for cell in plan.cells
+            if isinstance(checkpoint["cells"].get(cell.cell_id), dict)
+            and checkpoint["cells"][cell.cell_id].get("status") == "passed"
+        ]
+        missing_cells = [cell.cell_id for cell in plan.cells if cell not in publishable_cells]
+        partial = bool(missing_cells)
         try:
+            if partial and not publish_partial:
+                raise ValueError("internal: partial publication reached without --fpm-publish-partial")
             formal_rows = []
-            for cell in plan.cells:
+            for cell in publishable_cells:
                 entry = checkpoint["cells"].get(cell.cell_id)
-                if not isinstance(entry, dict) or entry.get("status") != "passed":
-                    raise ValueError(f"cannot publish non-passed FPM cell {cell.cell_id!r}")
                 formal_rows.extend(
                     aggregate_cell(
                         plan,
@@ -1640,7 +1660,17 @@ def _run_collection_impl(
                 "parquet": str(parquet_path),
                 "metadata": str(metadata_path),
                 "row_count": len(formal_rows),
+                "published_cells": len(publishable_cells),
+                "plan_cells": len(plan.cells),
+                "missing_cells": missing_cells,
             }
+            if partial:
+                logger.warning(
+                    "fpm_forward: PARTIAL publication (--fpm-publish-partial): %d/%d cells published, missing: %s",
+                    len(publishable_cells),
+                    len(plan.cells),
+                    ", ".join(missing_cells),
+                )
         except Exception as error:
             checkpoint["database"] = {
                 "status": "failed",

@@ -175,7 +175,12 @@ def _plan(cell: FPMCell):
         capability=SimpleNamespace(
             architecture="GlmMoeDsaForCausalLM",
             model_config=load_model_config("nvidia/GLM-5.2-NVFP4"),
+            support_level="native",
+            template_id=None,
+            template_version=None,
+            aic_database_version="test",
         ),
+        aic_revision="test-revision",
         to_dict=lambda: {"sha256": "plan-sha"},
     )
 
@@ -2119,3 +2124,121 @@ def test_user_extra_env_conflicting_with_collector_identity_fails_closed():
 
     with pytest.raises(ValueError, match="conflicting FPM environment value"):
         _cell_generator_overrides(plan, cell, base)
+
+
+def test_publish_partial_ships_passed_cells_and_records_the_missing(tmp_path, monkeypatch):
+    """--fpm-publish-partial: a plan with a legitimately-failed cell can still
+    publish its passed cells; the checkpoint records exactly what is missing
+    so coverage is auditable, and nothing is re-collected."""
+
+    passed_cell = _cell()
+    failed_cell = dataclasses.replace(passed_cell, cell_id="cell-prefill-failed")
+    plan = _plan(passed_cell)
+    plan.cells = (passed_cell, failed_cell)
+
+    artifact_root = tmp_path / "artifacts"
+    raw = artifact_root / plan.sha256[:16] / "cells" / passed_cell.cell_id / "raw" / "pod-0"
+    raw.mkdir(parents=True)
+    _write_provenance(
+        raw / "collector-provenance.json",
+        cell_id=passed_cell.cell_id,
+        plan_sha256=plan.sha256,
+        attempt_id="attempt-1",
+    )
+    (raw / "benchmark.json").write_text(json.dumps(_native_payload(phase="prefill", rank=0, dp=1)))
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "fpm_forward.json").write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {
+                    passed_cell.cell_id: {"status": "passed", "attempt_id": "attempt-1"},
+                    failed_cell.cell_id: {
+                        "status": "failed",
+                        "attempt_id": "attempt-2",
+                        "error_type": "RuntimeError",
+                        "error": "engine rejected the topology",
+                    },
+                },
+            }
+        )
+    )
+
+    # The database writer has its own coverage; stub it so this test isolates
+    # the publication gate and the aggregation over passed cells.
+    published = {}
+
+    def fake_writer(plan_arg, rows, *, systems_root=None):
+        published["rows"] = rows
+        parquet = tmp_path / "db" / "fpm_forward_perf.parquet"
+        parquet.parent.mkdir(parents=True, exist_ok=True)
+        parquet.write_bytes(b"parquet")
+        metadata = parquet.with_suffix(".metadata.json")
+        metadata.write_text("{}")
+        return parquet, metadata
+
+    monkeypatch.setattr("collector.fpm_forward.database.write_formal_database", fake_writer)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=False,
+        database_root=str(tmp_path / "db"),
+        publish_partial=True,
+    )
+
+    assert not [e for e in errors if e["classification"] == "formal_database_failed"]
+    checkpoint = json.loads((checkpoint_dir / "fpm_forward.json").read_text())
+    database = checkpoint["database"]
+    assert database["status"] == "passed"
+    assert database["published_cells"] == 1
+    assert database["plan_cells"] == 2
+    assert database["missing_cells"] == [failed_cell.cell_id]
+    assert database["row_count"] == len(published["rows"]) > 0
+    assert Path(database["parquet"]).exists()
+
+
+def test_partial_run_without_the_flag_still_refuses_to_publish(tmp_path):
+    """Default stays all-or-nothing: same setup, no flag, no database."""
+
+    passed_cell = _cell()
+    failed_cell = dataclasses.replace(passed_cell, cell_id="cell-prefill-failed")
+    plan = _plan(passed_cell)
+    plan.cells = (passed_cell, failed_cell)
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "fpm_forward.json").write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {
+                    passed_cell.cell_id: {"status": "passed", "attempt_id": "attempt-1"},
+                    failed_cell.cell_id: {"status": "failed", "attempt_id": "attempt-2"},
+                },
+            }
+        )
+    )
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(tmp_path / "artifacts"),
+        resume=True,
+        retry_failed=False,
+        smoke=False,
+        database_root=str(tmp_path / "db"),
+    )
+
+    assert [e["classification"] for e in errors] == ["campaign_incomplete"]
+    checkpoint = json.loads((checkpoint_dir / "fpm_forward.json").read_text())
+    assert "database" not in checkpoint

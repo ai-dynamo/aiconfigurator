@@ -444,6 +444,13 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Optional out-of-place systems/data root for formal database publication.",
     )
+    group.add_argument(
+        "--fpm-publish-partial",
+        action="store_true",
+        help="Publish rows from passed cells even when other cells failed (explicit opt-in; "
+        "the checkpoint records exactly which cells are missing). Default keeps the "
+        "all-cells-passed publication gate.",
+    )
     for axis, option in (
         ("tp", "--fpm-tp-sizes"),
         ("pp", "--fpm-pp-sizes"),
@@ -539,6 +546,7 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_max_prefill_cudagraph_size",
         "fpm_artifact_root",
         "fpm_database_root",
+        "fpm_publish_partial",
         # Deployment-only Generator inputs are registered unconditionally on
         # the collector CLI (an argv pre-scan cannot track argparse's own
         # abbreviation semantics), so the explicit-only discipline is enforced
