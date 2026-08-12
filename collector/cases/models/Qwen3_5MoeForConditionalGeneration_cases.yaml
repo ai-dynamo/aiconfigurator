@@ -105,18 +105,22 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: [nvfp4]
+    # NVFP4 artifact (experts-only ModelOpt recipe; kv fp8). Serving pin:
+    # sglang launched with --quantization modelopt_fp4 --moe-runner-backend
+    # flashinfer_trtllm (InferenceX runs 28131757535 / 28719981652,
+    # sglang v0.5.14-cu130 image); re-verify against sglang 0.5.14 moe
+    # runner dispatch on version bumps.
     - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
+      frameworks: [sglang]
       hidden_size: 4096
       inter_size: 1024
       topk: 10
       num_experts: 512
       sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       framework_quantization:
         sglang:
-          allowed_modes: [nvfp4]
-        trtllm:
-          allowed_modes: [nvfp4]
-        vllm:
           allowed_modes: [nvfp4]
   gemm:
     # Exact widths below the base feature grid (min 32): scalar shared-expert
