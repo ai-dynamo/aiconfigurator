@@ -7,5 +7,14 @@ runtime:
   framework: trtllm
   version: 1.3.0rc20
 tables:
+  # TP2/TP4 (single tray, original wave) + TP8/TP16 multi-node added
+  # 2026-08-12 from a 4-node x 4-GPU GB300 NVL fleet via mpirun.
+  # The multi-node rows required the issue #1416 collector fix: the old
+  # code path passed a dtype that disqualified the TRT-LLM MNNVL
+  # allreduce, so a naive multi-node run silently measured the fallback.
+  # Measured A/B on identical hardware/payload: 128B 4.42us (MNNVL) vs
+  # 27.27us (fallback), i.e. small payloads — the decode-dominant region —
+  # were previously over-reported by up to 6.2x.
+  # 23 message sizes (128B..512MB) per TP size.
   custom_allreduce_perf:
     status: complete

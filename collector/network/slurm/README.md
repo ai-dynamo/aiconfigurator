@@ -35,14 +35,18 @@ cat log_nccl/1node2gpu.out | grep 0:\ \  > 1u2g
 python3 cvt_log_to_perf_txt.py
 ```
 
-# 2.Custom allreduce collection in one node
+# 2.Custom allreduce collection
 
-## 2.1 Replace the "/path/to" in the sctipt with actual path
+Single-node scripts cover TP=2/4. On GB200/GB300 (4 GPUs per node) serving-relevant TP sizes span nodes; use the multi-node scripts so the TRT-LLM MNNVL path is exercised (issue #1416). `collect_allreduce.py` must construct `AllReduce(..., dtype=...)` — without dtype the collector silently measures the fallback kernel.
+
+## 2.1 Replace the "/path/to" in the script with actual path
 
 ## 2.2 Run the collector
 ```
 sbatch -N 1 ./slurm_custom_ar_2gpu.sh
 sbatch -N 1 ./slurm_custom_ar_4gpu.sh
+sbatch -N 2 ./slurm_custom_ar_8gpu.sh
+sbatch -N 4 ./slurm_custom_ar_16gpu.sh
 ```
 
 # 3. TensorRT-LLM MoE AlltoAll collection (NVLink)

@@ -169,7 +169,9 @@ def benchmark_trtllm_allreduce(
 
         op_list = []
         for i in range(repeat_n):
-            allreduce = trtllm_mods["AllReduce"](mapping=mapping).cuda()
+            # dtype enables MNNVL for multi-node TP (issue #1416):
+            # _torch/distributed/ops.py @v1.3.0rc20 builds `MNNVLAllReduce(mapping, dtype) if dtype else None`.
+            allreduce = trtllm_mods["AllReduce"](mapping=mapping, dtype=torch_dtype).cuda()
             allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
 
