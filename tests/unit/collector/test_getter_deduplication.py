@@ -384,10 +384,10 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    # 1926 = 1887 pre-Kimi-K3 + 39 K3 w4a16_mxfp4 cases (grouped-topk mapping
-    # for model_type kimi_linear).
-    assert len(cases) == 1926
-    assert sum(len(case[1]) for case in cases) == 52002
+    # 1968 = 1887 pre-Kimi-K3 + 39 K3 w4a16_mxfp4 cases (grouped-topk mapping
+    # for model_type kimi_linear) + 42 Nemotron Super FP8 cases.
+    assert len(cases) == 1968
+    assert sum(len(case[1]) for case in cases) == 53136
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —
@@ -416,13 +416,14 @@ def test_vllm_sm100_repository_moe_getter_expands_native_dsv4_w4a8_cases(monkeyp
 
 
 @pytest.mark.parametrize(
-    ("model_path", "moe_type"),
+    ("model_path", "moe_type", "expected_hidden_size"),
     [
-        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16"),
-        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8"),
+        ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "fp8", 1024),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16", 2048),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8", 2048),
     ],
 )
-def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_type):
+def test_vllm_nemotron_uses_latent_moe_width(monkeypatch, model_path, moe_type, expected_hidden_size):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
@@ -433,7 +434,7 @@ def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_
     assert len(cases) == 42
     assert sum(len(case[1]) for case in cases) == 1134
     assert {case[0] for case in cases} == {moe_type}
-    assert {case[2] for case in cases} == {2048}
+    assert {case[2] for case in cases} == {expected_hidden_size}
 
 
 @pytest.mark.parametrize(
