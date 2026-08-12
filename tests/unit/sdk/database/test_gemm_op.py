@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.gemm import GEMM
 
 
@@ -55,7 +56,7 @@ class TestGEMMCacheStructure:
 
 
 class TestStaticHelpers:
-    """``_get_quant_tc_flops`` + ``_normalize_gemm_quant_mode_for_table``."""
+    """``common.get_quant_tc_flops`` + ``_normalize_gemm_quant_mode_for_table``."""
 
     def test_normalize_fp8_static_maps_to_fp8(self):
         result = GEMM._normalize_gemm_quant_mode_for_table(common.GEMMQuantMode.fp8_static)
@@ -67,13 +68,55 @@ class TestStaticHelpers:
 
     def test_get_quant_tc_flops_uses_specific_key_when_present(self):
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 2000.0, "fp4_tc_flops": 4000.0}}
-        assert GEMM._get_quant_tc_flops(system_spec, common.GEMMQuantMode.bfloat16) == 1000.0
-        assert GEMM._get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8) == 2000.0
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.bfloat16) == 1000.0
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8) == 2000.0
 
-    def test_get_quant_tc_flops_falls_back_to_compute_factor(self):
-        """When fp8_tc_flops is missing, falls back to bfloat16_tc_flops * 2."""
+    def test_get_quant_tc_flops_resolves_by_compute_dtype(self):
+        """The mapping is per compute dtype, not per speedup factor: `sq`
+        (int8 pipeline) reads int8_tc_flops even though its compute factor
+        matches fp8's, and weight-only modes read bfloat16_tc_flops."""
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "int8_tc_flops": 30.0, "fp8_tc_flops": 2000.0}}
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.sq) == 30.0
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.int8_wo) == 1000.0
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.int4_wo) == 1000.0
+
+    def test_get_quant_tc_flops_missing_key_raises(self):
+        """No bf16-scaled extrapolation: a missing ``*_tc_flops`` entry means
+        the platform lacks that dtype (or the YAML is incomplete) and must
+        raise instead of fabricating a throughput."""
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0}}
-        assert GEMM._get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8) == 2000.0
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+        with pytest.raises(MissingSystemFlopsError, match="fp4_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.nvfp4)
+
+    def test_get_quant_tc_flops_non_positive_entry_raises(self):
+        """A zero/negative entry is a placeholder or a typo: letting it
+        through would turn SOL into inf and load-time clamps into silent
+        data corruption, so it is rejected like a missing entry."""
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 0}}
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": float("nan")}}
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+        # +inf (PyYAML parses `.inf`) would zero sol_math and silently collapse
+        # compute-bound SOL onto the memory roof.
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": float("inf")}}
+        with pytest.raises(MissingSystemFlopsError, match="fp8_tc_flops"):
+            common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.fp8)
+
+    def test_get_quant_tc_flops_memory_only_mode_raises(self):
+        system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0}}
+        with pytest.raises(MissingSystemFlopsError, match="memory-only"):
+            common.get_quant_tc_flops(system_spec, common.KVCacheQuantMode.fp8)
+
+    def test_get_quant_tc_flops_b300_fp4_uses_real_entry(self):
+        """b300 breaks the fixed 4x ratio (fp4 = 14 PFLOPS, bf16*4 = 9 PFLOPS):
+        the YAML entry must win over any compute-factor scaling (issue #1398)."""
+        system_spec = {"gpu": {"bfloat16_tc_flops": 2.25e15, "fp8_tc_flops": 4.5e15, "fp4_tc_flops": 1.4e16}}
+        assert common.get_quant_tc_flops(system_spec, common.MoEQuantMode.nvfp4) == 1.4e16
+        assert common.get_quant_tc_flops(system_spec, common.GEMMQuantMode.nvfp4) == 1.4e16
 
 
 class TestLoadData:
@@ -171,3 +214,38 @@ def test_query_returns_silicon_source_for_loaded_table(comprehensive_perf_db, qu
     GEMM migration."""
     result = comprehensive_perf_db.query_gemm(4, 256, 256, quant_mode)
     assert getattr(result, "source", None) == "silicon"
+
+
+def test_below_grid_shape_degrades_to_sol_only_with_flag(comprehensive_perf_db):
+    """`below_grid_sol` opt-in: a SILICON shape miss degrades to SOL; without
+    the flag it raises, and a quant-mode miss stays strict either way."""
+    db = comprehensive_perf_db
+    quant = common.GEMMQuantMode.bfloat16
+
+    # n=1 is octaves below the fixture grid (n >= 128).
+    with pytest.raises(PerfDataNotAvailableError):
+        db.query_gemm(4, 1, 256, quant)
+
+    result = db.query_gemm(4, 1, 256, quant, below_grid_sol=True)
+    assert result.source == "sol"
+    assert float(result) == float(db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.SOL))
+
+    # int8_wo has system flops but no collected table: strict despite the flag.
+    with pytest.raises(PerfDataNotAvailableError):
+        db.query_gemm(4, 1, 256, common.GEMMQuantMode.int8_wo, below_grid_sol=True)
+
+
+def test_below_grid_flag_threads_from_op_and_leaves_hybrid_unchanged(comprehensive_perf_db):
+    db = comprehensive_perf_db
+    quant = common.GEMMQuantMode.bfloat16
+
+    # Op-level: the constructor kwarg must reach the table query.
+    assert GEMM("gate", 1, 1, 256, quant, below_grid_sol=True).query(db, x=4).source == "sol"
+    with pytest.raises(PerfDataNotAvailableError):
+        GEMM("gate", 1, 1, 256, quant).query(db, x=4)
+
+    # HYBRID keeps its empirical fallback regardless of the flag.
+    with_flag = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID, below_grid_sol=True)
+    without = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID)
+    assert with_flag.source == without.source == "empirical"
+    assert float(with_flag) == float(without)

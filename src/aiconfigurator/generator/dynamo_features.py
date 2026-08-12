@@ -10,7 +10,10 @@ import json
 import shlex
 from typing import Any
 
+from packaging.version import InvalidVersion, Version
+
 KVBM_SUPPORTED_BACKENDS = frozenset({"trtllm", "vllm"})
+_VLLM_DISAGGREGATION_MODE_MIN_DYNAMO_VERSION = Version("1.0.0")
 
 
 def _present(value: Any) -> bool:
@@ -24,6 +27,32 @@ def normalize_router_mode(value: Any) -> str:
     if text in {"round-robin", "round robin"}:
         return "round-robin"
     return text
+
+
+def vllm_worker_role_args(role: str, dynamo_version: str | None) -> list[str]:
+    """Return the vLLM worker-role arguments supported by a Dynamo release.
+
+    Dynamo releases before 1.0 use the legacy boolean worker flags. Dynamo 1.0
+    introduced ``--disaggregation-mode`` and Dynamo 1.4 removed the legacy
+    flags. Missing or non-standard versions use the current interface so
+    callers that select only a backend template version retain modern output.
+    """
+
+    legacy_flags = {
+        "prefill": "--is-prefill-worker",
+        "decode": "--is-decode-worker",
+    }
+    legacy_flag = legacy_flags.get(role)
+    if legacy_flag is None:
+        raise ValueError(f"Unsupported vLLM worker role: {role}")
+
+    try:
+        version = Version(str(dynamo_version).strip()) if dynamo_version else None
+    except InvalidVersion:
+        version = None
+    if version is not None and version < _VLLM_DISAGGREGATION_MODE_MIN_DYNAMO_VERSION:
+        return [legacy_flag]
+    return ["--disaggregation-mode", role]
 
 
 def frontend_cli_args_from_dyn_config(

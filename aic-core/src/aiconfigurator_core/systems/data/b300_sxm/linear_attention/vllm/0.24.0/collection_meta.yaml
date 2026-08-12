@@ -2,10 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
   framework: vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0
+  image_digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
 tables:
   gdn_perf:
+    collector_ref: unknown
+    collector_hash: sha256:3a94897e5b30ddc37291b5060bf1fc56cdfc890a8dddc276759d56f3ef6efc5d
+    case_plan_hash: sha256:c4a596c322f4052e093e6b5c2efb32561b8938296bf92d038081f828da681ca2
+    collected_at: '2026-08-07'
+    rows: 9100
+    # Both error cells are the by-design packed-recurrent CUDA-grid guard
+    # raises on the largest decode shapes; no other failures.
     status: complete

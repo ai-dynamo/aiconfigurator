@@ -8,4 +8,13 @@ runtime:
   version: 0.24.0
 tables:
   moe_perf:
+    # 2026-08-01: appended 972 Kimi-K3 w4a16_mxfp4 rows (3584/3072, 896x16;
+    # kernel_source vllm_compressedtensorsw4a4mxfp4moe_marlin_marlinexperts,
+    # SITU activation). Collected on 8x B200 in the vLLM kimi-k3 preview
+    # runtime (0.1.dev19262, image sha256:e90e2603 — the moe family pin;
+    # stock 0.24.0 lacks SITU and would dispatch a different kernel), rows
+    # carry their honest runtime version column; merged into this 0.24.0
+    # table per owner decision 2026-08-01, keys disjoint. Classified
+    # failures: 3 moe_tp=32 tasks (marlin Invalid thread config at
+    # inter_size/32 = 96 — kernel tile limit).
     status: complete

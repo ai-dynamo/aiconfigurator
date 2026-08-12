@@ -133,6 +133,13 @@ inputs:
     required: false
   - key: K8sConfig.fpm_resource_labels
     required: false
+  # Multi-node FPM resource orchestrator. "lws" preserves the historical
+  # output; "grove" emits a PodCliqueSet. Single-node FPM always emits a Pod.
+  - key: K8sConfig.fpm_orchestrator
+    required: false
+    # Defaults are Jinja-evaluated: the inner quotes make this the string
+    # "lws" rather than an undefined bare identifier (config_schema rule).
+    default: '"lws"'
 
   # Worker config
   - key: WorkerConfig.prefill_workers

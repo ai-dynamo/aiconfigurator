@@ -16,15 +16,15 @@
 //! `prefix_correction = (full_s^2 - prefix^2) / full_s^2`. Generation has
 //! no prefix concept.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
-use crate::perf_database::wideep_mla::{
-    wideep_context_mla_sol_ms, wideep_generation_mla_sol_ms,
-};
+use crate::perf_database::attention::generation_attn_mode;
+use crate::perf_database::gemm::quant_tc_flops;
+use crate::perf_database::wideep_mla::{wideep_context_mla_sol_ms, wideep_generation_mla_sol_ms};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     if full_s == 0 {
@@ -209,7 +209,6 @@ mod tests {
         );
     }
 
-
     fn assert_close(got: f64, expected: f64, what: &str) {
         assert!(
             (got - expected).abs() < 1e-9,
@@ -273,7 +272,10 @@ mod tests {
             FmhaQuantMode::Fp8Block,
             "flashinfer",
         );
-        assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "got {result:?}"
+        );
     }
 
     /// Python oracle: `WideEPGenerationMLA._query_wideep_generation_mla_table`
@@ -293,15 +295,9 @@ mod tests {
             (2, 9000, 128, "fa3", 0.12152241047815426),
         ];
         for &(b, s, n, backend, expected) in cases {
-            let (latency, source) = query_wideep_generation_mla_table(
-                &db,
-                b,
-                s,
-                n,
-                KvCacheQuantMode::Fp8,
-                backend,
-            )
-            .expect("empirical query");
+            let (latency, source) =
+                query_wideep_generation_mla_table(&db, b, s, n, KvCacheQuantMode::Fp8, backend)
+                    .expect("empirical query");
             assert_close(
                 latency,
                 expected,
@@ -317,9 +313,18 @@ mod tests {
 
         // HYBRID on a kv slice with no data (bfloat16) -> terminal miss.
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
-        let result =
-            query_wideep_generation_mla_table(&db, 1, 4096, 128, KvCacheQuantMode::Bfloat16, "flashinfer");
-        assert!(matches!(result, Err(AicError::EmpiricalNotImplemented(_))), "got {result:?}");
+        let result = query_wideep_generation_mla_table(
+            &db,
+            1,
+            4096,
+            128,
+            KvCacheQuantMode::Bfloat16,
+            "flashinfer",
+        );
+        assert!(
+            matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
+            "got {result:?}"
+        );
     }
 
     /// Python whitelists attn_backend in {flashinfer, fa3} inside
@@ -411,7 +416,11 @@ mod tests {
                 "trtllm_mla",
             )
             .expect("trtllm_mla slice estimates");
-            assert_close(latency, expected, &format!("trtllm_mla ctx(b={b}, s={s}, pfx={prefix})"));
+            assert_close(
+                latency,
+                expected,
+                &format!("trtllm_mla ctx(b={b}, s={s}, pfx={prefix})"),
+            );
             assert_eq!(source, Source::Empirical);
         }
 
@@ -455,6 +464,54 @@ mod tests {
             matches!(result, Err(AicError::EmpiricalNotImplemented(_))),
             "expected the typed empirical miss, got {result:?}"
         );
+    }
+
+    /// SOL mode returns the pure WideEP MLA rooflines tagged `Source::Sol`:
+    /// context uses the caller's fmha label with prefix inside the formula;
+    /// generation rebinds the fmha label from the kv-cache dtype (Python
+    /// `_query_wideep_{context,generation}_mla_table` SOL branches). Neither
+    /// touches the table or the attn-backend whitelist.
+    #[test]
+    fn wideep_mla_sol_mode_returns_roofline_with_sol_source() {
+        let mut db = h200_sglang_db();
+        db.database_mode = DatabaseMode::Sol;
+        let spec = db.system_spec.clone();
+
+        let mut ctx = op(1);
+        // An unknown backend must not matter in SOL mode (Python's SOL branch
+        // returns before the whitelist check).
+        ctx.attn_backend = "not_a_backend".to_string();
+        let result = ctx.query(&db, 2, 4096, 512).expect("wideep ctx sol");
+        let main_flops = quant_tc_flops(&spec, ctx.fmha_quant_mode.mapping()).unwrap();
+        let bf16_flops = quant_tc_flops(&spec, FmhaQuantMode::Bfloat16.mapping()).unwrap();
+        let expected = wideep_context_mla_sol_ms(
+            &spec,
+            ctx.fmha_quant_mode,
+            ctx.num_heads as f64,
+            4096.0,
+            512.0,
+            2.0,
+            main_flops,
+            bf16_flops,
+        );
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+
+        let mut gen = WideEpGenerationMlaOp::new(
+            "wideep_gen_mla",
+            16,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Fp8Block,
+        );
+        gen.attn_backend = "flashinfer".to_string();
+        let result = gen.query(&db, 8, 4096).expect("wideep gen sol");
+        let fmha = generation_attn_mode(&spec, KvCacheQuantMode::Fp8);
+        let main_flops = quant_tc_flops(&spec, fmha.mapping()).unwrap();
+        let expected =
+            wideep_generation_mla_sol_ms(&spec, fmha, 16.0, 8.0, 4096.0, main_flops, bf16_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
     }
 }
 
@@ -512,11 +569,12 @@ impl WideEpGenerationMlaOp {
 // Database-mode dispatch, mirroring the Python `_query_wideep_*_table`
 // classmethods (`operations/mla.py`): SILICON queries the table; HYBRID
 // converts a typed silicon miss into the util-space empirical estimate;
-// EMPIRICAL always estimates. The SOL diagnostic modes never reach the
-// compiled engine. Python's classmethods take `tp_size` and use
-// `num_head = 128 // tp_size` everywhere (query coordinate AND query SOL);
-// these dispatches take that `num_heads` value directly, matching the op
-// struct / table surface.
+// EMPIRICAL always estimates; SOL (and the retired SOL_FULL alias) returns
+// the pure speed-of-light roofline with `Source::Sol` before any table or
+// attn-backend validation (Python's SOL branch touches neither). Python's
+// classmethods take `tp_size` and use `num_head = 128 // tp_size` everywhere
+// (query coordinate AND query SOL); these dispatches take that `num_heads`
+// value directly, matching the op struct / table surface.
 // ---------------------------------------------------------------------------
 
 /// Sample-coordinate head mapping for the util-empirical grids. Python's
@@ -559,15 +617,52 @@ fn query_wideep_context_mla_table(
         Ok(raw * prefix_correction(full_s, prefix))
     };
     match db.database_mode {
+        // Python `_query_wideep_context_mla_table`: `get_sol(b, s, prefix,
+        // tp_size, kvcache_quant_mode, fmha_quant_mode)[0]` — the kv quant is
+        // unused inside the formula; the caller's fmha label is used as-is.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let spec = &db.system_spec;
+            let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+            let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
+            Ok((
+                wideep_context_mla_sol_ms(
+                    spec,
+                    fmha_quant,
+                    num_heads as f64,
+                    s as f64,
+                    prefix as f64,
+                    b as f64,
+                    main_flops,
+                    bf16_flops,
+                ),
+                Source::Sol,
+            ))
+        }
         DatabaseMode::Empirical => Ok((
-            wideep_context_mla_empirical(db, b, s, prefix, num_heads, kv_quant, fmha_quant, attn_backend)?,
+            wideep_context_mla_empirical(
+                db,
+                b,
+                s,
+                prefix,
+                num_heads,
+                kv_quant,
+                fmha_quant,
+                attn_backend,
+            )?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok((latency, Source::Silicon)),
             Err(err) if err.is_missing_perf_data() => Ok((
                 wideep_context_mla_empirical(
-                    db, b, s, prefix, num_heads, kv_quant, fmha_quant, attn_backend,
+                    db,
+                    b,
+                    s,
+                    prefix,
+                    num_heads,
+                    kv_quant,
+                    fmha_quant,
+                    attn_backend,
                 )?,
                 Source::Empirical,
             )),
@@ -594,9 +689,20 @@ fn wideep_context_mla_empirical(
     attn_backend: &str,
 ) -> Result<f64, AicError> {
     let spec = &db.system_spec;
+    let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
     // c = (num_heads, full_s, b); tp = round(128 / c[0]) per Python.
     let sol = |c: &[f64]| {
-        wideep_context_mla_sol_ms(spec, fmha_quant, wideep_sample_num_head(c[0]), c[1], 0.0, c[2])
+        wideep_context_mla_sol_ms(
+            spec,
+            fmha_quant,
+            wideep_sample_num_head(c[0]),
+            c[1],
+            0.0,
+            c[2],
+            main_flops,
+            bf16_flops,
+        )
     };
     let key = format!(
         "wideep_ctx_mla:{attn_backend}:{}:{}",
@@ -604,8 +710,13 @@ fn wideep_context_mla_empirical(
         kv_quant.name()
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
-        match db.wideep_mla.context_points(attn_backend, kv_quant, fmha_quant) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+        match db
+            .wideep_mla
+            .context_points(attn_backend, kv_quant, fmha_quant)
+        {
+            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                points, sol,
+            )))),
             // Typed coverage miss -> no grid (estimate() raises the
             // empirical miss); schema/load errors propagate.
             Err(err) if err.is_missing_perf_data() => Ok(None),
@@ -620,6 +731,8 @@ fn wideep_context_mla_empirical(
         s as f64,
         prefix as f64,
         b as f64,
+        main_flops,
+        bf16_flops,
     );
     let query = [num_heads as f64, (s + prefix) as f64, b as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
@@ -651,6 +764,28 @@ fn query_wideep_generation_mla_table(
             .query_generation(b, s, num_heads, kv_quant, attn_backend)
     };
     match db.database_mode {
+        // Python `_query_wideep_generation_mla_table`: the fmha label is
+        // rebound to `generation_attn_mode(spec, kv)` BEFORE `get_sol` is
+        // defined, then `get_sol(b, s, tp_size, kvcache_quant_mode,
+        // fmha_quant_mode)[0]` (kv quant unused inside the formula).
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            let spec = &db.system_spec;
+            let fmha_quant = generation_attn_mode(spec, kv_quant);
+            let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+            let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
+            Ok((
+                wideep_generation_mla_sol_ms(
+                    spec,
+                    fmha_quant,
+                    num_heads as f64,
+                    b as f64,
+                    s as f64,
+                    main_flops,
+                    bf16_flops,
+                ),
+                Source::Sol,
+            ))
+        }
         DatabaseMode::Empirical => Ok((
             wideep_generation_mla_empirical(db, b, s, num_heads, kv_quant, attn_backend)?,
             Source::Empirical,
@@ -678,28 +813,45 @@ fn wideep_generation_mla_empirical(
     kv_quant: KvCacheQuantMode,
     attn_backend: &str,
 ) -> Result<f64, AicError> {
-    // Decode compute dtype follows the kv-cache dtype (Python overrides the
-    // passed fmha label before get_sol is defined).
-    let fmha_quant = if kv_quant == KvCacheQuantMode::Fp8 {
-        FmhaQuantMode::Fp8
-    } else {
-        FmhaQuantMode::Bfloat16
-    };
+    // Decode compute dtype follows the kv-cache dtype via the shared
+    // sm-gated rule (Python overrides the passed fmha label the same way
+    // before get_sol is defined).
     let spec = &db.system_spec;
+    let fmha_quant = generation_attn_mode(spec, kv_quant);
+    let main_flops = quant_tc_flops(spec, fmha_quant.mapping())?;
+    let bf16_flops = quant_tc_flops(spec, FmhaQuantMode::Bfloat16.mapping())?;
     // c = (num_heads, b, s); tp = round(128 / c[0]) per Python.
     let sol = |c: &[f64]| {
-        wideep_generation_mla_sol_ms(spec, fmha_quant, wideep_sample_num_head(c[0]), c[1], c[2])
+        wideep_generation_mla_sol_ms(
+            spec,
+            fmha_quant,
+            wideep_sample_num_head(c[0]),
+            c[1],
+            c[2],
+            main_flops,
+            bf16_flops,
+        )
     };
     let key = format!("wideep_gen_mla:{attn_backend}:{}", kv_quant.name());
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.wideep_mla.generation_points(attn_backend, kv_quant) {
-            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+            Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                points, sol,
+            )))),
             Err(err) if err.is_missing_perf_data() => Ok(None),
             Err(err) => Err(err),
         }
     })?;
     // Query SOL uses the op's own head count (= Python's `128 // tp_size`).
-    let sol_query = wideep_generation_mla_sol_ms(spec, fmha_quant, num_heads as f64, b as f64, s as f64);
+    let sol_query = wideep_generation_mla_sol_ms(
+        spec,
+        fmha_quant,
+        num_heads as f64,
+        b as f64,
+        s as f64,
+        main_flops,
+        bf16_flops,
+    );
     let query = [num_heads as f64, b as f64, s as f64];
     let (latency, _) = util_empirical::estimate(sol_query, &query, grid.as_deref(), 1.0)?;
     // Own-slice util fired (Python mla.py:1162 estimate()'s default tier).

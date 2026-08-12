@@ -47,6 +47,20 @@ class UnsupportedWideepConfigError(ValueError):
     """
 
 
+class MissingSystemFlopsError(ValueError):
+    """Raised when a quant mode's compute dtype has no ``*_tc_flops`` entry in the system YAML.
+
+    A missing entry means either the platform has no hardware support for that
+    dtype (the quant mode must not be modeled on it) or the system YAML is
+    incomplete and must be filled in. We raise instead of extrapolating
+    ``bfloat16_tc_flops * compute_factor`` so a fictional throughput is never
+    silently produced (b300/gb300 already break the fixed-ratio assumption).
+
+    Subclasses ``ValueError`` per the SDK convention for unsupported quant /
+    hardware rejections, so it is reported as an expected CLI error.
+    """
+
+
 class InterpolationDataNotAvailableError(ValueError):
     """Raised when interpolation cannot produce a real value from available data.
 

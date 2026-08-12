@@ -3,6 +3,7 @@
 
 import csv
 import json
+import math
 from collections import namedtuple
 from dataclasses import dataclass
 from enum import Enum
@@ -10,6 +11,8 @@ from functools import cache
 from importlib import resources as pkg_resources
 
 from packaging.version import InvalidVersion, Version
+
+from aiconfigurator_core.sdk.errors import MissingSystemFlopsError
 
 
 def parse_support_matrix_version(version: str | None) -> Version | None:
@@ -118,6 +121,9 @@ class HybridMoEConfig:
     SWA/local attention dims — set to 0 to fall back to model-level defaults
     (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
     Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_heads:    Query heads for SWA/local layers (0 → num_heads). Step-3.7-Flash
+                          declares these separately (96 on sliding vs 64 global) in
+                          ``text_config.attention_other_setting``.
         swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
         swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
         swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
@@ -125,6 +131,12 @@ class HybridMoEConfig:
 
     sliding_window_size: token window for SWA/local attention layers
     dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+
+    Step-specific attention extras, both off by default so the shared families
+    (MiMo-V2-Flash, Llama 4, Gemma 4) are unaffected:
+        use_qk_norm: per-head RMSNorm on Q and K before RoPE, every layer.
+        use_head_wise_attn_gate: g_proj (hidden_size → num_heads) whose sigmoid
+                          scales each head's attention output before o_proj.
     """
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
@@ -135,6 +147,12 @@ class HybridMoEConfig:
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+    # New fields are appended, never inserted: this dataclass has a generated
+    # positional constructor, so inserting ahead of an existing optional field
+    # silently changes what a legacy positional call means.
+    swa_num_heads: int = 0
+    use_qk_norm: bool = False
+    use_head_wise_attn_gate: bool = False
 
 
 @dataclass(frozen=True)
@@ -227,6 +245,42 @@ class Qwen35Config:
     num_experts: int = 0
     moe_inter_size: int = 0
     shared_expert_inter_size: int = 0
+
+
+@dataclass(frozen=True)
+class KimiK3Config:
+    """Config for Kimi-K3 hybrid KDA + MLA LatentMoE model.
+
+    layer_types: per-layer tuple of "linear_attention" (KDA) or "full_attention" (MLA),
+                 derived from config.json linear_attn_config.kda_layers (1-based).
+    kda_*: KDA layer geometry (Kimi-K3: 96 heads, head_dim 128, conv kernel 4;
+           q/k/v/gate projections are all num_heads*head_dim wide — full-rank gate).
+    MLA fields mirror the DeepSeek latent-attention geometry; mla_use_nope means the
+    rope slice is projected/cached but positionless (kernel shape unchanged), and
+    mla_use_output_gate adds one extra hidden->num_heads*v_head_dim gate GEMM.
+    LatentMoE: routed experts run in a routed_expert_hidden_size-wide latent space
+    (7168 -> 3584 down proj, experts at 3584/3072, 3584 -> 7168 up proj); the
+    num_shared_experts shared experts run in the full hidden space.
+    attn_res_block_size: AttnRes cross-layer residual block size (elementwise only).
+    """
+
+    layer_types: tuple[str, ...]  # per-layer: "linear_attention" (KDA) or "full_attention" (MLA)
+    kda_num_heads: int
+    kda_head_dim: int
+    kda_conv_kernel: int
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    topk: int = 0
+    num_experts: int = 0
+    moe_inter_size: int = 0
+    routed_expert_hidden_size: int = 0  # LatentMoE latent width (0 = experts in full hidden space)
+    num_shared_experts: int = 0
+    first_k_dense_replace: int = 0
+    dense_inter_size: int = 0
+    attn_res_block_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -485,6 +539,8 @@ DefaultHFModels = {
     "nvidia/DeepSeek-V3.1-NVFP4",
     # Kimi K2.5 Models
     "moonshotai/Kimi-K2.5",
+    # Kimi K3
+    "moonshotai/Kimi-K3",
     "nvidia/Kimi-K2.5-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
@@ -549,7 +605,31 @@ DefaultHFModels = {
     "nvidia/Nemotron-H-56B-Base-8K",
     # Google Gemma 4 Models
     "google/gemma-4-26B-A4B",
+    # StepFun Step-3.7 Models
+    "stepfun-ai/Step-3.7-Flash",
 }
+
+# Bundled model configs and the default support-matrix roster intentionally have
+# different lifecycles. A model can leave the generated matrix when a newer
+# release supersedes it while its cached config remains available for explicit
+# SDK/CLI use and for loading historical support-matrix rows.
+RetiredSupportMatrixHFModels = frozenset(
+    {
+        "zai-org/GLM-5",
+        "zai-org/GLM-5-FP8",
+        "nvidia/GLM-5-NVFP4",
+        "zai-org/GLM-5.1",
+        "zai-org/GLM-5.1-FP8",
+        "nvidia/GLM-5.1-NVFP4",
+        "MiniMaxAI/MiniMax-M2.5",
+        "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+        "nvidia/Nemotron-H-56B-Base-8K",
+    }
+)
+
+assert RetiredSupportMatrixHFModels <= DefaultHFModels
+SupportMatrixHFModels = DefaultHFModels - RetiredSupportMatrixHFModels
 
 """
 Supported systems (GPU types)
@@ -582,6 +662,7 @@ ModelFamily = {
     "DEEPSEEKV32",
     "DEEPSEEKV4",
     "KIMIK25",
+    "KIMIK3",
     "NEMOTRONNAS",
     "NEMOTRONH",
     "HYBRIDMOE",
@@ -590,6 +671,7 @@ ModelFamily = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -604,6 +686,7 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "GlmMoeDsaForCausalLM": "DEEPSEEKV32",
     "DeepseekV4ForCausalLM": "DEEPSEEKV4",
     "KimiK25ForConditionalGeneration": "KIMIK25",
+    "KimiK3ForConditionalGeneration": "KIMIK3",
     "NemotronForCausalLM": "NEMOTRONNAS",
     "DeciLMForCausalLM": "NEMOTRONNAS",
     "NemotronHForCausalLM": "NEMOTRONH",
@@ -614,6 +697,14 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiniMaxM3ForCausalLM": "MINIMAXM3",
     "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
+    # The published checkpoints declare Step3p7ForConditionalGeneration at the top
+    # level with a nested text_config architecture of Step3p5ForCausalLM. The
+    # *Flash* spellings only ever existed in this repo's curated configs, so both
+    # are mapped: real checkpoints and the curated fixtures.
+    "Step3p7ForConditionalGeneration": "STEP3P7",
+    "Step3p5ForCausalLM": "STEP3P7",
+    "Step3p7FlashForCausalLM": "STEP3P7",
+    "Step3p5FlashForCausalLM": "STEP3P7",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
@@ -625,6 +716,12 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 # _parse_hf_config_json will flatten these before parsing.
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
+    "KimiK3ForConditionalGeneration": "text_config",
+    # Step-3.7/3.5-Flash ship a vision tower and nest the whole decoder under
+    # text_config; without this the parser reads the top level and rejects real
+    # checkpoints for having no num_hidden_layers.
+    "Step3p7ForConditionalGeneration": "text_config",
+    "Step3p7FlashForCausalLM": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
@@ -633,6 +730,14 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
     "Qwen3VLMoeForConditionalGeneration": "text_config",
     "MiniMaxM3SparseForConditionalGeneration": "text_config",
 }
+
+# Architectures whose speculative decoding is DSPARK-style: ``nextn`` is the
+# speculative BLOCK SIZE served by a standalone trained draft model (block
+# proposal, verified at width nextn+1), NOT a chained target-shaped MTP
+# module. Their checkpoints carry no num_nextn_predict_layers, so
+# nextn="auto" cannot enable speculation and the MTP mismatch warning does
+# not apply (see Task._resolve_model_identity).
+DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
 
 """
 All reduce strategy for trtllm custom allreduce
@@ -876,11 +981,29 @@ ColumnsAFD = [
     "tokens/s/gpu",
     "tokens/s/user",
     "seq/s",
+    "request_rate",
     "concurrency",
+    "parallel",
     "pipeline_model",
     "num_microbatches",
+    "nextn",
     "combined_with_pd",
     "boundary_on_attn",
+    # Static prefill pool paired with the AFD pool in combined-with-PD
+    # default-mode sweeps; NaN for single-phase AFD-only estimates.
+    "(p)workers",
+    "(p)tp",
+    "(p)pp",
+    "(p)dp",
+    "(p)moe_tp",
+    "(p)ep",
+    "(p)bs",
+    "(p)num_gpus",
+    "(p)system",
+    "(p)backend",
+    "(p)version",
+    "(p)impl",
+    "(d)impl",
     "num_total_gpus",
     "memory",
     "backend",
@@ -899,7 +1022,11 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    SOL_FULL = 4  # Provide SOL time and details
+    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
+    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
+    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
+    # database's DEFAULT mode — mode entry raises (perf_database).
+    SOL_FULL = 4
 
 
 class TransferKind(Enum):
@@ -1004,6 +1131,7 @@ class PerfDataFilename(Enum):
     scale_matrix = "scale_matrix_perf.parquet"
     mamba2 = "mamba2_perf.parquet"
     gdn = "gdn_perf.parquet"
+    kda = "kda_perf.parquet"
     # Module-level attention profiling (complete self_attn forward)
     mla_context_module = "mla_context_module_perf.parquet"
     mla_generation_module = "mla_generation_module_perf.parquet"
@@ -1034,9 +1162,18 @@ class PerfDataFilename(Enum):
     dsv4_csa_attn_module = "dsv4_csa_attn_module_perf.parquet"
     dsv4_csa_topk_calib = "dsv4_csa_topk_calib_perf.parquet"
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
+    # Whole-model forward-pass data (forward_model="fpm"). Paired with a
+    # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
+    # ``operations.fpm_forward``, never through the shared layer.
+    fpm_forward = "fpm_forward_perf.parquet"
 
 
-QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name"])
+# compute_dtype names the tensor-core pipeline the mode's MMA actually executes
+# on ("bfloat16" | "int8" | "fp8" | "fp4"), i.e. which <dtype>_tc_flops entry of
+# the system YAML governs its SOL math. Weight-only modes (int8_wo, int4_wo,
+# w4a16_*) dequantize to bf16 before the MMA, so they map to "bfloat16". None
+# marks memory-only modes (KV cache, comm) that never query FLOPS.
+QuantMapping = namedtuple("QuantMapping", ["memory", "compute", "name", "compute_dtype"])
 
 
 class GEMMQuantMode(Enum):
@@ -1044,17 +1181,19 @@ class GEMMQuantMode(Enum):
     GEMM quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
-    int8_wo = QuantMapping(1, 1, "int8_wo")  # w8a16
-    int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
-    fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
-    fp8_static = QuantMapping(1, 2, "fp8_static")  # fp8 with static quantization (compute_scale/scale_matrix modeled)
-    sq = QuantMapping(1, 2, "sq")  # w8int8
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")  # w16a16
+    int8_wo = QuantMapping(1, 1, "int8_wo", "bfloat16")  # w8a16
+    int4_wo = QuantMapping(0.5, 1, "int4_wo", "bfloat16")  # w4a16
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")  # w8fp8
+    fp8_static = QuantMapping(
+        1, 2, "fp8_static", "fp8"
+    )  # fp8 with static quantization (compute_scale/scale_matrix modeled)
+    sq = QuantMapping(1, 2, "sq", "int8")  # w8int8
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
     fp8_ootb = QuantMapping(
-        1, 2, "fp8_ootb"
+        1, 2, "fp8_ootb", "fp8"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
-    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
 
 
 class MoEQuantMode(Enum):
@@ -1062,23 +1201,23 @@ class MoEQuantMode(Enum):
     MoE quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")  # w16a16
-    fp8 = QuantMapping(1, 2, "fp8")  # w8fp8
-    int4_wo = QuantMapping(0.5, 1, "int4_wo")  # w4a16
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # specific for trtllm torch ds fp8
-    w4afp8 = QuantMapping(0.5, 2, "w4afp8")  # specific for trtllm torch ds w4a8
-    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
-    w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4")  # native data format for gpt oss
-    w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8")
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")  # w16a16
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")  # w8fp8
+    int4_wo = QuantMapping(0.5, 1, "int4_wo", "bfloat16")  # w4a16
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
+    w4afp8 = QuantMapping(0.5, 2, "w4afp8", "fp8")  # specific for trtllm torch ds w4a8
+    nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4", "bfloat16")  # native data format for gpt oss
+    w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8", "fp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)
-    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm")
+    w4a8_mxfp4_mxfp8_trtllm = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8_trtllm", "fp8")
     # Blackwell trtllm-gen fused MoE: MXFP4 (E2M1, block-32) weights x MXFP8 (E4M3)
     # activations -- the kernel DeepSeek-V4-Pro actually runs in prefill on sm100
     # (bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f, flashinfer trtllm_fp4_block_scale_moe).
     # Distinct backend from w4a8_mxfp4_mxfp8 above (flashinfer cutedsl). DSV4 MoE
     # weights are stored MXFP4 (I8-packed E2M1 + E8M0 scales), so sglang dispatches
     # by GPU: sm100 -> this (trtllm-gen); sm90 -> w4a16_mxfp4_cutlass below.
-    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass")
+    w4a16_mxfp4_cutlass = QuantMapping(0.5, 1, "w4a16_mxfp4_cutlass", "bfloat16")
     # Hopper (sm90) DeepSeek-V4-Pro MoE: flashinfer cutlass SM90 mixed GEMM
     # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
     # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
@@ -1090,9 +1229,10 @@ class FMHAQuantMode(Enum):
     FMHA quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 1, "bfloat16")
-    fp8 = QuantMapping(1, 2, "fp8")
-    fp8_block = QuantMapping(1, 2, "fp8_block")  # FIXME: specific for sglang wideep
+    bfloat16 = QuantMapping(2, 1, "bfloat16", "bfloat16")
+    float16 = QuantMapping(2, 1, "float16", "bfloat16")  # sglang decode attention uses float16 compute
+    fp8 = QuantMapping(1, 2, "fp8", "fp8")
+    fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # FIXME: specific for sglang wideep
 
 
 class KVCacheQuantMode(Enum):
@@ -1100,9 +1240,9 @@ class KVCacheQuantMode(Enum):
     KVCache quant mode.
     """
 
-    bfloat16 = QuantMapping(2, 0, "bfloat16")
-    int8 = QuantMapping(1, 0, "int8")
-    fp8 = QuantMapping(1, 0, "fp8")
+    bfloat16 = QuantMapping(2, 0, "bfloat16", None)
+    int8 = QuantMapping(1, 0, "int8", None)
+    fp8 = QuantMapping(1, 0, "fp8", None)
 
 
 class CommQuantMode(Enum):
@@ -1110,6 +1250,47 @@ class CommQuantMode(Enum):
     Comm quant mode.
     """
 
-    half = QuantMapping(2, 0, "half")
-    int8 = QuantMapping(1, 0, "int8")
-    fp8 = QuantMapping(1, 0, "fp8")
+    half = QuantMapping(2, 0, "half", None)
+    int8 = QuantMapping(1, 0, "int8", None)
+    fp8 = QuantMapping(1, 0, "fp8", None)
+
+
+# compute_dtype -> system YAML key. A key's absence from the YAML means the
+# platform has no hardware for that dtype (see get_quant_tc_flops).
+_COMPUTE_DTYPE_TO_FLOPS_KEY = {
+    "bfloat16": "bfloat16_tc_flops",
+    "int8": "int8_tc_flops",
+    "fp8": "fp8_tc_flops",
+    "fp4": "fp4_tc_flops",
+}
+
+
+def get_quant_tc_flops(system_spec: dict, quant_mode) -> float:
+    """Resolve the tensor-core FLOPS governing ``quant_mode``'s SOL math.
+
+    Looks up the mode's ``compute_dtype`` entry in the system GPU spec. Raises
+    :class:`~aiconfigurator_core.sdk.errors.MissingSystemFlopsError` when the
+    YAML has no entry for that dtype — never extrapolates from bf16, so a
+    platform without e.g. fp4 hardware fails loudly instead of yielding a
+    fictional estimate (issue #1398).
+    """
+    compute_dtype = quant_mode.value.compute_dtype
+    if compute_dtype is None:
+        raise MissingSystemFlopsError(f"quant mode '{quant_mode.value.name}' is memory-only and has no compute FLOPS")
+    key = _COMPUTE_DTYPE_TO_FLOPS_KEY[compute_dtype]
+    # A non-positive value is treated the same as a missing entry: it can only
+    # be a placeholder or a typo, and letting it through turns every SOL into
+    # inf and load-time clamps into silent data corruption.
+    value = system_spec["gpu"].get(key)
+    # Require a positive FINITE value: `not value > 0` alone rejects NaN but
+    # admits +inf (PyYAML parses `.inf`), which silently zeroes sol_math and
+    # collapses compute-bound SOL onto the memory roof. Matches the Rust
+    # resolver's `is_finite() && > 0.0` filter.
+    if value is None or not (value > 0 and math.isfinite(value)):
+        raise MissingSystemFlopsError(
+            f"quant mode '{quant_mode.value.name}' needs '{key}', which this system's YAML "
+            f"does not define (or defines as a non-positive placeholder): either the platform "
+            f"does not support {compute_dtype} compute and the quant mode cannot be modeled on "
+            f"it, or the system YAML is missing the entry."
+        )
+    return value

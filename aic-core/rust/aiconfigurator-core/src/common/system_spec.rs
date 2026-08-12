@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::common::enums::{ComputeDtype, QuantMapping};
 use crate::common::error::AicError;
 
 /// Hardware system spec deserialized from `systems/<system>.yaml`.
@@ -59,6 +60,39 @@ pub struct GpuSpec {
     /// CUDA SM architecture version (e.g. 100 for Blackwell SM_100).
     #[serde(default)]
     pub sm_version: Option<u32>,
+}
+
+/// Strict tensor-core FLOPS resolver. Mirrors Python
+/// `common.get_quant_tc_flops`: the quant mode's `compute_dtype` selects the
+/// `<dtype>_tc_flops` spec entry; a missing OR non-positive entry is an error
+/// (the platform either lacks hardware for that dtype or the YAML is
+/// incomplete / holds a placeholder) — never a `bfloat16_tc_flops *
+/// compute_factor` extrapolation, and never a zero divisor that would turn
+/// SOL into inf and load-time clamps into silent data corruption.
+pub(crate) fn quant_tc_flops(spec: &SystemSpec, mapping: QuantMapping) -> Result<f64, AicError> {
+    let Some(dtype) = mapping.compute_dtype else {
+        return Err(AicError::MissingSystemFlops(format!(
+            "quant mode '{}' is memory-only and has no compute FLOPS",
+            mapping.name
+        )));
+    };
+    let value = match dtype {
+        ComputeDtype::Bfloat16 => spec.gpu.bfloat16_tc_flops,
+        ComputeDtype::Int8 => spec.gpu.int8_tc_flops,
+        ComputeDtype::Fp8 => spec.gpu.fp8_tc_flops,
+        ComputeDtype::Fp4 => spec.gpu.fp4_tc_flops,
+    };
+    value.filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+        AicError::MissingSystemFlops(format!(
+            "quant mode '{}' needs '{}', which this system's YAML does not define (or defines \
+             as a non-positive placeholder): either the platform does not support {:?} compute \
+             and the quant mode cannot be modeled on it, or the system YAML is missing the \
+             entry.",
+            mapping.name,
+            dtype.flops_key(),
+            dtype
+        ))
+    })
 }
 
 /// Node-level topology spec.

@@ -41,6 +41,7 @@ def _make_dispatch(
     quant_mode=None,
     moe_backend=None,
     reduce_results=True,
+    attn_ar_modeled=False,
     hidden_size=7168,
     topk=8,
     num_experts=256,
@@ -59,6 +60,7 @@ def _make_dispatch(
         quant_mode=quant_mode,
         moe_backend=moe_backend,
         reduce_results=reduce_results,
+        attn_ar_modeled=attn_ar_modeled,
     )
 
 
@@ -483,6 +485,160 @@ class TestSGLangNonDeepEPAttentionTpDp:
             ]
         )
         db.query_custom_allreduce.assert_not_called()
+
+
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
+class TestWideEpDeepEpLlNodeNumFallback:
+    """node_num resolution in the WideEP DeepEP tables.
+
+    Exact node-scale rows are silicon. Missing scales reuse matching node-1
+    data as an estimate. If neither exists, the query fails clearly.
+    """
+
+    @staticmethod
+    def _leaf(latency):
+        return {128: {"latency": latency, "power": 0.0, "energy": 0.0}}
+
+    def _db_with_ll_data(self):
+        db = MagicMock()
+        # node_num=1 -> 100us, node_num=2 -> 200us for (hidden=7168, topk=8, experts=256)
+        db._wideep_deepep_ll_data = {
+            1: {7168: {8: {256: self._leaf(100.0)}}},
+            2: {7168: {8: {256: self._leaf(200.0)}}},
+        }
+        db._default_database_mode = common.DatabaseMode.SILICON
+        # _interp_pr(lat, energy=...) -> echo the latency so tests can assert which bucket was
+        # used, and tag "silicon" the way the real one does so source assertions are meaningful.
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat, energy=energy, source="silicon")
+        return db
+
+    def _query(self, db, node_num, num_experts=256):
+        return MoEDispatch._query_wideep_deepep_ll_table(
+            db,
+            node_num=node_num,
+            num_tokens=128,
+            num_experts=num_experts,
+            topk=8,
+            hidden_size=7168,
+            database_mode=common.DatabaseMode.SILICON,
+        )
+
+    def test_measured_multi_node_scale_is_silicon(self, monkeypatch):
+        """node_num=2 is collected here: real data, used as-is, still "silicon"."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=2)
+        assert float(res) == pytest.approx(0.2)  # 200us/1000, the node_num=2 bucket
+        assert res.source == "silicon"
+
+    def test_unmeasured_multi_node_scale_uses_estimated_node1_data(self, monkeypatch):
+        """node_num=4 is absent, so matching node_num=1 rows are the estimate."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=4)
+        assert float(res) == pytest.approx(0.1)  # 100us/1000, the node_num=1 bucket
+        assert res.source == "estimated"
+
+    def test_sub_node_falls_back_to_node_num_1(self, monkeypatch):
+        """node_num < 1 (a config smaller than one node) still uses node_num=1..."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=4 / 8)  # MoEDispatch.query: num_gpus / num_gpus_per_node
+        assert float(res) == pytest.approx(0.1)  # 100us/1000, node_num=1 fallback
+
+    def test_sub_node_fallback_is_estimated(self, monkeypatch):
+        """The requested sub-node scale is not directly measured either."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        assert self._query(db, node_num=4 / 8).source == "estimated"
+
+    def test_node_num_1_no_fallback(self, monkeypatch):
+        """node_num=1 uses its own data directly."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        res = self._query(db, node_num=1)
+        assert float(res) == pytest.approx(0.1)
+        assert res.source == "silicon"
+
+    def test_node_num_1_missing_shape_raises(self, monkeypatch):
+        """node_num=1 with no rows for the shape -> not-available (as before)."""
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with pytest.raises(PerfDataNotAvailableError, match="node_num=1 fallback"):
+            self._query(db, node_num=1, num_experts=999)  # experts=999 absent at every node_num
+
+    def test_neither_present_raises(self, monkeypatch):
+        """No rows at the requested scale AND none at node_num=1 -> still not-available.
+
+        Producing an estimate requires something to estimate from; with nothing
+        to substitute, the config is dropped from the sweep.
+        """
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = self._db_with_ll_data()
+        with pytest.raises(PerfDataNotAvailableError, match="node_num=1 fallback"):
+            self._query(db, node_num=4, num_experts=999)  # experts=999 absent at every node_num
+
+    def test_normal_table_shares_the_same_path(self, monkeypatch):
+        """Normal-mode fallback has the same estimated-versus-silicon contract."""
+        monkeypatch.setattr(MoEDispatch, "load_data", lambda database: None)
+        db = MagicMock()
+        db._wideep_deepep_normal_data = {1: {7168: {8: {256: {20: self._leaf(100.0)}}}}}
+        db._default_database_mode = common.DatabaseMode.SILICON
+        db._interp_pr = lambda lat, energy=0.0: PerformanceResult(lat, energy=energy, source="silicon")
+
+        def query(node_num):
+            return MoEDispatch._query_wideep_deepep_normal_table(
+                db,
+                node_num=node_num,
+                num_tokens=128,
+                num_experts=256,
+                topk=8,
+                hidden_size=7168,
+                sms=20,
+                database_mode=common.DatabaseMode.SILICON,
+            )
+
+        fallback_result = query(node_num=8)
+        assert float(fallback_result) == pytest.approx(0.1)
+        assert fallback_result.source == "estimated"
+
+        exact = query(node_num=1)
+        assert float(exact) == pytest.approx(0.1)
+        assert exact.source == "silicon"
+
+
+@pytest.mark.skipif(torch.xpu.is_available(), reason="skip for xpu")
+class TestVllmCommPath:
+    """vLLM MoE block collectives: one final all-reduce. The pre-dispatch AR is
+    a proxy for the attention-output AR, skipped only when the model prices
+    that AR explicitly (attn_ar_modeled)."""
+
+    def test_pre_dispatch_is_free_when_model_prices_attention_ar(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True, attn_ar_modeled=True)
+
+        assert float(pre.query(db, x=8)) == 0.0
+        db.query_custom_allreduce.assert_not_called()
+
+    def test_pre_dispatch_charges_proxy_ar_by_default(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        pre = _make_dispatch(moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=True)
+
+        assert float(pre.query(db, x=8)) == pytest.approx(1.5)
+        db.query_custom_allreduce.assert_called_once()
+
+    def test_post_dispatch_prices_single_final_allreduce(self):
+        db = _make_mock_db(sm_version=90, backend="vllm")
+        post = _make_dispatch(
+            moe_tp_size=1, moe_ep_size=8, attention_dp_size=1, pre_dispatch=False, attn_ar_modeled=True
+        )
+
+        assert float(post.query(db, x=8)) == pytest.approx(1.5)
+        db.query_custom_allreduce.assert_called_once()
 
 
 if __name__ == "__main__":

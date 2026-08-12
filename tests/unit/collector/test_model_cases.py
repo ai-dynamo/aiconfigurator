@@ -13,6 +13,7 @@ import pytest
 
 from collector.case_generator import (
     get_attention_head_configs,
+    get_gemm_case_specs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
@@ -38,6 +39,19 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     namespace = dict(globals_dict)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
     return namespace["_build_mla_test_cases"]
+
+
+def _load_gdn_getter(module_path: str):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    source_path = REPO_ROOT / module_path
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
+    )
+    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    return namespace["get_gdn_test_cases"]
 
 
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
@@ -196,6 +210,71 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
         assert {
             (case.model_name, case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases
         } == {expected}
+
+
+@pytest.mark.parametrize(
+    ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
+    [
+        ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8, 16)),
+    ],
+)
+def test_qwen35_gdn_getters_expand_tp_local_physical_keys(
+    monkeypatch, model_path, d_model, global_k_heads, global_v_heads, tp_sizes
+):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    expected = {
+        (phase, d_model, 4, global_k_heads // tp, 128, global_v_heads // tp, 128)
+        for phase in ("context", "generation")
+        for tp in tp_sizes
+    }
+
+    for module_path in ("collector/sglang/collect_gdn.py", "collector/vllm/collect_gdn.py"):
+        cases = _load_gdn_getter(module_path)()
+        assert {(case[0], case[1], case[2], case[3], case[4], case[5], case[6]) for case in cases} == expected
+
+
+def test_gdn_tp_declarations_fail_loud_and_dedupe_on_loader_key(monkeypatch):
+    from collector import case_generator
+
+    invalid = {
+        "model_path": "example/invalid",
+        "d_model": 2048,
+        "d_conv": 4,
+        "num_k_heads": 16,
+        "head_k_dim": 128,
+        "num_v_heads": 32,
+        "head_v_dim": 128,
+        "tensor_parallel_sizes": [3],
+    }
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: [invalid])
+    with pytest.raises(ValueError, match="both global head counts to be divisible"):
+        case_generator.get_common_gdn_test_cases()
+
+    def profile(model_path, d_model, num_k_heads, num_v_heads, tp):
+        return {
+            "model_path": model_path,
+            "d_model": d_model,
+            "d_conv": 4,
+            "num_k_heads": num_k_heads,
+            "head_k_dim": 128,
+            "num_v_heads": num_v_heads,
+            "head_v_dim": 128,
+            "tensor_parallel_sizes": [tp],
+        }
+
+    profiles = [
+        profile("example/first", 2048, 16, 32, 4),
+        profile("example/duplicate", 2048, 4, 8, 1),
+        profile("example/distinct-d-model", 4096, 4, 8, 1),
+    ]
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: profiles)
+    cases = case_generator.get_common_gdn_test_cases()
+
+    assert len(cases) == 4
+    assert {(case.phase, case.d_model, case.num_k_heads, case.num_v_heads, case.model_name) for case in cases} == {
+        (phase, 2048, 4, 8, "example/first") for phase in ("context", "generation")
+    } | {(phase, 4096, 4, 8, "example/distinct-d-model") for phase in ("context", "generation")}
 
 
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
@@ -623,14 +702,18 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     cases = get_gemm_case_specs()
     xpu_cases = get_gemm_case_specs("vllm_xpu")
 
-    assert len(cases) == 35742
+    # Base sweep expansion first (order preserved for checkpoint stability),
+    # then model_case_values.gemm rows.
+    assert len(cases) == 37296
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
-    assert cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
-    assert len(xpu_cases) == 9177
+    assert len(xpu_cases) == 9618
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
-    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
     compute_scale_cases = get_compute_scale_case_specs()
@@ -655,7 +738,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    assert len(moe_cases) == 4911
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
+    assert len(moe_cases) == 5025
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -668,12 +752,14 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
-    assert len(get_context_mla_case_specs()) == 220
-    assert len(get_generation_mla_case_specs()) == 362
+    # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
+    # expanding the MLA spec grids.
+    assert len(get_context_mla_case_specs()) == 330
+    assert len(get_generation_mla_case_specs()) == 543
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
-    assert len(get_common_gdn_test_cases()) == 16
+    assert len(get_common_gdn_test_cases()) == 74
     mhc_cases = get_common_mhc_test_cases()
     assert len(mhc_cases) == 8
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
@@ -753,6 +839,33 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
     for backend in ("sglang", "trtllm"):
         plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K2.5")
         assert required_ops <= plan.selected_ops
+
+
+def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
+    # K3 has no trtllm serving lane. moe activation is framework-specific
+    # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
+    # planned-op zero-case expansion with no logged drop is structurally
+    # impossible (case_authoring.md; review 2026-08-04).
+    for backend in ("sglang", "vllm"):
+        plan = build_collection_case_plan(backend=backend, model_path="moonshotai/Kimi-K3")
+        assert "moe" in plan.selected_ops, backend
+    trtllm_plan = build_collection_case_plan(backend="trtllm", model_path="moonshotai/Kimi-K3")
+    assert "moe" not in trtllm_plan.selected_ops
+
+    # Cross-model trtllm sweeps (getter runs with no model filter) still see
+    # the K3 moe row: the declared empty trtllm allowlist rejects EVERY mode,
+    # and the trtllm getter logs the fully-dropped model instead of silently
+    # expanding to zero.
+    from collector.case_generator import get_moe_quantization_modes, moe_model_allows_quantization
+
+    modes = get_moe_quantization_modes(
+        "trtllm",
+        sm_version=100,
+        runtime_features={"per_block_fp8": True, "nvfp4": True, "mxfp4": True},
+    )
+    assert modes  # the sweep itself is non-empty
+    for mode in modes:
+        assert not moe_model_allows_quantization("trtllm", "moonshotai/Kimi-K3", mode), mode
 
 
 def test_dsa_module_prefix_context_sweeps_are_yaml_backed():
@@ -852,8 +965,10 @@ def test_mla_bmm_cases_expand_from_base_op_yaml():
     pre_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_pre")
     post_cases = get_mla_bmm_case_specs("sglang", "mla_bmm_gen_post")
 
-    assert len(pre_cases) == 400
-    assert len(post_cases) == 448
+    # 600/672 since the Kimi-K3 96-head family (96/48/24/12) joined the
+    # base head_counts grid alongside the DeepSeek 128-family (2026-08-02).
+    assert len(pre_cases) == 600
+    assert len(post_cases) == 672
     assert pre_cases[0] == MLABMMCommonTestCase(
         num_tokens=1,
         num_heads=128,
@@ -893,6 +1008,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         apply_model_filter=False,
     )
     wideep_specs = get_mla_module_model_specs(attention_type="mla", wideep_mla=True, apply_model_filter=False)
+    trtllm_specs = get_mla_module_model_specs(backend="trtllm")
     vllm_specs = get_mla_module_model_specs(backend="vllm")
 
     assert sweep.batch_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -1003,20 +1119,23 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("dsa", "deepseek-ai/DeepSeek-V3.2", "DeepseekV32ForCausalLM"),
         ("dsa", "zai-org/GLM-5", "GlmMoeDsaForCausalLM"),
     }
+    assert trtllm_specs == vllm_specs
 
 
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
     from collector.case_generator import get_mla_module_model_specs
 
-    for model_path, attention_type, architecture in (
-        ("nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
-        ("moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
-        ("nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+    for backend, model_path, attention_type, architecture in (
+        ("trtllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("trtllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
+        ("vllm", "nvidia/DeepSeek-V3.1-NVFP4", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2-Instruct", "mla", "DeepseekV3ForCausalLM"),
+        ("vllm", "moonshotai/Kimi-K2.5", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/Kimi-K2.5-NVFP4", "mla", "KimiK25ForConditionalGeneration"),
+        ("vllm", "nvidia/GLM-5-NVFP4", "dsa", "GlmMoeDsaForCausalLM"),
     ):
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
-        specs = get_mla_module_model_specs(attention_type=attention_type, backend="vllm")
+        specs = get_mla_module_model_specs(attention_type=attention_type, backend=backend)
         assert [(spec.model_path, spec.architecture) for spec in specs] == [(model_path, architecture)]
 
 
@@ -1181,7 +1300,10 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_generation",
         "moe",
     ]
+    # TRT-LLM 1.3.0rc20 serves the full K2.5 VLM including MoonViT3d, so the
+    # trtllm plan carries the vision encoder_attention profile like vLLM.
     assert build_collection_case_plan(backend="trtllm", model_path=kimi_path).ops == [
+        "encoder_attention",
         "gemm",
         "mla_bmm_gen_post",
         "mla_bmm_gen_pre",
@@ -1267,7 +1389,7 @@ def test_full_mode_ops_are_a_union_of_model_plan_ops():
             assert model_plan.selected_ops <= full_plan.selected_ops, f"{backend}/{model_path}"
 
 
-def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
+def test_mla_module_metadata_canonicalizes_consumer_keyed_backends():
     from collector.case_generator import get_mla_module_model_specs
 
     original_artifacts = {
@@ -1282,13 +1404,40 @@ def test_mla_module_metadata_preserves_legacy_backends_and_canonicalizes_vllm():
             for spec in get_mla_module_model_specs(
                 attention_type="mla",
                 backend=backend,
-                apply_model_filter=backend == "vllm",
+                apply_model_filter=backend in {"trtllm", "vllm"},
             )
         }
 
     assert paths("vllm") == {"deepseek-ai/DeepSeek-V3"}
     assert paths("sglang") == original_artifacts
-    assert paths("trtllm") == original_artifacts
+    assert paths("trtllm") == {"deepseek-ai/DeepSeek-V3"}
+
+
+def test_trtllm_mla_module_getter_requests_backend_canonicalization():
+    from types import SimpleNamespace
+
+    source_path = REPO_ROOT / "collector/trtllm/collect_mla_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_build_module_test_cases"
+    )
+    calls = []
+
+    def get_model_specs(**kwargs):
+        calls.append(kwargs)
+        return [SimpleNamespace(model_path="deepseek-ai/DeepSeek-V3")]
+
+    namespace = {
+        "get_context_test_cases": lambda _attention_type: [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16"]],
+        "get_generation_test_cases": lambda _attention_type: [],
+        "get_mla_module_model_specs": get_model_specs,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    cases = namespace["_build_module_test_cases"]("mla", "context")
+
+    assert calls == [{"attention_type": "mla", "backend": "trtllm"}]
+    assert cases == [[128, 1, 8, "bfloat16", "bfloat16", "bfloat16", "deepseek-ai/DeepSeek-V3", "mla"]]
 
 
 def test_support_matrix_models_have_model_case_aliases():
@@ -1410,3 +1559,19 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
 
     assert violations == []
+
+
+def test_qwen35_gemm_model_rows_add_exact_below_grid_widths():
+    """model_case_values.gemm supplies exact widths under the base feature grid
+    (scalar expert gate n=1, GDN b/a projections); token density comes from the
+    base sweeps and cases dedupe on the physical (x, n, k) tuple."""
+    specs = get_gemm_case_specs()
+    shapes = {(case.n, case.k) for case in specs}
+    assert {(1, 2048), (8, 2048), (16, 4096), (12, 5120)} <= shapes
+
+    base_tokens = set()
+    for sweep in load_yaml_file(BASE_OP_CASES_DIR / "gemm.yaml")["all_frameworks_op_cases"]["gemm"]["cases"]:
+        base_tokens.update(int(token) for token in sweep["token_counts"])
+    assert {case.x for case in specs if (case.n, case.k) == (1, 2048)} == base_tokens
+
+    assert len(specs) == len({(case.x, case.n, case.k) for case in specs})

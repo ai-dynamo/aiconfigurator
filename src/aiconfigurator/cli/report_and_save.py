@@ -24,6 +24,7 @@ from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
+from aiconfigurator.sdk.picking import WORKER_GPU_DIMS, parallel_dim
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
 
@@ -56,12 +57,14 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     total_count = 0
     power_count = 0
 
-    for exp_name, config_df in best_configs.items():
+    for config_df in best_configs.values():
         if config_df is not None and not config_df.empty and "power_w" in config_df.columns:
-            power_values = config_df["power_w"].values
-            total_count += len(power_values)
-            # Count how many configs have meaningful power data (>= 1W)
-            power_count += sum(1 for p in power_values if p >= 1.0)
+            for power_value in config_df["power_w"].values:
+                if pd.isna(power_value):
+                    continue
+                total_count += 1
+                if power_value >= 1.0:
+                    power_count += 1
 
     if total_count == 0:
         return False
@@ -69,6 +72,23 @@ def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold
     # Show power column if >= threshold of configs have meaningful power data
     power_ratio = power_count / total_count
     return power_ratio >= threshold
+
+
+def _format_power(power_w: object) -> str:
+    return "" if pd.isna(power_w) else f"{float(power_w):.1f}W"
+
+
+def _composed_worker_gpus(row: dict, role: str) -> int:
+    """Per-worker GPU count from a composed disagg row's ``(p)``/``(d)`` columns.
+
+    Iterates :data:`aiconfigurator.sdk.picking.WORKER_GPU_DIMS` so every
+    parallelism dimension lands here automatically; columns a row predates
+    (e.g. ``(d)cp``) default to 1.
+    """
+    gpus = 1
+    for dim in WORKER_GPU_DIMS:
+        gpus *= parallel_dim(row.get(f"({role}){dim}"))
+    return gpus
 
 
 def _plot_worker_setup_table(
@@ -130,12 +150,75 @@ def _plot_worker_setup_table(
     buf.append(f"\n{exp_name} Top Configurations: (Ranked by {ranking_label})")
     table = PrettyTable()
 
+    # AFD frames also carry (p)-prefixed columns for the paired static
+    # prefill pool, so the AFD check must run before the disagg one.
+    is_afd = "(a)nodes" in top_configs.columns
     # Check if it is disagg config by checking for prefill/decode specific columns
-    is_disagg = "(p)tp" in top_configs.columns
+    is_disagg = "(p)tp" in top_configs.columns and not is_afd
 
     top_configs["cluster_request_rate"] = top_configs["request_rate"] * top_configs["replicas"]
 
-    if is_disagg:
+    if is_afd:
+        field_names = [
+            "Rank",
+            "backend",
+            _cli_bold("tokens/s/gpu"),
+            "tokens/s/user",
+            "req/s",
+            "TTFT",
+            "TPOT",
+            "request_latency",
+            "concurrency",
+            "total_gpus (used)",
+            "replicas",
+            "gpus/replica",
+            "(a)nodes",
+            "(a)tp",
+            "(a)bs",
+            "(f)nodes",
+            "(f)ep",
+            "(p)workers",
+        ]
+        if show_power:
+            field_names.append("power_w")
+        table.field_names = field_names
+        for i, row in enumerate(top_configs.to_dict("records")):
+            a_gpus = int(row["(a)workers"]) * int(row["(a)tp"])
+            f_gpus = int(row["(f)workers"])
+            prefill_workers = row.get("(p)workers")
+            has_prefill_pool = prefill_workers is not None and not pd.isna(prefill_workers)
+            if has_prefill_pool:
+                p_workers = int(prefill_workers)
+                p_gpus = p_workers * int(row["(p)num_gpus"])
+                gpus_replica_str = f"{row['num_total_gpus']} (=A{a_gpus}+F{f_gpus}+P{p_gpus})"
+                p_workers_str = f"{p_workers} (tp{int(row.get('(p)tp', 1))})"
+            else:
+                gpus_replica_str = f"{row['num_total_gpus']} (=A{a_gpus}+F{f_gpus})"
+                p_workers_str = "-"
+            row_data = [
+                i + 1,
+                row["backend"],
+                _cli_bold(f"{row['tokens/s/gpu_cluster']:.2f}"),
+                f"{row['tokens/s/user']:.2f}",
+                f"{row['cluster_request_rate']:.2f}",
+                f"{row['ttft']:.2f}",
+                f"{row['tpot']:.2f}",
+                f"{row['request_latency']:.2f}",
+                f"{row['concurrency'] * row['replicas']} (={row['concurrency']}x{row['replicas']})",
+                f"{total_gpus} ({row['total_gpus_used']}={row['replicas']}x{row['num_total_gpus']})",
+                row["replicas"],
+                gpus_replica_str,
+                row["(a)nodes"],
+                row["(a)tp"],
+                row["(a)bs"],
+                row["(f)nodes"],
+                row["(f)ep"],
+                p_workers_str,
+            ]
+            if show_power:
+                row_data.append(_format_power(row["power_w"]))
+            table.add_row(row_data)
+    elif is_disagg:
         field_names = [
             "Rank",
             "backend",
@@ -163,11 +246,20 @@ def _plot_worker_setup_table(
         for i, row in enumerate(top_configs.to_dict("records")):
             display_total_gpus = row["total_gpus_used"] if "replicas_needed" in row else total_gpus
             display_concurrency = row["concurrency"] * row["replicas"]
+            # Worker GPU totals come from the shared dims list so a new
+            # parallelism dimension cannot be silently dropped again (#1476);
+            # the cp display factor stays hidden when cp=1 for readability.
+            p_gpus = _composed_worker_gpus(row, "p")
+            d_gpus = _composed_worker_gpus(row, "d")
+            p_cp = parallel_dim(row.get("(p)cp"))
+            p_cp_label = f"cp{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
+            p_cp_factor = f"x{_cli_underline(str(p_cp))}" if p_cp > 1 else ""
             if is_moe:
                 p_parallel = (
                     f"tp{_cli_underline(str(row['(p)tp']))}"
                     f"pp{_cli_underline(str(row['(p)pp']))}"
                     f"dp{_cli_underline(str(row['(p)dp']))}"
+                    f"{p_cp_label}"
                     f"etp{row['(p)moe_tp']}ep{row['(p)moe_ep']}"
                 )
                 d_parallel = (
@@ -177,35 +269,25 @@ def _plot_worker_setup_table(
                     f"etp{row['(d)moe_tp']}ep{row['(d)moe_ep']}"
                 )
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp'] * row['(p)dp']} "
+                    f"{p_gpus} "
                     f"(={_cli_underline(str(row['(p)tp']))}x"
                     f"{_cli_underline(str(row['(p)pp']))}x"
-                    f"{_cli_underline(str(row['(p)dp']))})"
+                    f"{_cli_underline(str(row['(p)dp']))}{p_cp_factor})"
                 )
                 d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp'] * row['(d)dp']} "
+                    f"{d_gpus} "
                     f"(={_cli_underline(str(row['(d)tp']))}x"
                     f"{_cli_underline(str(row['(d)pp']))}x"
                     f"{_cli_underline(str(row['(d)dp']))})"
                 )
             else:
-                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}"
+                p_parallel = f"tp{_cli_underline(str(row['(p)tp']))}pp{_cli_underline(str(row['(p)pp']))}{p_cp_label}"
                 d_parallel = f"tp{_cli_underline(str(row['(d)tp']))}pp{_cli_underline(str(row['(d)pp']))}"
                 p_gpus_worker = (
-                    f"{row['(p)pp'] * row['(p)tp']} "
-                    f"(={_cli_underline(str(row['(p)tp']))}x"
-                    f"{_cli_underline(str(row['(p)pp']))})"
+                    f"{p_gpus} (={_cli_underline(str(row['(p)tp']))}x{_cli_underline(str(row['(p)pp']))}{p_cp_factor})"
                 )
-                d_gpus_worker = (
-                    f"{row['(d)pp'] * row['(d)tp']} "
-                    f"(={_cli_underline(str(row['(d)tp']))}x"
-                    f"{_cli_underline(str(row['(d)pp']))})"
-                )
-            gpus_replica_str = (
-                f"{row['num_total_gpus']} "
-                f"(={row['(p)workers']}x{row['(p)pp'] * row['(p)tp'] * row['(p)dp']}"
-                f"+{row['(d)workers']}x{row['(d)pp'] * row['(d)tp'] * row['(d)dp']})"
-            )
+                d_gpus_worker = f"{d_gpus} (={_cli_underline(str(row['(d)tp']))}x{_cli_underline(str(row['(d)pp']))})"
+            gpus_replica_str = f"{row['num_total_gpus']} (={row['(p)workers']}x{p_gpus}+{row['(d)workers']}x{d_gpus})"
             row_data = [
                 i + 1,
                 row["backend"],
@@ -232,7 +314,7 @@ def _plot_worker_setup_table(
                 ]
             )
             if show_power:
-                row_data.append(f"{row['power_w']:.1f}W")
+                row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
     else:  # agg
         field_names = [
@@ -296,11 +378,84 @@ def _plot_worker_setup_table(
                 ]
             )
             if show_power:
-                row_data.append(f"{row['power_w']:.1f}W")
+                row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
 
     buf.append(table.get_string())
     return "\n".join(buf)
+
+
+def _task_gpu_budget(task: Task) -> int | None:
+    return task.effective_total_gpus if task.serving_mode == "afd" else task.total_gpus
+
+
+def _auto_result_tasks(
+    exp_name: str,
+    tasks: dict[str, Task],
+    *result_dfs: pd.DataFrame | None,
+) -> dict[str, Task]:
+    task_keys: list[str] = []
+    backends: set[str] = set()
+    for result_df in result_dfs:
+        if result_df is None or result_df.empty:
+            continue
+        if "_task_key" in result_df.columns:
+            task_keys.extend(str(value) for value in result_df["_task_key"].dropna().unique())
+        if "backend" in result_df.columns:
+            backends.update(str(value) for value in result_df["backend"].dropna().unique())
+
+    if task_keys:
+        resolved: dict[str, Task] = {}
+        for task_key in dict.fromkeys(task_keys):
+            if task_key not in tasks:
+                raise ValueError(
+                    f"Cannot save result bucket {exp_name!r}: result references unknown task key "
+                    f"{task_key!r}; available task keys: {sorted(tasks)}."
+                )
+            task = tasks[task_key]
+            if task.serving_mode != exp_name:
+                raise ValueError(
+                    f"Cannot save result bucket {exp_name!r}: task {task_key!r} has serving_mode={task.serving_mode!r}."
+                )
+            resolved[task_key] = task
+        return resolved
+
+    mode_tasks = {key: task for key, task in tasks.items() if task.serving_mode == exp_name}
+    if not backends:
+        return mode_tasks
+
+    resolved = {}
+    for backend_name in sorted(backends):
+        matches = {key: task for key, task in mode_tasks.items() if task.primary_backend_name == backend_name}
+        if len(matches) != 1:
+            raise ValueError(
+                f"Cannot save result bucket {exp_name!r} for backend {backend_name!r}: "
+                f"expected exactly one matching task, found {sorted(matches)}; "
+                f"available task keys: {sorted(tasks)}."
+            )
+        resolved.update(matches)
+    return resolved
+
+
+def _task_for_result_row(exp_name: str, row: pd.Series, exp_tasks: dict[str, Task]) -> Task:
+    task_key = row.get("_task_key")
+    if task_key is not None and not pd.isna(task_key):
+        task_key = str(task_key)
+        if task_key not in exp_tasks:
+            raise ValueError(
+                f"Cannot save result row for {exp_name!r}: task key {task_key!r} is not in "
+                f"the bucket tasks {sorted(exp_tasks)}."
+            )
+        return exp_tasks[task_key]
+
+    backend_name = row.get("backend")
+    matches = [task for task in exp_tasks.values() if task.primary_backend_name == backend_name]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Cannot save result row for {exp_name!r}, backend {backend_name!r}: expected "
+            f"exactly one task, found {len(matches)} among {sorted(exp_tasks)}."
+        )
+    return matches[0]
 
 
 def log_final_summary(
@@ -351,10 +506,11 @@ def log_final_summary(
             chosen_task = tasks[chosen_exp]
     else:
         chosen_task = tasks[chosen_exp]
+    chosen_total_gpus = _task_gpu_budget(chosen_task)
 
     summary_box.append(f"    Model: {chosen_task.primary_model_path} (is_moe: {chosen_task.is_moe})")
     if not load_match:
-        summary_box.append(f"    Total GPUs: {chosen_task.total_gpus}")
+        summary_box.append(f"    Total GPUs: {chosen_total_gpus}")
 
     if load_match:
         # Load-match mode summary
@@ -390,6 +546,11 @@ def log_final_summary(
         else:
             bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
+        afd_value = best_throughputs.get("afd")
+        if afd_value is not None and afd_value > 0:
+            reference = max((v for k, v in best_throughputs.items() if k != "afd" and v > 0), default=0.0)
+            if reference > 0:
+                summary_box.append(f"    AFD vs best non-AFD: {afd_value / reference:.2f}x")
     else:
         bold_msg = _cli_bold(f"{chosen_exp} at {best_throughputs[chosen_exp]:.2f} tokens/s/gpu")
         summary_box.append(f"    Best Experiment Chosen: {bold_msg}")
@@ -409,7 +570,7 @@ def log_final_summary(
             total_throughput = per_gpu * display_total_gpus
         else:
             per_gpu = best_throughput
-            display_total_gpus = chosen_task.total_gpus
+            display_total_gpus = chosen_total_gpus
             total_throughput = best_throughput * display_total_gpus
         summary_box.append(f"    - Best Throughput: {total_throughput:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {per_gpu:.2f} tokens/s/gpu")
@@ -417,14 +578,14 @@ def log_final_summary(
         if load_match and "replicas_needed" in best_conf_details.index:
             cluster_rr = float(best_conf_details["request_rate"]) * int(best_conf_details["replicas_needed"])
         else:
-            replicas = chosen_task.total_gpus // int(best_conf_details["num_total_gpus"])
+            replicas = chosen_total_gpus // int(best_conf_details["num_total_gpus"])
             cluster_rr = float(best_conf_details["request_rate"]) * replicas
         summary_box.append(f"    - Request Rate: {cluster_rr:.2f} req/s")
         summary_box.append(f"    - TTFT: {best_conf_details['ttft']:.2f}ms")
         summary_box.append(f"    - TPOT: {best_conf_details['tpot']:.2f}ms")
         summary_box.append(f"    - Request Latency: {best_conf_details['request_latency']:.2f}ms")
     else:
-        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_task.total_gpus:,.2f} tokens/s")
+        summary_box.append(f"    - Best Throughput: {best_throughput * chosen_total_gpus:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {best_throughput:.2f} tokens/s/gpu")
     summary_box.append("  " + "-" * 76)
 
@@ -509,7 +670,7 @@ def log_final_summary(
             config_df["backend"] = tasks[task_key].primary_backend_name
 
         exp_task = tasks[task_key]
-        total_gpus = getattr(exp_task, "total_gpus", None) or 0
+        total_gpus = _task_gpu_budget(exp_task) or 0
         table_buf = _plot_worker_setup_table(
             exp_name,
             config_df,
@@ -679,12 +840,12 @@ def save_results(
             if best_config_df is not None:
                 if "_per_ops_source" in best_config_df.columns:
                     best_config_per_ops_source = best_config_df["_per_ops_source"].tolist()
-                    best_config_df = best_config_df.drop(columns=["_per_ops_source"])
+                best_config_df = best_config_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
                 best_config_df.to_csv(os.path.join(exp_dir, "best_config_topn.csv"), index=False)
 
             # 2. Save all pareto dataframe (also stripped of _per_ops_source)
             if pareto_df is not None:
-                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source"], errors="ignore")
+                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
                 pareto_csv_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
@@ -693,17 +854,19 @@ def save_results(
                 backend_version_str = exp_task.primary_backend_version
             else:
                 # There could be multiple backends in the same experiment if backend == "auto" as the result is merged
+                exp_tasks = _auto_result_tasks(
+                    exp_name,
+                    tasks,
+                    best_configs.get(exp_name),
+                    pareto_fronts.get(exp_name),
+                )
                 actual_backend_versions = {
-                    task.primary_backend_name: task.primary_backend_version for task in tasks.values()
+                    task.primary_backend_name: task.primary_backend_version for task in exp_tasks.values()
                 }
                 backend_version_str = ", ".join(
                     f"({backend_name}){backend_version}"
                     for backend_name, backend_version in actual_backend_versions.items()
                 )
-                exp_tasks = {
-                    f"{exp_name}_{backend_name}": tasks[f"{exp_name}_{backend_name}"]
-                    for backend_name in actual_backend_versions
-                }
                 # generated backend versions for each backend, empty unless --generator-dynamo-version is provided
                 generated_backend_versions = {}
 
@@ -823,13 +986,13 @@ def save_results(
             # 4. Save the generated config for this experiment, sub-directory for each best config
             # Use original (non-display) data so --inclusive-tpot does not affect deployment artifacts.
             artifact_config_df = best_configs.get(exp_name)
+            afd_artifact_warning_emitted = False
             if artifact_config_df is not None:
                 for i, (idx, result_df) in enumerate(artifact_config_df.iterrows()):
                     # For multi-backend mode, get the task for this row's backend
                     if backend == "auto" and "backend" in result_df:
                         row_backend = result_df["backend"]
-                        row_task_key = f"{exp_name}_{row_backend}"
-                        row_task = tasks[row_task_key]
+                        row_task = _task_for_result_row(exp_name, result_df, exp_tasks)
                         row_backend_version = generated_backend_versions.get(
                             row_backend, row_task.primary_backend_version
                         )
@@ -837,6 +1000,17 @@ def save_results(
                         row_task = exp_task
                         row_backend_version = effective_generated_version
 
+                    if row_task.serving_mode == "afd":
+                        if not afd_artifact_warning_emitted:
+                            logger.warning(
+                                "Skipping deployment artifact generation for AFD experiment '%s': "
+                                "the current generator schema does not represent A/F worker topology.",
+                                exp_name,
+                            )
+                            afd_artifact_warning_emitted = True
+                        continue
+
+                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
                     cfg = task_config_to_generator_config(
                         task_config=row_task,
                         result_df=result_df,
@@ -848,8 +1022,8 @@ def save_results(
                     with open(os.path.join(top_config_dir, "generator_config.yaml"), "w") as f:
                         yaml.safe_dump(cfg, f, sort_keys=False)
 
-                    # Per-op data source breakdown (silicon / empirical / sol / mixed),
-                    # pulled from PerformanceResult.source via the InferenceSummary.
+                    # Per-op PerformanceResult.source breakdown, pulled through
+                    # the InferenceSummary.
                     # Same nested shape as per_ops_data, populated only when the row
                     # carried it through the pareto search.
                     if i < len(best_config_per_ops_source) and best_config_per_ops_source[i] is not None:

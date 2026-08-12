@@ -9,6 +9,8 @@ scale-computation portion so support matrix data can track the cost separately
 from the static quantize kernel.
 """
 
+__compat__ = "trtllm>=1.3.0rc20"
+
 import tensorrt_llm
 import torch
 from case_generator import get_compute_scale_case_specs

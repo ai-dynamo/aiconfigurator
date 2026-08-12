@@ -1,23 +1,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Public-contract tests for the reusable-Pod FPM artifact target."""
+"""Public-contract tests for the reusable-Pod FPM artifact target.
+
+The Generator side of the FPM contract renders exactly three artifacts:
+``k8s_deploy.yaml`` (the resource workload), ``fpm_env.sh`` (the contract's
+``FPM_ENV_EXPORTED_VARS``), and a thin ``run.sh`` that only launches the
+engine. Collection behavior (gate, result checker, barrier, follower
+classification, engine termination) lives in the collector's staged runtime
+and is tested there.
+"""
 
 from __future__ import annotations
 
 import copy
 import json
 import os
+import re
 import shlex
-import signal
 import stat
 import subprocess
-import time
+import tempfile
 from pathlib import Path
 
 import pytest
 import yaml
 
+from aiconfigurator.fpm_contract import (
+    FPM_BARRIER_TIMEOUT_ENV,
+    FPM_CELL_LABEL,
+    FPM_ENV_EXPORTED_VARS,
+    FPM_ENV_FILENAME,
+    FPM_MANIFEST_FILENAME,
+    FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION,
+    FPM_RUN_ID_ENV,
+    FPM_RUN_SCRIPT_FILENAME,
+)
 from aiconfigurator.generator.aggregators import generate_config_from_input_dict
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.main import main as generator_main
@@ -33,6 +51,21 @@ _COMPILATION_CONFIG = json.dumps(
         "compile_sizes": [1, 2, 4, 8],
     }
 )
+_ARTIFACT_TRIO = {FPM_MANIFEST_FILENAME, FPM_ENV_FILENAME, FPM_RUN_SCRIPT_FILENAME}
+_COLLECTION_VOCABULARY = (
+    "check_result_files",
+    "29511",
+    "2379",
+    "terminate_engine",
+    "benchmark_path_for_dp_rank",
+    "trap",
+)
+_FOREGROUND_EXEC_LINE = (
+    "exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \"${engine_command[@]}\""
+)
+_FPM_VARIABLE_RE = re.compile(r"\bFPM_[A-Z0-9_]+")
+_EXPORT_ASSIGNMENT_RE = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_TOPOLOGIES = ("single-node", "multinode-tp", "multinode-dp")
 
 
 def _params() -> dict:
@@ -96,6 +129,21 @@ def _params() -> dict:
     }
 
 
+def _multinode_params(*, data_parallel: bool = False) -> dict:
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+    if data_parallel:
+        params["params"]["agg"].update({"tensor_parallel_size": 1, "data_parallel_size": 16})
+    return params
+
+
+def _topology_params(topology: str) -> dict:
+    if topology == "single-node":
+        return _params()
+    return _multinode_params(data_parallel=topology == "multinode-dp")
+
+
 def _render(params: dict | None = None, backend: str = "vllm") -> dict[str, str]:
     return render_backend_templates(
         copy.deepcopy(params or _params()),
@@ -105,95 +153,28 @@ def _render(params: dict | None = None, backend: str = "vllm") -> dict[str, str]
     )
 
 
+def _k8s_documents(artifacts: dict[str, str]) -> list[dict]:
+    documents = list(yaml.safe_load_all(artifacts[FPM_MANIFEST_FILENAME]))
+    assert all(isinstance(document, dict) for document in documents)
+    return documents
+
+
+def _k8s_document(artifacts: dict[str, str], kind: str) -> dict:
+    matches = [document for document in _k8s_documents(artifacts) if document.get("kind") == kind]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _set_benchmark_mode(params: dict, mode: str) -> None:
     args = params["params"]["agg"]["extra_cli_args"]
     args[args.index("--benchmark-mode") + 1] = mode
 
 
-def _benchmark_result(
-    *,
-    mode: str = "prefill",
-    dp_rank: int = 0,
-    point_types: list[str] | None = None,
-    status: str = "complete",
-    valid: bool = True,
-) -> dict:
-    if point_types is None:
-        point_types = ["prefill" if mode == "agg" else mode]
-    results = [
-        {
-            "point": {"point_type": point_type},
-            "fpms": [{"dp_rank": dp_rank, "wall_time": 0.001}],
-        }
-        for point_type in point_types
-    ]
-    return {
-        "schema_version": 1,
-        "status": status,
-        "valid": valid,
-        "coverage": {
-            "expected_points": len(results),
-            "completed_points": len(results),
-            "skipped_points": 0,
-        },
-        "config": {"mode": mode},
-        "results": results,
-        "skipped_points": [],
-        "errors": [] if valid else ["boom"],
-    }
-
-
-def _run_script_with_static_result(
-    tmp_path: Path,
-    result: object,
-    *,
-    benchmark_mode: str = "prefill",
-) -> subprocess.CompletedProcess[str]:
-    output_path = tmp_path / "benchmark.json"
-    params = _params()
-    _set_benchmark_mode(params, benchmark_mode)
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    serialized = json.dumps(result)
-    (fake_package / "__main__.py").write_text(
-        f"""\
-import pathlib
-import signal
-import sys
-import time
-
-path = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text({serialized!r})
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.1)
-"""
-    )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(tmp_path / "fake-package")
-    return subprocess.run(
-        ["bash", str(script_path)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=8,
-        check=False,
-    )
-
-
 def _pod(artifacts: dict[str, str]) -> dict:
-    document = yaml.safe_load(artifacts["k8s_deploy.yaml"])
-    assert isinstance(document, dict)
-    return document
+    documents = _k8s_documents(artifacts)
+    assert len(documents) == 1
+    assert documents[0]["kind"] == "Pod"
+    return documents[0]
 
 
 def _main_container(pod: dict) -> dict:
@@ -202,8 +183,8 @@ def _main_container(pod: dict) -> dict:
     return containers[0]
 
 
-def _export_value(script: str, name: str) -> str:
-    prefix = f"{name}="
+def _export_assignments(script: str) -> list[str]:
+    assignments = []
     for line in script.splitlines():
         try:
             tokens = shlex.split(line, comments=True)
@@ -211,16 +192,342 @@ def _export_value(script: str, name: str) -> str:
             continue
         if not tokens or tokens[0] != "export":
             continue
-        for assignment in tokens[1:]:
-            if assignment.startswith(prefix):
-                return assignment[len(prefix) :]
-    raise AssertionError(f"missing export for {name}")
+        assignments.extend(tokens[1:])
+    return assignments
 
 
-def test_fpm_render_returns_only_resource_pod_and_run_script():
+def _export_value(script: str, name: str) -> str:
+    prefix = f"{name}="
+    values = [assignment[len(prefix) :] for assignment in _export_assignments(script) if assignment.startswith(prefix)]
+    if not values:
+        raise AssertionError(f"missing export for {name}")
+    if len(values) > 1:
+        raise AssertionError(f"duplicate exports for {name}: {values!r}")
+    return values[0]
+
+
+_NVCC_STUB_DIR: Path | None = None
+
+
+def _nvcc_stub_dir() -> Path:
+    """Execution tests run the rendered run.sh on hosts without a CUDA
+    toolchain, which would trip the multinode nvcc fail-fast guard. A stub
+    nvcc on PATH exercises the guard's healthy path instead; the guard's
+    failure path is covered by the rendering test."""
+    global _NVCC_STUB_DIR
+    if _NVCC_STUB_DIR is None:
+        stub_dir = Path(tempfile.mkdtemp(prefix="fpm-nvcc-stub-"))
+        stub = stub_dir / "nvcc"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        _NVCC_STUB_DIR = stub_dir
+    return _NVCC_STUB_DIR
+
+
+def _clean_env(**overrides: str) -> dict[str, str]:
+    """Subprocess environment without host FPM/orchestrator contamination."""
+    env = {name: value for name, value in os.environ.items() if not name.startswith(("FPM_", "LWS_", "GROVE_"))}
+    env["PATH"] = f"{_nvcc_stub_dir()}{os.pathsep}{env.get('PATH', '')}"
+    env.update(overrides)
+    return env
+
+
+def _write_runtime(tmp_path: Path, artifacts: dict[str, str]) -> Path:
+    """Stage run.sh next to the fpm_env.sh it sources; return the run.sh path."""
+    (tmp_path / FPM_ENV_FILENAME).write_text(artifacts[FPM_ENV_FILENAME])
+    script_path = tmp_path / FPM_RUN_SCRIPT_FILENAME
+    script_path.write_text(artifacts[FPM_RUN_SCRIPT_FILENAME])
+    return script_path
+
+
+def _write_fake_engine(tmp_path: Path, body: str) -> Path:
+    """Create an importable fake ``dynamo.vllm`` package; return the PYTHONPATH root."""
+    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
+    fake_package.mkdir(parents=True)
+    (fake_package.parent / "__init__.py").write_text("")
+    (fake_package / "__init__.py").write_text("")
+    (fake_package / "__main__.py").write_text(body)
+    return tmp_path / "fake-package"
+
+
+def _source_env_script(
+    tmp_path: Path,
+    env_script: str,
+    case_env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    env_path = tmp_path / FPM_ENV_FILENAME
+    env_path.write_text(env_script)
+    probe = 'source "$1" && printf "%s %s" "$FPM_NODE_RANK" "$FPM_MASTER_ADDR"'
+    return subprocess.run(
+        ["bash", "-c", probe, "bash", str(env_path)],
+        text=True,
+        capture_output=True,
+        env=_clean_env(**case_env),
+        timeout=5,
+        check=False,
+    )
+
+
+def test_fpm_render_returns_exactly_the_contract_artifact_trio():
     artifacts = _render()
 
-    assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
+    assert set(artifacts) == _ARTIFACT_TRIO
+
+
+def test_fpm_env_script_exports_exactly_the_contract_variables():
+    env_script = _render()[FPM_ENV_FILENAME]
+
+    exported = {assignment.split("=", 1)[0] for assignment in _export_assignments(env_script)}
+
+    assert exported == set(FPM_ENV_EXPORTED_VARS)
+    assert _export_value(env_script, "FPM_NODE_COUNT") == "1"
+    assert _export_value(env_script, "FPM_DATA_PARALLEL_SIZE") == "1"
+    assert _export_value(env_script, "FPM_LOCAL_DATA_PARALLEL_SIZE") == "1"
+    assert _export_value(env_script, "FPM_BENCHMARK_MODE") == "agg"
+    assert _export_value(env_script, "FPM_BENCHMARK_OUTPUT_PATH") == "/results/benchmark.json"
+    assert _export_value(env_script, "FPM_WAIT_TIMEOUT_SECONDS") == "7800"
+    assert _export_value(env_script, "FPM_RESULT_SCHEMA_VERSION") == str(FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION)
+
+
+def test_fpm_forwards_barrier_timeout_override_through_fpm_env_only():
+    """FPM_COMPLETION_BARRIER_TIMEOUT_SECONDS is a collection-runtime tunable:
+    it must land in fpm_env.sh (which the runtime sources) and never in run.sh
+    (which only the engine's environment sees)."""
+
+    params = _params()
+    params["K8sConfig"]["extra_env"].append({"name": FPM_BARRIER_TIMEOUT_ENV, "value": "45"})
+
+    artifacts = _render(params)
+    env_script = artifacts[FPM_ENV_FILENAME]
+
+    assert f"export {FPM_BARRIER_TIMEOUT_ENV}=45" in env_script.splitlines()
+    exported = {assignment.split("=", 1)[0] for assignment in _export_assignments(env_script)}
+    assert exported == set(FPM_ENV_EXPORTED_VARS) | {FPM_BARRIER_TIMEOUT_ENV}
+    assert FPM_BARRIER_TIMEOUT_ENV not in artifacts[FPM_RUN_SCRIPT_FILENAME]
+
+
+def test_fpm_single_node_data_parallel_exports_full_local_dp_size():
+    params = _params()
+    params["params"]["agg"].update({"tensor_parallel_size": 1, "data_parallel_size": 4})
+
+    env_script = _render(params)[FPM_ENV_FILENAME]
+
+    assert _export_value(env_script, "FPM_NODE_COUNT") == "1"
+    assert _export_value(env_script, "FPM_DATA_PARALLEL_SIZE") == "4"
+    assert _export_value(env_script, "FPM_LOCAL_DATA_PARALLEL_SIZE") == "4"
+
+
+@pytest.mark.parametrize("topology", _TOPOLOGIES)
+def test_fpm_run_script_is_collection_free_and_ends_with_foreground_exec(topology):
+    script = _render(_topology_params(topology))[FPM_RUN_SCRIPT_FILENAME]
+
+    assert 'source "$(dirname "${BASH_SOURCE[0]}")/fpm_env.sh"' in script
+    # Rank and leader discovery moved to fpm_env.sh in full.
+    assert "LWS_WORKER_INDEX" not in script
+    assert "GROVE_PCLQ" not in script
+    for token in _COLLECTION_VOCABULARY:
+        assert token not in script, f"collection-side token {token!r} leaked into run.sh"
+    last_line = [line for line in script.splitlines() if line.strip()][-1]
+    assert last_line == _FOREGROUND_EXEC_LINE
+
+
+@pytest.mark.unit
+def test_fpm_run_script_guards_multinode_cuda_toolchain():
+    """Multinode transport profiles rewrite PATH; a profile that drops
+    /usr/local/cuda/bin starves deep_gemm's runtime nvcc JIT and only crashes
+    minutes later. run.sh must fail fast with an nvcc check before launching
+    the engine. The guard is rendered into every script but gated on
+    FPM_NODE_COUNT at runtime, the same shape as the other multinode blocks."""
+
+    script = _render(_topology_params("multinode-tp"))[FPM_RUN_SCRIPT_FILENAME]
+    assert "FPM_NODE_COUNT > 1 )) && ! command -v nvcc" in script
+    assert script.index("command -v nvcc") < script.index("exec python3 -c")
+
+
+def _consumed_fpm_variables(script: str) -> set[str]:
+    """FPM_* names the script reads.
+
+    Names assigned by an ``export NAME=value`` passthrough line (the
+    collector-supplied ``extra_env``) are not reads, but their values are
+    still scanned (e.g. the DYN_FPM_WORKER_ID default reads FPM_RUN_ID).
+    """
+    consumed: set[str] = set()
+    for line in script.splitlines():
+        match = _EXPORT_ASSIGNMENT_RE.match(line)
+        scan_target = match.group(2) if match else line
+        consumed.update(_FPM_VARIABLE_RE.findall(scan_target))
+    return consumed
+
+
+@pytest.mark.parametrize("topology", _TOPOLOGIES)
+def test_fpm_run_script_consumes_only_contract_environment(topology):
+    script = _render(_topology_params(topology))[FPM_RUN_SCRIPT_FILENAME]
+
+    consumed = _consumed_fpm_variables(script)
+
+    assert consumed
+    assert consumed <= set(FPM_ENV_EXPORTED_VARS) | {FPM_RUN_ID_ENV}
+
+
+@pytest.mark.parametrize("topology", _TOPOLOGIES)
+def test_fpm_scripts_pass_bash_syntax_check(topology):
+    artifacts = _render(_topology_params(topology))
+
+    for name in (FPM_ENV_FILENAME, FPM_RUN_SCRIPT_FILENAME):
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=artifacts[name],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert syntax.returncode == 0, f"{name}: {syntax.stderr}"
+
+
+def _pod_template_labels(artifacts: dict[str, str], kind: str) -> list[dict]:
+    document = _k8s_document(artifacts, kind)
+    if kind == "Pod":
+        return [document["metadata"]["labels"]]
+    if kind == "LeaderWorkerSet":
+        group = document["spec"]["leaderWorkerTemplate"]
+        return [group[name]["metadata"]["labels"] for name in ("leaderTemplate", "workerTemplate")]
+    assert kind == "PodCliqueSet"
+    return [clique["labels"] for clique in document["spec"]["template"]["cliques"]]
+
+
+@pytest.mark.parametrize("kind", ["Pod", "LeaderWorkerSet", "PodCliqueSet"])
+def test_fpm_cell_label_reaches_every_pod_template(kind):
+    params = _params()
+    params["K8sConfig"]["fpm_resource_labels"] = {FPM_CELL_LABEL: "glm52-fpm-cell-0"}
+    if kind != "Pod":
+        params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+        params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+        params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
+    if kind == "PodCliqueSet":
+        params["K8sConfig"]["fpm_orchestrator"] = "grove"
+
+    label_sets = _pod_template_labels(_render(params), kind)
+
+    assert label_sets
+    for labels in label_sets:
+        assert labels[FPM_CELL_LABEL] == "glm52-fpm-cell-0"
+
+
+@pytest.mark.parametrize(
+    ("case_env", "expected_output"),
+    [
+        pytest.param(
+            {"LWS_WORKER_INDEX": "1", "LWS_LEADER_ADDRESS": "leader.example"},
+            "1 leader.example",
+            id="lws",
+        ),
+        pytest.param(
+            {
+                "GROVE_PCLQ_POD_INDEX": "1",
+                "GROVE_PCLQ_NAME": "glm52-fpm-agg-0-worker",
+                "GROVE_HEADLESS_SERVICE": "glm52-fpm-agg-0.default.svc.cluster.local",
+            },
+            "1 glm52-fpm-agg-0-worker-0.glm52-fpm-agg-0.default.svc.cluster.local",
+            id="grove",
+        ),
+        pytest.param(
+            {
+                "FPM_NODE_RANK": "0",
+                "FPM_MASTER_ADDR": "10.0.0.9",
+                "LWS_WORKER_INDEX": "1",
+                "LWS_LEADER_ADDRESS": "ignored.example",
+            },
+            "0 10.0.0.9",
+            id="explicit-fpm-presets-win",
+        ),
+    ],
+)
+def test_fpm_env_script_multinode_discovery_cascade(tmp_path, case_env, expected_output):
+    env_script = _render(_multinode_params())[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, case_env)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == expected_output
+
+
+def test_fpm_env_script_multinode_fails_closed_without_discovery(tmp_path):
+    env_script = _render(_multinode_params())[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, {})
+
+    assert completed.returncode == 2
+    assert "requires rank and leader discovery" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "case_env",
+    [
+        pytest.param({"LWS_WORKER_INDEX": "7", "LWS_LEADER_ADDRESS": "leader.example"}, id="out-of-range"),
+        pytest.param({"FPM_NODE_RANK": "one", "FPM_MASTER_ADDR": "leader.example"}, id="non-numeric"),
+    ],
+)
+def test_fpm_env_script_rejects_invalid_node_rank(tmp_path, case_env):
+    env_script = _render(_multinode_params())[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, case_env)
+
+    assert completed.returncode == 2
+    assert "Invalid FPM node rank" in completed.stderr
+
+
+def test_fpm_env_script_single_node_defaults_to_local_leader(tmp_path):
+    env_script = _render()[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, {})
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "0 127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    "partial_env",
+    [
+        pytest.param({"LWS_WORKER_INDEX": "0"}, id="rank-only-lws"),
+        pytest.param({"FPM_MASTER_ADDR": "10.0.0.1"}, id="leader-only-explicit"),
+        pytest.param({"GROVE_PCLQ_NAME": "glm52-fpm-agg-0-worker"}, id="grove-name-without-service"),
+    ],
+)
+def test_fpm_env_script_single_node_fails_closed_on_partial_discovery(tmp_path, partial_env):
+    """The rank-0/127.0.0.1 defaults apply only to a fully undiscovered
+    environment; any partial orchestrator answer is a misconfiguration."""
+
+    env_script = _render()[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, partial_env)
+
+    assert completed.returncode == 2
+    assert "FPM runtime requires complete rank and leader discovery" in completed.stderr
+
+
+def test_fpm_env_script_single_node_accepts_complete_explicit_discovery(tmp_path):
+    env_script = _render()[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(
+        tmp_path,
+        env_script,
+        {"FPM_NODE_RANK": "0", "FPM_MASTER_ADDR": "10.0.0.1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "0 10.0.0.1"
+
+
+def test_fpm_env_script_multinode_fails_closed_with_rank_but_no_leader(tmp_path):
+    """A rank without a leader source must not pass the multinode gate; this
+    pins the OR in its incomplete-discovery check."""
+
+    env_script = _render(_multinode_params())[FPM_ENV_FILENAME]
+
+    completed = _source_env_script(tmp_path, env_script, {"LWS_WORKER_INDEX": "1"})
+
+    assert completed.returncode == 2
+    assert "Multinode FPM requires rank and leader discovery" in completed.stderr
 
 
 def test_fpm_pinned_vllm_024_uses_floor_template_and_preserves_fpm_overlay():
@@ -231,10 +538,10 @@ def test_fpm_pinned_vllm_024_uses_floor_template_and_preserves_fpm_overlay():
         deployment_target="fpm",
     )
 
-    assert yaml.safe_load(artifacts["k8s_deploy.yaml"])["kind"] == "Pod"
-    assert "--tensor-parallel-size 4" in artifacts["run.sh"]
-    assert "--scheduler-cls fpm.scheduler.InstrumentedScheduler" in artifacts["run.sh"]
-    assert "--dump-config-to /results/resolved-config-node0.json" in artifacts["run.sh"]
+    assert yaml.safe_load(artifacts[FPM_MANIFEST_FILENAME])["kind"] == "Pod"
+    assert "--tensor-parallel-size 4" in artifacts[FPM_RUN_SCRIPT_FILENAME]
+    assert "--scheduler-cls fpm.scheduler.InstrumentedScheduler" in artifacts[FPM_RUN_SCRIPT_FILENAME]
+    assert "--dump-config-to /results/resolved-config-node0.json" in artifacts[FPM_RUN_SCRIPT_FILENAME]
 
 
 def test_fpm_resource_pod_is_keepalive_only_and_preserves_resources():
@@ -249,6 +556,8 @@ def test_fpm_resource_pod_is_keepalive_only_and_preserves_resources():
     assert "infinity" in keepalive
 
     assert int(container["resources"]["limits"]["nvidia.com/gpu"]) == 4
+    assert "claims" not in container["resources"]
+    assert "resourceClaims" not in pod["spec"]
     assert pod["spec"]["nodeSelector"]["nvidia.com/gpu.product"] == "NVIDIA-B200"
     assert not container.get("env")
     assert not container.get("envFrom")
@@ -315,7 +624,7 @@ def test_fpm_resource_overlay_cannot_change_resolved_gpu_count():
 
 
 def test_fpm_run_script_contains_resolved_args_passthrough_and_exports():
-    script = _render()["run.sh"]
+    script = _render()[FPM_RUN_SCRIPT_FILENAME]
 
     # Service-level fields plus the normal versioned vLLM template/rule output.
     assert "python3 -m dynamo.vllm" in script
@@ -337,16 +646,6 @@ def test_fpm_run_script_contains_resolved_args_passthrough_and_exports():
     assert _export_value(script, "NCCL_DEBUG") == "INFO"
     assert _export_value(script, "NCCL_CUMEM_ENABLE") == "1"
     assert "ulimit -n 1048576" in script
-    assert "wait_timeout_seconds=7800" in script
-
-    syntax = subprocess.run(
-        ["bash", "-n"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert syntax.returncode == 0, syntax.stderr
 
 
 def test_fpm_preserves_duplicate_environment_export_order():
@@ -358,7 +657,9 @@ def test_fpm_preserves_duplicate_environment_export_order():
         ]
     )
 
-    exports = [line for line in _render(params)["run.sh"].splitlines() if line.startswith("export NCCL_DEBUG=")]
+    exports = [
+        line for line in _render(params)[FPM_RUN_SCRIPT_FILENAME].splitlines() if line.startswith("export NCCL_DEBUG=")
+    ]
 
     assert exports == ["export NCCL_DEBUG=INFO", "export NCCL_DEBUG=WARN", "export NCCL_DEBUG=TRACE"]
 
@@ -368,11 +669,13 @@ def test_fpm_keeps_cli_and_environment_output_paths_aligned():
     params["K8sConfig"]["extra_env"] = [
         entry for entry in params["K8sConfig"]["extra_env"] if entry["name"] != "DYN_FPM_BENCHMARK_OUTPUT_PATH"
     ]
-    params["params"]["agg"]["extra_cli_args"].extend(["--benchmark-output-path", "/results/custom.json"])
+    params["params"]["agg"]["extra_cli_args"].extend(["--benchmark-output-path", "/results/benchmark_custom.json"])
 
-    script = _render(params)["run.sh"]
+    artifacts = _render(params)
 
-    assert _export_value(script, "DYN_FPM_BENCHMARK_OUTPUT_PATH") == "/results/custom.json"
+    engine_output = _export_value(artifacts[FPM_RUN_SCRIPT_FILENAME], "DYN_FPM_BENCHMARK_OUTPUT_PATH")
+    assert engine_output == "/results/benchmark_custom.json"
+    assert _export_value(artifacts[FPM_ENV_FILENAME], "FPM_BENCHMARK_OUTPUT_PATH") == "/results/benchmark_custom.json"
 
 
 def test_fpm_rejects_conflicting_output_paths():
@@ -381,48 +684,6 @@ def test_fpm_rejects_conflicting_output_paths():
 
     with pytest.raises(ValueError, match="same path"):
         _render(params)
-
-
-def _process_is_running(process_pid: int) -> bool:
-    """Return false for an exited process, including an unreaped Linux zombie."""
-    try:
-        os.kill(process_pid, 0)
-    except ProcessLookupError:
-        return False
-
-    proc_root = Path("/proc")
-    if not proc_root.is_dir():
-        return True
-
-    try:
-        status_lines = (proc_root / str(process_pid) / "status").read_text().splitlines()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-
-    state = next((line for line in status_lines if line.startswith("State:")), None)
-    if state is None:
-        return True
-    state_parts = state.split()
-    return len(state_parts) < 2 or state_parts[1] not in {"Z", "X", "x"}
-
-
-def _assert_process_stopped(pid_path) -> None:
-    process_pid = int(pid_path.read_text())
-    exit_deadline = time.monotonic() + 2
-    while time.monotonic() < exit_deadline:
-        if not _process_is_running(process_pid):
-            return
-        time.sleep(0.05)
-
-    if not _process_is_running(process_pid):
-        return
-    try:
-        os.kill(process_pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    pytest.fail(f"process {process_pid} survived FPM run.sh cleanup")
 
 
 @pytest.mark.parametrize(
@@ -453,7 +714,7 @@ def test_fpm_rejects_explicit_empty_environment_output_path():
         _render(params)
 
 
-def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
+def test_fpm_api_writes_exact_filenames_and_executable_scripts(tmp_path):
     artifacts = generate_backend_artifacts(
         copy.deepcopy(_params()),
         "vllm",
@@ -462,381 +723,50 @@ def test_fpm_api_writes_exact_filenames_and_executable_script(tmp_path):
         deployment_target="fpm",
     )
 
-    assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
-    assert {path.name for path in tmp_path.iterdir()} == {"k8s_deploy.yaml", "run.sh"}
+    assert set(artifacts) == _ARTIFACT_TRIO
+    assert {path.name for path in tmp_path.iterdir()} == _ARTIFACT_TRIO
     assert not (tmp_path / "run_x.sh").exists()
-    assert (tmp_path / "run.sh").stat().st_mode & stat.S_IXUSR
-    assert yaml.safe_load((tmp_path / "k8s_deploy.yaml").read_text())["kind"] == "Pod"
+    for script_name in (FPM_RUN_SCRIPT_FILENAME, FPM_ENV_FILENAME):
+        assert (tmp_path / script_name).stat().st_mode & stat.S_IXUSR
+    assert yaml.safe_load((tmp_path / FPM_MANIFEST_FILENAME).read_text())["kind"] == "Pod"
 
 
-def test_fpm_run_script_accepts_legacy_schema_v2_and_stops_fake_engine(tmp_path):
-    output_path = tmp_path / "benchmark.json"
-    params = _params()
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
-        """\
-import json
-import pathlib
-import signal
-import sys
-import time
-
-flag = "--benchmark-output-path"
-index = sys.argv.index(flag)
-path = pathlib.Path(sys.argv[index + 1])
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({"schema_version": 2, "status": "passed", "config": {"dp_rank": 0}}))
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.1)
-"""
-    )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(tmp_path / "fake-package")
-
-    completed = subprocess.run(
-        ["bash", str(script_path)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=10,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(output_path.read_text()) == {
-        "schema_version": 2,
-        "status": "passed",
-        "config": {"dp_rank": 0},
-    }
-
-    repeated = subprocess.run(
-        ["bash", str(script_path)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=10,
-        check=False,
-    )
-    assert repeated.returncode == 1
-    assert "Refusing to overwrite" in repeated.stderr
-
-
-@pytest.mark.parametrize(
-    ("benchmark_mode", "point_types"),
-    [
-        ("prefill", ["prefill"]),
-        ("decode", ["decode"]),
-        ("agg", ["prefill", "decode"]),
-    ],
-)
-def test_fpm_run_script_accepts_schema_v1_for_supported_benchmark_modes(
-    tmp_path,
-    benchmark_mode,
-    point_types,
-):
-    result = _benchmark_result(mode=benchmark_mode, point_types=point_types)
-
-    completed = _run_script_with_static_result(
+def test_fpm_run_script_execs_engine_in_foreground_with_setsid(tmp_path):
+    report_path = tmp_path / "engine-report.json"
+    pythonpath = _write_fake_engine(
         tmp_path,
-        result,
-        benchmark_mode=benchmark_mode,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-
-
-@pytest.mark.parametrize(
-    ("case", "expected_message"),
-    [
-        ("schema", "unsupported schema_version 3"),
-        ("mode", "benchmark mode 'decode' != 'prefill'"),
-        ("coverage", "invalid coverage"),
-        ("result_count", "results count 0 != 1"),
-        ("point_type", "point type 'decode' is not valid for 'prefill'"),
-        ("dp_rank", "FPM dp_ranks [1] != [0]"),
-        ("non_object", "top-level JSON must be an object"),
-    ],
-)
-def test_fpm_run_script_rejects_invalid_schema_v1_result(
-    tmp_path,
-    case,
-    expected_message,
-):
-    result = _benchmark_result()
-    payload: object = result
-    if case == "schema":
-        result["schema_version"] = 3
-    elif case == "mode":
-        result["config"]["mode"] = "decode"
-    elif case == "coverage":
-        result["coverage"]["completed_points"] = 0
-    elif case == "result_count":
-        result["results"] = []
-    elif case == "point_type":
-        result["results"][0]["point"]["point_type"] = "decode"
-    elif case == "dp_rank":
-        result["results"][0]["fpms"][0]["dp_rank"] = 1
-    elif case == "non_object":
-        payload = []
-    else:  # pragma: no cover - protects the test table itself
-        raise AssertionError(f"unknown test case: {case}")
-
-    completed = _run_script_with_static_result(tmp_path, payload)
-
-    assert completed.returncode == 1
-    assert expected_message in completed.stderr
-
-
-def test_fpm_run_script_waits_for_every_single_node_dp_result(tmp_path):
-    output_path = tmp_path / "benchmark.json"
-    params = _params()
-    _set_benchmark_mode(params, "prefill")
-    params["params"]["agg"].update(
-        {
-            "tensor_parallel_size": 1,
-            "data_parallel_size": 4,
-            "gpus_per_worker": 4,
-        }
-    )
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
         """\
-import json
-import pathlib
-import signal
-import sys
-import time
-
-output_flag = sys.argv.index("--benchmark-output-path")
-base = pathlib.Path(sys.argv[output_flag + 1])
-dp_flag = sys.argv.index("--data-parallel-size")
-dp_size = int(sys.argv[dp_flag + 1])
-base.parent.mkdir(parents=True, exist_ok=True)
-for rank in range(dp_size):
-    path = base if rank == 0 else base.with_name(f"{base.stem}_dp{rank}{base.suffix}")
-    path.write_text(json.dumps({
-        "schema_version": 1,
-        "status": "complete",
-        "valid": True,
-        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
-        "config": {"mode": "prefill"},
-        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
-        "skipped_points": [],
-        "rank": rank,
-    }))
-    time.sleep(1)
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.1)
-"""
-    )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(tmp_path / "fake-package")
-
-    completed = subprocess.run(
-        ["bash", str(script_path)],
-        text=True,
-        capture_output=True,
-        env=env,
-        timeout=12,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert [
-        json.loads((output_path if rank == 0 else tmp_path / f"benchmark_dp{rank}.json").read_text())["rank"]
-        for rank in range(4)
-    ] == [0, 1, 2, 3]
-
-
-def test_fpm_run_script_rejects_terminal_failed_result(tmp_path):
-    completed = _run_script_with_static_result(
-        tmp_path,
-        _benchmark_result(status="failed", valid=False),
-    )
-
-    assert completed.returncode == 1
-    assert "status='failed'" in completed.stderr
-    assert "valid=False" in completed.stderr
-    assert "boom" in completed.stderr
-
-
-@pytest.mark.parametrize(
-    ("result_status", "expected_returncode"),
-    [
-        ("passed", 0),
-        ("failed", 1),
-    ],
-)
-def test_fpm_run_script_bounds_stubborn_engine_shutdown(
-    tmp_path,
-    result_status,
-    expected_returncode,
-):
-    output_path = tmp_path / "benchmark.json"
-    pid_path = tmp_path / "engine.pid"
-    child_pid_path = tmp_path / "engine-child.pid"
-    params = _params()
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
-        f"""\
 import json
 import os
 import pathlib
-import signal
-import subprocess
 import sys
-import time
 
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-pathlib.Path(os.environ["FAKE_ENGINE_PID_PATH"]).write_text(str(os.getpid()))
-child = subprocess.Popen([
-    sys.executable,
-    "-c",
-    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3600)",
-])
-pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid))
-index = sys.argv.index("--benchmark-output-path")
-path = pathlib.Path(sys.argv[index + 1])
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps({{
-    "schema_version": 2,
-    "status": "{result_status}",
-    "config": {{"dp_rank": 0}},
-}}))
-while True:
-    time.sleep(0.1)
-"""
+pathlib.Path(os.environ["FAKE_REPORT_PATH"]).write_text(json.dumps({
+    "argv": sys.argv[1:],
+    "worker_id": os.environ.get("DYN_FPM_WORKER_ID"),
+    "group_leader": os.getpgrp() == os.getpid(),
+}))
+raise SystemExit(23)
+""",
     )
-    script_path = tmp_path / "run.sh"
-    script = _render(params)["run.sh"]
-    assert script.count("engine_shutdown_grace_seconds=30") == 1
-    script = script.replace(
-        "engine_shutdown_grace_seconds=30",
-        "engine_shutdown_grace_seconds=1",
-    )
-    script_path.write_text(script)
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONPATH": str(tmp_path / "fake-package"),
-            "FAKE_ENGINE_PID_PATH": str(pid_path),
-            "FAKE_ENGINE_CHILD_PID_PATH": str(child_pid_path),
-        }
-    )
+    script_path = _write_runtime(tmp_path, _render())
 
-    started = time.monotonic()
     completed = subprocess.run(
         ["bash", str(script_path)],
         text=True,
         capture_output=True,
-        env=env,
+        env=_clean_env(PYTHONPATH=str(pythonpath), FAKE_REPORT_PATH=str(report_path)),
         timeout=8,
         check=False,
     )
-    elapsed = time.monotonic() - started
 
-    assert completed.returncode == expected_returncode
-    assert elapsed < 7
-    assert "Engine did not stop within 1s; sending SIGKILL" in completed.stderr
-    for process_pid_path in (pid_path, child_pid_path):
-        _assert_process_stopped(process_pid_path)
-
-
-def test_fpm_run_script_cleans_process_group_when_engine_parent_exits(tmp_path):
-    output_path = tmp_path / "benchmark.json"
-    child_pid_path = tmp_path / "engine-child.pid"
-    params = _params()
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
-
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
-        """\
-import os
-import pathlib
-import signal
-import subprocess
-import sys
-
-child = subprocess.Popen(
-    [
-        sys.executable,
-        "-c",
-        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(3600)",
-    ],
-    stdin=subprocess.DEVNULL,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-pathlib.Path(os.environ["FAKE_ENGINE_CHILD_PID_PATH"]).write_text(str(child.pid))
-raise SystemExit(23)
-"""
-    )
-    script_path = tmp_path / "run.sh"
-    script = _render(params)["run.sh"]
-    assert script.count("engine_shutdown_grace_seconds=30") == 1
-    script = script.replace(
-        "engine_shutdown_grace_seconds=30",
-        "engine_shutdown_grace_seconds=1",
-    )
-    script_path.write_text(script)
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONPATH": str(tmp_path / "fake-package"),
-            "FAKE_ENGINE_CHILD_PID_PATH": str(child_pid_path),
-        }
-    )
-
-    try:
-        completed = subprocess.run(
-            ["bash", str(script_path)],
-            text=True,
-            capture_output=True,
-            env=env,
-            timeout=8,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        if child_pid_path.exists():
-            os.kill(int(child_pid_path.read_text()), signal.SIGKILL)
-        raise
-
+    # run.sh replaces itself with the engine: its exit code is the engine's,
+    # and setsid made the engine its own process-group leader.
     assert completed.returncode == 23
-    assert "Engine exited before writing all FPM benchmark outputs" in completed.stderr
-    assert "Engine did not stop within 1s; sending SIGKILL" in completed.stderr
-    _assert_process_stopped(child_pid_path)
+    report = json.loads(report_path.read_text())
+    assert report["worker_id"] == "glm52-fpm-a3-example-node0"
+    assert report["group_leader"] is True
+    assert "--benchmark-mode" in report["argv"]
 
 
 def test_default_and_explicit_normal_targets_remain_identical():
@@ -856,6 +786,7 @@ def test_default_and_explicit_normal_targets_remain_identical():
     assert "k8s_deploy.yaml" in explicit
     assert "run_0.sh" in explicit
     assert "run.sh" not in explicit
+    assert FPM_ENV_FILENAME not in explicit
 
 
 def test_legacy_yaml_normalization_preserves_extra_cli_args():
@@ -926,7 +857,7 @@ def test_render_artifacts_cli_accepts_fpm_target(tmp_path, capsys):
     )
     capsys.readouterr()
 
-    assert {path.name for path in output_dir.iterdir()} == {"k8s_deploy.yaml", "run.sh"}
+    assert {path.name for path in output_dir.iterdir()} == _ARTIFACT_TRIO
 
 
 def _disagg_params() -> dict:
@@ -967,30 +898,188 @@ def test_fpm_rejects_multiple_workers():
         _render(params)
 
 
-def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_script():
+@pytest.mark.parametrize("orchestrator", [None, "lws"], ids=["default", "explicit-lws"])
+def test_fpm_multinode_worker_emits_keepalive_leaderworkerset_and_rank_aware_scripts(orchestrator):
     params = _params()
-    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
-    params["params"]["agg"]["gpus_per_worker"] = 16
-    params["params"]["agg"]["tensor_parallel_size"] = 16
+    if orchestrator is not None:
+        params["K8sConfig"]["fpm_orchestrator"] = orchestrator
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"]["gpus_per_worker"] = 8
+    params["params"]["agg"]["tensor_parallel_size"] = 8
 
     artifacts = _render(params)
-    workload = yaml.safe_load(artifacts["k8s_deploy.yaml"])
+    documents = _k8s_documents(artifacts)
+    assert [document["kind"] for document in documents] == ["ComputeDomain", "LeaderWorkerSet"]
+    compute_domain = _k8s_document(artifacts, "ComputeDomain")
+    workload = _k8s_document(artifacts, "LeaderWorkerSet")
 
+    assert compute_domain == {
+        "apiVersion": "resource.nvidia.com/v1beta1",
+        "kind": "ComputeDomain",
+        "metadata": {
+            "name": "glm52-fpm-agg-compute-domain",
+            "namespace": "default",
+        },
+        "spec": {
+            "channel": {
+                "resourceClaimTemplate": {
+                    "name": "glm52-fpm-agg-compute-domain-channel",
+                }
+            },
+            "numNodes": 0,
+        },
+    }
     assert workload["apiVersion"] == "leaderworkerset.x-k8s.io/v1"
     assert workload["kind"] == "LeaderWorkerSet"
     group = workload["spec"]["leaderWorkerTemplate"]
     assert group["size"] == 2
     for template_name in ("leaderTemplate", "workerTemplate"):
-        container = group[template_name]["spec"]["containers"][0]
-        assert container["resources"]["limits"]["nvidia.com/gpu"] == "8"
+        pod_spec = group[template_name]["spec"]
+        assert pod_spec["resourceClaims"] == [
+            {
+                "name": "compute-domain-channel",
+                "resourceClaimTemplateName": "glm52-fpm-agg-compute-domain-channel",
+            }
+        ]
+        container = pod_spec["containers"][0]
+        assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+        assert container["resources"]["claims"] == [{"name": "compute-domain-channel"}]
         assert container["command"] == ["/bin/bash", "-lc"]
         assert container["args"] == ["exec sleep infinity"]
 
-    script = artifacts["run.sh"]
-    assert 'node_rank="${LWS_WORKER_INDEX:?LWS_WORKER_INDEX is required for multinode FPM}"' in script
-    assert 'master_addr="${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS is required for multinode FPM}"' in script
-    assert '--nnodes "$node_count" --node-rank "$node_rank"' in script
-    assert 'exec "${engine_command[@]}" --headless' in script
+    # fpm_env.sh owns rank/leader discovery; run.sh only consumes its exports.
+    env_script = artifacts[FPM_ENV_FILENAME]
+    assert _export_value(env_script, "FPM_NODE_COUNT") == "2"
+    assert 'fpm_node_rank="${FPM_NODE_RANK:-${LWS_WORKER_INDEX:-${GROVE_PCLQ_POD_INDEX:-}}}"' in env_script
+    assert 'fpm_master_addr="${FPM_MASTER_ADDR:-${LWS_LEADER_ADDRESS:-}}"' in env_script
+    script = artifacts[FPM_RUN_SCRIPT_FILENAME]
+    assert '--nnodes "$FPM_NODE_COUNT" --node-rank "$FPM_NODE_RANK"' in script
+    assert '--master-addr "$FPM_MASTER_ADDR" --master-port 29500' in script
+    # Followers get the engine's --headless flag and nothing more; exit
+    # classification against the leader belongs to the collector runtime.
+    assert "engine_command+=(--headless)" in script
+
+
+def test_fpm_multinode_gb200_grove_emits_compute_domain_and_keepalive_podcliqueset():
+    params = _params()
+    params["K8sConfig"]["fpm_orchestrator"] = "grove"
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
+
+    artifacts = _render(params)
+    documents = _k8s_documents(artifacts)
+
+    assert [document["kind"] for document in documents] == ["ComputeDomain", "PodCliqueSet"]
+    compute_domain = _k8s_document(artifacts, "ComputeDomain")
+    workload = _k8s_document(artifacts, "PodCliqueSet")
+    assert compute_domain == {
+        "apiVersion": "resource.nvidia.com/v1beta1",
+        "kind": "ComputeDomain",
+        "metadata": {
+            "name": "glm52-fpm-agg-compute-domain",
+            "namespace": "default",
+        },
+        "spec": {
+            "channel": {
+                "resourceClaimTemplate": {
+                    "name": "glm52-fpm-agg-compute-domain-channel",
+                }
+            },
+            "numNodes": 0,
+        },
+    }
+
+    assert workload["apiVersion"] == "grove.io/v1alpha1"
+    assert workload["metadata"]["name"] == "glm52-fpm-agg"
+    assert workload["metadata"]["namespace"] == "default"
+    assert workload["spec"]["replicas"] == 1
+    template = workload["spec"]["template"]
+    assert template["cliqueStartupType"] == "CliqueStartupTypeAnyOrder"
+    assert template["headlessServiceConfig"] == {"publishNotReadyAddresses": True}
+    assert len(template["cliques"]) == 1
+
+    clique = template["cliques"][0]
+    assert clique["name"] == "worker"
+    assert clique["labels"]["app.kubernetes.io/name"] == "glm52-fpm-agg"
+    assert clique["labels"]["app.kubernetes.io/component"] == "fpm-resource"
+    assert "kai.scheduler/queue" not in clique["labels"]
+    assert clique["spec"]["roleName"] == "worker"
+    assert clique["spec"]["replicas"] == 2
+    assert clique["spec"]["minAvailable"] == 2
+
+    pod_spec = clique["spec"]["podSpec"]
+    assert "schedulerName" not in pod_spec
+    assert pod_spec["nodeSelector"]["nvidia.com/gpu.product"] == "NVIDIA-GB200"
+    assert pod_spec["resourceClaims"] == [
+        {
+            "name": "compute-domain-channel",
+            "resourceClaimTemplateName": "glm52-fpm-agg-compute-domain-channel",
+        }
+    ]
+    assert len(pod_spec["containers"]) == 1
+    container = pod_spec["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
+    assert container["resources"]["claims"] == [{"name": "compute-domain-channel"}]
+    assert container["command"] == ["/bin/bash", "-lc"]
+    assert container["args"] == ["exec sleep infinity"]
+
+
+@pytest.mark.parametrize(
+    ("scheduler_name", "queue_label", "queue_name"),
+    [
+        ("kai-scheduler", "kai.scheduler/queue", "dynamo"),
+        ("custom-scheduler", "scheduler.example.com/queue", "fpm"),
+    ],
+)
+def test_fpm_grove_preserves_explicit_scheduler_and_queue_label(
+    scheduler_name,
+    queue_label,
+    queue_name,
+):
+    params = _params()
+    params["K8sConfig"].update(
+        {
+            "fpm_orchestrator": "grove",
+            "fpm_resource_labels": {queue_label: queue_name},
+            "worker_extra_pod_spec": {"schedulerName": scheduler_name},
+        }
+    )
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
+
+    workload = _k8s_document(_render(params), "PodCliqueSet")
+    clique = workload["spec"]["template"]["cliques"][0]
+
+    assert workload["metadata"]["labels"][queue_label] == queue_name
+    assert clique["labels"][queue_label] == queue_name
+    assert clique["spec"]["podSpec"]["schedulerName"] == scheduler_name
+
+
+def test_fpm_rejects_unknown_orchestrator():
+    params = _params()
+    params["K8sConfig"]["fpm_orchestrator"] = "deployment"
+
+    with pytest.raises(ValueError, match="fpm_orchestrator"):
+        _render(params)
+
+
+def test_fpm_b200_multinode_does_not_require_compute_domain():
+    params = _params()
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
+    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+
+    artifacts = _render(params)
+    documents = _k8s_documents(artifacts)
+
+    assert [document["kind"] for document in documents] == ["LeaderWorkerSet"]
+    group = documents[0]["spec"]["leaderWorkerTemplate"]
+    for template_name in ("leaderTemplate", "workerTemplate"):
+        pod_spec = group[template_name]["spec"]
+        assert "resourceClaims" not in pod_spec
+        assert "claims" not in pod_spec["containers"][0]["resources"]
 
 
 def test_fpm_multinode_efa_resource_matches_per_node_gpu_count():
@@ -1006,7 +1095,7 @@ def test_fpm_multinode_efa_resource_matches_per_node_gpu_count():
     params["WorkerConfig"]["agg_gpus_per_worker"] = 16
     params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
 
-    workload = yaml.safe_load(_render(params)["k8s_deploy.yaml"])
+    workload = _k8s_document(_render(params), "LeaderWorkerSet")
     group = workload["spec"]["leaderWorkerTemplate"]
 
     for template_name in ("leaderTemplate", "workerTemplate"):
@@ -1053,36 +1142,59 @@ def test_fpm_multinode_rejects_name_too_long_for_lws_revision_labels():
         _render(params)
 
 
-def test_fpm_multinode_requires_lws_runtime_environment(tmp_path):
-    params = _params()
-    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
-    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
+def test_fpm_multinode_requires_runtime_discovery_environment(tmp_path):
+    script_path = _write_runtime(tmp_path, _render(_multinode_params()))
 
     completed = subprocess.run(
         ["bash", str(script_path)],
         text=True,
         capture_output=True,
+        env=_clean_env(),
         timeout=5,
         check=False,
     )
 
-    assert completed.returncode != 0
-    assert "LWS_WORKER_INDEX is required" in completed.stderr
+    # The sourced fpm_env.sh fails closed and terminates run.sh with exit 2.
+    assert completed.returncode == 2
+    assert "requires rank and leader discovery" in completed.stderr
 
 
-def test_fpm_multinode_model_parallel_follower_receives_rank_and_headless(tmp_path):
+@pytest.mark.parametrize(
+    ("orchestrator", "discovery_env", "expected_master_addr"),
+    [
+        pytest.param(
+            "lws",
+            {
+                "LWS_WORKER_INDEX": "1",
+                "LWS_LEADER_ADDRESS": "leader.example",
+            },
+            "leader.example",
+            id="lws",
+        ),
+        pytest.param(
+            "grove",
+            {
+                "GROVE_PCLQ_POD_INDEX": "1",
+                "GROVE_PCLQ_NAME": "glm52-fpm-agg-0-worker",
+                "GROVE_HEADLESS_SERVICE": "glm52-fpm-agg-0.default.svc.cluster.local",
+            },
+            "glm52-fpm-agg-0-worker-0.glm52-fpm-agg-0.default.svc.cluster.local",
+            id="grove",
+        ),
+    ],
+)
+def test_fpm_multinode_model_parallel_follower_receives_rank_and_headless(
+    tmp_path,
+    orchestrator,
+    discovery_env,
+    expected_master_addr,
+):
     args_path = tmp_path / "engine-args.json"
-    params = _params()
-    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
-    params["params"]["agg"].update({"gpus_per_worker": 16, "tensor_parallel_size": 16})
+    params = _multinode_params()
+    params["K8sConfig"]["fpm_orchestrator"] = orchestrator
 
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
+    pythonpath = _write_fake_engine(
+        tmp_path,
         """\
 import json
 import os
@@ -1090,18 +1202,13 @@ import pathlib
 import sys
 
 pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
-"""
+""",
     )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONPATH": str(tmp_path / "fake-package"),
-            "FAKE_ARGS_PATH": str(args_path),
-            "LWS_WORKER_INDEX": "1",
-            "LWS_LEADER_ADDRESS": "leader.example",
-        }
+    script_path = _write_runtime(tmp_path, _render(params))
+    env = _clean_env(
+        PYTHONPATH=str(pythonpath),
+        FAKE_ARGS_PATH=str(args_path),
+        **discovery_env,
     )
 
     completed = subprocess.run(
@@ -1117,72 +1224,37 @@ pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
     engine_args = json.loads(args_path.read_text())
     assert engine_args[engine_args.index("--nnodes") + 1] == "2"
     assert engine_args[engine_args.index("--node-rank") + 1] == "1"
-    assert engine_args[engine_args.index("--master-addr") + 1] == "leader.example"
+    assert engine_args[engine_args.index("--master-addr") + 1] == expected_master_addr
+    assert engine_args[engine_args.index("--master-port") + 1] == "29500"
     assert engine_args[engine_args.index("--dump-config-to") + 1].endswith("resolved-config-node1.json")
     assert engine_args[-1] == "--headless"
 
 
-def test_fpm_multinode_dp_rank_executes_local_result_range(tmp_path):
-    output_path = tmp_path / "run.v1" / "metrics.final.json"
+def test_fpm_multinode_dp_rank_receives_local_data_parallel_flags(tmp_path):
     args_path = tmp_path / "engine-args.json"
-    params = _params()
+    params = _multinode_params(data_parallel=True)
     _set_benchmark_mode(params, "prefill")
-    params["WorkerConfig"]["agg_gpus_per_worker"] = 16
-    params["params"]["agg"].update(
-        {
-            "gpus_per_worker": 16,
-            "tensor_parallel_size": 1,
-            "data_parallel_size": 16,
-        }
-    )
-    for entry in params["K8sConfig"]["extra_env"]:
-        if entry["name"] == "DYN_FPM_BENCHMARK_OUTPUT_PATH":
-            entry["value"] = str(output_path)
 
-    fake_package = tmp_path / "fake-package" / "dynamo" / "vllm"
-    fake_package.mkdir(parents=True)
-    (fake_package.parent / "__init__.py").write_text("")
-    (fake_package / "__init__.py").write_text("")
-    (fake_package / "__main__.py").write_text(
+    pythonpath = _write_fake_engine(
+        tmp_path,
         """\
 import json
 import os
 import pathlib
-import signal
 import sys
-import time
 
 pathlib.Path(os.environ["FAKE_ARGS_PATH"]).write_text(json.dumps(sys.argv[1:]))
-output = pathlib.Path(sys.argv[sys.argv.index("--benchmark-output-path") + 1])
-local = int(sys.argv[sys.argv.index("--data-parallel-size-local") + 1])
-start = int(sys.argv[sys.argv.index("--data-parallel-start-rank") + 1])
-output.parent.mkdir(parents=True, exist_ok=True)
-for rank in range(start, start + local):
-    path = output if rank == 0 else output.with_name(f"{output.stem}_dp{rank}{output.suffix}")
-    path.write_text(json.dumps({
-        "schema_version": 1,
-        "status": "complete",
-        "valid": True,
-        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
-        "config": {"mode": "prefill"},
-        "results": [{"point": {"point_type": "prefill"}, "fpms": [{"dp_rank": rank}]}],
-        "skipped_points": [],
-    }))
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.1)
-"""
+""",
     )
-    script_path = tmp_path / "run.sh"
-    script_path.write_text(_render(params)["run.sh"])
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONPATH": str(tmp_path / "fake-package"),
-            "FAKE_ARGS_PATH": str(args_path),
-            "LWS_WORKER_INDEX": "1",
-            "LWS_LEADER_ADDRESS": "leader.example",
-        }
+    artifacts = _render(params)
+    assert _export_value(artifacts[FPM_ENV_FILENAME], "FPM_DATA_PARALLEL_SIZE") == "16"
+    assert _export_value(artifacts[FPM_ENV_FILENAME], "FPM_LOCAL_DATA_PARALLEL_SIZE") == "8"
+    script_path = _write_runtime(tmp_path, artifacts)
+    env = _clean_env(
+        PYTHONPATH=str(pythonpath),
+        FAKE_ARGS_PATH=str(args_path),
+        LWS_WORKER_INDEX="1",
+        LWS_LEADER_ADDRESS="leader.example",
     )
 
     completed = subprocess.run(
@@ -1190,7 +1262,7 @@ while True:
         text=True,
         capture_output=True,
         env=env,
-        timeout=8,
+        timeout=5,
         check=False,
     )
 
@@ -1199,12 +1271,10 @@ while True:
     assert engine_args[engine_args.index("--data-parallel-size-local") + 1] == "8"
     assert engine_args[engine_args.index("--data-parallel-start-rank") + 1] == "8"
     assert engine_args[engine_args.index("--data-parallel-address") + 1] == "leader.example"
+    assert engine_args[engine_args.index("--data-parallel-rpc-port") + 1] == "29510"
     assert engine_args[engine_args.index("--dump-config-to") + 1].endswith("resolved-config-node1.json")
     assert engine_args[-1] == "--data-parallel-hybrid-lb"
     assert "--headless" not in engine_args
-    assert {path.name for path in output_path.parent.glob("metrics.final_dp*.json")} == {
-        f"metrics.final_dp{rank}.json" for rank in range(8, 16)
-    }
 
 
 @pytest.mark.parametrize(
@@ -1229,6 +1299,30 @@ def test_fpm_rejects_passthrough_of_generator_owned_orchestration_flags(flag):
     params["params"]["agg"]["extra_cli_args"].append(flag)
 
     with pytest.raises(ValueError, match="owns orchestration option"):
+        _render(params)
+
+
+@pytest.mark.parametrize("spelling", ["--master_port", "--data_parallel_size_local=2", "--node_rank"])
+def test_fpm_rejects_underscore_spellings_of_owned_orchestration_flags(spelling):
+    """vLLM's FlexibleArgumentParser treats underscore and dash spellings as
+    the same option, so the guard must normalize before matching."""
+
+    params = _params()
+    params["params"]["agg"]["extra_cli_args"].append(spelling)
+
+    with pytest.raises(ValueError, match="owns orchestration option"):
+        _render(params)
+
+
+@pytest.mark.parametrize("reserved_name", ["FPM_NODE_RANK", "FPM_BENCHMARK_OUTPUT_PATH"])
+def test_fpm_rejects_reserved_contract_names_in_extra_env(reserved_name):
+    """An extra_env export of a contract variable would shadow the fpm_env.sh
+    value for the engine while the collection runtime keeps the original."""
+
+    params = _params()
+    params["K8sConfig"]["extra_env"].append({"name": reserved_name, "value": "0"})
+
+    with pytest.raises(ValueError, match="reserved FPM contract variable"):
         _render(params)
 
 
@@ -1264,6 +1358,24 @@ def test_fpm_rejects_env_from_environment_sources():
 
 def test_fpm_rejects_user_resource_claims():
     params = _params()
+    params["K8sConfig"]["worker_extra_pod_spec"] = {
+        "resourceClaims": [
+            {
+                "name": "compute-domain-channel",
+                "resourceClaimTemplateName": "user-owned",
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="resourceClaims"):
+        _render(params)
+
+
+def test_fpm_rejects_user_resource_claims_for_mnnvl_multinode():
+    params = _params()
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
     params["K8sConfig"]["worker_extra_pod_spec"] = {
         "resourceClaims": [
             {
@@ -1322,21 +1434,18 @@ def test_fpm_requires_benchmark_mode():
 @pytest.mark.parametrize("benchmark_mode", ["agg", "prefill", "decode"])
 def test_fpm_accepts_supported_benchmark_modes(benchmark_mode):
     params = _params()
-    args = params["params"]["agg"]["extra_cli_args"]
-    index = args.index("--benchmark-mode")
-    args[index + 1] = benchmark_mode
+    _set_benchmark_mode(params, benchmark_mode)
 
     artifacts = _render(params)
 
-    assert set(artifacts) == {"k8s_deploy.yaml", "run.sh"}
-    assert f"--benchmark-mode {benchmark_mode}" in artifacts["run.sh"]
+    assert set(artifacts) == _ARTIFACT_TRIO
+    assert f"--benchmark-mode {benchmark_mode}" in artifacts[FPM_RUN_SCRIPT_FILENAME]
+    assert _export_value(artifacts[FPM_ENV_FILENAME], "FPM_BENCHMARK_MODE") == benchmark_mode
 
 
 def test_fpm_rejects_unsupported_benchmark_mode():
     params = _params()
-    args = params["params"]["agg"]["extra_cli_args"]
-    index = args.index("--benchmark-mode")
-    args[index + 1] = "disagg"
+    _set_benchmark_mode(params, "disagg")
 
     with pytest.raises(ValueError, match="agg, prefill, decode"):
         _render(params)
@@ -1344,9 +1453,7 @@ def test_fpm_rejects_unsupported_benchmark_mode():
 
 def test_fpm_rejects_another_flag_in_a_required_value_position():
     params = _params()
-    args = params["params"]["agg"]["extra_cli_args"]
-    index = args.index("--benchmark-mode")
-    args[index + 1] = "--scheduler-cls"
+    _set_benchmark_mode(params, "--scheduler-cls")
 
     with pytest.raises(ValueError, match="requires a value"):
         _render(params)
@@ -1356,7 +1463,7 @@ def test_fpm_uses_benchmark_timeout_with_startup_grace():
     params = _params()
     params["params"]["agg"]["extra_cli_args"].extend(["--benchmark-timeout", "3600"])
 
-    assert "wait_timeout_seconds=4200" in _render(params)["run.sh"]
+    assert _export_value(_render(params)[FPM_ENV_FILENAME], "FPM_WAIT_TIMEOUT_SECONDS") == "4200"
 
 
 @pytest.mark.parametrize("timeout", ["zero", "0", "-1"])
@@ -1375,3 +1482,48 @@ def test_fpm_rejects_non_list_extra_cli_args(invalid):
 
     with pytest.raises((TypeError, ValueError)):
         _render(params)
+
+
+def test_fpm_orchestrator_schema_default_resolves_to_lws():
+    # Defaults are Jinja-evaluated; an unquoted identifier silently resolves
+    # to None and only the builder's None fallback saves it. Pin the schema
+    # default itself so the declaration stays truthful on its own.
+    from aiconfigurator.generator.rendering.schemas import apply_defaults
+
+    resolved = apply_defaults("K8sConfig", {}, backend="vllm")
+    assert resolved.get("fpm_orchestrator") == "lws"
+
+
+def test_fpm_multinode_without_mnnvl_fabric_disables_allreduce_fusion():
+    # Guard pin: on multinode systems without an MNNVL fabric the pinned
+    # engine's fused allreduce either hangs (auto -> mnnvl) or refuses to
+    # start (trtllm), so the render must disable the fusion pass.
+    script = _render(_multinode_params())[FPM_RUN_SCRIPT_FILENAME]
+    assert '"fuse_allreduce_rms":false' in script
+
+
+def test_fpm_single_node_keeps_allreduce_fusion():
+    script = _render(_params())[FPM_RUN_SCRIPT_FILENAME]
+    assert "fuse_allreduce_rms" not in script
+
+
+def test_fpm_multinode_mnnvl_fabric_keeps_allreduce_fusion():
+    params = _params()
+    params["K8sConfig"]["fpm_orchestrator"] = "grove"
+    params["NodeConfig"].update({"system_name": "gb200", "num_gpus_per_node": 4})
+    params["WorkerConfig"]["agg_gpus_per_worker"] = 8
+    params["params"]["agg"].update({"gpus_per_worker": 8, "tensor_parallel_size": 8})
+
+    script = _render(params)[FPM_RUN_SCRIPT_FILENAME]
+    assert "fuse_allreduce_rms" not in script
+
+
+def test_fpm_multinode_fusion_guard_merges_into_existing_compilation_config():
+    # The base fixture already carries the collector's compilation config
+    # (cudagraph capture policy); the guard must merge into that single flag
+    # rather than appending a second occurrence.
+    script = _render(_multinode_params())[FPM_RUN_SCRIPT_FILENAME]
+
+    assert script.count("--compilation-config") == 1
+    assert "cudagraph_mode" in script
+    assert '"fuse_allreduce_rms":false' in script

@@ -34,8 +34,8 @@ fn context_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
-                scale_num_tokens: 1,
-                seq_split: 1,
+            scale_num_tokens: 1,
+            seq_split: 1,
         }),
         Op::Gemm(GemmOp {
             name: "qkv_gemm".into(),
@@ -45,7 +45,8 @@ fn context_ops() -> Vec<Op> {
             quant_mode: GemmQuantMode::Fp8Block,
             scale_num_tokens: 0,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         }),
         Op::ContextAttention(ContextAttentionOp {
             name: "context_attention".into(),
@@ -57,7 +58,7 @@ fn context_ops() -> Vec<Op> {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: false,
-                cp_size: 1,
+            cp_size: 1,
         }),
     ]
 }
@@ -68,8 +69,8 @@ fn generation_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
-                scale_num_tokens: 1,
-                seq_split: 1,
+            scale_num_tokens: 1,
+            seq_split: 1,
         }),
         Op::GenerationAttention(GenerationAttentionOp {
             name: "generation_attention".into(),
@@ -98,7 +99,7 @@ fn fixture_engine_config() -> EngineConfig {
             attention_dp_size: Some(1),
             moe_tp_size: Some(1),
             moe_ep_size: Some(8),
-                cp_size: None,
+            cp_size: None,
         },
         quantization: QuantizationConfig {
             weight_dtype: None,
@@ -326,6 +327,80 @@ fn options_reject_zero_bounds() {
     assert!(matches!(err, AicError::InvalidEngineConfig(_)));
 }
 
+#[test]
+fn options_default_directional_correction_factors() {
+    let defaults = ForwardPassPerfOptions::default();
+    assert_eq!(defaults.min_faster_correction_factor, Some(0.5));
+    assert_eq!(defaults.max_slower_correction_factor, Some(2.0));
+
+    let omitted: ForwardPassPerfOptions = serde_json::from_str("{}").unwrap();
+    assert_eq!(omitted.min_faster_correction_factor, Some(0.5));
+    assert_eq!(omitted.max_slower_correction_factor, Some(2.0));
+
+    let unbounded: ForwardPassPerfOptions = serde_json::from_str(
+        r#"{
+            "min_faster_correction_factor": null,
+            "max_slower_correction_factor": null
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(unbounded.min_faster_correction_factor, None);
+    assert_eq!(unbounded.max_slower_correction_factor, None);
+
+    let no_floor: ForwardPassPerfOptions =
+        serde_json::from_str(r#"{"min_faster_correction_factor": null}"#).unwrap();
+    assert_eq!(no_floor.min_faster_correction_factor, None);
+    assert_eq!(no_floor.max_slower_correction_factor, Some(2.0));
+
+    let no_ceiling: ForwardPassPerfOptions =
+        serde_json::from_str(r#"{"max_slower_correction_factor": null}"#).unwrap();
+    assert_eq!(no_ceiling.min_faster_correction_factor, Some(0.5));
+    assert_eq!(no_ceiling.max_slower_correction_factor, None);
+}
+
+#[test]
+fn options_validate_directional_correction_factors() {
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_faster_correction_factor: Some(0.5),
+        max_slower_correction_factor: Some(2.0),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(model.options().min_faster_correction_factor, Some(0.5));
+    assert_eq!(model.options().max_slower_correction_factor, Some(2.0));
+
+    for valid_factor in [f64::MIN_POSITIVE, 1.0] {
+        ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+            min_faster_correction_factor: Some(valid_factor),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        max_slower_correction_factor: Some(1.0),
+        ..Default::default()
+    })
+    .unwrap();
+
+    for invalid_factor in [f64::NEG_INFINITY, -1.0, 0.0, 1.001, f64::INFINITY, f64::NAN] {
+        let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+            min_faster_correction_factor: Some(invalid_factor),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, AicError::InvalidEngineConfig(_)));
+    }
+
+    for invalid_factor in [f64::NEG_INFINITY, -1.0, 0.0, 0.999, f64::INFINITY, f64::NAN] {
+        let err = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+            max_slower_correction_factor: Some(invalid_factor),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, AicError::InvalidEngineConfig(_)));
+    }
+}
+
 // ---- regression-only mode (engine-agnostic) ----
 
 #[test]
@@ -391,6 +466,99 @@ fn fallback_regression_predicts_prefill_decode_and_mixed_workload_kinds() {
             .unwrap()
             .unwrap(),
         30.0,
+    );
+}
+
+#[test]
+fn fallback_regression_keeps_decode_fit_ready_when_ols_kv_slope_is_negative() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 6,
+        ..Default::default()
+    })
+    .unwrap();
+
+    // Highly correlated decode batch and KV-token features can make
+    // unconstrained OLS assign a negative slope to KV tokens even while the
+    // combined observed latency trend is positive. A monotonic constrained fit
+    // should put that slope on the zero boundary instead of staying unready.
+    let observations = [
+        (8, 16_000),
+        (16, 33_000),
+        (24, 47_000),
+        (32, 66_000),
+        (40, 79_000),
+        (48, 98_000),
+    ];
+    model
+        .tune_with_fpms(
+            &observations
+                .into_iter()
+                .map(|(requests, kv_tokens)| {
+                    let wall_time_ms =
+                        5.0 + 0.07 * f64::from(requests) - 0.00003 * f64::from(kv_tokens);
+                    vec![decode_fpm(requests, kv_tokens, wall_time_ms / 1_000.0)]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        model.diagnostics().readiness,
+        ForwardPassPerfReadiness::Ready
+    );
+    let lower_kv = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(32, 60_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    let higher_kv = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(32, 80_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    assert!(
+        higher_kv >= lower_kv,
+        "decode estimate must not decrease with KV load: lower={lower_kv}, higher={higher_kv}"
+    );
+
+    let fewer_requests = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(24, 70_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    let more_requests = model
+        .estimate_forward_pass_time_ms(&[decode_fpm(40, 70_000, 0.0)])
+        .unwrap()
+        .unwrap();
+    assert!(
+        more_requests > fewer_requests,
+        "constrained fit must retain a positive decode load signal: fewer={fewer_requests}, more={more_requests}"
+    );
+}
+
+#[test]
+fn fallback_regression_rejects_intercept_only_fit_when_slopes_are_identifiable() {
+    let mut model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_observations: 4,
+        ..Default::default()
+    })
+    .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![decode_fpm(8, 10_000, 0.020)],
+            vec![decode_fpm(16, 10_000, 0.018)],
+            vec![decode_fpm(8, 20_000, 0.017)],
+            vec![decode_fpm(16, 20_000, 0.015)],
+        ])
+        .unwrap();
+
+    assert_eq!(
+        model.diagnostics().readiness,
+        ForwardPassPerfReadiness::InsufficientData
+    );
+    assert_eq!(
+        model
+            .estimate_forward_pass_time_ms(&[decode_fpm(12, 15_000, 0.0)])
+            .unwrap(),
+        None
     );
 }
 
@@ -508,7 +676,12 @@ fn tuning_ignores_idle_wall_time_and_queued_only_work() {
 
 #[test]
 fn fallback_regression_has_no_correction_factors() {
-    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default()).unwrap();
+    let model = ForwardPassPerfModel::from_regression(ForwardPassPerfOptions {
+        min_faster_correction_factor: Some(0.5),
+        max_slower_correction_factor: Some(2.0),
+        ..Default::default()
+    })
+    .unwrap();
     assert_eq!(model.min_correction_factor(), None);
     assert_eq!(model.max_correction_factor(), None);
     assert_eq!(model.avg_correction_factor(), None);
@@ -558,6 +731,194 @@ fn native_correction_applies_after_bucket_is_ready() {
     );
 }
 
+/// The configured ceiling is absolute relative to the native estimate. It does
+/// not compound as matching outliers are added to an already-corrected bucket.
+#[test]
+fn native_slower_correction_ceiling_is_absolute_across_repeated_outliers() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        max_slower_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+    let outlier = prefill_fpm(20, native_ms * 90.0 / 1000.0);
+
+    model
+        .tune_with_fpms(&[vec![outlier.clone()], vec![outlier.clone()]])
+        .unwrap();
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 2.0,
+    );
+
+    model
+        .tune_with_fpms(&[
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier],
+        ])
+        .unwrap();
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 2.0,
+    );
+    assert_close(model.min_correction_factor().unwrap(), 2.0);
+    assert_close(model.max_correction_factor().unwrap(), 2.0);
+    assert_close(model.avg_correction_factor().unwrap(), 2.0);
+}
+
+/// Saturating the slower ceiling does not make a correction monotonic. Lower
+/// observations move the retained-sample median down as capped samples age out.
+#[test]
+fn native_correction_recovers_from_saturated_slower_ceiling() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        max_observations: 4,
+        max_slower_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+    let outlier = prefill_fpm(20, native_ms * 90.0 / 1000.0);
+    let recovered = prefill_fpm(20, native_ms / 1000.0);
+
+    model
+        .tune_with_fpms(&[
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier.clone()],
+            vec![outlier],
+        ])
+        .unwrap();
+    assert_close(model.max_correction_factor().unwrap(), 2.0);
+
+    model
+        .tune_with_fpms(&[vec![recovered.clone()], vec![recovered.clone()]])
+        .unwrap();
+    assert_close(model.max_correction_factor().unwrap(), 1.5);
+
+    model
+        .tune_with_fpms(&[vec![recovered.clone()], vec![recovered]])
+        .unwrap();
+    assert_close(model.max_correction_factor().unwrap(), 1.0);
+}
+
+/// Default directional limits are applied to each correction sample before
+/// taking the median, retaining observations inside either bound.
+#[test]
+fn native_default_directional_correction_bounds_are_applied_at_observation_ingestion() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+
+    model
+        .tune_with_fpms(&[
+            vec![prefill_fpm(20, native_ms * 0.1 / 1000.0)],
+            vec![prefill_fpm(20, native_ms * 100.0 / 1000.0)],
+        ])
+        .unwrap();
+
+    // The stored samples are [0.5, 2.0], whose median is 1.25. Applying bounds
+    // only after taking the raw [0.1, 100.0] median would produce 2.0.
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 1.25,
+    );
+    assert_close(model.min_correction_factor().unwrap(), 1.25);
+    assert_close(model.max_correction_factor().unwrap(), 1.25);
+    assert_close(model.avg_correction_factor().unwrap(), 1.25);
+}
+
+/// An upper ceiling does not clamp genuine observations below the native
+/// estimate.
+#[test]
+fn native_slower_correction_ceiling_preserves_faster_corrections() {
+    let mut model = native_model(ForwardPassPerfOptions {
+        min_observations: 2,
+        min_faster_correction_factor: None,
+        max_slower_correction_factor: Some(2.0),
+        ..Default::default()
+    });
+    let metrics = prefill_fpm(20, 0.0);
+    let native_ms = model
+        .estimate_forward_pass_time_ms(&[metrics])
+        .unwrap()
+        .unwrap();
+    let faster = prefill_fpm(20, native_ms * 0.5 / 1000.0);
+
+    model
+        .tune_with_fpms(&[vec![faster.clone()], vec![faster]])
+        .unwrap();
+
+    assert_close(
+        model
+            .estimate_forward_pass_time_ms(&[prefill_fpm(20, 0.0)])
+            .unwrap()
+            .unwrap(),
+        native_ms * 0.5,
+    );
+    assert_close(model.max_correction_factor().unwrap(), 0.5);
+}
+
+/// A faster-correction floor bounds only ratios below one and leaves slower
+/// corrections unbounded when no slower ceiling is configured.
+#[test]
+fn native_faster_correction_floor_is_independent() {
+    let options = ForwardPassPerfOptions {
+        min_observations: 2,
+        min_faster_correction_factor: Some(0.5),
+        max_slower_correction_factor: None,
+        ..Default::default()
+    };
+
+    let mut faster_model = native_model(options.clone());
+    let faster_metrics = prefill_fpm(20, 0.0);
+    let faster_native_ms = faster_model
+        .estimate_forward_pass_time_ms(&[faster_metrics])
+        .unwrap()
+        .unwrap();
+    let faster = prefill_fpm(20, faster_native_ms * 0.1 / 1000.0);
+    faster_model
+        .tune_with_fpms(&[vec![faster.clone()], vec![faster]])
+        .unwrap();
+    assert_close(faster_model.min_correction_factor().unwrap(), 0.5);
+
+    let mut slower_model = native_model(options);
+    let slower_metrics = prefill_fpm(20, 0.0);
+    let slower_native_ms = slower_model
+        .estimate_forward_pass_time_ms(&[slower_metrics])
+        .unwrap()
+        .unwrap();
+    let slower = prefill_fpm(20, slower_native_ms * 8.0 / 1000.0);
+    slower_model
+        .tune_with_fpms(&[vec![slower.clone()], vec![slower]])
+        .unwrap();
+    assert_close(slower_model.max_correction_factor().unwrap(), 8.0);
+}
+
 /// min_observations is workload-kind-wide; empty in-range regions keep the
 /// default factor 1.0. Two distinct prefill buckets get distinct factors.
 #[test]
@@ -566,6 +927,7 @@ fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_de
         min_observations: 2,
         bucket_count: 4,
         max_num_tokens: 100,
+        max_slower_correction_factor: None,
         ..Default::default()
     });
 
@@ -618,7 +980,7 @@ fn native_correction_min_observations_is_workload_kind_wide_and_empty_regions_de
     assert_eq!(model.diagnostics().correction_ready_buckets, 2);
 }
 
-/// Observations outside the configured correction bounds are ignored.
+/// Observations outside the configured correction-grid workload ranges are ignored.
 #[test]
 fn native_correction_uses_configured_bounds_and_ignores_out_of_range_observations() {
     let mut model = native_model(ForwardPassPerfOptions {

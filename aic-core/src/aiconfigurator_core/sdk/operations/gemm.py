@@ -28,6 +28,7 @@ from aiconfigurator_core.sdk import common, perf_interp
 from aiconfigurator_core.sdk.errors import (
     EmpiricalNotImplementedError,
     InterpolationDataNotAvailableError,
+    MissingSystemFlopsError,
     PerfDataNotAvailableError,
 )
 from aiconfigurator_core.sdk.operations import util_empirical
@@ -38,6 +39,54 @@ if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
+
+
+# Per-quant achieved-util LEVEL e(q) for GEMM, keyed by the (memory, compute)
+# profile — the GEMM counterpart of moe.py's _MOE_QUANT_UTIL_LEVEL, consumed
+# ONLY by the cross-PROFILE relation of the quant-transfer primitive as the
+# ratio e(query)/e(ref) (see util_empirical.quant_transfer_grid). A SINGLE
+# scalar per profile by design (the per-component split was validated as
+# untrustworthy on MoE; the same SOL-attribution argument holds here).
+#
+# [data] rows: median of util = SOL/measured over the clearly compute-bound
+# region (m >= 1024, n >= 2048, k >= 2048) of every collected gemm table on
+# b200/h200/h100 x trtllm/vllm/sglang (2026-08 snapshot); the range across
+# those six stacks is quoted per row. The bf16/fp8 level RATIO spans
+# 1.38-2.00 (~±20% around 1.6) — looser than MoE's ~10% but acceptable for
+# the last-resort relation. LOO on the mechanism (predict a collected quant
+# from its nearest-profile sibling at shared shapes, m >= 64): nvfp4 <- fp8
+# = 22-33% MAPE, comparable to MoE's ~24% xprofile LOO. [inferred] rows
+# follow the structure (efficiency drops with weight precision, mildly
+# recovers as activation precision drops); levels are relative and tunable —
+# only ratios are consumed.
+_GEMM_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
+    (2, 1): 0.70,  # w16a16 / bfloat16               [data 0.55-0.79]
+    (1, 1): 0.55,  # w8a16 / int8_wo                 [inferred]
+    (0.5, 1): 0.45,  # w4a16 / int4_wo (fused-dequant weight-only runs below
+    #                  the bf16 compute roofline it shares; Marlin-class) [inferred]
+    (1, 2): 0.45,  # w8a8 / fp8(_block/_ootb), sq    [data 0.28-0.55]
+    (0.5, 2): 0.35,  # w4a8                          [inferred]
+    (1, 4): 0.30,  # w8a4                            [inferred]
+    (0.5, 4): 0.30,  # w4a4                          [inferred ≈ nvfp4]
+    (0.5625, 4): 0.30,  # w4a4 / nvfp4               [data 0.21-0.36]
+}
+_GEMM_QUANT_UTIL_DEFAULT = 0.45  # unlisted profile: mid-range relative level
+
+
+def _gemm_quant_util_level(quant_mode) -> float:
+    """Achieved-util level e(q) for a GEMM quant, by (memory, compute) profile."""
+    return _GEMM_QUANT_UTIL_LEVEL.get(util_empirical.quant_profile(quant_mode), _GEMM_QUANT_UTIL_DEFAULT)
+
+
+def xprofile_util_level_known(quant_mode) -> bool:
+    """Whether the GEMM util-LEVEL table lists this quant's profile.
+
+    The runtime ladder falls back to ``_GEMM_QUANT_UTIL_DEFAULT`` for
+    unlisted profiles; the validate gate deliberately does NOT (admitting a
+    quant nobody calibrated would hide the missing level line the
+    add-a-quant recipe requires), so it asks this instead of reaching into
+    the table."""
+    return util_empirical.quant_profile(quant_mode) in _GEMM_QUANT_UTIL_LEVEL
 
 
 class _ZeroAwareDeltaLookup:
@@ -151,6 +200,7 @@ class GEMM(Operation):
         self._weights = self._n * self._k * quant_mode.value.memory
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
         self._low_precision_input = kwargs.get("low_precision_input", False)
+        self._below_grid_sol = kwargs.get("below_grid_sol", False)
 
     # ------------------------------------------------------------------
     # Data ownership: load + cache + clear
@@ -268,26 +318,6 @@ class GEMM(Operation):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _get_quant_tc_flops(system_spec, quant_mode) -> float:
-        """Resolve actual tensor-core FLOPS for a given quant mode.
-
-        Maps the quant mode's compute factor (1/2/4) to the corresponding
-        ``*_tc_flops`` entry in the system GPU spec. Falls back to
-        ``bfloat16_tc_flops * compute_factor`` when the spec entry is
-        missing.
-
-        Static so non-GEMM SOL callers in perf_database.py (DSV4, MLA,
-        attention) can delegate without an instance. Until ISSUE-16
-        retires those wrappers, ``PerfDatabase._get_quant_tc_flops``
-        forwards here."""
-        compute_to_flops_key = {1: "bfloat16_tc_flops", 2: "fp8_tc_flops", 4: "fp4_tc_flops"}
-        gpu = system_spec["gpu"]
-        key = compute_to_flops_key.get(quant_mode.value.compute)
-        if key is not None and key in gpu:
-            return gpu[key]
-        return gpu["bfloat16_tc_flops"] * quant_mode.value.compute
-
-    @staticmethod
     def _normalize_gemm_quant_mode_for_table(
         quant_mode: common.GEMMQuantMode,
     ) -> common.GEMMQuantMode:
@@ -326,6 +356,15 @@ class GEMM(Operation):
             return
 
         for quant_mode in gemm_data:
+            # Silicon data can exist for a dtype whose *_tc_flops entry is
+            # missing from the system YAML (e.g. b60 fp8). Leave that slice
+            # unclamped rather than failing the whole database load; query-time
+            # SOL/HYBRID paths still reject the quant mode loudly.
+            try:
+                common.get_quant_tc_flops(database.system_spec, quant_mode)
+            except MissingSystemFlopsError as exc:
+                logger.debug(f"skipping SOL clamp for gemm quant {quant_mode}: {exc}")
+                continue
             for m in gemm_data[quant_mode]:
                 for n in gemm_data[quant_mode][m]:
                     for k in gemm_data[quant_mode][m][n]:
@@ -431,11 +470,16 @@ class GEMM(Operation):
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
+        below_grid_sol: bool = False,
     ):
         """Query GEMM table — preserves PR #721 exact-hit → 1D → 3D fast path."""
+        # Strict eager resolution (parity with the Rust engine, which resolves
+        # flops with `?` at query entry): reject a missing *_tc_flops entry up
+        # front — a SILICON exact hit never invokes the get_sol closure.
+        common.get_quant_tc_flops(database.system_spec, quant_mode)
 
         def get_sol(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> tuple[float, float, float]:
-            tc_flops = cls._get_quant_tc_flops(database.system_spec, qm)
+            tc_flops = common.get_quant_tc_flops(database.system_spec, qm)
             sol_math = 2 * m_v * n_v * k_v / tc_flops * 1000
             sol_mem = (
                 qm.value.memory * (m_v * n_v + m_v * k_v + n_v * k_v) / database.system_spec["gpu"]["mem_bw"] * 1000
@@ -445,7 +489,10 @@ class GEMM(Operation):
 
         def get_empirical(m_v: int, n_v: int, k_v: int, qm: common.GEMMQuantMode) -> float:
             # SOL / util, where util is read best-effort from this op's own
-            # collected data; raises EmpiricalNotImplementedError when no data.
+            # collected data; when the quant has none, the shared
+            # quant-transfer primitive borrows a sibling quant's util grid
+            # (xquant same-profile / xprofile cross-profile). Raises
+            # EmpiricalNotImplementedError only when no relation finds data.
             sol_time = get_sol(m_v, n_v, k_v, qm)[0]
             tqm = cls._normalize_gemm_quant_mode_for_table(qm)
 
@@ -461,7 +508,56 @@ class GEMM(Operation):
                 lambda c: get_sol(c[0], c[1], c[2], qm)[0],
                 depth=3,
             )
-            latency, _ = util_empirical.estimate(sol_time, (m_v, n_v, k_v), grid)
+
+            util_scale = 1.0
+            prov = "empirical"  # own-quant util grid; relations below override
+            if grid is None or not grid.samples:
+                cls.load_data(database)
+                wrapper = database._gemm_data
+                policy = database.transfer_policy
+
+                def _collect(q, sol_q, provenance):
+                    # GEMM's xshape relation class is structurally EMPTY: the
+                    # own-quant grid above is already depth-3 over every
+                    # collected (m, n, k) — there is no "other slice of the
+                    # same quant" left to borrow, so a same-quant candidate
+                    # could only rebuild the identical (empty) sample set.
+                    if provenance == "xshape":
+                        return []
+                    # One candidate per sibling quant: its whole m->n->k
+                    # table. GEMM has no categorical slice features, so
+                    # features are constant and the pooled xquant selection
+                    # degrades to first-in-table (file row) order.
+                    return [
+                        util_empirical.ReferenceCandidate(
+                            features=(1.0,),
+                            node=wrapper[q],
+                            sol_fn=(lambda c, _sq=sol_q: get_sol(c[0], c[1], c[2], _sq)[0]),
+                            provenance=provenance,
+                        )
+                    ]
+
+                grid, util_scale, ref_prov = util_empirical.quant_transfer_grid(
+                    "gemm",
+                    (database.system, database.backend, database.version, tqm.name),
+                    (1.0,),
+                    policy,
+                    tqm,
+                    wrapper,
+                    _collect,
+                    _gemm_quant_util_level,
+                    depth=3,
+                    selection_key=(id(wrapper), policy),
+                    # weight-only must borrow bf16, never tie-break into fp8
+                    # (rationale on xprofile_quant_order)
+                    prefer_same_compute=True,
+                )
+                if ref_prov:
+                    prov = ref_prov
+
+            latency, _ = util_empirical.estimate(
+                sol_time, (m_v, n_v, k_v), grid, util_scale=util_scale, provenance=prov
+            )
             return latency
 
         if database_mode is None:
@@ -520,6 +616,13 @@ class GEMM(Operation):
             try:
                 result = perf_interp.query(config, gemm_data, m, n, k)
             except InterpolationDataNotAvailableError as exc:
+                # Opt-in: shapes outside the collected grid degrade to SOL
+                # instead of failing SILICON; exact rows win once collected.
+                # Quant-mode misses (above) stay strict, and HYBRID keeps
+                # its empirical fallback. SOL has no energy model, so
+                # energy=0.0 is a known (tiny) undercount in the ledger.
+                if below_grid_sol and database_mode == common.DatabaseMode.SILICON:
+                    return PerformanceResult(get_sol(m, n, k, quant_mode)[0], energy=0.0, source="sol")
                 raise PerfDataNotAvailableError(
                     "GEMM perf data not available for requested shape. "
                     f"system='{database.system}', backend='{database.backend}', version='{database.version}', "
@@ -754,10 +857,11 @@ class GEMM(Operation):
         latency_floor = 0.0
 
         # Query with energy
-        result = database.query_gemm(x, self._n, self._k, quant_mode)
+        result = database.query_gemm(x, self._n, self._k, quant_mode, below_grid_sol=self._below_grid_sol)
         latency = float(result)
         energy = result.energy
         source = getattr(result, "source", "silicon")
+        sol_base = source == "sol"
 
         # Static-FP8 GEMM is modeled from the dynamic FP8 base measurement
         # across backends; subtract the separately collected activation-
@@ -800,7 +904,8 @@ class GEMM(Operation):
         # rather than inventing energy when the latency floor fires.
         latency_clamped = max(latency_floor, latency)
         energy_clamped = max(0.0, energy)
-        if latency_clamped != latency or energy_clamped != energy:
+        # A SOL base clamps back to its own SOL by construction — not an anomaly.
+        if (latency_clamped != latency or energy_clamped != energy) and not sol_base:
             logger.warning(
                 "GEMM.query applied latency SOL floor / non-negative energy clamp. "
                 "op=%s m=%s n=%s k=%s quant_mode=%s post_sub(lat=%.6f, eng=%.6f) floor=%.6f",

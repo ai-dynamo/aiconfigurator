@@ -42,7 +42,7 @@ pub use dsv4::{Dsv4MegaMoeOp, Dsv4ModuleOp};
 pub use elementwise::ElementwiseOp;
 pub use embedding::EmbeddingOp;
 pub use gemm::GemmOp;
-pub use mamba::{GdnOp, Mamba2Op};
+pub use mamba::{GdnOp, KdaOp, Mamba2Op};
 pub use mhc::MhcModuleOp;
 pub use mla::{ContextMlaOp, GenerationMlaOp, MlaBmmOp, MlaModuleOp};
 pub use moe::MoeOp;

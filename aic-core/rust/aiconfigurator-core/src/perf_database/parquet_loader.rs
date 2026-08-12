@@ -113,10 +113,13 @@ impl PerfReader {
     /// Iterate over every row. Errors are surfaced per-row so loaders can
     /// distinguish a single corrupt row from a wholesale file failure.
     pub fn rows(&self) -> Result<impl Iterator<Item = Result<PerfRow, AicError>> + '_, AicError> {
-        let row_iter = self.file_reader.get_row_iter(None).map_err(|source| AicError::Parquet {
-            path: self.path.clone(),
-            source,
-        })?;
+        let row_iter = self
+            .file_reader
+            .get_row_iter(None)
+            .map_err(|source| AicError::Parquet {
+                path: self.path.clone(),
+                source,
+            })?;
         let path = self.path.clone();
         Ok(row_iter.map(move |r| {
             r.map(|row| PerfRow {
@@ -143,10 +146,13 @@ impl PerfRow {
     /// Borrowed string view into the row. Use this when the value is parsed
     /// or compared but not stored.
     pub fn str(&self, col: usize) -> Result<&str, AicError> {
-        self.row.get_string(col).map(String::as_str).map_err(|source| AicError::Parquet {
-            path: self.path.clone(),
-            source,
-        })
+        self.row
+            .get_string(col)
+            .map(String::as_str)
+            .map_err(|source| AicError::Parquet {
+                path: self.path.clone(),
+                source,
+            })
     }
 
     /// Cloned String for BTreeMap keys.
@@ -205,10 +211,12 @@ impl PerfRow {
     }
 
     pub fn f64(&self, col: usize) -> Result<f64, AicError> {
-        self.row.get_double(col).map_err(|source| AicError::Parquet {
-            path: self.path.clone(),
-            source,
-        })
+        self.row
+            .get_double(col)
+            .map_err(|source| AicError::Parquet {
+                path: self.path.clone(),
+                source,
+            })
     }
 
     /// BOOLEAN column, with fallbacks mirroring Python's `_to_bool` string
@@ -222,7 +230,10 @@ impl PerfRow {
             return Ok(v == 1);
         }
         let s = self.str(col)?;
-        Ok(matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "y"))
+        Ok(matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y"
+        ))
     }
 
     /// Optional double. Returns None when the column lookup is None OR the

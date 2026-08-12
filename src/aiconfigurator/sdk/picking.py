@@ -37,6 +37,42 @@ _RATE_MATCHING_DECODE_DEGRADATION_FACTOR = 0.92
 # local concurrency lc=15-20, formula lc/20+0.95 gives ~1.8
 _AUTOSCALE_TTFT_CORRECTION_FACTOR = 1.8
 
+# Parallelism dimensions that multiply into a worker's GPU footprint,
+# mirroring ModelConfig.total_gpus_per_worker.  Every consumer that sizes a
+# worker from a row dict must go through this list (or worker_gpus below) —
+# a dimension listed nowhere else was exactly how cp got dropped (#1476).
+WORKER_GPU_DIMS = ("tp", "pp", "dp", "cp")
+
+
+def parallel_dim(value: object, default: int = 1) -> int:
+    """Normalize a parallelism-dimension cell to a positive int.
+
+    Rows materialized through the schema column lists NaN-fill dimensions
+    they predate (e.g. ``cp`` / ``(p)cp``), and ``NaN or default`` does not
+    catch that because NaN is truthy — so missing / None / NaN / non-positive
+    all normalize to ``default`` here.
+    """
+    if isinstance(value, (int, float)) and value == value and value > 0:  # value == value filters NaN
+        return int(value)
+    return default
+
+
+def worker_gpus(summary_dict: dict) -> int:
+    """GPUs occupied by one worker, from a ``ColumnsStatic``-style row dict.
+
+    Prefers the row's own ``num_total_gpus`` — the authoritative value the
+    backends stamp from ``ModelConfig.total_gpus_per_worker`` — and falls
+    back to the ``WORKER_GPU_DIMS`` product for partial dicts that predate
+    the column.
+    """
+    n = parallel_dim(summary_dict.get("num_total_gpus"), default=0)
+    if n:
+        return n
+    gpus = 1
+    for dim in WORKER_GPU_DIMS:
+        gpus *= parallel_dim(summary_dict.get(dim))
+    return gpus
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a disagg summary dict from prefill + decode dicts
@@ -74,8 +110,8 @@ def _build_disagg_summary_dict(
         prefill_summary_dict["seq/s"] * prefill_num_worker * prefill_degradation_factor,
         decode_summary_dict["seq/s"] * decode_num_worker * decode_degradation_factor,
     )
-    prefill_gpus = prefill_summary_dict["pp"] * prefill_summary_dict["tp"] * prefill_summary_dict["dp"]
-    decode_gpus = decode_summary_dict["pp"] * decode_summary_dict["tp"] * decode_summary_dict["dp"]
+    prefill_gpus = worker_gpus(prefill_summary_dict)
+    decode_gpus = worker_gpus(decode_summary_dict)
     num_total_gpus = prefill_gpus * prefill_num_worker + decode_gpus * decode_num_worker
     seq_s_gpu = seq_s / num_total_gpus if num_total_gpus > 0 else 0.0
 
@@ -126,7 +162,7 @@ def _build_disagg_summary_dict(
         "(p)dp": prefill_summary_dict["dp"],
         "(p)moe_tp": prefill_summary_dict["moe_tp"],
         "(p)moe_ep": prefill_summary_dict["moe_ep"],
-        "(p)cp": prefill_summary_dict.get("cp", 1),
+        "(p)cp": parallel_dim(prefill_summary_dict.get("cp")),
         "(p)parallel": prefill_summary_dict["parallel"],
         "(p)gemm": prefill_summary_dict["gemm"],
         "(p)kvcache": prefill_summary_dict["kvcache"],
@@ -205,9 +241,11 @@ def pick_default(
     ``process_experiment_result``.
 
     Args:
-        pareto_df: Performance DataFrame (``ColumnsAgg`` or ``ColumnsDisagg``).
+        pareto_df: Performance DataFrame (``ColumnsAgg``, ``ColumnsDisagg``,
+            or ``ColumnsAFD``).
         total_gpus: Total GPUs available for deployment.
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"``.  AFD frames are
+            grouped by their synthesized ``parallel`` column like agg.
         target_tpot: TPOT SLA target in ms.  Used when
             ``target_request_latency`` is not set.
         target_request_latency: End-to-end request latency SLA in ms.  Takes
@@ -316,8 +354,10 @@ def pick_load_match(
     This is the standalone equivalent of the "load-match" picking path.
 
     Args:
-        pareto_df: Performance DataFrame (``ColumnsAgg`` or ``ColumnsDisagg``).
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        pareto_df: Performance DataFrame (``ColumnsAgg``, ``ColumnsDisagg``,
+            or ``ColumnsAFD``).
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"`` (afd groups by the
+            synthesized ``parallel`` column like agg).
         target_tpot: TPOT SLA target in ms.
         target_request_latency: Request latency SLA in ms (takes precedence).
         target_request_rate: Target system request rate in req/s.
@@ -553,7 +593,8 @@ def pick_optimization_type(
         optimization_type: ``"throughput"`` or ``"latency"``.
         total_gpus: Total GPUs available for deployment. Used to compute
             ``tokens/s/gpu_cluster`` for throughput ranking.
-        serving_mode: ``"agg"`` or ``"disagg"``.
+        serving_mode: ``"agg"``, ``"disagg"``, or ``"afd"`` (afd groups by the
+            synthesized ``parallel`` column like agg).
         top_n: Number of top configurations to return.
 
     Returns:

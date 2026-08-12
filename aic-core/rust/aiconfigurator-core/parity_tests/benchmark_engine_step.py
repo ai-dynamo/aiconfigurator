@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark Python SDK and Rust engine-step latency.
 
-- `cargo build` (compilation overhead): not timed; runs before benchmarking
-  when the Rust shared library needs to be built or refreshed.
-- Rust estimator setup: timed separately from step latency. Includes
-  Python/ctypes shared-library load, Rust model metadata load, Rust perf DB
-  load, and estimator construction, but not `cargo build`.
+- `maturin develop` / `cargo build` (compilation overhead): not timed; the
+  maturin-built `aiconfigurator_core` extension must be importable already.
+- Rust estimator setup: timed separately from step latency. Includes the
+  `aiconfigurator_core` extension import, Rust model metadata load, Rust perf
+  DB load, and estimator construction, but not the build.
 - Rust/Python step latency: timed samples use already-created runners. `hot`
   warms runtime query caches before timing; `cold` clears runtime query caches
   before each timed call. Cache clearing itself is not timed.
@@ -309,7 +309,7 @@ def _print_table(result: dict) -> None:
         f"{result['python_session_setup_ms']:.2f} ms (one-time, excluded from step latency)"
     )
     print(
-        "Rust estimator setup (ctypes load + Rust model/perf DB load + constructor): "
+        "Rust estimator setup (extension import + Rust model/perf DB load + constructor): "
         f"{result['rust_estimator_setup_ms']:.2f} ms (one-time, excluded from step latency)"
     )
     print()

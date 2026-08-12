@@ -24,11 +24,29 @@ from typing import Any
 import yaml
 
 from aiconfigurator.sdk import perf_database
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    _load_model_config_from_model_path,
+    _parse_hf_config_json,
+    get_model_config_from_model_path,
+)
 
 logger = logging.getLogger(__name__)
 
 _RFC1123_MAX_LEN = 63
+
+# Engine-limit keys stripped by ``build_naive_generator_params`` when the
+# caller asks to preserve the target image's own resolved limits
+# (``preserve_engine_limits=True``). Keep in sync with the rule plugins'
+# ``preserve_engine_limits`` guard.
+_ENGINE_LIMIT_KEYS = (
+    "max_batch_size",
+    "max_num_tokens",
+    "max_seq_len",
+    "tokens_per_block",
+    "gpu_memory_utilization",
+    "compilation_config",
+    "cuda_graph_batch_sizes",
+)
 
 # Default fallbacks
 _DEFAULT_GPUS_PER_NODE = 8
@@ -164,7 +182,7 @@ def _get_system_config(system_name: str) -> dict[str, Any]:
     return result
 
 
-def _estimate_model_weight_bytes(model_path: str) -> int:
+def _estimate_model_weight_bytes(model_path: str, *, model_metadata: dict[str, Any] | None = None) -> int:
     """
     Estimate model weight size in bytes based on model config.
 
@@ -178,6 +196,9 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
 
     Args:
         model_path: HuggingFace model path or local path.
+        model_metadata: Optional dictionary populated with the detected
+            ``architecture`` and ``is_moe`` values from the same config used
+            for sizing.
 
     Returns:
         Estimated model weight size in bytes.
@@ -186,10 +207,81 @@ def _estimate_model_weight_bytes(model_path: str) -> int:
         RuntimeError: If the model config cannot be fetched (e.g. model not found
             on HuggingFace). Callers must not proceed with guessed parameters.
     """
-    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+    try:
+        raw_config = _load_model_config_from_model_path(model_path)
+    except Exception as e:
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
 
     try:
-        config = get_model_config_from_model_path(model_path)
+        config = _parse_hf_config_json(raw_config)
+        weight_bytes = _estimate_weight_bytes_from_config(config, model_path)
+
+        if model_metadata is not None:
+            num_experts = config["num_experts"]
+            model_metadata.update(
+                architecture=config.get("architecture", ""),
+                is_moe=bool(num_experts and num_experts > 1),
+            )
+
+        return weight_bytes
+
+    except ValueError as e:
+        # The normalized AIC parser rejects architectures that AIC cannot model,
+        # but those are exactly the models that use naive config generation.
+        # Reuse the architecture-agnostic raw-config estimator so sizing remains
+        # available without weakening the native AIC support boundary.
+        from aiconfigurator.sdk.memory import NaiveKVCacheEstimator
+
+        logger.info(
+            "Normalized model parsing failed for %s; using raw config for naive sizing.",
+            model_path,
+        )
+        logger.debug("Normalized parser error for %s: %s", model_path, e)
+        try:
+            estimator = NaiveKVCacheEstimator.from_hf_config(
+                raw_config,
+                tp_size=1,
+                pp_size=1,
+            )
+            weight_bytes = estimator.weight_bytes()
+            if weight_bytes is None:
+                raise ValueError(
+                    "insufficient raw model metadata; expected hidden_size, "
+                    "num_hidden_layers, vocab_size, and intermediate_size"
+                )
+            logger.info(
+                "Estimated model weight size from raw config for %s: %.2f GiB",
+                model_path,
+                weight_bytes / (1024**3),
+            )
+            if model_metadata is not None:
+                architectures = raw_config.get("architectures")
+                architecture = architectures[0] if isinstance(architectures, list) and architectures else ""
+                num_experts = estimator.geometry.get("num_experts") or 0
+                model_metadata.update(
+                    architecture=architecture,
+                    is_moe=bool(num_experts and num_experts > 1),
+                )
+            return weight_bytes
+        except Exception as fallback_error:
+            logger.exception(
+                "Could not estimate model size for %s from raw config.",
+                model_path,
+            )
+            raise RuntimeError(
+                f"Could not estimate model size for {model_path!r}: {fallback_error}"
+            ) from fallback_error
+
+    except Exception as e:
+        logger.exception("Could not estimate model size for %s.", model_path)
+        raise RuntimeError(f"Model {model_path!r} not found or config unavailable") from e
+
+
+def _estimate_weight_bytes_from_config(config: dict, model_path: str) -> int:
+    """Run the DPP weight-size formula over an already-resolved model config."""
+
+    try:
         num_layers = config["layers"]
         hidden_size = config["hidden_size"]
         inter_size = config["inter_size"]
@@ -306,6 +398,8 @@ def build_naive_generator_params(
     optimization_type: str | None = None,
     generator_dynamo_version: str | None = None,
     generator_overrides: dict[str, Any] | None = None,
+    preserve_engine_limits: bool = False,
+    model_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build generator parameters for naive configuration generation.
@@ -313,6 +407,10 @@ def build_naive_generator_params(
     Calculates the smallest parallelization that fits the model in memory
     and selects the appropriate strategy (TP, TEP, or DEP) based on the
     model architecture and optimization objective.
+
+    This function is the FPM collector's declared render entry point:
+    ``collector/fpm_forward`` imports it from ``aiconfigurator.generator.naive``
+    and renders every cell with ``preserve_engine_limits=True``.
 
     Args:
         model_name: Name or HuggingFace ID of the model.
@@ -327,6 +425,18 @@ def build_naive_generator_params(
             defaults such as backend runtime images.
         generator_overrides: Optional raw generator override mapping loaded
             from ``--generator-config`` and ``--generator-set``.
+        preserve_engine_limits: When True, strip the naive engine-limit
+            defaults in ``_ENGINE_LIMIT_KEYS`` from every worker role's params
+            and set ``params["preserve_engine_limits"] = True`` so the rule
+            plugins do not reintroduce them. Native self-benchmarking must
+            observe the limits resolved by the target engine image instead of
+            the SLA-derived serving defaults.
+        model_config: Optional pre-parsed model configuration in the shape
+            returned by ``get_model_config_from_model_path``. When provided
+            (the FPM collector's frozen-plan render), model metadata is taken
+            from this payload verbatim and no filesystem or network model
+            resolution happens -- render stays a pure function of the frozen
+            plan even for checkpoints only reachable inside the cluster.
 
     Returns:
         Dictionary containing generator parameters.  When ``mode="agg"``,
@@ -339,8 +449,14 @@ def build_naive_generator_params(
     gpus_per_node = system_config["gpus_per_node"]
     vram_per_gpu = system_config["vram_per_gpu"]
 
-    # Estimate model weight size
-    model_weight_bytes = _estimate_model_weight_bytes(model_name)
+    # Estimate model weight size and retain architecture metadata from the same
+    # raw config so unsupported models do not require another parse/download.
+    # FPM renders size straight from the frozen config when one is provided.
+    model_metadata: dict[str, Any] = {}
+    if model_config is not None:
+        model_weight_bytes = _estimate_weight_bytes_from_config(model_config, model_name)
+    else:
+        model_weight_bytes = _estimate_model_weight_bytes(model_name, model_metadata=model_metadata)
 
     # Calculate minimum GPU count that fits the model
     min_gpus, fits, required_tp = _calculate_min_tp(
@@ -351,18 +467,22 @@ def build_naive_generator_params(
     )
 
     # Detect model architecture for MoE-aware parallelization
-    architecture = ""
-    is_moe = False
-    try:
-        model_config = get_model_config_from_model_path(model_name)
-        architecture = model_config.get("architecture", "")
-        num_experts = model_config.get("num_experts", 0)
-        is_moe = bool(num_experts and num_experts > 1)
-    except Exception:
-        logger.warning(
-            "Could not detect model architecture for %s; assuming dense (TP-only).",
-            model_name,
-        )
+    architecture = str(model_metadata.get("architecture", ""))
+    is_moe = bool(model_metadata.get("is_moe", False))
+    if not model_metadata:
+        # The frozen config wins when provided; otherwise preserve the
+        # test/mocking seam for callers that replace the weight estimator
+        # with a plain integer-returning stub.
+        try:
+            detected = model_config if model_config is not None else get_model_config_from_model_path(model_name)
+            architecture = detected.get("architecture", "")
+            num_experts = detected.get("num_experts", 0)
+            is_moe = bool(num_experts and num_experts > 1)
+        except Exception:
+            logger.warning(
+                "Could not detect model architecture for %s; assuming dense (TP-only).",
+                model_name,
+            )
 
     # Resolve parallelization strategy
     parallel = _resolve_parallelization(
@@ -523,5 +643,11 @@ def build_naive_generator_params(
     if effective_dynamo_version:
         params["generator_dynamo_version"] = effective_dynamo_version
     _drop_empty_worker_roles(params)
+
+    if preserve_engine_limits:
+        for role_params in params.get("params", {}).values():
+            for key in _ENGINE_LIMIT_KEYS:
+                role_params.pop(key, None)
+        params["preserve_engine_limits"] = True
 
     return params

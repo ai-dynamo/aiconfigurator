@@ -10,13 +10,13 @@
 //! The MHC module is collected as a single fused kernel; this operator scales
 //! the raw latency by `scale_factor`.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{DatabaseMode, GemmQuantMode};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
-use crate::perf_database::gemm::tc_flops_for_compute;
+use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MhcModuleOp {
@@ -76,7 +76,7 @@ impl MhcModuleOp {
     /// table only ever calls this with `"pre"` / `"post"` (op="both" is
     /// summed at the query level, each half with its own SOL) but the
     /// `"both"` arm is kept for formula completeness.
-    fn sol_ms(&self, db: &PerfDatabase, op_name: &str, nt: i64) -> f64 {
+    fn sol_ms(&self, db: &PerfDatabase, op_name: &str, nt: i64, tc_flops: f64) -> f64 {
         let sites: i128 = 2;
         let nt = nt as i128;
         let hc = self.hc_mult as i128;
@@ -106,8 +106,7 @@ impl MhcModuleOp {
         }
 
         let spec = &db.system_spec;
-        let sol_math =
-            ops as f64 / tc_flops_for_compute(spec, self.quant_mode.mapping().compute) * 1000.0;
+        let sol_math = ops as f64 / tc_flops * 1000.0;
         let sol_mem = (param_bytes + activation_bytes) / spec.gpu.mem_bw * 1000.0;
         sol_math.max(sol_mem)
     }
@@ -115,28 +114,38 @@ impl MhcModuleOp {
     /// Database-mode dispatch mirroring Python `_query_mhc_table`
     /// (`operations/dsv4.py`): SILICON queries the table; HYBRID converts a
     /// typed silicon miss into the util-space empirical estimate; EMPIRICAL
-    /// always estimates. The SOL diagnostic modes never reach the compiled
-    /// engine (the routing gate delegates them to the Python step).
+    /// always estimates; SOL (and the retired SOL_FULL alias) returns the
+    /// pure analytic roofline with `Source::Sol` and zero energy.
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
-        let sol = |op_name: &str, t: f64| self.sol_ms(db, op_name, t.round() as i64);
+        let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+        let sol = |op_name: &str, t: f64| self.sol_ms(db, op_name, t.round() as i64, tc_flops);
         let silicon = || {
             db.mhc
                 .query_module(&self.op, num_tokens, self.hc_mult, self.hidden_size, &sol)
+                .map(|v| PerformanceResult::with_energy(v.latency, v.energy, Source::Silicon))
         };
-        let (latency, source) = match db.database_mode {
-            DatabaseMode::Empirical => (self.mhc_empirical(db, num_tokens)?, Source::Empirical),
+        let result = match db.database_mode {
+            // Python `_query_mhc_table`: `get_sol()[0]` at the pre-bound
+            // `(nt=num_tokens, op_name=self.op)` — for op == "both" the SOL
+            // is the single fused `pre_ops + post_ops` roofline, NOT the
+            // empirical path's pre+post sum of estimates.
+            DatabaseMode::Sol | DatabaseMode::SolFull => PerformanceResult::new(
+                self.sol_ms(db, &self.op, i64::from(num_tokens), tc_flops),
+                Source::Sol,
+            ),
+            DatabaseMode::Empirical => {
+                PerformanceResult::new(self.mhc_empirical(db, num_tokens)?, Source::Empirical)
+            }
             DatabaseMode::Hybrid => match silicon() {
-                Ok(latency) => (latency, Source::Silicon),
+                Ok(result) => result,
                 Err(err) if err.is_missing_perf_data() => {
-                    (self.mhc_empirical(db, num_tokens)?, Source::Empirical)
+                    PerformanceResult::new(self.mhc_empirical(db, num_tokens)?, Source::Empirical)
                 }
                 Err(err) => return Err(err),
             },
-            _ => (silicon()?, Source::Silicon),
+            _ => silicon()?,
         };
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 
     /// Mirrors Python `_query_mhc_table::get_empirical`: for `op == "both"`
@@ -154,8 +163,14 @@ impl MhcModuleOp {
     /// `SOL(query)/util` over one op half's own `(num_tokens,)` curve.
     /// Mirrors Python `_query_mhc_table::get_empirical::_emp_for_op` (grid
     /// depth 1, `sol_fn = lambda c: get_sol(c[0], op_name)[0]`).
-    fn emp_for_op(&self, db: &PerfDatabase, op_name: &str, num_tokens: u32) -> Result<f64, AicError> {
-        let sol = |c: &[f64]| self.sol_ms(db, op_name, c[0].round() as i64);
+    fn emp_for_op(
+        &self,
+        db: &PerfDatabase,
+        op_name: &str,
+        num_tokens: u32,
+    ) -> Result<f64, AicError> {
+        let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+        let sol = |c: &[f64]| self.sol_ms(db, op_name, c[0].round() as i64, tc_flops);
         // Python keys the grid on (op_name, hc_mult, hidden_size, quant) —
         // NOT sinkhorn_iters, which is mirrored deliberately.
         let key = format!(
@@ -165,8 +180,13 @@ impl MhcModuleOp {
             self.quant_mode.name()
         );
         let grid = db.util_grids.get_or_try_build(&key, || {
-            match db.mhc.module_points(op_name, self.hc_mult, self.hidden_size) {
-                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(points, sol)))),
+            match db
+                .mhc
+                .module_points(op_name, self.hc_mult, self.hidden_size)
+            {
+                Ok(points) => Ok(Some(UtilGrid::new(util_empirical::build_samples(
+                    points, sol,
+                )))),
                 // Typed coverage miss -> no grid (estimate() raises the
                 // empirical miss); schema/load errors propagate.
                 Err(err) if err.is_missing_perf_data() => Ok(None),
@@ -253,7 +273,10 @@ mod tests {
     fn mhc_in_range_unchanged_by_roofline() {
         let db = b200_sglang_db();
         for &(nt, expected) in &[(3u32, 0.025050000000000003), (8u32, 0.0251)] {
-            let got = mhc_op("pre").query(&db, nt).expect("query must succeed").latency_ms;
+            let got = mhc_op("pre")
+                .query(&db, nt)
+                .expect("query must succeed")
+                .latency_ms;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "nt={nt}: rust {got} vs python {expected}"
@@ -351,5 +374,28 @@ mod tests {
         let de: MhcModuleOp = serde_json::from_value(v).expect("deserialize");
         assert_eq!(de.sinkhorn_iters, 20);
         assert_eq!(de.quant_mode, GemmQuantMode::Bfloat16);
+    }
+
+    /// SOL mode returns the fused mHC roofline tagged `Source::Sol` — for
+    /// `op == "both"` the SINGLE `pre_ops + post_ops` formula, NOT the
+    /// empirical path's pre+post sum of estimates (Python `_query_mhc_table`
+    /// SOL branch calls `get_sol()` once at the bound op name).
+    #[test]
+    fn mhc_sol_mode_returns_fused_roofline_with_sol_source() {
+        let mut db = b200_sglang_db();
+        db.database_mode = DatabaseMode::Sol;
+        let op = mhc_op("both");
+        let tc_flops = quant_tc_flops(&db.system_spec, op.quant_mode.mapping()).unwrap();
+        let result = op.query(&db, 512).expect("mhc sol");
+        let expected = op.sol_ms(&db, "both", 512, tc_flops);
+        assert_eq!(result.latency_ms, expected);
+        assert_eq!(result.source, Source::Sol);
+        assert_eq!(result.energy_wms, 0.0);
+        // Fused "both" == pre + post SOL (linear in ops and bytes), and both
+        // halves are individually positive.
+        let pre = op.sol_ms(&db, "pre", 512, tc_flops);
+        let post = op.sol_ms(&db, "post", 512, tc_flops);
+        assert!(pre > 0.0 && post > 0.0);
+        assert!(expected <= pre + post + 1e-12);
     }
 }
