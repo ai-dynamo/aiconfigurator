@@ -328,6 +328,17 @@ def test_build_runtime_config_carries_workload():
     assert rt.num_video_tokens == 784
 
 
+def test_video_fields_preserve_existing_task_positional_constructor_contract():
+    task = Task("agg", 4000, 1000, 0, 0, 0, 1, False)
+
+    assert task.enable_encoder_dp is False
+    assert task.video_height == 0
+    assert task.video_width == 0
+    assert task.video_frames == 0
+    assert task.num_videos_per_request == 0
+    assert task.num_video_tokens == 0
+
+
 def test_afd_rejects_visual_encoder_workload():
     task = Task(
         serving_mode="afd",

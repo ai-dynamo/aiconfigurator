@@ -184,12 +184,15 @@ def _projector_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int) -> list:
     n_layers = len(dims)
 
     result = []
+    # The final merger normalizes hidden_size before pixel shuffle. Deepstack
+    # mergers normalize merger_dim after shuffle, but the inverse token-count
+    # change preserves the same total hidden_size traffic per pre-merge patch.
     result.append(
         ops.ElementWise(
             "encoder_merger_norm",
             n_inst,
-            2 * enc_cfg.hidden_size,
-            2 * enc_cfg.hidden_size,
+            enc_cfg.hidden_size,
+            enc_cfg.hidden_size,
             0.8,
         )
     )

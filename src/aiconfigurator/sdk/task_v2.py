@@ -468,15 +468,10 @@ class Task:
     isl: int = 4000
     osl: int = 1000
     prefix: int = 0
-    # Multimodal visual inputs (folded into the effective ISL by RuntimeConfig).
+    # Multimodal image inputs (folded into the effective ISL by RuntimeConfig).
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
-    video_height: int = 0
-    video_width: int = 0
-    video_frames: int = 0
-    num_videos_per_request: int = 0
-    num_video_tokens: int = 0
     # Vision encoder data parallelism (ModelConfig default).
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
@@ -643,7 +638,16 @@ class Task:
     afd_ttft_correction_factor: float | None = None
     afd_decode_latency_correction: float = 1.0
 
-    # ====== 11. Internal — resolved in __post_init__ ======
+    # ====== 11. Multimodal video inputs ======
+    # Appended to preserve the positional constructor contract of all existing
+    # Task fields. New callers should pass these by keyword.
+    video_height: int = 0
+    video_width: int = 0
+    video_frames: int = 0
+    num_videos_per_request: int = 0
+    num_video_tokens: int = 0
+
+    # ====== 12. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
     _model_family: str = field(default="", repr=False, init=False)
     _raw_config: dict = field(default_factory=dict, repr=False, init=False)
