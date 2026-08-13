@@ -156,6 +156,11 @@ def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, exp
             "num_videos_per_request": 3,
             "num_video_tokens": 448,
         },
+        {
+            "video_frames": 16,
+            "num_videos_per_request": 3,
+            "num_video_tokens": 448,
+        },
     ],
 )
 def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch, visual_kwargs):

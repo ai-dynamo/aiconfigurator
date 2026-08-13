@@ -1698,7 +1698,7 @@ class Task:
         )
         if has_image_workload or has_video_workload:
             raise NotImplementedError(
-                "AFD does not support image/video encoder workloads; use agg or disagg serving mode."
+                "AFD does not support image/video encoder workloads; use agg, disagg, or static estimation."
             )
         if (
             isinstance(self.afd_max_a_batch_size, bool)
