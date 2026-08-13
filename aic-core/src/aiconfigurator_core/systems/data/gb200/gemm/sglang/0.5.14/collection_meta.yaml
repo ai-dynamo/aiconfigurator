@@ -14,6 +14,12 @@ tables:
     # exactly as serving's process_weights_after_loading does, and the
     # timed op is act-quant + gemm only (so these rows now legitimately
     # include the per-token-group quant serving pays each step).
-    # Example m32 @ n5120xk4096: 19.7 -> 19.9 (m=32 outlier vs ~11-12 us neighbors; disclosed) us. Same key grid;
+    # This gb200 run is noisier than its gb300/b200_sxm siblings: 19 (n,k)
+    # shapes show m=32 rows >1.5x their m-neighbors (12 of them >15us),
+    # ~360 small-m interior spikes, and 1203 keys (4.1%) sit >1.3x above
+    # the replaced rows (vs 4 on gb300, 142 on b200_sxm). Median new/old
+    # is 0.673, the same overall win as the sibling systems, so the
+    # corrected rows still strictly improve on the packing-biased ones;
+    # a gb200 gemm re-collection is tracked as a follow-up. Same key grid;
     # values-only replacement, deliberate append-only exception.
     status: complete

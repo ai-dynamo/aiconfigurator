@@ -250,12 +250,15 @@ def test_flashinfer_lane_sol_census_anchor_qwen35_397b_tp4_gb300():
     head_k_dim=128, num_v_heads=64, head_v_dim=128), sharded tp4 the way
     Qwen35Model._build_generation_ops does (``gdn_nk_per_tp = nk // tp``,
     ``gdn_nv_per_tp = nv // tp`` -- head COUNTS only, head dims unchanged),
-    bs=1, real gb300 spec (no flashinfer_gated_delta_rule_decode rows exist
-    in the packaged gb300/sglang/0.5.14 table yet -- Task 2 added the
-    collector lane but no GPU was available to re-collect -- so this is a
-    pure-SOL fallback query, exactly like the collector-blind-spot case
+    bs=1, real gb300 spec. The 8192 used for d_model below is a deliberate
+    synthetic stand-in, not 397B's real value (4096): flashinfer decode
+    silicon rows are keyed at d_model=4096 in the packaged
+    gb300/sglang/0.5.14 table (landed by AIC-1745), so the off-key d_model
+    keeps this query off those shipped rows and pins the pure-SOL closed
+    form itself, independent of table contents -- unlike the
+    collector-blind-spot case
     ``test_query_gdn_sglang_sm100_falls_back_to_fla_when_flashinfer_lane_absent``
-    covers above).
+    above, where the lane is genuinely absent from the fixture.
     """
     db = get_database("gb300", "sglang", "0.5.14")
     assert db.system_spec["gpu"]["sm_version"] >= 100
@@ -281,8 +284,8 @@ def test_flashinfer_lane_sol_census_anchor_qwen35_397b_tp4_gb300():
 
     # Unambiguous, parameter-free properties: the FlashInfer lane is
     # strictly cheaper than the fla lane at this exact shape, and both are
-    # a genuine SOL fallback (no real flashinfer_gated_delta_rule_decode
-    # silicon exists yet for gb300/sglang/0.5.14).
+    # a pure-SOL fallback by construction: the off-key d_model=8192 above
+    # keeps the query away from the real d_model=4096 silicon rows.
     assert 0 < sol_flashinfer < sol_fla
 
     # Closed-form pin at these exact dims/batch/mem_bw (self-consistent with
@@ -328,6 +331,8 @@ def test_flashinfer_lane_sol_matches_census_at_bs128():
         db,
         "flashinfer_gated_delta_rule_decode",
         batch,
+        # Off-key synthetic d_model (see the bs=1 census anchor above);
+        # keeps this query on the pure-SOL path regardless of table rows.
         (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4),
     )
 
