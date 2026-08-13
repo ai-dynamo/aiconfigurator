@@ -688,6 +688,62 @@ def _parse_hf_config_json(config: dict) -> dict:
                 "silently dropped and produce a wrong hybrid layer plan."
             )
         layer_types = tuple("linear_attention" if (i + 1) in kda_layer_ids else "full_attention" for i in range(layers))
+        kimi_vision_config = None
+        if vision_cfg:
+            merge_kernel = tuple(vision_cfg.get("merge_kernel_size") or ())
+            if len(merge_kernel) != 2 or any(not isinstance(v, int) or v <= 0 for v in merge_kernel):
+                raise ValueError("Kimi-K3 vision_config.merge_kernel_size must contain two positive integers")
+            if merge_kernel[0] != merge_kernel[1]:
+                raise ValueError(
+                    f"Kimi-K3 vision modeling currently requires a square merge_kernel_size; got {merge_kernel}"
+                )
+            if vision_cfg.get("merge_type") != "sd2_tpool":
+                raise ValueError(
+                    f"Kimi-K3 vision modeling requires merge_type='sd2_tpool'; got {vision_cfg.get('merge_type')!r}"
+                )
+            if vision_cfg.get("mm_projector_type") != "patchmergerv2":
+                raise ValueError(
+                    "Kimi-K3 vision modeling requires mm_projector_type='patchmergerv2'; "
+                    f"got {vision_cfg.get('mm_projector_type')!r}"
+                )
+
+            vision_hidden = vision_cfg["vt_hidden_size"]
+            vision_heads = vision_cfg["vt_num_attention_heads"]
+            qkv_hidden = vision_cfg.get("qkv_hidden_size") or vision_hidden
+            if qkv_hidden % vision_heads != 0:
+                raise ValueError(
+                    f"Kimi-K3 qkv_hidden_size ({qkv_hidden}) must be divisible by "
+                    f"vt_num_attention_heads ({vision_heads})"
+                )
+            merger_dim = vision_cfg["mm_hidden_size"] * merge_kernel[0] * merge_kernel[1]
+            out_hidden = vision_cfg["text_hidden_size"]
+            if out_hidden != hidden_size:
+                raise ValueError(
+                    f"Kimi-K3 vision text_hidden_size ({out_hidden}) must match "
+                    f"the language hidden_size ({hidden_size})"
+                )
+            kimi_vision_config = VisionEncoderConfig(
+                depth=vision_cfg["vt_num_hidden_layers"],
+                hidden_size=vision_hidden,
+                num_heads=vision_heads,
+                intermediate_size=vision_cfg["vt_intermediate_size"],
+                patch_size=vision_cfg["patch_size"],
+                # MoonVision3dPatchEmbed is a Conv2d applied independently to
+                # each frame; temporal pooling happens only after all ViT layers.
+                temporal_patch_size=1,
+                spatial_merge_size=merge_kernel[0],
+                out_hidden_size=out_hidden,
+                projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden)),
+                partial_rotary_factor=1.0,
+                qkv_hidden_size=qkv_hidden,
+                temporal_pool_all=True,
+                max_temporal_patches=vision_cfg.get("init_pos_emb_time", 0) or 0,
+                model_patch_embed=True,
+                model_pos_embed=True,
+                model_final_norm=True,
+                projector_post_norm=True,
+                encoder_type="kimi_k3_moonvit3d_patchmergerv2",
+            )
         extra_params = KimiK3Config(
             layer_types=layer_types,
             kda_num_heads=linear_attn_cfg["num_heads"],
@@ -707,11 +763,13 @@ def _parse_hf_config_json(config: dict) -> dict:
             first_k_dense_replace=config.get("first_k_dense_replace", 0),
             dense_inter_size=config.get("intermediate_size", 0),
             attn_res_block_size=config.get("attn_res_block_size", 0) or 0,
+            vision_config=kimi_vision_config,
         )
         logger.info(
             f"Kimi-K3 hybrid config: kda_layers={layer_types.count('linear_attention')}, "
             f"mla_layers={layer_types.count('full_attention')}, num_experts={num_experts}, "
-            f"latent={extra_params.routed_expert_hidden_size}, shared={extra_params.num_shared_experts}"
+            f"latent={extra_params.routed_expert_hidden_size}, shared={extra_params.num_shared_experts}, "
+            f"vision={'enabled' if kimi_vision_config is not None else 'absent'}"
         )
     elif architecture in {"DeepSeekForCausalLM", "DeepseekV3ForCausalLM"}:
         # DeepSeek V3 / R1 / Kimi K2: MLA latent geometry from config so the KV
