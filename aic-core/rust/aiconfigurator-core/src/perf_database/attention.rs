@@ -1018,7 +1018,7 @@ mod tests {
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed")
             .latency;
-        let expected = 0.4923998240128304;
+        let expected = 0.37153384771269;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1065,7 +1065,7 @@ mod tests {
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed")
             .latency;
-        let expected = 0.008451361751014535;
+        let expected = 0.009131092737966444;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1086,7 +1086,7 @@ mod tests {
         let cases: &[(u32, u32, f64)] = &[
             (8, 16384, 19.820667266845703),  // exact hit
             (8, 12000, 11.515825737734879),  // seq interp (sqrt blend)
-            (64, 16384, 158.56533813476562), // batch beyond staircase (util-hold)
+            (64, 16384, 184.03017609528183), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table
@@ -1166,9 +1166,9 @@ mod tests {
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686), // exact hit
-            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
-            (64, 65536, 9775.049479166666), // batch beyond staircase (util-hold)
+            (1, 1024, 0.03258133431275686),  // exact hit
+            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
+            (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table

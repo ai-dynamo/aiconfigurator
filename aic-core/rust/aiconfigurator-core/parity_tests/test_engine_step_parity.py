@@ -1083,6 +1083,37 @@ def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
     return float(latency_ms)
 
 
+def _cp_static_ctx_ms(case: EngineStepParityCase, *, engine_step_backend: str) -> float:
+    """Context-phase static sum through the cp-aware model builder.
+
+    The "static" surface goes through `cli_estimate`, which has no cp knob —
+    a cp>1 case fails model validation there before any op runs. CP cases
+    anchor the context phase (the only phase the CP composition runs on)
+    with the same `_case_model_config` construction the mixed surface uses,
+    routed to the requested engine per RuntimeConfig (the golden capture
+    pins "python"; the live test side passes "rust").
+    """
+    database = _case_database(case)
+    if database is None:
+        raise RuntimeError(
+            f"failed to load perf database for {case.system_name}/{case.backend_name}/{case.backend_version}"
+        )
+    model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+    backend = get_backend(case.backend_name)
+    runtime_config = config.RuntimeConfig(
+        batch_size=case.batch_size,
+        beam_width=1,
+        isl=case.isl,
+        osl=max(case.osl, 2),
+        prefix=case.prefix,
+        engine_step_backend=engine_step_backend,
+    )
+    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
+        backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
+    )
+    return float(sum(ctx_lat.values()))
+
+
 def _rust_mixed_step_ms(case: EngineStepParityCase) -> float:
     """Rust mix-step latency for the case's mix-step shape (same FPM)."""
     database = _case_database(case)
@@ -1199,6 +1230,8 @@ def _surface_metrics(
     if surface == "mixed":
         step_ms = _python_mixed_step_ms if engine_step_backend == "python" else _rust_mixed_step_ms
         return {"mixed_step": _safe_value(lambda: step_ms(case))}
+    if surface == "cp_static_ctx":
+        return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case, engine_step_backend=engine_step_backend))}
     if surface == "agg":
         metrics = _agg_metrics(case, engine_step_backend=engine_step_backend)
         return {
@@ -1460,8 +1493,8 @@ CP_CASES = [
     ),
     # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
     # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
-    # would need the uncollected fp8-FMHA context-MLA slice; DSA/dsv4 CP need
-    # uncollected sparse mqa/topk tables — both out of scope until collected.)
+    # would need the uncollected fp8-FMHA context-MLA slice; DSA CP needs
+    # uncollected sparse mqa/topk tables — out of scope until collected.)
     pytest.param(
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K2.5",
@@ -1478,11 +1511,47 @@ CP_CASES = [
     ),
 ]
 
+# DeepSeek-V4 CSA context-parallelism on a REUSE-carrying version (issue
+# #1498): 0.5.12 ships no primary dsv4 sparse tables — the mqa/topk lookups
+# resolve through the approved `reuse.yaml` donors (from_version 0.5.14) —
+# so this case anchors the reuse-aware CP top_last loader on both engines
+# AND the CP composition itself (the `_query_cp` full/cp deltas +
+# all-gathers, plus the token-major mHC seq_split division whose absence in
+# Rust was the original 34% static_ctx divergence). isl=8192 pins the
+# adjudicated repro shape.
+#
+# Anchored on BOTH the `cp_static_ctx` surface (the adjudicated static repro,
+# 42.430756 ms) and the mixed surface. The mixed anchor additionally pins the
+# `run_mixed` pass-filter fix: Python's passes used to run the FULL op lists
+# and discard the non-consumed values, so the generation-MoE singleton
+# low-token miss in pass 3 (num_tokens=1, one measured point at 1024) raised
+# on the Python side only, while the rust mixed step never queries the ops it
+# does not consume. With the passes filtered to their consumed sets the case
+# computes bit-identically on both engines (46.0492671363915 ms).
+DSV4_CP_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V4-Flash",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.12",
+            isl=8192,
+            osl=8,
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            cp_size=8,
+        ),
+        id="dsv4-flash-b200-sglang-0512-cp8-reuse",
+    ),
+]
+
 
 class TestRustEngineStepCpMixedStepParity:
     """CP parity on the mix-step surface (CP ops run in the prefill chunk)."""
 
-    @pytest.mark.parametrize("case", CP_CASES)
+    @pytest.mark.parametrize("case", [*CP_CASES, *DSV4_CP_CASES])
     def test_cp_parity(
         self,
         case: EngineStepParityCase,
@@ -1492,6 +1561,89 @@ class TestRustEngineStepCpMixedStepParity:
 
         reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case))
         assert reason is None, reason
+
+
+class TestRustEngineStepCpStaticCtxParity:
+    """CP parity on the context-phase static surface (issue #1498 anchor).
+
+    Pins the adjudicated DSV4 CSA CP repro shape end to end on a
+    reuse-carrying version: the composition's four sparse-gate lookups
+    resolve through approved donors, the mHC ops divide by seq_split, and
+    the static_ctx sums agree. The same case is ALSO exercised on the mixed
+    surface (`TestRustEngineStepCpMixedStepParity` parametrizes
+    DSV4_CP_CASES) — this surface exists because `cli_estimate` has no cp
+    knob, so the plain "static" surface cannot express a cp>1 case.
+    """
+
+    @pytest.mark.parametrize("case", DSV4_CP_CASES)
+    def test_cp_static_ctx_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_comparison_metrics(case, "cp_static_ctx"))
+        assert reason is None, reason
+
+
+class TestRustEngineHandleDatabasePolicyIdentity:
+    """Handle-cache isolation across database-policy views (review finding).
+
+    `build_engine_spec_json` bakes the database's policy-dependent
+    `perf_db_sources` into the compiled handle, so a shared-layer-off view
+    and a shared-layer-on view of the SAME on-disk identity must not alias
+    one cached handle. The cache is cleared ONCE per ordering (not between
+    the two queries — that is the point): whichever view warms the cache
+    must not answer, or fail, for the other. Guards both directions on the
+    adjudicated DSV4 CP shape: the false FAILURE (off-warmed cache raising
+    for the reuse-carrying on-view) and the false SUCCESS (on-warmed cache
+    computing for the primary-only off-view that must raise).
+    """
+
+    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
+
+    def _static_ctx_ms(self, model, view) -> float:
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
+        ctx_latency, _gen, *_ = rust_engine_step.estimate_static_latency_breakdown_with_rust(
+            model, view, rc, "static_ctx", 1, 1.0
+        )
+        return float(sum(ctx_latency.values()))
+
+    def _build(self):
+        (case,) = DSV4_CP_CASES[0].values
+        model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+        off = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=False,
+        )
+        on = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=True,
+        )
+        if off is None or on is None:
+            pytest.skip("no perf database for the DSV4 CP case identity")
+        return model, off, on
+
+    def test_off_warmed_cache_does_not_fail_the_shared_on_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+
+    def test_on_warmed_cache_does_not_answer_for_the_shared_off_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
 
 
 # HYBRID / EMPIRICAL parity cases: the util-space empirical layer
@@ -1869,6 +2021,7 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SMOKE_CASES, ENGINE_STEP_SURFACES),
     (POWER_CASES, ENGINE_STEP_SURFACES),
     (CP_CASES, ("mixed",)),
+    (DSV4_CP_CASES, ("cp_static_ctx", "mixed")),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
     (TIE_AGG_CASES, ("agg",)),
@@ -2105,3 +2258,305 @@ class TestRustProvenanceCapture:
             metrics = _static_metrics(case, engine_step_backend="rust")
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
         assert util_empirical.worst_provenance(tags) == "silicon", tags
+
+
+# --------------------------------------------------------------------------- #
+# forward_model="fpm": whole-model op parity over a synthetic dataset in a
+# temp systems root (no fpm_forward pair is checked in). Python resolves the
+# pair via `set_systems_paths`; the compiled spec carries the same root in
+# `engine.systems_path`, so the Rust `FpmForwardTable` reads the identical
+# file. Covers static_ctx / static_gen / mixed / genonly plus out-of-domain
+# error symmetry and the FpmForward op-transfer tags.
+# --------------------------------------------------------------------------- #
+
+_FPM_MODEL = "MiniMaxAI/MiniMax-M2.5"
+_FPM_VERSION = "0.19.0"
+# (workload_kind, batch, total_prefill, total_kv, latency_ms) — per-DP-rank
+# iteration totals, batch domains sized for the runtime points below.
+_FPM_ROWS = [
+    ("prefill", 1, 512, 0, 10.0),
+    ("prefill", 1, 1024, 0, 18.0),
+    ("prefill", 1, 2048, 0, 34.0),
+    ("prefill", 1, 1024, 1024, 21.0),
+    ("prefill", 2, 1024, 0, 18.5),
+    ("prefill", 2, 2048, 0, 35.0),
+    ("prefill", 2, 4096, 0, 69.0),
+    ("prefill", 4, 4096, 0, 68.0),
+    ("decode", 1, 0, 1, 2.0),
+    ("decode", 1, 0, 1025, 2.2),
+    ("decode", 1, 0, 65536, 3.1),
+    ("decode", 4, 0, 4, 4.0),
+    ("decode", 4, 0, 4100, 4.5),
+    ("decode", 4, 0, 262144, 7.9),
+    # CUDA-graph cliff pair at capture=512 plus an eager anchor: exercises
+    # the decode batch-axis regime routing on both engines.
+    ("decode", 512, 0, 4096, 10.0),
+    ("decode", 512, 0, 65536, 11.0),
+    ("decode", 512, 0, 262144, 12.0),
+    ("decode", 513, 0, 4096, 30.0),
+    ("decode", 513, 0, 65536, 33.0),
+    ("decode", 513, 0, 262144, 36.0),
+    ("decode", 1024, 0, 4096, 60.0),
+    ("decode", 1024, 0, 65536, 66.0),
+    ("decode", 1024, 0, 262144, 72.0),
+]
+
+
+def _fpm_write_pair(data_dir) -> None:
+    import hashlib
+    import json as _json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    identity = {
+        "gemm_quant_mode": "fp8_block",
+        "moe_quant_mode": "fp8_block",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+        "kv_cache_dtype": "fp8",
+        "tp": 2,
+        "pp": 1,
+        "dp": 1,
+        "moe_tp": 1,
+        "moe_ep": 2,
+        "cp": 1,
+    }
+    rows = []
+    for kind, batch, prefill, kv, lat in _FPM_ROWS:
+        rows.append(
+            {
+                "cell_id": f"fpm-{kind}-{batch}-{prefill}-{kv}",
+                "model_path": _FPM_MODEL,
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
+                "weight_quantization": "fp8_block",
+                **identity,
+                "moe_backend": "auto",
+                "attention_backend": "auto",
+                "enable_wideep": False,
+                "enable_eplb": False,
+                "workload_kind": kind,
+                "batch_size": batch,
+                "total_prefill_tokens": prefill,
+                "total_kv_read_tokens": kv,
+                "partition_policy": "balanced_v1",
+                "latency_ms": lat,
+            }
+        )
+    parquet_path = data_dir / "fpm_forward_perf.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), parquet_path)
+    digest = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
+    (data_dir / "fpm_forward_perf.metadata.json").write_text(
+        _json.dumps(
+            {
+                "schema_name": "aic_fpm_forward_perf",
+                "schema_version": 6,
+                "coordinate_system": "iteration_totals_balanced_v1",
+                "measurement_policy": "dynamo_native_single_sample_v1",
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
+                "parquet_sha256": digest,
+                "row_count": len(rows),
+            }
+        )
+    )
+
+
+@pytest.fixture(scope="class")
+def fpm_systems_root(tmp_path_factory):
+    import shutil
+
+    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
+
+    root = tmp_path_factory.mktemp("fpm_systems")
+    pkg_systems = perf_database.get_systems_paths()[-1]
+    shutil.copy(f"{pkg_systems}/b200_sxm.yaml", root / "b200_sxm.yaml")
+    data_dir = root / "data" / "b200_sxm" / "vllm" / _FPM_VERSION
+    data_dir.mkdir(parents=True)
+    _fpm_write_pair(data_dir)
+
+    perf_database.set_systems_paths(f"{root},default")
+    FPMForwardOp.clear_cache()
+    rust_engine_step._engine_handle_cache_clear()
+    try:
+        yield root
+    finally:
+        perf_database.set_systems_paths("default")
+        FPMForwardOp.clear_cache()
+        rust_engine_step._engine_handle_cache_clear()
+
+
+class TestRustEngineStepFpmParity:
+    """forward_model='fpm' engine-step parity (plan §M2 item 5)."""
+
+    def _build(self):
+        from aiconfigurator.sdk.config_builders import build_model_config
+
+        cfg = build_model_config(
+            tp_size=2,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            gemm_quant_mode="fp8_block",
+            moe_quant_mode="fp8_block",
+            kvcache_quant_mode="fp8",
+            fmha_quant_mode="bfloat16",
+            comm_quant_mode="half",
+            forward_model="fpm",
+        )
+        model = get_model(_FPM_MODEL, cfg, "vllm")
+        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
+        return model, get_backend("vllm"), database
+
+    def _static(self, model, backend, database, mode, batch, isl, osl, prefix, eng):
+        rc = config.RuntimeConfig(batch_size=batch, beam_width=1, isl=isl, osl=osl, prefix=prefix)
+        rc.engine_step_backend = eng
+
+        def thunk():
+            summary = backend.run_static(model, database, rc, mode=mode)
+            d = summary.get_context_latency_dict() if mode == "static_ctx" else summary.get_generation_latency_dict()
+            return sum(d.values())
+
+        return _safe_value(thunk)
+
+    @staticmethod
+    def _assert_pair(py, rs, point):
+        if isinstance(py, _ErrorSentinel) or isinstance(rs, _ErrorSentinel):
+            assert isinstance(py, _ErrorSentinel) and isinstance(rs, _ErrorSentinel), (
+                f"{point}: asymmetric error py={py!r} rs={rs!r}"
+            )
+            return
+        allowed = max(abs(py) * PARITY_RTOL, 1e-9)
+        assert abs(rs - py) <= allowed, f"{point}: py={py} rs={rs} delta={abs(rs - py)}"
+
+    def test_fpm_arena_selects_the_fpm_engine(self, fpm_systems_root, monkeypatch):
+        # Review finding (#1461): from_native() dropped forward_model, so the
+        # FPM arena always compiled the op_level engine. A decode-only
+        # estimate hitting the fpm_forward table's exact row proves the
+        # whole-model engine was selected through the supported predictor API.
+        _prepare_rust_core(monkeypatch)
+        from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+        config = {
+            "schema_version": 1,
+            "model_name": _FPM_MODEL,
+            "system_name": "b200_sxm",
+            "backend": "vllm",
+            "backend_version": _FPM_VERSION,
+            "systems_path": str(fpm_systems_root),
+            "tp_size": 2,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "moe_tp_size": 1,
+            "moe_ep_size": 2,
+            "weight_dtype": "fp8_block",
+            "moe_dtype": "fp8_block",
+            "activation_dtype": "bfloat16",
+            "kv_cache_dtype": "fp8",
+            "kv_block_size": None,
+            "nextn": None,
+            "forward_model": "fpm",
+        }
+        model = RustForwardPassPerfModel.from_native(config)
+        decode_only = [
+            {
+                "version": 1,
+                "scheduled_requests": {
+                    "num_decode_requests": 1,
+                    "sum_decode_kv_tokens": 1025,
+                },
+            }
+        ]
+        ms = model.estimate_forward_pass_time_ms(decode_only)
+        assert ms == pytest.approx(2.2)  # exact fpm decode row (1, 1025)
+
+    def test_fpm_spec_tags(self, fpm_systems_root, monkeypatch):
+        _prepare_rust_core(monkeypatch)
+        import json as _json
+
+        from aiconfigurator.sdk import engine as sdk_engine
+
+        model, _backend, database = self._build()
+        spec = _json.loads(
+            _quiet_call(
+                sdk_engine.build_engine_spec_json,
+                model,
+                model_path=_FPM_MODEL,
+                system="b200_sxm",
+                backend="vllm",
+                backend_version=_FPM_VERSION,
+                kv_block_size=None,
+                systems_path=None,
+                nextn=0,
+                database=database,
+            )
+        )
+        (ctx_tag,) = spec["context_ops"][0].keys()
+        (gen_tag,) = spec["generation_ops"][0].keys()
+        assert (ctx_tag, gen_tag) == ("FpmForward", "FpmForward")
+        ctx_op = spec["context_ops"][0]["FpmForward"]
+        assert ctx_op["phase"] == "prefill"
+        assert spec["generation_ops"][0]["FpmForward"]["phase"] == "decode"
+        assert len(ctx_op["match_identity"]) == 15
+        assert ctx_op["sol_ops"], "sol_ops must carry the original granular list"
+
+    @pytest.mark.parametrize(
+        ("mode", "batch", "isl", "osl", "prefix"),
+        [
+            ("static_ctx", 1, 1024, 1, 0),  # exact prefill hit
+            ("static_ctx", 1, 2048, 1, 1024),  # exact cached-prefill hit
+            ("static_ctx", 2, 1500, 1, 0),  # in-curve lerp
+            ("static_ctx", 3, 1024, 1, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 1, 1024, 2, 0),  # exact decode hit (kv = isl+1)
+            ("static_gen", 4, 1024, 2, 0),  # exact decode hit at B=4
+            ("static_gen", 2, 1024, 2, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 4, 9_000_000, 2, 0),  # out of domain -> both error
+            ("static_ctx", 16, 256, 1, 0),  # above the batch ceiling -> pure clamp (kv/T = 0)
+            ("static_ctx", 16, 320, 1, 256),  # high KV pressure -> SOL-rescaled clamp
+        ],
+    )
+    def test_fpm_static_parity(self, fpm_systems_root, monkeypatch, mode, batch, isl, osl, prefix):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+        py = self._static(model, backend, database, mode, batch, isl, osl, prefix, "python")
+        rs = self._static(model, backend, database, mode, batch, isl, osl, prefix, "rust")
+        self._assert_pair(py, rs, f"{mode} B={batch} isl={isl} prefix={prefix}")
+
+    @pytest.mark.parametrize(
+        ("ctx_tokens", "gen_tokens", "isl", "osl"),
+        [
+            (1024, 4, 1024, 2),  # mixed: prefill chunk + marginal decode
+            (512, 4, 1024, 2),  # partial chunk (chunk_scale > 1)
+            (0, 4, 1024, 2),  # gen-only keeps full decode
+            (0, 600, 100, 2),  # gen-only across the decode regime boundary (eager side)
+            (1024, 0, 1024, 2),  # prefill-only chunk
+            (4096, 0, 256, 1),  # 16 whole prefills: certified batch clamp to the ceiling
+        ],
+    )
+    def test_fpm_mixed_step_parity(self, fpm_systems_root, monkeypatch, ctx_tokens, gen_tokens, isl, osl):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+
+        def run(eng):
+            rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=0)
+            rc.engine_step_backend = eng
+            return _safe_value(
+                lambda: backend._get_mix_step_latency(model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0)[0]
+            )
+
+        self._assert_pair(run("python"), run("rust"), f"mixed ctx={ctx_tokens} gen={gen_tokens}")
+
+    def test_fpm_genonly_step_parity(self, fpm_systems_root, monkeypatch):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+
+        def run(eng):
+            rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2, prefix=0)
+            rc.engine_step_backend = eng
+            return _safe_value(lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0])
+
+        self._assert_pair(run("python"), run("rust"), "genonly gen=4")

@@ -37,6 +37,7 @@ _MOE_MODEL_FAMILIES = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 
 

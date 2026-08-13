@@ -655,6 +655,7 @@ struct EngineBuildRequest {
     nextn: u32,
     kv_block_size: Option<u32>,
     systems_path: Option<String>,
+    forward_model: Option<String>,
 }
 
 /// Ergonomic builder for the Rust -> Python -> Rust compiled-engine entry point.
@@ -695,8 +696,16 @@ impl AicEngineBuilder {
                 nextn: 0,
                 kv_block_size: None,
                 systems_path: None,
+                forward_model: None,
             },
         }
+    }
+
+    /// Forward-pass modeling mode (`"op_level"` | `"fpm"`); unset keeps
+    /// Python's default (op_level).
+    pub fn forward_model(mut self, forward_model: &str) -> Self {
+        self.request.forward_model = Some(forward_model.to_owned());
+        self
     }
 
     /// Select a specific backend version.
@@ -893,6 +902,7 @@ pub fn build_aic_engine(
         nextn,
         kv_block_size,
         systems_path: systems_path.map(str::to_owned),
+        forward_model: None,
     })
 }
 
@@ -931,6 +941,7 @@ fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, Ai
         kwargs.set_item("kvcache_quant_mode", request.kvcache_quant_mode.as_deref())?;
         kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
         kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
+        kwargs.set_item("forward_model", request.forward_model.as_deref())?;
         kwargs.set_item("nextn", request.nextn)?;
         kwargs.set_item("kv_block_size", request.kv_block_size)?;
         kwargs.set_item("systems_path", systems_root_str)?;
@@ -998,6 +1009,7 @@ pub(crate) fn compile_engine_to_engine(
         nextn,
         kv_block_size: config.kv_block_size,
         systems_path: systems_path.map(str::to_owned),
+        forward_model: config.forward_model.clone(),
     })
 }
 
@@ -1253,6 +1265,7 @@ mod tests {
                 scale_num_tokens: 0,
                 low_precision_input: false,
                 seq_split: 1,
+                below_grid_sol: false,
             }),
             Op::ContextAttention(ContextAttentionOp {
                 name: "context_attention".into(),
@@ -1300,6 +1313,7 @@ mod tests {
             systems_path: None,
             backend: BackendKind::Vllm,
             backend_version: Some("0.19.0".to_string()),
+            forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
                 tp_size: 8,

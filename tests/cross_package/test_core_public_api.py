@@ -70,7 +70,8 @@ def test_stable_function_signatures() -> None:
         "kvcache_quant_mode: 'str | None' = None, fmha_quant_mode: 'str | None' = None, "
         "comm_quant_mode: 'str | None' = None, nextn: 'int' = 0, "
         "kv_block_size: 'int | None' = None, "
-        "systems_path: 'str | None' = None) -> 'bytes'"
+        "systems_path: 'str | None' = None, "
+        "forward_model: 'str | None' = None) -> 'bytes'"
     )
     assert "scheduler_block_size" in inspect.signature(estimate_num_gpu_blocks).parameters
     assert "memory_fraction_kind" in inspect.signature(estimate_kv_cache).parameters
