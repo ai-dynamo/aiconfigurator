@@ -30,6 +30,17 @@ from aiconfigurator_core.sdk.step_estimate import MixedStepInput, StepEstimate
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass(frozen=True)
+class _EncoderVisualWorkload:
+    """Per-request-image token geometry after checkpoint preprocessing."""
+
+    output_tokens_per_image: int
+    output_tokens_per_sequence: int
+    transformer_tokens_per_sequence: int
+    patch_tokens_per_sequence: int
+    sequences_per_image: int
+
+
 class BaseBackend:
     """Base class for all inference backends.
 
@@ -212,8 +223,8 @@ class BaseBackend:
     def _visual_context_tokens_from_encoder_config(enc_cfg, runtime_config: RuntimeConfig) -> int:
         if not isinstance(enc_cfg, common.VisionEncoderConfig) or runtime_config.num_images_per_request <= 0:
             return 0
-        post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
-        return post_merge * runtime_config.num_images_per_request
+        workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
+        return workload.output_tokens_per_image * runtime_config.num_images_per_request
 
     @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
@@ -226,17 +237,94 @@ class BaseBackend:
         runtime_config: RuntimeConfig,
         enc_cfg,
     ) -> tuple[int, int]:
-        """Resolve the per-image pre-merge / post-merge token counts from
-        RuntimeConfig + VisionEncoderConfig.
+        """Compatibility wrapper for per-image output and ViT token counts.
 
         Resolution order:
             1. image_height + image_width (computed from patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
-        Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
+        Returns ``(output_tokens_per_image, transformer_tokens_per_image)``.
+        The second value includes per-sequence special tokens and all local or
+        global tile sequences for fixed tiled encoders.
         Returns ``(0, 0)`` when neither is set (text-only path).
         """
+        workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
+        return (
+            workload.output_tokens_per_image,
+            workload.transformer_tokens_per_sequence * workload.sequences_per_image,
+        )
+
+    @staticmethod
+    def _tiled_encoder_sequence_count(height: int, width: int, enc_cfg: common.VisionEncoderConfig) -> int:
+        """Mirror Llama4ImageProcessor's best-fit canvas and global-tile rule."""
+        tile = enc_cfg.image_size
+        candidates: list[tuple[int, int]] = []
+        for chunk_count in range(enc_cfg.max_num_tiles, 0, -1):
+            for factor in range(1, int(chunk_count**0.5) + 1):
+                if chunk_count % factor == 0:
+                    candidates.append((factor * tile, (chunk_count // factor) * tile))
+                    if factor != chunk_count // factor:
+                        candidates.append(((chunk_count // factor) * tile, factor * tile))
+
+        scales = [min(target_h / height, target_w / width) for target_h, target_w in candidates]
+        upscaling = [scale for scale in scales if scale >= 1]
+        if upscaling:
+            selected_scale = max(upscaling) if enc_cfg.resize_to_max_canvas else min(upscaling)
+        else:
+            selected_scale = max(scales)
+        viable = [
+            candidate
+            for candidate, scale in zip(candidates, scales, strict=True)
+            if abs(scale - selected_scale) <= 1e-12
+        ]
+        target_h, target_w = min(viable, key=lambda size: size[0] * size[1])
+        local_tiles = (target_h // tile) * (target_w // tile)
+        return local_tiles + int(enc_cfg.add_global_tile and local_tiles > 1)
+
+    @staticmethod
+    def _encoder_workload_per_visual(
+        runtime_config: RuntimeConfig,
+        enc_cfg: common.VisionEncoderConfig,
+    ) -> _EncoderVisualWorkload:
+        """Resolve output, ViT, and raw-patch tokens for one request image.
+
+        Dynamic-resolution encoders retain the legacy one-sequence formula.
+        Fixed tiled encoders (Llama 4) use the published image-processor canvas
+        selection, run each local/global tile as an independent ViT sequence,
+        and account for the per-tile CLS token separately from patch embedding.
+        """
+        zero = _EncoderVisualWorkload(0, 0, 0, 0, 0)
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
+
+        if enc_cfg.image_size > 0 and enc_cfg.max_num_tiles > 0:
+            post_per_sequence = (enc_cfg.image_size // (enc_cfg.patch_size * enc_cfg.spatial_merge_size)) ** 2
+            patch_per_sequence = (enc_cfg.image_size // enc_cfg.patch_size) ** 2
+            transformer_per_sequence = patch_per_sequence + int(enc_cfg.has_cls_token)
+            if has_image_dims:
+                sequences = BaseBackend._tiled_encoder_sequence_count(
+                    runtime_config.image_height,
+                    runtime_config.image_width,
+                    enc_cfg,
+                )
+                output_tokens = post_per_sequence * sequences
+            elif runtime_config.num_image_tokens > 0:
+                output_tokens = runtime_config.num_image_tokens
+                if output_tokens % post_per_sequence != 0:
+                    raise ValueError(
+                        "num_image_tokens must be a whole number of Llama 4 image chunks: "
+                        f"got {output_tokens}, chunk output is {post_per_sequence} tokens"
+                    )
+                sequences = output_tokens // post_per_sequence
+            else:
+                return zero
+            return _EncoderVisualWorkload(
+                output_tokens,
+                post_per_sequence,
+                transformer_per_sequence,
+                patch_per_sequence,
+                sequences,
+            )
+
         if has_image_dims:
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
             tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
@@ -247,10 +335,16 @@ class BaseBackend:
             tokens_per_image = runtime_config.num_image_tokens
             pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
         else:
-            return 0, 0
+            return zero
         if tokens_per_image <= 0 or pre_merge_per_image <= 0:
-            return 0, 0
-        return tokens_per_image, pre_merge_per_image
+            return zero
+        return _EncoderVisualWorkload(
+            tokens_per_image,
+            tokens_per_image,
+            pre_merge_per_image,
+            pre_merge_per_image,
+            1,
+        )
 
     def _run_encoder_phase(
         self,
@@ -274,35 +368,38 @@ class BaseBackend:
         if num_images <= 0 or not isinstance(enc_cfg, common.VisionEncoderConfig):
             return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
 
-        tokens_per_image, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
-        if tokens_per_image == 0:
+        workload = self._encoder_workload_per_visual(runtime_config, enc_cfg)
+        if workload.output_tokens_per_image == 0:
             # No image dimensions specified; skip encoder modeling.
             return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
 
-        n_img_post = tokens_per_image * num_images  # post-merge: injected into LLM context
+        n_img_post = workload.output_tokens_per_image * num_images  # post-merge: injected into LLM context
 
         # Encoder DP: whole images are sharded across the tp_size ranks and the
         # busiest rank (ceil share) gates the phase.
         encoder_dp_size = model.config.tp_size if model.config.enable_encoder_dp else 1
         images_local = -(-batch_size * num_images // encoder_dp_size)
+        sequences_local = images_local * workload.sequences_per_image
 
         # Per-op shape rules (the encoder orchestration — this token math —
         # stays Python-side; only the per-op values may come from the
         # compiled engine below). Projector ops and the DP exit AllGather run
-        # on post-merge tokens; ViT attention uses cu_seqlens (each image an
-        # independent varlen sequence of pre_merge_per_image patches).
+        # on post-merge tokens; ViT attention uses cu_seqlens (each tile is an
+        # independent varlen sequence containing its raw patches plus CLS).
         def _encoder_eff_s(op) -> int:
-            use_post = "encoder_projector" in op._name or "all_gather" in op._name
+            if "encoder_patch_embedding" in op._name:
+                return workload.patch_tokens_per_sequence
+            use_post = "encoder_projector" in op._name or op._name == "encoder_dp_all_gather"
             use_varlen = "encoder_attention" in op._name
             if use_varlen:
-                return pre_merge_per_image
-            return tokens_per_image if use_post else pre_merge_per_image
+                return workload.transformer_tokens_per_sequence
+            return workload.output_tokens_per_sequence if use_post else workload.transformer_tokens_per_sequence
 
         if should_use_rust_engine_step(runtime_config, database):
             rust = self._run_encoder_phase_with_rust(
                 model,
                 database,
-                images_local,
+                sequences_local,
                 _encoder_eff_s,
                 include_energy=include_energy,
             )
@@ -311,7 +408,7 @@ class BaseBackend:
                 return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
 
         for op in model.encoder_ops:
-            eff_batch, eff_s = images_local, _encoder_eff_s(op)
+            eff_batch, eff_s = sequences_local, _encoder_eff_s(op)
             x = eff_batch * eff_s
             result = op.query(
                 database,
@@ -333,7 +430,7 @@ class BaseBackend:
         self,
         model: BaseModel,
         database: PerfDatabase,
-        images_local: int,
+        sequences_local: int,
         eff_s_of,
         *,
         include_energy: bool,
@@ -345,7 +442,7 @@ class BaseBackend:
         compile path threads no image configuration), so they travel through
         the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
         ``eff_s`` (the shape math above), each group serialized to OpSpec
-        JSON and evaluated at ``batch=images_local, s=eff_s, x=batch*s``.
+        JSON and evaluated at ``batch=sequences_local, s=eff_s, x=batch*s``.
         Accumulation matches the Python loop for the shipped encoder op
         lists (unique names): latency/energy fold with ``+=``; sources are
         last-wins ACROSS shape groups, while duplicate names WITHIN one
@@ -372,10 +469,10 @@ class BaseBackend:
                     database,
                     ops_json=ops_json,
                     is_context=True,
-                    batch_size=images_local,
+                    batch_size=sequences_local,
                     s=eff_s,
                     prefix=0,
-                    x=images_local * eff_s,
+                    x=sequences_local * eff_s,
                 )
                 for name, latency_ms, energy_wms, source in entries:
                     latency_dict[name] += float(latency_ms)
@@ -1494,7 +1591,7 @@ class BaseBackend:
     def _get_encoder_component_memory(self, model: BaseModel, num_tokens: int, embed_tokens: int) -> dict[str, float]:
         """Encoder memory component colocated with the prefill/agg worker.
 
-        num_tokens: pre-merge patches run through the ViT on this rank.
+        num_tokens: transformer tokens run through the ViT on this rank.
         embed_tokens: post-merge tokens of the projected-embeddings buffer
         every rank holds at the encoder exit (the full batch in both modes).
         """
@@ -1528,16 +1625,16 @@ class BaseBackend:
             return {}
         if runtime_config.num_images_per_request <= 0:
             return {}
-        tokens_per_image, pre_merge_per_image = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
-        if pre_merge_per_image <= 0:
+        workload = self._encoder_workload_per_visual(runtime_config, enc_cfg)
+        if workload.transformer_tokens_per_sequence <= 0:
             return {}
         # ViT activations follow the busiest rank's image share; the embeddings
         # buffer covers the full batch on every rank.
         total_images = batch_size * runtime_config.num_images_per_request
         encoder_dp_size = model.config.tp_size if model.config.enable_encoder_dp else 1
         images_local = -(-total_images // encoder_dp_size)
-        num_tokens = images_local * pre_merge_per_image
-        embed_tokens = total_images * tokens_per_image
+        num_tokens = images_local * workload.sequences_per_image * workload.transformer_tokens_per_sequence
+        embed_tokens = total_images * workload.output_tokens_per_image
         return self._get_encoder_component_memory(model, num_tokens, embed_tokens)
 
     def run_agg(
