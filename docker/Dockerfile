@@ -147,3 +147,4 @@ COPY src/ /workspace/src/
 COPY aic-core/ /workspace/aic-core/
 COPY tools/ /workspace/tools/
 COPY collector/ /workspace/collector/
+COPY docs/support-matrix/index.html /workspace/docs/support-matrix/index.html
