@@ -59,6 +59,7 @@ CORE_SDK_LEAF_MODULES = [
     "operations.mamba",
     "operations.mla",
     "operations.moe",
+    "operations.moe_comm",
     "operations.msa",
     "operations.overlap",
     "operations.util_empirical",

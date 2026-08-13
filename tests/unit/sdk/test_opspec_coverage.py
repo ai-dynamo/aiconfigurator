@@ -39,6 +39,12 @@ EXEMPT: dict[str, str] = {
     # Dead class: no model instantiates it (Mamba2Kernel is the live op and
     # converts). Remove the class or this entry together.
     "Mamba2": "dead code — never instantiated; Mamba2Kernel is the live op",
+    # Large-EP SDK foundation (AIC-1438 PR 1): no model instantiates this op
+    # yet — PR 2 wires the consumers. The _to_opspec branch, Rust mirror, and
+    # parity case land with that wiring; until then the op is unreachable
+    # from the engine step.
+    "MoEAllToAll": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
+    "MoEExpertCompute": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
 }
 
 
